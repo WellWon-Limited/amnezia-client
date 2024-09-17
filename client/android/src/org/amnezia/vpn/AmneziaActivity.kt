@@ -1163,6 +1163,9 @@ class AmneziaActivity : QtActivity() {
         return super.dispatchTrackballEvent(ev)
     }
 
+    @Suppress("unused")
+    fun isPlay(): Boolean = BuildConfig.FLAVOR == "play"
+
     /**
      * Utils methods
      */
