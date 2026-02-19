@@ -1,5 +1,9 @@
 message("Client android ${CMAKE_ANDROID_ARCH_ABI} build")
 
+# Option to build Play variant (with Google Play Billing) instead of OSS
+# When ON, adds target android_play_apk: cmake --build . --target android_play_apk
+option(ANDROID_BUILD_PLAY "Add android_play_apk target for Google Play Billing build" OFF)
+
 set(APP_ANDROID_MIN_SDK 28)
 set(ANDROID_PLATFORM "android-${APP_ANDROID_MIN_SDK}" CACHE STRING
     "The minimum API level supported by the application or library" FORCE)
@@ -53,3 +57,18 @@ file(COPY ${AMNEZIA_LIBXRAY_PATH} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/androi
 find_package(openvpn-pt-android REQUIRED)
 set(LIBS ${LIBS} amnezia::openvpn-pt-android)
 set_property(TARGET ${PROJECT} APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${OPENVPN_PT_ANDROID_LIBCK_OVPN_PLUGIN_PATH})
+
+if(ANDROID_BUILD_PLAY)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_gradle_suffix "Debug")
+    else()
+        set(_gradle_suffix "Release")
+    endif()
+    set(_android_build_dir "${CMAKE_CURRENT_BINARY_DIR}/android-build-${PROJECT}")
+    add_custom_target(android_play_apk
+        COMMAND ./gradlew assemblePlay${_gradle_suffix} -DexplicitRun=1
+        WORKING_DIRECTORY "${_android_build_dir}"
+        COMMENT "Building Android Play variant (assemblePlay${_gradle_suffix})"
+        DEPENDS ${PROJECT}
+    )
+endif()
