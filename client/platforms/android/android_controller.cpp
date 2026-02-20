@@ -332,7 +332,11 @@ void AndroidController::sendTouch(float x, float y)
 bool AndroidController::isPlay()
 {
     return callActivityMethod<jboolean>("isPlay", "()Z");
+}
 
+bool AndroidController::isTestPurchaseEnvironment()
+{
+    return callActivityMethod<jboolean>("isTestPurchaseEnvironment", "()Z");
 }
 
 QJsonObject AndroidController::getSubscriptionPlans()
