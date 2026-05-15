@@ -57,6 +57,7 @@ struct ServerConfig {
     bool isApiV1() const;
     bool isApiV2() const;
     bool isApiConfig() const;
+    bool isXRayConfig() const;
     
     template<typename T>
     T* as() {

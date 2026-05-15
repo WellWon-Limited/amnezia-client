@@ -64,6 +64,13 @@ public:
     // Cache management
     void clearCachedProfile(int serverIndex, DockerContainer container);
 
+    // XRay subscription config getters/setters
+    void setCurrentConfigIndex(int index);
+    int getCurrentConfigIndex() const;
+    QString getConfigString(const int index) const;
+    QString getConfigName(const int index) const;
+    QJsonArray getConfigNames() const;
+
     // Getters
     QJsonArray getServersArray() const;
     QVector<ServerConfig> getServers() const;

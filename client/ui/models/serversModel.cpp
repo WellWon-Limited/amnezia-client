@@ -34,6 +34,10 @@ namespace
 
         constexpr char publicKeyInfo[] = "public_key";
         constexpr char expiresAt[] = "expires_at";
+
+        constexpr char xraySubscriptionConfig[] = "xray_subscription_config";
+        constexpr char xraySubscriptionConfigName[] = "xray_subscription_config_name";
+        constexpr char xraySubscriptionConfigCurrent[] = "xray_subscription_config_current";
     }
 
     QString normalizeVpnKey(const QString &vpnKey)
@@ -207,6 +211,11 @@ QVariant ServersModel::data(const QModelIndex &index, int role) const
         }
         return apiUtils::isSubscriptionExpiringSoon(apiConfig.subscription.endDate);
     }
+    case IsXRayConfigSelectionAvailableRole: {
+        if (server.isXRayConfig()) {
+            return server.as<NativeServerConfig>()->configString.has_value();
+        }
+    }
     }
 
     return QVariant();
@@ -301,6 +310,11 @@ bool ServersModel::isDefaultServerFromApi()
             || data(m_defaultServerIndex, IsServerFromGatewayApiRole).toBool();
 }
 
+bool ServersModel::isDefaultServerContainXRayConfigs()
+{
+    return data(m_defaultServerIndex, IsXRayConfigSelectionAvailableRole).toBool();
+}
+
 bool ServersModel::isProcessedServerHasWriteAccess()
 {
     return qvariant_cast<bool>(data(m_processedServerIndex, HasWriteAccessRole));
@@ -349,6 +363,8 @@ QHash<int, QByteArray> ServersModel::roleNames() const
     roles[IsRenewalAvailableRole] = "isRenewalAvailable";
     roles[IsSubscriptionExpiredRole] = "isSubscriptionExpired";
     roles[IsSubscriptionExpiringSoonRole] = "isSubscriptionExpiringSoon";
+
+    roles[IsXRayConfigSelectionAvailableRole] = "isXRayConfigSelectionAvailable";
 
     return roles;
 }

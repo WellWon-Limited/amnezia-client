@@ -46,6 +46,8 @@ public:
         IsSubscriptionExpiredRole,
         IsSubscriptionExpiringSoonRole,
 
+        IsXRayConfigSelectionAvailableRole,
+
         HasAmneziaDns
     };
 
@@ -59,6 +61,8 @@ public slots:
     const int getDefaultServerIndex();
     bool isDefaultServerCurrentlyProcessed();
     bool isDefaultServerFromApi();
+
+    bool isDefaultServerContainXRayConfigs();
 
     bool isProcessedServerHasWriteAccess();
     bool isDefaultServerHasWriteAccess();

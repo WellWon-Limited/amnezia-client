@@ -35,6 +35,12 @@ public:
     void setContainerConfig(int serverIndex, DockerContainer container, const ContainerConfig &config);
     void clearLastConnectionConfig(int serverIndex, DockerContainer container);
 
+    void setCurrentConfigIndex(int index);
+    int getCurrentConfigIndex() const;
+    QString getConfigString(const int index) const;
+    QString getConfigName(const int index) const;
+    QJsonArray getConfigNames() const;
+
     ServerCredentials serverCredentials(int index) const;
     bool hasServerWithVpnKey(const QString &vpnKey) const;
     bool hasServerWithCrc(quint16 crc) const;

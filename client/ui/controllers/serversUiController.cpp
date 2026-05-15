@@ -159,7 +159,11 @@ QString ServersUiController::getDefaultServerDescriptionCollapsed() const
     if (server.isApiConfig()) {
         return description;
     }
-    
+
+    if (server.isXRayConfig()) {
+        return getConfigName(getCurrentConfigIndex());
+    }
+
     DockerContainer container = server.defaultContainer();
     QString containerName = ContainerUtils::containerHumanNames().value(container);
     QString protocolVersion;
@@ -209,6 +213,10 @@ QString ServersUiController::getDefaultServerDescriptionExpanded() const
     
     if (server.isApiConfig()) {
         return description;
+    }
+
+    if (server.isXRayConfig()) {
+        return getConfigName(getCurrentConfigIndex());
     }
     
     return description + server.hostName();
@@ -270,6 +278,13 @@ bool ServersUiController::isDefaultServerFromApi() const
     const int configVersion = server.configVersion();
     return configVersion == apiDefs::ConfigSource::Telegram
             || configVersion == apiDefs::ConfigSource::AmneziaGateway;
+}
+
+bool ServersUiController::isDefaultServerContainXRayConfigs() const
+{
+    int defaultIndex = getDefaultServerIndex();
+    const ServerConfig server = m_serversController->getServerConfig(defaultIndex);
+    return server.isXRayConfig();
 }
 
 int ServersUiController::getProcessedServerIndex() const
@@ -442,6 +457,31 @@ QString ServersUiController::adDescription() const
         return apiV2->apiConfig.serviceInfo.adDescription;
     }
     return QString();
+}
+
+void ServersUiController::setCurrentConfigIndex(const int index)
+{
+    m_serversController->setCurrentConfigIndex(index);
+}
+
+int ServersUiController::getCurrentConfigIndex() const
+{
+    return m_serversController->getCurrentConfigIndex();
+}
+
+QString ServersUiController::getConfigString(const int index) const
+{
+    return m_serversController->getConfigString(index);
+}
+
+QString ServersUiController::getConfigName(const int index) const
+{
+    return m_serversController->getConfigName(index);
+}
+
+QJsonArray ServersUiController::getConfigNames() const
+{
+    return m_serversController->getConfigNames();
 }
 
 void ServersUiController::updateContainersModel()

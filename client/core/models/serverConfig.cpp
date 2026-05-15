@@ -120,6 +120,10 @@ bool ServerConfig::isApiConfig() const
     return isApiV1() || isApiV2();
 }
 
+bool ServerConfig::isXRayConfig() const {
+    return isNative() && std::get<NativeServerConfig>(data).configString.has_value();
+}
+
 QJsonObject ServerConfig::toJson() const
 {
     return std::visit([](const auto& v) { return v.toJson(); }, data);
@@ -150,7 +154,7 @@ ServerConfig ServerConfig::fromJson(const QJsonObject& json)
                 break;
             }
         }
-        
+
         if (hasThirdPartyConfig) {
             return ServerConfig{NativeServerConfig::fromJson(json)};
         } else {
@@ -186,7 +190,7 @@ ServerConfig ServerConfig::fromJson(const QJsonObject& json)
                 break;
             }
         }
-        
+
         if (hasThirdPartyConfig) {
             return ServerConfig{NativeServerConfig::fromJson(json)};
         } else {

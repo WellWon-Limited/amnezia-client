@@ -26,6 +26,8 @@ class ServersUiController : public QObject
     Q_PROPERTY(bool isDefaultServerDefaultContainerHasSplitTunneling READ isDefaultServerDefaultContainerHasSplitTunneling NOTIFY defaultServerIndexChanged)
     Q_PROPERTY(bool isDefaultServerFromApi READ isDefaultServerFromApi NOTIFY defaultServerIndexChanged)
     
+    Q_PROPERTY(bool isDefaultServerContainXRayConfigs READ isDefaultServerContainXRayConfigs NOTIFY defaultServerIndexChanged)
+    
     Q_PROPERTY(int processedIndex READ getProcessedServerIndex WRITE setProcessedServerIndex NOTIFY processedServerIndexChanged)
     Q_PROPERTY(int processedContainerIndex READ getProcessedContainerIndex WRITE setProcessedContainerIndex NOTIFY processedContainerIndexChanged)
     Q_PROPERTY(bool processedServerIsPremium READ processedServerIsPremium NOTIFY processedServerIndexChanged)
@@ -61,6 +63,7 @@ public slots:
     QString getDefaultServerDescriptionExpanded() const;
     bool isDefaultServerDefaultContainerHasSplitTunneling() const;
     bool isDefaultServerFromApi() const;
+    bool isDefaultServerContainXRayConfigs() const;
     
     int getProcessedServerIndex() const;
     void setProcessedServerIndex(int index);
@@ -77,6 +80,12 @@ public slots:
     bool isAdVisible() const;
     QString adHeader() const;
     QString adDescription() const;
+
+    void setCurrentConfigIndex(int index);
+    int getCurrentConfigIndex() const;
+    QString getConfigString(const int index) const;
+    QString getConfigName(const int index) const;
+    QJsonArray getConfigNames() const;
     
     QStringList getAllInstalledServicesName(int serverIndex) const;
 

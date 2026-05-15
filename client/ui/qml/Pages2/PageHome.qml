@@ -311,11 +311,11 @@ PageType {
                     objectName: "rowLayoutLabel"
                     Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
                     Layout.topMargin: 8
-                    Layout.bottomMargin: drawer.isCollapsedStateActive ? 44 : ServersUiController.isDefaultServerFromApi ? 61 : 16
+                    Layout.bottomMargin: drawer.isCollapsedStateActive ? 44 : (ServersUiController.isDefaultServerFromApi || ServersUiController.isDefaultServerContainXRayConfigs) ? 61 : 16
                     spacing: 0
 
                     BasicButtonType {
-                        enabled: (ServersUiController.defaultServerImagePathCollapsed !== "") && drawer.isCollapsedStateActive
+                        enabled: (ServersUiController.defaultServerImagePathCollapsed !== ""  || ServersUiController.isDefaultServerContainXRayConfigs) && drawer.isCollapsedStateActive
                         hoverEnabled: enabled
 
                         implicitHeight: 36
@@ -359,6 +359,8 @@ PageType {
 
                                     PageController.goToPage(PageEnum.PageSettingsApiServerInfo)
                                 }
+                            } else if (ServersModel.getProcessedServerData("isXRayConfigSelectionAvailable")) {
+                                    PageController.goToPage(PageEnum.PageSettingsXRayAvailableConfigs)
                             } else {
                                 PageController.goToPage(PageEnum.PageSettingsServerInfo)
                             }
@@ -379,7 +381,7 @@ PageType {
                     Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
                     spacing: 8
 
-                    visible: !ServersUiController.isDefaultServerFromApi
+                    visible: !ServersUiController.isDefaultServerFromApi && !ServersUiController.isDefaultServerContainXRayConfigs
 
                     DropDownType {
                         id: containersDropDown
