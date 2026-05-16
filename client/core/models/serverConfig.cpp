@@ -91,7 +91,7 @@ int ServerConfig::configVersion() const
         } else if constexpr (std::is_same_v<T, ApiV2ServerConfig>) {
             return apiDefs::ConfigSource::AmneziaGateway;
         }
-        return 0; // SelfHostedServerConfig or NativeServerConfig
+        return 0; // SelfHostedServerConfig or NativeServerConfig or XRaySubscriptionConfig
     }, data);
 }
 
@@ -120,8 +120,9 @@ bool ServerConfig::isApiConfig() const
     return isApiV1() || isApiV2();
 }
 
-bool ServerConfig::isXRayConfig() const {
-    return isNative() && std::get<NativeServerConfig>(data).configString.has_value();
+bool ServerConfig::isXRayConfig() const
+{
+    return std::holds_alternative<XRaySubscriptionConfig>(data);
 }
 
 QJsonObject ServerConfig::toJson() const
@@ -135,6 +136,10 @@ ServerConfig ServerConfig::fromJson(const QJsonObject& json)
     
     switch (configType) {
     case apiDefs::ConfigType::SelfHosted: {
+        if (json.contains(configKey::xraySubscriptionConfig)) {
+            return ServerConfig {XRaySubscriptionConfig::fromJson(json)};
+        }
+
         bool hasThirdPartyConfig = false;
         QJsonArray containersArray = json.value(configKey::containers).toArray();
         for (const QJsonValue& val : containersArray) {

@@ -58,29 +58,29 @@ void ServersController::clearCachedProfile(int serverIndex, DockerContainer cont
     m_serversRepository->clearLastConnectionConfig(serverIndex, container);
 }
 
-void ServersController::setCurrentConfigIndex(const int index)
+void ServersController::setCurrentConfigIndex(const int serverIndex, const int index)
 {
-    m_serversRepository->setCurrentConfigIndex(index);
+    m_serversRepository->setCurrentConfigIndex(serverIndex, index);
 }
 
-int ServersController::getCurrentConfigIndex() const
+int ServersController::getCurrentConfigIndex(const int serverIndex) const
 {
-    return m_serversRepository->getCurrentConfigIndex();
+    return m_serversRepository->getCurrentConfigIndex(serverIndex);
 }
 
-QString ServersController::getConfigString(const int index) const
+QString ServersController::getConfigString(const int serverIndex, const int index) const
 {
-    return m_serversRepository->getConfigString(index);
+    return m_serversRepository->getConfigString(serverIndex, index);
 }
 
-QString ServersController::getConfigName(const int index) const
+QString ServersController::getConfigName(const int serverIndex, const int index) const
 {
-    return m_serversRepository->getConfigName(index);
+    return m_serversRepository->getConfigName(serverIndex, index);
 }
 
-QJsonArray ServersController::getConfigNames() const
+QJsonArray ServersController::getConfigNames(const int serverIndex) const
 {
-    return m_serversRepository->getConfigNames();
+    return m_serversRepository->getConfigNames(serverIndex);
 }
 
 QJsonArray ServersController::getServersArray() const

@@ -379,6 +379,9 @@ QString ServersUiController::getDefaultServerDescription(const ServerConfig& ser
     } else if (server.isApiV1()) {
         const ApiV1ServerConfig* apiV1 = server.as<ApiV1ServerConfig>();
         return apiV1 ? apiV1->description : QString();
+    } else if (server.isXRayConfig()) {
+        const XRaySubscriptionConfig *xray = server.as<XRaySubscriptionConfig>();
+        return xray ? xray->configName.at(xray->currentConfig).toString() : server.description();
     } else {
         ServerCredentials credentials = m_serversController->getServerCredentials(index);
         if (!credentials.userName.isEmpty() && !credentials.secretData.isEmpty()) {
@@ -461,27 +464,27 @@ QString ServersUiController::adDescription() const
 
 void ServersUiController::setCurrentConfigIndex(const int index)
 {
-    m_serversController->setCurrentConfigIndex(index);
+    m_serversController->setCurrentConfigIndex(m_processedServerIndex, index);
 }
 
 int ServersUiController::getCurrentConfigIndex() const
 {
-    return m_serversController->getCurrentConfigIndex();
+    return m_serversController->getCurrentConfigIndex(m_processedServerIndex);
 }
 
 QString ServersUiController::getConfigString(const int index) const
 {
-    return m_serversController->getConfigString(index);
+    return m_serversController->getConfigString(m_processedServerIndex, index);
 }
 
 QString ServersUiController::getConfigName(const int index) const
 {
-    return m_serversController->getConfigName(index);
+    return m_serversController->getConfigName(m_processedServerIndex, index);
 }
 
 QJsonArray ServersUiController::getConfigNames() const
 {
-    return m_serversController->getConfigNames();
+    return m_serversController->getConfigNames(m_processedServerIndex);
 }
 
 void ServersUiController::updateContainersModel()

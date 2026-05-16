@@ -10,6 +10,7 @@
 #include "core/utils/protocolEnum.h"
 #include "core/models/selfhosted/selfHostedServerConfig.h"
 #include "core/models/selfhosted/nativeServerConfig.h"
+#include "core/models/selfhosted/xraySubscriptionConfig.h"
 #include "core/models/api/apiV1ServerConfig.h"
 #include "core/models/api/apiV2ServerConfig.h"
 #include "core/models/containerConfig.h"
@@ -23,6 +24,7 @@ struct ServerConfig {
     using Variant = std::variant<
         SelfHostedServerConfig,
         NativeServerConfig,
+        XRaySubscriptionConfig,
         ApiV1ServerConfig,
         ApiV2ServerConfig
     >;

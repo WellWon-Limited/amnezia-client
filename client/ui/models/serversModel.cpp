@@ -98,7 +98,7 @@ QVariant ServersModel::data(const QModelIndex &index, int role) const
     }
     case ServerDescriptionRole: {
         auto description = getServerDescription(server, index.row());
-        return configVersion ? description : description + server.hostName();
+        return configVersion ? description : server.isXRayConfig() ? description : description + server.hostName();
     }
     case HostNameRole: return server.hostName();
     case CredentialsRole: return QVariant::fromValue(serverCredentials(index.row()));
@@ -213,7 +213,7 @@ QVariant ServersModel::data(const QModelIndex &index, int role) const
     }
     case IsXRayConfigSelectionAvailableRole: {
         if (server.isXRayConfig()) {
-            return server.as<NativeServerConfig>()->configString.has_value();
+            return !server.as<XRaySubscriptionConfig>()->configString.isEmpty();
         }
     }
     }
@@ -257,6 +257,9 @@ QString ServersModel::getServerDescription(const ServerConfig &server, const int
     } else if (server.isApiV1()) {
         const ApiV1ServerConfig *apiV1 = server.as<ApiV1ServerConfig>();
         return apiV1 ? apiV1->description : server.description();
+    } else if (server.isXRayConfig()) {
+        const XRaySubscriptionConfig *xray = server.as<XRaySubscriptionConfig>();
+        return xray ? xray->configName.at(xray->currentConfig).toString() : server.description();
     } else if (data(index, HasWriteAccessRole).toBool()) {
         QMap<DockerContainer, ContainerConfig> containers = server.containers();
         bool isDnsInstalled = containers.contains(DockerContainer::Dns);
