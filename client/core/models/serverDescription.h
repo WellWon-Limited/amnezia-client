@@ -9,6 +9,7 @@
 #include "core/models/selfhosted/selfHostedAdminServerConfig.h"
 #include "core/models/selfhosted/selfHostedUserServerConfig.h"
 #include "core/models/selfhosted/nativeServerConfig.h"
+#include "core/models/selfhosted/xraySubscriptionConfig.h"
 #include "core/models/api/legacyApiServerConfig.h"
 #include "core/models/api/apiV2ServerConfig.h"
 
@@ -31,6 +32,8 @@ struct ServerDescription
     bool primaryDnsIsAmnezia = false;
     DockerContainer defaultContainer = DockerContainer::None;
     bool hasInstalledVpnContainers = false;
+
+    bool isXRaySubscription = false;
 
     bool isApiV1 = false;
     bool isApiV2 = false;
@@ -56,6 +59,7 @@ struct ServerDescription
 ServerDescription buildServerDescription(const SelfHostedAdminServerConfig &server, bool isAmneziaDnsEnabled);
 ServerDescription buildServerDescription(const SelfHostedUserServerConfig &server, bool isAmneziaDnsEnabled);
 ServerDescription buildServerDescription(const NativeServerConfig &server, bool isAmneziaDnsEnabled);
+ServerDescription buildServerDescription(const XRaySubscriptionConfig &server, bool isAmneziaDnsEnabled);
 ServerDescription buildServerDescription(const LegacyApiServerConfig &server, bool isAmneziaDnsEnabled);
 ServerDescription buildServerDescription(const ApiV2ServerConfig &server, bool isAmneziaDnsEnabled);
 

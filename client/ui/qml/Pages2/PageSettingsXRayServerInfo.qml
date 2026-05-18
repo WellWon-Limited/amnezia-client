@@ -113,7 +113,7 @@ PageType {
                             PageController.showNotificationMessage(qsTr("Cannot reload config during active connection"))
                         } else {
                             PageController.showBusyIndicator(true)
-                            InstallController.rebootProcessedServer()
+                            InstallController.rebootProcessedServer(ServersUiController.getProcessedServerId())
                             PageController.showBusyIndicator(false)
                         }
                     }
@@ -148,7 +148,7 @@ PageType {
                             PageController.showNotificationMessage(qsTr("Cannot remove server during active connection"))
                         } else {
                             PageController.showBusyIndicator(true)
-                            InstallController.removeServer(ServersUiController.getProcessedServerIndex())
+                            InstallController.removeServer(ServersUiController.getProcessedServerId())
                             PageController.showBusyIndicator(false)
                         }
                     }

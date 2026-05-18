@@ -61,6 +61,13 @@ bool ServersController::renameServer(const QString &serverId, const QString &nam
         m_serversRepository->editServer(serverId, cfg->toJson(), kind);
         return true;
     }
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        if (!cfg.has_value()) return false;
+        cfg->description = name;
+        m_serversRepository->editServer(serverId, cfg->toJson(), kind);
+        return true;
+    }
     case serverConfigUtils::ConfigType::AmneziaPremiumV2:
     case serverConfigUtils::ConfigType::AmneziaFreeV3:
     case serverConfigUtils::ConfigType::ExternalPremium: {
@@ -114,6 +121,13 @@ void ServersController::setDefaultContainer(const QString &serverId, DockerConta
         m_serversRepository->editServer(serverId, cfg->toJson(), kind);
         return;
     }
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        if (!cfg.has_value()) return;
+        cfg->defaultContainer = container;
+        m_serversRepository->editServer(serverId, cfg->toJson(), kind);
+        return;
+    }
     case serverConfigUtils::ConfigType::AmneziaPremiumV2:
     case serverConfigUtils::ConfigType::AmneziaFreeV3:
     case serverConfigUtils::ConfigType::ExternalPremium: {
@@ -128,6 +142,75 @@ void ServersController::setDefaultContainer(const QString &serverId, DockerConta
     case serverConfigUtils::ConfigType::Invalid:
     default:
         return;
+    }
+}
+
+void ServersController::setCurrentConfigIndex(const QString &serverId, const int index)
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        if (!cfg.has_value()) return;
+        cfg->currentConfig = index;
+        m_serversRepository->editServer(serverId, cfg->toJson(), kind);
+        return;
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return;
+    }
+}
+
+int ServersController::getCurrentConfigIndex(const QString &serverId) const
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->currentConfig : int();
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return int();
+    }
+}
+
+QString ServersController::getConfigString(const QString &serverId, const int index) const
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->configString.at(index).toString() : QString();
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default:
+        return QString();
+    }
+}
+
+QString ServersController::getConfigName(const QString &serverId, const int index) const
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->configName.at(index).toString() : QString();
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return QString();
+    }
+}
+
+QJsonArray ServersController::getConfigNames(const QString &serverId) const
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->configName : QJsonArray();
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return QJsonArray();
     }
 }
 
@@ -166,6 +249,14 @@ QVector<ServerDescription> ServersController::buildServerDescriptions(bool isAmn
             d = buildServerDescription(*cfg, isAmneziaDnsEnabled);
             break;
         }
+        case Kind::XRaySubscription: {
+            const auto cfg = m_serversRepository->xraySubscriptionConfig(id);
+            if (!cfg) {
+                continue;
+            }
+            d = buildServerDescription(*cfg, isAmneziaDnsEnabled);
+            break;
+        }
         case Kind::AmneziaPremiumV2:
         case Kind::AmneziaFreeV3:
         case Kind::ExternalPremium: {
@@ -197,60 +288,37 @@ QVector<ServerDescription> ServersController::buildServerDescriptions(bool isAmn
 }
 
 QMap<DockerContainer, ContainerConfig> ServersController::getServerContainersMap(const QString &serverId) const
-void ServersController::setCurrentConfigIndex(const int serverIndex, const int index)
-{
-    m_serversRepository->setCurrentConfigIndex(serverIndex, index);
-}
-
-int ServersController::getCurrentConfigIndex(const int serverIndex) const
-{
-    return m_serversRepository->getCurrentConfigIndex(serverIndex);
-}
-
-QString ServersController::getConfigString(const int serverIndex, const int index) const
-{
-    return m_serversRepository->getConfigString(serverIndex, index);
-}
-
-QString ServersController::getConfigName(const int serverIndex, const int index) const
-{
-    return m_serversRepository->getConfigName(serverIndex, index);
-}
-
-QJsonArray ServersController::getConfigNames(const int serverIndex) const
-{
-    return m_serversRepository->getConfigNames(serverIndex);
-}
-
-QJsonArray ServersController::getServersArray() const
 {
     switch (m_serversRepository->serverKind(serverId)) {
     case serverConfigUtils::ConfigType::SelfHostedAdmin: {
         const auto cfg = m_serversRepository->selfHostedAdminConfig(serverId);
-        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig>{};
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
     }
     case serverConfigUtils::ConfigType::SelfHostedUser: {
         const auto cfg = m_serversRepository->selfHostedUserConfig(serverId);
-        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig>{};
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
     }
     case serverConfigUtils::ConfigType::Native: {
         const auto cfg = m_serversRepository->nativeConfig(serverId);
-        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig>{};
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
+    }
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        const auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
     }
     case serverConfigUtils::ConfigType::AmneziaPremiumV2:
     case serverConfigUtils::ConfigType::AmneziaFreeV3:
     case serverConfigUtils::ConfigType::ExternalPremium: {
         const auto cfg = m_serversRepository->apiV2Config(serverId);
-        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig>{};
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
     }
     case serverConfigUtils::ConfigType::AmneziaPremiumV1:
     case serverConfigUtils::ConfigType::AmneziaFreeV2: {
         const auto cfg = m_serversRepository->legacyApiConfig(serverId);
-        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig>{};
+        return cfg.has_value() ? cfg->containers : QMap<DockerContainer, ContainerConfig> {};
     }
     case serverConfigUtils::ConfigType::Invalid:
-    default:
-        return {};
+    default: return {};
     }
 }
 
@@ -267,6 +335,10 @@ DockerContainer ServersController::getDefaultContainer(const QString &serverId) 
     }
     case serverConfigUtils::ConfigType::Native: {
         const auto cfg = m_serversRepository->nativeConfig(serverId);
+        return cfg.has_value() ? cfg->defaultContainer : DockerContainer::None;
+    }
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        const auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
         return cfg.has_value() ? cfg->defaultContainer : DockerContainer::None;
     }
     case serverConfigUtils::ConfigType::AmneziaPremiumV2:
@@ -342,6 +414,14 @@ QString ServersController::notificationDisplayName(const QString &serverId) cons
     }
     case Kind::Native: {
         if (const auto cfg = m_serversRepository->nativeConfig(serverId)) {
+            if (!cfg->displayName.isEmpty()) {
+                return cfg->displayName;
+            }
+        }
+        break;
+    }
+    case Kind::XRaySubscription: {
+        if (const auto cfg = m_serversRepository->xraySubscriptionConfig(serverId)) {
             if (!cfg->displayName.isEmpty()) {
                 return cfg->displayName;
             }

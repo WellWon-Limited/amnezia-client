@@ -234,12 +234,6 @@ QString ServersUiController::getDefaultServerDescriptionExpanded() const
             return description.expandedServerDescription;
         }
     }
-
-    if (server.isXRayConfig()) {
-        return getConfigName(getCurrentConfigIndex());
-    }
-    
-    return description + server.hostName();
     return QString();
 }
 
@@ -296,6 +290,17 @@ bool ServersUiController::isDefaultServerFromApi() const
     for (const auto &description : m_orderedServerDescriptions) {
         if (description.serverId == defaultServerId) {
             return description.isApiV2;
+        }
+    }
+    return false;
+}
+
+bool ServersUiController::isDefaultServerContainXRayConfigs() const
+{
+    const QString defaultServerId = m_serversController->getDefaultServerId();
+    for (const auto &description : m_orderedServerDescriptions) {
+        if (description.serverId == defaultServerId) {
+            return description.isXRaySubscription;
         }
     }
     return false;
@@ -480,27 +485,27 @@ int ServersUiController::getServerIndexById(const QString &serverId) const
 
 void ServersUiController::setCurrentConfigIndex(const int index)
 {
-    m_serversController->setCurrentConfigIndex(m_processedServerIndex, index);
+    m_serversController->setCurrentConfigIndex(m_processedServerId, index);
 }
 
 int ServersUiController::getCurrentConfigIndex() const
 {
-    return m_serversController->getCurrentConfigIndex(m_processedServerIndex);
+    return m_serversController->getCurrentConfigIndex(m_processedServerId);
 }
 
 QString ServersUiController::getConfigString(const int index) const
 {
-    return m_serversController->getConfigString(m_processedServerIndex, index);
+    return m_serversController->getConfigString(m_processedServerId, index);
 }
 
 QString ServersUiController::getConfigName(const int index) const
 {
-    return m_serversController->getConfigName(m_processedServerIndex, index);
+    return m_serversController->getConfigName(m_processedServerId, index);
 }
 
 QJsonArray ServersUiController::getConfigNames() const
 {
-    return m_serversController->getConfigNames(m_processedServerIndex);
+    return m_serversController->getConfigNames(m_processedServerId);
 }
 
 void ServersUiController::updateContainersModel()

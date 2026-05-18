@@ -512,39 +512,42 @@ ImportController::ImportResult ImportController::importLink(const QUrl &url)
     return result;
 }
 
-ImportController::ImportResult ImportController::editServerConfigWithData(QString data, int serverIndex, const QJsonObject& uiConfig)
+ImportController::ImportResult ImportController::editServerConfigWithData(const QString &serverId, QString data, const QJsonObject& uiConfig)
 {
     ImportResult result = extractConfigFromData(data);
 
     if (result.errorCode != ErrorCode::NoError)
         return result;
 
-    const QJsonObject currentConfig = m_serversRepository->server(serverIndex).toJson();
     QJsonObject editedConfig = result.config;
 
-    for (auto it = uiConfig.begin(); it != uiConfig.end(); ++it) {
-        editedConfig.insert(it.key(), it.value());
-    }
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        if (!cfg.has_value()) {
+            result.errorCode = ErrorCode::ImportInvalidConfigError;
+            break;
+        }
 
-    if (currentConfig.contains(configKey::description)) {
+        QJsonObject currentConfig = cfg->toJson();
+
+        for (auto it = uiConfig.begin(); it != uiConfig.end(); ++it) {
+            editedConfig.insert(it.key(), it.value());
+        }
+
         editedConfig.insert(configKey::description, currentConfig.value(configKey::description));
-    }
-
-    if (currentConfig.contains(configKey::xraySubscriptionConfig)) {
         editedConfig.insert(configKey::xraySubscriptionConfig, currentConfig.value(configKey::xraySubscriptionConfig));
-    }
-
-    if (currentConfig.contains(configKey::xraySubscriptionConfigName)) {
         editedConfig.insert(configKey::xraySubscriptionConfigName, currentConfig.value(configKey::xraySubscriptionConfigName));
-    }
-
-    if (currentConfig.contains(configKey::xraySubscriptionConfigCurrent)) {
         editedConfig.insert(configKey::xraySubscriptionConfigCurrent, currentConfig.value(configKey::xraySubscriptionConfigCurrent));
+
+        m_serversRepository->editServer(serverId, editedConfig, kind);
+
+        break;
     }
-
-    const ServerConfig finalServerConfig = ServerConfig::fromJson(editedConfig);
-
-    m_serversRepository->editServer(serverIndex, finalServerConfig);
+    case serverConfigUtils::ConfigType::Invalid:
+    default: result.errorCode = ErrorCode::ImportInvalidConfigError;
+    }
 
     result.config = editedConfig;
 

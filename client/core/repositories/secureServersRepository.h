@@ -11,6 +11,7 @@
 #include "core/models/selfhosted/selfHostedAdminServerConfig.h"
 #include "core/models/selfhosted/selfHostedUserServerConfig.h"
 #include "core/models/selfhosted/nativeServerConfig.h"
+#include "core/models/selfhosted/xraySubscriptionConfig.h"
 #include "core/models/api/apiV2ServerConfig.h"
 #include "core/models/api/legacyApiServerConfig.h"
 #include "core/models/containerConfig.h"
@@ -34,6 +35,7 @@ public:
     std::optional<SelfHostedAdminServerConfig> selfHostedAdminConfig(const QString &serverId) const;
     std::optional<SelfHostedUserServerConfig> selfHostedUserConfig(const QString &serverId) const;
     std::optional<NativeServerConfig> nativeConfig(const QString &serverId) const;
+    std::optional<XRaySubscriptionConfig> xraySubscriptionConfig(const QString &serverId) const;
     std::optional<ApiV2ServerConfig> apiV2Config(const QString &serverId) const;
     std::optional<LegacyApiServerConfig> legacyApiConfig(const QString &serverId) const;
 
@@ -47,22 +49,6 @@ public:
     void setDefaultServer(const QString &serverId);
 
     void clearServers();
-    void setDefaultContainer(int serverIndex, DockerContainer container);
-    ContainerConfig containerConfig(int serverIndex, DockerContainer container) const;
-    void setContainerConfig(int serverIndex, DockerContainer container, const ContainerConfig &config);
-    void clearLastConnectionConfig(int serverIndex, DockerContainer container);
-
-    void setCurrentConfigIndex(const int serverIndex, int index);
-    int getCurrentConfigIndex(const int serverIndex) const;
-    QString getConfigString(const int serverIndex, const int index) const;
-    QString getConfigName(const int serverIndex, const int index) const;
-    QJsonArray getConfigNames(const int serverIndex) const;
-
-    ServerCredentials serverCredentials(int index) const;
-    bool hasServerWithVpnKey(const QString &vpnKey) const;
-    bool hasServerWithCrc(quint16 crc) const;
-
-    void setServersArray(const QJsonArray &servers);
 
     void invalidateCache();
 

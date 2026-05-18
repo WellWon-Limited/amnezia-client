@@ -286,6 +286,19 @@ std::optional<NativeServerConfig> SecureServersRepository::nativeConfig(const QS
     return NativeServerConfig::fromJson(strippedJson);
 }
 
+std::optional<XRaySubscriptionConfig> SecureServersRepository::xraySubscriptionConfig(const QString &serverId) const
+{
+    const auto it = m_serverJsonById.constFind(serverId);
+    if (it == m_serverJsonById.constEnd()) {
+        return std::nullopt;
+    }
+    const QJsonObject strippedJson = withoutStorageServerId(it.value());
+    if (serverConfigUtils::configTypeFromJson(strippedJson) != serverConfigUtils::ConfigType::XRaySubscription) {
+        return std::nullopt;
+    }
+    return XRaySubscriptionConfig::fromJson(strippedJson);
+}
+
 std::optional<ApiV2ServerConfig> SecureServersRepository::apiV2Config(const QString &serverId) const
 {
     const auto it = m_serverJsonById.constFind(serverId);
@@ -299,65 +312,6 @@ std::optional<ApiV2ServerConfig> SecureServersRepository::apiV2Config(const QStr
     return ApiV2ServerConfig::fromJson(strippedJson);
 }
 
-void SecureServersRepository::setCurrentConfigIndex(const int serverIndex, const int index)
-{
-    ServerConfig serverConfig = server(serverIndex);
-
-    if (serverConfig.isXRayConfig()) {
-        XRaySubscriptionConfig* xrayConfig = serverConfig.as<XRaySubscriptionConfig>();
-        if (xrayConfig && xrayConfig->currentConfig != index) {
-            xrayConfig->currentConfig = index;
-            editServer(serverIndex, serverConfig);
-        }
-    }
-}
-
-int SecureServersRepository::getCurrentConfigIndex(const int serverIndex) const
-{
-    ServerConfig serverConfig = server(serverIndex);
-    if (!serverConfig.isXRayConfig())
-        return int();
-
-    const XRaySubscriptionConfig* xrayConfig = serverConfig.as<XRaySubscriptionConfig>();
-    if (xrayConfig->currentConfig < 0)
-        return int();
-
-    return xrayConfig->currentConfig;
-}
-
-QString SecureServersRepository::getConfigString(const int serverIndex, const int index) const
-{
-    ServerConfig serverConfig = server(serverIndex);
-    if (!serverConfig.isXRayConfig())
-        return QString();
-
-    const XRaySubscriptionConfig* xrayConfig = serverConfig.as<XRaySubscriptionConfig>();
-    if (xrayConfig->configString.isEmpty())
-        return QString();
-
-    return xrayConfig->configString.at(index).toString();
-}
-
-QString SecureServersRepository::getConfigName(const int serverIndex, const int index) const
-{
-    QJsonArray names = getConfigNames(serverIndex);
-    return names.at(index).toString();
-}
-
-QJsonArray SecureServersRepository::getConfigNames(const int serverIndex) const
-{
-    ServerConfig serverConfig = server(serverIndex);
-    if (!serverConfig.isXRayConfig())
-        return QJsonArray();
-
-    const XRaySubscriptionConfig* xrayConfig = serverConfig.as<XRaySubscriptionConfig>();
-    if (xrayConfig->configName.isEmpty())
-        return QJsonArray();
-
-    return xrayConfig->configName;
-}
-
-ServerCredentials SecureServersRepository::serverCredentials(int index) const
 std::optional<LegacyApiServerConfig> SecureServersRepository::legacyApiConfig(const QString &serverId) const
 {
     const auto it = m_serverJsonById.constFind(serverId);
