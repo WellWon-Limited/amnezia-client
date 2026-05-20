@@ -483,14 +483,9 @@ int ServersUiController::getServerIndexById(const QString &serverId) const
     return rowForServerId(m_orderedServerDescriptions, serverId);
 }
 
-void ServersUiController::setCurrentConfigIndex(const int index)
+QString ServersUiController::getSubLink() const
 {
-    m_serversController->setCurrentConfigIndex(m_processedServerId, index);
-}
-
-int ServersUiController::getCurrentConfigIndex() const
-{
-    return m_serversController->getCurrentConfigIndex(m_processedServerId);
+    return m_serversController->getSubLink(m_processedServerId);
 }
 
 QString ServersUiController::getConfigString(const int index) const
@@ -506,6 +501,16 @@ QString ServersUiController::getConfigName(const int index) const
 QJsonArray ServersUiController::getConfigNames() const
 {
     return m_serversController->getConfigNames(m_processedServerId);
+}
+
+int ServersUiController::getCurrentConfigIndex() const
+{
+    return m_serversController->getCurrentConfigIndex(m_processedServerId);
+}
+
+void ServersUiController::setCurrentConfigIndex(const int index)
+{
+    m_serversController->setCurrentConfigIndex(m_processedServerId, index);
 }
 
 void ServersUiController::updateContainersModel()

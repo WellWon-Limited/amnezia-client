@@ -145,32 +145,16 @@ void ServersController::setDefaultContainer(const QString &serverId, DockerConta
     }
 }
 
-void ServersController::setCurrentConfigIndex(const QString &serverId, const int index)
+QString ServersController::getSubLink(const QString &serverId) const
 {
     const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
     switch (kind) {
     case serverConfigUtils::ConfigType::XRaySubscription: {
         auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
-        if (!cfg.has_value()) return;
-        cfg->currentConfig = index;
-        m_serversRepository->editServer(serverId, cfg->toJson(), kind);
-        return;
+        return cfg.has_value() ? cfg->subLink : QString();
     }
     case serverConfigUtils::ConfigType::Invalid:
-    default: return;
-    }
-}
-
-int ServersController::getCurrentConfigIndex(const QString &serverId) const
-{
-    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
-    switch (kind) {
-    case serverConfigUtils::ConfigType::XRaySubscription: {
-        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
-        return cfg.has_value() ? cfg->currentConfig : int();
-    }
-    case serverConfigUtils::ConfigType::Invalid:
-    default: return int();
+    default: return QString();
     }
 }
 
@@ -183,8 +167,7 @@ QString ServersController::getConfigString(const QString &serverId, const int in
         return cfg.has_value() ? cfg->configString.at(index).toString() : QString();
     }
     case serverConfigUtils::ConfigType::Invalid:
-    default:
-        return QString();
+    default: return QString();
     }
 }
 
@@ -211,6 +194,36 @@ QJsonArray ServersController::getConfigNames(const QString &serverId) const
     }
     case serverConfigUtils::ConfigType::Invalid:
     default: return QJsonArray();
+    }
+}
+
+int ServersController::getCurrentConfigIndex(const QString &serverId) const
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        return cfg.has_value() ? cfg->currentConfig : int();
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return int();
+    }
+}
+
+void ServersController::setCurrentConfigIndex(const QString &serverId, const int index)
+{
+    const serverConfigUtils::ConfigType kind = m_serversRepository->serverKind(serverId);
+    switch (kind) {
+    case serverConfigUtils::ConfigType::XRaySubscription: {
+        auto cfg = m_serversRepository->xraySubscriptionConfig(serverId);
+        if (!cfg.has_value())
+            return;
+        cfg->currentConfig = index;
+        m_serversRepository->editServer(serverId, cfg->toJson(), kind);
+        return;
+    }
+    case serverConfigUtils::ConfigType::Invalid:
+    default: return;
     }
 }
 

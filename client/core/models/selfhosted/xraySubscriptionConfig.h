@@ -26,6 +26,7 @@ namespace amnezia
         QString dns1;
         QString dns2;
 
+        QString subLink;
         QJsonArray configString;
         QJsonArray configName;
         int currentConfig;

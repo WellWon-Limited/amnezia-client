@@ -503,6 +503,7 @@ ImportController::ImportResult ImportController::importLink(const QUrl &url)
     }
 
     serverConfig.insert(configKey::description, m_appSettingsRepository->nextAvailableServerName());
+    serverConfig[configKey::xraySubscriptionLink] = url.toString();
     serverConfig[configKey::xraySubscriptionConfig] = configStrings;
     serverConfig[configKey::xraySubscriptionConfigName] = configNames;
     serverConfig[configKey::xraySubscriptionConfigCurrent] = 0;
@@ -537,6 +538,7 @@ ImportController::ImportResult ImportController::editServerConfigWithData(const 
         }
 
         editedConfig.insert(configKey::description, currentConfig.value(configKey::description));
+        editedConfig.insert(configKey::xraySubscriptionLink, currentConfig.value(configKey::xraySubscriptionLink));
         editedConfig.insert(configKey::xraySubscriptionConfig, currentConfig.value(configKey::xraySubscriptionConfig));
         editedConfig.insert(configKey::xraySubscriptionConfigName, currentConfig.value(configKey::xraySubscriptionConfigName));
         editedConfig.insert(configKey::xraySubscriptionConfigCurrent, currentConfig.value(configKey::xraySubscriptionConfigCurrent));

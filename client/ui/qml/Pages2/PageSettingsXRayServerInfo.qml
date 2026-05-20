@@ -113,7 +113,10 @@ PageType {
                             PageController.showNotificationMessage(qsTr("Cannot reload config during active connection"))
                         } else {
                             PageController.showBusyIndicator(true)
-                            InstallController.rebootProcessedServer(ServersUiController.getProcessedServerId())
+                            if (!ImportController.importLink(ServersUiController.getSubLink()) &&
+                                !ImportController.editServerConfigWithData(ServersUiController.getProcessedServerId(), ServersUiController.getConfigString(ServersUiController.getCurrentConfigIndex()))) {
+                                    PageController.showNotificationMessage(qsTr("Error during config reload"))
+                                }
                             PageController.showBusyIndicator(false)
                         }
                     }

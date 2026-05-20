@@ -61,6 +61,9 @@ namespace amnezia
             obj[configKey::dns2] = dns2;
         }
 
+        if (!subLink.isEmpty()) {
+            obj[configKey::xraySubscriptionLink] = subLink;
+        }
         if (!configString.isEmpty()) {
             obj[configKey::xraySubscriptionConfig] = configString;
         }
@@ -103,6 +106,7 @@ namespace amnezia
             config.displayName = config.description.isEmpty() ? config.hostName : config.description;
         }
 
+        config.subLink = json.value(configKey::xraySubscriptionLink).toString();
         config.configString = json.value(configKey::xraySubscriptionConfig).toArray();
         config.configName = json.value(configKey::xraySubscriptionConfigName).toArray();
         config.currentConfig = json.value(configKey::xraySubscriptionConfigCurrent).toInt();

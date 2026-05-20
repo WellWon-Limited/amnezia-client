@@ -98,13 +98,13 @@ public slots:
     QString adHeader() const;
     QString adDescription() const;
 
-    void setCurrentConfigIndex(int index);
-    int getCurrentConfigIndex() const;
+    QString getSubLink() const;
     QString getConfigString(const int index) const;
     QString getConfigName(const int index) const;
     QJsonArray getConfigNames() const;
-    
-    
+    int getCurrentConfigIndex() const;
+    void setCurrentConfigIndex(int index);
+
     QString getServerId(int index) const;
     int getServerIndexById(const QString &serverId) const;
     QStringList getAllInstalledServicesName(int serverIndex) const;
