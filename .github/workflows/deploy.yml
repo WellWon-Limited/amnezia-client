@@ -873,7 +873,7 @@ jobs:
 
         deploy/build.sh -t android --sign --aab --play --build ./deploy/build/play
 
-        (cd deploy/build/play/client/android-build/build/outputs/bundle/release && mv android-build-release.aab AmneziaVPN_${VERSION}_play.aab)
+        (cd deploy/build/play/client/android-build/build/outputs/bundle/playRelease && mv *.aab AmneziaVPN_${VERSION}_play.aab)
 
     - name: 'Build Play APK'
       env:
@@ -887,7 +887,7 @@ jobs:
 
         deploy/build.sh -t android --sign --apk --play --build ./deploy/build/play-apk
 
-        (cd deploy/build/play-apk/client/android-build/build/outputs/apk && mv android-build-release-unsigned.apk AmneziaVPN_${VERSION}_play.apk)
+        (cd deploy/build/play-apk/client/android-build/build/outputs/apk/play/release && mv *.apk AmneziaVPN_${VERSION}_play.apk)
 
     - name: 'Upload universal APK'
       uses: actions/upload-artifact@v7
@@ -906,14 +906,14 @@ jobs:
     - name: 'Upload Play AAB'
       uses: actions/upload-artifact@v7
       with:
-        path: deploy/build/play/client/android-build/build/outputs/bundle/release/*.aab
+        path: deploy/build/play/client/android-build/build/outputs/bundle/playRelease/*.aab
         archive: false
         retention-days: 7
 
     - name: 'Upload Play APK'
       uses: actions/upload-artifact@v7
       with:
-        path: deploy/build/play-apk/client/android-build/build/outputs/apk/*.apk
+        path: deploy/build/play-apk/client/android-build/build/outputs/apk/play/release/*.apk
         archive: false
         retention-days: 7
 
