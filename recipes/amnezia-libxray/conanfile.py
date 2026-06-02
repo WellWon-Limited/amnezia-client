@@ -1,6 +1,7 @@
 from conan import ConanFile
 from conan.tools.files import get, copy
 from conan.tools.layout import basic_layout
+from conan.tools.gnu import AutotoolsToolchain
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.env import Environment
 
@@ -23,7 +24,7 @@ class AmneziaLibxray(ConanFile):
 
     def build_requirements(self):
         self.tool_requires("go/1.26.0")
-    
+
     def validate(self):
         if self.settings.os != "Android":
             raise ConanInvalidConfiguration(f"{self.name} v{self.version} does not support {self.settings.os}")
@@ -34,14 +35,20 @@ class AmneziaLibxray(ConanFile):
         )
 
     def generate(self):
-        env = Environment()
+        tc = AutotoolsToolchain(self)
+        env = tc.environment()
+        env.define("CGO_LDFLAGS", tc.ldflags)
+        env.define("CGO_CFLAGS", tc.cflags)
+        tc.generate(env)
+
+        android_env = Environment()
         ndk_path_str = self.conf.get("tools.android:ndk_path")
         if ndk_path_str:
             ndk_path = Path(ndk_path_str)
             if len(ndk_path.parts) > 2:
                 sdk_path = ndk_path.parents[1]
-                env.define("ANDROID_HOME", str(sdk_path))
-        env.vars(self).save_script("conan_provide_androidhome")
+                android_env.define("ANDROID_HOME", str(sdk_path))
+        android_env.vars(self).save_script("conan_provide_androidhome")
 
     def _patch_sources(self):
         build_path = os.path.join(self.build_folder, "build.sh")
