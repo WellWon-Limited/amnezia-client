@@ -1,7 +1,6 @@
 from conan import ConanFile
-from conan.tools.files import get, copy
+from conan.tools.files import get, copy, replace_in_file
 from conan.tools.layout import basic_layout
-from conan.tools.gnu import AutotoolsToolchain
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.env import Environment
 
@@ -35,25 +34,24 @@ class AmneziaLibxray(ConanFile):
         )
 
     def generate(self):
-        tc = AutotoolsToolchain(self)
-        env = tc.environment()
-        env.define("CGO_LDFLAGS", tc.ldflags)
-        env.define("CGO_CFLAGS", tc.cflags)
-        tc.generate(env)
-
-        android_env = Environment()
+        env = Environment()
         ndk_path_str = self.conf.get("tools.android:ndk_path")
         if ndk_path_str:
             ndk_path = Path(ndk_path_str)
             if len(ndk_path.parts) > 2:
                 sdk_path = ndk_path.parents[1]
-                android_env.define("ANDROID_HOME", str(sdk_path))
-        android_env.vars(self).save_script("conan_provide_androidhome")
+                env.define("ANDROID_HOME", str(sdk_path))
+        env.vars(self).save_script("conan_provide_androidhome")
 
     def _patch_sources(self):
         build_path = os.path.join(self.build_folder, "build.sh")
         build_stat = os.stat(build_path)
         os.chmod(build_path, build_stat.st_mode | stat.S_IEXEC)
+        replace_in_file(self,
+            build_path,
+            '-ldflags="-w -s -buildid="',
+            '-ldflags="-w -s -buildid= -extldflags=-Wl,-z,max-page-size=16384"',
+        )
 
     def build(self):
         self._patch_sources()
