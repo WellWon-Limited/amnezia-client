@@ -888,7 +888,9 @@ ErrorCode SubscriptionController::processPlayMarketPurchase(const QString &userC
     checkPayload[apiDefs::key::transactionId] = purchaseToken;
 
     QByteArray checkResponse;
+    qWarning() << "[Billing][processPlayMarketPurchase] v1/subscriptions request:" << QJsonDocument(checkPayload).toJson(QJsonDocument::Compact);
     ErrorCode checkError = executeRequest(QString("%1v1/subscriptions"), checkPayload, checkResponse, false);
+    qWarning() << "[Billing][processPlayMarketPurchase] v1/subscriptions errorCode:" << static_cast<int>(checkError) << "response:" << checkResponse;
     if (checkError != ErrorCode::NoError) {
         qWarning().noquote() << "[Billing] Initial subscriptions check failed:" << static_cast<int>(checkError);
         return checkError;
@@ -1083,7 +1085,9 @@ SubscriptionController::PlayMarketRestoreResult SubscriptionController::processP
         checkPayload[apiDefs::key::transactionId] = purchaseToken;
 
         QByteArray checkResponse;
+        qWarning() << "[Billing] v1/subscriptions request:" << QJsonDocument(checkPayload).toJson(QJsonDocument::Compact);
         ErrorCode checkError = executeRequest(QString("%1v1/subscriptions"), checkPayload, checkResponse, false);
+        qWarning() << "[Billing] v1/subscriptions errorCode:" << static_cast<int>(checkError) << "response:" << checkResponse;
         if (checkError != ErrorCode::NoError) {
             qWarning().noquote() << "[Billing] Initial subscriptions check failed:" << static_cast<int>(checkError);
             result.errorCode = checkError;
