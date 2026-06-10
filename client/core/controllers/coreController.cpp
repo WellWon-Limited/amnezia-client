@@ -11,6 +11,11 @@
 #include "logger.h"
 #include "secureQSettings.h"
 
+#ifdef AVPN_ENGINE_ENABLED            // AVPN overlay
+    #include "amneziaApplication.h"   // amnApp->networkManager()
+    #include "core/serviceEngine/AvpnEngineQml.h"
+#endif
+
 #if defined(Q_OS_ANDROID)
     #include "core/utils/installedAppsImageProvider.h"
     #include "platforms/android/android_controller.h"
@@ -193,6 +198,13 @@ void CoreController::initControllers()
 
     m_settingsUiController = new SettingsUiController(m_settingsController, m_serversController, this);
     setQmlContextProperty("SettingsController", m_settingsUiController);
+
+#ifdef AVPN_ENGINE_ENABLED   // AVPN overlay: умный движок (пул/выбор/failover) + диагностика
+    // Переиспользуем готовые объекты форка: VpnConnection, SecureAppSettingsRepository, networkManager.
+    auto *avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
+                                               amnApp->networkManager(), this);
+    setQmlContextProperty("AvpnEngine", avpnEngine);
+#endif
 
     m_pageController = new PageController(m_serversController, m_settingsController, this);
     setQmlContextProperty("PageController", m_pageController);

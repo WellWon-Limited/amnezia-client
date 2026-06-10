@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "address": ["10.7.0.5/32"],
+  "status": "active",
+  "expires_at": "2026-09-01T00:00:00Z",
+  "traffic": { "used": 1234567, "limit": 0 },
+  "nodes": [
+    {
+      "node_id": "fra-01",
+      "region": "eu-central",
+      "endpoint": "203.0.113.10:51820",
+      "server_pubkey": "K1nDpUbLiCkEyExAmPlE0000000000000000000000=",
+      "proto": "awg",
+      "weight": 1.0,
+      "health": { "telegram": 0.99, "youtube": 0.97, "gemini": 0.95, "openai": 0.96 },
+      "allowed_ips": ["0.0.0.0/0", "::/0"],
+      "dns": ["1.1.1.1", "1.0.0.1"],
+      "mtu": 1280,
+      "persistent_keepalive": 25,
+      "preshared_key": null,
+      "awg_params": {
+        "Jc": 4, "Jmin": 50, "Jmax": 1000, "S1": 86, "S2": 57,
+        "H1": 1, "H2": 2, "H3": 3, "H4": 4
+      }
+    }
+  ]
+}

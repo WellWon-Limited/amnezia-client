@@ -34,7 +34,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "org.amnezia.vpn"
+        applicationId = "org.antivpn.client"
         targetSdk = qtTargetSdkVersion.toInt()
 
         // keeps language resources for only the locales specified below

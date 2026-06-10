@@ -99,6 +99,7 @@ endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/3rdparty.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/sources.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/avpn.cmake)   # AVPN overlay (serviceEngine; -DAVPN_ENGINE=OFF чтобы выключить)
 
 include_directories(
     ${CMAKE_CURRENT_LIST_DIR}/../ipc
@@ -149,16 +150,16 @@ if(APPLE)
     cmake_policy(SET CMP0114 NEW)
 
     if(NOT BUILD_OSX_APP_IDENTIFIER)
-        set(BUILD_OSX_APP_IDENTIFIER org.amnezia.AmneziaVPN CACHE STRING "OSX Application identifier")
+        set(BUILD_OSX_APP_IDENTIFIER org.antivpn.client CACHE STRING "OSX Application identifier")
     endif()
     if(NOT BUILD_IOS_APP_IDENTIFIER)
-        set(BUILD_IOS_APP_IDENTIFIER org.amnezia.AmneziaVPN CACHE STRING "iOS Application identifier")
+        set(BUILD_IOS_APP_IDENTIFIER hk.wellwon.vpn CACHE STRING "iOS Application identifier")
     endif()
     if(NOT BUILD_IOS_GROUP_IDENTIFIER)
-        set(BUILD_IOS_GROUP_IDENTIFIER group.org.amnezia.AmneziaVPN CACHE STRING "iOS Group identifier")
+        set(BUILD_IOS_GROUP_IDENTIFIER group.hk.wellwon.zanaves CACHE STRING "iOS Group identifier")
     endif()
     if(NOT BUILD_VPN_DEVELOPMENT_TEAM)
-        set(BUILD_VPN_DEVELOPMENT_TEAM X7UJ388FXK CACHE STRING "Amnezia VPN Development Team")
+        set(BUILD_VPN_DEVELOPMENT_TEAM Q7DVH5MCWF CACHE STRING "AVPN Development Team")
     endif()
 
     set(CMAKE_XCODE_GENERATE_SCHEME FALSE)

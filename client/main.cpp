@@ -19,7 +19,10 @@
 bool isAnotherInstanceRunning()
 {
     QLocalSocket socket;
-    socket.connectToServer("AmneziaVPNInstance");
+    // AVPN: derive instance socket from APPLICATION_NAME (→"AVPNInstance"), was hardcoded
+    // "AmneziaVPNInstance" — shared name cross-linked our fork with official Amnezia
+    // (clicking either icon raised whichever instance already held the socket).
+    socket.connectToServer(QStringLiteral(APPLICATION_NAME "Instance"));
     if (socket.waitForConnected(500)) {
         qWarning() << "AmneziaVPN is already running";
         return true;
