@@ -11,12 +11,37 @@ import "../Controls2"
 import "../Controls2/TextTypes"
 import "../Config"
 import "../Components"
+import "../Avpn/components"   // AVPN: TribeBottomNav (наша навигация)
 
 PageType {
     id: root
 
     property bool isControlsDisabled: false
     property bool isTabBarDisabled: false
+
+    // AVPN: фиче-флаг нашей нижней навигации (3 вкладки) вместо Amnezia TabBar.
+    readonly property bool avpnNav: true
+
+    // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Защита / 3 Профиль).
+    function goAvpnTab(index) {
+        avpnBottomNav.currentIndex = index
+        if (index === 1)
+            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageLocationsAvpn.qml")
+        else if (index === 2)
+            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageSecurityAvpn.qml")
+        else if (index === 3)
+            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageAccountAvpn.qml")
+        else
+            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageConnectAvpn.qml")
+    }
+
+    // AVPN: Connect-экран просит переключить вкладку / открыть настройки.
+    Connections {
+        target: tabBarStackView ? tabBarStackView.currentItem : null
+        ignoreUnknownSignals: true
+        function onRequestTab(index) { root.goAvpnTab(index) }
+        function onRequestSettings() { root.goAvpnTab(3) }
+    }
 
     Connections {
         objectName: "pageControllerConnection"
@@ -30,7 +55,11 @@ PageType {
             } else {
                 tabBar.visible = true
                 tabBar.setCurrentIndex(0)
-                tabBarStackView.goToTabBarPage(PageEnum.PageHome)
+                ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
+                if (root.avpnNav)
+                    root.goAvpnTab(0)                                    // AVPN: наш Connect-экран
+                else
+                    tabBarStackView.goToTabBarPageUrl("PageHomeAvpn.qml")
             }
         }
 
@@ -269,12 +298,19 @@ PageType {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.left: parent.left
-        anchors.bottom: tabBar.top
+        anchors.bottom: root.avpnNav ? avpnBottomNav.top : tabBar.top   // AVPN: над нашей навигацией
 
         enabled: !root.isControlsDisabled
 
         function goToTabBarPage(page) {
             var pagePath = PageController.getPagePath(page)
+            tabBarStackView.clear(StackView.Immediate)
+            tabBarStackView.replace(pagePath, { "objectName" : pagePath }, StackView.Immediate)
+        }
+
+        // AVPN: загрузка нашей страницы по относительному URL (резолвится и в qrc, и с диска).
+        function goToTabBarPageUrl(relUrl) {
+            var pagePath = Qt.resolvedUrl(relUrl)
             tabBarStackView.clear(StackView.Immediate)
             tabBarStackView.replace(pagePath, { "objectName" : pagePath }, StackView.Immediate)
         }
@@ -286,7 +322,8 @@ PageType {
                 pagePath = PageController.getPagePath(PageEnum.PageSetupWizardStart)
             } else {
                 tabBar.visible = true
-                pagePath = PageController.getPagePath(PageEnum.PageHome)
+                pagePath = Qt.resolvedUrl(root.avpnNav ? "../Avpn/Pages/PageConnectAvpn.qml"
+                                                       : "PageHomeAvpn.qml") // AVPN: наш Connect-экран
                 ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
             }
 
@@ -328,9 +365,11 @@ PageType {
         leftPadding: 96
         rightPadding: 96
 
-        height: visible ? homeTabButton.implicitHeight + tabBar.topPadding + tabBar.bottomPadding : 0
+        // AVPN: при нашей навигации Amnezia TabBar схлопнут и неактивен (обработчики его ещё трогают).
+        opacity: root.avpnNav ? 0 : 1
+        height: root.avpnNav ? 0 : (visible ? homeTabButton.implicitHeight + tabBar.topPadding + tabBar.bottomPadding : 0)
 
-        enabled: !root.isControlsDisabled && !root.isTabBarDisabled
+        enabled: !root.avpnNav && !root.isControlsDisabled && !root.isTabBarDisabled
 
         background: Shape {
             objectName: "backgroundShape"
@@ -360,8 +399,8 @@ PageType {
             isSelected: tabBar.currentIndex === 0
             image: "qrc:/images/controls/home.svg"
             clickedFunc: function () {
-                tabBarStackView.goToTabBarPage(PageEnum.PageHome)
                 ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
+                tabBarStackView.goToTabBarPageUrl("PageHomeAvpn.qml") // AVPN: наш Connect-экран
                 tabBar.currentIndex = 0
             }
         }
@@ -422,5 +461,22 @@ PageType {
                 tabBar.currentIndex = 3
             }
         }
+    }
+
+    // AVPN: наша нижняя навигация (3 вкладки) — замена Amnezia TabBar.
+    TribeBottomNav {
+        id: avpnBottomNav
+        objectName: "avpnBottomNav"
+
+        anchors.right: parent.right
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: PageController.imeHeight
+
+        visible: root.avpnNav && !PageController.isStartPageVisible()
+        bottomInset: PageController.safeAreaBottomMargin
+        enabled: !root.isControlsDisabled && !root.isTabBarDisabled
+
+        onActivated: function(index) { root.goAvpnTab(index) }
     }
 }
