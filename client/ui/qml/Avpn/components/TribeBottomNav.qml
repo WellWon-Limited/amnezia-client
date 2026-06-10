@@ -5,7 +5,7 @@ import ".."   // Theme
 
 // AVPN: bottom navigation (replaces Amnezia TabBar). 4 tabs. UI-DESIGN.md §4.
 // Tabler-style stroke icons drawn inline (no PNG). Emits activated(index).
-Rectangle {
+Item {
     id: nav
     property int currentIndex: 0
     signal activated(int index)
@@ -20,12 +20,18 @@ Rectangle {
 
     implicitHeight: 72 + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
-    radius: 24
-    color: Theme.color.nav
+    readonly property int topRadius: 24
+
+    // фон: скруглены ТОЛЬКО верхние углы — нижние уведены за нижний край
+    // (раньше нижние углы маскировались полупрозрачным патчем → просвечивали)
+    Rectangle {
+        anchors.fill: parent
+        anchors.bottomMargin: -nav.topRadius
+        radius: nav.topRadius
+        color: Theme.color.nav
+    }
     // top hairline
     Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.color.border }
-    // скруглить только верхние углы (нижние перекрыты краем экрана)
-    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: parent.radius; color: Theme.color.nav }
 
     // активный цвет = единый акцент (Theme.color.accent), idle — приглушён (textDisabled)
     // для контраста с активным табом
