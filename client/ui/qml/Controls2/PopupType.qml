@@ -6,6 +6,7 @@ import Style 1.0
 
 import "TextTypes"
 import "../Config"
+import "../Avpn"   // AVPN: Theme (тёмная тема Tribe для глобальных попапов)
 
 Popup {
     id: root
@@ -39,8 +40,10 @@ Popup {
     background: Rectangle {
         anchors.fill: parent
 
-        color: "white"
-        radius: 4
+        color: Theme.color.surface1            // AVPN: было "white"
+        radius: Theme.radius.lg
+        border.width: 1
+        border.color: Theme.color.border
     }
 
     Timer {
@@ -71,6 +74,8 @@ Popup {
                 horizontalAlignment: Text.AlignLeft
                 Layout.fillWidth: true
 
+                color: Theme.color.text1               // AVPN: светлый текст на тёмном попапе
+
                 onLinkActivated: function(link) {
                     Qt.openUrlExternally(LanguageUiController.getCurrentDocsUrl(link))
                 }
@@ -90,13 +95,15 @@ Popup {
 
                 implicitHeight: 32
 
-                defaultColor: "white"
-                hoveredColor: AmneziaStyle.color.lightGray
-                pressedColor: AmneziaStyle.color.lightGray
-                disabledColor: AmneziaStyle.color.charcoalGray
+                // AVPN: тёмная glass-кнопка вместо белой
+                defaultColor: Theme.color.glassStrong
+                hoveredColor: Theme.color.surface2
+                pressedColor: Theme.color.surface3
+                disabledColor: Theme.color.surface1
 
-                textColor: AmneziaStyle.color.midnightBlack
-                borderWidth: 0
+                textColor: Theme.color.text1
+                borderWidth: 1
+                borderColor: Theme.color.border2
 
                 text: qsTr("Close")
 
