@@ -98,7 +98,11 @@ void AmneziaApplication::init()
 {
     m_engine = new QQmlApplicationEngine;
 
-    const QUrl url(QStringLiteral("qrc:/ui/qml/main2.qml"));
+    // dev hot-reload: если задан AVPN_QML_SRC, грузим QML с диска (qmlpreview видит файлы → live reload)
+    const QByteArray qmlSrcEnv = qgetenv("AVPN_QML_SRC");
+    const QUrl url = qmlSrcEnv.isEmpty()
+        ? QUrl(QStringLiteral("qrc:/ui/qml/main2.qml"))
+        : QUrl::fromLocalFile(QString::fromUtf8(qmlSrcEnv) + "/main2.qml");
     QObject::connect(
         m_engine, &QQmlApplicationEngine::objectCreated, this,
         [this, url](QObject *obj, const QUrl &objUrl) {
@@ -139,6 +143,8 @@ void AmneziaApplication::init()
     m_coreController.reset(new CoreController(m_vpnConnection, m_settings, m_engine));
 
     m_engine->addImportPath("qrc:/ui/qml/Modules/");
+    if (!qmlSrcEnv.isEmpty())
+        m_engine->addImportPath(QString::fromUtf8(qmlSrcEnv) + "/Modules/");
 
     if (m_parser.isSet(m_optImport)) {
         const QString data = m_parser.value(m_optImport);
@@ -225,6 +231,11 @@ void AmneziaApplication::loadFonts()
     QQuickStyle::setStyle("Basic");
 
     QFontDatabase::addApplicationFont(":/fonts/pt-root-ui_vf.ttf");
+
+    // AVPN: Tribe VPN design-system fonts (UI-DESIGN.md §2). QML reads them via Avpn/Theme.qml.
+    QFontDatabase::addApplicationFont(":/fonts/Manrope-VariableFont_wght.ttf");
+    QFontDatabase::addApplicationFont(":/fonts/Inter-VariableFont.ttf");
+    QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono-VariableFont_wght.ttf");
 }
 
 bool AmneziaApplication::parseCommands()
@@ -251,7 +262,9 @@ bool AmneziaApplication::parseCommands()
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && !defined(MACOS_NE)
 void AmneziaApplication::startLocalServer() {
-    const QString serverName("AmneziaVPNInstance");
+    // AVPN: must match main.cpp isAnotherInstanceRunning() — unique per-build name so our
+    // fork and official Amnezia don't share the single-instance channel (was "AmneziaVPNInstance").
+    const QString serverName(QStringLiteral(APPLICATION_NAME "Instance"));
     QLocalServer::removeServer(serverName);
 
     QLocalServer *server = new QLocalServer(this);

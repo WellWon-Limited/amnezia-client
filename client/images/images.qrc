@@ -1,6 +1,10 @@
 <RCC>
     <qresource prefix="/">
         <file>../fonts/pt-root-ui_vf.ttf</file>
+        <!-- AVPN: Tribe VPN design-system fonts (UI-DESIGN.md §2) -->
+        <file>../fonts/Manrope-VariableFont_wght.ttf</file>
+        <file>../fonts/Inter-VariableFont.ttf</file>
+        <file>../fonts/JetBrainsMono-VariableFont_wght.ttf</file>
     </qresource>
     <qresource prefix="/images">
         <file>amneziaBigLogo.png</file>

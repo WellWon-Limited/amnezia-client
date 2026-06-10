@@ -63,6 +63,10 @@ QString PageController::getPagePath(PageLoader::PageEnum page)
 {
     QMetaEnum metaEnum = QMetaEnum::fromType<PageLoader::PageEnum>();
     QString pageName = metaEnum.valueToKey(static_cast<int>(page));
+    // dev hot-reload: грузить страницы с диска, если задан AVPN_QML_SRC (правка QML → ui-reload без пересборки)
+    const QByteArray qmlSrc = qgetenv("AVPN_QML_SRC");
+    if (!qmlSrc.isEmpty())
+        return "file://" + QString::fromUtf8(qmlSrc) + "/Pages2/" + pageName + ".qml";
     return "qrc:/ui/qml/Pages2/" + pageName + ".qml";
 }
 

@@ -30,19 +30,9 @@ set_target_properties(networkextension PROPERTIES
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
 )
 
-if(DEPLOY)
-    set_target_properties(networkextension PROPERTIES
-        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Distribution"
-        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY[variant=Debug] "Apple Development"
-        XCODE_ATTRIBUTE_CODE_SIGN_STYLE Manual
-        XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER "distr ios.org.amnezia.AmneziaVPN"
-        XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER[variant=Debug] "dev ios.org.amnezia.AmneziaVPN"
-    )
-else()
-    set_target_properties(networkextension PROPERTIES
-        XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
-    )
-endif()
+set_target_properties(networkextension PROPERTIES
+    XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
+)
 
 set_target_properties(networkextension PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
@@ -53,7 +43,7 @@ set_target_properties(networkextension PROPERTIES
 )
 
 set_target_properties("networkextension" PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "6D75W6GFC2"
 )
 
 find_library(FW_ASSETS_LIBRARY AssetsLibrary)

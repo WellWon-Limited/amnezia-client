@@ -78,19 +78,9 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_EMBED_APP_EXTENSIONS networkextension
 )
 
-if(DEFINED DEPLOY)
-    set_target_properties(${PROJECT} PROPERTIES
-        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Distribution"
-        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY[variant=Debug] "Apple Development"
-        XCODE_ATTRIBUTE_CODE_SIGN_STYLE Manual
-        XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER "distr ios.org.amnezia.AmneziaVPN"
-        XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER[variant=Debug] "dev ios.org.amnezia.AmneziaVPN"
-    )
-else()
-    set_target_properties(${PROJECT} PROPERTIES
-        XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
-    )
-endif()
+set_target_properties(${PROJECT} PROPERTIES
+    XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
+)
 
 set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
@@ -100,7 +90,7 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_OBJC_INTEROP_MODE "objcxx"
 )
 set_target_properties(${PROJECT} PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "6D75W6GFC2"
 )
 target_include_directories(${PROJECT} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(${PROJECT} PRIVATE
@@ -130,6 +120,7 @@ target_sources(${PROJECT} PRIVATE
 set_property(TARGET ${PROJECT} APPEND PROPERTY RESOURCE
     ${CMAKE_CURRENT_SOURCE_DIR}/ios/app/AmneziaVPNLaunchScreen.storyboard
     ${CMAKE_CURRENT_SOURCE_DIR}/ios/app/PrivacyInfo.xcprivacy
+    ${CMAKE_CURRENT_SOURCE_DIR}/ios/app/Media.xcassets
 )
 
 add_subdirectory(ios/networkextension)
