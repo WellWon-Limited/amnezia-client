@@ -29,6 +29,7 @@ uninstall() {
     launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
     rm -f "$PLIST"
     pkill -x "$LABEL" 2>/dev/null || true
+    rm -rf "/Library/PrivilegedHelperTools/TribeVPN"
 
     # Чистим только анкор "tribe" и под-анкоры — системные правила и "amn" не трогаем.
     for anc in $(pfctl -s Anchors 2>/dev/null | awk '/^'"$PF_ANCHOR"'/ {sub(/\*$/, "", $1); print $1}'); do
@@ -42,21 +43,25 @@ uninstall() {
 }
 
 install() {
-    local bin="${1:-}"
-    [ -n "$bin" ] || die "укажи путь к бинарю: install /путь/к/Tribe-service"
-    [ -x "$bin" ] || die "бинарь не найден или не исполняемый: $bin"
-    [ "$(basename "$bin")" = "$LABEL" ] || die "ожидаю бинарь с именем $LABEL (isServiceReady ищет процесс по имени)"
-    case "$bin" in */AmneziaVPN.app/*) die "это бинарь официальной Amnezia — отказ";; esac
-    bin="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
+    local src="${1:-}"
+    [ -n "$src" ] || die "укажи путь к бинарю: install /путь/к/Tribe-service"
+    [ -x "$src" ] || die "бинарь не найден или не исполняемый: $src"
+    [ "$(basename "$src")" = "$LABEL" ] || die "ожидаю бинарь с именем $LABEL (isServiceReady ищет процесс по имени)"
+    case "$src" in */AmneziaVPN.app/*) die "это бинарь официальной Amnezia — отказ";; esac
+
+    # ⚠️ launchd МОЛЧА не запускает системных демонов из user-writable путей —
+    # кладём бинарь в root-овый /Library/PrivilegedHelperTools (см. AVPN-iOS-DEV §15).
+    local destdir="/Library/PrivilegedHelperTools/TribeVPN"
+    local bin="$destdir/$LABEL"
+    mkdir -p "$destdir"
+    cp -f "$src" "$bin"
 
     # pf-правила демон читает из каталога pf рядом с бинарём (ResourceDir).
-    local bindir; bindir="$(dirname "$bin")"
-    if [ ! -f "$bindir/pf/${PF_ANCHOR}.conf" ]; then
-        echo "Копирую pf-правила (${PF_ANCHOR}.*) рядом с бинарём…"
-        mkdir -p "$bindir/pf"
-        cp "$REPO_PF_DIR/${PF_ANCHOR}."*.conf "$REPO_PF_DIR/${PF_ANCHOR}.conf" "$bindir/pf/" 2>/dev/null \
-            || die "в $REPO_PF_DIR нет ${PF_ANCHOR}.*.conf (пересобери: cmake генерирует tribe.400.allowPIA.conf)"
-    fi
+    mkdir -p "$destdir/pf"
+    cp -f "$REPO_PF_DIR/${PF_ANCHOR}."*.conf "$REPO_PF_DIR/${PF_ANCHOR}.conf" "$destdir/pf/" 2>/dev/null \
+        || die "в $REPO_PF_DIR нет ${PF_ANCHOR}.*.conf (пересобери: cmake генерирует tribe.400.allowPIA.conf)"
+    chown -R root:wheel "$destdir"
+    chmod 755 "$destdir" "$bin"
 
     # Группа для xray-фильтрации (своя, не amnvpn).
     if ! dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
