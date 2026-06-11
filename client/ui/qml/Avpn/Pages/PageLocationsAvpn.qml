@@ -22,7 +22,7 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: 8 + PageController.safeAreaTopMargin
+        anchors.topMargin: 8 + Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top) // iOS: PageController даёт 0
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md

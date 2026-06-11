@@ -13,6 +13,11 @@ PageType {
 
     signal requestStart()
 
+    // iOS: PageController.safeArea* реализован только для Android → берём максимум
+    // с SafeArea (Qt 6.9+); окно edge-to-edge (Qt.ExpandedClientAreaHint в main2.qml)
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
+    readonly property real safeBottom: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
     // звёздное небо (как на Connect, облегчённое)
@@ -48,35 +53,40 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: PageController.safeAreaTopMargin
+        anchors.topMargin: root.safeTop
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         spacing: 0
 
         Item { Layout.fillHeight: true }
 
-        // большой бренд: 5 баров (пропорции лого 16/28/36/26/18) + wordmark, низ баров на базовой линии
-        Item {
+        // большой бренд по центру: марка из 5 баров (пропорции лого 16/28/36/26/18),
+        // под ней wordmark «Tribe VPN» ровно на ширину марки (HorizontalFit)
+        Column {
             Layout.alignment: Qt.AlignHCenter
-            implicitWidth: bigMark.width + 16 + bigText.width
-            implicitHeight: bigText.height
+            spacing: Theme.space.lg
+
             Row {
                 id: bigMark
-                anchors.left: parent.left
-                anchors.bottom: bigText.baseline
-                spacing: 5
-                Rectangle { width: 8; height: 18; radius: 4; color: "#EEF3F9";           anchors.bottom: parent.bottom }
-                Rectangle { width: 8; height: 31; radius: 4; color: "#EEF3F9";           anchors.bottom: parent.bottom }
-                Rectangle { width: 8; height: 40; radius: 4; color: Theme.color.accent;  anchors.bottom: parent.bottom }
-                Rectangle { width: 8; height: 29; radius: 4; color: "#EEF3F9";           anchors.bottom: parent.bottom }
-                Rectangle { width: 8; height: 20; radius: 4; color: "#EEF3F9";           anchors.bottom: parent.bottom }
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 11
+                // низ баров на одной линии; масштаб ×2.3 от пропорций лого
+                Rectangle { width: 18; height: 37; radius: 9; color: "#EEF3F9";           anchors.bottom: parent.bottom }
+                Rectangle { width: 18; height: 64; radius: 9; color: "#EEF3F9";           anchors.bottom: parent.bottom }
+                Rectangle { width: 18; height: 83; radius: 9; color: Theme.color.accent;  anchors.bottom: parent.bottom }
+                Rectangle { width: 18; height: 60; radius: 9; color: "#EEF3F9";           anchors.bottom: parent.bottom }
+                Rectangle { width: 18; height: 41; radius: 9; color: "#EEF3F9";           anchors.bottom: parent.bottom }
             }
             Text {
                 id: bigText
-                anchors.left: bigMark.right; anchors.leftMargin: 16
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: bigMark.width
                 text: "Tribe VPN"; color: "#EEF3F9"
-                font.family: Theme.font.display; font.pixelSize: 36; font.weight: Theme.font.wExtra
-                font.letterSpacing: Theme.font.trackTight * 36
+                fontSizeMode: Text.HorizontalFit
+                font.family: Theme.font.display; font.pixelSize: 64; minimumPixelSize: 12
+                font.weight: Theme.font.wExtra
+                font.letterSpacing: Theme.font.trackTight * 32
+                horizontalAlignment: Text.AlignHCenter
             }
         }
 
@@ -110,7 +120,7 @@ PageType {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 52
-            Layout.bottomMargin: Theme.space.xl + PageController.safeAreaBottomMargin
+            Layout.bottomMargin: Theme.space.xl + root.safeBottom
             radius: Theme.radius.lg
             color: ctaMa.pressed ? Theme.color.accentDeep
                                  : (ctaMa.containsMouse ? Theme.color.accentBright : Theme.color.accent)
