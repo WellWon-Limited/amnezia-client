@@ -189,7 +189,7 @@ PageType {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 52
-            Layout.bottomMargin: Theme.space.sm
+            Layout.bottomMargin: Theme.space.lg   // = отступу «Обновить подключение» на главной
             radius: Theme.radius.lg
             color: quitMa.containsMouse ? Qt.rgba(0x1E / 255, 0x29 / 255, 0x3B / 255, 0.5) : "transparent"
             border.width: 1
