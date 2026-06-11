@@ -14,7 +14,7 @@ Item {
     readonly property var tabs: [
         { label: qsTr("Главная"), icon: "M5 12 L3 12 L12 3 L21 12 L19 12 M5 12 L5 20 L9 20 L9 14 L15 14 L15 20 L19 20 L19 12" },
         { label: qsTr("Серверы"), icon: "M12 3 a9 9 0 1 0 0.01 0 M3 12 L21 12 M12 3 c-3 3 -3 15 0 18 M12 3 c3 3 3 15 0 18" },
-        { label: qsTr("Защита"),  icon: "M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z" },
+        { label: qsTr("Анти-VPN"), icon: "M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z" },
         { label: qsTr("Профиль"), icon: "M12 12 a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M6 20 v-1 a6 6 0 0 1 12 0 v1" }
     ]
 
