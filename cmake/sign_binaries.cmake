@@ -36,9 +36,9 @@ if(APPLE)
     set(client_exec ${execs})
     list(FILTER client_exec INCLUDE REGEX [[AmneziaVPN$]])
     set(service_exec ${execs})
-    list(FILTER service_exec INCLUDE REGEX [[AmneziaVPN-service$]])
+    list(FILTER service_exec INCLUDE REGEX [[AVPN-service$]]) # AVPN: имя демона
     set(other_execs ${execs})
-    list(FILTER other_execs EXCLUDE REGEX [[AmneziaVPN$|AmneziaVPN-service$]])
+    list(FILTER other_execs EXCLUDE REGEX [[AmneziaVPN$|AVPN-service$]]) # AVPN: имя демона
 
     list(APPEND files "${frameworks}" "${dylibs}" "${other_execs}" "${service_exec}" "${client_exec}" "${bundle}")
 

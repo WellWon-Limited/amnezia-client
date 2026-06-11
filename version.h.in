@@ -10,11 +10,11 @@
 #endif
 
 #define APPLICATION_NAME    "AVPN"
-// AVPN: имя ДОЛЖНО совпадать с бинарём root-демона (target AmneziaVPN-service):
-// isServiceReady() ищет процесс по этому имени (pgrep -f, case-sensitive).
-// "AVPN-service" не матчился → ErrorCode 103 при живом демоне. Бонус: на macOS-превью
-// клиент работает через уже установленный демон официальной Amnezia (IPC совместим).
-#define SERVICE_NAME        "AmneziaVPN-service"
+// AVPN: имя ДОЛЖНО совпадать с бинарём root-демона (target в service/server/CMakeLists):
+// isServiceReady() ищет процесс по этому имени (pgrep -f, case-sensitive) — расхождение
+// даёт ErrorCode 103 при живом демоне. Мы полностью отделены от официальной Amnezia:
+// свой демон AVPN-service + свой сокет (ipc.h) — оба могут стоять рядом (AVPN-iOS-DEV §15).
+#define SERVICE_NAME        "AVPN-service"
 #define ORGANIZATION_NAME   "AVPN.ORG"
 
 #endif  // VERSION_H
