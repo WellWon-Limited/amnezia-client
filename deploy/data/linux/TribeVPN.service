@@ -1,5 +1,5 @@
 [Unit]
-Description=AmneziaVPN Service
+Description=TribeVPN Service
 After=network.target
 StartLimitIntervalSec=0
 
@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 Type=simple
 Restart=always
 RestartSec=1
-ExecStart=/opt/AmneziaVPN/bin/AmneziaVPN-service
+ExecStart=/opt/TribeVPN/bin/Tribe-service
 
 [Install]
 WantedBy=multi-user.target

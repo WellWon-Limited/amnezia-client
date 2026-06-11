@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
 
-set(PROJECT AVPN-service) # AVPN: своё имя демона (= SERVICE_NAME в version.h.in, проверка isServiceReady)
+set(PROJECT Tribe-service) # AVPN: своё имя демона (= SERVICE_NAME в version.h.in, проверка isServiceReady)
 project(${PROJECT} VERSION ${AMNEZIAVPN_VERSION})
 
 if (APPLE)

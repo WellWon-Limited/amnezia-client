@@ -187,11 +187,11 @@ PageType {
         readonly property var exportLogsHandler: function() {
             var fileName = ""
             if (GC.isMobile()) {
-                fileName = "AmneziaVPN.log"
+                fileName = "TribeVPN.log"
             } else {
                 fileName = SystemController.getFileName(qsTr("Save"),
                                                         qsTr("Logs files (*.log)"),
-                                                        StandardPaths.standardLocations(StandardPaths.DocumentsLocation) + "/AmneziaVPN",
+                                                        StandardPaths.standardLocations(StandardPaths.DocumentsLocation) + "/TribeVPN",
                                                         true,
                                                         ".log")
             }
@@ -217,7 +217,7 @@ PageType {
             var fileName = ""
             fileName = SystemController.getFileName(qsTr("Save"),
                                                     qsTr("Logs files (*.log)"),
-                                                    StandardPaths.standardLocations(StandardPaths.DocumentsLocation) + "/AmneziaVPN-service",
+                                                    StandardPaths.standardLocations(StandardPaths.DocumentsLocation) + "/Tribe-service",
                                                     true,
                                                     ".log")
             if (fileName !== "") {

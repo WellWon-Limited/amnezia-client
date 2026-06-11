@@ -19,7 +19,7 @@
 #include "killswitch.h"
 
 constexpr const int WG_TUN_PROC_TIMEOUT = 5000;
-constexpr const char* WG_RUNTIME_DIR = "/var/run/amneziawg";
+constexpr const char* WG_RUNTIME_DIR = "/var/run/tribewg"; // AVPN: не делить runtime-каталог с офиц. Amnezia
 
 namespace {
 Logger logger("WireguardUtilsMacos");

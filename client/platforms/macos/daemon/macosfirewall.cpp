@@ -35,7 +35,11 @@
 #include <QProcess>
 #include <QCoreApplication>
 
-#define BRAND_IDENTIFIER "amn"
+// AVPN: свой PF-анкор — официальная Amnezia использует "amn", общий анкор означает,
+// что два демона перетирают правила фаервола друг друга (имена pf-файлов в deploy/
+// data/macos/pf/ обязаны начинаться с этого же префикса: enableAnchor() ищет
+// "<brand>.<anchor>.conf")
+#define BRAND_IDENTIFIER "tribe"
 
 namespace {
     Logger logger("MacOSFirewall");
@@ -52,7 +56,7 @@ namespace {
 // Writable location that does NOT live inside the signed bundle.  Using a
 // constant path under /Library/Application Support keeps the signature intact
 // and is accessible to the root helper.
-#define DaemonDataDir QStringLiteral("/Library/Application Support/AmneziaVPN/pf")
+#define DaemonDataDir QStringLiteral("/Library/Application Support/TribeVPN/pf") // AVPN: не делить каталог с офиц. Amnezia
 
 #include <QProcess>
 

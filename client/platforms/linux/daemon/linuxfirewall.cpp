@@ -35,7 +35,8 @@
 #include "xray_defs.h"
 #include <QProcess>
 
-#define BRAND_CODE "amn"
+// AVPN: свой префикс — у официальной Amnezia "amn" (цепочки amnvpn, группа amnvpn, cgroup amnvpnexclusions)
+#define BRAND_CODE "tribe"
 
 namespace {
 Logger logger("LinuxFirewall");

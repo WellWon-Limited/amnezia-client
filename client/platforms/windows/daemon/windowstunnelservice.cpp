@@ -15,9 +15,10 @@
 #include "platforms/windows/windowsutils.h"
 #include "windowsdaemon.h"
 
+// AVPN: суффикс пайпа = имя туннеля (TribeVPN), иначе общий пайп с официальной Amnezia
 #define TUNNEL_NAMED_PIPE \
   "\\\\."                 \
-  "\\pipe\\ProtectedPrefix\\Administrators\\AmneziaWG\\AmneziaVPN"
+  "\\pipe\\ProtectedPrefix\\Administrators\\AmneziaWG\\TribeVPN"
 
 constexpr uint32_t WINDOWS_TUNNEL_MONITOR_TIMEOUT_MSEC = 2000;
 

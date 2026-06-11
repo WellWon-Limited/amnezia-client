@@ -50,18 +50,20 @@ if(APPLE AND NOT IOS)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(AMN_PF_RULE_IDENTITY "user { root }")
     else()
-        set(AMN_PF_RULE_IDENTITY "group { amnvpn }")
+        # AVPN: своя группа — не делить amnvpn с официальной Amnezia
+        set(AMN_PF_RULE_IDENTITY "group { tribevpn }")
     endif()
 
+    # AVPN: pf-файлы переименованы amn.* -> tribe.* (= BRAND_IDENTIFIER в macosfirewall.cpp)
     configure_file(
-        "${CMAKE_SOURCE_DIR}/deploy/data/pf-templates/amn.400.allowPIA.conf.in"
-        "${CMAKE_CURRENT_BINARY_DIR}/amn.400.allowPIA.conf"
+        "${CMAKE_SOURCE_DIR}/deploy/data/pf-templates/tribe.400.allowPIA.conf.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/tribe.400.allowPIA.conf"
         @ONLY
     )
 
     file(COPY_FILE
-        "${CMAKE_CURRENT_BINARY_DIR}/amn.400.allowPIA.conf"
-        "${CMAKE_SOURCE_DIR}/deploy/data/macos/pf/amn.400.allowPIA.conf"
+        "${CMAKE_CURRENT_BINARY_DIR}/tribe.400.allowPIA.conf"
+        "${CMAKE_SOURCE_DIR}/deploy/data/macos/pf/tribe.400.allowPIA.conf"
         ONLY_IF_DIFFERENT
     )
 endif()
