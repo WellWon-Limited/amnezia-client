@@ -27,8 +27,6 @@ PageType {
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md
 
-        TribeHeader { Layout.fillWidth: true; title: qsTr("Локации") }
-
         Text {
             text: qsTr("РЕКОМЕНДУЕМЫЕ")
             color: Theme.color.accent
