@@ -20,8 +20,9 @@ PageType {
     readonly property color slate500: Theme.color.text3
     readonly property color slate900: "#0F172A"
 
-    // previewSim=true: визуальная симуляция (off→Поиск…→Connected) для превью. В проде false. // AVPN DEV
-    property bool previewSim: true
+    // previewSim: визуальная симуляция (off→Поиск…→Connected) ТОЛЬКО для превью-демо.
+    // false = орб ходит в реальный ConnectionController (прод-поведение). // AVPN
+    property bool previewSim: false
     property bool simConnected: false
     property bool simConnecting: false
     readonly property bool isOn:  previewSim ? simConnected  : ConnectionController.isConnected
