@@ -14,7 +14,9 @@
 #include "windowstunnelservice.h"
 #include "wireguardutilswindows.h"
 
-#define TUNNEL_SERVICE_NAME L"AmneziaWGTunnel$AmneziaVPN"
+// AVPN: свой суффикс ($имя туннеля = s_interfaceName в wireguardutilswindows.h) —
+// иначе одна запись в SCM с официальной Amnezia
+#define TUNNEL_SERVICE_NAME L"AmneziaWGTunnel$TribeVPN"
 
 class WindowsDaemon final : public Daemon {
   Q_DISABLE_COPY_MOVE(WindowsDaemon)

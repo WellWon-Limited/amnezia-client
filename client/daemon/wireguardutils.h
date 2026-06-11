@@ -14,7 +14,7 @@
 
 #include "interfaceconfig.h"
 
-constexpr const char* WG_INTERFACE = "amn0";
+constexpr const char* WG_INTERFACE = "tribe0"; // AVPN: офиц. Amnezia держит amn0 — общее имя = конфликт интерфейса/нейм-файла
 
 constexpr uint16_t WG_KEEPALIVE_PERIOD = 60;
 

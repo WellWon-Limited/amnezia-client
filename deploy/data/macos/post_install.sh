@@ -1,7 +1,9 @@
 #!/bin/bash
 
-APP_NAME=AmneziaVPN
-SERVICE_GROUP=amnvpn
+# AVPN: свои имена — не пересекаться с официальной Amnezia (AmneziaVPN / amnvpn / AmneziaVPN-service)
+APP_NAME=AntiVPN
+SERVICE_GROUP=tribevpn
+SERVICE_LABEL=Tribe-service
 PLIST_NAME=$APP_NAME.plist
 LAUNCH_DAEMONS_PLIST_NAME=/Library/LaunchDaemons/$PLIST_NAME
 LOG_FOLDER=/var/log/$APP_NAME
@@ -44,7 +46,7 @@ else
   next_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | sort -n | awk '$1>=500{g=$1} END{print (g?g+1:501)}')
   run_cmd dscl . -create "/Groups/$SERVICE_GROUP"
   run_cmd dscl . -create "/Groups/$SERVICE_GROUP" PrimaryGroupID "$next_gid"
-  run_cmd dscl . -create "/Groups/$SERVICE_GROUP" RealName "Amnezia VPN Service Group"
+  run_cmd dscl . -create "/Groups/$SERVICE_GROUP" RealName "Tribe VPN Service Group"
 fi
 
 run_cmd sudo chmod -R a-w "$APP_PATH/"
@@ -52,7 +54,7 @@ run_cmd sudo chown -R root "$APP_PATH/"
 run_cmd sudo chgrp -R wheel "$APP_PATH/"
 
 log "Requesting ${APP_NAME} to quit gracefully"
-run_cmd osascript -e 'tell application "AmneziaVPN" to quit' || true
+run_cmd osascript -e 'tell application "'"$APP_NAME"'" to quit' || true
 
 PLIST_SOURCE="$APP_PATH/Contents/Resources/$PLIST_NAME"
 if [ -f "$PLIST_SOURCE" ]; then
@@ -64,9 +66,9 @@ fi
 run_cmd chown root:wheel "$LAUNCH_DAEMONS_PLIST_NAME"
 run_cmd chmod 644 "$LAUNCH_DAEMONS_PLIST_NAME"
 run_cmd launchctl bootstrap system "$LAUNCH_DAEMONS_PLIST_NAME" || run_cmd launchctl load "$LAUNCH_DAEMONS_PLIST_NAME"
-run_cmd launchctl enable "system/$APP_NAME-service" || true
-run_cmd launchctl kickstart -k "system/$APP_NAME-service" || true
-run_cmd launchctl print "system/$APP_NAME-service" || true
+run_cmd launchctl enable "system/$SERVICE_LABEL" || true
+run_cmd launchctl kickstart -k "system/$SERVICE_LABEL" || true
+run_cmd launchctl print "system/$SERVICE_LABEL" || true
 log "Launching ${APP_NAME} application"
 run_cmd open -a "$APP_PATH" || true
 

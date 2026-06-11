@@ -37,10 +37,11 @@
 		<string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
 	</dict>
 
+	<!-- AVPN: своя app group — общий контейнер с официальной Amnezia недопустим -->
 	<key>com.wireguard.ios.app_group_id</key>
-	<string>group.org.amnezia.AmneziaVPN</string>
+	<string>group.org.antivpn.client</string>
 
 	<key>com.wireguard.macos.app_group_id</key>
-	<string>$(DEVELOPMENT_TEAM).group.org.amnezia.AmneziaVPN</string>
+	<string>$(DEVELOPMENT_TEAM).group.org.antivpn.client</string>
 </dict>
 </plist>
