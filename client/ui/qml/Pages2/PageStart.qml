@@ -24,7 +24,7 @@ PageType {
     // на ПОЛНЫЙ ванильный интерфейс (их TabBar + страницы), возврат — кнопка «‹ Tribe».
     readonly property bool avpnNav: !Dev.amneziaMode
 
-    // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Защита / 3 Профиль).
+    // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Анти-VPN / 3 Профиль).
     function goAvpnTab(index) {
         avpnBottomNav.currentIndex = index
         if (index === 1)
