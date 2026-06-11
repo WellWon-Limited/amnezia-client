@@ -41,7 +41,17 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
-    const auto candidate = m_selector.pick(m_pool, m_currentNodeId); // C-4: TCP-ping → score → choose
+    auto candidate = m_selector.pick(m_pool, m_currentNodeId); // C-4: TCP-ping → score → choose
+    if (!candidate && !m_pool.nodes().isEmpty()) {
+        // MVP-фолбэк (спайк §9.3): AWG-порт UDP-only → TCP-ping может не пройти ни до одной
+        // ноды (фильтр выкинет всё). Не отказываем: берём ноду с максимальным weight (бэкенд).
+        const auto &all = m_pool.nodes();
+        const SubscriptionNode *best = &all.first();
+        for (const SubscriptionNode &n : all)
+            if (n.weight > best->weight)
+                best = &n;
+        candidate = *best;
+    }
     if (!candidate) {
         error = QStringLiteral("no nodes available");
         m_state = EngineState::Error;

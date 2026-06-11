@@ -35,12 +35,23 @@ PageType {
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
             simConnecting = true; simTimer.restart()
+        } else if (typeof AvpnEngine !== "undefined") {
+            // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
+            if (isOn || isBusy) AvpnEngine.stop()
+            else AvpnEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {
-            // нет конфигурации (свежая установка) — не уводим в ванильный wizard
+            // нет ни движка, ни конфигурации — не уводим в ванильный wizard
             PageController.showNotificationMessage(qsTr("Доступ выдаётся после входа в аккаунт — функция скоро появится"))
         } else {
             ConnectionController.connectButtonClicked()
         }
+    }
+
+    // ошибки движка — в стандартный тост
+    Connections {
+        target: typeof AvpnEngine !== "undefined" ? AvpnEngine : null
+        ignoreUnknownSignals: true
+        function onError(message) { PageController.showErrorMessage(message) }
     }
     Timer { id: simTimer; interval: 1500; onTriggered: { root.simConnecting = false; root.simConnected = true } }
 
