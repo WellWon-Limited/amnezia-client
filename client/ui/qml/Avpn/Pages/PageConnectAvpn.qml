@@ -116,8 +116,32 @@ PageType {
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
         }
+        // admin-режим (lucide shield): включает скрытые dev/админ-элементы
+        // (мост в Amnezia-UI на странице Профиль и т.п.) — состояние в Dev.adminMode
+        Item {
+            anchors.right: gear.left; anchors.rightMargin: 2
+            anchors.verticalCenter: parent.verticalCenter
+            width: 40; height: 40
+            opacity: Dev.adminMode ? 1.0 : 0.55
+            Shape {
+                anchors.centerIn: parent
+                width: 22; height: 22
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: Dev.adminMode ? root.blueAccent
+                                               : (adminMa.containsMouse ? "white" : root.slate400)
+                    fillColor: Dev.adminMode ? Qt.rgba(0x7C / 255, 0xA2 / 255, 0xD0 / 255, 0.18) : "transparent"
+                    strokeWidth: 1.7
+                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                    PathSvg { path: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }
+                }
+            }
+            MouseArea { id: adminMa; anchors.fill: parent; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor; onClicked: Dev.adminMode = !Dev.adminMode }
+        }
         // gear (lucide settings)
         Item {
+            id: gear
             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
             width: 40; height: 40
             Shape {

@@ -78,6 +78,7 @@
         <!-- AVPN: Tribe VPN overlay UI (Theme singleton + components + pages) -->
         <file>Avpn/qmldir</file>
         <file>Avpn/Theme.qml</file>
+        <file>Avpn/Dev.qml</file>
         <file>Avpn/components/TribeButton.qml</file>
         <file>Avpn/components/TribeCard.qml</file>
         <file>Avpn/components/TribeToggle.qml</file>

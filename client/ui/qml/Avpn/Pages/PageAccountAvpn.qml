@@ -28,9 +28,10 @@ PageType {
             Layout.fillWidth: true; title: qsTr("Аккаунт")
             rightItem: Item {
                 width: 36; height: 36
+                visible: Dev.adminMode   // мост виден только в админ-режиме (щит на Connect)
                 Image {
                     anchors.centerIn: parent
-                    source: "qrc:/images/AmneziaVPN.png"
+                    source: "qrc:/images/controls/amnezia.svg"
                     sourceSize: Qt.size(26, 26)
                     opacity: amneziaMa.containsMouse ? 1.0 : 0.65
                 }
