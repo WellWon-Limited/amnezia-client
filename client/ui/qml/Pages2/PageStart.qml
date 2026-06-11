@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Shapes
+import QtCore                 // AVPN: Settings (флаг пройденного онбординга)
 
 import PageEnum 1.0
 import Style 1.0
@@ -24,6 +25,12 @@ PageType {
     // на ПОЛНЫЙ ванильный интерфейс (их TabBar + страницы), возврат — кнопка «‹ Tribe».
     readonly property bool avpnNav: !Dev.amneziaMode
 
+    // AVPN: первый запуск (нет серверов + онбординг не пройден) → наш PageOnboardingAvpn,
+    // а не ванильный wizard. После «Приступим» (requestStart) попадаем на наш Connect.
+    // onboardingActive ставится императивно в точках роутинга (isStartPageVisible — не реактивный).
+    Settings { id: avpnOnboard; category: "AvpnOnboarding"; property bool done: false }
+    property bool onboardingActive: false
+
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Анти-VPN / 3 Профиль).
     function goAvpnTab(index) {
         avpnBottomNav.currentIndex = index
@@ -43,6 +50,12 @@ PageType {
         ignoreUnknownSignals: true
         function onRequestTab(index) { root.goAvpnTab(index) }
         function onRequestSettings() { root.goAvpnTab(3) }
+        // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
+        function onRequestStart() {
+            avpnOnboard.done = true
+            root.onboardingActive = false
+            root.goAvpnTab(0)
+        }
         // AVPN: мост в ПОЛНЫЙ интерфейс Amnezia — ванильный TabBar + их главная;
         // возврат — плавающая кнопка «‹ Tribe» (низ экрана).
         function onRequestAmnezia() {
@@ -60,6 +73,23 @@ PageType {
         target: PageController
 
         function onGoToPageHome() {
+            // AVPN: наш флоу — онбординг только на первом запуске, дальше всегда наш Connect
+            if (root.avpnNav) {
+                if (PageController.isStartPageVisible() && !avpnOnboard.done) {
+                    root.onboardingActive = true
+                    tabBar.visible = false
+                    tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageOnboardingAvpn.qml")
+                } else {
+                    root.onboardingActive = false
+                    tabBar.visible = true
+                    tabBar.setCurrentIndex(0)
+                    if (!PageController.isStartPageVisible())
+                        ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
+                    root.goAvpnTab(0)
+                }
+                return
+            }
+            // AVPN: amneziaMode → ванильный флоу
             if (PageController.isStartPageVisible()) {
                 tabBar.visible = false
                 tabBarStackView.goToTabBarPage(PageEnum.PageSetupWizardStart)
@@ -67,10 +97,7 @@ PageType {
                 tabBar.visible = true
                 tabBar.setCurrentIndex(0)
                 ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
-                if (root.avpnNav)
-                    root.goAvpnTab(0)                                    // AVPN: наш Connect-экран
-                else
-                    tabBarStackView.goToTabBarPage(PageEnum.PageHome)    // AVPN: amneziaMode → ванильная главная
+                tabBarStackView.goToTabBarPage(PageEnum.PageHome)
             }
         }
 
@@ -309,7 +336,9 @@ PageType {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.left: parent.left
-        anchors.bottom: root.avpnNav ? avpnBottomNav.top : tabBar.top   // AVPN: над нашей навигацией
+        // AVPN: над нашей навигацией; на онбординге навигации нет — страница до низа окна
+        anchors.bottom: root.onboardingActive ? parent.bottom
+                                              : (root.avpnNav ? avpnBottomNav.top : tabBar.top)
 
         enabled: !root.isControlsDisabled
 
@@ -328,14 +357,20 @@ PageType {
 
         Component.onCompleted: {
             var pagePath
-            if (PageController.isStartPageVisible()) {
+            if (root.avpnNav && PageController.isStartPageVisible() && !avpnOnboard.done) {
+                // AVPN: первый запуск → наш онбординг
+                root.onboardingActive = true
+                tabBar.visible = false
+                pagePath = Qt.resolvedUrl("../Avpn/Pages/PageOnboardingAvpn.qml")
+            } else if (!root.avpnNav && PageController.isStartPageVisible()) {
                 tabBar.visible = false
                 pagePath = PageController.getPagePath(PageEnum.PageSetupWizardStart)
             } else {
                 tabBar.visible = true
                 pagePath = Qt.resolvedUrl(root.avpnNav ? "../Avpn/Pages/PageConnectAvpn.qml"
                                                        : "PageHomeAvpn.qml") // AVPN: наш Connect-экран
-                ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
+                if (!PageController.isStartPageVisible())
+                    ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
             }
 
             tabBarStackView.push(pagePath, { "objectName" : pagePath })
@@ -525,7 +560,7 @@ PageType {
         anchors.bottom: parent.bottom
         anchors.bottomMargin: PageController.imeHeight
 
-        visible: root.avpnNav && !PageController.isStartPageVisible()
+        visible: root.avpnNav && !root.onboardingActive   // AVPN: на онбординге навигации нет
         bottomInset: PageController.safeAreaBottomMargin
         enabled: !root.isControlsDisabled && !root.isTabBarDisabled
 

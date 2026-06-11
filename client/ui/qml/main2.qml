@@ -58,8 +58,9 @@ Window  {
     height: GC.screenHeight
     minimumWidth: GC.isDesktop() ? 360 : 0
     minimumHeight: GC.isDesktop() ? 640 : 0
-    maximumWidth: 600
-    maximumHeight: 800
+    // AVPN: клампить окно только на десктопе — на iPhone (высота > 800pt) кламп даёт letterbox
+    maximumWidth: GC.isDesktop() ? 600 : 16777215
+    maximumHeight: GC.isDesktop() ? 800 : 16777215
 
     color: AmneziaStyle.color.midnightBlack
 
