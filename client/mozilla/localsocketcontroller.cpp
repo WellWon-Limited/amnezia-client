@@ -102,12 +102,13 @@ void LocalSocketController::initialize(const Device* device, const Keys* keys) {
 void LocalSocketController::initializeInternal() {
   m_daemonState = eInitializing;
 
+// AVPN: свой путь сокета демона (= daemonlocalserver.cpp) — изоляция от офиц. Amnezia
 #ifdef MZ_WINDOWS
-  QString path = "\\\\.\\pipe\\amneziavpn";
+  QString path = "\\\\.\\pipe\\avpn";
 #else
-  QString path = "/var/run/amneziavpn/daemon.socket";
+  QString path = "/var/run/avpn/daemon.socket";
   if (!QFileInfo::exists(path)) {
-    path = "/tmp/amneziavpn.socket";
+    path = "/tmp/avpn.socket";
   }
 #endif
 
