@@ -80,10 +80,12 @@ PageType {
             }
         }
 
+        // слоган + описание — посередине между лого и кнопкой
+        Item { Layout.fillHeight: true }
+
         Text {
             Layout.fillWidth: true
-            Layout.topMargin: Theme.space.xxl
-            text: qsTr("Работает всё — и Рунет,\nи весь интернет")
+            text: qsTr("Умный VPN\nс искусственным\nинтеллектом")
             color: Theme.color.text1
             font.family: Theme.font.display; font.pixelSize: Theme.font.h2
             font.weight: Theme.font.wBold
