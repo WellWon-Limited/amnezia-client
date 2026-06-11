@@ -6,11 +6,35 @@ import Qt5Compat.GraphicalEffects as Fx
 import ".."              // Theme
 import "../components"
 import "../../Controls2" // PageType
+import "../data/presets.js" as Presets   // реальный конфиг NeVPN (см. data/presets.js)
 
 // AVPN: «Анти-VPN» (вкладка nav) — обход VPN для РФ-ресурсов (порт функционала NeVPN).
 // P-U2 мок на статичных данных; реальный движок (роутинг/пресеты с GitHub) — P-U6.
 PageType {
     id: root
+
+    // реальный конфиг пресетов NeVPN (тот же, что тянется с GitHub:
+    // wellwon/anti-vpn-config/presets.json). Схема: categories[key,title,services[id,title,domains,prefixes]]
+    readonly property var presetCategories: Presets.config.categories
+    readonly property int presetsVersion: Presets.config.version
+    readonly property int presetsServiceCount: {
+        var n = 0
+        for (var i = 0; i < Presets.config.categories.length; i++)
+            n += Presets.config.categories[i].services.length
+        return n
+    }
+
+    // иконки категорий по key (24-grid lucide, сабпасы одной строкой)
+    readonly property var categoryIcons: ({
+        market: "M6 2 L3 6 V20 a2 2 0 0 0 2 2 H19 a2 2 0 0 0 2 -2 V6 L18 2 Z M3 6 H21 M16 10 a4 4 0 0 1 -8 0",
+        social: "M9 11 a4 4 0 1 0 0 -8 4 4 0 0 0 0 8 z M17 21 v-2 a4 4 0 0 0 -4 -4 H5 a4 4 0 0 0 -4 4 v2 M16 3.1 a4 4 0 0 1 0 7.8 M23 21 v-2 a4 4 0 0 0 -3 -3.9",
+        bank: "M12 3 L3 8.5 H21 Z M5 11 V18 M9.5 11 V18 M14.5 11 V18 M19 11 V18 M3 21 H21",
+        media: "M4 7 h16 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 H4 a2 2 0 0 1 -2 -2 V9 a2 2 0 0 1 2 -2 Z M8 3 L12 7 L16 3",
+        gov: "M4 21 V5 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v16 M9 8 h1 M14 8 h1 M9 12 h1 M14 12 h1 M9 16 h1 M14 16 h1 M3 21 H21",
+        ved: "M21 16 V8 a2 2 0 0 0 -1 -1.73 l-7 -4 a2 2 0 0 0 -2 0 l-7 4 A2 2 0 0 0 3 8 v8 a2 2 0 0 0 1 1.73 l7 4 a2 2 0 0 0 2 0 l7 -4 A2 2 0 0 0 21 16 Z M3.3 7 L12 12 L20.7 7 M12 22 V12",
+        wechat: "M21 11.5 a8.38 8.38 0 0 1 -.9 3.8 8.5 8.5 0 0 1 -7.6 4.7 8.38 8.38 0 0 1 -3.8 -.9 L3 21 l1.9 -5.7 a8.38 8.38 0 0 1 -.9 -3.8 8.5 8.5 0 0 1 4.7 -7.6 8.38 8.38 0 0 1 3.8 -.9 h.5 a8.48 8.48 0 0 1 8 8 v.5 z"
+    })
+    readonly property string fallbackIcon: "M12 21 a9 9 0 1 0 -0.01 0 z M3.6 9 H20.4 M3.6 15 H20.4 M12 3 a15 15 0 0 1 0 18 M12 3 a15 15 0 0 0 0 18"
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
@@ -212,16 +236,9 @@ PageType {
                     }
                 }
 
-                // ── пресеты (с GitHub) ─────────────────────────────────────
+                // ── пресеты (реальный конфиг, все категории) ───────────────
                 Repeater {
-                    model: [
-                        { name: qsTr("МАРКЕТПЛЕЙСЫ"), icon: "M6 2 L3 6 V20 a2 2 0 0 0 2 2 H19 a2 2 0 0 0 2 -2 V6 L18 2 Z M3 6 H21 M16 10 a4 4 0 0 1 -8 0",
-                          items: ["Wildberries", "Ozon", "Avito", "Lamoda", "Яндекс Маркет", "Мегамаркет"] },
-                        { name: qsTr("СОЦСЕТИ"), icon: "M9 11 a4 4 0 1 0 0 -8 4 4 0 0 0 0 8 z M17 21 v-2 a4 4 0 0 0 -4 -4 H5 a4 4 0 0 0 -4 4 v2 M16 3.1 a4 4 0 0 1 0 7.8 M23 21 v-2 a4 4 0 0 0 -3 -3.9",
-                          items: ["ВКонтакте", "Одноклассники"] },
-                        { name: qsTr("БАНКИ"), icon: "M12 3 L3 8.5 H21 Z M5 11 V18 M9.5 11 V18 M14.5 11 V18 M19 11 V18 M3 21 H21",
-                          items: ["Сбербанк", "Альфа-Банк", "ВТБ", "Газпромбанк", "Т-Банк", "МКБ"] }
-                    ]
+                    model: root.presetCategories
                     Column {
                         id: presetSection
                         required property var modelData
@@ -229,7 +246,7 @@ PageType {
                         spacing: Theme.space.md
                         SectionLabel {
                             width: parent.width
-                            text: presetSection.modelData.name + " · " + presetSection.modelData.items.length
+                            text: presetSection.modelData.title.toUpperCase() + " · " + presetSection.modelData.services.length
                             linkText: qsTr("всё вкл")
                         }
                         Rectangle {
@@ -242,9 +259,9 @@ PageType {
                                 id: presetCol
                                 width: parent.width
                                 Repeater {
-                                    model: presetSection.modelData.items
+                                    model: presetSection.modelData.services
                                     Item {
-                                        required property string modelData
+                                        required property var modelData
                                         required property int index
                                         width: presetCol.width; height: 54
                                         Rectangle {
@@ -259,12 +276,23 @@ PageType {
                                             anchors.leftMargin: Theme.space.lg
                                             anchors.rightMargin: Theme.space.lg
                                             spacing: Theme.space.md
-                                            IconChip { path: presetSection.modelData.icon }
-                                            Text {
+                                            IconChip { path: root.categoryIcons[presetSection.modelData.key] || root.fallbackIcon }
+                                            Column {
                                                 Layout.fillWidth: true
-                                                text: modelData
-                                                color: Theme.color.text1
-                                                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                                                spacing: 1
+                                                Text {
+                                                    text: modelData.title
+                                                    color: Theme.color.text1
+                                                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                                                }
+                                                Text {
+                                                    text: (modelData.domains ? modelData.domains.length : 0)
+                                                          + qsTr(" доменов")
+                                                          + (modelData.prefixes && modelData.prefixes.length
+                                                             ? " · " + modelData.prefixes.length + qsTr(" подсетей") : "")
+                                                    color: Theme.color.text3
+                                                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                                                }
                                             }
                                             TribeToggle { checked: true }
                                         }
@@ -320,7 +348,10 @@ PageType {
                                     Layout.fillWidth: true
                                     spacing: 2
                                     Text { text: qsTr("Конфиг пресетов"); color: Theme.color.text1; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium }
-                                    Text { text: qsTr("обновлён 2 ч назад"); color: Theme.color.text3; font.family: Theme.font.body; font.pixelSize: Theme.font.caption }
+                                    Text {
+                                        text: qsTr("версия %1 · %2 сервисов").arg(root.presetsVersion).arg(root.presetsServiceCount)
+                                        color: Theme.color.text3; font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                                    }
                                 }
                                 Rectangle {
                                     Layout.preferredWidth: updText.width + 2 * Theme.space.lg
@@ -341,25 +372,6 @@ PageType {
                             }
                         }
 
-                        Rectangle { width: parent.width - 2 * Theme.space.lg; height: 1; color: Theme.color.border; anchors.horizontalCenter: parent.horizontalCenter }
-
-                        // системная служба
-                        Item {
-                            width: parent.width; height: 62
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                                spacing: Theme.space.md
-                                IconChip { path: "M4 2 h16 a2 2 0 0 1 2 2 v4 a2 2 0 0 1 -2 2 H4 a2 2 0 0 1 -2 -2 V4 a2 2 0 0 1 2 -2 Z M4 14 h16 a2 2 0 0 1 2 2 v4 a2 2 0 0 1 -2 2 H4 a2 2 0 0 1 -2 -2 v-4 a2 2 0 0 1 2 -2 Z M6 6 h0.01 M6 18 h0.01" }
-                                Column {
-                                    Layout.fillWidth: true
-                                    spacing: 2
-                                    Text { text: qsTr("Системная служба"); color: Theme.color.text1; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium }
-                                    Text { text: qsTr("применяет маршруты обхода"); color: Theme.color.text3; font.family: Theme.font.body; font.pixelSize: Theme.font.caption }
-                                }
-                                TribeBadge { variant: "on"; text: qsTr("активна") }
-                            }
-                        }
                     }
                 }
             }

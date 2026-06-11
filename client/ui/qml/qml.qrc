@@ -79,6 +79,7 @@
         <file>Avpn/qmldir</file>
         <file>Avpn/Theme.qml</file>
         <file>Avpn/Dev.qml</file>
+        <file>Avpn/data/presets.js</file>
         <file>Avpn/components/TribeButton.qml</file>
         <file>Avpn/components/TribeCard.qml</file>
         <file>Avpn/components/TribeToggle.qml</file>
