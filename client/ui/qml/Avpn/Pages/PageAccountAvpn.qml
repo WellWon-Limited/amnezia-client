@@ -11,6 +11,12 @@ import "../../Controls2" // PageType
 PageType {
     id: root
 
+    // мост в полный интерфейс Amnezia (PageStart включает Dev.amneziaMode)
+    signal requestAmnezia()
+
+    // авторизация — мок до P-U3 (AuthController): false → кнопка «Войти»
+    property bool authorized: false
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
     ColumnLayout {
@@ -20,9 +26,47 @@ PageType {
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md
 
-        TribeHeader { Layout.fillWidth: true; title: qsTr("Аккаунт") }
+        // верхняя строка: админ-кнопки справа (перенесены с главной), без заголовка
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            Item { Layout.fillWidth: true }
+            // мост в Amnezia-UI — только в админ-режиме
+            Item {
+                Layout.preferredWidth: 36; Layout.preferredHeight: 36
+                visible: Dev.adminMode
+                Image {
+                    anchors.centerIn: parent
+                    source: "qrc:/images/controls/amnezia.svg"
+                    sourceSize: Qt.size(22, 22)
+                    opacity: amneziaMa.containsMouse ? 1.0 : 0.65
+                }
+                MouseArea { id: amneziaMa; anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor; onClicked: root.requestAmnezia() }
+            }
+            // тумблер админ-режима (lucide shield)
+            Item {
+                Layout.preferredWidth: 36; Layout.preferredHeight: 36
+                opacity: Dev.adminMode ? 1.0 : 0.55
+                Shape {
+                    anchors.centerIn: parent
+                    width: 22; height: 22
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Dev.adminMode ? Theme.color.accent
+                                                   : (adminMa.containsMouse ? Theme.color.text1 : Theme.color.text3)
+                        fillColor: Dev.adminMode ? Theme.color.chipSelected : "transparent"
+                        strokeWidth: 1.7
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }
+                    }
+                }
+                MouseArea { id: adminMa; anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor; onClicked: Dev.adminMode = !Dev.adminMode }
+            }
+        }
 
-        // account card
+        // плашка пользователя + Войти/Выйти
         TribeCard {
             Layout.fillWidth: true
             implicitHeight: 64
@@ -49,11 +93,32 @@ PageType {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: qsTr("Пробный доступ")
+                    text: root.authorized ? qsTr("Аккаунт") : qsTr("Пробный доступ")
                     color: Theme.color.text1
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wMedium
+                }
+                // Войти (не авторизованы) / Выйти (авторизованы) — действия в P-U3
+                Rectangle {
+                    Layout.preferredWidth: authText.width + 2 * Theme.space.lg
+                    Layout.preferredHeight: 34
+                    radius: Theme.radius.pill
+                    color: root.authorized
+                           ? (authMa.containsMouse ? Theme.color.surface2 : "transparent")
+                           : (authMa.containsMouse ? Theme.color.accentBright : Theme.color.accent)
+                    border.width: root.authorized ? 1 : 0
+                    border.color: Theme.color.border2
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                    Text {
+                        id: authText
+                        anchors.centerIn: parent
+                        text: root.authorized ? qsTr("Выйти") : qsTr("Войти")
+                        color: root.authorized ? Theme.color.text1 : "white"
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        font.weight: Theme.font.wSemibold
+                    }
+                    MouseArea { id: authMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
                 }
             }
         }
@@ -102,6 +167,13 @@ PageType {
             }
         }
 
+        TribeListRow {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.sm
+            title: qsTr("About Tribe VPN")
+            rightItem: Text { text: "›"; color: Theme.color.text3; font.pixelSize: Theme.font.h3; anchors.verticalCenter: parent.verticalCenter }
+        }
+
         // neutral account-management note (NO steering — §10)
         Text {
             Layout.fillWidth: true
@@ -115,14 +187,10 @@ PageType {
 
         TribeButton {
             Layout.fillWidth: true
-            variant: "glass"
-            text: qsTr("Выйти")
-        }
-        TribeButton {
-            Layout.fillWidth: true
             variant: "ghost"
-            text: qsTr("Удалить аккаунт")
+            text: qsTr("Закрыть приложение")
             Layout.bottomMargin: Theme.space.sm
+            onClicked: Qt.quit()
         }
     }
 }

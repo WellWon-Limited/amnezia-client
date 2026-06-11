@@ -30,7 +30,6 @@ PageType {
 
     signal requestTab(int index)
     signal requestSettings()
-    signal requestAmnezia()   // мост в полный Amnezia-UI (PageStart включает Dev.amneziaMode)
 
     function onOrbClicked() {
         if (previewSim) {
@@ -117,44 +116,34 @@ PageType {
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
         }
-        // мост в полный Amnezia-UI — виден только в админ-режиме (щит правее)
-        Item {
-            anchors.right: adminBtn.left; anchors.rightMargin: 2
+        // бейдж подписки: остаток трафика + дни (мок до P-U3/SubscriptionController);
+        // тап → Профиль
+        Rectangle {
+            anchors.right: gear.left; anchors.rightMargin: Theme.space.sm
             anchors.verticalCenter: parent.verticalCenter
-            width: 40; height: 40
-            visible: Dev.adminMode
-            Image {
+            width: statCol.width + 2 * Theme.space.md
+            height: 38
+            radius: Theme.radius.md
+            color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
+            border.width: 1; border.color: Theme.color.border
+            Behavior on color { ColorAnimation { duration: 160 } }
+            Column {
+                id: statCol
                 anchors.centerIn: parent
-                source: "qrc:/images/controls/amnezia.svg"
-                sourceSize: Qt.size(22, 22)
-                opacity: amneziaMa.containsMouse ? 1.0 : 0.65
-            }
-            MouseArea { id: amneziaMa; anchors.fill: parent; hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor; onClicked: root.requestAmnezia() }
-        }
-        // admin-режим (lucide shield): показывает скрытые dev/админ-элементы
-        // (мост в Amnezia-UI слева и т.п.) — состояние в Dev.adminMode
-        Item {
-            id: adminBtn
-            anchors.right: gear.left; anchors.rightMargin: 2
-            anchors.verticalCenter: parent.verticalCenter
-            width: 40; height: 40
-            opacity: Dev.adminMode ? 1.0 : 0.55
-            Shape {
-                anchors.centerIn: parent
-                width: 22; height: 22
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: Dev.adminMode ? root.blueAccent
-                                               : (adminMa.containsMouse ? "white" : root.slate400)
-                    fillColor: Dev.adminMode ? Qt.rgba(0x7C / 255, 0xA2 / 255, 0xD0 / 255, 0.18) : "transparent"
-                    strokeWidth: 1.7
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }
+                spacing: 1
+                Row {
+                    spacing: 4
+                    Text { text: "3.2 ГБ"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 11 }
+                    Text { text: qsTr("трафик"); color: root.slate500; font.family: Theme.font.body; font.pixelSize: 11 }
+                }
+                Row {
+                    spacing: 4
+                    Text { text: "12 дней"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 11 }
+                    Text { text: qsTr("подписка"); color: root.slate500; font.family: Theme.font.body; font.pixelSize: 11 }
                 }
             }
-            MouseArea { id: adminMa; anchors.fill: parent; hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor; onClicked: Dev.adminMode = !Dev.adminMode }
+            MouseArea { id: statMa; anchors.fill: parent; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
         }
         // gear (lucide settings)
         Item {

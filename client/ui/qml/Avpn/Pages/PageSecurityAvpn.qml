@@ -38,10 +38,18 @@ PageType {
         root.apply()
     }
 
-    function setCategoryOn(cat) {
+    function categoryAllOn(cat) {
+        for (var i = 0; i < cat.services.length; i++)
+            if (!isServiceOn(cat.services[i].id)) return false
+        return true
+    }
+
+    function setCategoryAll(cat, on) {
         var ids = cat.services.map(function(s) { return s.id })
-        root.disabledIds = root.disabledIds.filter(function(x) { return ids.indexOf(x) < 0 })
-        store.disabledServices = JSON.stringify(root.disabledIds)
+        var d = root.disabledIds.filter(function(x) { return ids.indexOf(x) < 0 })
+        if (!on) d = d.concat(ids)
+        root.disabledIds = d
+        store.disabledServices = JSON.stringify(d)
         root.stateRev++
         root.apply()
     }
@@ -67,9 +75,33 @@ PageType {
         root.apply()
     }
 
+    // авто-переподключение туннеля после изменений (дебаунс): close → дождаться
+    // отключения → open. Без него split-tunneling применился бы только при следующем коннекте.
+    property bool pendingReconnect: false
+    Timer {
+        id: reconnectTimer
+        interval: 1200
+        onTriggered: {
+            if (!ConnectionController.isConnected) return
+            root.pendingReconnect = true
+            ConnectionController.closeConnection()
+        }
+    }
+    Connections {
+        target: ConnectionController
+        function onConnectionStateChanged() {
+            if (root.pendingReconnect && !ConnectionController.isConnected
+                    && !ConnectionController.isConnectionInProgress) {
+                root.pendingReconnect = false
+                ConnectionController.openConnection()
+            }
+        }
+    }
+
     // полная реконсиляция: собрать все активные записи → в split tunneling Amnezia.
     // Корзина routeMode=VpnAllExceptSites своя, ванильные списки юзера не трогаем.
     function apply() {
+        reconnectTimer.restart()
         if (!store.masterOn) {
             IpSplitTunnelingController.toggleSplitTunneling(false)
             return
@@ -183,8 +215,6 @@ PageType {
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md
 
-        TribeHeader { Layout.fillWidth: true; title: qsTr("Анти-VPN") }
-
         Flickable {
             id: flick
             Layout.fillWidth: true
@@ -239,7 +269,7 @@ PageType {
                             }
                             Text {
                                 text: store.masterOn
-                                      ? qsTr("%1 записей — напрямую, мимо туннеля").arg(root.activeEntryCount())
+                                      ? qsTr("%1 сайтов — без VPN").arg(root.activeEntryCount())
                                       : qsTr("напрямую, мимо VPN-туннеля")
                                 color: Theme.color.text3
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
@@ -362,8 +392,8 @@ PageType {
                         SectionLabel {
                             width: parent.width
                             text: presetSection.modelData.title.toUpperCase() + " · " + presetSection.modelData.services.length
-                            linkText: qsTr("всё вкл")
-                            onLinkClicked: root.setCategoryOn(presetSection.modelData)
+                            linkText: { root.stateRev; return root.categoryAllOn(presetSection.modelData) ? qsTr("всё выкл") : qsTr("всё вкл") }
+                            onLinkClicked: root.setCategoryAll(presetSection.modelData, !root.categoryAllOn(presetSection.modelData))
                         }
                         Rectangle {
                             width: parent.width
@@ -496,7 +526,7 @@ PageType {
 
                 Text {
                     width: parent.width
-                    text: qsTr("Изменения применяются при следующем подключении туннеля")
+                    text: qsTr("При изменениях активный туннель переподключается автоматически")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     wrapMode: Text.WordWrap
