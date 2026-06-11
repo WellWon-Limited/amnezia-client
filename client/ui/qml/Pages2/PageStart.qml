@@ -407,7 +407,7 @@ PageType {
         anchors.bottomMargin: PageController.imeHeight
 
         topPadding: 8
-        bottomPadding: 8 + PageController.safeAreaBottomMargin
+        bottomPadding: 8 + Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom) // AVPN: iOS — PageController даёт 0
         leftPadding: 96
         rightPadding: 96
 
@@ -561,7 +561,9 @@ PageType {
         anchors.bottomMargin: PageController.imeHeight
 
         visible: root.avpnNav && !root.onboardingActive   // AVPN: на онбординге навигации нет
-        bottomInset: PageController.safeAreaBottomMargin
+        // iOS: PageController.safeArea* только для Android → SafeArea (Qt 6.9+); фон нава
+        // уходит под home-индикатор до самого низа (implicitHeight = 72 + inset)
+        bottomInset: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)
         enabled: !root.isControlsDisabled && !root.isTabBarDisabled
 
         onActivated: function(index) { root.goAvpnTab(index) }

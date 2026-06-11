@@ -31,6 +31,21 @@ PageType {
     signal requestTab(int index)
     signal requestSettings()
 
+    // iOS: PageController.safeArea* реализован только для Android → максимум с SafeArea (Qt 6.9+)
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
+
+    // Мобайл: сцена (орб + горы + подпись) опущена на ~20% высоты экрана, но так, чтобы
+    // подпись не наезжала на карточку сервера (низ сцены ≥ 24px над bottomBlock).
+    // Шапку, бейдж, карточку и кнопку не трогаем (реш. 2026-06-11).
+    readonly property bool isMobile: Qt.platform.os === "ios" || Qt.platform.os === "android"
+    readonly property real sceneShift: {
+        if (!isMobile) return 0
+        var orbBase = safeTop + 16 + 40 + 76          // header top+height + базовый отступ орба
+        var captionBottom = orbBase + 256 + 20 + 18   // орб + отступ подписи + высота подписи
+        var maxShift = bottomBlock.y - captionBottom - 24
+        return Math.max(0, Math.min(Math.round(root.height * 0.20), maxShift))
+    }
+
     function onOrbClicked() {
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
@@ -40,8 +55,9 @@ PageType {
             if (isOn || isBusy) AvpnEngine.stop()
             else AvpnEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {
-            // нет ни движка, ни конфигурации — не уводим в ванильный wizard
-            PageController.showNotificationMessage(qsTr("Доступ выдаётся после входа в аккаунт — функция скоро появится"))
+            // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
+            // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
+            PageController.showNotificationMessage(qsTr("Серверы сервиса запускаются — пробный доступ появится в ближайшем обновлении, аккаунт не нужен"))
         } else {
             ConnectionController.connectButtonClicked()
         }
@@ -100,7 +116,7 @@ PageType {
     Item {
         id: header
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        anchors.topMargin: 16 + PageController.safeAreaTopMargin
+        anchors.topMargin: 16 + root.safeTop
         anchors.leftMargin: Theme.space.xl; anchors.rightMargin: Theme.space.lg
         height: 40; z: 10
 
@@ -159,7 +175,7 @@ PageType {
         id: orb
         width: 256; height: 256
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: header.bottom; anchors.topMargin: 76   // сцена опущена к подписи «Подключиться…», шапка на месте
+        anchors.top: header.bottom; anchors.topMargin: 76 + root.sceneShift   // сцена опущена (мобайл: ещё ~20% вниз), шапка на месте
         z: 10
 
         // внешнее свечение (КРУГЛОЕ — задаём радиусы = половине ширины, иначе квадрат)
@@ -276,6 +292,7 @@ PageType {
 
     // ── низ: карточка сервера + кнопка обновить (z30 — выше основания гор) ──
     Column {
+        id: bottomBlock
         anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
         anchors.bottomMargin: Theme.space.lg
         anchors.leftMargin: Theme.space.xl; anchors.rightMargin: Theme.space.xl

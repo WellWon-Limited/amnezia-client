@@ -61,6 +61,9 @@ Window  {
     // AVPN: клампить окно только на десктопе — на iPhone (высота > 800pt) кламп даёт letterbox
     maximumWidth: GC.isDesktop() ? 600 : 16777215
     maximumHeight: GC.isDesktop() ? 800 : 16777215
+    // AVPN: с Qt 6.9 окно на iOS НЕ заходит под статус-бар/home-индикатор без этого флага —
+    // без него фон обрезан сверху и снизу. Отступы контента — SafeArea.margins в страницах.
+    flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint) : Qt.Window
 
     color: AmneziaStyle.color.midnightBlack
 

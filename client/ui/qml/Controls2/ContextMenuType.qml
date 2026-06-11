@@ -50,7 +50,9 @@ Menu {
     MenuItem {
         text: qsTr("&Paste")
         // Fix calling paste from clipboard when launching app on android
-        enabled: Qt.platform.os === "android" ? true : textObj.canPaste
+        // AVPN: на iOS canPaste читает UIPasteboard (mimeData->text) → системный промпт
+        // «вставить из macOS» без действия пользователя; включаем без проверки, как на Android
+        enabled: (Qt.platform.os === "android" || Qt.platform.os === "ios") ? true : textObj.canPaste
         onTriggered: textObj.paste()
     }
 
