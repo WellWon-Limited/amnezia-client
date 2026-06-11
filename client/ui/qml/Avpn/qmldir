@@ -1,3 +1,4 @@
 module Avpn
 
 singleton Theme 1.0 Theme.qml
+singleton Dev 1.0 Dev.qml
