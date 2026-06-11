@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
+import QtCore                            // Settings (персист состояния обхода)
 import Qt5Compat.GraphicalEffects as Fx
 
 import ".."              // Theme
@@ -9,9 +10,100 @@ import "../../Controls2" // PageType
 import "../data/presets.js" as Presets   // реальный конфиг NeVPN (см. data/presets.js)
 
 // AVPN: «Анти-VPN» (вкладка nav) — обход VPN для РФ-ресурсов (порт функционала NeVPN).
-// P-U2 мок на статичных данных; реальный движок (роутинг/пресеты с GitHub) — P-U6.
+// РАБОЧАЯ схема: пресеты+исключения → site-based split tunneling Amnezia
+// (IpSplitTunnelingController: routeMode VpnAllExceptSites + список доменов/CIDR).
+// Применяется при следующем подключении туннеля (как и ванильный split tunneling).
 PageType {
     id: root
+
+    // ── состояние обхода (персист в QSettings, категория AvpnBypass) ────
+    Settings {
+        id: store
+        category: "AvpnBypass"
+        property bool masterOn: false
+        property string disabledServices: "[]"   // JSON: id выключенных сервисов (дефолт — все вкл)
+        property string customHosts: "[]"        // JSON: [{host, on}]
+    }
+    property var disabledIds: JSON.parse(store.disabledServices)
+    property var customHosts: JSON.parse(store.customHosts)
+    property int stateRev: 0   // бамп → Repeater'ы пересоздают строки (свежие биндинги тогглов)
+
+    function isServiceOn(id) { return root.disabledIds.indexOf(id) < 0 }
+
+    function setServiceOn(id, on) {
+        var d = root.disabledIds.filter(function(x) { return x !== id })
+        if (!on) d.push(id)
+        root.disabledIds = d
+        store.disabledServices = JSON.stringify(d)
+        root.apply()
+    }
+
+    function setCategoryOn(cat) {
+        var ids = cat.services.map(function(s) { return s.id })
+        root.disabledIds = root.disabledIds.filter(function(x) { return ids.indexOf(x) < 0 })
+        store.disabledServices = JSON.stringify(root.disabledIds)
+        root.stateRev++
+        root.apply()
+    }
+
+    function addCustomHost(host) {
+        host = host.trim()
+        if (host === "") return
+        for (var i = 0; i < root.customHosts.length; i++)
+            if (root.customHosts[i].host === host) return
+        var list = root.customHosts.slice()
+        list.push({ host: host, on: true })
+        root.customHosts = list
+        store.customHosts = JSON.stringify(list)
+        root.apply()
+    }
+
+    function setCustomHost(index, on, remove) {
+        var list = root.customHosts.slice()
+        if (remove) list.splice(index, 1)
+        else list[index].on = on
+        root.customHosts = list
+        store.customHosts = JSON.stringify(list)
+        root.apply()
+    }
+
+    // полная реконсиляция: собрать все активные записи → в split tunneling Amnezia.
+    // Корзина routeMode=VpnAllExceptSites своя, ванильные списки юзера не трогаем.
+    function apply() {
+        if (!store.masterOn) {
+            IpSplitTunnelingController.toggleSplitTunneling(false)
+            return
+        }
+        IpSplitTunnelingController.setRouteMode(2 /* RouteMode::VpnAllExceptSites */)
+        IpSplitTunnelingController.removeSites()
+        var cats = root.presetCategories
+        for (var c = 0; c < cats.length; c++)
+            for (var s = 0; s < cats[c].services.length; s++) {
+                var svc = cats[c].services[s]
+                if (!root.isServiceOn(svc.id)) continue
+                var entries = (svc.domains || []).concat(svc.prefixes || [])
+                for (var e = 0; e < entries.length; e++)
+                    IpSplitTunnelingController.addSite(entries[e])
+            }
+        for (var h = 0; h < root.customHosts.length; h++)
+            if (root.customHosts[h].on)
+                IpSplitTunnelingController.addSite(root.customHosts[h].host)
+        IpSplitTunnelingController.toggleSplitTunneling(true)
+    }
+
+    function activeEntryCount() {
+        var n = 0
+        var cats = root.presetCategories
+        for (var c = 0; c < cats.length; c++)
+            for (var s = 0; s < cats[c].services.length; s++) {
+                var svc = cats[c].services[s]
+                if (root.isServiceOn(svc.id))
+                    n += (svc.domains || []).length + (svc.prefixes || []).length
+            }
+        for (var h = 0; h < root.customHosts.length; h++)
+            if (root.customHosts[h].on) n++
+        return n
+    }
 
     // реальный конфиг пресетов NeVPN (тот же, что тянется с GitHub:
     // wellwon/anti-vpn-config/presets.json). Схема: categories[key,title,services[id,title,domains,prefixes]]
@@ -50,12 +142,18 @@ PageType {
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
         }
+        signal linkClicked()
         Text {
             visible: parent.linkText !== ""
             text: parent.linkText
-            color: Theme.color.accent
+            color: linkMa.containsMouse ? Theme.color.accentBright : Theme.color.accent
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             font.weight: Theme.font.wSemibold
+            MouseArea {
+                id: linkMa; anchors.fill: parent; anchors.margins: -6
+                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: parent.parent.linkClicked()
+            }
         }
     }
 
@@ -140,12 +238,17 @@ PageType {
                                 font.weight: Theme.font.wSemibold
                             }
                             Text {
-                                text: qsTr("напрямую, мимо VPN-туннеля")
+                                text: store.masterOn
+                                      ? qsTr("%1 записей — напрямую, мимо туннеля").arg(root.activeEntryCount())
+                                      : qsTr("напрямую, мимо VPN-туннеля")
                                 color: Theme.color.text3
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                             }
                         }
-                        TribeToggle { checked: true }
+                        TribeToggle {
+                            checked: store.masterOn
+                            onToggled: { store.masterOn = checked; root.apply() }
+                        }
                     }
                 }
 
@@ -156,8 +259,10 @@ PageType {
                     width: parent.width
                     spacing: Theme.space.sm
                     TribeField {
+                        id: hostField
                         Layout.fillWidth: true
                         placeholderText: qsTr("Сайт, IP или подсеть 17.0.0.0/8…")
+                        onAccepted: { root.addCustomHost(text); text = "" }
                     }
                     Rectangle {
                         Layout.preferredWidth: 46; Layout.preferredHeight: 46
@@ -174,18 +279,19 @@ PageType {
                                 PathSvg { path: "M9 2 V16 M2 9 H16" }
                             }
                         }
-                        MouseArea { id: addMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                        MouseArea {
+                            id: addMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.addCustomHost(hostField.text); hostField.text = "" }
+                        }
                     }
                 }
 
-                // пользовательские записи (мок)
+                // пользовательские записи
                 Repeater {
-                    model: [
-                        { host: "wellwon.app", letter: "W" },
-                        { host: "www.rusprofile.ru", letter: "R" }
-                    ]
+                    model: { root.stateRev; return root.customHosts }
                     Rectangle {
                         required property var modelData
+                        required property int index
                         width: content.width
                         height: 56
                         radius: Theme.radius.md
@@ -196,13 +302,16 @@ PageType {
                             anchors.leftMargin: Theme.space.lg
                             anchors.rightMargin: Theme.space.lg
                             spacing: Theme.space.md
-                            Rectangle { Layout.preferredWidth: 7; Layout.preferredHeight: 7; radius: 3.5; color: Theme.color.connected }
+                            Rectangle {
+                                Layout.preferredWidth: 7; Layout.preferredHeight: 7; radius: 3.5
+                                color: parent.parent.modelData.on ? Theme.color.connected : Theme.color.textDisabled
+                            }
                             Rectangle {
                                 Layout.preferredWidth: 28; Layout.preferredHeight: 28
                                 radius: Theme.radius.sm; color: Theme.color.surface2
                                 Text {
                                     anchors.centerIn: parent
-                                    text: parent.parent.parent.modelData.letter
+                                    text: parent.parent.parent.modelData.host.charAt(0).toUpperCase()
                                     color: Theme.color.text2
                                     font.family: Theme.font.display; font.pixelSize: Theme.font.caption; font.weight: Theme.font.wBold
                                 }
@@ -229,9 +338,15 @@ PageType {
                                         PathSvg { path: "M3 6 H21 M19 6 V20 a2 2 0 0 1 -2 2 H7 a2 2 0 0 1 -2 -2 V6 M8 6 V4 a2 2 0 0 1 2 -2 h4 a2 2 0 0 1 2 2 v2 M10 11 v6 M14 11 v6" }
                                     }
                                 }
-                                MouseArea { id: delMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                                MouseArea {
+                                    id: delMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { root.setCustomHost(index, false, true); root.stateRev++ }
+                                }
                             }
-                            TribeToggle { checked: true }
+                            TribeToggle {
+                                checked: modelData.on
+                                onToggled: root.setCustomHost(index, checked, false)
+                            }
                         }
                     }
                 }
@@ -248,6 +363,7 @@ PageType {
                             width: parent.width
                             text: presetSection.modelData.title.toUpperCase() + " · " + presetSection.modelData.services.length
                             linkText: qsTr("всё вкл")
+                            onLinkClicked: root.setCategoryOn(presetSection.modelData)
                         }
                         Rectangle {
                             width: parent.width
@@ -259,7 +375,7 @@ PageType {
                                 id: presetCol
                                 width: parent.width
                                 Repeater {
-                                    model: presetSection.modelData.services
+                                    model: { root.stateRev; return presetSection.modelData.services }
                                     Item {
                                         required property var modelData
                                         required property int index
@@ -294,7 +410,10 @@ PageType {
                                                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                                                 }
                                             }
-                                            TribeToggle { checked: true }
+                                            TribeToggle {
+                                                checked: root.isServiceOn(modelData.id)
+                                                onToggled: root.setServiceOn(modelData.id, checked)
+                                            }
                                         }
                                     }
                                 }
@@ -373,6 +492,14 @@ PageType {
                         }
 
                     }
+                }
+
+                Text {
+                    width: parent.width
+                    text: qsTr("Изменения применяются при следующем подключении туннеля")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    wrapMode: Text.WordWrap
                 }
             }
         }
