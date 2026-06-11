@@ -210,7 +210,7 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: 8 + PageController.safeAreaTopMargin
+        anchors.topMargin: Theme.space.xl + PageController.safeAreaTopMargin   // = боковым полям
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md

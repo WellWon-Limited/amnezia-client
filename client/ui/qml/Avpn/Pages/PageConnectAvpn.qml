@@ -82,7 +82,7 @@ PageType {
         }
     }
 
-    // ── header: бренд-марк + Tribe VPN + шестерёнка ─────────────────────
+    // ── header: бренд-марк + Tribe VPN + бейдж подписки ─────────────────
     Item {
         id: header
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
@@ -116,57 +116,26 @@ PageType {
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
         }
-        // бейдж подписки: остаток трафика + дни (мок до P-U3/SubscriptionController);
-        // тап → Профиль
+        // бейдж подписки (одна строка): остаток трафика + дни (мок до P-U3);
+        // тап → Профиль (заменяет шестерёнку)
         Rectangle {
-            anchors.right: gear.left; anchors.rightMargin: Theme.space.sm
+            anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            width: statCol.width + 2 * Theme.space.md
-            height: 38
-            radius: Theme.radius.md
+            width: statRow.width + 2 * Theme.space.lg
+            height: 36
+            radius: Theme.radius.pill
             color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
             border.width: 1; border.color: Theme.color.border
             Behavior on color { ColorAnimation { duration: 160 } }
-            Column {
-                id: statCol
+            Row {
+                id: statRow
                 anchors.centerIn: parent
-                spacing: 1
-                Row {
-                    spacing: 4
-                    Text { text: "3.2 ГБ"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 11 }
-                    Text { text: qsTr("трафик"); color: root.slate500; font.family: Theme.font.body; font.pixelSize: 11 }
-                }
-                Row {
-                    spacing: 4
-                    Text { text: "12 дней"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 11 }
-                    Text { text: qsTr("подписка"); color: root.slate500; font.family: Theme.font.body; font.pixelSize: 11 }
-                }
+                spacing: Theme.space.sm
+                Text { text: "3.2 GB"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle { width: 3; height: 3; radius: 1.5; color: root.slate500; anchors.verticalCenter: parent.verticalCenter }
+                Text { text: qsTr("12 дн."); color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
             }
             MouseArea { id: statMa; anchors.fill: parent; hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
-        }
-        // gear (lucide settings)
-        Item {
-            id: gear
-            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-            width: 40; height: 40
-            Shape {
-                anchors.centerIn: parent
-                width: 24; height: 24
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: gearMa.containsMouse ? "white" : root.slate400
-                    fillColor: "transparent"; strokeWidth: 1.7
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
-                }
-                ShapePath {
-                    strokeColor: gearMa.containsMouse ? "white" : root.slate400
-                    fillColor: "transparent"; strokeWidth: 1.7
-                    PathSvg { path: "M12 12 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0" }
-                }
-            }
-            MouseArea { id: gearMa; anchors.fill: parent; hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
         }
     }
