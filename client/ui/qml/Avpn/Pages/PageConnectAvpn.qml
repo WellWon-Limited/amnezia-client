@@ -30,6 +30,7 @@ PageType {
 
     signal requestTab(int index)
     signal requestSettings()
+    signal requestAmnezia()   // мост в полный Amnezia-UI (PageStart включает Dev.amneziaMode)
 
     function onOrbClicked() {
         if (previewSim) {
@@ -116,9 +117,25 @@ PageType {
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
         }
-        // admin-режим (lucide shield): включает скрытые dev/админ-элементы
-        // (мост в Amnezia-UI на странице Профиль и т.п.) — состояние в Dev.adminMode
+        // мост в полный Amnezia-UI — виден только в админ-режиме (щит правее)
         Item {
+            anchors.right: adminBtn.left; anchors.rightMargin: 2
+            anchors.verticalCenter: parent.verticalCenter
+            width: 40; height: 40
+            visible: Dev.adminMode
+            Image {
+                anchors.centerIn: parent
+                source: "qrc:/images/controls/amnezia.svg"
+                sourceSize: Qt.size(22, 22)
+                opacity: amneziaMa.containsMouse ? 1.0 : 0.65
+            }
+            MouseArea { id: amneziaMa; anchors.fill: parent; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor; onClicked: root.requestAmnezia() }
+        }
+        // admin-режим (lucide shield): показывает скрытые dev/админ-элементы
+        // (мост в Amnezia-UI слева и т.п.) — состояние в Dev.adminMode
+        Item {
+            id: adminBtn
             anchors.right: gear.left; anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
             width: 40; height: 40

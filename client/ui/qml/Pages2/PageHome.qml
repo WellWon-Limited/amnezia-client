@@ -21,43 +21,6 @@ PageType {
 
     property var containersDropDownRef: null
 
-    // AVPN: временный возврат на наш Connect-экран (пока активна кнопка-мост «А»). Убрать вместе с мостом.
-    Rectangle {
-        id: avpnBack
-        z: 1000
-        anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.topMargin: 16 + PageController.safeAreaTopMargin
-        anchors.leftMargin: 16
-        height: 36
-        radius: 18
-        width: avpnBackRow.width + 26
-        color: avpnBackMouse.pressed ? "#1C1F26" : "#13151B"
-        border.color: "#262A33"
-        border.width: 1
-
-        Row {
-            id: avpnBackRow
-            anchors.centerIn: parent
-            spacing: 5
-            Text {
-                text: "‹"; color: "#34D399"; font.pixelSize: 20; font.weight: Font.Bold
-                anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-                text: "Tribe VPN"; color: "#C9CDD6"; font.pixelSize: 14; font.weight: Font.Bold
-                anchors.verticalCenter: parent.verticalCenter
-            }
-        }
-
-        MouseArea {
-            id: avpnBackMouse
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: PageController.goToPageHome()   // → наш PageHomeAvpn
-        }
-    }
-
     Connections {
         target: Qt.application
 

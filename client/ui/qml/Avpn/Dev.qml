@@ -7,4 +7,7 @@ import QtQuick
 // Переключается щитом слева от шестерёнки на Connect-экране.
 QtObject {
     property bool adminMode: false
+    // полный интерфейс Amnezia (ванильный TabBar + их страницы) вместо Tribe-UI;
+    // вход — иконка «А» на Connect (видна в adminMode), выход — кнопка «‹ Tribe»
+    property bool amneziaMode: false
 }

@@ -11,6 +11,7 @@ import "../Controls2"
 import "../Controls2/TextTypes"
 import "../Config"
 import "../Components"
+import "../Avpn"              // AVPN: singletons Theme + Dev (admin/amnezia-режимы)
 import "../Avpn/components"   // AVPN: TribeBottomNav (наша навигация)
 
 PageType {
@@ -19,8 +20,9 @@ PageType {
     property bool isControlsDisabled: false
     property bool isTabBarDisabled: false
 
-    // AVPN: фиче-флаг нашей нижней навигации (3 вкладки) вместо Amnezia TabBar.
-    readonly property bool avpnNav: true
+    // AVPN: наша нижняя навигация вместо Amnezia TabBar; Dev.amneziaMode переключает
+    // на ПОЛНЫЙ ванильный интерфейс (их TabBar + страницы), возврат — кнопка «‹ Tribe».
+    readonly property bool avpnNav: !Dev.amneziaMode
 
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Защита / 3 Профиль).
     function goAvpnTab(index) {
@@ -41,9 +43,15 @@ PageType {
         ignoreUnknownSignals: true
         function onRequestTab(index) { root.goAvpnTab(index) }
         function onRequestSettings() { root.goAvpnTab(3) }
-        // AVPN: мост в полный интерфейс Amnezia (их настройки) — внутри tabBar-стека,
-        // наша навигация остаётся, возврат — любым табом.
-        function onRequestAmnezia() { tabBarStackView.goToTabBarPageUrl("PageSettings.qml") }
+        // AVPN: мост в ПОЛНЫЙ интерфейс Amnezia — ванильный TabBar + их главная;
+        // возврат — плавающая кнопка «‹ Tribe» (низ экрана).
+        function onRequestAmnezia() {
+            Dev.amneziaMode = true
+            tabBar.visible = true
+            ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
+            tabBarStackView.goToTabBarPage(PageEnum.PageHome)
+            tabBar.currentIndex = 0
+        }
     }
 
     Connections {
@@ -62,7 +70,7 @@ PageType {
                 if (root.avpnNav)
                     root.goAvpnTab(0)                                    // AVPN: наш Connect-экран
                 else
-                    tabBarStackView.goToTabBarPageUrl("PageHomeAvpn.qml")
+                    tabBarStackView.goToTabBarPage(PageEnum.PageHome)    // AVPN: amneziaMode → ванильная главная
             }
         }
 
@@ -403,7 +411,7 @@ PageType {
             image: "qrc:/images/controls/home.svg"
             clickedFunc: function () {
                 ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
-                tabBarStackView.goToTabBarPageUrl("PageHomeAvpn.qml") // AVPN: наш Connect-экран
+                tabBarStackView.goToTabBarPage(PageEnum.PageHome) // AVPN: таб-бар виден только в amneziaMode → ванильная главная
                 tabBar.currentIndex = 0
             }
         }
@@ -463,6 +471,47 @@ PageType {
                 tabBarStackView.goToTabBarPage(PageEnum.PageSetupWizardConfigSource)
                 tabBar.currentIndex = 3
             }
+        }
+    }
+
+    // AVPN: возврат из полного Amnezia-UI в Tribe (виден только в Dev.amneziaMode)
+    Rectangle {
+        visible: Dev.amneziaMode && !PageController.isStartPageVisible()
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.space.lg
+        anchors.bottom: tabBar.top
+        anchors.bottomMargin: Theme.space.md
+        width: backRow.width + 2 * Theme.space.lg
+        height: 36
+        radius: Theme.radius.pill
+        color: Theme.color.surface1
+        border.color: Theme.color.border2
+        border.width: 1
+        z: 50
+        Row {
+            id: backRow
+            anchors.centerIn: parent
+            spacing: Theme.space.xs
+            Text {
+                text: "‹"
+                color: Theme.color.accent
+                font.family: Theme.font.display
+                font.pixelSize: Theme.font.h3
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                text: "Tribe"
+                color: Theme.color.text1
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.bodyS
+                font.weight: Theme.font.wSemibold
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: { Dev.amneziaMode = false; root.goAvpnTab(0) }
         }
     }
 
