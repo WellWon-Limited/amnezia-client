@@ -41,6 +41,9 @@ PageType {
         ignoreUnknownSignals: true
         function onRequestTab(index) { root.goAvpnTab(index) }
         function onRequestSettings() { root.goAvpnTab(3) }
+        // AVPN: мост в полный интерфейс Amnezia (их настройки) — внутри tabBar-стека,
+        // наша навигация остаётся, возврат — любым табом.
+        function onRequestAmnezia() { tabBarStackView.goToTabBarPageUrl("PageSettings.qml") }
     }
 
     Connections {

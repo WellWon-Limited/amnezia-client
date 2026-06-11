@@ -11,6 +11,10 @@ import "../../Controls2" // PageType
 PageType {
     id: root
 
+    // мост в полный интерфейс Amnezia (vanilla PageSettings внутри tabBar-стека:
+    // наша нижняя навигация остаётся видимой — вернуться можно любым табом)
+    signal requestAmnezia()
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
     ColumnLayout {
@@ -20,7 +24,24 @@ PageType {
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md
 
-        TribeHeader { Layout.fillWidth: true; title: qsTr("Аккаунт") }
+        TribeHeader {
+            Layout.fillWidth: true; title: qsTr("Аккаунт")
+            rightItem: Item {
+                width: 36; height: 36
+                Image {
+                    anchors.centerIn: parent
+                    source: "qrc:/images/AmneziaVPN.png"
+                    sourceSize: Qt.size(26, 26)
+                    opacity: amneziaMa.containsMouse ? 1.0 : 0.65
+                }
+                MouseArea {
+                    id: amneziaMa
+                    anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.requestAmnezia()
+                }
+            }
+        }
 
         // account card
         TribeCard {
