@@ -248,7 +248,9 @@ void PageController::onShowErrorMessage(ErrorCode errorCode)
     const auto fullErrorMessage = errorString(errorCode);
     const auto errorMessage = fullErrorMessage.mid(fullErrorMessage.indexOf(". ") + 1); // remove ErrorCode %1.
     const auto errorUrl = QStringLiteral("troubleshooting/error-codes/#error-%1-%2").arg(static_cast<int>(errorCode)).arg(utils::enumToString(errorCode).toLower());
-    const auto fullMessage = QStringLiteral("<a href=\"%1\" style=\"color: #FBB26A;\">ErrorCode: %2</a>. %3").arg(errorUrl).arg(static_cast<int>(errorCode)).arg(errorMessage);
+    // AVPN: код ошибки красным (токен danger #E2625C из Avpn/Theme.qml) + текст с новой строки.
+    // Qt игнорирует style= у <a> (красит в Text.linkColor) — цвет задаём через <font color>.
+    const auto fullMessage = QStringLiteral("<a href=\"%1\"><font color=\"#E2625C\">ErrorCode: %2</font></a><br>%3").arg(errorUrl).arg(static_cast<int>(errorCode)).arg(errorMessage);
 
     emit showErrorMessage(fullMessage);
 }
