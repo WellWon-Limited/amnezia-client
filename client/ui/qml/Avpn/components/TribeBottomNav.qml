@@ -20,14 +20,9 @@ Item {
 
     implicitHeight: 72 + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
-    readonly property int topRadius: 24
-
-    // фон: скруглены ТОЛЬКО верхние углы — нижние уведены за нижний край
-    // (раньше нижние углы маскировались полупрозрачным патчем → просвечивали)
+    // фон: без скруглений (плоская панель во всю ширину, реш. 2026-06-11)
     Rectangle {
         anchors.fill: parent
-        anchors.bottomMargin: -nav.topRadius
-        radius: nav.topRadius
         color: Theme.color.nav
     }
     // top hairline

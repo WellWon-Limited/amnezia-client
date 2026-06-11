@@ -185,12 +185,41 @@ PageType {
 
         Item { Layout.fillHeight: true }
 
-        TribeButton {
+        // как «Обновить подключение» на главной: рамка + иконка + текст по центру
+        Rectangle {
             Layout.fillWidth: true
-            variant: "ghost"
-            text: qsTr("Закрыть приложение")
+            Layout.preferredHeight: 52
             Layout.bottomMargin: Theme.space.sm
-            onClicked: Qt.quit()
+            radius: Theme.radius.lg
+            color: quitMa.containsMouse ? Qt.rgba(0x1E / 255, 0x29 / 255, 0x3B / 255, 0.5) : "transparent"
+            border.width: 1
+            border.color: quitMa.containsMouse ? Qt.rgba(0x7C / 255, 0xA2 / 255, 0xD0 / 255, 0.5)
+                                               : Qt.rgba(0x33 / 255, 0x41 / 255, 0x55 / 255, 0.8)
+            Behavior on color { ColorAnimation { duration: 160 } }
+            Row {
+                anchors.centerIn: parent
+                spacing: 10
+                // иконка power (lucide, 24-grid → 20px)
+                Shape {
+                    width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter
+                    transform: Scale { xScale: 20 / 24; yScale: 20 / 24 }
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 2
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M12 3 V12 M18.4 6.6 a9 9 0 1 1 -12.77 0.04" }
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Закрыть приложение")
+                    color: Theme.color.text1
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                    font.weight: Theme.font.wMedium
+                }
+            }
+            MouseArea { id: quitMa; anchors.fill: parent; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor; onClicked: Qt.quit() }
         }
     }
 }
