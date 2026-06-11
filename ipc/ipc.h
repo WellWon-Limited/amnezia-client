@@ -6,7 +6,9 @@
 
 #include "../client/core/utils/utilities.h"
 
-#define IPC_SERVICE_URL "local:AmneziaVpnIpcInterface"
+// AVPN: свой сокет — полная изоляция от установленной рядом официальной Amnezia
+// (наш клиент ↔ наш демон AVPN-service; см. AVPN-iOS-DEV §15)
+#define IPC_SERVICE_URL "local:AvpnIpcInterface"
 
 namespace amnezia {
 
