@@ -12,6 +12,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                              QNetworkAccessManager *nam, QObject *parent)
     : QObject(parent), m_tunnel(conn, this), m_store(store), m_nam(nam), m_conn(conn)
 {
+    // dev/E2E: переопределение control plane (напр. http://127.0.0.1:48480 — локальный бэкенд)
+    const QByteArray envUrl = qgetenv("AVPN_API_URL");
+    if (!envUrl.isEmpty())
+        m_baseUrl = QString::fromUtf8(envUrl);
+
     m_engine.setTunnel(&m_tunnel);
 
     // health-loop driver: периодический tick (3–5с).
