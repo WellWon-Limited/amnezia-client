@@ -28,8 +28,9 @@ bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QSt
 {
     if (!m_conn)
         return false;
-    // VpnConnection живёт в своём QThread → только через очередь.
-    // TODO(in-fork): подтвердить DockerContainer::Awg (имя enum) и сигнатуру connectToVpn.
+    // VpnConnection живёт в своём QThread → только через очередь. // AVPN
+    // DockerContainer::Awg (containerEnum.h) и порядок аргументов connectToVpn
+    // (serverId, container, vpnConfiguration) сверены с форком — корректно. // AVPN
     return QMetaObject::invokeMethod(
         m_conn, "connectToVpn", Qt::QueuedConnection,
         Q_ARG(QString, serverId),

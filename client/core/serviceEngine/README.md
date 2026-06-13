@@ -20,7 +20,7 @@
 
 ## Касания апстрима (держать минимальными, все помечены `// AVPN`)
 - `cmake/avpn.cmake` — наши сорсы (изолировано); включается 1 строкой `include(...avpn.cmake)` в CMakeLists.
-- `Pages2/PageStart.qml` — роутинг на `PageHomeAvpn` (метки `// AVPN`).
+- `Pages2/PageStart.qml` — роутинг на `PageHomeTribe` (метки `// AVPN`).
 - `Pages2/PageHome.qml` — временная кнопка «‹ AntiVPN» (метка `// AVPN`, потом убрать).
 - (план) `ui/controllers/connectionUiController` — тонкий вызов `ServiceEngine` вместо прямого openConnection.
 - (план) `ITunnelControl`-реализации поверх штатного awg: desktop `daemon switchServer/updatePeer`,
@@ -52,7 +52,7 @@ tests/                        — фикстура + автономная про
 - **Регистрация:** `CoreController::initialize` под `#ifdef AVPN_ENGINE_ENABLED` создаёт `AvpnEngineQml`
   (переиспользуя `m_vpnConnection`, `m_appSettingsRepository`, `amnApp->networkManager()`) и
   `setQmlContextProperty("AvpnEngine", …)`. Касание апстрима — 1 ifdef-блок + 1 include.
-- **QML:** `PageHomeAvpn` зовёт `AvpnEngine.start()`; `PageDiagnostics` читает `AvpnEngine.debugSnapshot()`
+- **QML:** `PageHomeTribe` зовёт `AvpnEngine.start()`; `PageDiagnostics` читает `AvpnEngine.debugSnapshot()`
   (бейдж `engine` вместо `demo`). Панель уже грациозно деградирует, если `AvpnEngine` нет (демо-режим).
 - **Статус:** код написан; **первая полная in-fork сборка — на стороне сборки форка** (здесь не компилируется:
   тяжёлый Conan/Qt). Автономный регресс (pure-части) зелёный. При ошибке компиляции overlay → `-DAVPN_ENGINE=OFF`.
@@ -100,7 +100,7 @@ core/serviceEngine/tests/build_check.sh    # QtCore-only; парсит fixtures/
   Подключено в `ServiceEngine`: `tick(now)` (периодический, читает stats→feed→onDead) +
   `notifyConnectionLost()` (реактивный). Чистая логика протестирована. Драйвер QTimer 3–5с и платформенный
   источник handshake (desktop getStatus / iOS checkStatus / android getLastHandshake) — тонкая обвязка in-fork.
-- **C-6 ✅:** `Pages2/PageDiagnostics.qml` — скрытый developer-экран (5 тапов по логотипу на `PageHomeAvpn`,
+- **C-6 ✅:** `Pages2/PageDiagnostics.qml` — скрытый developer-экран (5 тапов по логотипу на `PageHomeTribe`,
   push через `StackView.view`, без C++/enum). Секции: состояние/подписка/пул(score+health)/лог свитчей/оверрайды.
   Источник — `AvpnEngine.debugSnapshot()`; пока движок не зарегистрирован QML context property `AvpnEngine` →
   демо-заглушка (бейдж `demo`/`engine`). Маскировка секретов (план §7). qmllint чистый, превью без ошибок.

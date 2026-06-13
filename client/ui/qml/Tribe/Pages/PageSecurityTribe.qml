@@ -83,6 +83,12 @@ PageType {
         interval: 1200
         onTriggered: {
             if (!ConnectionController.isConnected) return
+            // AVPN: на iOS NEVPNManager форсит видимый рестарт туннеля при смене конфига → не рвём
+            // активное соединение; настройки уже сохранены и применятся при следующем подключении.
+            if (Qt.platform.os === "ios") {
+                PageController.showNotificationMessage(qsTr("Изменения применятся при следующем подключении"))
+                return
+            }
             root.pendingReconnect = true
             ConnectionController.closeConnection()
         }
@@ -210,7 +216,7 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: Theme.space.xl + Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)   // = боковым полям; iOS: PageController даёт 0
+        anchors.topMargin: Theme.space.xl + PageController.safeAreaTopMargin   // iOS: натив-инсет из pageController
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         spacing: Theme.space.md

@@ -57,6 +57,7 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
                      ? SubStatus::Degraded
                      : SubStatus::Active;
     out.expiresAt = root.value("expires_at").toString();
+    out.graceUntil = root.value("grace_until").toString(); // AVPN: grace (expires_at + 24ч)
 
     const QJsonObject tr = root.value("traffic").toObject();
     out.trafficUsed = static_cast<qint64>(tr.value("used").toDouble());
@@ -67,6 +68,8 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
         SubscriptionNode n;
         n.nodeId = no.value("node_id").toString();
         n.region = no.value("region").toString();
+        n.name = no.value("label").toString(no.value("name").toString()); // AVPN: label (фолбэк name)
+        n.countryCode = no.value("country_code").toString(); // AVPN: ISO-3166 → флаг-эмодзи
         n.endpoint = no.value("endpoint").toString();
         n.serverPubkey = no.value("server_pubkey").toString();
         n.awg = parseAwg(no.value("awg_params").toObject());

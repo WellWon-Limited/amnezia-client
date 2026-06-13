@@ -3,7 +3,7 @@ pragma Singleton
 import QtQuick
 
 // AVPN: Tribe VPN design tokens (UI-DESIGN.md §2). Single source of truth for our overlay UI.
-// Night-sky + azure + glass. NO hardcoded hex anywhere else in Avpn/* — read this singleton.
+// Night-sky + azure + glass. NO hardcoded hex anywhere else in Tribe/* — read this singleton.
 QtObject {
     id: theme
 
@@ -41,6 +41,10 @@ QtObject {
         readonly property color connected: "#41C28C"
         readonly property color warning: "#E2A53C"   // connecting / expiring
         readonly property color danger: "#E2625C"    // disconnected / error
+        // CTA-gold — НАМЕРЕННОЕ исключение из night-sky (как warning): монетизационный
+        // призыв «Получить ключ» при исчерпании триала. Контраст ради конверсии. // AVPN
+        readonly property color cta: "#E8B23A"        // CTA gradient top
+        readonly property color ctaDeep: "#C8922A"    // CTA gradient bottom
         // badge alpha fills
         readonly property color badgeOn: Qt.rgba(0x41 / 255, 0xC2 / 255, 0x8C / 255, 0.16)
         readonly property color badgeWarn: Qt.rgba(0xE2 / 255, 0xA5 / 255, 0x3C / 255, 0.16)

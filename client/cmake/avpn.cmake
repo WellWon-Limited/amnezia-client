@@ -35,6 +35,9 @@ list(APPEND HEADERS
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/ServiceEngine.h
     ${AVPN_SE}/AvpnEngineQml.h
+    ${AVPN_SE}/AvpnPushBridge.h
+    ${AVPN_SE}/AvpnDeepLinkBridge.h
+    ${AVPN_SE}/AvpnIntentBridge.h
 )
 
 list(APPEND SOURCES
@@ -46,4 +49,19 @@ list(APPEND SOURCES
     ${AVPN_SE}/VpnConnectionTunnelControl.cpp
     ${AVPN_SE}/ServiceEngine.cpp
     ${AVPN_SE}/AvpnEngineQml.cpp
+    ${AVPN_SE}/AvpnPushBridge.cpp
+    ${AVPN_SE}/AvpnDeepLinkBridge.cpp
+    ${AVPN_SE}/AvpnIntentBridge.cpp
 )
+
+# AVPN: нативные iOS-исходники — только для iOS-таргета.
+if(IOS)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnSafeArea.mm)
+    # AVPN (Task 9): APNs контроллер (auth + device token + входящие пуши).
+    list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.h)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.mm)
+    # AVPN (Task E): консьюмер «намерений» App Intent авто-паузы — читает App Group NSUserDefaults.
+    # Здесь же реализован extern "C" Avpn_consumeIntentFlags() (на desktop — no-op в AvpnIntentBridge.cpp).
+    list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnIntentController.h)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnIntentController.mm)
+endif()

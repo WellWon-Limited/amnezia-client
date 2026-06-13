@@ -14,6 +14,9 @@
 #ifdef AVPN_ENGINE_ENABLED            // AVPN overlay
     #include "amneziaApplication.h"   // amnApp->networkManager()
     #include "core/serviceEngine/AvpnEngineQml.h"
+    #include "core/serviceEngine/AvpnPushBridge.h" // AVPN (Task 9): мост пушей → QML
+    #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
+    #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
 #endif
 
 #if defined(Q_OS_ANDROID)
@@ -203,7 +206,25 @@ void CoreController::initControllers()
     // Переиспользуем готовые объекты форка: VpnConnection, SecureAppSettingsRepository, networkManager.
     auto *avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
                                                amnApp->networkManager(), this);
-    setQmlContextProperty("AvpnEngine", avpnEngine);
+    setQmlContextProperty("TribeEngine", avpnEngine);
+
+    // AVPN (Task 9): мост пуш-уведомлений (APNs/FCM) → QML. На desktop/Android без пушей это просто
+    // пустой счётчик. Натив-слой (iOS QtAppDelegate.mm) дёргает singleton instance() из своего потока.
+    setQmlContextProperty("AvpnPush", avpn::AvpnPushBridge::instance());
+
+    // AVPN (Task 13): мост обратного диплинка ПЕРЕНОСА (tribe://transfer / Universal Link) → QML.
+    auto *avpnDeepLink = avpn::AvpnDeepLinkBridge::instance();
+    setQmlContextProperty("AvpnDeepLink", avpnDeepLink);
+    // Извлечённый из ссылки токен переноса → движок (POST /v1/transfer/redeem + РОТАЦИЯ токена).
+    // У моста нет base URL / Identity / NAM, поэтому redeem делает движок.
+    QObject::connect(avpnDeepLink, &avpn::AvpnDeepLinkBridge::transferRequested,
+                     avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
+
+    // AVPN (Task E): мост-консьюмер «намерений» фонового App Intent авто-паузы (Task 8). Сам движок
+    // (AvpnEngineQml) уже connect-ится к pauseRequested/resumeRequested в конструкторе. Здесь лишь
+    // ГАРАНТИРУЕМ создание singleton-моста до того, как натив-слой (Avpn_consumeIntentFlags при
+    // foreground) его дёрнет. QML-доступ не нужен — это чисто натив→движок мост.
+    (void)avpn::AvpnIntentBridge::instance();
 #endif
 
     m_pageController = new PageController(m_serversController, m_settingsController, this);

@@ -6,16 +6,16 @@ import "../Controls2"
 
 // AVPN диагностическая панель (скрытый developer-экран, 5 тапов по логотипу). Overlay, апстрим не трогаем.
 // Источник данных — ServiceEngine.debugSnapshot() движка serviceEngine. Пока движок не зарегистрирован
-// как QML context property ("AvpnEngine"), используем заглушку → по готовности движка заменяем на реальные данные.
+// как QML context property ("TribeEngine"), используем заглушку → по готовности движка заменяем на реальные данные.
 // Это НЕ админка бэкенда (та — веб-панель за Cloudflare Zero Trust). См. implimintation.md §7.
 PageType {
     id: root
 
     readonly property color accent: "#34D399"
-    readonly property bool hasEngine: (typeof AvpnEngine !== "undefined") && AvpnEngine !== null
+    readonly property bool hasEngine: (typeof TribeEngine !== "undefined") && TribeEngine !== null
 
     // Снимок: реальный из движка, иначе демонстрационная заглушка (та же форма, что DebugSnapshot.h).
-    readonly property var snap: hasEngine ? AvpnEngine.debugSnapshot() : ({
+    readonly property var snap: hasEngine ? TribeEngine.debugSnapshot() : ({
         "state": "connected",
         "currentNodeId": "fra-01",
         "latestHandshakeAgeSec": 12,
@@ -159,9 +159,9 @@ PageType {
                 title: "Оверрайды"
                 RowLayout {
                     width: parent.width; spacing: 8
-                    DiagBtn { text: "Re-probe"; enabled: root.hasEngine; onTap: if (root.hasEngine) AvpnEngine.reprobe() }
-                    DiagBtn { text: "Switch";   enabled: root.hasEngine; onTap: if (root.hasEngine) AvpnEngine.manualSwitch() }
-                    DiagBtn { text: "Reset LKG";enabled: root.hasEngine; onTap: if (root.hasEngine) AvpnEngine.resetLkg() }
+                    DiagBtn { text: "Re-probe"; enabled: root.hasEngine; onTap: if (root.hasEngine) TribeEngine.reprobe() }
+                    DiagBtn { text: "Switch";   enabled: root.hasEngine; onTap: if (root.hasEngine) TribeEngine.manualSwitch() }
+                    DiagBtn { text: "Reset LKG";enabled: root.hasEngine; onTap: if (root.hasEngine) TribeEngine.resetLkg() }
                 }
             }
 

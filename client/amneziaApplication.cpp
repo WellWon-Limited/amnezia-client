@@ -232,7 +232,7 @@ void AmneziaApplication::loadFonts()
 
     QFontDatabase::addApplicationFont(":/fonts/pt-root-ui_vf.ttf");
 
-    // AVPN: Tribe VPN design-system fonts (UI-DESIGN.md §2). QML reads them via Avpn/Theme.qml.
+    // AVPN: Tribe VPN design-system fonts (UI-DESIGN.md §2). QML reads them via Tribe/Theme.qml.
     QFontDatabase::addApplicationFont(":/fonts/Manrope-VariableFont_wght.ttf");
     QFontDatabase::addApplicationFont(":/fonts/Inter-VariableFont.ttf");
     QFontDatabase::addApplicationFont(":/fonts/JetBrainsMono-VariableFont_wght.ttf");

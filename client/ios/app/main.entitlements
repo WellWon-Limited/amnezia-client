@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- AVPN (Task 9): APNs push. development в Debug; production-провижн меняет на production. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- AVPN (Task 13): Universal Links переноса /transfer (apple-app-site-association хостит tribevpn.com) -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:tribevpn.com</string>
+	</array>
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
 		<string>packet-tunnel-provider</string>

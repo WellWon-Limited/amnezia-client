@@ -175,7 +175,9 @@ Window  {
 
         anchors.right: parent.right
         anchors.left: parent.left
-        anchors.bottom: parent.bottom
+        // AVPN: уведомления — в ВЕРХ под логотип/плашку Tribe (бренд-решение 2026-06-11), не в низ
+        anchors.top: parent.top
+        anchors.topMargin: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top) + 64
 
         implicitHeight: popupNotificationMessage.height
 
@@ -200,7 +202,9 @@ Window  {
 
         anchors.right: parent.right
         anchors.left: parent.left
-        anchors.bottom: parent.bottom
+        // AVPN: ошибки — тоже в ВЕРХ под логотип/плашку Tribe (бренд-решение 2026-06-11)
+        anchors.top: parent.top
+        anchors.topMargin: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top) + 64
 
         implicitHeight: popupErrorMessage.height
 

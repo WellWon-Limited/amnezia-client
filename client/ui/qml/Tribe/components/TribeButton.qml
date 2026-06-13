@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
 
-import ".."   // Avpn/qmldir → Theme singleton
+import ".."   // Tribe/qmldir → Theme singleton
 
 // AVPN: Tribe VPN button. Variants: "primary" (gradient + glow), "glass", "ghost", "icon".
 // Tokens only (Theme). UI-DESIGN.md §3.

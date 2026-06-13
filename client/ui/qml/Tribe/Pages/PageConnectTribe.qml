@@ -4,7 +4,7 @@ import QtQuick.Shapes
 import Qt5Compat.GraphicalEffects as Fx
 
 import ".."              // Theme
-import "../components"
+import "../components" // TribeFlag (круглый флаг по country_code) и др.
 import "../../Controls2" // PageType
 
 // AVPN: Connect-экран (звёздное небо + горы во всю ширину + орб-сфера). Горы full-bleed и
@@ -30,9 +30,45 @@ PageType {
 
     signal requestTab(int index)
     signal requestSettings()
+    signal requestNotifications()
+    signal requestAdminServers()  // AVPN: админ-просмотр пула нод (только Dev.adminMode)
 
-    // iOS: PageController.safeArea* реализован только для Android → максимум с SafeArea (Qt 6.9+)
-    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
+    // AVPN: центр уведомлений — счётчик непрочитанных. Реальные пуши (#9) идут через мост
+    // AvpnPush (APNs/FCM → C++ → QML). В dev-превью моста нет → фолбэк 2 (mock-бейдж).
+    readonly property bool hasPush: (typeof AvpnPush !== "undefined")
+    readonly property int unreadCount: hasPush ? Number(AvpnPush.unreadCount) : 2
+
+    // AVPN: бейдж подписки. Реактивные Q_PROPERTY на TribeEngine (NOTIFY changed): trafficUsed/
+    // trafficLimit/daysLeft/subActive — читают загруженную Subscription через движок. Гард на
+    // undefined-движок (dev-превью) с литеральными фолбэками.
+    readonly property bool hasEngine:     (typeof TribeEngine !== "undefined")
+    readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
+    readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
+    readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
+    // AVPN: триал/подписка исчерпаны → монетизационный CTA «Получить ключ» вместо ротации.
+    // Исчерпан, если: подписка неактивна, ИЛИ дней не осталось (0), ИЛИ лимит трафика выбран.
+    readonly property bool subExpired: root.hasEngine && (!root.subActive
+                              || (TribeEngine.daysLeft === 0)
+                              || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))
+    // остаток трафика: «∞» при безлимите/неизвестно (limit 0 или NaN), иначе (limit-used) в ГБ
+    function fmtTrafficLeft() {
+        if (!hasEngine) return "3.2 GB"                // dev-превью: литеральный фолбэк
+        if (!(trafficLimitB > 0)) return "∞"           // безлимит / ещё не загружено (0 или NaN)
+        var leftB = Math.max(0, trafficLimitB - trafficUsedB)
+        if (isNaN(leftB)) return "∞"
+        return (leftB / 1e9).toFixed(1) + " GB"
+    }
+    // daysLeft<0 = бессрочно/неизвестно → «∞»; иначе «N дн.»
+    readonly property string daysLeftText: !hasEngine ? qsTr("12 дн.")
+                              : (TribeEngine.daysLeft >= 0 ? qsTr("%1 дн.").arg(TribeEngine.daysLeft)
+                                                          : qsTr("∞"))
+
+    // AVPN: реальный сервер из подписки (карточка внизу). Гард на undefined currentNode (иначе краш).
+    readonly property var curNode: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode
+                                             : ({ region: "", ip: "", hasNode: false })
+
+    // iOS/Android/desktop: натив-инсет из pageController (на iOS читает UIKit safeAreaInsets).
+    readonly property real safeTop: PageController.safeAreaTopMargin
 
     // Мобайл: сцена (орб + горы + подпись) опущена на ~20% высоты экрана, но так, чтобы
     // подпись не наезжала на карточку сервера (низ сцены ≥ 24px над bottomBlock).
@@ -41,19 +77,20 @@ PageType {
     readonly property real sceneShift: {
         if (!isMobile) return 0
         var orbBase = safeTop + 16 + 40 + 76          // header top+height + базовый отступ орба
-        var captionBottom = orbBase + 256 + 20 + 18   // орб + отступ подписи + высота подписи
+        var captionBottom = orbBase + 256 + 30 + 18   // орб + отступ подписи + высота подписи
         var maxShift = bottomBlock.y - captionBottom - 24
-        return Math.max(0, Math.min(Math.round(root.height * 0.20), maxShift))
+        // сцена опущена на ~20% высоты, но приподнята на ~высоту кнопки «Обновить» (52, чуть меньше — 44)
+        return Math.max(0, Math.min(Math.round(root.height * 0.20) - 44, maxShift))
     }
 
     function onOrbClicked() {
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
             simConnecting = true; simTimer.restart()
-        } else if (typeof AvpnEngine !== "undefined") {
+        } else if (typeof TribeEngine !== "undefined") {
             // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
-            if (isOn || isBusy) AvpnEngine.stop()
-            else AvpnEngine.start()
+            if (isOn || isBusy) TribeEngine.stop()
+            else TribeEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
             // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
@@ -65,11 +102,30 @@ PageType {
 
     // ошибки движка — в стандартный тост
     Connections {
-        target: typeof AvpnEngine !== "undefined" ? AvpnEngine : null
+        target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) { PageController.showErrorMessage(message) }
     }
+
+    // AVPN (Task 13): активация после покупки по диплинку → re-fetch подписки (бейдж оживёт).
+    Connections {
+        target: (typeof AvpnDeepLink !== "undefined") ? AvpnDeepLink : null
+        ignoreUnknownSignals: true
+        function onActivated(token, accountId) {
+            if (typeof TribeEngine !== "undefined" && typeof TribeEngine.bootstrap === "function")
+                TribeEngine.bootstrap()
+            PageController.showNotificationMessage(qsTr("Доступ активирован на этом устройстве"))
+        }
+    }
+
+    // AVPN (Task 11): bootstrap НЕ зовём из Component.onCompleted — он делает блокирующий сетевой
+    // вызов (вложенный QEventLoop), а во время построения QML это вызывает re-entrancy и краш
+    // (QQuickItem::setFocus на недостроенном элементе). Движок сам дефер-вызывает bootstrap из
+    // конструктора уже ПОСЛЕ показа окна (QTimer::singleShot) — безопасно, как обычный start().
     Timer { id: simTimer; interval: 1500; onTriggered: { root.simConnecting = false; root.simConnected = true } }
+    // AVPN DEV: УБРАТЬ — самоскрин для верификации без TCC (см. tribe-ui-verify-loop)
+    Timer { running: true; interval: 2500; repeat: false
+        onTriggered: root.grabToImage(function(r){ r.saveToFile("/tmp/avpn-screen.png") }) }
 
     // ── фон ─────────────────────────────────────────────────────────────
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -78,7 +134,7 @@ PageType {
     Item {
         id: starField
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        height: 340; clip: true; z: 0
+        height: 400; clip: true; z: 0   // выше = звёзды тянутся ниже, ближе к орбу
         property var starsData: []
         Component.onCompleted: {
             var arr = []
@@ -146,27 +202,98 @@ PageType {
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
         }
-        // бейдж подписки (одна строка): остаток трафика + дни (мок до P-U3);
-        // тап → Профиль (заменяет шестерёнку)
+        // AVPN: админ-вход в просмотр пула нод (server/stack, vector). Только Dev.adminMode.
+        // Маленькая иконка справа от бренда; тап → requestAdminServers() → PageLocationsTribe (админ).
         Rectangle {
-            anchors.right: parent.right
+            id: adminServersBtn
+            visible: Dev.adminMode
+            anchors.left: brand.right; anchors.leftMargin: Theme.space.md
             anchors.verticalCenter: parent.verticalCenter
-            width: statRow.width + 2 * Theme.space.lg
-            height: 36
+            width: 36; height: 36
             radius: Theme.radius.pill
-            color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
+            color: adminMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
             border.width: 1; border.color: Theme.color.border
             Behavior on color { ColorAnimation { duration: 160 } }
-            Row {
-                id: statRow
+            // иконка «server/stack» (Tabler "stack", 24-grid → 22px)
+            Shape {
                 anchors.centerIn: parent
-                spacing: Theme.space.sm
-                Text { text: "3.2 GB"; color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
-                Rectangle { width: 3; height: 3; radius: 1.5; color: root.slate500; anchors.verticalCenter: parent.verticalCenter }
-                Text { text: qsTr("12 дн."); color: "#EEF3F9"; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                width: 22; height: 22
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.7
+                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                    PathSvg { path: "M12 3 L21 8 L12 13 L3 8 Z M3 12 L12 17 L21 12 M3 16 L12 21 L21 16" }
+                }
             }
-            MouseArea { id: statMa; anchors.fill: parent; hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
+            MouseArea { id: adminMa; anchors.fill: parent; hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor; onClicked: root.requestAdminServers() }
+        }
+
+        // бейдж подписки + колокол уведомлений (прижаты вправо одной Row); // AVPN
+        Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Theme.space.md
+
+            // бейдж подписки (одна строка): остаток трафика (real) + дни (real daysLeft).
+            // тап → Профиль (заменяет шестерёнку). subActive гейтит цвет рамки.
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: statRow.width + 2 * Theme.space.lg
+                height: 36
+                radius: Theme.radius.pill
+                color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
+                border.width: 1
+                border.color: root.subActive ? Theme.color.border : Theme.color.warning
+                Behavior on color { ColorAnimation { duration: 160 } }
+                Row {
+                    id: statRow
+                    anchors.centerIn: parent
+                    spacing: Theme.space.sm
+                    Text { text: root.fmtTrafficLeft(); color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: 3; height: 3; radius: 1.5; color: root.slate500; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: root.daysLeftText; color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                }
+                MouseArea { id: statMa; anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
+            }
+
+            // колокол уведомлений (vector Tabler "bell") + бейдж непрочитанных
+            Rectangle {
+                id: bellBtn
+                anchors.verticalCenter: parent.verticalCenter
+                width: 36; height: 36
+                radius: Theme.radius.pill
+                color: bellMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
+                border.width: 1; border.color: Theme.color.border
+                Behavior on color { ColorAnimation { duration: 160 } }
+                Shape {
+                    anchors.centerIn: parent
+                    width: 22; height: 22
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.7
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M6 8 a6 6 0 0 1 12 0 c0 7 3 9 3 9 H3 s3 -2 3 -9z M10.5 21 a2 2 0 0 0 3 0" }
+                    }
+                }
+                // бейдж непрочитанных (красный кружок с числом)
+                Rectangle {
+                    visible: root.unreadCount > 0
+                    width: 16; height: 16; radius: 8
+                    color: Theme.color.danger
+                    anchors.right: parent.right; anchors.top: parent.top
+                    anchors.rightMargin: -2; anchors.topMargin: -2
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.unreadCount > 9 ? "9+" : String(root.unreadCount)
+                        color: "#FFFFFF"
+                        font.family: Theme.font.body; font.pixelSize: 10; font.weight: Theme.font.wBold
+                    }
+                }
+                MouseArea { id: bellMa; anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor; onClicked: root.requestNotifications() }
+            }
         }
     }
 
@@ -282,7 +409,7 @@ PageType {
     // подпись под орбом (поверх гор)
     Text {
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: orb.bottom; anchors.topMargin: 20
+        anchors.top: orb.bottom; anchors.topMargin: 30   // чуть ниже орба (просьба 2026-06-11)
         z: 30; horizontalAlignment: Text.AlignHCenter
         text: root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
                         : qsTr("Подключиться — нажмите кнопку выше")
@@ -308,38 +435,48 @@ PageType {
             Row {
                 anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
                 spacing: Theme.space.lg
-                // флаг Латвии
-                Rectangle {
-                    width: 52; height: 52; radius: 26; anchors.verticalCenter: parent.verticalCenter
-                    color: Qt.rgba(0x0F/255,0x17/255,0x2A/255,0.8)
-                    border.width: 1; border.color: Qt.rgba(0x33/255,0x41/255,0x55/255,0.5)
-                    Item {
-                        anchors.centerIn: parent; width: 32; height: 32
-                        layer.enabled: true
-                        layer.effect: Fx.OpacityMask { maskSource: Rectangle { width: 32; height: 32; radius: 16 } }
-                        Column {
-                            anchors.fill: parent
-                            Rectangle { width: parent.width; height: parent.height * 0.4; color: "#9E3039" }
-                            Rectangle { width: parent.width; height: parent.height * 0.2; color: "white" }
-                            Rectangle { width: parent.width; height: parent.height * 0.4; color: "#9E3039" }
+                // иконка региона: КРУГЛЫЙ флаг по country_code «во всю плашку» (SVG из flagKit,
+                // не эмодзи), иначе тёмная плашка с Tabler "world".
+                TribeFlag {
+                    width: 52; height: 52; anchors.verticalCenter: parent.verticalCenter
+                    code: root.curNode.hasNode ? (root.curNode.countryCode || "") : ""
+                    fallback: Component {
+                        Rectangle {
+                            radius: width / 2
+                            color: Qt.rgba(0x0F/255,0x17/255,0x2A/255,0.8)
+                            border.width: 1; border.color: Qt.rgba(0x33/255,0x41/255,0x55/255,0.5)
+                            Shape {
+                                anchors.centerIn: parent; width: 26; height: 26
+                                preferredRendererType: Shape.CurveRenderer
+                                ShapePath {
+                                    strokeColor: root.blueAccent; fillColor: "transparent"; strokeWidth: 1.8
+                                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                    PathSvg { path: "M13 2 a11 11 0 1 0 0.01 0z M2 13 h22 M13 2 a16 16 0 0 1 0 22 a16 16 0 0 1 0 -22z" }
+                                }
+                            }
                         }
                     }
                 }
                 Column {
                     anchors.verticalCenter: parent.verticalCenter; spacing: 2
-                    width: parent.width - 52 - 30 - 18 - 3 * Theme.space.lg
-                    Text { text: qsTr("Латвия"); color: "white"
+                    // при выбранном узле справа сигнал+шеврон (30+18); без узла — текст во всю ширину
+                    width: parent.width - 52 - Theme.space.lg - (root.curNode.hasNode ? (30 + 18 + 2 * Theme.space.lg) : 0)
+                    Text { text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
+                        color: "white"; elide: Text.ElideRight; width: parent.width
                         font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold }
-                    Text { text: "IP: 213.155.12.184"; color: root.slate500
+                    Text { text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
+                        color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10 }
                 }
-                Row {  // сигнал-бары
+                Row {  // сигнал-бары (только когда узел выбран)
+                    visible: root.curNode.hasNode
                     spacing: 2; height: 16; anchors.verticalCenter: parent.verticalCenter
                     Rectangle { width: 4; height: 8;  radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
                     Rectangle { width: 4; height: 12; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
                     Rectangle { width: 4; height: 16; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
                 }
                 Shape {
+                    visible: root.curNode.hasNode
                     width: 18; height: 18; anchors.verticalCenter: parent.verticalCenter
                     preferredRendererType: Shape.CurveRenderer
                     ShapePath { strokeColor: root.slate500; fillColor: "transparent"; strokeWidth: 2
@@ -347,23 +484,80 @@ PageType {
                         PathSvg { path: "M7 4 L13 9 L7 14" } }
                 }
             }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.requestTab(1) }
+            // карточка-инфо (без перехода): Серверы ушли в админ-панель (#5). // AVPN
         }
 
-        // кнопка «Обновить коннект»
+        // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────
+        // subExpired → ЗОЛОТАЯ кнопка «Получить ключ» (CTA, монетизация).
+        // иначе      → кнопка «Обновить подключение» (ротация ноды).
+        // ────────────────────────────────────────────────────────────────────
+
+        // ЗОЛОТАЯ CTA «Обновить ключ» — в личный кабинет с JWT-авторизацией (триал исчерпан). // AVPN
         Rectangle {
+            id: ctaBtn
+            visible: root.subExpired
+            width: parent.width; height: 52; radius: Theme.radius.lg
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: ctaMa.pressed ? Theme.color.ctaDeep : Theme.color.cta }
+                GradientStop { position: 1.0; color: Theme.color.ctaDeep }
+            }
+            scale: ctaMa.pressed ? 0.985 : 1.0
+            Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            Row {
+                anchors.centerIn: parent; spacing: 10
+                // иконка ключа (lucide "key-round", 24-grid → 20px)
+                Shape {
+                    width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter
+                    transform: Scale { xScale: 20/24; yScale: 20/24 }
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath { strokeColor: Theme.color.bg900; fillColor: "transparent"; strokeWidth: 2
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M2.586 17.414 A2 2 0 0 0 2 18.828 V21 a1 1 0 0 0 1 1 h3 a1 1 0 0 0 1 -1 v-1 a1 1 0 0 1 1 -1 h1 a1 1 0 0 0 1 -1 v-1 a1 1 0 0 1 1 -1 h.172 a2 2 0 0 0 1.414 -.586 l.814 -.814 a6.5 6.5 0 1 0 -4 -4z M15.5 7.5 a.5 .5 0 1 0 .01 0z" } }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Обновить ключ")
+                    color: Theme.color.bg900
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
+                }
+            }
+            MouseArea {
+                id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    // Личный кабинет с JWT-авторизацией: токен подписки (если движок его отдаёт) → query.
+                    // TODO(AVPN): экспонировать TribeEngine.authToken (JWT) из C++ для сквозной авторизации.
+                    var base = "https://tribevpn.com/account"
+                    var tok = (root.hasEngine && TribeEngine.authToken !== undefined) ? String(TribeEngine.authToken) : ""
+                    Qt.openUrlExternally(tok.length > 0 ? (base + "?token=" + encodeURIComponent(tok)) : base)
+                }
+            }
+        }
+
+        // кнопка «Обновить коннект» → ротация на ДРУГУЮ ноду (TribeEngine.manualSwitch,
+        // исключает текущую). Активна только при подключении; на время свитча — busy. // AVPN
+        Rectangle {
+            id: refreshBtn
+            visible: !root.subExpired
             width: parent.width; height: 52; radius: 16
+            // ротация осмысленна только когда туннель поднят; иначе приглушаем
+            opacity: (root.hasEngine && !root.isOn) ? 0.45 : 1.0
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
             border.width: 1
             border.color: refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
             Behavior on color { ColorAnimation { duration: 160 } }
             Row {
                 anchors.centerIn: parent; spacing: 10
-                // иконка обновления (Tabler refresh, 24-grid → ровно в 20px, по центру)
+                // иконка обновления (Tabler refresh, 24-grid → ровно в 20px, по центру).
+                // На время свитча — бесконечное вращение. // AVPN
                 Shape {
+                    id: refreshIcon
                     width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter
                     transform: Scale { xScale: 20/24; yScale: 20/24 }
                     preferredRendererType: Shape.CurveRenderer
+                    RotationAnimation on rotation {
+                        running: root.hasEngine && TribeEngine.busy && !Theme.motion.reduceMotion
+                        from: 0; to: 360; duration: 900; loops: Animation.Infinite
+                    }
                     ShapePath { strokeColor: root.blueAccent; fillColor: "transparent"; strokeWidth: 2
                         capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
                         PathSvg { path: "M20 11 a8.1 8.1 0 0 0 -15.5 -2 M4 5 v4 h4" } }
@@ -372,11 +566,23 @@ PageType {
                         PathSvg { path: "M4 13 a8.1 8.1 0 0 0 15.5 2 M20 19 v-4 h-4" } }
                 }
                 Text {
-                    anchors.verticalCenter: parent.verticalCenter; text: qsTr("Обновить подключение")
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: (root.hasEngine && TribeEngine.busy) ? qsTr("Подбираем сервер…") : qsTr("Обновить подключение")
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
             }
-            MouseArea { id: refreshMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+            MouseArea {
+                id: refreshMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (!root.hasEngine) return
+                    if (TribeEngine.busy) return
+                    if (!root.isOn) {     // не подключены — обычный старт вместо ротации
+                        TribeEngine.start()
+                        return
+                    }
+                    TribeEngine.manualSwitch()   // форс-свитч на другую ноду (исключая текущую)
+                }
+            }
         }
     }
 }

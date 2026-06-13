@@ -1,10 +1,25 @@
 #include "AvpnEngineQml.h"
 
 #include "core/repositories/secureAppSettingsRepository.h"
+#include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
+#include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
+#include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 
+#include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
 #include <QDateTime>
+#include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
+// AVPN (Devices+Account): синхронные REST-вызовы к control plane, как fetchSubscription.
+#include "NetAwait.h" // AVPN: awaitReply() — ожидание с таймаутом (анти-фриз GUI)
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QUrl>
 
 namespace avpn {
 
@@ -23,15 +38,128 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
 
-    // реактивный failover: смена состояния туннеля.
-    if (m_conn)
+    // AVPN (Task 7): таймер авто-паузы «для покупок». Одноразовый: истёк → бездействие → resume.
+    m_pauseTimer.setSingleShot(true);
+    connect(&m_pauseTimer, &QTimer::timeout, this, &AvpnEngineQml::onPauseTimeout);
+
+    // AVPN (Task E): консьюмер «намерений» фонового iOS App Intent (Task 8). Интент в фоне уже
+    // реально опустил/поднял туннель и записал флаг в App Group; при выходе в foreground натив-слой
+    // (QtAppDelegate.mm → Avpn_consumeIntentFlags → AvpnIntentController.mm) эмитит сигналы моста.
+    // Здесь согласуем СВОЁ состояние: pause → pauseForShopping (m_paused + гасим failover),
+    // resume → resumeFromPause. На desktop мост молчит (Avpn_consumeIntentFlags — no-op).
+    connect(avpn::AvpnIntentBridge::instance(), &avpn::AvpnIntentBridge::pauseRequested,
+            this, [this]() { pauseForShopping(); });
+    connect(avpn::AvpnIntentBridge::instance(), &avpn::AvpnIntentBridge::resumeRequested,
+            this, &AvpnEngineQml::resumeFromPause);
+
+    // AVPN (Task 9 — APNs): мост пушей. Натив (AvpnPushController.mm) кладёт device token + окружение в
+    // мост; здесь, получив deviceTokenReady, шлём токен на бэк авторизованно (Bearer subscription_token).
+    // На desktop мост молчит (нет натив-регистратора). markAllRead из QML → readRequested → сброс
+    // серверного счётчика. Singleton-мост, как AvpnIntentBridge.
+    connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::deviceTokenReady,
+            this, [this](const QString &token, const QString &platform, const QString &environment) {
+                if (platform == QLatin1String("ios")) // Android-FCM пойдёт своим путём позже
+                    registerPushToken(token, environment);
+            });
+    connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readRequested,
+            this, &AvpnEngineQml::markNotificationsRead);
+
+    // AVPN (Task 9): разрешение на пуши спрашиваем ОДИН раз — после первого успешного коннекта (UX:
+    // контекстный запрос). Persist, чтобы не пытаться при каждом коннекте (iOS и так дедупит промпт).
+    {
+        QSettings s;
+        m_pushPermissionAsked = s.value(QStringLiteral("AvpnPush/permissionAsked"), false).toBool();
+    }
+
+    // реактивный failover + правдивый статус: реальное состояние туннеля. // AVPN
+    if (m_conn) {
         connect(m_conn, &VpnConnection::connectionStateChanged,
                 this, &AvpnEngineQml::onConnectionStateChanged, Qt::QueuedConnection);
+        // AVPN: протокол-уровневые ошибки (ErrorCode) идут отдельным сигналом — раньше терялись.
+        connect(m_conn, &VpnConnection::vpnProtocolError,
+                this, &AvpnEngineQml::onVpnProtocolError, Qt::QueuedConnection);
+    }
+
+    // AVPN (Task 11): тихий bootstrap при создании движка — наполнить подписку ДО первого Connect,
+    // чтобы бейдж ГБ/дней/subActive был живой сразу. Дефер через singleShot(0): bootstrap() делает
+    // синхронный сетевой вызов (QEventLoop), поэтому не блокируем конструктор/инициализацию UI —
+    // отдаём управление циклу событий. КРАШ-ФИКС: singleShot(0) слишком рано — bootstrap крутит
+    // вложенный QEventLoop, и если он сработает во время загрузки/показа QML, вложенный цикл
+    // прокручивает чужие события (таймеры/фокус) на недостроенном дереве → re-entrancy SIGSEGV
+    // (QQuickItem::setFocus). 1200мс гарантируют, что окно показано и loop простаивает (как при
+    // пользовательском start()). Идемпотентно (m_bootstrapped). // AVPN
+    QTimer::singleShot(1200, this, &AvpnEngineQml::bootstrap);
 }
 
 QString AvpnEngineQml::state() const
 {
+    // AVPN (Task 7): «paused» — наша надстройка над фазами движка (туннель реально down, ждём
+    // авто-возврат). Перекрывает disconnected, чтобы UI отличал паузу-для-покупок от обычного стопа.
+    if (m_paused)
+        return QStringLiteral("paused");
     return debugSnapshot().value(QStringLiteral("state")).toString();
+}
+
+// AVPN: статус подписки (Task 3) — единый источник debugSnapshot() (как state()).
+qlonglong AvpnEngineQml::trafficUsed() const
+{
+    return debugSnapshot().value(QStringLiteral("trafficUsed")).toLongLong();
+}
+
+qlonglong AvpnEngineQml::trafficLimit() const
+{
+    return debugSnapshot().value(QStringLiteral("trafficLimit")).toLongLong();
+}
+
+// AVPN: JWT подписки из защищённого стора — для редиректа в кабинет с авторизацией.
+QString AvpnEngineQml::authToken() const
+{
+    return Enrollment::loadToken();
+}
+
+bool AvpnEngineQml::subActive() const
+{
+    return debugSnapshot().value(QStringLiteral("subStatus")).toString() == QLatin1String("active");
+}
+
+int AvpnEngineQml::daysLeft() const
+{
+    const QString iso = debugSnapshot().value(QStringLiteral("expiresAt")).toString();
+    if (iso.isEmpty())
+        return -1; // бессрочно / неизвестно
+    const QDateTime exp = QDateTime::fromString(iso, Qt::ISODate);
+    if (!exp.isValid())
+        return -1;
+    const qint64 secs = QDateTime::currentDateTimeUtc().secsTo(exp.toUTC());
+    return secs <= 0 ? 0 : static_cast<int>(secs / 86400);
+}
+
+// AVPN: реальный текущий сервер для карточки Connect. До подключения показываем первую ноду пула.
+QVariantMap AvpnEngineQml::currentNode() const
+{
+    const DebugSnapshot s = m_engine.debugSnapshot();
+    const NodeDebugRow *pick = nullptr;
+    for (const NodeDebugRow &r : s.pool) {
+        if (r.nodeId == s.currentNodeId) { pick = &r; break; }
+    }
+    if (!pick && !s.pool.isEmpty())
+        pick = &s.pool.first();
+    QVariantMap node;
+    node["nodeId"]    = pick ? pick->nodeId : QString();
+    node["region"]    = pick ? pick->region : QString();
+    node["name"]      = pick ? pick->name : QString();
+    node["countryCode"] = pick ? pick->countryCode : QString(); // AVPN: для флага-эмодзи
+    node["endpoint"]  = pick ? pick->endpoint : QString();
+    node["ip"]        = pick ? pick->endpoint.section(QLatin1Char(':'), 0, 0) : QString();
+    node["connected"] = (s.state == QLatin1String("connected"));
+    node["hasNode"]   = (pick != nullptr);
+    return node;
+}
+
+// AVPN: весь пул нод для страницы «Серверы».
+QVariantList AvpnEngineQml::nodePool() const
+{
+    return debugSnapshot().value(QStringLiteral("pool")).toList();
 }
 
 void AvpnEngineQml::onTick()
@@ -40,18 +168,81 @@ void AvpnEngineQml::onTick()
         emit changed(); // произошёл свитч
 }
 
-void AvpnEngineQml::onConnectionStateChanged()
+void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 {
-    // Если туннель неожиданно отвалился, а движок считает себя подключённым → немедленный свитч.
-    if (m_engine.notifyConnectionLost())
-        emit changed();
+    // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
+    // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
+    switch (s) {
+    case Vpn::Connected:
+        m_engine.onTunnelConnected();
+        // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
+        // поднялся), а не на холодном старте. Один раз за установку (persist). Мост дёрнет натив
+        // (UNUserNotificationCenter + registerForRemoteNotifications); на desktop — no-op.
+        if (!m_pushPermissionAsked) {
+            m_pushPermissionAsked = true;
+            QSettings().setValue(QStringLiteral("AvpnPush/permissionAsked"), true);
+            avpn::AvpnPushBridge::instance()->requestAuthorization();
+        }
+        break;
+    case Vpn::Error:
+        // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;
+        // не вышло (или мы не были Connected) → честно фиксируем Error.
+        if (!m_engine.notifyConnectionLost())
+            m_engine.onTunnelError();
+        break;
+    case Vpn::Disconnected:
+        // Неожиданный обрыв при активном туннеле → failover; иначе честно отражаем «отключено».
+        if (!m_engine.notifyConnectionLost())
+            m_engine.onTunnelDisconnected();
+        break;
+    case Vpn::Reconnecting:
+        m_engine.notifyConnectionLost();
+        break;
+    default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
+        break;
+    }
     emit changed();
+}
+
+void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
+{
+    // Протокол-уровневая ошибка раньше терялась (сигнал не был подключён). Surface наружу в error();
+    // если падение из активного Connected — сначала пробуем свитч, иначе честно фиксируем Error.
+    if (!m_engine.notifyConnectionLost())
+        m_engine.onTunnelError();
+    m_busy = false;
+    emit error(errorString(code));
+    emit changed();
+}
+
+void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ/дней/subActive) ДО первого Connect.
+{
+    // Идемпотентно: один раз за жизнь движка (защита от повторного вызова из QML Component.onCompleted
+    // нескольких экранов + дефер-вызова из конструктора).
+    if (m_bootstrapped)
+        return;
+    m_bootstrapped = true;
+
+    // Ключи клиента (zero-knowledge) — для enroll и последующего connect; ошибка не фатальна для бейджа.
+    QString err;
+    if (m_engine.identityEnsureKeys(m_store, err))
+        m_tunnel.setClientKeys(m_engine.clientKeys());
+
+    // Тихая прогрузка подписки БЕЗ подъёма туннеля. Оффлайн/нет токена → мягко (не показываем error()),
+    // бейдж просто останется на дефолтах до первого успешного start()/bootstrap().
+    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err))
+        emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
+    // при провале — тихо: bootstrap не должен пугать пользователя ошибкой при холодном старте.
 }
 
 void AvpnEngineQml::start()
 {
     if (m_busy)
         return;
+    // AVPN (Task 7): явный start() выходит из паузы (пользователь сам поднял VPN).
+    m_pauseTimer.stop();
+    m_paused = false;
+    m_wasConnected = false;
     m_busy = true;
     emit changed();
 
@@ -73,7 +264,13 @@ void AvpnEngineQml::start()
 
 void AvpnEngineQml::stop()
 {
+    // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN —
+    // авто-возврат не нужен).
+    m_pauseTimer.stop();
+    m_paused = false;
+    m_wasConnected = false;
     m_healthTimer.stop();
+    m_engine.requestStop(); // AVPN: намеренное отключение — гасим failover до down()
     m_tunnel.down();
     emit changed();
 }
@@ -99,6 +296,399 @@ void AvpnEngineQml::resetLkg()
     emit changed();
 }
 
+// AVPN (Task C): вход/восстановление по коду доступа (POST /v1/code/redeem). Синхронно (как enroll).
+void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId)
+{
+    if (m_busy)
+        return;
+    const QString trimmed = code.trimmed();
+    if (trimmed.isEmpty()) {
+        emit error(QStringLiteral("Введите код доступа"));
+        return;
+    }
+
+    m_busy = true;
+    emit changed();
+
+    avpn::CodeRedeemResponse resp;
+    QVariantList devices;
+    QString err;
+    const avpn::CodeRedeemResult res =
+        Enrollment::redeemCode(m_nam, m_baseUrl, m_engine.identity(), m_store,
+                               trimmed, evictDeviceId, resp, devices, err);
+
+    m_busy = false;
+
+    switch (res) {
+    case avpn::CodeRedeemResult::Ok:
+        // РОТАЦИЯ токена уже сделана внутри Enrollment::redeemCode (saveToken). Перечитываем подписку
+        // под НОВЫМ токеном — напрямую через движок (QML-фасадный bootstrap() идемпотентен и не сработал
+        // бы повторно). Провал re-fetch не критичен: лимиты подтянутся при следующем bootstrap/start.
+        m_engine.bootstrap(m_nam, m_baseUrl, m_store, err);
+        // AVPN (Task 9): subscription_token ротирован → старый push token на сервере отвязан.
+        // Пере-регистрируем известный device token под новым токеном (fingerprint сменился → не дедупнется).
+        if (!m_pushToken.isEmpty())
+            registerPushToken(m_pushToken, m_pushEnv);
+        emit changed(); // daysLeft/traffic*/subActive/nodePool/authToken обновятся
+        break;
+    case avpn::CodeRedeemResult::BadCode:
+        emit error(QStringLiteral("Неверный код доступа"));
+        emit changed();
+        break;
+    case avpn::CodeRedeemResult::SeatLimit:
+        // Мест нет — UI покажет devices[] для выбора кого отключить (повторный redeemCode с evictDeviceId
+        // или DELETE /v1/devices/{id}). Не пишем error(), чтобы не дублировать модалкой выбора.
+        emit seatLimitReached(devices);
+        emit changed();
+        break;
+    case avpn::CodeRedeemResult::Failed:
+    default:
+        emit error(err.isEmpty() ? QStringLiteral("Не удалось активировать код") : err);
+        emit changed();
+        break;
+    }
+}
+
+// AVPN (Task 13): принять перенос «как SIM» (POST /v1/transfer/redeem). Зовётся мостом диплинка
+// (AvpnDeepLinkBridge) по tribe://transfer?t=… . Синхронно (как redeemCode).
+void AvpnEngineQml::redeemTransfer(const QString &transferToken)
+{
+    if (m_busy)
+        return;
+    const QString trimmed = transferToken.trimmed();
+    if (trimmed.isEmpty()) {
+        emit error(QStringLiteral("Пустая ссылка переноса"));
+        return;
+    }
+
+    m_busy = true;
+    emit changed();
+
+    avpn::TransferRedeemResponse resp;
+    QString err;
+    const avpn::TransferRedeemResult res =
+        Enrollment::redeemTransfer(m_nam, m_baseUrl, m_engine.identity(), m_store,
+                                   trimmed, resp, err);
+
+    m_busy = false;
+
+    switch (res) {
+    case avpn::TransferRedeemResult::Ok:
+        // РОТАЦИЯ токена уже сделана внутри Enrollment::redeemTransfer (saveToken). Перечитываем
+        // подписку под НОВЫМ токеном напрямую через движок (QML-фасадный bootstrap() идемпотентен).
+        m_engine.bootstrap(m_nam, m_baseUrl, m_store, err);
+        // AVPN (Task 9): токен ротирован переносом → пере-регистрируем push token под новым.
+        if (!m_pushToken.isEmpty())
+            registerPushToken(m_pushToken, m_pushEnv);
+        emit transferRedeemed();
+        emit changed(); // daysLeft/traffic*/subActive/nodePool/authToken обновятся
+        break;
+    case avpn::TransferRedeemResult::BadToken:
+        emit error(QStringLiteral("Ссылка переноса недействительна или истекла"));
+        emit changed();
+        break;
+    case avpn::TransferRedeemResult::SeatLimit:
+        emit error(QStringLiteral("Достигнут лимит устройств"));
+        emit changed();
+        break;
+    case avpn::TransferRedeemResult::Failed:
+    default:
+        emit error(err.isEmpty() ? QStringLiteral("Не удалось принять перенос") : err);
+        emit changed();
+        break;
+    }
+}
+
+// AVPN (Task 13): выпустить перенос с ЭТОГО устройства (POST /v1/transfer, Bearer authToken).
+QVariantMap AvpnEngineQml::createTransfer()
+{
+    QVariantMap result;
+    if (m_busy)
+        return result;
+
+    m_busy = true;
+    emit changed();
+
+    avpn::TransferMintResponse resp;
+    QString err;
+    const bool ok = Enrollment::createTransfer(m_nam, m_baseUrl, authToken(), resp, err);
+
+    m_busy = false;
+    emit changed();
+
+    if (!ok) {
+        emit error(err.isEmpty() ? QStringLiteral("Не удалось создать перенос") : err);
+        return result;
+    }
+    result.insert(QStringLiteral("transfer_token"), resp.transferToken);
+    result.insert(QStringLiteral("deep_link"), resp.deepLink);
+    return result;
+}
+
+// AVPN (Task 7): тумблер #6 — читаем из ТОГО ЖЕ стора, что QML Settings{category:"AvpnSettings"}.
+// QtCore.Settings без своего fileName использует default-конструируемый QSettings (org/app из
+// QCoreApplication, выставленные ORGANIZATION_NAME/APPLICATION_NAME в main.cpp) → ключ совпадает.
+bool AvpnEngineQml::autoPauseEnabled() const
+{
+    QSettings s; // org/app берутся из QCoreApplication (как у QML Settings)
+    // Дефолт true — совпадает с `property bool autoPauseRu: true` в PageAccountTribe.qml.
+    return s.value(QStringLiteral("AvpnSettings/autoPauseRu"), true).toBool();
+}
+
+// AVPN (Task 7): пауза туннеля «для покупок». Будет дёргаться iOS App Intent (Task 8).
+// Семантика бездействия БЕЗ foreground-API: ставим одноразовый таймер на `seconds`; если за это
+// время пользователь не вернул туннель руками (resumeFromPause) и не остановил VPN — считаем, что
+// он «не трогал» → авто-поднимаем обратно. Это и есть «бездействие → вернулись».
+void AvpnEngineQml::pauseForShopping(int seconds)
+{
+    // Тумблер управляет лишь АВТО-триггером со стороны системы. Ручной/intent-вызов работает всегда —
+    // если бы мы блокировали по autoPauseEnabled(), кнопка «пауза для покупок» молча не сработала бы.
+    // (Авто-инициатор на стороне iOS-интента сам проверит тумблер перед вызовом — Task 8.)
+
+    if (m_paused) {
+        // Уже на паузе — продлеваем окно (пользователь «ещё не закончил покупки»).
+        m_pauseTimer.start(qMax(1, seconds) * 1000);
+        return;
+    }
+
+    // Запоминаем, был ли активный туннель: только тогда есть смысл поднимать его обратно по таймауту.
+    // Если VPN и так не был поднят — пауза вырождается в no-op подъёма (просто ничего не роняем).
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    m_wasConnected = (st == QLatin1String("connected") || st == QLatin1String("connecting")
+                      || st == QLatin1String("switching") || st == QLatin1String("selecting"));
+
+    m_paused = true;
+    // Реально опускаем туннель: на паузе utun-детект ДОЛЖЕН показывать туннель опущенным (трафик
+    // покупки идёт мимо VPN). requestStop() гасит failover, чтобы прилетевший Disconnected не
+    // переподнял ноду немедленно (как в stop()).
+    m_healthTimer.stop();
+    m_engine.requestStop();
+    m_tunnel.down();
+
+    m_pauseTimer.start(qMax(1, seconds) * 1000);
+    emit changed();
+}
+
+// AVPN (Task 7): ручной выход из паузы — поднять туннель сразу, не дожидаясь таймера.
+void AvpnEngineQml::resumeFromPause()
+{
+    if (!m_paused)
+        return;
+    m_pauseTimer.stop();
+    m_paused = false;
+    // Поднимаем туннель обратно только если до паузы он был активен. Иначе — просто снимаем флаг.
+    if (m_wasConnected)
+        start(); // enroll→subscription→connect (идемпотентно по busy); поднимет лучшую ноду
+    m_wasConnected = false;
+    emit changed();
+}
+
+// AVPN (Task 7): таймер паузы истёк → бездействие → возвращаемся (поднимаем туннель обратно).
+void AvpnEngineQml::onPauseTimeout()
+{
+    resumeFromPause();
+}
+
+// AVPN (Devices+Account): GET /v1/devices АСИНХРОННО → property `devices` + devicesChanged().
+// Контракт отдаёт ГОЛЫЙ JSON-массив DeviceInfo (не обёртку {devices:[…]}, как в 409-теле redeem).
+// Bearer = authToken() (subscription_token). Нет токена / 401 / сеть / таймаут → пустой список.
+// КРИТИЧНО: БЕЗ вложенного QEventLoop — зовётся из QML-таймера (settingsLoadTimer); nested loop
+// на GUI-потоке прокручивал чужие события и при destroy объекта в его теле → re-entrancy краш
+// («Object destroyed while one of its QML signal handlers is in progress / nested event loop»).
+void AvpnEngineQml::refreshDevices()
+{
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        if (!m_devices.isEmpty()) { m_devices.clear(); emit devicesChanged(); }
+        return;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/devices"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply); // жёсткий таймаут без nested loop (abort → finished с code==0)
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QVariantList list;
+        if (code >= 200 && code < 300) {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isArray()) {
+                for (const QJsonValue &v : doc.array()) {
+                    const QJsonObject d = v.toObject();
+                    QVariantMap m;
+                    m.insert(QStringLiteral("device_id"), d.value(QStringLiteral("device_id")).toString());
+                    m.insert(QStringLiteral("platform"), d.value(QStringLiteral("platform")).toString());
+                    m.insert(QStringLiteral("label"), d.value(QStringLiteral("label")).toString());
+                    m.insert(QStringLiteral("last_seen"), d.value(QStringLiteral("last_seen")).toString());
+                    m.insert(QStringLiteral("is_current"), d.value(QStringLiteral("is_current")).toBool());
+                    list.append(m);
+                }
+            }
+        }
+        // 401/сеть/таймаут → пустой список (как в синхронной версии). Эмитим всегда, чтобы UI
+        // мог снять «загрузку» и забиндиться на актуальное значение.
+        m_devices = list;
+        emit devicesChanged();
+    });
+}
+
+// AVPN (Devices+Account): DELETE /v1/devices/{id} → кик устройства (его токен убит, peer снят на
+// каждой ноде). 204 → true + emit changed() (UI перечитает listDevices()). 401/404/сеть → false +
+// emit error. Account-scoped: чужой/несуществующий id отдаёт 404 (BOLA-защита бэка).
+bool AvpnEngineQml::kickDevice(const QString &deviceId)
+{
+    const QString id = deviceId.trimmed();
+    if (id.isEmpty()) {
+        emit error(QStringLiteral("Не указано устройство"));
+        return false;
+    }
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        emit error(QStringLiteral("Нет авторизации"));
+        return false;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/devices/")
+                            + QString::fromUtf8(QUrl::toPercentEncoding(id)))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->deleteResource(req);
+    awaitReply(reply); // AVPN: было QEventLoop без таймаута → фриз при зависшем бэке
+
+    const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QNetworkReply::NetworkError netErr = reply->error();
+    const QString netErrStr = reply->errorString();
+    reply->deleteLater();
+
+    if (netErr != QNetworkReply::NoError && code == 0) {
+        emit error(QStringLiteral("Сеть недоступна: %1").arg(netErrStr));
+        return false;
+    }
+    if (code == 401) {
+        emit error(QStringLiteral("Сессия истекла"));
+        return false;
+    }
+    if (code == 404) {
+        emit error(QStringLiteral("Устройство не найдено"));
+        return false;
+    }
+    if (code < 200 || code >= 300) {
+        emit error(QStringLiteral("Не удалось отключить устройство (HTTP %1)").arg(code));
+        return false;
+    }
+    emit changed(); // UI перечитает список устройств
+    return true;
+}
+
+// AVPN (Devices+Account): GET /v1/account АСИНХРОННО → property `account` + accountChanged().
+// Bearer = authToken(). Нет токена / 401 / сеть / таймаут → пустая мапа (UI покажет дефолты).
+// Формат: {account_id, status, expires_at?, traffic_limit, traffic_used}. БЕЗ nested loop
+// (как refreshDevices — зовётся из QML-таймера, nested loop = re-entrancy краш).
+void AvpnEngineQml::refreshAccount()
+{
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        if (!m_account.isEmpty()) { m_account.clear(); emit accountChanged(); }
+        return;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/account"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QVariantMap result;
+        if (code >= 200 && code < 300) {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isObject()) {
+                const QJsonObject o = doc.object();
+                result.insert(QStringLiteral("account_id"), o.value(QStringLiteral("account_id")).toString());
+                result.insert(QStringLiteral("status"), o.value(QStringLiteral("status")).toString());
+                result.insert(QStringLiteral("expires_at"), o.value(QStringLiteral("expires_at")).toString());
+                result.insert(QStringLiteral("traffic_limit"),
+                              static_cast<qlonglong>(o.value(QStringLiteral("traffic_limit")).toDouble()));
+                result.insert(QStringLiteral("traffic_used"),
+                              static_cast<qlonglong>(o.value(QStringLiteral("traffic_used")).toDouble()));
+            }
+        }
+        m_account = result;
+        emit accountChanged();
+    });
+}
+
+// AVPN (Task 9 — APNs): POST /v1/devices/push-token (Bearer = subscription_token). АСИНХРОННО (как
+// refreshAccount — без вложенного QEventLoop: зовётся из сигнала моста на GUI-потоке). body
+// {token, platform:"ios", environment, app_version}. Нет токена подписки / сеть / таймаут → тихо
+// (повторится при следующем коннекте или ротации токена). Дедуп: один POST на пару (token,env) за сессию.
+void AvpnEngineQml::registerPushToken(const QString &token, const QString &environment)
+{
+    if (token.isEmpty())
+        return;
+    // Запоминаем последний токен/окружение для ПЕРЕ-регистрации после ротации subscription_token.
+    m_pushToken = token;
+    m_pushEnv = environment;
+
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty())
+        return; // ещё не enrolled — зарегистрируем, когда появится subscription_token (коннект/redeem)
+
+    // Дедуп: не дёргаем бэк повторно тем же токеном+окружением под тем же subscription_token.
+    const QString fingerprint = token + QLatin1Char('|') + environment + QLatin1Char('|') + auth;
+    if (m_pushTokenSent == fingerprint)
+        return;
+
+    QJsonObject body;
+    body.insert(QStringLiteral("token"), token);
+    body.insert(QStringLiteral("platform"), QStringLiteral("ios"));
+    if (!environment.isEmpty())
+        body.insert(QStringLiteral("environment"), environment);
+    const QString ver = QCoreApplication::applicationVersion();
+    if (!ver.isEmpty())
+        body.insert(QStringLiteral("app_version"), ver);
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/devices/push-token"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+
+    QNetworkReply *reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    armTimeout(reply); // жёсткий таймаут без nested loop
+    connect(reply, &QNetworkReply::finished, this, [this, reply, fingerprint]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code >= 200 && code < 300)
+            m_pushTokenSent = fingerprint; // успех → больше не дублируем
+        // 401/сеть/таймаут → НЕ помечаем отправленным: повторим при ротации/реконнекте. Тихо (фоновая
+        // best-effort регистрация не должна показывать пользователю ошибку).
+    });
+}
+
+// AVPN (Task 9 — APNs): POST /v1/notifications/read (Bearer) — обнулить серверный счётчик непрочитанных.
+// Без тела. АСИНХРОННО, тихо (фоновое действие). Вызывается по AvpnPushBridge::readRequested
+// (QML: AvpnPush.markAllRead()). Локальный бейдж иконки уже снят натив-clearer'ом в мосте.
+void AvpnEngineQml::markNotificationsRead()
+{
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty())
+        return;
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/notifications/read"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+
+    QNetworkReply *reply = m_nam->post(req, QByteArray());
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
 QVariantMap AvpnEngineQml::debugSnapshot() const
 {
     const DebugSnapshot s = m_engine.debugSnapshot();
@@ -112,12 +702,18 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
     m["lkgStale"] = s.lkgStale;
     m["trafficUsed"] = static_cast<qlonglong>(s.trafficUsed);
     m["trafficLimit"] = static_cast<qlonglong>(s.trafficLimit);
+    m["expiresAt"] = s.expiresAt; // AVPN: для daysLeft()
 
     QVariantList pool;
     for (const NodeDebugRow &r : s.pool) {
         QVariantMap n;
         n["nodeId"] = r.nodeId;
         n["region"] = r.region;
+        n["name"] = r.name;                                          // AVPN: имя сервера (опц.)
+        n["countryCode"] = r.countryCode;                            // AVPN: ISO-3166 alpha-2 → флаг-эмодзи
+
+        n["endpoint"] = r.endpoint;                                   // AVPN: реальный host:port
+        n["ip"] = r.endpoint.section(QLatin1Char(':'), 0, 0);         // AVPN: только host для показа
         n["scoreMs"] = r.scoreMs;
         n["healthy"] = r.healthy;
         n["reason"] = r.reason;

@@ -109,6 +109,7 @@ target_sources(${PROJECT} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/ScreenProtection.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/VPNCController.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/StoreKit2Helper.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/AvpnAppIntents.swift # AVPN (Task 8): App Intents / Shortcuts
 )
 
 target_sources(${PROJECT} PRIVATE

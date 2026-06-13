@@ -86,19 +86,21 @@ QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const Subscrip
     if (node.mtu > 0)
         o.insert(QStringLiteral("mtu"), QString::number(node.mtu));
 
-    // AmneziaWG-параметры
+    // AmneziaWG-параметры. AVPN: ТОЛЬКО строки — форк (awgProtocolConfig.h) и iOS WGConfig.swift
+    // объявляют Jc..H4 как QString/String?. Если слать числами, Swift JSONDecoder падает typeMismatch
+    // → весь WGConfig не декодится → NE не поднимает туннель (баг «AWG в Настройках, но 0 хендшейков»).
     const AwgParams &a = node.awg;
-    o.insert(QStringLiteral("Jc"), a.Jc);
-    o.insert(QStringLiteral("Jmin"), a.Jmin);
-    o.insert(QStringLiteral("Jmax"), a.Jmax);
-    o.insert(QStringLiteral("S1"), a.S1);
-    o.insert(QStringLiteral("S2"), a.S2);
-    if (a.S3) o.insert(QStringLiteral("S3"), *a.S3);
-    if (a.S4) o.insert(QStringLiteral("S4"), *a.S4);
-    o.insert(QStringLiteral("H1"), a.H1);
-    o.insert(QStringLiteral("H2"), a.H2);
-    o.insert(QStringLiteral("H3"), a.H3);
-    o.insert(QStringLiteral("H4"), a.H4);
+    o.insert(QStringLiteral("Jc"), QString::number(a.Jc));
+    o.insert(QStringLiteral("Jmin"), QString::number(a.Jmin));
+    o.insert(QStringLiteral("Jmax"), QString::number(a.Jmax));
+    o.insert(QStringLiteral("S1"), QString::number(a.S1));
+    o.insert(QStringLiteral("S2"), QString::number(a.S2));
+    if (a.S3) o.insert(QStringLiteral("S3"), QString::number(*a.S3));
+    if (a.S4) o.insert(QStringLiteral("S4"), QString::number(*a.S4));
+    o.insert(QStringLiteral("H1"), QString::number(a.H1));
+    o.insert(QStringLiteral("H2"), QString::number(a.H2));
+    o.insert(QStringLiteral("H3"), QString::number(a.H3));
+    o.insert(QStringLiteral("H4"), QString::number(a.H4));
     if (!a.I1.isEmpty()) o.insert(QStringLiteral("I1"), a.I1);
     if (!a.I2.isEmpty()) o.insert(QStringLiteral("I2"), a.I2);
     if (!a.I3.isEmpty()) o.insert(QStringLiteral("I3"), a.I3);
@@ -119,6 +121,9 @@ QJsonObject AwgConfigBuilder::build(const Subscription &sub, const SubscriptionN
     if (node.dns.size() > 0)
         root.insert(QStringLiteral("dns1"), node.dns.value(0));
     root.insert(QStringLiteral("dns2"), node.dns.value(node.dns.size() > 1 ? 1 : 0)); // iOS: dns2 обязателен
+    // AVPN: iOS setupAwg читает splitTunnelType из КОРНЯ (m_rawConfig), а WGConfig.swift объявляет его
+    // Int (non-optional) → без него декод падает. 0 = full-tunnel (совпадает с allowed_ips 0.0.0.0/0).
+    root.insert(QStringLiteral("splitTunnelType"), 0);
     root.insert(QStringLiteral("config_version"), 0);
     return root;
 }

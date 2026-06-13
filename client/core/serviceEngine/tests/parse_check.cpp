@@ -77,7 +77,8 @@ int main(int argc, char **argv)
                      && inner.value(QStringLiteral("hostName")).toString() == QLatin1String("203.0.113.10")
                      && inner.value(QStringLiteral("port")).toInt() == 51820
                      && inner.value(QStringLiteral("client_ip")).toString() == QLatin1String("10.7.0.5/32")
-                     && inner.value(QStringLiteral("Jc")).toInt() == 4
+                     && inner.value(QStringLiteral("Jc")).toString() == QLatin1String("4") // AVPN: AWG-параметры — строки (контракт форка/iOS WGConfig)
+                     && cfg.value(QStringLiteral("splitTunnelType")).toInt() == 0       // AVPN: iOS требует splitTunnelType в корне
                      && inner.value(QStringLiteral("isObfuscationEnabled")).toBool()
                      && !cfg.value(QStringLiteral("dns2")).toString().isEmpty()
                      && wg.contains(QLatin1String("[Interface]")) && wg.contains(QLatin1String("Jc = 4"))
