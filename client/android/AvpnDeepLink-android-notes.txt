@@ -1,0 +1,52 @@
+AVPN (Task 13) — Android: обратный диплинк ПЕРЕНОСА («как SIM») на новое устройство.
+НЕ подключено к сборке (нет Android-окружения в этом цикле). План по аналогии с iOS-частью.
+
+Цель: поймать tribe://transfer?t=<token> (custom scheme) и https://tribevpn.com/transfer?t=...
+(App Link) → вызвать C++ AvpnDeepLink_handleUrl(url). Мост извлечёт токен переноса и эмитит
+transferRequested(token); coreController связал это с AvpnEngineQml::redeemTransfer(token) →
+POST /v1/transfer/redeem → РОТАЦИЯ subscription_token (Enrollment::saveToken) → подписка re-fetch,
+доступ переносится на ЭТО устройство (старое — гасится бэкендом fleet-wide).
+
+1) AndroidManifest.xml — в <activity> главной (AmneziaActivity / org.amnezia.vpn.*) добавить:
+
+    <!-- custom scheme -->
+    <intent-filter>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="tribe" android:host="transfer"/>
+    </intent-filter>
+
+    <!-- App Links (https), autoVerify через assetlinks.json на tribevpn.com -->
+    <intent-filter android:autoVerify="true">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="https" android:host="tribevpn.com" android:pathPrefix="/transfer"/>
+    </intent-filter>
+
+2) Activity (Kotlin) — onCreate + onNewIntent:
+
+    private fun handleAvpnDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        val s = data.toString()
+        if (s.startsWith("tribe://transfer") || s.contains("tribevpn.com/transfer"))
+            AvpnNative.handleDeepLink(s)   // JNI → C++ AvpnDeepLink_handleUrl
+    }
+    // onCreate: handleAvpnDeepLink(intent); onNewIntent(i): setIntent(i); handleAvpnDeepLink(i)
+
+3) JNI-мост — в platforms/android/android_controller.cpp (рядом с другими JNICALL) добавить:
+
+    extern "C" JNIEXPORT void JNICALL
+    Java_org_amnezia_vpn_AvpnNative_handleDeepLink(JNIEnv *env, jobject, jstring url) {
+        const char *u = env->GetStringUTFChars(url, nullptr);
+        AvpnDeepLink_handleUrl(u);          // объявлена в AvpnDeepLinkBridge.h (extern "C")
+        env->ReleaseStringUTFChars(url, u);
+    }
+
+4) assetlinks.json (хостит веб-команда на https://tribevpn.com/.well-known/assetlinks.json) —
+   для App Links autoVerify (sha256 подписи релизного keystore + package name).
+
+C++-мост (AvpnDeepLinkBridge) уже кросс-платформенный — Android-сторона только зовёт
+AvpnDeepLink_handleUrl(); остальное (извлечение токена, transferRequested→redeemTransfer в движке,
+РОТАЦИЯ токена, re-fetch подписки) общее с iOS.

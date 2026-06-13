@@ -55,9 +55,33 @@ public:
     bool notifyConnectionLost();
     QString currentNodeId() const { return m_currentNodeId; }
 
+    // AVPN: правдивый статус. up() ставит туннель в очередь (async), поэтому connect() остаётся в
+    // Connecting; реальные переходы прилетают из VpnConnection::connectionStateChanged через
+    // AvpnEngineQml. Вызывать ТОЛЬКО из onConnectionStateChanged (enum-free, без зависимости на Vpn::).
+    //  onTunnelConnected()    — туннель реально поднялся (Connecting/Switching → Connected).
+    //  onTunnelError()        — туннель упал с ошибкой (любая фаза → Error).
+    //  onTunnelDisconnected() — туннель отключился (Connected/… → Disconnected, без свитча).
+    // Возвращают true, если фаза изменилась (вызывающий шлёт changed()).
+    bool onTunnelConnected();
+    bool onTunnelError();
+    bool onTunnelDisconnected();
+
+    // AVPN: пользователь нажал «стоп». Помечаем НАМЕРЕННОЕ отключение (state→Disconnected,
+    // сбрасываем текущую ноду) ДО m_tunnel.down(), иначе прилетевший Disconnected уйдёт в
+    // notifyConnectionLost()→onDead()→switchTo() и туннель переподнимется сразу после стопа.
+    void requestStop();
+
     // Полный flow «одной кнопки» (in-fork): enroll (если нет токена) → GET /v1/subscription → load → connect.
     // store/nam — из приложения; baseUrl — control plane. nowEpoch — для health/snapshot.
     bool startFlow(QNetworkAccessManager *nam, const QString &baseUrl,
+                   SecureAppSettingsRepository *store, QString &error);
+
+    // AVPN: «тихий» bootstrap при старте приложения (Task 11) — наполнить подписку ДО первого Connect,
+    // чтобы бейдж ГБ/дней/subActive был живой сразу. Шаги: токен из хранилища (иначе enroll) →
+    // GET /v1/subscription → loadSubscription. БЕЗ connect() (туннель не поднимаем). Состояние движка
+    // НЕ трогаем (остаётся Disconnected). Возвращает true, если подписка наполнена; false + error —
+    // при оффлайне/отсутствии токена (вызывающий трактует мягко, это не фатальная ошибка).
+    bool bootstrap(QNetworkAccessManager *nam, const QString &baseUrl,
                    SecureAppSettingsRepository *store, QString &error);
 
     QStringList switchLog() const { return m_switchLog; }
@@ -69,6 +93,8 @@ public:
         return m_identity.ensureKeys(store, error);
     }
     ClientKeys clientKeys() const { return m_identity.keys(); }
+    // AVPN: доступ к Identity для in-fork сетевых вызовов фасада (redeem по коду — Enrollment::redeemCode).
+    Identity &identity() { return m_identity; }
 
 private:
     bool onDead(); // выбрать кандидата (исключая текущую) и переключиться

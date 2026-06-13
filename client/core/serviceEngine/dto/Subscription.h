@@ -24,6 +24,8 @@ struct AwgParams {
 struct SubscriptionNode {
     QString nodeId;
     QString region;
+    QString name;                        // AVPN: label из контракта (фолбэк region) — отображаемое имя
+    QString countryCode;                 // AVPN: ISO-3166 alpha-2 (country_code) → флаг-эмодзи; пусто = нет
     QString endpoint;                    // "host:port" — клиент разбивает на host+port
     QString serverPubkey;
     AwgParams awg;
@@ -45,6 +47,7 @@ struct Subscription {
     QStringList address;                 // стабильный /32 (Interface Address), маппится в client_ip
     SubStatus   status = SubStatus::Active;
     QString     expiresAt;               // ISO-8601; пусто = бессрочно
+    QString     graceUntil;              // AVPN: expires_at + 24ч — не рвать туннель раньше (grace)
     qint64      trafficUsed = 0;
     qint64      trafficLimit = 0;        // 0 = безлимит
     QList<SubscriptionNode> nodes;

@@ -113,7 +113,7 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_OBJC_INTEROP_MODE "objcxx"
 )
 set_target_properties(${PROJECT} PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "Q7DVH5MCWF"  # AVPN: WellWon Limited (НЕ апстрим X7UJ388FXK, НЕ личный Vlad Frolov 6D75W6GFC2)
 )
 target_include_directories(${PROJECT} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(${PROJECT} PRIVATE

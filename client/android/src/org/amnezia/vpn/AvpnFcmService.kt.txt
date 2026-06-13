@@ -1,0 +1,69 @@
+// AVPN (Task 9) — ЗАГОТОВКА Android FCM (Firebase Cloud Messaging). НЕ подключено к сборке.
+//
+// Это .kt.txt (не .kt) НАМЕРЕННО: чтобы не тянуть зависимость firebase-messaging и google-services
+// плагин до того, как у проекта появится Firebase-проект (google-services.json) и решение по
+// дистрибуции (Google Play vs RuStore — у RuStore свой push SDK). Когда окружение готово:
+//   1) переименовать в AvpnFcmService.kt;
+//   2) выполнить шаги ниже (gradle, manifest, JNI-мост).
+//
+// ── ШАГ 1. build.gradle.kts (модуль приложения) ───────────────────────────────────────────────
+//   plugins { id("com.google.gms.google-services") }              // + classpath в корневом build
+//   dependencies { implementation("com.google.firebase:firebase-messaging:24.+") }
+//   Положить google-services.json в client/android/ (gitignore — секрет проекта).
+//
+// ── ШАГ 2. AndroidManifest.xml (client/android/AndroidManifest.xml) ───────────────────────────
+//   Внутри <application> добавить:
+//     <service
+//         android:name="org.amnezia.vpn.AvpnFcmService"
+//         android:exported="false">
+//         <intent-filter>
+//             <action android:name="com.google.firebase.MESSAGING_EVENT" />
+//         </intent-filter>
+//     </service>
+//   Для Android 13+ запросить рантайм-право POST_NOTIFICATIONS (как iOS UN authorization):
+//     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+//
+// ── ШАГ 3. JNI-мост в C++ AvpnPushBridge ──────────────────────────────────────────────────────
+//   Зеркало iOS-пути (AvpnPushController → AvpnPushBridge). Нужны JNI-функции, которые из Kotlin
+//   зовут C++ singleton avpn::AvpnPushBridge::instance():
+//     • onNewToken(token)        → bridge->setDeviceToken(token, "android") + POST /v1/devices/push
+//     • onMessageReceived(t, b)  → bridge->onRemoteNotification(title, body)
+//   Объявить их в platforms/android/android_controller.cpp (там уже есть JNI-инфраструктура форка),
+//   а Kotlin вызывает их через external fun / уже существующий QtAndroid JNI-канал.
+//
+// ── ШАГ 4. Отправка токена на бэк ─────────────────────────────────────────────────────────────
+//   Тот же контракт, что iOS: POST {baseUrl}/v1/devices/push {token, platform:"android"}.
+//   Можно делать прямо в C++ (AvpnPushBridge) общим кодом, чтобы не дублировать на Kotlin.
+
+package org.amnezia.vpn
+
+/*
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
+
+class AvpnFcmService : FirebaseMessagingService() {
+
+    // Новый/обновлённый FCM registration token. Зеркало iOS didRegisterForRemoteNotifications.
+    override fun onNewToken(token: String) {
+        super.onNewToken(token)
+        // TODO: пробросить в C++ AvpnPushBridge::setDeviceToken(token, "android")
+        //       и отправить на бэк POST /v1/devices/push {token, platform:"android"}.
+        nativeOnNewToken(token)
+    }
+
+    // Входящий пуш. Зеркало iOS didReceiveRemoteNotification.
+    override fun onMessageReceived(message: RemoteMessage) {
+        super.onMessageReceived(message)
+        val title = message.notification?.title ?: message.data["title"] ?: "Tribe"
+        val body = message.notification?.body ?: message.data["body"] ?: ""
+        // TODO: пробросить в C++ AvpnPushBridge::onRemoteNotification(title, body)
+        //       → поднимется бейдж непрочитанных в QML (как на iOS).
+        nativeOnMessageReceived(title, body)
+        // (опционально) показать системное уведомление через NotificationManager, если фон.
+    }
+
+    // JNI → C++. Объявить реализацию в platforms/android/android_controller.cpp.
+    private external fun nativeOnNewToken(token: String)
+    private external fun nativeOnMessageReceived(title: String, body: String)
+}
+*/

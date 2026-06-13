@@ -73,29 +73,33 @@
         <file>Pages2/PageDeinstalling.qml</file>
         <file>Pages2/PageDevMenu.qml</file>
         <file>Pages2/PageHome.qml</file>
-        <file>Pages2/PageHomeAvpn.qml</file>
+        <file>Pages2/PageHomeTribe.qml</file>
         <file>Pages2/PageDiagnostics.qml</file>
         <!-- AVPN: Tribe VPN overlay UI (Theme singleton + components + pages) -->
-        <file>Avpn/qmldir</file>
-        <file>Avpn/Theme.qml</file>
-        <file>Avpn/Dev.qml</file>
-        <file>Avpn/data/presets.js</file>
-        <file>Avpn/components/TribeButton.qml</file>
-        <file>Avpn/components/TribeCard.qml</file>
-        <file>Avpn/components/TribeToggle.qml</file>
-        <file>Avpn/components/TribeField.qml</file>
-        <file>Avpn/components/TribeBadge.qml</file>
-        <file>Avpn/components/TribePill.qml</file>
-        <file>Avpn/components/TribeListRow.qml</file>
-        <file>Avpn/components/TribeHeader.qml</file>
-        <file>Avpn/components/TribeBottomNav.qml</file>
-        <file>Avpn/components/SignalRing.qml</file>
-        <file>Avpn/components/LoadBars.qml</file>
-        <file>Avpn/Pages/PageConnectAvpn.qml</file>
-        <file>Avpn/Pages/PageLocationsAvpn.qml</file>
-        <file>Avpn/Pages/PageAccountAvpn.qml</file>
-        <file>Avpn/Pages/PageSecurityAvpn.qml</file>
-        <file>Avpn/Pages/PageOnboardingAvpn.qml</file>
+        <file>Tribe/qmldir</file>
+        <file>Tribe/Theme.qml</file>
+        <file>Tribe/Dev.qml</file>
+        <file>Tribe/data/presets.js</file>
+        <file>Tribe/components/TribeButton.qml</file>
+        <file>Tribe/components/TribeCard.qml</file>
+        <file>Tribe/components/TribeToggle.qml</file>
+        <file>Tribe/components/TribeField.qml</file>
+        <file>Tribe/components/TribeBadge.qml</file>
+        <file>Tribe/components/TribePill.qml</file>
+        <file>Tribe/components/TribeListRow.qml</file>
+        <file>Tribe/components/TribeHeader.qml</file>
+        <file>Tribe/components/TribeBottomNav.qml</file>
+        <file>Tribe/components/SignalRing.qml</file>
+        <file>Tribe/components/LoadBars.qml</file>
+        <file>Tribe/components/ChatBubble.qml</file>
+        <file>Tribe/components/TribeFlag.qml</file>
+        <file>Tribe/Pages/PageConnectTribe.qml</file>
+        <file>Tribe/Pages/PageLocationsTribe.qml</file>
+        <file>Tribe/Pages/PageAccountTribe.qml</file>
+        <file>Tribe/Pages/PageSecurityTribe.qml</file>
+        <file>Tribe/Pages/PageOnboardingTribe.qml</file>
+        <file>Tribe/Pages/PageSupportTribe.qml</file>
+        <file>Tribe/Pages/PageNotificationsTribe.qml</file>
         <file>Pages2/PageProtocolAwgSettings.qml</file>
         <file>Pages2/PageProtocolOpenVpnSettings.qml</file>
         <file>Pages2/PageProtocolRaw.qml</file>

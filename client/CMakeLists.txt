@@ -211,6 +211,9 @@ else()
     qt_finalize_target(${PROJECT})
 endif()
 
+# AVPN build-fix: iOS пакуется Xcode'ом на этапе archive, CMake install() не нужен и падает на
+# RESOURCE-каталоге Media.xcassets (ios.cmake:120). Десктоп-деплой оставляем как было.
+if(NOT IOS)
 install(TARGETS ${PROJECT}
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     RUNTIME_DEPENDENCY_SET client_deps
@@ -240,6 +243,7 @@ install(RUNTIME_DEPENDENCY_SET client_deps
     COMPONENT AmneziaVPN
     DESTINATION "${RUNTIME_DEPS_DIR}"
 )
+endif()  # AVPN build-fix: NOT IOS (см. выше)
 
 set(deploy_tool_options "")
 if(WIN32)

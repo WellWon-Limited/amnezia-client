@@ -6,7 +6,7 @@ import Style 1.0
 
 import "TextTypes"
 import "../Config"
-import "../Avpn"   // AVPN: Theme (тёмная тема Tribe для глобальных попапов)
+import "../Tribe"   // AVPN: Theme (тёмная тема Tribe для глобальных попапов)
 
 Popup {
     id: root
@@ -105,7 +105,7 @@ Popup {
                 borderWidth: 1
                 borderColor: Theme.color.border2
 
-                text: qsTr("Close")
+                text: qsTr("Закрыть") // AVPN: было "Close" (англ.)
 
                 clickedFunc: function() {
                     root.close()

@@ -1,7 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 
-import ".."   // Theme
+import ".."             // Theme
+import "../../Controls2" // ContextMenuType
 
 // AVPN: text field. surface1 + border, r-sm; focus → accent + ring. UI-DESIGN.md §3.
 TextField {
@@ -15,6 +16,10 @@ TextField {
     font.pixelSize: Theme.font.bodyS
     selectByMouse: true
     selectionColor: Theme.color.accentDeep
+
+    // AVPN: своё тёмное контекст-меню вместо нативного белого iOS-меню (и без баннера «вставка» —
+    // ContextMenuType короткозамыкает canPaste на iOS). Паттерн форка (TextFieldWithHeaderType).
+    ContextMenu.menu: ContextMenuType { textObj: control }
 
     property bool error: false
 

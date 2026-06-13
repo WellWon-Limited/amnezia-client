@@ -19,6 +19,12 @@
     #include "ui/utils/macosUtil.h"
 #endif
 
+// AVPN: нативный iOS safe-area inset (AvpnSafeArea.mm) — Qt даёт 0 при ExpandedClientAreaHint.
+#ifdef Q_OS_IOS
+extern "C" int avpnSafeAreaTop();
+extern "C" int avpnSafeAreaBottom();
+#endif
+
 PageController::PageController(ServersController* serversController, SettingsController* settingsController,
                                QObject *parent)
     : QObject(parent), m_serversController(serversController), m_settingsController(settingsController)
@@ -219,6 +225,9 @@ int PageController::getSafeAreaTopMargin()
         return result;
     }
 #endif
+#ifdef Q_OS_IOS
+    return avpnSafeAreaTop(); // AVPN: реальный инсет выреза/Dynamic Island из UIKit
+#endif
     return 0;
 }
 
@@ -235,6 +244,9 @@ int PageController::getSafeAreaBottomMargin()
         return result;
     }
 #endif
+#ifdef Q_OS_IOS
+    return avpnSafeAreaBottom(); // AVPN: реальный нижний инсет (home-индикатор) из UIKit
+#endif
     return 0;
 }
 
@@ -248,7 +260,7 @@ void PageController::onShowErrorMessage(ErrorCode errorCode)
     const auto fullErrorMessage = errorString(errorCode);
     const auto errorMessage = fullErrorMessage.mid(fullErrorMessage.indexOf(". ") + 1); // remove ErrorCode %1.
     const auto errorUrl = QStringLiteral("troubleshooting/error-codes/#error-%1-%2").arg(static_cast<int>(errorCode)).arg(utils::enumToString(errorCode).toLower());
-    // AVPN: код ошибки красным (токен danger #E2625C из Avpn/Theme.qml) + текст с новой строки.
+    // AVPN: код ошибки красным (токен danger #E2625C из Tribe/Theme.qml) + текст с новой строки.
     // Qt игнорирует style= у <a> (красит в Text.linkColor) — цвет задаём через <font color>.
     const auto fullMessage = QStringLiteral("<a href=\"%1\"><font color=\"#E2625C\">ErrorCode: %2</font></a><br>%3").arg(errorUrl).arg(static_cast<int>(errorCode)).arg(errorMessage);
 

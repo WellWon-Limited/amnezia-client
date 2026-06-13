@@ -58,15 +58,17 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Connecting;
+    m_currentNodeId = candidate->nodeId; // AVPN: фиксируем выбранную ноду уже на фазе Connecting
     const TunnelResult r = m_tunnel->up(m_pool.subscription(), *candidate);
     if (!r.ok) {
         error = r.error;
         m_state = EngineState::Error;
         return false;
     }
-    m_currentNodeId = candidate->nodeId;
+    // AVPN: up() ставит туннель в очередь VpnConnection (async) — НЕ объявляем Connected здесь.
+    // Реальный переход Connecting→Connected/Error приходит из VpnConnection::connectionStateChanged
+    // через AvpnEngineQml → onTunnelConnected()/onTunnelError() (правдивый статус, не маска успеха).
     m_health.reset();
-    m_state = EngineState::Connected;
     return true;
 }
 
@@ -95,6 +97,28 @@ bool ServiceEngine::startFlow(QNetworkAccessManager *nam, const QString &baseUrl
     return connect(error);
 }
 
+bool ServiceEngine::bootstrap(QNetworkAccessManager *nam, const QString &baseUrl,
+                              SecureAppSettingsRepository *store, QString &error) // AVPN
+{
+    // Тихая прогрузка подписки без подъёма туннеля (Task 11). Состояние движка не меняем —
+    // остаёмся Disconnected; наполняем только NodePool/Subscription для живого бейджа.
+    // 1) токен: из хранилища, иначе enroll (genkey + POST /v1/trial)
+    QString token = Enrollment::loadToken(); // AVPN: SecureQSettings-backed
+    if (token.isEmpty()) {
+        if (!enroll(nam, baseUrl, store, error))
+            return false; // оффлайн/без сети — мягко (вызывающий не считает фатальным)
+        token = m_token;
+    } else {
+        m_token = token;
+    }
+    // 2) GET /v1/subscription
+    QByteArray body;
+    if (!Enrollment::fetchSubscription(nam, baseUrl, token, body, error))
+        return false;
+    // 3) распарсить (NodePool + лимиты/expiresAt для бейджа). БЕЗ connect().
+    return loadSubscription(body, error);
+}
+
 bool ServiceEngine::tick(qint64 nowEpoch)
 {
     if (m_state != EngineState::Connected || !m_tunnel)
@@ -110,6 +134,48 @@ bool ServiceEngine::notifyConnectionLost()
     if (m_state != EngineState::Connected)
         return false;
     return onDead();
+}
+
+// AVPN: правдивые переходы из реального состояния VpnConnection (см. ServiceEngine.h).
+bool ServiceEngine::onTunnelConnected() // AVPN
+{
+    // Подтверждаем Connected ТОЛЬКО из фаз подъёма/свитча — не «воскрешаем» Disconnected/Error.
+    if (m_state == EngineState::Connecting || m_state == EngineState::Switching
+        || m_state == EngineState::Selecting) {
+        m_state = EngineState::Connected;
+        m_health.reset();
+        return true;
+    }
+    return false;
+}
+
+bool ServiceEngine::onTunnelError() // AVPN
+{
+    if (m_state == EngineState::Error)
+        return false;
+    m_state = EngineState::Error;
+    return true;
+}
+
+bool ServiceEngine::onTunnelDisconnected() // AVPN
+{
+    // Реактивный failover уже покрыт notifyConnectionLost() (Connected→свитч). Здесь — только
+    // честное отражение «отключено», когда движок НЕ в фазе подъёма (иначе это промежуточный
+    // Disconnecting перед reconnect — не сбрасываем).
+    if (m_state == EngineState::Disconnected || m_state == EngineState::Connecting
+        || m_state == EngineState::Switching || m_state == EngineState::Selecting)
+        return false;
+    m_state = EngineState::Disconnected;
+    m_currentNodeId.clear();
+    return true;
+}
+
+void ServiceEngine::requestStop() // AVPN
+{
+    // Намеренный стоп: гасим фазу до down(), чтобы Disconnected не запустил failover.
+    m_state = EngineState::Disconnected;
+    m_currentNodeId.clear();
+    m_health.reset();
 }
 
 bool ServiceEngine::onDead()
@@ -155,6 +221,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
                                                       : QStringLiteral("active");
     s.trafficUsed = sub.trafficUsed;
     s.trafficLimit = sub.trafficLimit;
+    s.expiresAt = sub.expiresAt; // AVPN: для AvpnEngineQml::daysLeft()
     s.lkgStale = false; // TODO(C-7): отражать stale-LKG при offline-подъёме
 
     // реальные рантайм-статы туннеля
@@ -171,6 +238,9 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         NodeDebugRow row;
         row.nodeId = n.nodeId;
         row.region = n.region;
+        row.name = n.name;         // AVPN: имя сервера (опц.)
+        row.countryCode = n.countryCode; // AVPN: ISO-3166 alpha-2 → флаг-эмодзи в UI
+        row.endpoint = n.endpoint; // AVPN: реальный host:port для UI
         row.healthy = true; // TODO(C-4 proactive): хранить измеренный score/health пула
         row.reason = (n.nodeId == m_currentNodeId) ? QStringLiteral("current") : QString();
         s.pool << row;

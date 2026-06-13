@@ -12,8 +12,8 @@ import "../Controls2"
 import "../Controls2/TextTypes"
 import "../Config"
 import "../Components"
-import "../Avpn"              // AVPN: singletons Theme + Dev (admin/amnezia-режимы)
-import "../Avpn/components"   // AVPN: TribeBottomNav (наша навигация)
+import "../Tribe"              // AVPN: singletons Theme + Dev (admin/amnezia-режимы)
+import "../Tribe/components"   // AVPN: TribeBottomNav (наша навигация)
 
 PageType {
     id: root
@@ -25,7 +25,7 @@ PageType {
     // на ПОЛНЫЙ ванильный интерфейс (их TabBar + страницы), возврат — кнопка «‹ Tribe».
     readonly property bool avpnNav: !Dev.amneziaMode
 
-    // AVPN: первый запуск (нет серверов + онбординг не пройден) → наш PageOnboardingAvpn,
+    // AVPN: первый запуск (нет серверов + онбординг не пройден) → наш PageOnboardingTribe,
     // а не ванильный wizard. После «Приступим» (requestStart) попадаем на наш Connect.
     // onboardingActive ставится императивно в точках роутинга (isStartPageVisible — не реактивный).
     Settings { id: avpnOnboard; category: "AvpnOnboarding"; property bool done: false }
@@ -35,13 +35,13 @@ PageType {
     function goAvpnTab(index) {
         avpnBottomNav.currentIndex = index
         if (index === 1)
-            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageLocationsAvpn.qml")
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSupportTribe.qml")
         else if (index === 2)
-            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageSecurityAvpn.qml")
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSecurityTribe.qml")
         else if (index === 3)
-            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageAccountAvpn.qml")
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAccountTribe.qml")
         else
-            tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageConnectAvpn.qml")
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageConnectTribe.qml")
     }
 
     // AVPN: Connect-экран просит переключить вкладку / открыть настройки.
@@ -50,6 +50,10 @@ PageType {
         ignoreUnknownSignals: true
         function onRequestTab(index) { root.goAvpnTab(index) }
         function onRequestSettings() { root.goAvpnTab(3) }
+        // AVPN: колокол → центр уведомлений (#3)
+        function onRequestNotifications() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml") }
+        // AVPN: админ-вход (Dev.adminMode) → просмотр пула нод (#5)
+        function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
         function onRequestStart() {
             avpnOnboard.done = true
@@ -78,7 +82,7 @@ PageType {
                 if (PageController.isStartPageVisible() && !avpnOnboard.done) {
                     root.onboardingActive = true
                     tabBar.visible = false
-                    tabBarStackView.goToTabBarPageUrl("../Avpn/Pages/PageOnboardingAvpn.qml")
+                    tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageOnboardingTribe.qml")
                 } else {
                     root.onboardingActive = false
                     tabBar.visible = true
@@ -361,14 +365,14 @@ PageType {
                 // AVPN: первый запуск → наш онбординг
                 root.onboardingActive = true
                 tabBar.visible = false
-                pagePath = Qt.resolvedUrl("../Avpn/Pages/PageOnboardingAvpn.qml")
+                pagePath = Qt.resolvedUrl("../Tribe/Pages/PageOnboardingTribe.qml")
             } else if (!root.avpnNav && PageController.isStartPageVisible()) {
                 tabBar.visible = false
                 pagePath = PageController.getPagePath(PageEnum.PageSetupWizardStart)
             } else {
                 tabBar.visible = true
-                pagePath = Qt.resolvedUrl(root.avpnNav ? "../Avpn/Pages/PageConnectAvpn.qml"
-                                                       : "PageHomeAvpn.qml") // AVPN: наш Connect-экран
+                pagePath = Qt.resolvedUrl(root.avpnNav ? "../Tribe/Pages/PageConnectTribe.qml"
+                                                       : "PageHomeTribe.qml") // AVPN: наш Connect-экран
                 if (!PageController.isStartPageVisible())
                     ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
             }

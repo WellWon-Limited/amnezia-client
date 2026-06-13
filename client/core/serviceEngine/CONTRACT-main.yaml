@@ -1,0 +1,1115 @@
+openapi: 3.1.0
+info:
+  title: Tribe — control plane API
+  version: 0.4.1
+  description: >
+    Client↔backend contract (source of truth for client codegen). Backend exposes the
+    healthy pool + AmneziaWG params + per-target health; the CLIENT picks the server by its
+    own ping/failover. See documents/backend_plan.md §12 and documents/implimintation.md §6
+    (field mapping in §6.3). BREAKING vs 0.1.0: new required fields in Subscription/SubscriptionNode,
+    Account.status enum changed, trial + billing + admin endpoints added.
+    0.3.0 (additive): + GET /v1/plans (paywall catalog); POST /admin/nodes triggers backfill of all
+    active users onto the new node before it is served in /v1/subscription (R-2); the subscription
+    token is LONG-LIVED and rotatable (revocation at the delivery layer; rotate on compromise) —
+    there is no client refresh endpoint (R-1).
+    0.3.1 (security hardening from automated review; happy path unchanged): input patterns/maxLength on
+    admin + trial sinks (SSH/Redis); BOLA ownership scoping on /v1/billing/status; subscription token is
+    server-tracked (jti) and ROTATED on trial→paid activation (new token invalidates the old); /admin/nodes
+    must reject endpoints in RFC1918/loopback/metadata ranges and verify server_pubkey vs live wg show.
+    0.3.2 (typed errors): added components.schemas.Error + components.responses (Unauthorized/Forbidden/
+    BadRequest). CONVENTION (applies to ALL endpoints, even where not enumerated): every subscriptionToken
+    endpoint may return 401 Error (revoked/expired/invalid token); every /admin/* returns 403 Error on origin/
+    authz failure; any request with a body or path param may return 400 Error on validation. Clients should
+    codegen the Error type and handle these.
+    0.3.3 (P-B5 issuance semantics): + Subscription.grace_until (24h grace after expires_at,
+    CONTRACT-DELTA-2026-06-09); + GET /v1/config (per-platform min_app_version + server-driven probe
+    targets). TOKEN ROTATION: every successful POST /v1/trial response carries a FRESH
+    subscription_token (rotated on idempotent replay too — only a sha256 digest is stored server-side;
+    the previous token is invalidated, the client always overwrites its stored token).
+    0.3.4 (P-B7 billing): + POST /v1/billing/webhook/{provider} (server-to-server; the BODY IS NEVER
+    TRUSTED — the backend re-fetches the live status from the provider API before any state change;
+    always 200) and + POST /admin/activation-tokens (operator mint for web purchases; raw token is
+    returned once, only its sha256 is stored). payment_id is a backend-minted opaque high-entropy id.
+    0.4.0 (P-B7.5, CONTRACT-DELTA-2026-06-09): email+code login (no passwords) — POST
+    /v1/auth/email/request-code (ALWAYS 200, anti-enumeration; rate-limited) and POST
+    /v1/auth/email/verify (device-scoped token; migrates a trial device onto the email account;
+    409 device_limit_reached carries the device list for the kick flow); + GET /v1/devices,
+    DELETE /v1/devices/{id} (kick = peer removed on EVERY node + token killed),
+    DELETE /v1/account (Apple 5.1.1(v): tokens + peers + PII). Push notifications remain v1.1.
+    0.4.1 (P-B9 admin ops): + /admin/users (search/patch incl. traffic_reset+revoke_tokens/delete),
+    /admin/nodes GET/PATCH/DELETE(drain), /admin/payments (+/reconcile), /admin/audit, /admin/stats.
+    ORIGIN HARDENING IMPLEMENTED (Task 13): when CF_ACCESS_TEAM_DOMAIN/CF_ACCESS_ADMIN_AUD are set,
+    every /admin/* request must carry a valid Cf-Access-Jwt-Assertion (JWKS-verified, aud-checked);
+    the admin bearer remains the second factor. Every mutating admin action writes an audit row.
+servers:
+  - url: https://api.tribevpn.com
+    description: production
+  - url: http://127.0.0.1:8000
+    description: local dev
+
+components:
+  securitySchemes:
+    subscriptionToken:
+      type: http
+      scheme: bearer
+      description: >
+        Per-user LONG-LIVED subscription token, but SERVER-TRACKED by id (jti → subscription) so
+        revocation is enforced at EVERY endpoint, not only /v1/subscription. No client refresh endpoint
+        (R-1, user decision). Rotation: the backend MUST mint a NEW token and invalidate the old one on
+        trial→paid activation (returned via ActivateOut) and on operator-initiated rotation after
+        compromise. Over-limit/expired users additionally get an empty/degraded pool. (SEC: token lifecycle)
+    adminToken:
+      type: http
+      scheme: bearer
+      description: >
+        Admin/operator token for node + user management. MUST sit behind an independent origin control
+        (Cloudflare Access JWT or mTLS) — the bearer alone is not sufficient for fleet-wide SSH actions. (SEC)
+  responses:
+    Unauthorized:
+      description: Missing/invalid/revoked subscription token (R-1 server-tracked jti).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: Admin origin control failed, or not owner of the resource (BOLA).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    BadRequest:
+      description: Validation error (input pattern/maxLength, malformed body).
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Error:
+      type: object
+      description: Standard error body for non-2xx responses (typed for client/backend codegen).
+      required: [code, message]
+      properties:
+        code: { type: string, example: unauthorized }
+        message: { type: string, example: "subscription token revoked" }
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status: { type: string, example: ok }
+        version: { type: string, example: 0.1.0 }
+    AwgParams:
+      type: object
+      description: >
+        AmneziaWG obfuscation params. The 9-field bundle (Jc,Jmin,Jmax,S1,S2,H1-H4) is required
+        and must be emitted whole — iOS only enables AWG when all 9 are present. S3/S4 and I1..I5
+        are optional extensions; I* are strings (hex packets), not integers. See implimintation.md §6.3.
+      required: [Jc, Jmin, Jmax, S1, S2, H1, H2, H3, H4]
+      properties:
+        Jc: { type: integer }
+        Jmin: { type: integer }
+        Jmax: { type: integer }
+        S1: { type: integer }
+        S2: { type: integer }
+        S3: { type: integer, nullable: true }
+        S4: { type: integer, nullable: true }
+        H1: { type: integer }
+        H2: { type: integer }
+        H3: { type: integer }
+        H4: { type: integer }
+        I1: { type: string, nullable: true, pattern: "^[0-9A-Fa-f]{0,2048}$" }
+        I2: { type: string, nullable: true, pattern: "^[0-9A-Fa-f]{0,2048}$" }
+        I3: { type: string, nullable: true, pattern: "^[0-9A-Fa-f]{0,2048}$" }
+        I4: { type: string, nullable: true, pattern: "^[0-9A-Fa-f]{0,2048}$" }
+        I5: { type: string, nullable: true, pattern: "^[0-9A-Fa-f]{0,2048}$" }
+    SubscriptionNode:
+      type: object
+      description: >
+        Everything the client needs to build a working AmneziaWG config for this node and to
+        rank it. The client tunnel address is NOT per-node — it is ONE stable per-user /32 at the
+        subscription top level (identical on every node), so a node swap is a pure peer swap, not
+        an interface re-address. See backend_plan.md §6.
+      required:
+        - node_id
+        - region
+        - endpoint
+        - server_pubkey
+        - awg_params
+        - health
+        - allowed_ips
+        - dns
+      properties:
+        node_id: { type: string, example: fra-01 }
+        region: { type: string, example: eu-central }
+        label: { type: string, nullable: true, example: "Finland", description: "Human display name shown in the client (city/country); falls back to region if null." }
+        country_code: { type: string, nullable: true, example: "FI", description: "ISO-3166 alpha-2 (auto-detected from node IP, operator-overridable). Client renders the flag emoji from this; null when undetected." }
+        endpoint: { type: string, example: "203.0.113.10:51820" }
+        server_pubkey: { type: string }
+        awg_params: { $ref: "#/components/schemas/AwgParams" }
+        proto:
+          type: string
+          enum: [awg]
+          description: Tunnel protocol. Only AmneziaWG is supported in this contract.
+          example: awg
+        weight:
+          type: number
+          description: Operator-assigned ranking hint (higher = preferred); client may override by ping.
+          example: 1.0
+        health:
+          type: object
+          description: >
+            Per-target health map {target: score in [0..1]}. Replaces the old scalar health_score —
+            different categories (telegram/youtube/gemini/openai) can be reachable to differing degrees.
+          additionalProperties:
+            type: number
+            minimum: 0
+            maximum: 1
+          example: { telegram: 0.99, youtube: 0.97, gemini: 0.95, openai: 0.96 }
+        allowed_ips:
+          type: array
+          description: Client-side AllowedIPs (full-tunnel by default; split is a later phase).
+          items: { type: string }
+          example: ["0.0.0.0/0", "::/0"]
+        dns:
+          type: array
+          description: >
+            DNS servers to push into the tunnel. REQUIRED — minimum 1 (backend SHOULD send >=2 since iOS
+            dns1/dns2 are non-optional; duplicate one if needed). See implimintation.md §6.3 / §4.
+          minItems: 1
+          items: { type: string }
+          example: ["1.1.1.1", "1.0.0.1"]
+        mtu:
+          type: integer
+          description: Tunnel MTU.
+          example: 1280
+        persistent_keepalive:
+          type: integer
+          description: Seconds; keeps the handshake fresh so DEAD-detection is reliable.
+          default: 25
+          example: 25
+        preshared_key:
+          type: string
+          nullable: true
+          description: Optional WG preshared key (post-quantum hardening); omit if unused.
+    Subscription:
+      type: object
+      description: >
+        Body is the source of truth (headers are mirrors). Offline policy: the client keeps the
+        last valid subscription as an encrypted LKG cache and may use it stale for ~48h while the
+        backend is unreachable (stale-but-usable banner; connect is never blocked).
+      required: [version, address, expires_at, traffic, nodes]
+      properties:
+        version: { type: integer, example: 1 }
+        address:
+          type: array
+          description: >
+            Client tunnel address(es) / Interface Address (CIDR). ONE STABLE per-user /32, identical on
+            every node (precondition for in-place peer swap). Maps to client_ip on the client.
+            See implimintation.md §6.3 / backend_plan §6. (Moved from per-node to top level — GAP-A.)
+            IPv4-only in v1: the client wraps ::/0 into the tunnel or blocks v6 (no leak — invariant #8).
+          items: { type: string }
+          example: ["10.7.0.5/32"]
+        status:
+          type: string
+          enum: [active, degraded]
+          default: active
+          description: >
+            "degraded" = soft limit / expiry → nodes[] is empty or reduced; client shows an upgrade banner
+            and keeps any active tunnel. Cross-check GET /v1/account for trial|active|expired. (GAP-D)
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Subscription expiry; null = unlimited/none. Body is source of truth; also mirrored in the
+            Subscription-Userinfo header. (Trial always has a non-null expiry — GAP-E.)
+        grace_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            expires_at + 24h. The client MUST NOT tear down an active tunnel before this moment
+            (banner only, no payment nag). Null when expires_at is null. (CONTRACT-DELTA-2026-06-09)
+        traffic:
+          $ref: "#/components/schemas/Traffic"
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/SubscriptionNode" }
+    Traffic:
+      type: object
+      required: [used, limit]
+      properties:
+        used: { type: integer, description: bytes consumed (aggregate of rx+tx deltas by pubkey) }
+        limit: { type: integer, description: "bytes; 0 = unlimited" }
+    Account:
+      type: object
+      required: [account_id, status, traffic_limit, traffic_used]
+      properties:
+        account_id: { type: string }
+        status: { type: string, enum: [trial, active, expired] }
+        expires_at: { type: string, format: date-time, nullable: true }
+        traffic_limit: { type: integer, description: bytes; 0 = unlimited }
+        traffic_used: { type: integer, description: bytes }
+    ServerPublic:
+      type: object
+      required: [node_id, region, load]
+      properties:
+        node_id: { type: string }
+        region: { type: string }
+        load: { type: number, minimum: 0, maximum: 1 }
+    EmailRequestIn:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+    EmailVerifyIn:
+      type: object
+      required: [email, code, public_key, device_id]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        public_key: { type: string, pattern: "^[A-Za-z0-9+/]{43}=$" }
+        device_id: { type: string, minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9._-]{16,128}$" }
+        platform: { type: string, maxLength: 32 }
+    EmailVerifyOut:
+      type: object
+      required: [subscription_token, account_id, status]
+      properties:
+        subscription_token:
+          type: string
+          description: PER-DEVICE token (rotate-on-issue); client overwrites its stored token.
+        account_id: { type: string }
+        status: { type: string, enum: [trial, active, expired] }
+        expires_at: { type: string, format: date-time, nullable: true }
+    DeviceInfo:
+      type: object
+      required: [device_id]
+      properties:
+        device_id: { type: string, description: Backend device id (NOT the client install id). }
+        platform: { type: string, nullable: true }
+        label: { type: string, nullable: true }
+        last_seen: { type: string, format: date-time, nullable: true }
+        is_current: { type: boolean }
+    ProbeTargetConfig:
+      type: object
+      required: [target, kind, host, port, interval_s]
+      properties:
+        target: { type: string, example: telegram }
+        kind: { type: string, enum: [tcp, tls, http], example: tcp }
+        host: { type: string, example: web.telegram.org }
+        port: { type: integer, example: 443 }
+        interval_s: { type: integer, example: 60 }
+    Config:
+      type: object
+      description: >
+        Client bootstrap config. Probe targets are server-driven (a new category ships without an
+        app release); only fixed categories are ever probed — never user-visited domains (privacy).
+      required: [min_app_version, probe_targets, subscription_refresh_interval_s]
+      properties:
+        min_app_version:
+          type: object
+          additionalProperties: { type: string }
+          example: { ios: "1.0.0", android: "1.0.0" }
+        probe_targets:
+          type: array
+          items: { $ref: "#/components/schemas/ProbeTargetConfig" }
+        subscription_refresh_interval_s: { type: integer, example: 43200 }
+    ProbeTarget:
+      type: string
+      description: Category reachability target. Reused in Probe.target and SubscriptionNode.health keys.
+      enum: [telegram, youtube, gemini, openai]
+    Probe:
+      type: object
+      required: [target, ok]
+      properties:
+        target: { $ref: "#/components/schemas/ProbeTarget" }
+        ok: { type: boolean }
+        rtt_ms: { type: integer, nullable: true }
+        err: { type: string, nullable: true }
+    TelemetryIn:
+      type: object
+      required: [node_id, client_ts, probes]
+      properties:
+        node_id: { type: string }
+        client_ts: { type: integer }
+        app_ver: { type: string, nullable: true }
+        platform: { type: string, nullable: true }
+        probes:
+          type: array
+          items: { $ref: "#/components/schemas/Probe" }
+    ActivateIn:
+      type: object
+      required: [token, public_key]
+      properties:
+        token:
+          type: string
+          description: One-time, short-TTL activation token from deep-link / code. Single-use.
+        public_key:
+          type: string
+          description: >
+            Client-generated WireGuard PUBLIC key. The private key is generated on-device and
+            never leaves it (Keychain/DPAPI). Backend provisions this pubkey across the pool;
+            it must NOT mint keypairs server-side. See backend_plan.md §6 / §11.
+    ActivateOut:
+      type: object
+      required: [subscription_token, account_id]
+      properties:
+        subscription_token:
+          type: string
+          description: >
+            NEW token issued on activation/upgrade; the backend MUST invalidate the previous (trial)
+            token. Client MUST overwrite the stored token with this value. (SEC: rotate on trust boundary)
+        account_id: { type: string }
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: New expiry after activation/upgrade (saves a follow-up /v1/account round-trip).
+        traffic_limit: { type: integer, description: "bytes; 0 = unlimited" }
+        status: { type: string, enum: [trial, active, expired] }
+    TrialIn:
+      type: object
+      required: [public_key, device_id, platform]
+      properties:
+        public_key:
+          type: string
+          pattern: "^[A-Za-z0-9+/]{43}=$"
+          description: >
+            Client-generated WireGuard PUBLIC key (44-char base64). Private key never leaves device.
+            Backend provisions this pubkey across the pool (zero-knowledge). See implimintation.md §5.1 / §6.
+        device_id:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._-]{16,128}$"
+          description: >
+            Anti-abuse + idempotency key ONLY — NOT an auth credential and NOT proof of identity
+            (client-chosen, not secret). Account identity is bound to public_key. Backend rate-limits on
+            (device_id, ASN, /24) with a max trials/day per IP-block, and bounds length so it can't
+            pollute Redis. Strong anti-takeover requires `attestation`. (SEC)
+        attestation:
+          type: string
+          nullable: true
+          description: >
+            RECOMMENDED for production: platform attestation token (iOS App Attest/DeviceCheck,
+            Android Play Integrity, desktop best-effort). When present the backend MUST verify it before
+            granting/replaying a trial and rate-limit on the attested device hash. (SEC: anti-abuse)
+        platform:
+          type: string
+          description: Client platform (ios/android/macos/windows/linux).
+    TrialOut:
+      type: object
+      required: [subscription_token, account_id, expires_at, traffic_limit]
+      properties:
+        subscription_token: { type: string }
+        account_id: { type: string }
+        expires_at: { type: string, format: date-time, description: Trial expiry. }
+        traffic_limit: { type: integer, description: "bytes; 0 = unlimited" }
+    CodeRedeemIn:
+      type: object
+      required: [code, public_key, device_id]
+      properties:
+        code: { type: string, maxLength: 64, example: "TRIBE-HW8P-R415-A6WS-ENFR", description: "Access code; accepted with/without prefix, any case/dashes." }
+        public_key: { type: string, pattern: "^[A-Za-z0-9+/]{43}=$", description: "Client WG public key (private key never leaves device)." }
+        device_id: { type: string, minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9._-]{16,128}$" }
+        platform: { type: string, maxLength: 32, nullable: true }
+        evict_device_id: { type: string, nullable: true, pattern: "^[0-9]{1,18}$", description: "1-seat 'transfer here': kick this device (backend id from the 409 devices[]) before attaching." }
+    CodeRedeemOut:
+      type: object
+      required: [subscription_token, account_id, status, seat_limit, seats_used]
+      properties:
+        subscription_token: { type: string }
+        account_id: { type: string }
+        status: { type: string, enum: [trial, active, expired] }
+        expires_at: { type: string, format: date-time, nullable: true }
+        seat_limit: { type: integer, description: "Devices allowed on this account (1/5/10)." }
+        seats_used: { type: integer }
+    CodeRotateOut:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: "The NEW raw code — show once; the old one is dead." }
+    CheckoutIn:
+      type: object
+      required: [plan_id]
+      properties:
+        plan_id: { type: string, description: Identifier of the plan being purchased/extended. }
+    CheckoutOut:
+      type: object
+      required: [payment_id, pay_url, amount, currency, expires_at]
+      properties:
+        payment_id: { type: string, description: Backend payment identifier for status polling. }
+        pay_url: { type: string, format: uri, description: Payment URL to open in the system browser. }
+        sbp_qr:
+          type: string
+          nullable: true
+          description: Optional SBP (Faster Payments) QR payload/URL for in-app rendering.
+        amount: { type: number, description: Amount to charge. }
+        currency: { type: string, description: ISO 4217 currency code (e.g. RUB). }
+        expires_at: { type: string, format: date-time, description: Payment intent expiry. }
+    BillingStatus:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [pending, paid, failed] }
+    Plan:
+      type: object
+      description: One purchasable plan in the in-app paywall catalog. plan_id feeds /v1/billing/checkout. (R-3)
+      required: [plan_id, title, duration_days, amount, currency]
+      properties:
+        plan_id: { type: string, description: Stable plan identifier passed to /v1/billing/checkout., example: m1 }
+        title: { type: string, example: "1 month" }
+        duration_days: { type: integer, example: 30 }
+        traffic_limit:
+          type: integer
+          nullable: true
+          description: "bytes granted by this plan; 0 or null = unlimited"
+        amount: { type: number, example: 199 }
+        currency: { type: string, description: ISO 4217 currency code., example: RUB }
+    AdminNodeIn:
+      type: object
+      description: >
+        All fields reach an SSH/shell/config sink — constrain hard AND the backend MUST use argv-list
+        invocation (never string interpolation) plus an egress-CIDR allowlist. (SEC: injection/SSRF)
+        The root password is consumed ONCE by the SSH bootstrap (key install + host-key capture) and
+        never stored; the node's AWG params and server pubkey are bootstrap OUTPUTS, not inputs.
+      required: [host, username, password, name, region, endpoint]
+      properties:
+        host:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: "^[A-Za-z0-9.\\-:\\[\\]]+$"
+          description: SSH bootstrap target (IP or DNS). SSRF-guarded like endpoint.
+          example: "203.0.113.10"
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._\\-]+$"
+          example: root
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Used exactly once (TOFU bootstrap); never persisted.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[\\w .\\-]+$"
+          description: Human display name (Unicode/Cyrillic ok); becomes Node.label.
+          example: "Финляндия"
+        region: { type: string, pattern: "^[a-z0-9-]{1,32}$", example: eu-central }
+        endpoint:
+          type: string
+          maxLength: 64
+          pattern: "^[0-9A-Fa-f:.\\[\\]]+:[0-9]{1,5}$"
+          description: >
+            host:port. Backend MUST reject hosts resolving to RFC1918/loopback/link-local/metadata
+            ranges before opening SSH. (SEC: SSRF)
+          example: "203.0.113.10:48420"
+        weight: { type: number, minimum: 0, maximum: 1000, nullable: true }
+    AdminNodeOut:
+      type: object
+      required: [node_id, region, endpoint]
+      properties:
+        node_id: { type: string }
+        region: { type: string }
+        endpoint: { type: string }
+        server_pubkey: { type: string }
+
+paths:
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /v1/config:
+    get:
+      tags: [config]
+      summary: Client bootstrap config (force-update versions, probe targets)
+      description: >
+        No auth, cacheable. Probe targets are server-driven so categories change without an app
+        release; only fixed categories are ever probed (privacy: no user-visited domains).
+      security: []
+      responses:
+        "200":
+          description: config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Config" }
+  /v1/activate:
+    post:
+      tags: [activation]
+      summary: Activate by post-payment token / deep-link
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ActivateIn" }
+      responses:
+        "200":
+          description: activated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivateOut" }
+  /v1/subscription:
+    get:
+      tags: [subscription]
+      summary: Healthy pool + AmneziaWG params + health scores
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: subscription
+          headers:
+            Subscription-Userinfo:
+              schema: { type: string }
+              description: "upload=...; download=...; total=...; expire=..."
+            Profile-Update-Interval:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/account:
+    get:
+      tags: [account]
+      summary: Subscription status, quota, expiry
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [account]
+      summary: Delete the account from the app (Apple 5.1.1(v))
+      description: >
+        Full wipe: every device's peer is revoked on EVERY node, all tokens die, the account row
+        (PII incl. email) is deleted. Payment records survive unlinked (no PII) for accounting.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "204": { description: deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/servers:
+    get:
+      tags: [servers]
+      summary: Public pool metadata (regions, load)
+      responses:
+        "200":
+          description: pool
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ServerPublic" }
+  /v1/telemetry/reachability:
+    post:
+      tags: [telemetry]
+      summary: Ingest reachability probes (category targets only)
+      security: [{ subscriptionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TelemetryIn" }
+      responses:
+        "202":
+          description: accepted
+  /v1/auth/email/request-code:
+    post:
+      tags: [auth]
+      summary: Send a 6-digit login code (no passwords)
+      description: >
+        ALWAYS returns the same 200 body whether the account exists or not (anti-enumeration).
+        Rate-limited per email and per IP (429). Code TTL ~10 min, 5 wrong attempts kill it. (SEC)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailRequestIn" }
+      responses:
+        "200":
+          description: sent (or silently ignored — existence is never revealed)
+        "429":
+          description: rate-limited
+  /v1/auth/email/verify:
+    post:
+      tags: [auth]
+      summary: Exchange a valid code for a device-scoped subscription token
+      description: >
+        Migrates an existing trial device (matched by device_id OR public_key) onto the email
+        account — peers and the stable /32 are untouched, the orphaned anonymous trial account is
+        deleted. A new device is created and provisioned fleet-wide. Each device holds its OWN
+        token. 409 device_limit_reached carries the account's devices for the kick flow.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailVerifyIn" }
+      responses:
+        "200":
+          description: verified
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmailVerifyOut" }
+        "400":
+          description: invalid_code (wrong/expired code; 5 misses invalidate it)
+        "409":
+          description: "device_limit_reached: detail carries devices[] (DeviceInfo) for kick"
+  /v1/devices:
+    get:
+      tags: [devices]
+      summary: List the account's devices
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DeviceInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/devices/{id}:
+    delete:
+      tags: [devices]
+      summary: Kick a device (token killed + peer removed on EVERY node)
+      description: Scoped to the caller's account; foreign/missing ids return 404 (BOLA).
+      security: [{ subscriptionToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: kicked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: not found (or not yours) }
+  /v1/devices/{id}/extend:
+    post:
+      tags: [devices]
+      summary: Apply wallet days to a device (P-W2)
+      description: >
+        Spend `days` from the account's day wallet to extend this device's `expires_at`
+        (base = max(now, current expiry)). The device is put on the paid traffic allowance
+        (operator-configurable, default 100 GiB) and its usage counter resets. Account-scoped:
+        a foreign/missing id is 404; 403 when the wallet has fewer days than requested.
+      security: [{ subscriptionToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [days]
+              properties:
+                days: { type: integer, minimum: 1, maximum: 3650 }
+      responses:
+        "200":
+          description: extended
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, traffic_limit, traffic_used, wallet_days]
+                properties:
+                  device_id: { type: string }
+                  expires_at: { type: string, format: date-time, nullable: true }
+                  traffic_limit: { type: integer, description: "bytes; 0 = unlimited" }
+                  traffic_used: { type: integer }
+                  wallet_days: { type: integer, description: "pool balance after the apply" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: insufficient wallet days }
+        "404": { description: not found (or not yours) }
+  /v1/transfer:
+    post:
+      tags: [transfer]
+      summary: Mint a one-time key-transfer token ("move like a SIM")
+      description: >
+        Authenticated. Returns a short-lived single-use token (sha256 in Redis, TTL ~15 min) bound
+        to the caller's account + current device, plus a `tribe://transfer?t=…` deep link. Redeeming
+        it on a NEW device rehomes the SIM and kills this one.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transfer_token, deep_link]
+                properties:
+                  transfer_token: { type: string }
+                  deep_link: { type: string, example: "tribe://transfer?t=…" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/transfer/redeem:
+    post:
+      tags: [transfer]
+      summary: Redeem a transfer token on the new device (unauthenticated — token IS auth)
+      description: >
+        The new key joins the SAME account, inherits the source device's time + traffic, and the
+        source device is killed (peer revoked fleet-wide + row/JWT gone). Single-use; rate-limited
+        per IP. Returns the new device's JWT subscription token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transfer_token, public_key, device_id]
+              properties:
+                transfer_token: { type: string, minLength: 1, maxLength: 128 }
+                public_key: { type: string, pattern: "^[A-Za-z0-9+/]{43}=$" }
+                device_id: { type: string, pattern: "^[A-Za-z0-9._-]{16,128}$" }
+                platform: { type: string, nullable: true, maxLength: 32 }
+                model: { type: string, nullable: true, maxLength: 128 }
+      responses:
+        "200":
+          description: transferred
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscription_token, account_id, traffic_limit, traffic_used]
+                properties:
+                  subscription_token: { type: string }
+                  account_id: { type: string }
+                  expires_at: { type: string, format: date-time, nullable: true }
+                  traffic_limit: { type: integer }
+                  traffic_used: { type: integer }
+        "401": { description: invalid or expired token }
+        "409": { description: device limit reached }
+        "429": { description: too many attempts }
+  /v1/billing/webhook/{provider}:
+    post:
+      tags: [billing]
+      summary: Payment-provider callback (server-to-server)
+      description: >
+        Not called by clients. The body only NAMES the payment (object.id = provider payment id);
+        the backend re-verifies the live status via the provider API before applying anything, so a
+        spoofed body cannot upgrade an account. Always returns 200 to stop provider retries. (SEC)
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, example: yookassa }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: acknowledged (processed or ignored)
+  /v1/trial:
+    post:
+      tags: [trial]
+      summary: First-run trial sign-up (unauthenticated; anti-abuse by device_id + IP)
+      description: >
+        No bearer auth. Rate-limited (Redis) on (device_id, ASN, /24 IP block) with a max trials/day
+        per IP-block; deduplicated and idempotent — the same device_id returns the same account / stable
+        /32. device_id is anti-abuse only, NOT identity (account is bound to public_key); production SHOULD
+        require platform `attestation` (App Attest/Play Integrity) to block trial-farming and account
+        takeover via device_id replay. See implimintation.md §6. (SEC)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TrialIn" }
+      responses:
+        "200":
+          description: trial granted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrialOut" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429":
+          description: rate-limited (anti-abuse)
+  /v1/code/redeem:
+    post:
+      tags: [codes]
+      summary: Log in / restore on a device by access code (P-B12; the code IS the credential)
+      description: >
+        Unauthenticated — the access code (TRIBE-XXXX-…) identifies the account (Mullvad model).
+        Attaches THIS device (own keypair + stable /32, provisioned fleet-wide) and returns a
+        device-scoped subscription token. 401 on a bad/unknown code; 409 device_limit_reached +
+        devices[] when seats are full (then kick a device via DELETE /v1/devices/{id} or pass
+        evict_device_id for the 1-seat "transfer here" shortcut). Rate-limited per IP. (SEC)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRedeemIn" }
+      responses:
+        "200":
+          description: code accepted; device attached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeRedeemOut" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: seats full — carries devices[] for the kick flow
+        "429":
+          description: rate-limited (anti-abuse)
+  /v1/code/rotate:
+    post:
+      tags: [codes]
+      summary: Rotate the access code (owner only); old code dies immediately
+      description: >
+        Owner device only (Bearer). Mints a NEW code (shown once); the previous hash is invalidated.
+        Devices / tokens / peers are untouched — only the credential changes. Use after kicking an
+        unknown device. 403 if the device is not an owner; 409 if the account has no code.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: new code (show once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeRotateOut" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: account has no code
+  /v1/billing/checkout:
+    post:
+      tags: [billing]
+      summary: Create an in-app payment (SBP QR / pay_url)
+      security: [{ subscriptionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutIn" }
+      responses:
+        "200":
+          description: payment created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutOut" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/billing/status/{payment_id}:
+    get:
+      tags: [billing]
+      summary: Poll payment status (scoped to the caller's account)
+      description: >
+        BOLA guard: the backend MUST scope payment_id to the bearer's account_id and return 404 (not 403)
+        for any payment it does not own, so ids can't be enumerated cross-tenant. payment_id SHOULD be an
+        opaque high-entropy server value (or HMAC(payment_id, account_id)). (SEC: IDOR)
+      security: [{ subscriptionToken: [] }]
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{8,128}$" }
+      responses:
+        "200":
+          description: payment status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingStatus" }
+        "404":
+          description: payment not found OR not owned by the caller (indistinguishable on purpose)
+  /v1/plans:
+    get:
+      tags: [billing]
+      summary: Available subscription plans (catalog for the in-app paywall)
+      description: >
+        Public plan catalog. plan_id values feed POST /v1/billing/checkout so prices/durations are
+        backend-driven and changeable without a client release. (R-3)
+      responses:
+        "200":
+          description: plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Plan" }
+  /admin/nodes:
+    post:
+      tags: [admin]
+      summary: Register a new node in the pool (then backfill all active users onto it)
+      description: >
+        Bootstraps a node over SSH (docker + AmneziaWG container) AND reconciles EVERY active user's
+        pubkey onto it via SSH (awg set peer + syncconf) BEFORE the node becomes eligible for /v1/subscription.
+        A node is never served to clients until backfill completes — otherwise a client could receive a
+        node it has no peer on and fail to connect/swap. Mirror of the revoke reconciliation. (R-2)
+        (SEC) endpoint is an SSRF/fleet-push sink: reject endpoints resolving to RFC1918/loopback/
+        link-local/metadata ranges (403), and prefer a two-operator split (propose → independent activate)
+        so one admin-token compromise can't push a node fleet-wide. Protect /admin/* origin with
+        Cloudflare Access JWT / mTLS, not the bearer alone.
+      security: [{ adminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminNodeIn" }
+      responses:
+        "200":
+          description: node registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminNodeOut" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: Search accounts (q over email/account_id, status filter, devices + online)
+      security: [{ adminToken: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status_filter, in: query, schema: { type: string, enum: [trial, active, expired] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: accounts with devices and online flags }
+  /admin/users/{id}:
+    get:
+      tags: [admin]
+      summary: One account with devices
+      security: [{ adminToken: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "200": { description: account }, "404": { description: not found } }
+    patch:
+      tags: [admin]
+      summary: Partial update + operator actions (traffic_reset / revoke_tokens)
+      description: revoke_tokens kills every device token instantly (rotation-on-compromise, R-1).
+      security: [{ adminToken: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [trial, active, expired] }
+                expires_at: { type: string, format: date-time }
+                traffic_limit: { type: integer, minimum: 0 }
+                traffic_reset: { type: boolean }
+                revoke_tokens: { type: boolean }
+      responses: { "200": { description: updated }, "404": { description: not found } }
+    delete:
+      tags: [admin]
+      summary: Operator account wipe (peers off every node, devices + account deleted)
+      security: [{ adminToken: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "204": { description: deleted }, "404": { description: not found } }
+  /admin/nodes/{id}:
+    patch:
+      tags: [admin]
+      summary: Update node weight/status/awg_params
+      security: [{ adminToken: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                weight: { type: integer, minimum: 0, maximum: 1000 }
+                status: { type: string, enum: [healthy, unhealthy] }
+                awg_params: { $ref: "#/components/schemas/AwgParams" }
+      responses: { "200": { description: updated }, "404": { description: not found } }
+    delete:
+      tags: [admin]
+      summary: Decommission a node (out of issuance, best-effort peer drain, row deleted)
+      security: [{ adminToken: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "204": { description: deleted }, "404": { description: not found } }
+  /admin/payments:
+    get:
+      tags: [admin]
+      summary: Recent payments (status filter, paging)
+      security: [{ adminToken: [] }]
+      parameters:
+        - { name: status_filter, in: query, schema: { type: string, enum: [pending, paid, failed] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses: { "200": { description: payments } }
+  /admin/payments/reconcile:
+    post:
+      tags: [admin]
+      summary: Manual sweep of pending payments against the provider API
+      security: [{ adminToken: [] }]
+      responses:
+        "202": { description: reconciled }
+        "503": { description: billing provider not configured }
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: Audit trail (latest first)
+      security: [{ adminToken: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses: { "200": { description: audit entries } }
+  /admin/stats:
+    get:
+      tags: [admin]
+      summary: Operational dashboard (statuses, presence, traffic, health matrix, loop heartbeats)
+      security: [{ adminToken: [] }]
+      responses: { "200": { description: stats } }
+  /admin/activation-tokens:
+    post:
+      tags: [admin]
+      summary: Mint a one-time activation token (web purchase bridge)
+      security: [{ adminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id]
+              properties:
+                plan_id: { type: string, example: m1 }
+      responses:
+        "200":
+          description: raw token (shown ONCE; only the sha256 digest is stored)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, expires_at]
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/users/{id}/provision:
+    post:
+      tags: [admin]
+      summary: Provision a user's pubkey across the pool (SSH awg set peer + syncconf)
+      security: [{ adminToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: provisioning accepted
+  /admin/users/{id}/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke a user's peers across the pool
+      security: [{ adminToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: revocation accepted
