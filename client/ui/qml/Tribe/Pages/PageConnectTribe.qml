@@ -556,8 +556,11 @@ PageType {
                 // На время свитча — бесконечное вращение. // AVPN
                 Shape {
                     id: refreshIcon
-                    width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter
-                    transform: Scale { xScale: 20/24; yScale: 20/24 }
+                    // 24×24 = система координат путей (24-сетка) → Item.Center=(12,12)=центр иконки.
+                    // scale-конвенс (а НЕ transform:Scale{origin 0,0}) → и масштаб, и вращение вокруг
+                    // центра → крутится ровно вокруг своей оси, без биения. // AVPN
+                    width: 24; height: 24; anchors.verticalCenter: parent.verticalCenter
+                    scale: 20/24; transformOrigin: Item.Center
                     preferredRendererType: Shape.CurveRenderer
                     RotationAnimation on rotation {
                         running: root.hasEngine && TribeEngine.busy && !Theme.motion.reduceMotion
