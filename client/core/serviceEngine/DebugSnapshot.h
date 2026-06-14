@@ -15,6 +15,12 @@ struct NodeDebugRow {
     QString endpoint;        // AVPN: "host:port" — для показа реального сервера в UI (карточка/Серверы)
     double  scoreMs = 0.0;
     bool    healthy = true;
+    // AVPN (live-node picker): обогащённый пул для шторки выбора сервера. Источник правды — backend
+    // (weight оператора + health-агрегат из /v1/subscription), TCP-RTT не показываем (AWG = UDP-only).
+    double  weight = 1.0;    // AVPN: вес оператора (ёмкость/нагрузка) — сортировка/фолбэк-выбор
+    double  healthAgg = 1.0; // AVPN: агрегат backend-health 0..1 (пусто = 1.0 = живой) → 0..4 бара в UI
+    bool    alive = true;    // AVPN: жив ли узел по backend-данным (healthAgg > 0)
+    bool    current = false; // AVPN: == текущая выбранная нода (для акцента/галки в UI)
     QString reason;          // почему так ранжирована / последний вердикт пробы
 };
 

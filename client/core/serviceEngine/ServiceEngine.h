@@ -55,6 +55,21 @@ public:
     bool notifyConnectionLost();
     QString currentNodeId() const { return m_currentNodeId; }
 
+    // AVPN (live-node picker): ручной выбор/ротация поверх авто-логики.
+    //  switchToNode(nodeId) — «Закрепить»: m_pinnedNodeId=nodeId; если онлайн → Switcher на эту ноду,
+    //    иначе connect() стартует с неё. Движок сам с закреплённой ради скорости не уходит.
+    //  rotateNext() — round-robin по живым нодам (сортировка weight↓/health↓/nodeId↑), круговой индекс
+    //    от текущей → следующая (заворот). Кнопка «Обновить подключение». 2 узла → пинг-понг.
+    //  pinnedNodeId() — закреплённая пользователем нода (пусто = авто).
+    // Возвращают true при успешном свитче/старте; false + error — нет такой/живой ноды или провал.
+    bool switchToNode(const QString &nodeId, QString &error); // AVPN
+    bool rotateNext(QString &error);                          // AVPN
+    QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
+    // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация
+    // (rotateNext) снимают pin — иначе connect() всегда отдаёт приоритет закреплённой ноде, и
+    // возврат-в-авто / offline-ротация молча ломаются (reselect закреплённой).
+    void clearPin() { m_pinnedNodeId.clear(); }               // AVPN
+
     // AVPN: правдивый статус. up() ставит туннель в очередь (async), поэтому connect() остаётся в
     // Connecting; реальные переходы прилетают из VpnConnection::connectionStateChanged через
     // AvpnEngineQml. Вызывать ТОЛЬКО из onConnectionStateChanged (enum-free, без зависимости на Vpn::).
@@ -99,6 +114,11 @@ public:
 private:
     bool onDead(); // выбрать кандидата (исключая текущую) и переключиться
 
+    // AVPN (live-node picker): backend-фолбэк выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB
+    // (мёртвая/текущая). Живой = health-агрегат > 0; пустой health = живой (бэкенд провижинит живыми).
+    // Не делает I/O (в отличие от Selector::pick) — чистый выбор по данным подписки. nullptr = нет.
+    const SubscriptionNode *pickByWeight(const QString &exclA, const QString &exclB) const; // AVPN
+
     Identity      m_identity;
     NodePool      m_pool;
     Selector      m_selector;
@@ -107,6 +127,7 @@ private:
     ITunnelControl *m_tunnel = nullptr;
     EngineState   m_state = EngineState::Disconnected;
     QString       m_currentNodeId;
+    QString       m_pinnedNodeId; // AVPN: закреплённая пользователем нода (switchToNode); пусто = авто
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;

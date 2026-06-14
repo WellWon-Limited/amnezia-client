@@ -426,12 +426,16 @@ PageType {
         spacing: Theme.space.lg
         z: 30
 
-        // карточка сервера
+        // карточка сервера — тап открывает шторку выбора сервера (TribeNodeSheet). // AVPN
         Rectangle {
+            id: serverCard
             width: parent.width; implicitHeight: 84; height: 84
             radius: 24
             color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
             border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
+            // press-scale (как у кнопок) — тактильный отклик при тапе по карточке
+            scale: serverCardMa.pressed ? 0.985 : 1.0
+            Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
             Row {
                 anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
                 spacing: Theme.space.lg
@@ -475,16 +479,15 @@ PageType {
                     Rectangle { width: 4; height: 12; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
                     Rectangle { width: 4; height: 16; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
                 }
-                Shape {
-                    visible: root.curNode.hasNode
-                    width: 18; height: 18; anchors.verticalCenter: parent.verticalCenter
-                    preferredRendererType: Shape.CurveRenderer
-                    ShapePath { strokeColor: root.slate500; fillColor: "transparent"; strokeWidth: 2
-                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                        PathSvg { path: "M7 4 L13 9 L7 14" } }
-                }
             }
-            // карточка-инфо (без перехода): Серверы ушли в админ-панель (#5). // AVPN
+            // тап по всей карточке → шторка выбора сервера (живые узлы пула). Шеврон убран. // AVPN
+            MouseArea {
+                id: serverCardMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: nodeSheet.open()
+            }
         }
 
         // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────
@@ -533,8 +536,8 @@ PageType {
             }
         }
 
-        // кнопка «Обновить коннект» → ротация на ДРУГУЮ ноду (TribeEngine.manualSwitch,
-        // исключает текущую). Активна только при подключении; на время свитча — busy. // AVPN
+        // кнопка «Обновить коннект» → round-robin на следующую живую ноду (TribeEngine.rotateNext,
+        // круговой обход от текущей с заворотом). Активна только при подключении; на время свитча — busy. // AVPN
         Rectangle {
             id: refreshBtn
             visible: !root.subExpired
@@ -580,9 +583,15 @@ PageType {
                         TribeEngine.start()
                         return
                     }
-                    TribeEngine.manualSwitch()   // форс-свитч на другую ноду (исключая текущую)
+                    TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
                 }
             }
         }
+    }
+
+    // AVPN (live-node picker): шторка выбора сервера. z выше bottomBlock (z:30) → перекрывает сцену.
+    TribeNodeSheet {
+        id: nodeSheet
+        z: 200
     }
 }

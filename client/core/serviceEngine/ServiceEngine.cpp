@@ -8,6 +8,37 @@
 
 namespace avpn {
 
+// AVPN (live-node picker): агрегат backend-health узла в [0..1]. Пустой health = 1.0 (живой) — бэкенд
+// провижинит узлы /v1/subscription уже живыми, отсутствие телеметрии не значит «мёртв». Среднее по
+// всем target'ам (telegram/google/…). См. spec §13-14.
+static double healthAggregate(const SubscriptionNode &n) // AVPN
+{
+    if (n.health.isEmpty())
+        return 1.0;
+    double sum = 0.0;
+    for (auto it = n.health.constBegin(); it != n.health.constEnd(); ++it)
+        sum += it.value();
+    return sum / static_cast<double>(n.health.size());
+}
+
+// AVPN (live-node picker): выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB. Без I/O.
+const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const QString &exclB) const // AVPN
+{
+    const QList<SubscriptionNode> &all = m_pool.nodes();
+    const SubscriptionNode *best = nullptr;
+    for (const SubscriptionNode &n : all) {
+        if (!exclA.isEmpty() && n.nodeId == exclA)
+            continue;
+        if (!exclB.isEmpty() && n.nodeId == exclB)
+            continue;
+        if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
+            continue;
+        if (!best || n.weight > best->weight)
+            best = &n;
+    }
+    return best;
+}
+
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
 {
     Subscription sub;
@@ -41,16 +72,23 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
-    auto candidate = m_selector.pick(m_pool, m_currentNodeId); // C-4: TCP-ping → score → choose
-    if (!candidate && !m_pool.nodes().isEmpty()) {
-        // MVP-фолбэк (спайк §9.3): AWG-порт UDP-only → TCP-ping может не пройти ни до одной
-        // ноды (фильтр выкинет всё). Не отказываем: берём ноду с максимальным weight (бэкенд).
-        const auto &all = m_pool.nodes();
-        const SubscriptionNode *best = &all.first();
-        for (const SubscriptionNode &n : all)
-            if (n.weight > best->weight)
-                best = &n;
-        candidate = *best;
+    std::optional<SubscriptionNode> candidate; // AVPN: optional — закрепление/weight-фолбэк ниже
+    // AVPN (live-node picker): если пользователь закрепил ноду — стартуем с неё (она есть и жива).
+    // Закрепление имеет приоритет над авто-скорингом: «движок не уходит ради скорости» (spec §23-25).
+    if (!m_pinnedNodeId.isEmpty()) {
+        for (const SubscriptionNode &n : m_pool.nodes())
+            if (n.nodeId == m_pinnedNodeId && healthAggregate(n) > 0.0) {
+                candidate = n;
+                break;
+            }
+    }
+    if (!candidate)
+        candidate = m_selector.pick(m_pool, m_currentNodeId); // C-4: TCP-ping → score → choose
+    if (!candidate) {
+        // MVP-фолбэк (спайк §9.3): AWG-порт UDP-only → TCP-ping может не пройти ни до одной ноды
+        // (фильтр выкинет всё). Не отказываем: берём живую ноду с максимальным weight (бэкенд).
+        if (const SubscriptionNode *best = pickByWeight(QString(), QString())) // AVPN
+            candidate = *best;
     }
     if (!candidate) {
         error = QStringLiteral("no nodes available");
@@ -182,7 +220,16 @@ bool ServiceEngine::onDead()
 {
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду
-    const auto candidate = m_selector.pick(m_pool, QString(), 75, 0, 3000, m_currentNodeId);
+    std::optional<SubscriptionNode> candidate =
+        m_selector.pick(m_pool, QString(), 75, 0, 3000, m_currentNodeId);
+    if (!candidate) {
+        // AVPN (live-node picker): weight-фолбэк зеркалит connect() — чинит авто-failover при AWG-UDP,
+        // когда TCP-ping не достукивается ни до одной ноды. Берём живую ноду с max weight, исключая
+        // мёртвую (текущую). Закрепление НЕ учитываем (spec §24-26): при смерти закреплённой уходим на
+        // лучшую живую и остаёмся там — назад сам не прыгаем.
+        if (const SubscriptionNode *best = pickByWeight(m_currentNodeId, QString())) // AVPN
+            candidate = *best;
+    }
     if (!candidate) {
         m_state = EngineState::Error;
         return false;
@@ -241,12 +288,120 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         row.name = n.name;         // AVPN: имя сервера (опц.)
         row.countryCode = n.countryCode; // AVPN: ISO-3166 alpha-2 → флаг-эмодзи в UI
         row.endpoint = n.endpoint; // AVPN: реальный host:port для UI
-        row.healthy = true; // TODO(C-4 proactive): хранить измеренный score/health пула
+        // AVPN (live-node picker): обогащаем строку backend-данными (weight + health-агрегат). Источник
+        // правды — подписка; TCP-RTT не показываем (AWG = UDP). alive/current → акцент/бары в шторке.
+        const double agg = healthAggregate(n);
+        row.weight = n.weight;
+        row.healthAgg = agg;
+        row.alive = agg > 0.0;
+        row.current = (n.nodeId == m_currentNodeId);
+        row.healthy = row.alive; // легаси-поле: теперь = alive (backend), не заглушка true
         row.reason = (n.nodeId == m_currentNodeId) ? QStringLiteral("current") : QString();
         s.pool << row;
     }
     s.switchLog = m_switchLog;
     return s;
+}
+
+// AVPN (live-node picker): «Закрепить» — пользователь явно выбрал ноду. Запоминаем закрепление и
+// либо переключаемся на неё (если онлайн — Switcher), либо стартуем connect() с неё (он уже учитывает
+// m_pinnedNodeId). Авто-логика после этого с закреплённой ради скорости не уходит; при её смерти —
+// onDead() уведёт на лучшую живую и ОСТАНЕТСЯ там (назад вручную). Spec §23-26.
+bool ServiceEngine::switchToNode(const QString &nodeId, QString &error) // AVPN
+{
+    if (nodeId.isEmpty()) {
+        error = QStringLiteral("empty nodeId");
+        return false;
+    }
+    m_pinnedNodeId = nodeId;
+
+    // Найти выбранную ноду в подписке (копия по значению — НЕ кэшируем указатель через сетевой вызов).
+    SubscriptionNode target;
+    bool found = false;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (n.nodeId == nodeId) { target = n; found = true; break; }
+    if (!found) {
+        error = QStringLiteral("node not in subscription: %1").arg(nodeId);
+        return false;
+    }
+
+    if (m_state == EngineState::Connected) {
+        // Онлайн — in-place peer swap на закреплённую ноду.
+        const QString from = m_currentNodeId;
+        const TunnelResult r = m_switcher.switchTo(m_pool.subscription(), target);
+        if (!r.ok) {
+            m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3").arg(from, nodeId, r.error));
+            error = r.error;
+            m_state = EngineState::Error;
+            return false;
+        }
+        m_switchLog.append(QStringLiteral("switch %1→%2: pinned (manual)").arg(from, nodeId));
+        if (m_switchLog.size() > 20)
+            m_switchLog.removeFirst();
+        m_currentNodeId = nodeId;
+        m_health.reset();
+        m_state = EngineState::Connected;
+        return true;
+    }
+
+    // Оффлайн — поднять туннель с закреплённой ноды (connect() уже отдаёт приоритет m_pinnedNodeId).
+    return connect(error);
+}
+
+// AVPN (live-node picker): round-robin «Обновить подключение». Список ЖИВЫХ нод (health-агрегат > 0;
+// пустой health = живой), детерминированная сортировка (weight↓ / health↓ / nodeId↑ — устойчивая,
+// без джиттера). Круговой индекс от текущей → следующая (заворот); 2 узла → пинг-понг.
+bool ServiceEngine::rotateNext(QString &error) // AVPN
+{
+    // Ручная ротация ≠ «закрепить»: снимаем закрепление, иначе offline-ветка ниже (m_currentNodeId=target
+    // → connect()) перебивается приоритетом m_pinnedNodeId в connect() и ротация молча no-op'ит на pin.
+    m_pinnedNodeId.clear(); // AVPN
+    QList<SubscriptionNode> live;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (healthAggregate(n) > 0.0)
+            live.append(n);
+    if (live.size() < 2) {
+        error = QStringLiteral("not enough live nodes to rotate");
+        return false;
+    }
+    std::sort(live.begin(), live.end(), [](const SubscriptionNode &a, const SubscriptionNode &b) {
+        if (a.weight != b.weight)
+            return a.weight > b.weight;               // weight↓
+        const double ha = healthAggregate(a), hb = healthAggregate(b);
+        if (ha != hb)
+            return ha > hb;                           // health↓
+        return a.nodeId < b.nodeId;                   // nodeId↑ (tie-break — против застревания)
+    });
+
+    int cur = -1;
+    for (int i = 0; i < live.size(); ++i)
+        if (live.at(i).nodeId == m_currentNodeId) { cur = i; break; }
+    const int next = (cur < 0) ? 0 : (cur + 1) % live.size();
+    const SubscriptionNode target = live.at(next); // копия по значению
+
+    // Закрепление снято выше — это ручная ротация, а не «закрепить» (switchToNode).
+    if (m_state == EngineState::Connected) {
+        const QString from = m_currentNodeId;
+        const TunnelResult r = m_switcher.switchTo(m_pool.subscription(), target);
+        if (!r.ok) {
+            m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3").arg(from, target.nodeId, r.error));
+            error = r.error;
+            m_state = EngineState::Error;
+            return false;
+        }
+        m_switchLog.append(QStringLiteral("switch %1→%2: rotate (manual)").arg(from, target.nodeId));
+        if (m_switchLog.size() > 20)
+            m_switchLog.removeFirst();
+        m_currentNodeId = target.nodeId;
+        m_health.reset();
+        m_state = EngineState::Connected;
+        return true;
+    }
+
+    // Оффлайн — стартуем туннель с выбранной ноды. m_pinnedNodeId уже снят выше (ручная ротация);
+    // укажем currentNodeId, чтобы connect() стартовал с выбранной (без приоритета закрепления).
+    m_currentNodeId = target.nodeId;
+    return connect(error);
 }
 
 } // namespace avpn

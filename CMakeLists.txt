@@ -4,7 +4,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PROJECT AmneziaVPN)
-set(AMNEZIAVPN_VERSION 4.9.2.14)
+set(AMNEZIAVPN_VERSION 5.0.0.15)
+
+# AVPN: Tribe — СОБСТВЕННАЯ версия (ВСЕ платформы: iOS/macOS/Android/Windows) перекрывает upstream
+# Amnezia. НИКОГДА не откатываемся на 4.9.x. Значение живёт в tribe_version.cmake (наш файл — апстрим
+# его не трогает → merge не перетрёт). Бампать ТОЛЬКО там. См. docs/amnezia-fork/VERSIONING.md. // AVPN
+include(${CMAKE_CURRENT_LIST_DIR}/tribe_version.cmake)
+set(AMNEZIAVPN_VERSION ${TRIBE_VERSION})
 
 set(QT_CREATOR_SKIP_PACKAGE_MANAGER_SETUP ON CACHE BOOL "" FORCE)
 set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES
@@ -29,6 +35,8 @@ set(RELEASE_DATE "${CURRENT_DATE}")
 
 set(APP_MAJOR_VERSION ${CMAKE_PROJECT_VERSION_MAJOR}.${CMAKE_PROJECT_VERSION_MINOR}.${CMAKE_PROJECT_VERSION_PATCH})
 set(APP_ANDROID_VERSION_CODE 2123)
+# AVPN: Android versionCode — тоже из нашего tribe_version.cmake (перекрывает upstream). // AVPN
+set(APP_ANDROID_VERSION_CODE ${TRIBE_ANDROID_VERSION_CODE})
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
     set(MZ_PLATFORM_NAME "linux")
