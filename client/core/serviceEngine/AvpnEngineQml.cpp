@@ -134,16 +134,19 @@ int AvpnEngineQml::daysLeft() const
     return secs <= 0 ? 0 : static_cast<int>(secs / 86400);
 }
 
-// AVPN: реальный текущий сервер для карточки Connect. До подключения показываем первую ноду пула.
+// AVPN: текущий сервер для карточки Connect. Показываем ноду ТОЛЬКО когда реально подключены/
+// переключаемся; до коннекта и после стопа hasNode=false → карточка показывает «Умный выбор сервера»
+// (умный выбор происходит в момент connect, выбранная нода видна уже подключённой). Без fallback на
+// pool.first() — иначе в простое показывалась «Польша».
 QVariantMap AvpnEngineQml::currentNode() const
 {
     const DebugSnapshot s = m_engine.debugSnapshot();
+    const bool live = (s.state == QLatin1String("connected") || s.state == QLatin1String("switching"));
     const NodeDebugRow *pick = nullptr;
-    for (const NodeDebugRow &r : s.pool) {
-        if (r.nodeId == s.currentNodeId) { pick = &r; break; }
+    if (live && !s.currentNodeId.isEmpty()) {
+        for (const NodeDebugRow &r : s.pool)
+            if (r.nodeId == s.currentNodeId) { pick = &r; break; }
     }
-    if (!pick && !s.pool.isEmpty())
-        pick = &s.pool.first();
     QVariantMap node;
     node["nodeId"]    = pick ? pick->nodeId : QString();
     node["region"]    = pick ? pick->region : QString();

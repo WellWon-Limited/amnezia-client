@@ -112,12 +112,21 @@ public:
     Identity &identity() { return m_identity; }
 
 private:
-    bool onDead(); // выбрать кандидата (исключая текущую) и переключиться
+    // tunnelStillUp=true (health-DEAD из tick — туннель ещё «поднят») → down()→ждём Disconnected→up();
+    // false (failover из реального Disconnected/Error — туннель уже опущен) → up() сразу.
+    bool onDead(bool tunnelStillUp); // выбрать кандидата (исключая текущую) и переключиться
 
     // AVPN (live-node picker): backend-фолбэк выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB
     // (мёртвая/текущая). Живой = health-агрегат > 0; пустой health = живой (бэкенд провижинит живыми).
     // Не делает I/O (в отличие от Selector::pick) — чистый выбор по данным подписки. nullptr = нет.
     const SubscriptionNode *pickByWeight(const QString &exclA, const QString &exclB) const; // AVPN
+
+    // AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч. requestSwitch ставит m_state=Switching
+    // (→ transient Disconnected/Error от down() НЕ запускает failover) и: при tunnelUp — down(), ждём
+    // реальный Disconnected (onTunnelDisconnected→continuePendingSwitch→up); при !tunnelUp — up() сразу.
+    // НЕЛЬЗЯ up() сразу после down() на iOS (NEVPNManager «Operation Cancelled»). reason — для switchLog.
+    bool requestSwitch(const QString &targetNodeId, bool tunnelUp, const QString &reason); // AVPN
+    bool continuePendingSwitch(); // AVPN: поднять up() на отложенную целевую ноду (туннель уже опущен)
 
     Identity      m_identity;
     NodePool      m_pool;
@@ -128,6 +137,8 @@ private:
     EngineState   m_state = EngineState::Disconnected;
     QString       m_currentNodeId;
     QString       m_pinnedNodeId; // AVPN: закреплённая пользователем нода (switchToNode); пусто = авто
+    QString       m_pendingSwitchNodeId; // AVPN: целевая нода во время двухфазного свитча (пусто = нет)
+    QString       m_pendingSwitchReason; // AVPN: причина для switchLog (pinned/rotate/dead)
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;

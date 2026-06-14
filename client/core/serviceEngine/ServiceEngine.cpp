@@ -163,7 +163,7 @@ bool ServiceEngine::tick(qint64 nowEpoch)
         return false;
     const TunnelStats stats = m_tunnel->readStats();
     if (m_health.feed(stats, nowEpoch))
-        return onDead();
+        return onDead(/*tunnelStillUp=*/true); // health-DEAD: туннель ещё «поднят» → down→ждём→up
     return false;
 }
 
@@ -171,7 +171,7 @@ bool ServiceEngine::notifyConnectionLost()
 {
     if (m_state != EngineState::Connected)
         return false;
-    return onDead();
+    return onDead(/*tunnelStillUp=*/false); // реальный обрыв: туннель уже опущен → up() сразу
 }
 
 // AVPN: правдивые переходы из реального состояния VpnConnection (см. ServiceEngine.h).
@@ -189,6 +189,10 @@ bool ServiceEngine::onTunnelConnected() // AVPN
 
 bool ServiceEngine::onTunnelError() // AVPN
 {
+    // AVPN: ошибка в фазе down() свитча (iOS иногда рапортует Error вместо чистого Disconnected при
+    // тиар-дауне) — это ожидаемо, продолжаем секвенс (up() на целевую), а не валимся в Error.
+    if (m_state == EngineState::Switching && !m_pendingSwitchNodeId.isEmpty())
+        return continuePendingSwitch();
     if (m_state == EngineState::Error)
         return false;
     m_state = EngineState::Error;
@@ -197,6 +201,10 @@ bool ServiceEngine::onTunnelError() // AVPN
 
 bool ServiceEngine::onTunnelDisconnected() // AVPN
 {
+    // AVPN (двухфазный свитч): Disconnected во время свитча — это ОЖИДАЕМЫЙ обрыв от down();
+    // теперь, когда туннель реально опущен, поднимаем up() на целевую ноду (iOS-safe секвенс).
+    if (m_state == EngineState::Switching && !m_pendingSwitchNodeId.isEmpty())
+        return continuePendingSwitch();
     // Реактивный failover уже покрыт notifyConnectionLost() (Connected→свитч). Здесь — только
     // честное отражение «отключено», когда движок НЕ в фазе подъёма (иначе это промежуточный
     // Disconnecting перед reconnect — не сбрасываем).
@@ -216,17 +224,16 @@ void ServiceEngine::requestStop() // AVPN
     m_health.reset();
 }
 
-bool ServiceEngine::onDead()
+bool ServiceEngine::onDead(bool tunnelStillUp)
 {
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду
     std::optional<SubscriptionNode> candidate =
         m_selector.pick(m_pool, QString(), 75, 0, 3000, m_currentNodeId);
     if (!candidate) {
-        // AVPN (live-node picker): weight-фолбэк зеркалит connect() — чинит авто-failover при AWG-UDP,
-        // когда TCP-ping не достукивается ни до одной ноды. Берём живую ноду с max weight, исключая
-        // мёртвую (текущую). Закрепление НЕ учитываем (spec §24-26): при смерти закреплённой уходим на
-        // лучшую живую и остаёмся там — назад сам не прыгаем.
+        // weight-фолбэк зеркалит connect() — чинит авто-failover при AWG-UDP, когда TCP-ping не
+        // достукивается ни до одной ноды. Закрепление НЕ учитываем (spec §24-26): при смерти
+        // закреплённой уходим на лучшую живую и остаёмся там — назад сам не прыгаем.
         if (const SubscriptionNode *best = pickByWeight(m_currentNodeId, QString())) // AVPN
             candidate = *best;
     }
@@ -234,20 +241,56 @@ bool ServiceEngine::onDead()
         m_state = EngineState::Error;
         return false;
     }
-    const QString from = m_currentNodeId;
-    const TunnelResult r = m_switcher.switchTo(m_pool.subscription(), *candidate); // applyPeer (MVP: down+up)
-    if (!r.ok) {
-        m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3")
-                               .arg(from, candidate->nodeId, r.error));
-        m_state = EngineState::Error;
+    // AVPN: через двухфазный секвенс-свитч (без back-to-back down+up — iOS-safe; без failover-гонки).
+    return requestSwitch(candidate->nodeId, tunnelStillUp, QStringLiteral("dead (failover)"));
+}
+
+// AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч — см. объявление в ServiceEngine.h.
+bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, const QString &reason)
+{
+    if (!m_tunnel) { m_state = EngineState::Error; return false; }
+    bool found = false;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (n.nodeId == targetNodeId) { found = true; break; }
+    if (!found)
         return false;
+    m_pendingSwitchNodeId = targetNodeId;
+    m_pendingSwitchReason = reason;
+    m_state = EngineState::Switching;       // гард: transient Disconnected/Error от down() не триггерит failover
+    m_health.reset();
+    if (tunnelUp) {
+        m_tunnel->down();                   // ждём реальный Disconnected → continuePendingSwitch() поднимет up()
+        return true;
     }
-    m_switchLog.append(QStringLiteral("switch %1→%2: dead (no rx, tx grew)").arg(from, candidate->nodeId));
+    return continuePendingSwitch();         // туннель уже опущен → up() сразу
+}
+
+bool ServiceEngine::continuePendingSwitch() // AVPN
+{
+    if (m_pendingSwitchNodeId.isEmpty())
+        return false;
+    SubscriptionNode target;
+    bool found = false;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (n.nodeId == m_pendingSwitchNodeId) { target = n; found = true; break; }
+    const QString from = m_currentNodeId;
+    const QString tid = m_pendingSwitchNodeId;
+    const QString reason = m_pendingSwitchReason;
+    m_pendingSwitchNodeId.clear();
+    m_pendingSwitchReason.clear();
+    if (!found || !m_tunnel) { m_state = EngineState::Error; return true; }
+    const TunnelResult r = m_tunnel->up(m_pool.subscription(), target); // прямой up() (без повторного down)
+    if (!r.ok) {
+        m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3").arg(from, tid, r.error));
+        m_state = EngineState::Error;
+        return true;
+    }
+    m_switchLog.append(QStringLiteral("switch %1→%2: %3").arg(from, tid, reason));
     if (m_switchLog.size() > 20)
         m_switchLog.removeFirst();
-    m_currentNodeId = candidate->nodeId;
+    m_currentNodeId = tid;
     m_health.reset();
-    m_state = EngineState::Connected;
+    // остаёмся Switching; onTunnelConnected() подтвердит Connected, когда туннель реально поднимется.
     return true;
 }
 
@@ -325,22 +368,12 @@ bool ServiceEngine::switchToNode(const QString &nodeId, QString &error) // AVPN
         return false;
     }
 
-    if (m_state == EngineState::Connected) {
-        // Онлайн — in-place peer swap на закреплённую ноду.
-        const QString from = m_currentNodeId;
-        const TunnelResult r = m_switcher.switchTo(m_pool.subscription(), target);
-        if (!r.ok) {
-            m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3").arg(from, nodeId, r.error));
-            error = r.error;
-            m_state = EngineState::Error;
+    if (m_state == EngineState::Connected || m_state == EngineState::Switching) {
+        // Онлайн — двухфазный секвенс-свитч на закреплённую ноду (iOS-safe; без failover-гонки/шторма).
+        if (!requestSwitch(nodeId, /*tunnelUp=*/true, QStringLiteral("pinned (manual)"))) {
+            error = QStringLiteral("switch to node failed: %1").arg(nodeId);
             return false;
         }
-        m_switchLog.append(QStringLiteral("switch %1→%2: pinned (manual)").arg(from, nodeId));
-        if (m_switchLog.size() > 20)
-            m_switchLog.removeFirst();
-        m_currentNodeId = nodeId;
-        m_health.reset();
-        m_state = EngineState::Connected;
         return true;
     }
 
@@ -380,21 +413,12 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
     const SubscriptionNode target = live.at(next); // копия по значению
 
     // Закрепление снято выше — это ручная ротация, а не «закрепить» (switchToNode).
-    if (m_state == EngineState::Connected) {
-        const QString from = m_currentNodeId;
-        const TunnelResult r = m_switcher.switchTo(m_pool.subscription(), target);
-        if (!r.ok) {
-            m_switchLog.append(QStringLiteral("switch %1→%2 FAILED: %3").arg(from, target.nodeId, r.error));
-            error = r.error;
-            m_state = EngineState::Error;
+    if (m_state == EngineState::Connected || m_state == EngineState::Switching) {
+        // Онлайн — двухфазный секвенс-свитч на следующую ноду (iOS-safe, без шторма).
+        if (!requestSwitch(target.nodeId, /*tunnelUp=*/true, QStringLiteral("rotate (manual)"))) {
+            error = QStringLiteral("rotate failed");
             return false;
         }
-        m_switchLog.append(QStringLiteral("switch %1→%2: rotate (manual)").arg(from, target.nodeId));
-        if (m_switchLog.size() > 20)
-            m_switchLog.removeFirst();
-        m_currentNodeId = target.nodeId;
-        m_health.reset();
-        m_state = EngineState::Connected;
         return true;
     }
 
