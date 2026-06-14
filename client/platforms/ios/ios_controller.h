@@ -83,6 +83,10 @@ public:
 signals:
     void connectionStateChanged(Vpn::ConnectionState state);
     void bytesChanged(quint64 receivedBytes, quint64 sentBytes);
+    // AVPN: возраст WG-хендшейка (unix sec, 0 = нет/неизвестно) — для DEAD-детекта serviceEngine
+    // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
+    // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
+    void handshakeChanged(qint64 lastHandshakeEpochSec);
     void importConfigFromOutside(const QString);
     void importBackupFromOutside(const QString);
 

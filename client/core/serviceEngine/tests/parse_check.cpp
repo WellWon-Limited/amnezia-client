@@ -3,7 +3,9 @@
 #include "../AwgConfigBuilder.h"
 #include "../Enrollment.h"
 #include "../HealthLoop.h"
+#include "../MtprotoProbe.h"
 #include "../Selector.h"
+#include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
 
 #include <QCoreApplication>
@@ -182,6 +184,110 @@ int main(int argc, char **argv)
         printf("healthloop: OK (one-way death→DEAD, healthy/idle/fresh-handshake→alive, exclude works)\n");
     }
 
-    printf("OK: parsed + config + enrollment + selector + healthloop\n");
+    // --- SignalQuality: RTT→5 баров + EWMA-сглаживание + гистерезис (детерминированно) ---
+    {
+        // 1) Чистая таблица порогов RTT→бары (ITU-T G.114 + Cisco VoIP + игровой консенсус).
+        bool mapOk = SignalQuality::barsForRtt(30) == 5
+                     && SignalQuality::barsForRtt(49) == 5 && SignalQuality::barsForRtt(50) == 4
+                     && SignalQuality::barsForRtt(99) == 4 && SignalQuality::barsForRtt(100) == 3
+                     && SignalQuality::barsForRtt(149) == 3 && SignalQuality::barsForRtt(150) == 2
+                     && SignalQuality::barsForRtt(299) == 2 && SignalQuality::barsForRtt(300) == 1
+                     && SignalQuality::barsForRtt(799) == 1 && SignalQuality::barsForRtt(800) == 0
+                     && SignalQuality::barsForRtt(-1) == 0; // недостижимо → 0
+
+        // 2) Первый сэмпл сидирует SRTT и показывает уровень сразу (без дебаунса).
+        SignalQuality q;
+        int b0 = q.feed(80, true);            // srtt=80 → 4 бара
+        int srtt0 = q.smoothedRtt();
+
+        // 3) Одиночный спайк поглощается EWMA(α=1/8): 80→spike240 ⇒ srtt=100, бар держится 4 (анти-дребезг).
+        int b1 = q.feed(240, true);           // srtt=(7*80+240)/8=100; гистерезис band4 [44,112) → остаёмся 4
+        int srtt1 = q.smoothedRtt();
+
+        // 4) Устойчиво высокий RTT (второй 240): srtt≈118 покидает расширенную полосу → падаем до 3.
+        int b2 = q.feed(240, true);           // srtt≈117.5 → 3
+
+        // 5) Hard-gate: недостижимо → немедленно 0 (мимо сглаживания/дебаунса), затем восстановление.
+        SignalQuality q2;
+        q2.feed(40, true);                    // 5 баров
+        int down = q2.feed(-1, false);        // нет ответа → 0 сразу
+        int up = q2.feed(40, true);           // вернулась связь → снова 5
+
+        printf("signal: map=%d b0=%d srtt0=%d b1=%d srtt1=%d b2=%d down=%d up=%d\n",
+               mapOk, b0, srtt0, b1, srtt1, b2, down, up);
+
+        bool sigOk = mapOk
+                     && b0 == 4 && srtt0 == 80
+                     && b1 == 4 && srtt1 == 100      // спайк поглощён, бар не дрогнул
+                     && b2 == 3                      // устойчивый рост RTT → -1 бар
+                     && down == 0 && up == 5;        // hard-gate вниз и восстановление вверх
+        if (!sigOk) { fprintf(stderr, "FAIL: SignalQuality mapping/smoothing mismatch\n"); return 9; }
+        printf("signalquality: OK (RTT→5 баров, EWMA-сглаживание, гистерезис, hard-gate недостижимости)\n");
+    }
+
+    // --- MtprotoProbe: req_pq_multi build + resPQ parse (детерминированно, login-free liveness) ---
+    {
+        auto le32 = [](QByteArray &b, quint32 v) {
+            b.append(char(v & 0xff)); b.append(char((v >> 8) & 0xff));
+            b.append(char((v >> 16) & 0xff)); b.append(char((v >> 24) & 0xff));
+        };
+        auto le64 = [](QByteArray &b, quint64 v) {
+            for (int i = 0; i < 8; ++i) b.append(char((v >> (8 * i)) & 0xff));
+        };
+
+        // фиксированный nonce 01..10 + произвольный валидный-вид msg_id
+        QByteArray nonce(16, Qt::Uninitialized);
+        for (int i = 0; i < 16; ++i) nonce[i] = char(i + 1);
+        const qint64 msgId = qint64(0x51E3025500000000LL);
+
+        // 1) Сборка unencrypted message: auth_key_id=0(8) + msgId(8) + len(4) + ctor(4) + nonce(16) = 40.
+        const QByteArray msg = MtprotoProbe::buildReqPqMulti(nonce, msgId);
+        bool buildOk = msg.size() == 40;
+        for (int i = 0; i < 8; ++i) buildOk = buildOk && msg[i] == 0;           // auth_key_id = 0
+        qint64 gotMsgId = 0; for (int i = 0; i < 8; ++i) gotMsgId |= qint64(quint8(msg[8 + i])) << (8 * i);
+        buildOk = buildOk && gotMsgId == msgId;
+        buildOk = buildOk && quint8(msg[16]) == 0x14 && msg[17] == 0 && msg[18] == 0 && msg[19] == 0; // len=20
+        buildOk = buildOk && quint8(msg[20]) == 0xf1 && quint8(msg[21]) == 0x8e   // be7e8ef1 (LE)
+                  && quint8(msg[22]) == 0x7e && quint8(msg[23]) == 0xbe;
+        buildOk = buildOk && msg.mid(24, 16) == nonce;                            // nonce на месте
+
+        // 2) Intermediate-фрейминг: 4-байтный LE-префикс длины (+ const-тег коннекта 0xeeeeeeee).
+        const QByteArray framed = MtprotoProbe::frameIntermediate(msg);
+        quint32 flen = quint8(framed[0]) | (quint8(framed[1]) << 8)
+                       | (quint8(framed[2]) << 16) | (quint32(quint8(framed[3])) << 24);
+        bool frameOk = framed.size() == msg.size() + 4 && flen == quint32(msg.size())
+                       && framed.mid(4) == msg && MtprotoProbe::kIntermediateTag == 0xeeeeeeeeu;
+
+        // 3) Парсинг синтетического resPQ: nonce эхо ⇒ true + извлечён server_nonce.
+        QByteArray sn(16, Qt::Uninitialized);
+        for (int i = 0; i < 16; ++i) sn[i] = char(0x40 + i);
+        auto makeResPq = [&](const QByteArray &nn, const QByteArray &svn) {
+            QByteArray data; le32(data, 0x05162463u); data.append(nn); data.append(svn);
+            data.append(char(0x08)); data.append(QByteArray(8, '\x11')); data.append(QByteArray(3, '\0')); // pq string (pad)
+            le32(data, 0x1cb5c415u); le32(data, 1); le64(data, 0xABCDEF0123456789ULL);                     // Vector<long>=[fp]
+            QByteArray m; le64(m, 0); le64(m, quint64(0x123400000000ULL)); le32(m, quint32(data.size())); m.append(data);
+            return m;
+        };
+        const QByteArray resp = makeResPq(nonce, sn);
+        QByteArray outSrv;
+        bool parseOk = MtprotoProbe::parseResPq(resp, nonce, &outSrv) && outSrv == sn;
+
+        // 4) Подделанный nonce и неверный конструктор ⇒ отказ (анти-false-positive).
+        QByteArray badNonce = nonce; badNonce[0] = char(quint8(badNonce[0]) ^ 0xff);
+        bool rejectNonce = !MtprotoProbe::parseResPq(resp, badNonce, nullptr);
+        QByteArray wrongCtor = resp; wrongCtor[20] = char(0x00);
+        bool rejectCtor = !MtprotoProbe::parseResPq(wrongCtor, nonce, nullptr);
+        bool rejectShort = !MtprotoProbe::parseResPq(resp.left(40), nonce, nullptr); // обрезано → отказ
+
+        printf("mtproto: build=%d frame=%d parse=%d rejN=%d rejC=%d rejS=%d srv=%s\n",
+               buildOk, frameOk, parseOk, rejectNonce, rejectCtor, rejectShort,
+               outSrv == sn ? "ok" : "bad");
+
+        bool mtOk = buildOk && frameOk && parseOk && rejectNonce && rejectCtor && rejectShort;
+        if (!mtOk) { fprintf(stderr, "FAIL: MtprotoProbe build/parse mismatch\n"); return 10; }
+        printf("mtprotoprobe: OK (req_pq_multi build, intermediate frame, resPQ parse, nonce/ctor/short reject)\n");
+    }
+
+    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto\n");
     return 0;
 }

@@ -4,6 +4,8 @@
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
+#include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 
@@ -37,6 +39,65 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // health-loop driver: периодический tick (3–5с).
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
+
+    // AVPN (реальные палочки): app-layer RTT-проба ЧЕРЕЗ туннель. AWG UDP-only ⇒ ICMP/TCP-пинг до
+    // эндпоинта пуст; реальный RTT даёт крошечный HTTPS-запрос к generate_204 через поднятый full-tunnel.
+    // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
+    // Поток RTT → m_signal (EWMA+гистерезис) → liveBars 0..5. Запуск — из onTick(), когда Connected.
+    m_probe = new QualityProbe(m_nam, this);
+    m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
+                           QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")});
+    connect(m_probe, &QualityProbe::result, this, [this](int rttMs, bool reachable) {
+        m_liveBars = m_signal.feed(rttMs, reachable);
+        m_liveRtt = m_signal.smoothedRtt();
+        m_liveReachable = reachable;
+        emit liveQualityChanged();
+    });
+
+    // AVPN (чипы доступности): проба «работает ли сервис через ЭТУ ноду» — с устройства через туннель
+    // (бэкенд знать не может: доступность = f(юзер,сеть,регион,нода,время)). Telegram — login-free
+    // MTProto handshake к seed-DC-IP (детект троттлинга сильнее, чем reachability); YouTube/прочие —
+    // TLS-complete с реальным SNI (грубая reachability; точный троттл-детект YouTube — TODO, см. ServiceProbe.h).
+    {
+        QList<ServiceProbeConfig> cfgs;
+        cfgs.append({QStringLiteral("telegram"),  ServiceProbeConfig::Mtproto,
+                     QStringLiteral("149.154.167.51"), 443, 1500}); // seed DC2 (рефреш через help.getConfig — TODO)
+        cfgs.append({QStringLiteral("youtube"),   ServiceProbeConfig::Https,
+                     QStringLiteral("www.youtube.com"), 443, 1500});
+        cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Https,
+                     QStringLiteral("www.instagram.com"), 443, 1500});
+        m_svcProbe = new ServiceProbe(m_nam, this);
+        m_svcProbe->setServices(cfgs);
+
+        // Сидируем список статусов (state=-1 «неизвестно») в порядке cfgs — UI рисует чипы сразу.
+        auto labelOf = [](const QString &k) {
+            if (k == QLatin1String("telegram"))  return QStringLiteral("Telegram");
+            if (k == QLatin1String("youtube"))   return QStringLiteral("YouTube");
+            if (k == QLatin1String("instagram")) return QStringLiteral("Instagram");
+            return k;
+        };
+        for (const ServiceProbeConfig &c : cfgs) {
+            QVariantMap m;
+            m[QStringLiteral("key")] = c.key;
+            m[QStringLiteral("label")] = labelOf(c.key);
+            m[QStringLiteral("state")] = -1;
+            m[QStringLiteral("rttMs")] = -1;
+            m_serviceStatus.append(m);
+        }
+        connect(m_svcProbe, &ServiceProbe::result, this,
+                [this](const QString &key, int state, int rttMs) {
+                    for (int i = 0; i < m_serviceStatus.size(); ++i) {
+                        QVariantMap m = m_serviceStatus.at(i).toMap();
+                        if (m.value(QStringLiteral("key")).toString() == key) {
+                            m[QStringLiteral("state")] = state;
+                            m[QStringLiteral("rttMs")] = rttMs;
+                            m_serviceStatus[i] = m;
+                            break;
+                        }
+                    }
+                    emit serviceStatusChanged();
+                });
+    }
 
     // AVPN (Task 7): таймер авто-паузы «для покупок». Одноразовый: истёк → бездействие → resume.
     m_pauseTimer.setSingleShot(true);
@@ -184,6 +245,20 @@ void AvpnEngineQml::onTick()
 {
     if (m_engine.tick(QDateTime::currentSecsSinceEpoch()))
         emit changed(); // произошёл свитч
+
+    // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
+    // measure() сам игнорит повторный запуск, пока предыдущий в полёте. На не-connected — не мерим
+    // и держим бары на 0 (hard-gate сбросит при следующем reachable=false, см. ниже onConnectionStateChanged).
+    if (m_probe && state() == QLatin1String("connected"))
+        m_probe->measure();
+}
+
+void AvpnEngineQml::probeServices()
+{
+    // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
+    // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
+    if (m_svcProbe && state() == QLatin1String("connected"))
+        m_svcProbe->probeAll();
 }
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
@@ -205,6 +280,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
         // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
         flushPendingPushToken();
+        // AVPN (чипы доступности): через ~1с после поднятия (маршруты/DNS осели) пробуем сервисы.
+        QTimer::singleShot(1000, this, &AvpnEngineQml::probeServices);
         break;
     case Vpn::Error:
         // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;
@@ -223,6 +300,31 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
         break;
     }
+
+    // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
+    // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
+    if (state() != QLatin1String("connected") && (m_liveBars != 0 || m_liveReachable || m_liveRtt >= 0)) {
+        m_signal.reset();
+        m_liveBars = 0;
+        m_liveRtt = -1;
+        m_liveReachable = false;
+        emit liveQualityChanged();
+
+        // AVPN (чипы доступности): обрыв/смена ноды → статусы сервисов больше не актуальны → «неизвестно».
+        bool anyKnown = false;
+        for (int i = 0; i < m_serviceStatus.size(); ++i) {
+            QVariantMap m = m_serviceStatus.at(i).toMap();
+            if (m.value(QStringLiteral("state")).toInt() != -1) {
+                m[QStringLiteral("state")] = -1;
+                m[QStringLiteral("rttMs")] = -1;
+                m_serviceStatus[i] = m;
+                anyKnown = true;
+            }
+        }
+        if (anyKnown)
+            emit serviceStatusChanged();
+    }
+
     emit changed();
 }
 

@@ -30,8 +30,10 @@ public:
     // wg-quick через sendProviderMessage→WireGuardAdapter.update; Android — новый JNI awgSetConfig (см. README).
     TunnelResult applyPeer(const Subscription &sub, const SubscriptionNode &node) override;
 
-    // readStats: rx/tx из bytesChanged. latestHandshake на этом слое не отдаётся — для DEAD-детекта
-    // по handshake нужен платформенный status (desktop getStatus / iOS checkStatus / android getLastHandshake).
+    // readStats: rx/tx из bytesChanged; latestHandshakeEpoch — из платформенного сигнала handshakeChanged.
+    //   iOS:     IosController::checkStatus парсит UAPI last_handshake_time_sec → handshakeChanged.
+    //   Android: GoBackend.awgGetConfig → Statistics.lastHandshakeSec → JNI onStatisticsUpdate → handshakeUpdated.
+    //   desktop: handshake живёт в daemon (getPeerStatus), в наш адаптер не доходит → HealthLoop на rx/tx.
     TunnelStats readStats() override;
 
     void down() override;

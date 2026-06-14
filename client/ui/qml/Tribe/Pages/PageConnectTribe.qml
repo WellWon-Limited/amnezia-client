@@ -503,12 +503,22 @@ PageType {
                         color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10 }
                 }
-                Row {  // сигнал-бары (только когда узел выбран)
+                Row {  // реальные сигнал-бары: app-layer RTT ЧЕРЕЗ туннель (TribeEngine.liveBars) + мс
                     visible: root.curNode.hasNode
-                    spacing: 2; height: 16; anchors.verticalCenter: parent.verticalCenter
-                    Rectangle { width: 4; height: 8;  radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
-                    Rectangle { width: 4; height: 12; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
-                    Rectangle { width: 4; height: 16; radius: 2; color: root.blueAccent; anchors.bottom: parent.bottom }
+                    spacing: Theme.space.sm; height: 16; anchors.verticalCenter: parent.verticalCenter
+                    // число мс — второй (не-цветовой) носитель уровня; виден, когда проба дошла. // AVPN
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.hasEngine && TribeEngine.liveReachable === true
+                                 && Number(TribeEngine.liveRttMs) >= 0
+                        text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                        color: root.slate500
+                        font.family: Theme.font.mono; font.pixelSize: 10
+                    }
+                    LoadBars {  // 5 баров, зелёные/серые. 0 = нет связи/ещё не мерили.
+                        anchors.verticalCenter: parent.verticalCenter
+                        level: root.hasEngine ? Number(TribeEngine.liveBars) : 0
+                    }
                 }
             }
             // тап по всей карточке → шторка выбора сервера (живые узлы пула). Шеврон убран. // AVPN
@@ -519,6 +529,17 @@ PageType {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: nodeSheet.open()
             }
+        }
+
+        // ── чипы доступности сервисов ЧЕРЕЗ текущую ноду (Telegram/YouTube/Instagram) ──
+        // Замер с устройства через туннель (ServiceProbe): 🟢 работает / 🟡 медленно(троттл) / 🔴 заблок.
+        // Тап по чипу → перепроверить. Виден только при выбранной ноде. // AVPN
+        TribeServiceChips {
+            width: parent.width
+            visible: root.hasEngine && root.curNode.hasNode
+                     && TribeEngine.serviceStatus !== undefined && TribeEngine.serviceStatus.length > 0
+            model: root.hasEngine ? TribeEngine.serviceStatus : []
+            onRecheck: if (root.hasEngine) TribeEngine.probeServices()
         }
 
         // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────

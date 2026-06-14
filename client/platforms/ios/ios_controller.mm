@@ -382,6 +382,9 @@ void IosController::checkStatus()
             }
 
             emit bytesChanged(rxBytes - m_rxBytes, txBytes - m_txBytes);
+            // AVPN: отдаём возраст хендшейка наружу (unix sec; <=0 → 0 «неизвестно») — serviceEngine
+            // HealthLoop использует его для DEAD-детекта на iOS (раньше latestHandshakeEpoch был 0).
+            emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;
             m_statusRequestInFlight = false;

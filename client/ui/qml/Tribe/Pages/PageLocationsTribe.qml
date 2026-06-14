@@ -87,14 +87,15 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter
                     LoadBars {
                         anchors.verticalCenter: parent.verticalCenter
-                        // signal: при наличии числового ping/level в модели — масштабируем, иначе 3
+                        // signal: ping/level из модели → 5-балльная шкала (как SignalQuality.barsForRtt),
+                        // иначе 3 («неизвестно/средне» для админ-просмотра пула).
                         level: {
                             if (!modelData) return 3
-                            if (modelData.level !== undefined) return Math.max(0, Math.min(4, modelData.level))
+                            if (modelData.level !== undefined) return Math.max(0, Math.min(5, modelData.level))
                             if (modelData.ping !== undefined) {
                                 var p = Number(modelData.ping)
-                                if (isNaN(p)) return 3
-                                return p < 60 ? 4 : (p < 120 ? 3 : (p < 200 ? 2 : 1))
+                                if (isNaN(p) || p < 0) return 0
+                                return p < 50 ? 5 : (p < 100 ? 4 : (p < 150 ? 3 : (p < 300 ? 2 : 1)))
                             }
                             return 3
                         }
