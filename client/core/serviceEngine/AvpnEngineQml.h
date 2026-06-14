@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ServiceEngine.h"
+#include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "VpnConnectionTunnelControl.h"
 
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
@@ -21,6 +22,9 @@ class SecureAppSettingsRepository;
 class QNetworkAccessManager;
 
 namespace avpn {
+
+class QualityProbe; // AVPN: app-layer RTT-проба через туннель (QualityProbe.h)
+class ServiceProbe; // AVPN: проба доступности сервисов (Telegram/YouTube) через туннель (ServiceProbe.h)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -47,6 +51,15 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(QVariantMap account READ account NOTIFY accountChanged)
     // AVPN (Task 7): туннель на «авто-паузе для покупок» (реально down, ждём авто-возврат). // AVPN
     Q_PROPERTY(bool paused READ paused NOTIFY changed)
+    // AVPN (реальные палочки): живое качество ТЕКУЩЕГО соединения, измеренное app-layer RTT-пробой
+    // ЧЕРЕЗ туннель (AWG UDP-only ⇒ ICMP/TCP-пинг бессмыслен). liveBars 0..5 (EWMA+гистерезис),
+    // liveRttMs — сглаженный RTT (−1 = ещё не мерили/нет связи), liveReachable — дошла ли проба.
+    Q_PROPERTY(int liveRttMs READ liveRttMs NOTIFY liveQualityChanged)
+    Q_PROPERTY(int liveBars READ liveBars NOTIFY liveQualityChanged)
+    Q_PROPERTY(bool liveReachable READ liveReachable NOTIFY liveQualityChanged)
+    // AVPN (чипы доступности): статус сервисов через ЭТУ ноду. Список [{key,label,state,rttMs}],
+    // state: -1 неизв / 0 заблок / 1 медленно(троттл) / 2 работает. Замер — с устройства через туннель.
+    Q_PROPERTY(QVariantList serviceStatus READ serviceStatus NOTIFY serviceStatusChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -156,6 +169,14 @@ public:
     Q_INVOKABLE void markNotificationsRead();
     // AVPN: читается тумблером #6 — отражает текущую фазу «на паузе» для UI.
     bool paused() const { return m_paused; }
+    // AVPN (реальные палочки): живое качество текущего соединения.
+    int liveRttMs() const { return m_liveRtt; }
+    int liveBars() const { return m_liveBars; }
+    bool liveReachable() const { return m_liveReachable; }
+    // AVPN (чипы доступности): текущий статус сервисов (кэш последней пробы).
+    QVariantList serviceStatus() const { return m_serviceStatus; }
+    // Запустить пробу сервисов через туннель (on-connect авто + по тапу из UI). No-op, если не Connected.
+    Q_INVOKABLE void probeServices();
     // AVPN (Task 7): состояние тумблера #6 (AvpnSettings/autoPauseRu) — для авто-инициатора (iOS
     // App Intent / Shortcuts, Task 8): проверить ПЕРЕД авто-вызовом pauseForShopping. Ручной/intent
     // вызов pauseForShopping работает независимо от этого флага.
@@ -174,6 +195,10 @@ signals:
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
+    // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
+    void liveQualityChanged();
+    // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
+    void serviceStatusChanged();
 
 private slots:
     void onTick();
@@ -191,6 +216,15 @@ private:
     QNetworkAccessManager       *m_nam = nullptr;
     VpnConnection               *m_conn = nullptr;
     QTimer                       m_healthTimer;
+    // AVPN (реальные палочки): app-layer RTT-проба через туннель + сглаживание в 0..5 баров.
+    QualityProbe                *m_probe = nullptr;   // создаётся в конструкторе (владелец — this)
+    SignalQuality                m_signal;            // EWMA+гистерезис (чистая логика, протестирована)
+    int                          m_liveRtt = -1;      // сглаженный RTT, мс (−1 = нет данных)
+    int                          m_liveBars = 0;      // 0..5
+    bool                         m_liveReachable = false;
+    // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
+    ServiceProbe                *m_svcProbe = nullptr;
+    QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
     bool                         m_bootstrapped = false; // AVPN: bootstrap() выполняем один раз (Task 11)

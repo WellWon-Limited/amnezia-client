@@ -120,8 +120,9 @@ class AmneziaActivity : QtActivity() {
                     }
 
                     ServiceEvent.STATISTICS_UPDATE -> {
-                        msg.data?.getStatistics()?.let { (rxBytes, txBytes) ->
-                            QtAndroidController.onStatisticsUpdate(rxBytes, txBytes)
+                        // AVPN: + lastHandshakeSec (3-й компонент Statistics) → в C++ для DEAD-детекта.
+                        msg.data?.getStatistics()?.let { (rxBytes, txBytes, lastHandshakeSec) ->
+                            QtAndroidController.onStatisticsUpdate(rxBytes, txBytes, lastHandshakeSec)
                         }
                     }
 

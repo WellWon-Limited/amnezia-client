@@ -4,6 +4,16 @@
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 
+// AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
+// уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
+// чтобы не трогать кросс-платформенный VpnConnection. Android — свой путь через JNI (см. ниже, TODO).
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    #include "platforms/ios/ios_controller.h"
+#endif
+#if defined(Q_OS_ANDROID)
+    #include "platforms/android/android_controller.h"
+#endif
+
 #include <QMetaObject>
 
 namespace avpn {
@@ -15,6 +25,19 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         connect(m_conn, &VpnConnection::bytesChanged, this,
                 &VpnConnectionTunnelControl::onBytesChanged, Qt::QueuedConnection);
     }
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    // AVPN: возраст хендшейка → m_stats.latestHandshakeEpoch (на iOS раньше был 0 ⇒ HealthLoop
+    // опирался только на rx/tx; теперь DEAD-детект учитывает и устаревший handshake, как на desktop).
+    connect(IosController::Instance(), &IosController::handshakeChanged, this,
+            [this](qint64 hsEpochSec) { m_stats.latestHandshakeEpoch = hsEpochSec; },
+            Qt::QueuedConnection);
+#endif
+#if defined(Q_OS_ANDROID)
+    // AVPN: то же на Android (last_handshake_time_sec из GoBackend.awgGetConfig → Statistics → JNI).
+    connect(AndroidController::instance(), &AndroidController::handshakeUpdated, this,
+            [this](qint64 hsEpochSec) { m_stats.latestHandshakeEpoch = hsEpochSec; },
+            Qt::QueuedConnection);
+#endif
 }
 
 void VpnConnectionTunnelControl::onBytesChanged(quint64 rx, quint64 tx)

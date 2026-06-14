@@ -44,10 +44,13 @@ open class Wireguard : Protocol() {
                         when {
                             startsWith("rx_bytes=") -> setRxBytes(substring(9).toLong()).also { ++optsCount }
                             startsWith("tx_bytes=") -> setTxBytes(substring(9).toLong()).also { ++optsCount }
+                            // AVPN: возраст хендшейка для DEAD-детекта serviceEngine (раньше шёл только в state-логику)
+                            startsWith("last_handshake_time_sec=") ->
+                                setLastHandshakeSec(substring(24).toLong()).also { ++optsCount }
                             else -> {}
                         }
                     }
-                    if (optsCount == 2) return@forEach
+                    if (optsCount == 3) return@forEach
                 }
             }
         }
