@@ -56,13 +56,15 @@ public:
     QString currentNodeId() const { return m_currentNodeId; }
 
     // AVPN (live-node picker): ручной выбор/ротация поверх авто-логики.
-    //  switchToNode(nodeId) — «Закрепить»: m_pinnedNodeId=nodeId; если онлайн → Switcher на эту ноду,
-    //    иначе connect() стартует с неё. Движок сам с закреплённой ради скорости не уходит.
+    //  setPinnedNode(nodeId) — «Выбрать»: только закрепляет узел (m_pinnedNodeId=nodeId), НЕ коннектит.
+    //    Модель «выбор = задать цель, коннект — кнопкой»: следующий connect() (orb «Connect») поднимет
+    //    закреплённую ноду. Тиар-даун текущего туннеля (если был онлайн другой узел) делает мост
+    //    (AvpnEngineQml::switchToNode), чтобы избежать back-to-back up() без down() (iOS-storm).
     //  rotateNext() — round-robin по живым нодам (сортировка weight↓/health↓/nodeId↑), круговой индекс
     //    от текущей → следующая (заворот). Кнопка «Обновить подключение». 2 узла → пинг-понг.
     //  pinnedNodeId() — закреплённая пользователем нода (пусто = авто).
     // Возвращают true при успешном свитче/старте; false + error — нет такой/живой ноды или провал.
-    bool switchToNode(const QString &nodeId, QString &error); // AVPN
+    bool setPinnedNode(const QString &nodeId, QString &error); // AVPN (был switchToNode: коннектил сам)
     bool rotateNext(QString &error);                          // AVPN
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация

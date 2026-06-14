@@ -346,39 +346,29 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     return s;
 }
 
-// AVPN (live-node picker): «Закрепить» — пользователь явно выбрал ноду. Запоминаем закрепление и
-// либо переключаемся на неё (если онлайн — Switcher), либо стартуем connect() с неё (он уже учитывает
-// m_pinnedNodeId). Авто-логика после этого с закреплённой ради скорости не уходит; при её смерти —
-// onDead() уведёт на лучшую живую и ОСТАНЕТСЯ там (назад вручную). Spec §23-26.
-bool ServiceEngine::switchToNode(const QString &nodeId, QString &error) // AVPN
+// AVPN (live-node picker): «Выбрать» — пользователь явно выбрал ноду в шторке. ТОЛЬКО закрепляем
+// её (m_pinnedNodeId); НЕ коннектим и НЕ свитчим. Модель «выбор = задать цель, коннект — кнопкой»:
+// следующий connect() (orb «Connect») поднимет закреплённую ноду (он уже отдаёт приоритет
+// m_pinnedNodeId). Если сейчас онлайн другой узел — туннель гасит мост (AvpnEngineQml::switchToNode)
+// через requestStop()+down(), чтобы НЕ делать back-to-back up() без реального Disconnected (iOS-storm,
+// «Operation Cancelled»/«Network error»). Авто-логика с закреплённой ради скорости не уходит; при её
+// смерти onDead() уведёт на лучшую живую и ОСТАНЕТСЯ там (назад вручную). Spec §23-26.
+bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
     }
-    m_pinnedNodeId = nodeId;
-
-    // Найти выбранную ноду в подписке (копия по значению — НЕ кэшируем указатель через сетевой вызов).
-    SubscriptionNode target;
+    // Узел должен существовать в подписке (иначе нечего закреплять/поднимать).
     bool found = false;
     for (const SubscriptionNode &n : m_pool.nodes())
-        if (n.nodeId == nodeId) { target = n; found = true; break; }
+        if (n.nodeId == nodeId) { found = true; break; }
     if (!found) {
         error = QStringLiteral("node not in subscription: %1").arg(nodeId);
         return false;
     }
-
-    if (m_state == EngineState::Connected || m_state == EngineState::Switching) {
-        // Онлайн — двухфазный секвенс-свитч на закреплённую ноду (iOS-safe; без failover-гонки/шторма).
-        if (!requestSwitch(nodeId, /*tunnelUp=*/true, QStringLiteral("pinned (manual)"))) {
-            error = QStringLiteral("switch to node failed: %1").arg(nodeId);
-            return false;
-        }
-        return true;
-    }
-
-    // Оффлайн — поднять туннель с закреплённой ноды (connect() уже отдаёт приоритет m_pinnedNodeId).
-    return connect(error);
+    m_pinnedNodeId = nodeId;
+    return true;
 }
 
 // AVPN (live-node picker): round-robin «Обновить подключение». Список ЖИВЫХ нод (health-агрегат > 0;

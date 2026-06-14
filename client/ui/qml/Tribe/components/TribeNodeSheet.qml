@@ -6,9 +6,10 @@ import ".."   // Theme
 
 // AVPN (live-node picker): нижняя шторка выбора сервера. Паттерн seatSheet из PageAccountTribe:
 // затемнение фона + перехват кликов + нижняя TribeCard (elevated) с грабером сверху.
-// Содержимое: «Авто (быстрейший)» → TribeEngine.reprobe(); ListView ТОЛЬКО живых узлов
-// (modelData.alive) из TribeEngine.nodePool — TribeFlag + имя + сигнал-бары (из health 0..1 → 0..4);
-// текущий (modelData.current) — акцент + галка; тап → TribeEngine.switchToNode(nodeId) + close().
+// Содержимое: «Авто (быстрейший)» → TribeEngine.selectAuto() (авто-режим без реконнекта); ListView
+// ТОЛЬКО живых узлов (modelData.alive) из TribeEngine.nodePool — TribeFlag + имя + сигнал-бары (health
+// 0..1 → 0..4); текущий (modelData.current) — акцент + галка. Тап по узлу → TribeEngine.switchToNode(nodeId):
+// НЕ коннектит, только задаёт цель (orb→OFF, если был онлайн другой узел) — подключение по кнопке Connect.
 // Без шевронов. open() → отложенный refreshPool() (Timer, НЕ из кадра показа — refreshPool синхронный
 // nested-loop fetch, прямой вызов в onOpened крашит). Только токены Theme.qml.
 Item {
@@ -130,8 +131,10 @@ Item {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        if (sheet.hasEngine && typeof TribeEngine.reprobe === "function")
-                            TribeEngine.reprobe()
+                        // авто-режим без реконнекта: снимаем закрепление. Оффлайн → «Умный выбор сервера»
+                        // (следующий Connect выберет узел); онлайн → остаёмся на текущем + бейдж «auto».
+                        if (sheet.hasEngine && typeof TribeEngine.selectAuto === "function")
+                            TribeEngine.selectAuto()
                         sheet.close()
                     }
                 }
@@ -260,7 +263,7 @@ Item {
                             onClicked: {
                                 var id = nodeRow.modelData ? (nodeRow.modelData.nodeId || "") : ""
                                 if (id !== "" && sheet.hasEngine && typeof TribeEngine.switchToNode === "function")
-                                    TribeEngine.switchToNode(id)   // «Закрепить» (async на движке)
+                                    TribeEngine.switchToNode(id)   // «Выбрать» цель (НЕ коннектит; orb→OFF, ждём Connect)
                                 sheet.close()
                             }
                         }
