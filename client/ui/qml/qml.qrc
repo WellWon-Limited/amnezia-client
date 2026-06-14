@@ -93,6 +93,7 @@
         <file>Tribe/components/LoadBars.qml</file>
         <file>Tribe/components/ChatBubble.qml</file>
         <file>Tribe/components/TribeFlag.qml</file>
+        <file>Tribe/components/TribeNodeSheet.qml</file>
         <file>Tribe/Pages/PageConnectTribe.qml</file>
         <file>Tribe/Pages/PageLocationsTribe.qml</file>
         <file>Tribe/Pages/PageAccountTribe.qml</file>
