@@ -183,6 +183,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
             QSettings().setValue(QStringLiteral("AvpnPush/permissionAsked"), true);
             avpn::AvpnPushBridge::instance()->requestAuthorization();
         }
+        // AVPN (Task 9): к моменту Connected subscription_token уже создан (start/bootstrap → enroll).
+        // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
+        // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
+        flushPendingPushToken();
         break;
     case Vpn::Error:
         // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;
@@ -233,6 +237,11 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
     if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err))
         emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
     // при провале — тихо: bootstrap не должен пугать пользователя ошибкой при холодном старте.
+
+    // AVPN (Task 9): если первичный авто-enroll создал subscription_token, а device token уже пришёл
+    // из APNs ДО enroll — флашим отложенный push-токен (дедуп защитит от повтора). authToken() пуст →
+    // registerPushToken снова тихо отложит до следующего коннекта/ротации.
+    flushPendingPushToken();
 }
 
 void AvpnEngineQml::start()
@@ -278,6 +287,7 @@ void AvpnEngineQml::stop()
 void AvpnEngineQml::reprobe()
 {
     QString err;
+    m_engine.clearPin(); // AVPN: «Авто (быстрейший)» снимает закрепление → connect() выбирает по скорингу
     if (m_engine.connect(err))
         emit changed();
     else
@@ -294,6 +304,42 @@ void AvpnEngineQml::resetLkg()
 {
     Enrollment::clearToken(); // AVPN: SecureQSettings-backed
     emit changed();
+}
+
+// AVPN (live-node picker): «Закрепить» сервер из шторки выбора. switchToNode внутри либо делает
+// in-place свитч (онлайн), либо стартует connect() (оффлайн) — async, реальный Connected прилетит
+// через onConnectionStateChanged. start() таймера нужен на случай оффлайн-старта (health-tick).
+void AvpnEngineQml::switchToNode(const QString &nodeId)
+{
+    QString err;
+    if (m_engine.switchToNode(nodeId, err)) {
+        m_healthTimer.start(); // если был оффлайн-connect — запускаем health-loop (идемпотентно)
+        emit changed();
+    } else {
+        emit error(err);
+    }
+}
+
+// AVPN (live-node picker): кнопка «Обновить подключение» — round-robin на следующую живую ноду.
+void AvpnEngineQml::rotateNext()
+{
+    QString err;
+    if (m_engine.rotateNext(err)) {
+        m_healthTimer.start();
+        emit changed();
+    } else {
+        emit error(err);
+    }
+}
+
+// AVPN (live-node picker): пере-зачитать подписку/health и обновить nodePool. Тихий no-op при провале
+// (оффлайн/нет токена) — как bootstrap, не пугаем пользователя ошибкой при простом обновлении списка.
+void AvpnEngineQml::refreshPool()
+{
+    QString err;
+    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err))
+        emit changed(); // nodePool/health обновлены → шторка перерисуется
+    // при провале — тихо (silent fail)
 }
 
 // AVPN (Task C): вход/восстановление по коду доступа (POST /v1/code/redeem). Синхронно (как enroll).
@@ -671,6 +717,18 @@ void AvpnEngineQml::registerPushToken(const QString &token, const QString &envir
     });
 }
 
+// AVPN (Task 9 — APNs): флаш отложенного push-токена после появления subscription_token. Закрывает
+// гэп первичного авто-enroll: device token пришёл из APNs ДО enroll (registerPushToken запомнил
+// m_pushToken, но не отправил, т.к. authToken был пуст). После успешного bootstrap/enroll subscription_token
+// уже есть → отправляем. Дедуп по fingerprint (token|env|auth) защищает от лишнего POST, если токен
+// уже ушёл по redeem-пути. No-op при пустом push-токене (desktop / разрешение не выдано).
+void AvpnEngineQml::flushPendingPushToken()
+{
+    if (m_pushToken.isEmpty())
+        return;
+    registerPushToken(m_pushToken, m_pushEnv);
+}
+
 // AVPN (Task 9 — APNs): POST /v1/notifications/read (Bearer) — обнулить серверный счётчик непрочитанных.
 // Без тела. АСИНХРОННО, тихо (фоновое действие). Вызывается по AvpnPushBridge::readRequested
 // (QML: AvpnPush.markAllRead()). Локальный бейдж иконки уже снят натив-clearer'ом в мосте.
@@ -716,6 +774,11 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         n["ip"] = r.endpoint.section(QLatin1Char(':'), 0, 0);         // AVPN: только host для показа
         n["scoreMs"] = r.scoreMs;
         n["healthy"] = r.healthy;
+        // AVPN (live-node picker): обогащённые поля для шторки выбора сервера (weight/health/alive/current).
+        n["weight"] = r.weight;
+        n["health"] = r.healthAgg;  // 0..1 агрегат backend-health → 0..4 бара в UI
+        n["alive"] = r.alive;       // жив по backend-данным (фильтр «только живые» в шторке)
+        n["current"] = r.current;   // == текущая нода → акцент #7CA2D0 + галка
         n["reason"] = r.reason;
         pool.append(n);
     }

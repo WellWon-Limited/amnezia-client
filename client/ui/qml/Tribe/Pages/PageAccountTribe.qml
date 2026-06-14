@@ -188,6 +188,10 @@ PageType {
         ColumnLayout {
             id: settingsCol
             width: settingsFlick.width
+            // AVPN: ColumnLayout как прямой content-item Flickable не подгоняет height под implicitHeight
+            // сам (в отличие от позиционера Column). Без этого height=0 → нижние секции схлопываются и
+            // под карточкой подписки остаётся большая пустая тёмная полоса. Биндим к implicitHeight.
+            height: implicitHeight
             spacing: Theme.space.md
 
         // AVPN (#16): заголовок «Настройки» убран (нижняя навигация уже подписана). Оставляем только

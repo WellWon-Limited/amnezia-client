@@ -37,6 +37,9 @@ class AvpnEngineQml : public QObject {
     // nodePool = список нод [{nodeId,region,endpoint,...}] из живой подписки.
     Q_PROPERTY(QVariantMap currentNode READ currentNode NOTIFY changed)
     Q_PROPERTY(QVariantList nodePool READ nodePool NOTIFY changed)
+    // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
+    // позже выбор сервера гейтится этим одним флагом. CONSTANT — значение не меняется в рантайме.
+    Q_PROPERTY(bool proSelectionEnabled READ proSelectionEnabled CONSTANT)
     // AVPN (анти-фриз/анти-краш): устройства и статус аккаунта грузятся АСИНХРОННО (без вложенного
     // QEventLoop на GUI-потоке). UI биндится на эти property; refreshDevices()/refreshAccount() лишь
     // запускают фоновый GET, результат прилетает через devicesChanged()/accountChanged().
@@ -61,6 +64,8 @@ public:
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
     QVariantList nodePool() const;
+    // AVPN (live-node picker): Pro-гейт-заглушка — выбор сервера доступен (сейчас всегда true).
+    bool proSelectionEnabled() const { return true; }
 
     // AVPN: кэш последнего async-ответа /v1/devices и /v1/account (для биндинга в QML).
     QVariantList devices() const { return m_devices; }
@@ -77,6 +82,14 @@ public:
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
     Q_INVOKABLE void resetLkg();                     // очистить кэш токена/подписки (re-enroll при start)
+
+    // AVPN (live-node picker): ручной выбор сервера из шторки + кнопка «Обновить подключение».
+    //  switchToNode(nodeId) — «Закрепить» выбранную ноду (переключиться/подключиться к ней).
+    //  rotateNext()         — round-robin на следующую живую ноду (кнопка «Обновить подключение»).
+    //  refreshPool()        — пере-зачитать подписку/health и обновить nodePool (NOTIFY changed).
+    Q_INVOKABLE void switchToNode(const QString &nodeId);
+    Q_INVOKABLE void rotateNext();
+    Q_INVOKABLE void refreshPool();
 
     // AVPN (Task C): вход/восстановление по коду доступа (POST /v1/code/redeem). Синхронно.
     // 200 → РОТАЦИЯ токена (Enrollment::saveToken) → re-fetch подписки → emit changed().
@@ -127,6 +140,14 @@ public:
     // Store). Нет токена подписки / сеть → тихий no-op (повторится при ротации токена/реконнекте).
     // Обычно зовётся не из QML, а из движка по сигналу AvpnPushBridge::deviceTokenReady.
     Q_INVOKABLE void registerPushToken(const QString &token, const QString &environment);
+
+    // AVPN (Task 9 — APNs): флаш отложенного push-токена ПОСЛЕ появления subscription_token.
+    // Сценарий гэпа: APNs отдал device token ДО первичного авто-enroll (authToken пуст →
+    // registerPushToken запомнил m_pushToken, но НЕ отправил). После успешного bootstrap/enroll
+    // (Connected) subscription_token уже есть → дёргаем registerPushToken повторно; дедуп по
+    // fingerprint (token|env|auth) пропустит лишний POST, если он уже ушёл (redeem-пути). No-op,
+    // если push-токен пуст (desktop / разрешение не выдано).
+    void flushPendingPushToken();
 
     // AVPN (Task 9 — APNs): отметить уведомления прочитанными на сервере (POST /v1/notifications/read,
     // Bearer). Обнуляет серверный счётчик непрочитанных → следующий пуш придёт с низким aps.badge.
