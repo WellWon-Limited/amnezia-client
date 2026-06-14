@@ -9,19 +9,31 @@
 
 #include "core/serviceEngine/AvpnPushBridge.h"
 
-// APNs-окружение токена для регистрации на бэке: Debug-сборка → sandbox; иначе по чеку App Store —
-// TestFlight (sandboxReceipt) → sandbox, релиз App Store → production. Бэк маршрутит per-device
-// (api.sandbox.push.apple.com vs api.push.apple.com), ключ один. Совпадает с aps-environment провижина.
+// APNs-окружение токена для регистрации на бэке — ИСТОЧНИК ПРАВДЫ: entitlement aps-environment из
+// embedded.mobileprovision (production → "production", development → "sandbox"). НЕ по debug/release и
+// НЕ по sandboxReceipt: TestFlight = production APNs (sandboxReceipt — про StoreKit, не про APNs!),
+// и регистрация sandbox-токена в TestFlight даёт 400 BadDeviceToken. Бэк маршрутит per-device.
+// Fallback (профиль не прочитался) — "production": наш shipping-путь TestFlight/App Store.
 static NSString *avpnPushEnvironment(void)
 {
-#if defined(DEBUG) || defined(QT_DEBUG)
-    return @"sandbox";
-#else
-    NSURL *receiptURL = [[NSBundle mainBundle] appStoreReceiptURL];
-    if ([[receiptURL lastPathComponent] isEqualToString:@"sandboxReceipt"])
-        return @"sandbox"; // TestFlight
-    return @"production";  // App Store
-#endif
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"embedded" ofType:@"mobileprovision"];
+    NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+    if (data) {
+        // Файл — CMS-обёртка; вытаскиваем встроенный XML-plist между <plist…> и </plist>.
+        NSString *raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+        NSRange a = [raw rangeOfString:@"<plist"];
+        NSRange b = [raw rangeOfString:@"</plist>"];
+        if (a.location != NSNotFound && b.location != NSNotFound && b.location > a.location) {
+            NSString *plistStr = [raw substringWithRange:NSMakeRange(a.location, b.location + b.length - a.location)];
+            NSDictionary *plist = [NSPropertyListSerialization
+                propertyListWithData:[plistStr dataUsingEncoding:NSISOLatin1StringEncoding]
+                             options:0 format:nil error:nil];
+            NSString *aps = plist[@"Entitlements"][@"aps-environment"];
+            if ([aps isEqualToString:@"development"]) return @"sandbox";
+            if ([aps isEqualToString:@"production"]) return @"production";
+        }
+    }
+    return @"production"; // shipping = TestFlight/App Store
 }
 
 // Регистратор для AvpnPushBridge.requestAuthorization() (QML/движок может инициировать запрос).
