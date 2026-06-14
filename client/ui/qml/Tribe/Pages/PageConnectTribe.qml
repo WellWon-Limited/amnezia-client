@@ -67,8 +67,10 @@ PageType {
     readonly property var curNode: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode
                                              : ({ region: "", ip: "", hasNode: false })
 
-    // iOS/Android/desktop: натив-инсет из pageController (на iOS читает UIKit safeAreaInsets).
-    readonly property real safeTop: PageController.safeAreaTopMargin
+    // iOS: PageController.safeArea* реализован только для Android → берём максимум с SafeArea
+    // (Qt 6.9+, реактивный UIKit-инсет). БЕЗ этого на холодном старте iOS PageController=0 →
+    // верх съезжает под чёлку, и «чинится» только после пересоздания страницы (смена вкладки).
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
 
     // Мобайл: сцена (орб + горы + подпись) опущена на ~20% высоты экрана, но так, чтобы
     // подпись не наезжала на карточку сервера (низ сцены ≥ 24px над bottomBlock).

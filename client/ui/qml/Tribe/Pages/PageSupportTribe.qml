@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls   // TextField (поле ввода композера)
 import QtQuick.Layouts
 import QtQuick.Shapes
 
@@ -10,6 +11,9 @@ import "../../Controls2" // PageType
 // задача #10 (Tribe-Backend). Дизайн строго по Theme-токенам.
 PageType {
     id: root
+
+    // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
@@ -42,15 +46,9 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: PageController.safeAreaTopMargin
+        // заголовок «Поддержка» убран (вкладка уже подписана в нижней навигации). Отступ от чёлки. // AVPN
+        anchors.topMargin: root.safeTop + Theme.space.lg
         spacing: 0
-
-        TribeHeader {
-            Layout.fillWidth: true
-            Layout.leftMargin: Theme.space.md
-            Layout.rightMargin: Theme.space.md
-            title: qsTr("Поддержка")
-        }
 
         ListView {
             id: list
@@ -73,13 +71,16 @@ PageType {
             Component.onCompleted: positionViewAtEnd()
         }
 
-        // composer: поле + круглая кнопка отправки
+        // composer: поле-пилюля + круглая кнопка отправки. Контент над safe-area/клавиатурой
+        // (нижний инсет уходит в ПАДДИНГ, не оставляет пустоту под полем → центрирование ок). // AVPN
         Rectangle {
+            id: composer
             Layout.fillWidth: true
-            implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md
-                            + Math.max(PageController.safeAreaBottomMargin, PageController.imeHeight)
             color: Theme.color.bg900
+            readonly property real bottomInset: Math.max(PageController.safeAreaBottomMargin, PageController.imeHeight)
+            implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md + bottomInset
 
+            // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
 
             RowLayout {
@@ -89,29 +90,63 @@ PageType {
                 anchors.topMargin: Theme.space.md
                 spacing: Theme.space.sm
 
-                TribeField {
-                    id: input
+                // поле ввода — пилюля; рамка подсвечивается акцентом в фокусе
+                Rectangle {
                     Layout.fillWidth: true
-                    placeholderText: qsTr("Сообщение…")
-                    onAccepted: root.send()
+                    Layout.preferredHeight: 48
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: height / 2
+                    color: Theme.color.surface1
+                    border.width: 1
+                    border.color: input.activeFocus ? Theme.color.accent : Theme.color.border
+                    Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
+
+                    TextField {
+                        id: input
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.space.lg
+                        anchors.rightMargin: Theme.space.md
+                        verticalAlignment: TextInput.AlignVCenter
+                        placeholderText: qsTr("Сообщение…")
+                        color: Theme.color.text1
+                        placeholderTextColor: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.bodyM
+                        background: null
+                        selectionColor: Theme.color.accent
+                        onAccepted: root.send()
+                    }
                 }
 
+                // кнопка отправки — круг по центру поля; акцент при непустом вводе, press-scale
                 Rectangle {
-                    Layout.preferredWidth: 46; Layout.preferredHeight: 46
-                    radius: 23
-                    color: input.text.length > 0 ? Theme.color.accent : Theme.color.surface2
-                    Behavior on color { ColorAnimation { duration: 160 } }
+                    id: sendBtn
+                    Layout.preferredWidth: 48; Layout.preferredHeight: 48
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: height / 2
+                    readonly property bool ready: input.text.trim().length > 0
+                    color: ready ? Theme.color.accent : Theme.color.surface2
+                    scale: (sendMa.pressed && ready) ? 0.92 : 1.0
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                    Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
+
                     Shape {
                         anchors.centerIn: parent; width: 22; height: 22
                         preferredRendererType: Shape.CurveRenderer
                         ShapePath {
-                            strokeColor: input.text.length > 0 ? Theme.color.bg900 : Theme.color.text3
+                            strokeColor: sendBtn.ready ? Theme.color.bg900 : Theme.color.text3
                             fillColor: "transparent"; strokeWidth: 2
                             capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
                             PathSvg { path: "M5 12 L19 12 M13 6 L19 12 L13 18" }
                         }
                     }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.send() }
+                    MouseArea {
+                        id: sendMa
+                        anchors.fill: parent
+                        enabled: sendBtn.ready
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.send()
+                    }
                 }
             }
         }
