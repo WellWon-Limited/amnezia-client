@@ -142,10 +142,21 @@ QVariantMap AvpnEngineQml::currentNode() const
 {
     const DebugSnapshot s = m_engine.debugSnapshot();
     const bool live = (s.state == QLatin1String("connected") || s.state == QLatin1String("switching"));
+    const QString pinned = m_engine.pinnedNodeId();
+    // Какой узел показывать на карточке Connect:
+    //  • онлайн (connected/switching) → реальный текущий узел (s.currentNodeId);
+    //  • НЕ онлайн, но закреплён пользователем → закреплённый (виден сразу после выбора в шторке,
+    //    ещё ДО нажатия Connect — модель «выбор = задать цель, коннект — кнопкой»);
+    //  • иначе → ничего (hasNode=false) → карточка показывает «Умный выбор сервера».
+    QString showId;
+    if (live && !s.currentNodeId.isEmpty())
+        showId = s.currentNodeId;
+    else if (!pinned.isEmpty())
+        showId = pinned;
     const NodeDebugRow *pick = nullptr;
-    if (live && !s.currentNodeId.isEmpty()) {
+    if (!showId.isEmpty()) {
         for (const NodeDebugRow &r : s.pool)
-            if (r.nodeId == s.currentNodeId) { pick = &r; break; }
+            if (r.nodeId == showId) { pick = &r; break; }
     }
     QVariantMap node;
     node["nodeId"]    = pick ? pick->nodeId : QString();
@@ -156,6 +167,10 @@ QVariantMap AvpnEngineQml::currentNode() const
     node["ip"]        = pick ? pick->endpoint.section(QLatin1Char(':'), 0, 0) : QString();
     node["connected"] = (s.state == QLatin1String("connected"));
     node["hasNode"]   = (pick != nullptr);
+    // AVPN: бейдж «auto» — показываем ТОЛЬКО когда подключены в авто-режиме (узел выбрал движок, pin
+    // пуст). При ручном выборе (pin задан) бейджа нет. pinned — что показанный узел закреплён вручную.
+    node["pinned"]    = (!pinned.isEmpty() && pick && pick->nodeId == pinned);
+    node["auto"]      = (s.state == QLatin1String("connected") && pinned.isEmpty());
     return node;
 }
 
@@ -309,18 +324,39 @@ void AvpnEngineQml::resetLkg()
     emit changed();
 }
 
-// AVPN (live-node picker): «Закрепить» сервер из шторки выбора. switchToNode внутри либо делает
-// in-place свитч (онлайн), либо стартует connect() (оффлайн) — async, реальный Connected прилетит
-// через onConnectionStateChanged. start() таймера нужен на случай оффлайн-старта (health-tick).
+// AVPN (live-node picker): «Выбрать» сервер из шторки. Новая модель «выбор = задать цель, коннект —
+// кнопкой»: НЕ коннектим автоматически. setPinnedNode только закрепляет узел; если сейчас онлайн ДРУГОЙ
+// узел — гасим туннель (как stop(): requestStop()+down()), чтобы orb стал OFF и пользователь поднял
+// выбранную ноду кнопкой Connect. Это убирает iOS-storm (back-to-back up() без реального Disconnected →
+// «Operation Cancelled»/«Network error»): между down() и up() теперь стоит человек (нажатие Connect).
 void AvpnEngineQml::switchToNode(const QString &nodeId)
 {
     QString err;
-    if (m_engine.switchToNode(nodeId, err)) {
-        m_healthTimer.start(); // если был оффлайн-connect — запускаем health-loop (идемпотентно)
-        emit changed();
-    } else {
+    if (!m_engine.setPinnedNode(nodeId, err)) {
         emit error(err);
+        return;
     }
+    const DebugSnapshot s = m_engine.debugSnapshot();
+    const bool live = (s.state == QLatin1String("connected") || s.state == QLatin1String("switching")
+                       || s.state == QLatin1String("connecting") || s.state == QLatin1String("selecting"));
+    if (live && s.currentNodeId != nodeId) {
+        // Подключены к другому узлу → чистый тиар-даун (failover не сработает — requestStop гасит фазу).
+        m_healthTimer.stop();
+        m_engine.requestStop();
+        m_tunnel.down();
+    }
+    emit changed(); // карточка покажет выбранный узел (закреплён), orb → OFF (ждём Connect)
+}
+
+// AVPN (live-node picker): «Авто (быстрейший)» в шторке — переключение в авто-режим БЕЗ реконнекта.
+// Только снимаем закрепление: если оффлайн → карточка станет «Умный выбор сервера», следующий Connect
+// выберет узел по скорингу/weight; если онлайн → остаёмся на текущем узле, появляется бейдж «auto»
+// (узел движок дальше ведёт сам). НЕ зовём connect() онлайн (был бы back-to-back up() без down() —
+// iOS-storm). Сознательно НЕ реконнектим ради «самого быстрого»: модель без авто-переподключений.
+void AvpnEngineQml::selectAuto()
+{
+    m_engine.clearPin();
+    emit changed();
 }
 
 // AVPN (live-node picker): кнопка «Обновить подключение» — round-robin на следующую живую ноду.

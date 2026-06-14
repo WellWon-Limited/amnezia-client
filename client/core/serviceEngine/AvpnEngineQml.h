@@ -88,6 +88,7 @@ public:
     //  rotateNext()         — round-robin на следующую живую ноду (кнопка «Обновить подключение»).
     //  refreshPool()        — пере-зачитать подписку/health и обновить nodePool (NOTIFY changed).
     Q_INVOKABLE void switchToNode(const QString &nodeId);
+    Q_INVOKABLE void selectAuto();   // AVPN: «Авто (быстрейший)» — авто-режим без реконнекта (снять pin)
     Q_INVOKABLE void rotateNext();
     Q_INVOKABLE void refreshPool();
 

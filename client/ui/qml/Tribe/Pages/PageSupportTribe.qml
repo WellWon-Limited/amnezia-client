@@ -71,67 +71,66 @@ PageType {
             Component.onCompleted: positionViewAtEnd()
         }
 
-        // composer: поле-пилюля + круглая кнопка отправки. Контент над safe-area/клавиатурой
-        // (нижний инсет уходит в ПАДДИНГ, не оставляет пустоту под полем → центрирование ок). // AVPN
+        // composer (редизайн 2026-06-14): ОДНА пилюля с кнопкой отправки ВНУТРИ справа (стиль
+        // iMessage/Telegram) — компактнее и аккуратнее, без отдельной высокой кнопки и лишних отступов.
+        // Контент над safe-area/клавиатурой (нижний инсет уходит в паддинг, без пустоты под полем). // AVPN
         Rectangle {
             id: composer
             Layout.fillWidth: true
             color: Theme.color.bg900
             readonly property real bottomInset: Math.max(PageController.safeAreaBottomMargin, PageController.imeHeight)
-            implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md + bottomInset
+            // компактно: пилюля + по sm-отступу сверху/снизу + safe-area/IME-инсет
+            implicitHeight: pill.height + 2 * Theme.space.sm + bottomInset
 
             // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
 
-            RowLayout {
-                id: composerRow
+            // единая пилюля: TextField во всю ширину + круглая кнопка отправки, вписанная в правый край
+            Rectangle {
+                id: pill
                 anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                 anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                anchors.topMargin: Theme.space.md
-                spacing: Theme.space.sm
+                anchors.topMargin: Theme.space.sm
+                height: 50
+                radius: height / 2
+                color: Theme.color.surface1
+                border.width: 1
+                border.color: input.activeFocus ? Theme.color.accent : Theme.color.border
+                Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
 
-                // поле ввода — пилюля; рамка подсвечивается акцентом в фокусе
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 48
-                    Layout.alignment: Qt.AlignVCenter
-                    radius: height / 2
-                    color: Theme.color.surface1
-                    border.width: 1
-                    border.color: input.activeFocus ? Theme.color.accent : Theme.color.border
-                    Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
-
-                    TextField {
-                        id: input
-                        anchors.fill: parent
-                        anchors.leftMargin: Theme.space.lg
-                        anchors.rightMargin: Theme.space.md
-                        verticalAlignment: TextInput.AlignVCenter
-                        placeholderText: qsTr("Сообщение…")
-                        color: Theme.color.text1
-                        placeholderTextColor: Theme.color.text3
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.bodyM
-                        background: null
-                        selectionColor: Theme.color.accent
-                        onAccepted: root.send()
-                    }
+                TextField {
+                    id: input
+                    anchors.left: parent.left; anchors.right: sendBtn.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Theme.space.lg
+                    anchors.rightMargin: Theme.space.sm
+                    verticalAlignment: TextInput.AlignVCenter
+                    placeholderText: qsTr("Сообщение…")
+                    color: Theme.color.text1
+                    placeholderTextColor: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyM
+                    background: null
+                    selectionColor: Theme.color.accent
+                    onAccepted: root.send()
                 }
 
-                // кнопка отправки — круг по центру поля; акцент при непустом вводе, press-scale
+                // круглая кнопка отправки — вписана в правый край пилюли (40 в 50, зазор 5).
+                // акцент при непустом вводе, иначе приглушённая; press-scale. // AVPN
                 Rectangle {
                     id: sendBtn
-                    Layout.preferredWidth: 48; Layout.preferredHeight: 48
-                    Layout.alignment: Qt.AlignVCenter
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: 5
+                    width: 40; height: 40
                     radius: height / 2
                     readonly property bool ready: input.text.trim().length > 0
-                    color: ready ? Theme.color.accent : Theme.color.surface2
+                    color: ready ? Theme.color.accent : Theme.color.surface3
                     scale: (sendMa.pressed && ready) ? 0.92 : 1.0
                     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
                     Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
                     Shape {
-                        anchors.centerIn: parent; width: 22; height: 22
+                        anchors.centerIn: parent; width: 20; height: 20
                         preferredRendererType: Shape.CurveRenderer
                         ShapePath {
                             strokeColor: sendBtn.ready ? Theme.color.bg900 : Theme.color.text3

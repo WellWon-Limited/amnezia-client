@@ -467,9 +467,38 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter; spacing: 2
                     // при выбранном узле справа сигнал+шеврон (30+18); без узла — текст во всю ширину
                     width: parent.width - 52 - Theme.space.lg - (root.curNode.hasNode ? (30 + 18 + 2 * Theme.space.lg) : 0)
-                    Text { text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
-                        color: "white"; elide: Text.ElideRight; width: parent.width
-                        font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold }
+                    // строка имени + бейдж «auto» (только когда подключены в авто-режиме). // AVPN
+                    Row {
+                        width: parent.width
+                        spacing: Theme.space.sm
+                        Text {
+                            id: nodeName
+                            text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
+                            color: "white"; elide: Text.ElideRight
+                            // оставляем место под бейдж, чтобы имя не наезжало на него
+                            width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
+                            font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
+                        }
+                        // нежный blue-accent бейдж «auto» (green зарезервирован под статус соединения).
+                        // accent #7CA2D0 (токен Theme.color.accent) translucent — как прочие rgba-плашки
+                        // этого сценического экрана. Виден ТОЛЬКО при auto-режиме подключения. // AVPN
+                        Rectangle {
+                            id: autoBadge
+                            visible: root.curNode.auto === true
+                            anchors.verticalCenter: nodeName.verticalCenter
+                            height: 20; width: autoLabel.implicitWidth + 2 * Theme.space.sm
+                            radius: Theme.radius.pill
+                            color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.16)
+                            border.width: 1; border.color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.45)
+                            Text {
+                                id: autoLabel
+                                anchors.centerIn: parent
+                                text: qsTr("auto")
+                                color: Theme.color.accent
+                                font.family: Theme.font.body; font.pixelSize: 11; font.weight: Theme.font.wBold
+                            }
+                        }
+                    }
                     Text { text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
                         color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10 }
