@@ -12,8 +12,8 @@ PageType {
 
     signal back()
 
-    // iOS/Android/desktop: натив-инсет (safe area).
-    readonly property real safeTop: PageController.safeAreaTopMargin
+    // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
 
     // AVPN (#9): реальные пуши приходят через мост AvpnPush (APNs/FCM → C++ → QML). В dev-превью
     // моста нет → показываем только mock-данные.
