@@ -2,9 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- AVPN (Task 9): APNs push. development в Debug; production-провижн меняет на production. -->
+	<!-- AVPN (Task 9): APNs push. PRODUCTION — TestFlight И App Store используют production APNs
+	     (оба distribution). Эмпирика: development-токен в TestFlight → 400 BadDeviceToken.
+	     Для локального Xcode-debug по кабелю при необходимости временно ставить development. -->
 	<key>aps-environment</key>
-	<string>development</string>
+	<string>production</string>
 	<!-- AVPN (Task 13): Universal Links переноса /transfer (apple-app-site-association хостит tribevpn.com) -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
