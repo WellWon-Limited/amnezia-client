@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Shapes
 
@@ -99,8 +101,9 @@ Flow {
                 anchors.centerIn: parent
                 width: 18; height: 13; radius: 4
                 color: "#FF0000"
-                Shape {   // белый «play»-треугольник
+                Shape {   // белый «play»-треугольник (оптический сдвиг вправо для центровки)
                     anchors.centerIn: parent
+                    anchors.horizontalCenterOffset: 1
                     width: 7; height: 8
                     ShapePath {
                         fillColor: "white"; strokeColor: "transparent"
@@ -114,12 +117,17 @@ Flow {
         id: logoInstagram
         Shape {
             width: 18; height: 18
-            // скруглённый квадрат + объектив + точка (контур, бренд-розовый)
+            preferredRendererType: Shape.CurveRenderer
+            // скруглённый квадрат + объектив (контур) + видоискатель (залитый кружок) — бренд-розовый
             transform: Scale { xScale: 18/24; yScale: 18/24 }
             ShapePath {
                 strokeColor: "#E1306C"; fillColor: "transparent"; strokeWidth: 2
                 capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                PathSvg { path: "M6 2 h12 a4 4 0 0 1 4 4 v12 a4 4 0 0 1 -4 4 h-12 a4 4 0 0 1 -4 -4 v-12 a4 4 0 0 1 4 -4 z M12 8 a4 4 0 1 0 0.01 0 z M17.5 6.5 a0.6 0.6 0 1 0 0.01 0 z" }
+                PathSvg { path: "M6 2 h12 a4 4 0 0 1 4 4 v12 a4 4 0 0 1 -4 4 h-12 a4 4 0 0 1 -4 -4 v-12 a4 4 0 0 1 4 -4 z M12 8 a4 4 0 1 0 0.01 0 z" }
+            }
+            ShapePath {   // точка-видоискатель залитым кружком (надёжнее вырожденной микро-дуги)
+                strokeColor: "transparent"; fillColor: "#E1306C"
+                PathSvg { path: "M16.6 6.5 a0.9 0.9 0 1 0 1.8 0 a0.9 0.9 0 1 0 -1.8 0 z" }
             }
         }
     }

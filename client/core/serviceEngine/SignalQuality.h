@@ -37,7 +37,9 @@ public:
         if (!reachable || rttMs < 0) {     // hard-gate: обрыв пути → 0 сразу, RTT-стейт сбрасываем
             m_bars = 0;
             m_hasSrtt = false;
-            m_init = true;
+            m_init = false;                // НОВАЯ серия: первый достижимый сэмпл сидируется БЕЗ
+                                           // гистерезиса, иначе медленный (704–800мс) reconnect залипал
+                                           // бы в «липкой» полосе bar0 и не показывал 1 бар.
             return m_bars;
         }
         if (!m_hasSrtt) {                  // первый сэмпл серии сидирует SRTT

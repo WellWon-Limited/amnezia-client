@@ -213,14 +213,22 @@ int main(int argc, char **argv)
         int down = q2.feed(-1, false);        // нет ответа → 0 сразу
         int up = q2.feed(40, true);           // вернулась связь → снова 5
 
-        printf("signal: map=%d b0=%d srtt0=%d b1=%d srtt1=%d b2=%d down=%d up=%d\n",
-               mapOk, b0, srtt0, b1, srtt1, b2, down, up);
+        // 6) Регресс: после hard-gate первый достижимый сэмпл в «липкой» полосе bar0 (704–800мс) НЕ
+        //    должен залипнуть на 0 — новая серия обязана сидироваться без гистерезиса.
+        SignalQuality q3;
+        q3.feed(750, true);                   // srtt 750 → 1 бар
+        int gate = q3.feed(-1, false);        // обрыв → 0
+        int recov = q3.feed(750, true);       // связь вернулась, медленно (750мс) → 1, не застрять на 0
+
+        printf("signal: map=%d b0=%d srtt0=%d b1=%d srtt1=%d b2=%d down=%d up=%d gate=%d recov=%d\n",
+               mapOk, b0, srtt0, b1, srtt1, b2, down, up, gate, recov);
 
         bool sigOk = mapOk
                      && b0 == 4 && srtt0 == 80
                      && b1 == 4 && srtt1 == 100      // спайк поглощён, бар не дрогнул
                      && b2 == 3                      // устойчивый рост RTT → -1 бар
-                     && down == 0 && up == 5;        // hard-gate вниз и восстановление вверх
+                     && down == 0 && up == 5         // hard-gate вниз и восстановление вверх
+                     && gate == 0 && recov == 1;     // восстановление в липкой полосе bar0 не залипает
         if (!sigOk) { fprintf(stderr, "FAIL: SignalQuality mapping/smoothing mismatch\n"); return 9; }
         printf("signalquality: OK (RTT→5 баров, EWMA-сглаживание, гистерезис, hard-gate недостижимости)\n");
     }
