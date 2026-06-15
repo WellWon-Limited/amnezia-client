@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 
 import ".."   // Theme
@@ -20,7 +22,7 @@ Row {
             required property int index
             readonly property bool active: index < bars.level
             width: 4
-            height: 6 + index * ((16 - 6) / (bars.count - 1))   // 6..16 (нарастающие)
+            height: 6 + index * ((16 - 6) / Math.max(1, bars.count - 1)) // 6..16; guard от count==1
             radius: 1
             y: bars.height - height                              // выравнивание по нижнему краю
             color: active ? bars.barColor : bars.trackColor
