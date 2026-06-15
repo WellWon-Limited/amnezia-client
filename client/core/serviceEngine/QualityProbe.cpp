@@ -78,6 +78,10 @@ void QualityProbe::tryEndpoint(int idx)
 void QualityProbe::finishOk(int rttMs)
 {
     m_inFlight = false;
+    // last-good вперёд: если сработал фолбэк (напр. свой /v1/ping ещё не развёрнут → 404), не долбим
+    // мёртвый primary на каждом тике — следующий measure() начнёт с рабочего эндпоинта.
+    if (m_curIdx > 0 && m_curIdx < m_endpoints.size())
+        m_endpoints.move(m_curIdx, 0);
     emit result(rttMs, true);
 }
 
