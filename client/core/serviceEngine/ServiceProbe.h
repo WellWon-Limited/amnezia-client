@@ -17,6 +17,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 class QNetworkAccessManager;
 
@@ -28,11 +29,14 @@ enum class ServiceState { Unknown = -1, Blocked = 0, Slow = 1, Works = 2 };
 
 struct ServiceProbeConfig {
     enum Kind { Mtproto, Https };
-    QString key;       // "telegram","youtube","instagram",…
-    Kind    kind = Https;
-    QString host;      // Mtproto: seed DC IP; Https: хост для SNI/GET (реальный SNI обязателен)
-    int     port = 443;
-    int     slowMs = 1500; // RTT/TTFB выше ⇒ Slow (троттлинг/далёкий путь)
+    QString     key;            // "telegram","youtube","instagram",…
+    Kind        kind = Https;
+    QString     host;           // Mtproto: ПЕРВЫЙ seed DC IP; Https: хост для SNI/GET (реальный SNI обязателен)
+    int         port = 443;
+    int         slowMs = 1500;  // RTT/TTFB выше ⇒ Slow (троттлинг/далёкий путь)
+    QStringList fallbackHosts;  // Mtproto: запасные seed DC IP (пробуем по очереди; первый resPQ → works).
+                                // Зачем: один IP мог смениться/лечь → ложный «заблок». DC-IP не статичны
+                                // (core.telegram.org/api/datacenter); правильный рефреш — help.getConfig (TODO).
 };
 
 class ServiceProbe : public QObject {
@@ -54,6 +58,9 @@ signals:
 
 private:
     void probeMtproto(const ServiceProbeConfig &c, int timeoutMs);
+    // Один seed-DC из списка: успех → finish(works/slow); провал → следующий seed; все провалились → finish(blocked).
+    void attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
+                            int perHostMs, int slowMs);
     void probeHttps(const ServiceProbeConfig &c, int timeoutMs);
     void finish(const QString &key, ServiceState st, int rttMs);
 

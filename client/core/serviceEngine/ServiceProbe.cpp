@@ -41,9 +41,26 @@ void ServiceProbe::finish(const QString &key, ServiceState st, int rttMs)
     }
 }
 
-// Telegram: login-free MTProto handshake к seed-DC-IP через туннель.
+// Telegram: login-free MTProto handshake к seed-DC-IP через туннель. Пробуем seed-IP по очереди
+// (первый ответивший resPQ ⇒ works), чтобы один сменившийся/легший IP не давал ложный «заблок».
 void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
 {
+    QStringList hosts;
+    hosts << c.host;
+    hosts += c.fallbackHosts;
+    // делим бюджет на seed'ы (мин. 1500мс на seed): худший случай (все молчат) ограничен timeoutMs·~.
+    const int perHost = qMax(1500, timeoutMs / qMax(1, hosts.size()));
+    attemptMtprotoHost(c.key, hosts, 0, c.port, perHost, c.slowMs);
+}
+
+void ServiceProbe::attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
+                                      int perHostMs, int slowMs)
+{
+    if (idx >= hosts.size()) {     // все seed'ы молчат/ответили мусором ⇒ заблокировано
+        finish(key, ServiceState::Blocked, -1);
+        return;
+    }
+
     // 16 случайных байт nonce — его эхо проверяем в resPQ (анти-false-positive).
     QByteArray nonce(MtprotoProbe::kNonceLen, Qt::Uninitialized);
     for (int i = 0; i < nonce.size(); ++i)
@@ -55,8 +72,6 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
     auto *clock = new QElapsedTimer();
     auto *buf = new QByteArray();
     auto *done = new bool(false);
-    const QString key = c.key;
-    const int slowMs = c.slowMs;
 
     // Примитивы (clock/buf/done) удаляем в destroyed(sock) — ПОСЛЕ всех очередных сигналов: иначе
     // второй queued-сигнал (например error после readyRead) прочитал бы освобождённый *done (UAF).
@@ -65,11 +80,12 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
     connect(sock, &QObject::destroyed, [clock, buf, done]() {
         delete clock; delete buf; delete done;
     });
-    auto fail = [this, key, sock, done]() {
+    // Провал ЭТОГО seed'а → пробуем следующий (а не сразу «заблок»): один IP мог лечь/смениться.
+    auto fail = [this, key, hosts, idx, port, perHostMs, slowMs, sock, done]() {
         if (*done) return;
         *done = true;
         sock->deleteLater();
-        finish(key, ServiceState::Blocked, -1); // TCP не дошёл / нет корректного resPQ / таймаут = заблокировано
+        attemptMtprotoHost(key, hosts, idx + 1, port, perHostMs, slowMs);
     };
     auto ok = [this, key, slowMs, sock, done](int rtt) {
         if (*done) return;
@@ -78,8 +94,8 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
         finish(key, rtt > slowMs ? ServiceState::Slow : ServiceState::Works, rtt);
     };
 
-    // Таймаут пробы.
-    QTimer::singleShot(timeoutMs, sock, [sock, done, fail]() {
+    // Таймаут на ОДИН seed.
+    QTimer::singleShot(perHostMs, sock, [sock, done, fail]() {
         if (*done) return;
         sock->abort();
         fail();
@@ -113,7 +129,7 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
             [fail](QAbstractSocket::SocketError) { fail(); });
 
     clock->start();
-    sock->connectToHost(c.host, quint16(c.port));
+    sock->connectToHost(hosts.at(idx), quint16(port));
 }
 
 // YouTube/прочие: TLS-complete с РЕАЛЬНЫМ SNI + TTFB. (Грубая reachability; точный троттл-детект

@@ -60,8 +60,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // TLS-complete с реальным SNI (грубая reachability; точный троттл-детект YouTube — TODO, см. ServiceProbe.h).
     {
         QList<ServiceProbeConfig> cfgs;
+        // Telegram: несколько seed-DC-IP (OONI-стабильные DC2/DC4/DC5) — первый ответивший resPQ ⇒
+        // works; так один сменившийся/легший IP не даёт ложный «заблок». Рефреш через help.getConfig — TODO.
         cfgs.append({QStringLiteral("telegram"),  ServiceProbeConfig::Mtproto,
-                     QStringLiteral("149.154.167.51"), 443, 1500}); // seed DC2 (рефреш через help.getConfig — TODO)
+                     QStringLiteral("149.154.167.51"), 443, 1500,
+                     QStringList{QStringLiteral("149.154.167.91"), QStringLiteral("91.108.56.130")}});
         cfgs.append({QStringLiteral("youtube"),   ServiceProbeConfig::Https,
                      QStringLiteral("www.youtube.com"), 443, 1500});
         cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Https,
