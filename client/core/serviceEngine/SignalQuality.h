@@ -18,14 +18,16 @@ public:
     static constexpr int kMaxBars = 5;
 
     // Чистая таблица RTT(мс)→бары. rttMs<0 (недостижимо) → 0.
-    // 5:<50  4:<100  3:<150  2:<300  1:<800  0:>=800/недостижимо.
+    // AVPN: шкала откалибрована под VPN-туннель (RTT включает путь до удалённой ноды), а не под
+    // локальную сеть — иначе реальные 100–250мс почти всегда давали 1–2 бара и 4–5 были недостижимы.
+    // 5:<100  4:<160  3:<250  2:<400  1:<800  0:>=800/недостижимо. (147мс ⇒ 4 бара.)
     static int barsForRtt(int rttMs)
     {
         if (rttMs < 0) return 0;
-        if (rttMs < 50)  return 5;
-        if (rttMs < 100) return 4;
-        if (rttMs < 150) return 3;
-        if (rttMs < 300) return 2;
+        if (rttMs < 100) return 5;
+        if (rttMs < 160) return 4;
+        if (rttMs < 250) return 3;
+        if (rttMs < 400) return 2;
         if (rttMs < 800) return 1;
         return 0;
     }
@@ -76,13 +78,13 @@ private:
 
     static double bandLo(int bar)
     {
-        switch (bar) { case 5: return 0; case 4: return 50; case 3: return 100;
-                       case 2: return 150; case 1: return 300; default: return 800; }
+        switch (bar) { case 5: return 0; case 4: return 100; case 3: return 160;
+                       case 2: return 250; case 1: return 400; default: return 800; }
     }
     static double bandHi(int bar)
     {
-        switch (bar) { case 5: return 50; case 4: return 100; case 3: return 150;
-                       case 2: return 300; case 1: return 800; default: return 1e12; }
+        switch (bar) { case 5: return 100; case 4: return 160; case 3: return 250;
+                       case 2: return 400; case 1: return 800; default: return 1e12; }
     }
     // «Залипание»: SRTT всё ещё внутри расширенной (±kHystFrac) полосы текущего бара ⇒ не меняем уровень.
     bool sticky(double srtt, int bar) const

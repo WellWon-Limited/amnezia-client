@@ -162,15 +162,17 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
     });
     connect(reply, &QNetworkReply::finished, reply, [this, reply, c, clock, ttfb]() {
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const bool tlsOk = (reply->error() == QNetworkReply::NoError
-                            || reply->error() == QNetworkReply::ContentOperationNotPermittedError)
-                           && httpStatus >= 200 && httpStatus < 400;
+        // AVPN: достижимость = TLS установился / пришёл ЛЮБОЙ HTTP-ответ (включая 4xx/405/redirect).
+        // 4xx/405 на HEAD ≠ блокировка: значит SNI прошёл и DPI НЕ срезал соединение. Прежняя проверка
+        // (только 2xx/3xx) давала ЛОЖНЫЙ красный (Instagram отдаёт 4xx/redirect на «/», хотя работает).
+        // «Заблокировано» теперь только при сетевой/TLS-ошибке или таймауте БЕЗ какого-либо ответа. // AVPN
+        const bool reachable = httpStatus > 0 || *ttfb >= 0;
         const int rtt = (*ttfb >= 0) ? int(*ttfb) : int(clock->elapsed());
-        ServiceState st = !tlsOk ? ServiceState::Blocked
-                                 : (rtt > c.slowMs ? ServiceState::Slow : ServiceState::Works);
+        ServiceState st = !reachable ? ServiceState::Blocked
+                                     : (rtt > c.slowMs ? ServiceState::Slow : ServiceState::Works);
         delete clock; delete ttfb;
         reply->deleteLater();
-        finish(c.key, st, tlsOk ? rtt : -1);
+        finish(c.key, st, reachable ? rtt : -1);
     });
 }
 
