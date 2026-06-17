@@ -125,9 +125,6 @@ PageType {
     // (QQuickItem::setFocus на недостроенном элементе). Движок сам дефер-вызывает bootstrap из
     // конструктора уже ПОСЛЕ показа окна (QTimer::singleShot) — безопасно, как обычный start().
     Timer { id: simTimer; interval: 1500; onTriggered: { root.simConnecting = false; root.simConnected = true } }
-    // AVPN DEV: УБРАТЬ — самоскрин для верификации без TCC (см. tribe-ui-verify-loop)
-    Timer { running: true; interval: 2500; repeat: false
-        onTriggered: root.grabToImage(function(r){ r.saveToFile("/tmp/avpn-screen.png") }) }
 
     // ── фон ─────────────────────────────────────────────────────────────
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -438,13 +435,16 @@ PageType {
             // press-scale (как у кнопок) — тактильный отклик при тапе по карточке
             scale: serverCardMa.pressed ? 0.985 : 1.0
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
-            Row {
+            Item {
                 anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                spacing: Theme.space.lg
+                // якорная раскладка (не Row-позиционер): флаг слева, сигнал-блок справа с симметричным
+                // отступом lg, имя/IP — между ними. // AVPN
                 // иконка региона: КРУГЛЫЙ флаг по country_code «во всю плашку» (SVG из flagKit,
                 // не эмодзи), иначе тёмная плашка с Tabler "world".
                 TribeFlag {
-                    width: 52; height: 52; anchors.verticalCenter: parent.verticalCenter
+                    id: regionFlag
+                    width: 52; height: 52
+                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
                     code: root.curNode.hasNode ? (root.curNode.countryCode || "") : ""
                     fallback: Component {
                         Rectangle {
@@ -465,8 +465,10 @@ PageType {
                 }
                 Column {
                     anchors.verticalCenter: parent.verticalCenter; spacing: 2
-                    // при выбранном узле справа сигнал+шеврон (30+18); без узла — текст во всю ширину
-                    width: parent.width - 52 - Theme.space.lg - (root.curNode.hasNode ? (30 + 18 + 2 * Theme.space.lg) : 0)
+                    anchors.left: regionFlag.right; anchors.leftMargin: Theme.space.lg
+                    // при узле — до сигнал-блока справа; без узла — до правого края карточки // AVPN
+                    anchors.right: root.curNode.hasNode ? sigGroup.left : parent.right
+                    anchors.rightMargin: Theme.space.lg
                     // строка имени + бейдж «auto» (только когда подключены в авто-режиме). // AVPN
                     Row {
                         width: parent.width
@@ -503,21 +505,25 @@ PageType {
                         color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10 }
                 }
-                Row {  // реальные сигнал-бары: app-layer RTT ЧЕРЕЗ туннель (TribeEngine.liveBars) + мс
+                // правый сигнал-блок: бары (в строке с именем сервера) над мс (в строке с IP),
+                // всё выровнено вправо; отступ справа = lg, как слева у флага. // AVPN
+                Column {
+                    id: sigGroup
                     visible: root.curNode.hasNode
-                    spacing: Theme.space.sm; height: 16; anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    spacing: 2
+                    LoadBars {  // 5 баров, зелёные/серые. 0 = нет связи/ещё не мерили.
+                        anchors.right: parent.right
+                        level: root.hasEngine ? Number(TribeEngine.liveBars) : 0
+                    }
                     // число мс — второй (не-цветовой) носитель уровня; виден, когда проба дошла. // AVPN
                     Text {
-                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right
                         visible: root.hasEngine && TribeEngine.liveReachable === true
                                  && Number(TribeEngine.liveRttMs) >= 0
                         text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
                         color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10
-                    }
-                    LoadBars {  // 5 баров, зелёные/серые. 0 = нет связи/ещё не мерили.
-                        anchors.verticalCenter: parent.verticalCenter
-                        level: root.hasEngine ? Number(TribeEngine.liveBars) : 0
                     }
                 }
             }
