@@ -10,11 +10,15 @@ import ".."   // Theme
 // Замер идёт С УСТРОЙСТВА через туннель (ServiceProbe.cpp). Тап по чипу → повторная проба.
 // Статус-цвета — ТОКЕНЫ Theme (connected/warning/danger/text3). Цвета ЛОГО — фирменные (бренд-исключение
 // из правила «только токены», как сценические детали Connect: иначе лого нераспознаваемо). UI-DESIGN.md §3.
-Flow {
+Row {
     id: chips
     property var model: []           // TribeEngine.serviceStatus
     signal recheck()                 // тап по чипу → перепроверить
     spacing: Theme.space.sm
+    // AVPN: ВСЕ чипы в ОДНУ строку — делим ширину поровну (не Flow с переносом), чтобы три сервиса
+    // всегда влезали в один ряд на любом экране; лейбл с эллипсисом, если узко.
+    readonly property real chipW: (model && model.length > 0)
+                                  ? (width - (model.length - 1) * spacing) / model.length : 0
 
     function stateColor(s) {
         if (s === 2) return Theme.color.connected   // работает — зелёный
@@ -37,7 +41,7 @@ Flow {
             readonly property string key: modelData ? (modelData.key || "") : ""
             readonly property int st: modelData && modelData.state !== undefined ? modelData.state : -1
             height: 32
-            width: row.width + 2 * Theme.space.md
+            width: chips.chipW           // равная доля ширины — гарантирует одну строку // AVPN
             radius: Theme.radius.pill
             color: Theme.color.surface1
             border.width: 1
@@ -63,6 +67,9 @@ Flow {
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyS
                     font.weight: Theme.font.wMedium
+                    // эллипсис, если лейбл не влезает в равную долю чипа // AVPN
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, chip.width - 18 - 8 - 3 * Theme.space.sm)
                 }
                 // статус-дот (цвет = статус)
                 Rectangle {
