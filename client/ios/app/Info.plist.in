@@ -79,8 +79,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- AVPN: Dark (было Light) — наш UI тёмный; форсит тёмную iOS-клавиатуру/меню/алерты -->
 	<key>UIUserInterfaceStyle</key>
-	<string>Light</string>
+	<string>Dark</string>
 	<key>com.wireguard.ios.app_group_id</key>
 	<string>group.hk.wellwon.zanaves</string>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
