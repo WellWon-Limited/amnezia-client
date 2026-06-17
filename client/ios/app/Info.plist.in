@@ -200,14 +200,8 @@
                         </dict>
                 </dict>
 	</array>
-        <!-- AVPN (Task 8): App Intents / Shortcuts. Интенты регистрируются автоматически из
-             AppShortcutsProvider; активити-типы объявляем явно для донейта/обнаружения в
-             Shortcuts и Spotlight. -->
-        <key>NSUserActivityTypes</key>
-        <array>
-                <string>TribeEnableIntent</string>
-                <string>TribePauseIntent</string>
-        </array>
+        <!-- AVPN: NSUserActivityTypes (TribeEnableIntent/TribePauseIntent) убраны — интенты
+             переехали в App Intents Extension (ios/appintentsextension); в app-таргете их нет. -->
         <key>CFBundleDocumentTypes</key>
         <array>
                 <dict>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- AVPN: extension управляет существующим туннелем (NETunnelProviderManager.startVPNTunnel/
+	     stopVPNTunnel) → нужна та же networkextension-capability, что у app/NE. -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+	<!-- AVPN: общий контейнер с приложением и NE — интенты пишут сюда мост к движку (pause/resume). -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.hk.wellwon.zanaves</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)group.hk.wellwon.zanaves</string>
+	</array>
+</dict>
+</plist>
