@@ -266,6 +266,7 @@ void AvpnEngineQml::probeServices()
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 {
+    m_lastTunnelState = s; // AVPN: кэш реального состояния туннеля (для отложенного start() при смене узла)
     // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
     switch (s) {
@@ -296,6 +297,12 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Неожиданный обрыв при активном туннеле → failover; иначе честно отражаем «отключено».
         if (!m_engine.notifyConnectionLost())
             m_engine.onTunnelDisconnected();
+        // AVPN (фикс смены сервера): отложенный ручной start() — туннель прошлого узла реально опущен,
+        // теперь безопасно поднимать новый (без гонки с незавершённым Disconnect).
+        if (m_pendingStart) {
+            m_pendingStart = false;
+            doStart();
+        }
         break;
     case Vpn::Reconnecting:
         m_engine.notifyConnectionLost();
@@ -369,12 +376,38 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
 
 void AvpnEngineQml::start()
 {
-    if (m_busy)
+    if (m_busy || m_pendingStart)
         return;
     // AVPN (Task 7): явный start() выходит из паузы (пользователь сам поднял VPN).
     m_pauseTimer.stop();
     m_paused = false;
     m_wasConnected = false;
+
+    // AVPN (фикс смены сервера): если туннель прошлого узла ещё опускается (switchToNode сделал down()),
+    // НЕ поднимаем новый поверх незавершённого Disconnect — на iOS NE это давало вечное «подбираем
+    // сервер» + «ошибка сети» (startVPNTunnel игнорируется на сессии в Disconnecting, а контрол-плейн
+    // HTTP уходил в таймаут). Откладываем реальный старт до прихода Disconnected (onConnectionStateChanged).
+    // На холодном старте (нет активного/опускающегося туннеля) — стартуем сразу, поведение не меняется.
+    if (m_lastTunnelState == Vpn::Connected || m_lastTunnelState == Vpn::Connecting
+        || m_lastTunnelState == Vpn::Disconnecting || m_lastTunnelState == Vpn::Reconnecting
+        || m_lastTunnelState == Vpn::Preparing) {
+        m_pendingStart = true;
+        m_busy = true;
+        emit changed();
+        // Фолбэк-сторож: если реальный Disconnected по какой-то причине не прилетит — всё равно стартуем
+        // (best-effort), чтобы не залипнуть в ожидании навсегда.
+        QTimer::singleShot(5000, this, [this]() {
+            if (m_pendingStart) { m_pendingStart = false; doStart(); }
+        });
+        return;
+    }
+    doStart();
+}
+
+// AVPN: реальное тело старта. Вынесено из start(), чтобы вызываться и напрямую (холодный старт), и
+// отложенно из onConnectionStateChanged(Disconnected) — после завершения teardown прошлого узла.
+void AvpnEngineQml::doStart()
+{
     m_busy = true;
     emit changed();
 

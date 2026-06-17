@@ -210,6 +210,10 @@ private slots:
     void onPauseTimeout();
 
 private:
+    // AVPN: реальное тело start() (enroll→subscription→connect). Вызывается из start() напрямую ИЛИ
+    // отложенно из onConnectionStateChanged(Disconnected), когда нужно дождаться teardown прошлого узла.
+    void doStart();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
@@ -227,6 +231,11 @@ private:
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
+    // AVPN (фикс смены сервера): ручной start() после смены узла откладывается, пока туннель прошлого
+    // узла реально не опустится (Disconnected). Без этого on iOS up()/контрол-плейн стартовал поверх
+    // незавершённого Disconnect → вечное «подбираем сервер» + «ошибка сети».
+    bool                         m_pendingStart = false;
+    Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // кэш реального состояния туннеля
     bool                         m_bootstrapped = false; // AVPN: bootstrap() выполняем один раз (Task 11)
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume
