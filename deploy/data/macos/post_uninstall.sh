@@ -1,103 +1,40 @@
 #!/bin/bash
+# Используется как CPack PREFLIGHT (чистка перед установкой новой версии) И как
+# скрипт полного удаления. Делегирует снятие демона в ЕДИНЫЙ tribe-daemon.sh, чтобы
+# гарантированно не осталось хвостов от прошлых установок. Официальную Amnezia не трогает.
+set -uo pipefail
 
-# AVPN: свои имена — не трогаем при удалении ничего из официальной Amnezia
-APP_NAME=AntiVPN
-SERVICE_LABEL=Tribe-service
-PLIST_NAME=$APP_NAME.plist
-LAUNCH_DAEMONS_PLIST_NAME="/Library/LaunchDaemons/$PLIST_NAME"
-APP_PATH="/Applications/$APP_NAME.app"
-USER_APP_SUPPORT="$HOME/Library/Application Support/$APP_NAME"
-SYSTEM_APP_SUPPORT="/Library/Application Support/$APP_NAME"
-LOG_FOLDER="/var/log/$APP_NAME"
-CACHES_FOLDER="$HOME/Library/Caches/$APP_NAME"
-SERVICE_GROUP="tribevpn"
+APP="/Applications/TribeVPN.app"
+MGR="$APP/Contents/Resources/tribe-daemon.sh"
 
-# Attempt to quit the GUI application if it's currently running
-if pgrep -x "$APP_NAME" > /dev/null; then
-    echo "Quitting $APP_NAME..."
-    osascript -e 'tell application "'"$APP_NAME"'" to quit' || true
-    # Wait up to 10 seconds for the app to terminate gracefully
-    for i in {1..10}; do
-        if ! pgrep -x "$APP_NAME" > /dev/null; then
-            break
-        fi
-        sleep 1
+# Корректно закрыть GUI, если запущен
+if pgrep -x "TribeVPN" > /dev/null 2>&1; then
+    osascript -e 'tell application "TribeVPN" to quit' 2>/dev/null || true
+    for _ in $(seq 1 10); do pgrep -x "TribeVPN" >/dev/null 2>&1 || break; sleep 1; done
+fi
+
+if [ -x "$MGR" ]; then
+    bash "$MGR" uninstall || true
+else
+    # Фолбэк, если менеджер недоступен (старая/битая установка): снять наши артефакты вручную.
+    launchctl bootout system /Library/LaunchDaemons/Tribe-service.plist 2>/dev/null \
+        || launchctl unload /Library/LaunchDaemons/Tribe-service.plist 2>/dev/null || true
+    rm -f /Library/LaunchDaemons/Tribe-service.plist \
+          /Library/LaunchDaemons/AntiVPN.plist \
+          /Library/LaunchDaemons/com.antivpn.helper.plist
+    pkill -x "Tribe-service" 2>/dev/null || true
+    pkill -f "PrivilegedHelperTools/.*/amneziawg-go" 2>/dev/null || true
+    for anc in $(pfctl -s Anchors 2>/dev/null | awk '/^[[:space:]]*tribe/ {sub(/\*$/,"",$1); print $1}'); do
+        pfctl -a "$anc" -F all 2>/dev/null || true
     done
+    rm -rf /Library/PrivilegedHelperTools/Tribe \
+           /Library/PrivilegedHelperTools/TribeVPN \
+           "/Library/Application Support/TribeVPN" \
+           "/Library/Application Support/ANTIVPN" \
+           /Applications/AntiVPN.app
 fi
 
-# Stop the running service if it exists
-if pgrep -x "$SERVICE_LABEL" > /dev/null; then
-    sudo killall -9 "$SERVICE_LABEL"
-fi
-
-# Unload the service if loaded and remove its plist file regardless
-if launchctl list "$SERVICE_LABEL" &> /dev/null; then
-    sudo launchctl bootout system "$LAUNCH_DAEMONS_PLIST_NAME" || sudo launchctl unload "$LAUNCH_DAEMONS_PLIST_NAME"
-fi
-sudo rm -f "$LAUNCH_DAEMONS_PLIST_NAME"
-
-# Remove the entire application bundle
-sudo rm -rf "$APP_PATH"
-
-# Remove Application Support folders (user and system, if they exist)
-rm -rf "$USER_APP_SUPPORT"
-sudo rm -rf "$SYSTEM_APP_SUPPORT"
-
-# Remove the log folder
-sudo rm -rf "$LOG_FOLDER"
-
-# Remove any caches left behind
-rm -rf "$CACHES_FOLDER"
-
-# Remove PF data directory created by firewall helper, if present
-sudo rm -rf "/Library/Application Support/${APP_NAME}/pf"
-
-# ---------------- PF firewall cleanup ----------------------
-# Rules are loaded under the anchor "tribe" (see macosfirewall.cpp)
-# Flush only that anchor to avoid destroying user/system rules.
-
-PF_ANCHOR="tribe"
-
-### Flush all PF rules, NATs, and tables under our anchor and sub-anchors ###
-anchors=$(sudo pfctl -s Anchors 2>/dev/null | awk '/^'"${PF_ANCHOR}"'/ {sub(/\*$/, "", $1); print $1}')
-for anc in $anchors; do
-    echo "Flushing PF anchor $anc"
-    sudo pfctl -a "$anc" -F all 2>/dev/null || true
-    # flush tables under this anchor
-    tables=$(sudo pfctl -s Tables 2>/dev/null | awk '/^'"$anc"'/ {print}')
-    for tbl in $tables; do
-        echo "Killing PF table $tbl"
-        sudo pfctl -t "$tbl" -T kill 2>/dev/null || true
-    done
-done
-
-### Reload default PF config to restore system rules ###
-if [ -f /etc/pf.conf ]; then
-    echo "Restoring system PF config"
-    sudo pfctl -f /etc/pf.conf 2>/dev/null || true
-fi
-
-### Disable PF if no rules remain ###
-if sudo pfctl -s info 2>/dev/null | grep -q '^Status: Enabled' && \
-   ! sudo pfctl -sr 2>/dev/null | grep -q .; then
-    echo "Disabling PF"
-    sudo pfctl -d 2>/dev/null || true
-fi
-
-# Remove amnvpn group if it's not referenced by users
-if dscl . -read "/Groups/$SERVICE_GROUP" >/dev/null 2>&1; then
-    group_gid=$(dscl . -read "/Groups/$SERVICE_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')
-    users_with_primary_gid=""
-    if [ -n "$group_gid" ]; then
-        users_with_primary_gid=$(dscl . -list /Users PrimaryGroupID 2>/dev/null | awk -v gid="$group_gid" '$2 == gid {print $1}')
-    fi
-
-    if [ -z "$users_with_primary_gid" ]; then
-        echo "Removing group $SERVICE_GROUP"
-        sudo dscl . -delete "/Groups/$SERVICE_GROUP" || true
-    else
-        echo "Keeping group $SERVICE_GROUP (still used by users): $users_with_primary_gid"
-    fi
-fi
-
-# -----------------------------------------------------------
+# Полное удаление: снести и приложение (для PREFLIGHT productbuild это безопасно —
+# payload пишется уже после preflight, новая копия встанет следом).
+rm -rf "$APP"
+exit 0
