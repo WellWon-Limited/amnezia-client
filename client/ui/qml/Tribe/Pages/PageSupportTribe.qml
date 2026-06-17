@@ -71,13 +71,13 @@ PageType {
             Component.onCompleted: positionViewAtEnd()
         }
 
-        // composer (редизайн 2026-06-14): ОДНА пилюля с кнопкой отправки ВНУТРИ справа (стиль
-        // iMessage/Telegram) — компактнее и аккуратнее, без отдельной высокой кнопки и лишних отступов.
-        // Контент над safe-area/клавиатурой (нижний инсет уходит в паддинг, без пустоты под полем). // AVPN
+        // composer (редизайн 2026-06-16): без тёмной подложки (цвет страницы bg800), поле — авто-
+        // растущий вверх TextArea (мин 44 → кап 132 → внутренний скролл), кнопка отправки прижата к
+        // нижнему-правому краю (остаётся на месте при росте). Тёмное контекст-меню как в TribeField. // AVPN
         Rectangle {
             id: composer
             Layout.fillWidth: true
-            color: Theme.color.bg900
+            color: Theme.color.bg800   // было bg900 — убрана тёмная подложка, цвет страницы // AVPN
             readonly property real bottomInset: Math.max(PageController.safeAreaBottomMargin, PageController.imeHeight)
             // компактно: пилюля + по sm-отступу сверху/снизу + safe-area/IME-инсет
             implicitHeight: pill.height + 2 * Theme.space.sm + bottomInset
@@ -85,42 +85,58 @@ PageType {
             // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
 
-            // единая пилюля: TextField во всю ширину + круглая кнопка отправки, вписанная в правый край
+            // авто-растущая пилюля: TextArea во всю ширину + круглая кнопка отправки в правом-нижнем углу
             Rectangle {
                 id: pill
                 anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                 anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
                 anchors.topMargin: Theme.space.sm
-                height: 50
-                radius: height / 2
+
+                readonly property int minH: 44
+                readonly property int maxH: 132
+                // растёт по контенту до капа; при превышении — внутренний скролл TextArea. // AVPN
+                height: Math.max(minH, Math.min(maxH, input.implicitHeight))
+                radius: Math.min(height / 2, Theme.radius.xl)   // пилюля на 1 строке → скруглённый прямоугольник при росте
                 color: Theme.color.surface1
                 border.width: 1
                 border.color: input.activeFocus ? Theme.color.accent : Theme.color.border
                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
+                Behavior on height { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
-                TextField {
-                    id: input
+                ScrollView {
+                    id: scroller
                     anchors.left: parent.left; anchors.right: sendBtn.left
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.top: parent.top; anchors.bottom: parent.bottom
                     anchors.leftMargin: Theme.space.lg
-                    anchors.rightMargin: Theme.space.sm
-                    verticalAlignment: TextInput.AlignVCenter
-                    placeholderText: qsTr("Сообщение…")
-                    color: Theme.color.text1
-                    placeholderTextColor: Theme.color.text3
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.bodyM
-                    background: null
-                    selectionColor: Theme.color.accent
-                    onAccepted: root.send()
+                    anchors.rightMargin: Theme.space.xs
+                    clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    TextArea {
+                        id: input
+                        width: scroller.availableWidth
+                        wrapMode: TextArea.Wrap
+                        topPadding: Theme.space.sm + 3; bottomPadding: Theme.space.sm + 3
+                        leftPadding: 0; rightPadding: 0
+                        placeholderText: qsTr("Сообщение…")
+                        color: Theme.color.text1
+                        placeholderTextColor: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.bodyM
+                        background: null
+                        selectionColor: Theme.color.accent
+                        // тёмное контекст-меню вместо нативного белого iOS-меню (паттерн форка) // AVPN
+                        ContextMenu.menu: ContextMenuType { textObj: input }
+                        // Enter = перенос строки (мультистрочный composer); отправка только кнопкой. // AVPN
+                    }
                 }
 
-                // круглая кнопка отправки — вписана в правый край пилюли (40 в 50, зазор 5).
-                // акцент при непустом вводе, иначе приглушённая; press-scale. // AVPN
+                // круглая кнопка отправки — прижата к правому-нижнему краю пилюли (40, зазор 5),
+                // остаётся на месте при росте поля. Акцент при непустом вводе; press-scale. // AVPN
                 Rectangle {
                     id: sendBtn
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    anchors.rightMargin: 5
+                    anchors.right: parent.right; anchors.bottom: parent.bottom
+                    anchors.rightMargin: 5; anchors.bottomMargin: 5
                     width: 40; height: 40
                     radius: height / 2
                     readonly property bool ready: input.text.trim().length > 0
