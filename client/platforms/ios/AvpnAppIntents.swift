@@ -105,7 +105,8 @@ private func avpnStopTunnel() async throws {
 
 @available(iOS 16.0, *)
 struct TribeEnableIntent: AppIntent {
-    static var title: LocalizedStringResource = "Tribe: включить"
+    // AVPN: «VPN» в заголовке — иначе поиск в «Командах» по слову «VPN» не находит (ищет по title).
+    static var title: LocalizedStringResource = "Tribe VPN: включить"
     static var description = IntentDescription(
         "Поднимает VPN-туннель Tribe (для выхода из паузы «для покупок» или ручного включения)."
     )
@@ -126,7 +127,8 @@ struct TribeEnableIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct TribePauseIntent: AppIntent {
-    static var title: LocalizedStringResource = "Tribe: пауза"
+    // AVPN: «VPN» в заголовке для поиска в «Командах» (см. TribeEnableIntent).
+    static var title: LocalizedStringResource = "Tribe VPN: пауза"
     static var description = IntentDescription(
         "Ставит Tribe на паузу «для покупок»: туннель реально опускается, трафик идёт мимо VPN."
     )
@@ -156,8 +158,10 @@ struct AvpnAppShortcuts: AppShortcutsProvider {
                 "Включить \(.applicationName)",
                 "\(.applicationName) включить"
             ],
-            shortTitle: "Tribe: включить",
-            systemImageName: "bolt.shield"
+            shortTitle: "Tribe VPN: включить",
+            // AVPN: фирменный SF-символ под наш бренд-щит (filled — солиднее тонкого дефолта).
+            // App Intents даёт только SF-символы (своё лого на плитку нельзя — by design), см. ресёрч.
+            systemImageName: "lock.shield.fill"
         )
         AppShortcut(
             intent: TribePauseIntent(),
@@ -166,8 +170,9 @@ struct AvpnAppShortcuts: AppShortcutsProvider {
                 "Пауза \(.applicationName)",
                 "\(.applicationName) пауза"
             ],
-            shortTitle: "Tribe: пауза",
-            systemImageName: "pause.circle"
+            shortTitle: "Tribe VPN: пауза",
+            // AVPN: filled-вариант в тон «включить» (единый стиль пары команд).
+            systemImageName: "pause.circle.fill"
         )
     }
 }
