@@ -51,6 +51,9 @@ class WireguardUtilsMacos final : public WireguardUtils {
   QString uapiCommand(const QString& command);
   static int uapiErrno(const QString& command);
   QString waitForTunnelName(const QString& filename);
+  // AVPN: гасит чужие VPN-туннели (utun, держащие дефолт-маршрут), кроме selfIfname,
+  // чтобы при нашем подключении остался ровно один активный VPN.
+  static void displaceConflictingVpns(const QString& selfIfname);
 
   QString m_ifname;
   QProcess m_tunnel;

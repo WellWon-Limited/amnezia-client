@@ -18,8 +18,8 @@
 
 #include "killswitch.h"
 
-constexpr const int WG_TUN_PROC_TIMEOUT = 5000;
-constexpr const char* WG_RUNTIME_DIR = "/var/run/tribewg"; // AVPN: не делить runtime-каталог с офиц. Amnezia
+constexpr const int WG_TUN_PROC_TIMEOUT = 15000; // AVPN: было 5000 — мало для первого старта amneziawg-go под демоном (создание utun + проверка подписи) → таймаут → демон убивал процесс
+constexpr const char* WG_RUNTIME_DIR = "/var/run/amneziawg"; // AVPN: ДОЛЖЕН совпадать с зашитым в amneziawg-go каталогом UAPI-сокета (/var/run/amneziawg), иначе waitForTunnelName не находит <ifname>.sock → таймаут. Изоляция от upstream сохраняется: у официальной Amnezia wireguard-go = /var/run/wireguard
 
 namespace {
 Logger logger("WireguardUtilsMacos");
@@ -64,6 +64,11 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
     return false;
   }
 
+  // AVPN: «один VPN». До подъёма нашего туннеля гасим любой чужой VPN, держащий
+  // дефолт-маршрут (Amnezia, Outline и любой full-tunnel) — иначе на macOS два
+  // демон-VPN могут сосуществовать и драться за маршрут.
+  displaceConflictingVpns(m_ifname);
+
   QDir wgRuntimeDir(WG_RUNTIME_DIR);
   if (!wgRuntimeDir.exists()) {
     wgRuntimeDir.mkpath(".");
@@ -76,6 +81,11 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
   pe.insert("LOG_LEVEL", "debug");
 #endif
   m_tunnel.setProcessEnvironment(pe);
+
+  // AVPN: вывод amneziawg-go идёт в stdout/stderr демона (→ StandardErrorPath лог).
+  // Без этого pipe QProcess не вычитывается и может заполниться/подвесить процесс,
+  // а ошибки wg-go были не видны. ForwardedChannels устраняет и deadlock, и слепоту.
+  m_tunnel.setProcessChannelMode(QProcess::ForwardedChannels);
 
   QDir appPath(QCoreApplication::applicationDirPath());
   QStringList wgArgs = {"-f", "utun"};
@@ -462,6 +472,53 @@ QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
   }
 
   return QString();
+}
+
+// AVPN: гарантия «на macOS активен один VPN». Перед подъёмом нашего туннеля находим
+// чужие utun-интерфейсы, которые держат дефолт-маршрут (0/1, 128.0/1, default или их
+// IPv6-аналоги) — это конкурирующие full-tunnel VPN (Amnezia/Outline/любой). Системные
+// utun (AirDrop/Handoff/Continuity) дефолт-маршрут НЕ держат, поэтому не затрагиваются.
+// Гасим их интерфейс (ifconfig down) + сносим их дефолт-маршруты: чужой туннель теряет
+// трафик, его собственный сетевой монитор это видит и отключается. Свой интерфейс
+// (selfIfname) и физические (en*) не трогаем.
+void WireguardUtilsMacos::displaceConflictingVpns(const QString& selfIfname) {
+  // ТОЛЬКО IPv4-дефолт: full-tunnel VPN держит 0/1 / 128.0/1 / default через utun.
+  // Системные utun (Continuity/AirDrop/iCloud Relay) держат лишь IPv6-половинки (::/1) —
+  // их НЕ трогаем, иначе ломается системная сеть. Поэтому inet6 исключён намеренно.
+  const QString script = QStringLiteral(
+      "netstat -rnf inet 2>/dev/null | "
+      "awk '($1==\"default\"||$1==\"0/1\"||$1==\"128.0/1\") "
+      "&& $NF ~ /^utun[0-9]+$/ {print $NF}' | sort -u");
+
+  QProcess finder;
+  finder.start(QStringLiteral("/bin/sh"), QStringList{QStringLiteral("-c"), script});
+  if (!finder.waitForFinished(3000)) {
+    finder.kill();
+    return;
+  }
+  const QStringList ifaces =
+      QString::fromUtf8(finder.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+
+  for (QString ifn : ifaces) {
+    ifn = ifn.trimmed();
+    if (ifn.isEmpty() || !ifn.startsWith(QStringLiteral("utun"))) continue;
+    if (!selfIfname.isEmpty() && ifn == selfIfname) continue;  // не трогаем свой
+
+    logger.warning() << "Displacing conflicting VPN on interface" << ifn;
+    // Снести дефолт-маршруты, идущие через чужой интерфейс.
+    for (const QString& r : {QStringLiteral("default"), QStringLiteral("0.0.0.0/1"),
+                             QStringLiteral("128.0.0.0/1")}) {
+      QProcess del;
+      del.start(QStringLiteral("/sbin/route"),
+                QStringList{QStringLiteral("-q"), QStringLiteral("-n"),
+                            QStringLiteral("delete"), QStringLiteral("-ifscope"), ifn, r});
+      del.waitForFinished(2000);
+    }
+    // Погасить чужой интерфейс — туннель остаётся без устройства, чужой VPN отключается.
+    QProcess down;
+    down.start(QStringLiteral("/sbin/ifconfig"), QStringList{ifn, QStringLiteral("down")});
+    down.waitForFinished(2000);
+  }
 }
 
 void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)

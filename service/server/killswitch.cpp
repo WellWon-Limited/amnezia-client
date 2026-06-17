@@ -44,7 +44,12 @@ bool KillSwitch::init()
         return disableAllTraffic();
     }
 
-    return true;
+    // AVPN: self-heal на старте демона. Если прошлый инстанс упал с загруженным
+    // firewall-анкором ("tribe") / висящим pf.token — здесь он снимается (на macOS
+    // disableKillSwitch() → MacOSFirewall::uninstall(): флаш анкора + снос токена +
+    // восстановление /etc/pf.conf). Гарантия: сеть не может остаться запертой после
+    // краша демона. killswitch по умолчанию OFF, так что обычный путь — именно сюда.
+    return disableKillSwitch();
 }
 
 bool KillSwitch::refresh(bool enabled)
