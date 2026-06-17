@@ -9,7 +9,7 @@ set(CLIENT_ROOT_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 # интенты в ОДНОМ таргете — здесь они вместе (AvpnAppIntents.swift). Чистый Swift, без Qt/C++.
 add_executable(appintentsextension)
 set_target_properties(appintentsextension PROPERTIES
-    XCODE_PRODUCT_TYPE com.apple.product-type.app-extension
+    XCODE_PRODUCT_TYPE com.apple.product-type.extensionkit-extension
     BUNDLE_EXTENSION appex
 
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
@@ -29,15 +29,27 @@ set_target_properties(appintentsextension PROPERTIES
     XCODE_ATTRIBUTE_APPLICATION_EXTENSION_API_ONLY "YES"
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+    # AVPN: App Intents Extension требует iOS 16+. При наследии 14.0 от app фреймворк App Intents НЕ
+    # эмитит entry-точку расширения (нет секции __swift5_entry) + валидатор Apple отвергает MinOS<16.
+    XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "16.0"
 
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../Frameworks"
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
 )
 
 set_target_properties(appintentsextension PROPERTIES
-    XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
-    # AVPN: подпись ТОЛЬКО WellWon Q7DVH5MCWF (НЕ личный 6D75W6GFC2 — см. memory tribe-signing-wellwon-only).
+    # AVPN: РУЧНАЯ подпись — для нового bundle id xcodebuild-автоподпись через ASC-ключ не
+    # авторизуется («Authentication failed: bearer token»), хотя прямой ASC API тем же ключом пишет.
+    # Профиль «Tribe AppIntents AppStore» создан через ASC API (POST /v1/profiles, dist-cert WellWon)
+    # и установлен в ~/Library/MobileDevice/Provisioning Profiles. App/NE остаются на Automatic
+    # (кэшированные профили). Подпись ТОЛЬКО WellWon Q7DVH5MCWF (см. memory tribe-signing-wellwon-only).
+    XCODE_ATTRIBUTE_CODE_SIGN_STYLE Manual
     XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "Q7DVH5MCWF"
+    # archive подписывает ЛОКАЛЬНО dev-сертификатом «Apple Development: Created via API» (единственная
+    # iOS-identity с приватным ключом в кейчейне; локального distribution-ключа нет). export потом
+    # ре-подписывает для App Store в ОБЛАКЕ (как app/NE в билде 20). Dev-профиль создан через ASC API.
+    XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER "Tribe AppIntents Dev"
+    XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
 )
 
 set_target_properties(appintentsextension PROPERTIES

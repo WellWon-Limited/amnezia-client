@@ -75,7 +75,8 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks"
-    XCODE_EMBED_APP_EXTENSIONS "networkextension;appintentsextension"
+    XCODE_EMBED_APP_EXTENSIONS networkextension
+    XCODE_EMBED_EXTENSIONKIT_EXTENSIONS appintentsextension
 )
 
 set_target_properties(${PROJECT} PROPERTIES
