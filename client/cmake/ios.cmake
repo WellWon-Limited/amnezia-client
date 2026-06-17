@@ -75,7 +75,7 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks"
-    XCODE_EMBED_APP_EXTENSIONS networkextension
+    XCODE_EMBED_APP_EXTENSIONS "networkextension;appintentsextension"
 )
 
 set_target_properties(${PROJECT} PROPERTIES
@@ -109,7 +109,8 @@ target_sources(${PROJECT} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/ScreenProtection.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/VPNCController.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/StoreKit2Helper.swift
-    ${CLIENT_ROOT_DIR}/platforms/ios/AvpnAppIntents.swift # AVPN (Task 8): App Intents / Shortcuts
+    # AVPN: AvpnAppIntents.swift ПЕРЕНЕСЁН в App Intents Extension (ios/appintentsextension) —
+    # в основном таргете iOS поднимал всё Qt-приложение в фоне ради фоновой команды → краш. Тут НЕ компилируем.
 )
 
 target_sources(${PROJECT} PRIVATE
@@ -126,3 +127,7 @@ set_property(TARGET ${PROJECT} APPEND PROPERTY RESOURCE
 
 add_subdirectory(ios/networkextension)
 add_dependencies(${PROJECT} networkextension)
+
+# AVPN: App Intents Extension — команды Shortcuts в отдельном процессе (без подъёма Qt-приложения в фоне).
+add_subdirectory(ios/appintentsextension)
+add_dependencies(${PROJECT} appintentsextension)
