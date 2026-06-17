@@ -176,3 +176,16 @@ struct AvpnAppShortcuts: AppShortcutsProvider {
         )
     }
 }
+
+// MARK: - ExtensionKit entry point (точка входа appex)
+
+// AVPN: явная @main-точка входа App Intents Extension. Генерирует секцию __swift5_entry, которую
+// требует валидатор Apple («The __swift5_entry section is missing… prevents the extension from
+// running»). Xcode-шаблон вставляет её неявно; CMake-сборка — нет, поэтому объявляем сами.
+// Протокол AppIntentsExtension (refines ExtensionFoundation.AppExtension) предоставляет @main по
+// умолчанию; тело пустое — интенты и AppShortcutsProvider фреймворк находит по извлечённым
+// метаданным (Metadata.appintents). Компилируется ТОЛЬКО в extension-таргете (target iOS 16+).
+@available(iOS 16.0, *)
+@main
+struct TribeAppIntentsEntryPoint: AppIntentsExtension {
+}

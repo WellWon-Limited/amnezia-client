@@ -2,20 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- AVPN: extension управляет существующим туннелем (NETunnelProviderManager.startVPNTunnel/
-	     stopVPNTunnel) → нужна та же networkextension-capability, что у app/NE. -->
+	<!-- AVPN: extension управляет существующим туннелем (NETunnelProviderManager start/stopVPNTunnel)
+	     → нужна networkextension-capability (packet-tunnel-provider). -->
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
 		<string>packet-tunnel-provider</string>
 	</array>
-	<!-- AVPN: общий контейнер с приложением и NE — интенты пишут сюда мост к движку (pause/resume). -->
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.hk.wellwon.zanaves</string>
-	</array>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)group.hk.wellwon.zanaves</string>
-	</array>
+	<!-- AVPN v1: App Group НАМЕРЕННО убран. Публичный ASC API не умеет привязывать App Group к новому
+	     App ID (/v1/appGroups = 404), а GUI-портал в headless-сборке недоступен. App Group нужен лишь
+	     для тонкой синхронизации паузы с движком (avpnPostBridge) — НЕ для главного (гашение/подъём
+	     туннеля, оно на networkextension). Swift-код моста gracefully no-op без права (guard let defaults).
+	     Чтобы включить мост позже: в портале привязать group.hk.wellwon.zanaves к этому App ID →
+	     перевыпустить профиль с app-groups → вернуть ключи application-groups/keychain сюда. -->
 </dict>
 </plist>

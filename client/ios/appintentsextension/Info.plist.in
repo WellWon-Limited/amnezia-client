@@ -25,11 +25,12 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
 
-	<!-- AVPN: App Intents Extension. Точка входа — App Intents framework сам находит интенты и
-	     AppShortcutsProvider по метаданным; принципал-класс не нужен (в отличие от NE). -->
-	<key>NSExtension</key>
+	<!-- AVPN: App Intents Extension = ExtensionKit (EXAppExtension), НЕ классический NSExtension.
+	     Apple отвергает NSExtension+PlugIns для appintents-extension: нужен EXAppExtensionAttributes
+	     и встраивание в Extensions/. App Intents framework сам находит интенты/AppShortcutsProvider. -->
+	<key>EXAppExtensionAttributes</key>
 	<dict>
-		<key>NSExtensionPointIdentifier</key>
+		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.appintents-extension</string>
 	</dict>
 </dict>
