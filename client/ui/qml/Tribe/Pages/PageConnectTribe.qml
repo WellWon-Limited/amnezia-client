@@ -21,12 +21,18 @@ PageType {
     readonly property color slate900: "#0F172A"
 
     // previewSim: визуальная симуляция (off→Поиск…→Connected) ТОЛЬКО для превью-демо.
-    // false = орб ходит в реальный ConnectionController (прод-поведение). // AVPN
+    // false = орб ходит в РЕАЛЬНЫЙ движок (TribeEngine), а не в ванильный ConnectionController. // AVPN
     property bool previewSim: false
     property bool simConnected: false
     property bool simConnecting: false
-    readonly property bool isOn:  previewSim ? simConnected  : ConnectionController.isConnected
-    readonly property bool isBusy: previewSim ? simConnecting : ConnectionController.isConnectionInProgress
+    // AVPN (фикс рассинхрона орба): состояние орба берём из TribeEngine (наша стейт-машина), а НЕ из
+    // ванильного ConnectionController — иначе орб решал stop/start по чужому состоянию и расходился с
+    // движком (повторный Connect делал stop, смена ноды «не коннектила»). Фолбэк на ConnectionController
+    // только если движка нет (не наш кейс на проде).
+    readonly property bool isOn:  previewSim ? simConnected
+                                  : (hasEngine ? (TribeEngine.state === "connected") : ConnectionController.isConnected)
+    readonly property bool isBusy: previewSim ? simConnecting
+                                  : (hasEngine ? TribeEngine.busy : ConnectionController.isConnectionInProgress)
 
     signal requestTab(int index)
     signal requestSettings()
