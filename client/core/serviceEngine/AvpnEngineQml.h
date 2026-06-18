@@ -208,11 +208,17 @@ private slots:
     void onVpnProtocolError(amnezia::ErrorCode code);
     // AVPN (Task 7): таймер паузы истёк → бездействие → поднять туннель обратно.
     void onPauseTimeout();
+    // AVPN (reconcile-машина): терминальный колбэк туннеля не пришёл за таймаут → разблокировать.
+    void onWatchdog();
 
 private:
-    // AVPN: реальное тело start() (enroll→subscription→connect). Вызывается из start() напрямую ИЛИ
-    // отложенно из onConnectionStateChanged(Disconnected), когда нужно дождаться teardown прошлого узла.
-    void doStart();
+    // AVPN (reconcile-машина смены ноды): единый контур «намерение vs факт». ВСЕ подъёмы/опускания
+    // туннеля идут ТОЛЬКО из терминального состояния (.connected/.disconnected/.error); смена ноды =
+    // stop → дождаться Disconnected → start (никогда не up() поверх незакрытой iOS-NE-сессии). Это
+    // убирает «подбираем сервер»→«Network Error» и залипания. См. memory tribe-server-switch-fix.
+    void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
+    void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
+    void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
 
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
@@ -231,11 +237,15 @@ private:
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
-    // AVPN (фикс смены сервера): ручной start() после смены узла откладывается, пока туннель прошлого
-    // узла реально не опустится (Disconnected). Без этого on iOS up()/контрол-плейн стартовал поверх
-    // незавершённого Disconnect → вечное «подбираем сервер» + «ошибка сети».
-    bool                         m_pendingStart = false;
-    Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // кэш реального состояния туннеля
+    // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
+    Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // ФАКТ: реальное состояние туннеля
+    bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
+    bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
+    bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
+    int                          m_startAttempts = 0;              // подряд неудачных connect — анти-зацикливание
+    enum class Op { None, Starting, Stopping };
+    Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)
+    QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
     bool                         m_bootstrapped = false; // AVPN: bootstrap() выполняем один раз (Task 11)
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume

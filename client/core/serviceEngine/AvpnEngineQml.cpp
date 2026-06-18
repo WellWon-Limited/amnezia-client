@@ -106,6 +106,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_pauseTimer.setSingleShot(true);
     connect(&m_pauseTimer, &QTimer::timeout, this, &AvpnEngineQml::onPauseTimeout);
 
+    // AVPN (reconcile-машина): единый сторож. Если терминальный колбэк туннеля (Connected/Disconnected)
+    // не прилетит за таймаут (iOS NE иногда не рапортует чистый Disconnected) — разблокируем машину,
+    // чтобы отложенный старт/стоп не залип навсегда. Один таймер (не накапливаем singleShot, как раньше).
+    m_watchdog.setSingleShot(true);
+    m_watchdog.setInterval(15000); // > 12с iOS handshake-timeout, чтобы не прерывать нормальный connect
+    connect(&m_watchdog, &QTimer::timeout, this, &AvpnEngineQml::onWatchdog);
+
     // AVPN (Task E): консьюмер «намерений» фонового iOS App Intent (Task 8). Интент в фоне уже
     // реально опустил/поднял туннель и записал флаг в App Group; при выходе в foreground натив-слой
     // (QtAppDelegate.mm → Avpn_consumeIntentFlags → AvpnIntentController.mm) эмитит сигналы моста.
@@ -295,20 +302,35 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         break;
     case Vpn::Disconnected:
         // Неожиданный обрыв при активном туннеле → failover; иначе честно отражаем «отключено».
+        // Отложенный старт смены ноды теперь ведёт reconcile() (ниже), а не разовый m_pendingStart.
         if (!m_engine.notifyConnectionLost())
             m_engine.onTunnelDisconnected();
-        // AVPN (фикс смены сервера): отложенный ручной start() — туннель прошлого узла реально опущен,
-        // теперь безопасно поднимать новый (без гонки с незавершённым Disconnect).
-        if (m_pendingStart) {
-            m_pendingStart = false;
-            doStart();
-        }
         break;
     case Vpn::Reconnecting:
         m_engine.notifyConnectionLost();
         break;
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
         break;
+    }
+
+    // AVPN (reconcile-машина): терминальное состояние снимает op-in-flight и разрешает следующий шаг;
+    // промежуточные (Connecting/Disconnecting/Reconnecting/Preparing) держим «занято» (UI «подбираем…»).
+    {
+        const bool terminal = (s == Vpn::Connected || s == Vpn::Disconnected
+                               || s == Vpn::Error || s == Vpn::Unknown);
+        if (terminal) {
+            const Op finished = m_op;
+            m_op = Op::None;
+            m_opInFlight = false;
+            m_busy = false;
+            m_watchdog.stop();
+            if (s == Vpn::Connected)
+                m_startAttempts = 0;                 // успех — счётчик попыток сброшен
+            else if (s == Vpn::Error && finished == Op::Starting)
+                ++m_startAttempts;                   // connect не удался — считаем попытку (анти-зацикливание)
+        } else {
+            m_busy = true;                           // идёт переход — занято
+        }
     }
 
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
@@ -336,6 +358,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     }
 
     emit changed();
+
+    // AVPN: довести факт до намерения — поднять отложенный старт после Disconnected (смена ноды) или
+    // погасить туннель, если намерение изменилось. No-op, если op в полёте / состояние промежуточное.
+    reconcile();
 }
 
 void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
@@ -344,9 +370,18 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     // если падение из активного Connected — сначала пробуем свитч, иначе честно фиксируем Error.
     if (!m_engine.notifyConnectionLost())
         m_engine.onTunnelError();
+    // AVPN (фикс залипания): ошибка ОБЯЗАНА снять op-in-flight (раньше не трогала m_pendingStart →
+    // следующий start() мгновенно return → орб залипал навсегда). Теперь машина разблокируется.
+    const Op finished = m_op;
+    m_op = Op::None;
+    m_opInFlight = false;
     m_busy = false;
+    m_watchdog.stop();
+    if (finished == Op::Starting)
+        ++m_startAttempts;
     emit error(errorString(code));
     emit changed();
+    reconcile();
 }
 
 void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ/дней/subActive) ДО первого Connect.
@@ -376,78 +411,162 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
 
 void AvpnEngineQml::start()
 {
-    if (m_busy || m_pendingStart)
-        return;
     // AVPN (Task 7): явный start() выходит из паузы (пользователь сам поднял VPN).
     m_pauseTimer.stop();
     m_paused = false;
     m_wasConnected = false;
-
-    // AVPN (фикс смены сервера): если туннель прошлого узла ещё опускается (switchToNode сделал down()),
-    // НЕ поднимаем новый поверх незавершённого Disconnect — на iOS NE это давало вечное «подбираем
-    // сервер» + «ошибка сети» (startVPNTunnel игнорируется на сессии в Disconnecting, а контрол-плейн
-    // HTTP уходил в таймаут). Откладываем реальный старт до прихода Disconnected (onConnectionStateChanged).
-    // На холодном старте (нет активного/опускающегося туннеля) — стартуем сразу, поведение не меняется.
-    if (m_lastTunnelState == Vpn::Connected || m_lastTunnelState == Vpn::Connecting
-        || m_lastTunnelState == Vpn::Disconnecting || m_lastTunnelState == Vpn::Reconnecting
-        || m_lastTunnelState == Vpn::Preparing) {
-        m_pendingStart = true;
-        m_busy = true;
-        emit changed();
-        // Фолбэк-сторож: если реальный Disconnected по какой-то причине не прилетит — всё равно стартуем
-        // (best-effort), чтобы не залипнуть в ожидании навсегда.
-        QTimer::singleShot(5000, this, [this]() {
-            if (m_pendingStart) { m_pendingStart = false; doStart(); }
-        });
-        return;
-    }
-    doStart();
+    // Намерение: хотим быть онлайн (к авто/закреплённой ноде). Факт догонит reconcile() из терминала.
+    m_wantConnected = true;
+    m_startAttempts = 0;        // ручной запуск — свежая серия попыток
+    reconcile();
 }
 
-// AVPN: реальное тело старта. Вынесено из start(), чтобы вызываться и напрямую (холодный старт), и
-// отложенно из onConnectionStateChanged(Disconnected) — после завершения teardown прошлого узла.
-void AvpnEngineQml::doStart()
+void AvpnEngineQml::stop()
 {
+    // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN).
+    m_pauseTimer.stop();
+    m_paused = false;
+    m_wasConnected = false;
+    // Намерение: хотим быть офлайн. reconcile() опустит туннель, если он поднят.
+    m_wantConnected = false;
+    m_needsRestart = false;
+    m_startAttempts = 0;
+    reconcile();
+}
+
+// AVPN (reconcile-машина): ЕДИНСТВЕННАЯ точка, поднимающая/опускающая туннель. Действует ТОЛЬКО из
+// терминального состояния (.connected/.disconnected/.error) — никогда не up()/down() поверх перехода
+// (back-to-back давало iOS «Operation Cancelled»/«Network error»). Смена ноды: connected + needsRestart
+// → guardedStop(); затем на пришедшем Disconnected reconcile() сам поднимет цель (pinned/auto). Зовётся
+// из start/stop/switchToNode/rotateNext/selectAuto/reprobe и из onConnectionStateChanged/onWatchdog.
+void AvpnEngineQml::reconcile()
+{
+    if (m_paused)
+        return;          // во время авто-паузы туннель ведёт pause-логика — не вмешиваемся
+    if (m_opInFlight)
+        return;          // операция в полёте — ждём терминального колбэка (debounce, анти-шторм)
+
+    const Vpn::ConnectionState s = m_lastTunnelState;
+    const bool connected = (s == Vpn::Connected);
+    // Error/Unknown/Disconnected = «можно действовать» (туннель де-факто не поднят). Error трактуем так
+    // же, как Disconnected, иначе после ошибки teardown машина залипла бы (старый баг).
+    const bool actionable = (s == Vpn::Disconnected || s == Vpn::Unknown || s == Vpn::Error);
+    if (!connected && !actionable)
+        return;          // промежуточное (Connecting/Disconnecting/Reconnecting/Preparing) — ждём
+
+    if (m_wantConnected) {
+        if (connected) {
+            if (m_needsRestart) {        // надо переехать на другую ноду → сначала чистый teardown
+                m_needsRestart = false;
+                guardedStop();
+            }
+            // connected && !needsRestart → уже где надо
+        } else {                         // офлайн, а хотим онлайн → поднимаем выбранную/авто ноду
+            if (m_startAttempts >= 3) {  // постоянный провал connect — не зацикливаемся (ошибка уже показана)
+                m_wantConnected = false;
+                m_startAttempts = 0;
+                return;
+            }
+            guardedStart();
+        }
+    } else {                             // хотим офлайн
+        if (connected)
+            guardedStop();
+        // офлайн → уже отключены
+    }
+}
+
+// AVPN: поднять туннель. startFlow = enroll→GET /v1/subscription→connect()→up() (async). Помечаем
+// op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
+void AvpnEngineQml::guardedStart()
+{
+    m_op = Op::Starting;
+    m_opInFlight = true;
     m_busy = true;
+    m_needsRestart = false;   // свежий старт всегда поднимает целевую (pin/auto) ноду — рестарт не нужен
+    m_watchdog.start();
     emit changed();
 
-    // Ключи клиента (zero-knowledge) → отдать туннель-адаптеру для сборки конфига.
     QString err;
     if (m_engine.identityEnsureKeys(m_store, err))
         m_tunnel.setClientKeys(m_engine.clientKeys());
 
     if (!m_engine.startFlow(m_nam, m_baseUrl, m_store, err)) {
+        // Контрол-плейн/enroll провалился ДО подъёма туннеля (терминального колбэка не будет) —
+        // снимаем op-in-flight здесь, считаем попытку и показываем ошибку. Авто-ретрай не запускаем
+        // (нет сети/enroll — пусть пользователь повторит); орб станет «Connect».
+        m_op = Op::None;
+        m_opInFlight = false;
         m_busy = false;
+        m_watchdog.stop();
+        ++m_startAttempts;
         emit error(err);
         emit changed();
         return;
     }
     m_healthTimer.start();
-    m_busy = false;
+    // up() в очереди — реальный Connecting→Connected/Error прилетит в onConnectionStateChanged, где
+    // op-in-flight снимется. m_busy остаётся true до тех пор.
     emit changed();
 }
 
-void AvpnEngineQml::stop()
+// AVPN: опустить туннель. requestStop() гасит фазу/failover ДО down() (иначе прилетевший Disconnected
+// переподнял бы ноду); реальный Disconnected снимет op-in-flight и reconcile поднимет цель при смене.
+void AvpnEngineQml::guardedStop()
 {
-    // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN —
-    // авто-возврат не нужен).
-    m_pauseTimer.stop();
-    m_paused = false;
-    m_wasConnected = false;
+    m_op = Op::Stopping;
+    m_opInFlight = true;
+    m_busy = true;
+    m_watchdog.start();
     m_healthTimer.stop();
-    m_engine.requestStop(); // AVPN: намеренное отключение — гасим failover до down()
+    m_engine.requestStop();
     m_tunnel.down();
     emit changed();
 }
 
+// AVPN: сторож reconcile — терминальный колбэк не пришёл за таймаут (iOS NE иногда «молчит» при
+// teardown или connect завис). Разблокируем машину, чтобы не залипнуть навсегда.
+void AvpnEngineQml::onWatchdog()
+{
+    if (!m_opInFlight)
+        return;
+    const Op finished = m_op;
+    m_op = Op::None;
+    m_opInFlight = false;
+    m_busy = false;
+    if (finished == Op::Stopping) {
+        // teardown не отрапортовал чистым Disconnected → считаем опущенным, отложенный старт пойдёт.
+        m_lastTunnelState = Vpn::Disconnected;
+        emit changed();
+        reconcile();
+    } else if (finished == Op::Starting && m_lastTunnelState != Vpn::Connected) {
+        // connect завис без терминала → принудительный teardown (→ Disconnected → reconcile ретрайнет
+        // с учётом анти-зацикливания m_startAttempts, либо остановится, если попытки исчерпаны).
+        ++m_startAttempts;
+        m_healthTimer.stop();
+        m_engine.requestStop();
+        m_tunnel.down();
+        emit changed();
+    } else {
+        emit changed();
+        reconcile();
+    }
+}
+
 void AvpnEngineQml::reprobe()
 {
-    QString err;
-    m_engine.clearPin(); // AVPN: «Авто (быстрейший)» снимает закрепление → connect() выбирает по скорингу
-    if (m_engine.connect(err))
-        emit changed();
-    else
-        emit error(err);
+    // AVPN: re-pick авто-ноды через единый reconcile (не дёргаем m_engine.connect() напрямую — это
+    // обходило бы стейт-машину и давало back-to-back up()). Снимаем pin; если онлайн — перевыбираем.
+    m_engine.clearPin();
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    if (st == QLatin1String("connected") || st == QLatin1String("connecting")
+        || st == QLatin1String("switching") || st == QLatin1String("selecting")) {
+        m_wantConnected = true;
+        m_needsRestart = true;   // переподнять на свежевыбранной авто-ноде
+        m_startAttempts = 0;
+    }
+    emit changed();
+    reconcile();
 }
 
 void AvpnEngineQml::manualSwitch()
@@ -474,16 +593,18 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
         emit error(err);
         return;
     }
+    // AVPN (новая модель): выбор ноды = подключиться к ней (как в любом VPN-клиенте — тап по стране
+    // коннектит). reconcile() сам сделает stop→ждём Disconnected→start на выбранной (iOS-safe, без
+    // шторма), если сейчас онлайн ДРУГАЯ нода; если офлайн — просто поднимет выбранную. Это убирает
+    // прежний баг «выбрал Финляндию → нажал Connect → ничего» (выбор не коннектил, а Connect делал stop).
     const DebugSnapshot s = m_engine.debugSnapshot();
-    const bool live = (s.state == QLatin1String("connected") || s.state == QLatin1String("switching")
-                       || s.state == QLatin1String("connecting") || s.state == QLatin1String("selecting"));
-    if (live && s.currentNodeId != nodeId) {
-        // Подключены к другому узлу → чистый тиар-даун (failover не сработает — requestStop гасит фазу).
-        m_healthTimer.stop();
-        m_engine.requestStop();
-        m_tunnel.down();
-    }
-    emit changed(); // карточка покажет выбранный узел (закреплён), orb → OFF (ждём Connect)
+    const bool sameLive = (s.state == QLatin1String("connected") && s.currentNodeId == nodeId);
+    m_wantConnected = true;
+    m_startAttempts = 0;
+    if (!sameLive)
+        m_needsRestart = true;   // переехать на выбранную (онлайн другая) / поднять её (офлайн)
+    emit changed();
+    reconcile();
 }
 
 // AVPN (live-node picker): «Авто (быстрейший)» в шторке — переключение в авто-режим БЕЗ реконнекта.
@@ -497,16 +618,27 @@ void AvpnEngineQml::selectAuto()
     emit changed();
 }
 
-// AVPN (live-node picker): кнопка «Обновить подключение» — round-robin на следующую живую ноду.
+// AVPN (live-node picker): кнопка «Обновить подключение» — round-robin на следующую живую ноду через
+// единый reconcile (не дёргаем m_engine.rotateNext() напрямую — он имел свой контур свитча, конфликтуя
+// с reconcile). Берём следующую живую ноду (чистый nextLiveNodeId, без side-effects), закрепляем как
+// цель и просим переключиться: reconcile сделает stop→Disconnected→start на ней (iOS-safe).
 void AvpnEngineQml::rotateNext()
 {
-    QString err;
-    if (m_engine.rotateNext(err)) {
-        m_healthTimer.start();
-        emit changed();
-    } else {
-        emit error(err);
+    const QString next = m_engine.nextLiveNodeId();
+    if (next.isEmpty()) {
+        emit error(QStringLiteral("Недостаточно живых серверов для переключения"));
+        return;
     }
+    QString err;
+    if (!m_engine.setPinnedNode(next, err)) {
+        emit error(err);
+        return;
+    }
+    m_wantConnected = true;
+    m_needsRestart = true;
+    m_startAttempts = 0;
+    emit changed();
+    reconcile();
 }
 
 // AVPN (live-node picker): пере-зачитать подписку/health и обновить nodePool. Тихий no-op при провале
