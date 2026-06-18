@@ -66,6 +66,9 @@ public:
     // Возвращают true при успешном свитче/старте; false + error — нет такой/живой ноды или провал.
     bool setPinnedNode(const QString &nodeId, QString &error); // AVPN (был switchToNode: коннектил сам)
     bool rotateNext(QString &error);                          // AVPN
+    // AVPN: следующая живая нода после текущей (та же сортировка, что rotateNext, но БЕЗ side-effects —
+    // фасад использует для «Обновить подключение» через единый reconcile). Пусто = некуда ротировать.
+    QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация
     // (rotateNext) снимают pin — иначе connect() всегда отдаёт приоритет закреплённой ноде, и

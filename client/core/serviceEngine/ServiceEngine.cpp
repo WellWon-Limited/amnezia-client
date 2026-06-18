@@ -2,6 +2,7 @@
 #include "SubscriptionParser.h"
 
 #include <QDateTime>
+#include <QRandomGenerator> // AVPN: рандомизация авто-выбора среди равных нод (иначе всегда первая = Польша)
 
 // [IN-FORK] токен/хранилище для startFlow:
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -25,7 +26,13 @@ static double healthAggregate(const SubscriptionNode &n) // AVPN
 const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const QString &exclB) const // AVPN
 {
     const QList<SubscriptionNode> &all = m_pool.nodes();
-    const SubscriptionNode *best = nullptr;
+    // AVPN (фикс «авто всегда Польша»): AWG = UDP-only ⇒ TCP-ping не достукивается ⇒ сюда падаем почти
+    // всегда. Раньше брали ПЕРВЫЙ узел с max weight (n.weight > best — строгое «>»), т.е. при равных
+    // весах детерминированно первый в JSON-порядке = Польша; Финляндия не выбиралась НИКОГДА. Теперь:
+    // собираем верхний «ярус» (узлы у максимального weight) среди живых и выбираем СЛУЧАЙНО — авто
+    // реально распределяет/чередует равноценные ноды.
+    QList<const SubscriptionNode *> tier;
+    double maxW = -1.0;
     for (const SubscriptionNode &n : all) {
         if (!exclA.isEmpty() && n.nodeId == exclA)
             continue;
@@ -33,10 +40,20 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        if (!best || n.weight > best->weight)
-            best = &n;
+        if (n.weight > maxW + 1e-9) {   // новый максимум — ярус обнуляем
+            maxW = n.weight;
+            tier.clear();
+            tier.append(&n);
+        } else if (n.weight >= maxW - 1e-9) { // в пределах максимума — добавляем в ярус
+            tier.append(&n);
+        }
     }
-    return best;
+    if (tier.isEmpty())
+        return nullptr;
+    if (tier.size() == 1)
+        return tier.first();
+    const int idx = static_cast<int>(QRandomGenerator::global()->bounded(tier.size()));
+    return tier.at(idx);
 }
 
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
@@ -83,7 +100,9 @@ bool ServiceEngine::connect(QString &error)
             }
     }
     if (!candidate)
-        candidate = m_selector.pick(m_pool, m_currentNodeId); // C-4: TCP-ping → score → choose
+        // AVPN: случайный seed для джиттера среди near-best (иначе seed=0 → всегда первый кандидат).
+        candidate = m_selector.pick(m_pool, m_currentNodeId, 75,
+                                    QRandomGenerator::global()->generate()); // C-4: TCP-ping → score → choose
     if (!candidate) {
         // MVP-фолбэк (спайк §9.3): AWG-порт UDP-only → TCP-ping может не пройти ни до одной ноды
         // (фильтр выкинет всё). Не отказываем: берём живую ноду с максимальным weight (бэкенд).
@@ -229,7 +248,7 @@ bool ServiceEngine::onDead(bool tunnelStillUp)
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду
     std::optional<SubscriptionNode> candidate =
-        m_selector.pick(m_pool, QString(), 75, 0, 3000, m_currentNodeId);
+        m_selector.pick(m_pool, QString(), 75, QRandomGenerator::global()->generate(), 3000, m_currentNodeId);
     if (!candidate) {
         // weight-фолбэк зеркалит connect() — чинит авто-failover при AWG-UDP, когда TCP-ping не
         // достукивается ни до одной ноды. Закрепление НЕ учитываем (spec §24-26): при смерти
@@ -416,6 +435,31 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
     // укажем currentNodeId, чтобы connect() стартовал с выбранной (без приоритета закрепления).
     m_currentNodeId = target.nodeId;
     return connect(error);
+}
+
+// AVPN: следующая живая нода после текущей — чистая версия rotateNext (без свитча/connect). Фасад
+// использует для «Обновить подключение» через единый reconcile-контур. Та же сортировка, что rotateNext.
+QString ServiceEngine::nextLiveNodeId() const
+{
+    QList<SubscriptionNode> live;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (healthAggregate(n) > 0.0)
+            live.append(n);
+    if (live.size() < 2)
+        return QString();
+    std::sort(live.begin(), live.end(), [](const SubscriptionNode &a, const SubscriptionNode &b) {
+        if (a.weight != b.weight)
+            return a.weight > b.weight;
+        const double ha = healthAggregate(a), hb = healthAggregate(b);
+        if (ha != hb)
+            return ha > hb;
+        return a.nodeId < b.nodeId;
+    });
+    int cur = -1;
+    for (int i = 0; i < live.size(); ++i)
+        if (live.at(i).nodeId == m_currentNodeId) { cur = i; break; }
+    const int next = (cur < 0) ? 0 : (cur + 1) % live.size();
+    return live.at(next).nodeId;
 }
 
 } // namespace avpn
