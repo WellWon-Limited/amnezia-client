@@ -186,13 +186,13 @@ int main(int argc, char **argv)
 
     // --- SignalQuality: RTT→5 баров + EWMA-сглаживание + гистерезис (детерминированно) ---
     {
-        // 1) Чистая таблица порогов RTT→бары (откалибрована под VPN-туннель: 5:<100 4:<160 3:<250 2:<400 1:<800).
+        // 1) Чистая таблица порогов RTT→бары (ЩЕДРАЯ калибровка под VPN-туннель: 5:<150 4:<230 3:<330 2:<500 1:<800).
         bool mapOk = SignalQuality::barsForRtt(30) == 5
-                     && SignalQuality::barsForRtt(99) == 5 && SignalQuality::barsForRtt(100) == 4
-                     && SignalQuality::barsForRtt(147) == 4   // типичный туннельный RTT → «хороший» сигнал
-                     && SignalQuality::barsForRtt(159) == 4 && SignalQuality::barsForRtt(160) == 3
-                     && SignalQuality::barsForRtt(249) == 3 && SignalQuality::barsForRtt(250) == 2
-                     && SignalQuality::barsForRtt(399) == 2 && SignalQuality::barsForRtt(400) == 1
+                     && SignalQuality::barsForRtt(149) == 5 && SignalQuality::barsForRtt(150) == 4
+                     && SignalQuality::barsForRtt(147) == 5   // типичный туннельный RTT → ПОЛНЫЙ сигнал
+                     && SignalQuality::barsForRtt(229) == 4 && SignalQuality::barsForRtt(230) == 3
+                     && SignalQuality::barsForRtt(329) == 3 && SignalQuality::barsForRtt(330) == 2
+                     && SignalQuality::barsForRtt(499) == 2 && SignalQuality::barsForRtt(500) == 1
                      && SignalQuality::barsForRtt(799) == 1 && SignalQuality::barsForRtt(800) == 0
                      && SignalQuality::barsForRtt(-1) == 0; // недостижимо → 0
 
@@ -201,35 +201,40 @@ int main(int argc, char **argv)
         int b0 = q.feed(80, true);            // srtt=80 → 5 баров
         int srtt0 = q.smoothedRtt();
 
-        // 3) Одиночный спайк поглощается EWMA(α=1/8): 80→spike240 ⇒ srtt=100, бар держится 5 (анти-дребезг).
-        int b1 = q.feed(240, true);           // srtt=(7*80+240)/8=100; гистерезис band5 [0,112) → остаёмся 5
+        // 3) Одиночный спайк поглощается EWMA(α=1/4): 80→spike240 ⇒ srtt=120, бар держится 5 (анти-дребезг).
+        int b1 = q.feed(240, true);           // srtt=0.75*80+0.25*240=120; band5 [0,150) → остаёмся 5
         int srtt1 = q.smoothedRtt();
 
-        // 4) Устойчиво высокий RTT (второй 240): srtt≈118 покидает расширенную полосу band5 → падаем до 4.
-        int b2 = q.feed(240, true);           // srtt≈117.5 → 4
+        // 4) Второй 240: srtt=150 — raw уже 4, но гистерезис (расширенная полоса band5 [0,162)) держит 5.
+        int b2 = q.feed(240, true);           // srtt=0.75*120+0.25*240=150 → sticky → остаёмся 5
 
-        // 5) Hard-gate: недостижимо → немедленно 0 (мимо сглаживания/дебаунса), затем восстановление.
+        // 5) Третий 240: srtt≈173 покидает расширенную полосу band5 → падаем до 4.
+        int b3 = q.feed(240, true);           // srtt=0.75*150+0.25*240≈172.5→173 → 4
+        int srtt3 = q.smoothedRtt();
+
+        // 6) Hard-gate: недостижимо → немедленно 0 (мимо сглаживания/дебаунса), затем восстановление.
         SignalQuality q2;
         q2.feed(40, true);                    // 5 баров
         int down = q2.feed(-1, false);        // нет ответа → 0 сразу
         int up = q2.feed(40, true);           // вернулась связь → снова 5
 
-        // 6) Регресс: после hard-gate первый достижимый сэмпл в «липкой» полосе bar0 (704–800мс) НЕ
+        // 7) Регресс: после hard-gate первый достижимый сэмпл в «липкой» полосе bar1 (750мс) НЕ
         //    должен залипнуть на 0 — новая серия обязана сидироваться без гистерезиса.
         SignalQuality q3;
         q3.feed(750, true);                   // srtt 750 → 1 бар
         int gate = q3.feed(-1, false);        // обрыв → 0
         int recov = q3.feed(750, true);       // связь вернулась, медленно (750мс) → 1, не застрять на 0
 
-        printf("signal: map=%d b0=%d srtt0=%d b1=%d srtt1=%d b2=%d down=%d up=%d gate=%d recov=%d\n",
-               mapOk, b0, srtt0, b1, srtt1, b2, down, up, gate, recov);
+        printf("signal: map=%d b0=%d srtt0=%d b1=%d srtt1=%d b2=%d b3=%d srtt3=%d down=%d up=%d gate=%d recov=%d\n",
+               mapOk, b0, srtt0, b1, srtt1, b2, b3, srtt3, down, up, gate, recov);
 
         bool sigOk = mapOk
                      && b0 == 5 && srtt0 == 80
-                     && b1 == 5 && srtt1 == 100      // спайк поглощён, бар не дрогнул
-                     && b2 == 4                      // устойчивый рост RTT → -1 бар
+                     && b1 == 5 && srtt1 == 120      // спайк поглощён, бар не дрогнул
+                     && b2 == 5                      // второй 240 ещё в липкой полосе → держим 5
+                     && b3 == 4 && srtt3 == 173      // устойчивый рост RTT → -1 бар
                      && down == 0 && up == 5         // hard-gate вниз и восстановление вверх
-                     && gate == 0 && recov == 1;     // восстановление в липкой полосе bar0 не залипает
+                     && gate == 0 && recov == 1;     // восстановление в липкой полосе bar1 не залипает
         if (!sigOk) { fprintf(stderr, "FAIL: SignalQuality mapping/smoothing mismatch\n"); return 9; }
         printf("signalquality: OK (RTT→5 баров, EWMA-сглаживание, гистерезис, hard-gate недостижимости)\n");
     }

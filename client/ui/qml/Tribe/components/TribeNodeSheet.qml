@@ -212,32 +212,19 @@ Item {
                                 elide: Text.ElideRight
                             }
 
-                            // сигнал-бары: health (0..1) → 0..4 заполненных бара (как на Connect)
-                            Row {
-                                id: signalBars
+                            // сигнал-бары: тот же 5-баровый LoadBars, что и на карточке Connect.
+                            // Для НЕактивных узлов живого RTT нет (AWG UDP-only ⇒ не пингуется), поэтому
+                            // уровень берём из backend-агрегата health (0..1). Живой узел всегда ≥3 баров
+                            // (он прошёл фильтр alive), здоровый → 5; health пусто = 1.0 (backend-контракт). // AVPN
+                            LoadBars {
                                 Layout.alignment: Qt.AlignVCenter
-                                Layout.preferredWidth: 22   // 4 бара ×4px + 3 зазора ×2px
-                                Layout.preferredHeight: 16
-                                spacing: 2
-                                // округлённое число активных баров из агрегата health
-                                readonly property int bars: {
-                                    var h = nodeRow.modelData ? Number(nodeRow.modelData.health) : 0
-                                    if (isNaN(h)) h = 0
-                                    return Math.max(0, Math.min(4, Math.round(h * 4)))
+                                level: {
+                                    var h = nodeRow.modelData ? Number(nodeRow.modelData.health) : 1
+                                    if (isNaN(h)) h = 1   // health отсутствует = живой = 1.0
+                                    return Math.max(3, Math.min(5, Math.round(h * 5)))
                                 }
-                                Repeater {
-                                    model: 4
-                                    delegate: Rectangle {
-                                        required property int index
-                                        width: 4
-                                        height: 6 + index * 3   // 6,9,12,15
-                                        radius: 2
-                                        anchors.bottom: parent.bottom
-                                        color: (index < signalBars.bars)
-                                               ? (nodeRow.isCurrent ? Theme.color.accent : Theme.color.accentDeep)
-                                               : Theme.color.surface3
-                                    }
-                                }
+                                // текущий узел — акцентные бары; остальные — стандартный зелёный «сигнал».
+                                barColor: nodeRow.isCurrent ? Theme.color.accent : Theme.color.connected
                             }
 
                             // галка у текущего узла (Tabler check, inline-вектор)
