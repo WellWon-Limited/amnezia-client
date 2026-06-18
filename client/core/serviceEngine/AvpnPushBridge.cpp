@@ -2,11 +2,48 @@
 #include "AvpnPushBridge.h"
 
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QMetaObject>
+#include <QSettings>
+
+#include <utility>
 
 namespace avpn {
 
-AvpnPushBridge::AvpnPushBridge(QObject *parent) : QObject(parent) {}
+namespace {
+// AVPN: ключ QSettings для локальной истории уведомлений (JSON-массив [{title,body,time,read}]).
+constexpr auto kNotifSettingsKey = "avpn/notifications";
+} // namespace
+
+AvpnPushBridge::AvpnPushBridge(QObject *parent) : QObject(parent)
+{
+    loadPersisted();   // история прошлых пушей доступна сразу при старте (без сети)
+}
+
+void AvpnPushBridge::loadPersisted()
+{
+    QSettings s;
+    const QByteArray raw = s.value(QString::fromLatin1(kNotifSettingsKey)).toByteArray();
+    if (raw.isEmpty())
+        return;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw);
+    if (!doc.isArray())
+        return;
+    m_items = doc.array().toVariantList();
+    int unread = 0;
+    for (const QVariant &v : std::as_const(m_items))
+        if (!v.toMap().value(QStringLiteral("read")).toBool())
+            ++unread;
+    m_unreadCount = unread;
+}
+
+void AvpnPushBridge::persist() const
+{
+    QSettings s;
+    s.setValue(QString::fromLatin1(kNotifSettingsKey),
+               QJsonDocument(QJsonArray::fromVariantList(m_items)).toJson(QJsonDocument::Compact));
+}
 
 AvpnPushBridge *AvpnPushBridge::instance()
 {
@@ -27,6 +64,8 @@ void AvpnPushBridge::markAllRead()
             changedAny = true;
         }
     }
+    if (changedAny)
+        persist();   // AVPN: сохранить обновлённые read-флаги локально
     // AVPN: сбросить системный бейдж иконки (натив: setBadgeCount:0) — даже если локально уже 0,
     // системный бейдж мог быть выставлен прилетевшим aps.badge, пока приложение было закрыто.
     if (m_badgeClearer)
@@ -124,6 +163,7 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     while (m_items.size() > 50)
         m_items.removeLast();
     m_unreadCount += 1;
+    persist();   // AVPN: сохранить новый пуш в локальную историю (переживёт перезапуск)
     emit changed();
 }
 
