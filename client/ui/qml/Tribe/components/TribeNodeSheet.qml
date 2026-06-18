@@ -8,8 +8,8 @@ import ".."   // Theme
 // затемнение фона + перехват кликов + нижняя TribeCard (elevated) с грабером сверху.
 // Содержимое: «Авто (быстрейший)» → TribeEngine.selectAuto() (авто-режим без реконнекта); ListView
 // ТОЛЬКО живых узлов (modelData.alive) из TribeEngine.nodePool — TribeFlag + имя + сигнал-бары (health
-// 0..1 → 0..4); текущий (modelData.current) — акцент + галка. Тап по узлу → TribeEngine.switchToNode(nodeId):
-// НЕ коннектит, только задаёт цель (orb→OFF, если был онлайн другой узел) — подключение по кнопке Connect.
+// 0..1 → 0..5); текущий (modelData.current) — акцент + галка. Тап по узлу → TribeEngine.switchToNode(nodeId):
+// ПОДКЛЮЧАЕТСЯ к выбранной (движок сам stop→Disconnected→start, если онлайн другая; reconcile, iOS-safe).
 // Без шевронов. open() → отложенный refreshPool() (Timer, НЕ из кадра показа — refreshPool синхронный
 // nested-loop fetch, прямой вызов в onOpened крашит). Только токены Theme.qml.
 Item {
