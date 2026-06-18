@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 import ".."              // Theme
 import "../components"
 import "../../Controls2" // PageType
 
 // AVPN: центр уведомлений (#3). Открывается из колокола в шапке Connect.
-// Сейчас mock-список; реальные пуши — #9 (APNs/FCM), бэкенд — #10.
+// Показывает РЕАЛЬНЫЕ пуши (APNs/FCM), сохранённые движком локально (переживают перезапуск).
+// История между сессиями/устройствами с сервера — отдельная задача (бэкенд GET /v1/notifications).
 PageType {
     id: root
 
@@ -15,20 +17,14 @@ PageType {
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
 
-    // AVPN (#9): реальные пуши приходят через мост AvpnPush (APNs/FCM → C++ → QML). В dev-превью
-    // моста нет → показываем только mock-данные.
+    // AVPN (#9): реальные пуши приходят через мост AvpnPush (APNs/FCM → C++ → QML), движок хранит их
+    // локально (QSettings) → переживают перезапуск приложения. В dev-превью моста нет → пустой список.
     readonly property bool hasPush: (typeof AvpnPush !== "undefined")
     readonly property var pushItems: hasPush ? AvpnPush.items : []
 
-    // mock-данные уведомлений (заголовок / текст / время / прочитано) — fallback/демо.
-    readonly property var mockItems: [
-        { title: qsTr("Подписка продлена"),       body: qsTr("Доступ активен ещё 12 дней. Спасибо, что остаётесь с Tribe."), time: qsTr("2 ч назад"),   read: false },
-        { title: qsTr("Новая локация: Нидерланды"), body: qsTr("Добавлен быстрый сервер в Амстердаме — уже в пуле."),          time: qsTr("Вчера"),       read: false },
-        { title: qsTr("Совет по скорости"),        body: qsTr("Нажмите «Обновить подключение», если сайт грузится медленно."), time: qsTr("3 дня назад"), read: true  }
-    ]
-
-    // Реальные пуши сверху, затем демо-данные.
-    readonly property var items: pushItems.concat(mockItems)
+    // Только РЕАЛЬНЫЕ уведомления — мок-демо убран (колокол показывает то, что действительно
+    // приходило пользователю). Пусто → экран пустого состояния ниже. // AVPN
+    readonly property var items: pushItems
 
     // При открытии центра уведомлений отмечаем все пуши прочитанными → бейдж на колоколе гаснет.
     Component.onCompleted: {
@@ -120,6 +116,47 @@ PageType {
                     }
                 }
             }
+        }
+    }
+
+    // пустое состояние: уведомлений ещё не приходило (мок-демо убран). // AVPN
+    Column {
+        anchors.centerIn: parent
+        width: parent.width - 2 * Theme.space.x3
+        spacing: Theme.space.md
+        visible: root.items.length === 0
+
+        // иконка-колокол (Tabler bell, 24-grid → ×2 до 48px)
+        Shape {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 48; height: 48
+            preferredRendererType: Shape.CurveRenderer
+            transform: Scale { xScale: 2; yScale: 2 }
+            ShapePath {
+                strokeColor: Theme.color.text3; fillColor: "transparent"; strokeWidth: 1.6
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M10 5a2 2 0 0 1 4 0a7 7 0 0 1 4 6v3a4 4 0 0 0 2 3h-16a4 4 0 0 0 2 -3v-3a7 7 0 0 1 4 -6 M9 17v1a3 3 0 0 0 6 0v-1" }
+            }
+        }
+
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: qsTr("Пока нет уведомлений")
+            color: Theme.color.text1
+            font.family: Theme.font.display
+            font.pixelSize: Theme.font.bodyL
+            font.weight: Theme.font.wBold
+        }
+
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            text: qsTr("Здесь появятся важные сообщения о подписке, новых серверах и состоянии сервиса.")
+            color: Theme.color.text2
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.bodyS
         }
     }
 }

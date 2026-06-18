@@ -73,6 +73,9 @@ private:
     void applyAuthStatus(const QString &status);
     void applyPushEnvironment(const QString &environment);
     void applyRemoteNotification(const QString &title, const QString &body);
+    // AVPN: локальная история уведомлений (QSettings) — переживает перезапуск приложения.
+    void loadPersisted();   // вызвать в конструкторе: загрузить m_items + пересчитать m_unreadCount
+    void persist() const;   // сохранить m_items (JSON) после каждого изменения
 
     int          m_unreadCount = 0;
     QString      m_deviceToken;
