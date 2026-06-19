@@ -475,8 +475,13 @@ PageType {
 
     // подпись под орбом (поверх гор)
     Text {
+        id: connectCaption
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: orb.bottom; anchors.topMargin: 30   // чуть ниже орба (просьба 2026-06-11)
+        // мобайл: чуть ниже орба; десктоп: ровно на lg ВЫШЕ карточки — тот же зазор, что чипы↔карточка // AVPN
+        anchors.top: root.isMobile ? orb.bottom : undefined
+        anchors.topMargin: 30
+        anchors.bottom: root.isMobile ? undefined : bottomBlock.top
+        anchors.bottomMargin: Theme.space.lg
         z: 30; horizontalAlignment: Text.AlignHCenter
         text: root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
                         : qsTr("Подключиться — нажмите кнопку выше")
