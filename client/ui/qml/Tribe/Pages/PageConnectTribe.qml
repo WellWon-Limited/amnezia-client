@@ -545,13 +545,16 @@ PageType {
 
         // ── чипы доступности сервисов ЧЕРЕЗ текущую ноду (Telegram/YouTube/Instagram) ──
         // Замер с устройства через туннель (ServiceProbe): 🟢 работает / 🟡 медленно(троттл) / 🔴 заблок.
-        // Тап по чипу → перепроверить. Виден только при выбранной ноде. // AVPN
+        // Тап по чипу → перепроверить. Видны ВСЕГДА (и ДО подключения / в авто-режиме) — чтобы раскладка
+        // не «прыгала»: до коннекта статусы -1 (серый дот «…») + приглушённая прозрачность = неактивны;
+        // тап перепроверяет только когда подключены. // AVPN
         TribeServiceChips {
             width: parent.width
-            visible: root.hasEngine && root.curNode.hasNode
+            visible: root.hasEngine
                      && TribeEngine.serviceStatus !== undefined && TribeEngine.serviceStatus.length > 0
+            opacity: root.isOn ? 1.0 : 0.4   // не подключены → серые/неактивные
             model: root.hasEngine ? TribeEngine.serviceStatus : []
-            onRecheck: if (root.hasEngine) TribeEngine.probeServices()
+            onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
 
         // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────
@@ -639,7 +642,7 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter
                     // AVPN: «Подбираем сервер…» ТОЛЬКО в авто-режиме (узел выбирает движок). При РУЧНОМ
                     // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
-                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Обновить подключение")
+                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Сменить сервер")
                           : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
