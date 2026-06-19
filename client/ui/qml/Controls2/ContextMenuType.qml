@@ -47,14 +47,10 @@ Menu {
         enabled: textObj.selectedText
         onTriggered: textObj.copy()
     }
-    MenuItem {
-        text: qsTr("&Paste")
-        // Fix calling paste from clipboard when launching app on android
-        // AVPN: на iOS canPaste читает UIPasteboard (mimeData->text) → системный промпт
-        // «вставить из macOS» без действия пользователя; включаем без проверки, как на Android
-        enabled: (Qt.platform.os === "android" || Qt.platform.os === "ios") ? true : textObj.canPaste
-        onTriggered: textObj.paste()
-    }
+    // AVPN: пункт «Вставить» УБРАН по требованию пользователя — на iOS любое чтение буфера обмена
+    // (canPaste/paste) вызывает системный промпт «Разрешить вставку», который раздражал. Без пункта
+    // меню буфер не читается → промпт не появляется. (Если когда-то понадобится вставка ключа без
+    // промпта — отдельная нативная кнопка UIPasteControl, а не пункт меню.)
 
     MenuItem {
         text: qsTr("&SelectAll")
