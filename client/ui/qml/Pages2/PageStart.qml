@@ -52,6 +52,9 @@ PageType {
         function onRequestSettings() { root.goAvpnTab(3) }
         // AVPN: колокол → центр уведомлений (#3)
         function onRequestNotifications() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml") }
+        // AVPN: «назад» с уведомлений/админ-пула. Эти страницы открыты через replace (depth=1), поэтому
+        // PageController.closePage() уходил в ветку depth<=1 → hideWindow() (прятал окно). Возвращаем на Connect.
+        function onBack() { root.goAvpnTab(0) }
         // AVPN: админ-вход (Dev.adminMode) → просмотр пула нод (#5)
         function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
