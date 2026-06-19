@@ -43,6 +43,10 @@ public:
     bool connect(QString &error);
 
     EngineState state() const { return m_state; }
+    // AVPN: подписка уже загружена (есть ноды) → connect() можно звать ЛОКАЛЬНО, без сетевого startFlow
+    // (enroll/GET subscription). Нужно, чтобы реконнект не ходил в сеть на главном потоке (вложенный
+    // QEventLoop → Hang UIKit + abort на 2-м коннекте). Как Amnezia: коннект-кнопка только поднимает туннель.
+    bool hasSubscription() const { return !m_pool.nodes().isEmpty(); }
     DebugSnapshot debugSnapshot() const;
 
     // C-5 health-loop:
