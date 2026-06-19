@@ -539,8 +539,14 @@ void VpnConnection::disconnectFromVpn()
 {
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // iOS/macOS NE use IosController directly; m_vpnProtocol is not set there.
-    IosController::Instance()->disconnectVpn();
+    // AVPN: НЕ эмитим синхронный Disconnected — реальный придёт из IosController (disconnectVpn эмитит
+    // Disconnected сразу, если гасить нечего; иначе stopTunnel → vpnStatusDidChange → Disconnected). Так
+    // реконнект на новый сервер НЕ стартует, пока старый туннель не дошёл до Disconnected (как в Amnezia;
+    // иначе старт поверх Disconnecting → «Operation not permitted» → Network Error при смене сервера).
+    setConnectionState(Vpn::ConnectionState::Disconnecting);
     disconnect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus);
+    IosController::Instance()->disconnectVpn();
+    return;
 #endif
 
     if (m_vpnProtocol.isNull()) {
