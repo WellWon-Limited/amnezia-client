@@ -335,13 +335,20 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
 
 void IosController::disconnectVpn()
 {
-    if (!m_currentTunnel) {
+    // AVPN: если гасить нечего (нет менеджера / нет сессии / уже опущен) — эмитим Disconnected СРАЗУ,
+    // чтобы движок не повис в ожидании. Если сессия ЖИВАЯ — только stopTunnel; РЕАЛЬНЫЙ Disconnected
+    // прилетит из vpnStatusDidChange (его и ждёт reconcile перед реконнектом на новый сервер — это и есть
+    // «как в Amnezia»: не стартуем новый туннель, пока старый не дошёл до Disconnected).
+    if (!m_currentTunnel || ![m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
+        emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
         return;
     }
-
-    if ([m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
-        [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
+    NEVPNStatus st = m_currentTunnel.connection.status;
+    if (st == NEVPNStatusDisconnected || st == NEVPNStatusInvalid) {
+        emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
+        return;
     }
+    [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
 }
 
 
@@ -542,6 +549,28 @@ void IosController::vpnStatusDidChange(void *pNotification)
 void IosController::vpnConfigurationDidChange(void *pNotification)
 {
     qDebug() << "IosController::vpnConfigurationDidChange" << pNotification;
+    // AVPN (фикс краша «удалил VPN-конфиг в Настройках»): если наш менеджер удалён извне, дальше любое
+    // обращение к m_currentTunnel.connection (checkStatus/start) — это разыменование удалённого объекта.
+    // Проверяем актуальность; если наш менеджер пропал из системы — сбрасываем ссылку и стейт, чтобы
+    // следующий connect пересоздал менеджер с нуля (как делают другие VPN-приложения — без краша).
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+        if (error)
+            return;
+        bool stillExists = false;
+        for (NETunnelProviderManager *m in managers) {
+            if (m == m_currentTunnel) { stillExists = true; break; }
+        }
+        if (!stillExists && m_currentTunnel) {
+            qDebug() << "IosController::vpnConfigurationDidChange : our manager was removed externally — clearing";
+            m_currentTunnel = nullptr;
+            m_handshakeConfirmed = false;
+            m_handshakeAwaiting = false;
+            m_handshakeTimer.invalidate();
+            m_statusRequestInFlight = false;
+            m_lastEmittedState = Vpn::ConnectionState::Unknown;
+            emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
+        }
+    }];
 }
 
 bool IosController::setupOpenVPN()
@@ -845,6 +874,13 @@ bool IosController::startXray(const QString &config)
 
 void IosController::startTunnel()
 {
+    // AVPN (фикс краша): без менеджера дальше идёт nil-разыменование (m_currentTunnel.protocolConfiguration
+    // и т.д.). Бывает при teardown→reconnect (rotateNext) и при удалённом в Настройках iOS VPN-конфиге.
+    if (!m_currentTunnel) {
+        qDebug() << "IosController::startTunnel : no current tunnel manager";
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return;
+    }
     NSString *protocolName = @"Unknown";
 
     NETunnelProviderProtocol *tunnelProtocol = (NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration;
@@ -881,53 +917,25 @@ void IosController::startTunnel()
                             return;
                         }
 
-                        // AVPN (фикс «старт поверх teardown»): НЕ бьём startVPNTunnel вслепую. Ждём
-                        // терминального .disconnected (ретраи), иначе старт поверх Connecting/Disconnecting
-                        // → iOS «Operation not permitted» → Network Error на 2-м коннекте/смене сервера.
-                        startSessionWhenIdle(tunnel, 16);
+                        // AVPN: ПРЯМОЙ старт (как ванильная Amnezia). Гейт-ожидание здесь ломало ПЕРВЫЙ
+                        // коннект (свежий менеджер в переходном статусе → stopTunnel → «сброс»). Гарантию
+                        // «не стартовать поверх живого туннеля» даём РАНЬШЕ: ждём РЕАЛЬНОГО Disconnected
+                        // перед connectVpn нового сервера (disconnectVpn + vpnConnection iOS-ветка).
+                        NSError *startError = nil;
+                        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+                        if (!started || startError) {
+                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
+                                               << " : Tunnel Start Error"
+                                               << (startError ? startError.localizedDescription.UTF8String : "");
+                            emit connectionStateChanged(Vpn::ConnectionState::Error);
+                        } else {
+                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
+                                               << " : started ok";
+                        }
                     });
                 }];
             });
         }];
-    });
-}
-
-// AVPN: стартовать VPN-сессию ТОЛЬКО когда она в терминальном .disconnected/.invalid. Если ещё
-// Connecting/Connected/Reasserting/Disconnecting — инициируем teardown (если нужно) и перепроверяем
-// через 0.5с (до retriesLeft раз). Это переносит «ждём Disconnected перед start» в нативный слой,
-// где он реально влияет на NE-сессию (движок этого гарантировать не мог).
-void IosController::startSessionWhenIdle(NETunnelProviderManager *tunnel, int retriesLeft)
-{
-    if (!tunnel) {
-        emit connectionStateChanged(Vpn::ConnectionState::Error);
-        return;
-    }
-    NEVPNStatus st = tunnel.connection.status;
-    if (st == NEVPNStatusDisconnected || st == NEVPNStatusInvalid) {
-        NSError *startError = nil;
-        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
-        if (!started || startError) {
-            qDebug() << "IosController::startSessionWhenIdle : start error"
-                     << (startError ? startError.localizedDescription.UTF8String : "(unknown)");
-            emit connectionStateChanged(Vpn::ConnectionState::Error);
-        } else {
-            qDebug() << "IosController::startSessionWhenIdle : started ok";
-        }
-        return;
-    }
-    if (retriesLeft <= 0) {
-        qDebug() << "IosController::startSessionWhenIdle : session not idle in time, status" << (long)st;
-        emit connectionStateChanged(Vpn::ConnectionState::Error);
-        return;
-    }
-    // Сессия ещё живёт/поднимается — просим закрыться (если ещё не закрывается) и ждём.
-    if (st == NEVPNStatusConnected || st == NEVPNStatusConnecting || st == NEVPNStatusReasserting) {
-        if ([tunnel.connection isKindOfClass:[NETunnelProviderSession class]])
-            [(NETunnelProviderSession *)tunnel.connection stopTunnel];
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        this->startSessionWhenIdle(tunnel, retriesLeft - 1);
     });
 }
 

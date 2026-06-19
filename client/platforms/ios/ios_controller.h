@@ -117,9 +117,6 @@ private:
     NSString *m_serverAddress {};
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NSDictionary *message, std::function<void(NSDictionary *)> callback = nullptr);
-    // AVPN: запустить сессию ТОЛЬКО из терминального .disconnected (ждём teardown ретраями), иначе
-    // startVPNTunnel поверх Connecting/Disconnecting → iOS «Operation not permitted» → Network Error.
-    void startSessionWhenIdle(NETunnelProviderManager *tunnel, int retriesLeft);
 #endif
 
     amnezia::Proto m_proto;
