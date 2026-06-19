@@ -43,11 +43,10 @@ PageType {
             Layout.fillWidth: true
             title: qsTr("Уведомления")
             showBack: true
-            onBackClicked: {
-                root.back()
-                if (typeof PageController !== "undefined" && PageController.closePage)
-                    PageController.closePage()
-            }
+            // AVPN: только сигнал back() → PageStart вернёт на Connect (goAvpnTab 0). НЕ зовём
+            // PageController.closePage() — страница открыта через replace (depth=1), и closePage уходил
+            // в hideWindow() (прятал окно) вместо возврата. Отсюда «кнопка назад не работает».
+            onBackClicked: root.back()
         }
 
         ListView {
