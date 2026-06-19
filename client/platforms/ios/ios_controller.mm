@@ -232,45 +232,59 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
 
     qDebug() << "IosController::connectVpn" << tunnelName;
 
+    // AVPN (фикс 2-го коннекта): сбрасываем стейт прошлого цикла. Без этого m_handshakeConfirmed оставался
+    // true со старого туннеля → 2-й Connected эмитился БЕЗ реального handshake новой ноды («зелёный орб,
+    // но трафика нет» = Network Error); m_lastEmittedState глушил нужный переход (dedup); m_statusRequestInFlight
+    // блокировал checkStatus. (void)tunnelName — имя больше не используем для матчинга (см. ниже).
+    (void)tunnelName;
     m_currentTunnel = nullptr;
+    m_handshakeConfirmed = false;
+    m_handshakeAwaiting = false;
+    m_handshakeTimer.invalidate();
+    m_statusRequestInFlight = false;
+    m_lastEmittedState = Vpn::ConnectionState::Unknown;
+    m_rxBytes = 0;
+    m_txBytes = 0;
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block bool ok = true;
-    __block bool isNewTunnelCreated = false;
 
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
         @try {
             if (error) {
-                qDebug() << "IosController::connectVpn : VPNC: loadAllFromPreferences error:" << [error.localizedDescription UTF8String];
+                qDebug() << "IosController::connectVpn : loadAllFromPreferences error:" << [error.localizedDescription UTF8String];
                 emit connectionStateChanged(Vpn::ConnectionState::Error);
                 ok = false;
                 return;
             }
 
-            NSInteger managerCount = managers.count;
-            qDebug() << "IosController::connectVpn : We have received managers:" << (long)managerCount;
+            qDebug() << "IosController::connectVpn : managers received:" << (long)managers.count;
 
-
+            // AVPN (фикс смены сервера): ПЕРЕИСПОЛЬЗУЕМ ОДИН менеджер (как официальный WireGuard iOS),
+            // НЕ плодим по имени-с-сервером. Раньше localizedDescription = "<сервер> <proto>" → на каждый
+            // сервер создавался НОВЫЙ NETunnelProviderManager → они копились в системе → конфликты
+            // save/load/start у iOS-NE → вис «коннектинг» + Network Error при смене сервера. Берём наш
+            // менеджер по bundle-id провайдера (isOurManager), все лишние/битые/дубли — удаляем.
+            NSMutableArray<NETunnelProviderManager *> *extras = [NSMutableArray array];
             for (NETunnelProviderManager *manager in managers) {
-                if ([manager.localizedDescription isEqualToString:tunnelName.toNSString()]) {
+                if (!m_currentTunnel && isOurManager(manager)) {
                     m_currentTunnel = manager;
-                    qDebug() << "IosController::connectVpn : Using existing tunnel:" << manager.localizedDescription;
-                    if (manager.connection.status == NEVPNStatusConnected) {
-                        emit connectionStateChanged(Vpn::ConnectionState::Connected);
-                        return;
-                    }
-
-                    break;
+                } else {
+                    [extras addObject:manager];
                 }
+            }
+            for (NETunnelProviderManager *m in extras) {
+                [m removeFromPreferencesWithCompletionHandler:^(NSError *e) {
+                    if (e) qDebug() << "IosController::connectVpn : remove extra manager error" << e.localizedDescription.UTF8String;
+                }];
             }
 
             if (!m_currentTunnel) {
-                isNewTunnelCreated = true;
                 m_currentTunnel = [[NETunnelProviderManager alloc] init];
-                m_currentTunnel.localizedDescription = [NSString stringWithUTF8String:tunnelName.toStdString().c_str()];
-                qDebug() << "IosController::connectVpn : Creating new tunnel" << m_currentTunnel.localizedDescription;
+                qDebug() << "IosController::connectVpn : creating new tunnel manager";
             }
-
+            // AVPN: стабильное имя — чтобы конфиг в Настройках iOS назывался понятно и не плодился по серверам.
+            m_currentTunnel.localizedDescription = @"Tribe VPN";
         }
         @catch (NSException *exception) {
             qDebug() << "IosController::connectVpn : exception" << QString::fromNSString(exception.reason);
@@ -282,7 +296,12 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
         }
     }];
 
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    // AVPN: таймаут вместо DISPATCH_TIME_FOREVER — если completion не пришёл (битые prefs / лимит NE-профилей),
+    // не виснем на потоке навсегда; считаем ошибкой и выходим.
+    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) != 0) {
+        qDebug() << "IosController::connectVpn : loadAllFromPreferences timed out";
+        return false;
+    }
     if (!ok) return false;
 
     [[NSNotificationCenter defaultCenter]
@@ -862,24 +881,53 @@ void IosController::startTunnel()
                             return;
                         }
 
-                        NSError *startError = nil;
-                        qDebug() << iosStatusToState(tunnel.connection.status);
-
-                        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
-
-                        if (!started || startError) {
-                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
-                                               << " : Connect " << protocolName << " Tunnel Start Error"
-                                               << (startError ? startError.localizedDescription.UTF8String : "");
-                            emit connectionStateChanged(Vpn::ConnectionState::Error);
-                        } else {
-                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
-                                               << " : Starting the tunnel succeeded";
-                        }
+                        // AVPN (фикс «старт поверх teardown»): НЕ бьём startVPNTunnel вслепую. Ждём
+                        // терминального .disconnected (ретраи), иначе старт поверх Connecting/Disconnecting
+                        // → iOS «Operation not permitted» → Network Error на 2-м коннекте/смене сервера.
+                        startSessionWhenIdle(tunnel, 16);
                     });
                 }];
             });
         }];
+    });
+}
+
+// AVPN: стартовать VPN-сессию ТОЛЬКО когда она в терминальном .disconnected/.invalid. Если ещё
+// Connecting/Connected/Reasserting/Disconnecting — инициируем teardown (если нужно) и перепроверяем
+// через 0.5с (до retriesLeft раз). Это переносит «ждём Disconnected перед start» в нативный слой,
+// где он реально влияет на NE-сессию (движок этого гарантировать не мог).
+void IosController::startSessionWhenIdle(NETunnelProviderManager *tunnel, int retriesLeft)
+{
+    if (!tunnel) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return;
+    }
+    NEVPNStatus st = tunnel.connection.status;
+    if (st == NEVPNStatusDisconnected || st == NEVPNStatusInvalid) {
+        NSError *startError = nil;
+        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+        if (!started || startError) {
+            qDebug() << "IosController::startSessionWhenIdle : start error"
+                     << (startError ? startError.localizedDescription.UTF8String : "(unknown)");
+            emit connectionStateChanged(Vpn::ConnectionState::Error);
+        } else {
+            qDebug() << "IosController::startSessionWhenIdle : started ok";
+        }
+        return;
+    }
+    if (retriesLeft <= 0) {
+        qDebug() << "IosController::startSessionWhenIdle : session not idle in time, status" << (long)st;
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return;
+    }
+    // Сессия ещё живёт/поднимается — просим закрыться (если ещё не закрывается) и ждём.
+    if (st == NEVPNStatusConnected || st == NEVPNStatusConnecting || st == NEVPNStatusReasserting) {
+        if ([tunnel.connection isKindOfClass:[NETunnelProviderSession class]])
+            [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        this->startSessionWhenIdle(tunnel, retriesLeft - 1);
     });
 }
 
