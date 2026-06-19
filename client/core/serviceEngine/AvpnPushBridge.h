@@ -32,11 +32,13 @@ class AvpnPushBridge : public QObject {
 public:
     static AvpnPushBridge *instance();
 
-    int unreadCount() const { return m_unreadCount; }
+    // AVPN: геттеры истории лениво подгружают её при первом доступе — БЕЗОПАСНО (после main), а не в
+    // конструкторе (он может вызваться из __attribute__((constructor)) ДО main → CFPreferences-краш).
+    int unreadCount() const { const_cast<AvpnPushBridge *>(this)->ensureLoaded(); return m_unreadCount; }
     QString deviceToken() const { return m_deviceToken; }
     QString platform() const { return m_platform; }
     QString authStatus() const { return m_authStatus; }
-    QVariantList items() const { return m_items; }
+    QVariantList items() const { const_cast<AvpnPushBridge *>(this)->ensureLoaded(); return m_items; }
 
     // --- QML API ---
     // Пользователь открыл центр уведомлений / отметил всё прочитанным → обнулить бейдж.
@@ -74,8 +76,11 @@ private:
     void applyPushEnvironment(const QString &environment);
     void applyRemoteNotification(const QString &title, const QString &body);
     // AVPN: локальная история уведомлений (QSettings) — переживает перезапуск приложения.
-    void loadPersisted();   // вызвать в конструкторе: загрузить m_items + пересчитать m_unreadCount
-    void persist() const;   // сохранить m_items (JSON) после каждого изменения
+    // ВАЖНО: НЕ грузить в конструкторе — он может выполниться из __attribute__((constructor)) ДО main()
+    // (AvpnPushController.mm), а QSettings на Apple = CFPreferences → без org-name краш «CFEqual NULL».
+    void ensureLoaded();    // ленивая загрузка при первом доступе, только когда приложение готово
+    void loadPersisted();   // фактическая загрузка m_items + пересчёт m_unreadCount (через ensureLoaded)
+    void persist() const;   // сохранить m_items (JSON) после изменения (guarded: no-op до готовности app)
 
     int          m_unreadCount = 0;
     QString      m_deviceToken;
@@ -83,6 +88,7 @@ private:
     QString      m_environment;   // AVPN: "sandbox" | "production" | "" (десктоп/неизвестно)
     QString      m_authStatus = QStringLiteral("unknown");
     QVariantList m_items;
+    bool         m_loaded = false;   // AVPN: история уже подгружена из QSettings (ленивая инициализация)
     void (*m_authRequester)() = nullptr;
     void (*m_badgeClearer)() = nullptr;   // AVPN: натив-сброс бейджа иконки
 };

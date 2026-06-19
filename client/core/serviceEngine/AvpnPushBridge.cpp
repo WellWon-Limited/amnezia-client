@@ -1,6 +1,7 @@
 // AVPN (Task 9) — реализация моста пушей → QML. См. AvpnPushBridge.h.
 #include "AvpnPushBridge.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -18,7 +19,24 @@ constexpr auto kNotifSettingsKey = "avpn/notifications";
 
 AvpnPushBridge::AvpnPushBridge(QObject *parent) : QObject(parent)
 {
-    loadPersisted();   // история прошлых пушей доступна сразу при старте (без сети)
+    // КРИТИЧНО: НЕ трогаем здесь QSettings! Этот синглтон впервые создаётся из
+    // __attribute__((constructor)) avpnPushInstallRequester() в AvpnPushController.mm — то есть ДО main()
+    // и до QCoreApplication::setOrganizationName(). На Apple QSettings = CFPreferences; обращение к нему
+    // без bundle-id/org-name даёт «*** CFEqual() called with NULL first argument ***» → КРАШ ЗАПУСКА
+    // (билды 22-24). Историю грузим ЛЕНИВО через ensureLoaded(), когда приложение уже инициализировано.
+}
+
+// AVPN: ленивая загрузка истории — ТОЛЬКО когда приложение готово (создан QCoreApplication и задан
+// org-name). До main() (ранний конструктор/пуш-колбэк) — no-op, чтобы не трогать CFPreferences с NULL
+// app-id. Повторно безопасно: грузим один раз (m_loaded), при следующем доступе попробуем снова.
+void AvpnPushBridge::ensureLoaded()
+{
+    if (m_loaded)
+        return;
+    if (!QCoreApplication::instance() || QCoreApplication::organizationName().isEmpty())
+        return;
+    m_loaded = true;
+    loadPersisted();
 }
 
 void AvpnPushBridge::loadPersisted()
@@ -40,6 +58,9 @@ void AvpnPushBridge::loadPersisted()
 
 void AvpnPushBridge::persist() const
 {
+    // Защита от раннего вызова (до main): не трогаем CFPreferences без org-name (см. ensureLoaded).
+    if (!QCoreApplication::instance() || QCoreApplication::organizationName().isEmpty())
+        return;
     QSettings s;
     s.setValue(QString::fromLatin1(kNotifSettingsKey),
                QJsonDocument(QJsonArray::fromVariantList(m_items)).toJson(QJsonDocument::Compact));
@@ -54,6 +75,7 @@ AvpnPushBridge *AvpnPushBridge::instance()
 
 void AvpnPushBridge::markAllRead()
 {
+    ensureLoaded();
     bool changedAny = (m_unreadCount != 0);
     m_unreadCount = 0;
     for (auto &v : m_items) {
@@ -153,6 +175,7 @@ void AvpnPushBridge::applyPushEnvironment(const QString &environment)
 
 void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString &body)
 {
+    ensureLoaded();   // подгрузить прошлую историю, чтобы новый пуш не затёр её при persist()
     QVariantMap item;
     item[QStringLiteral("title")] = title;
     item[QStringLiteral("body")] = body;
