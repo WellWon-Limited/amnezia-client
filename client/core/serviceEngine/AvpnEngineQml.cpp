@@ -307,22 +307,38 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         QTimer::singleShot(4500, this, &AvpnEngineQml::probeServices);
         break;
     case Vpn::Error:
-        // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;
-        // не вышло (или мы не были Connected) → честно фиксируем Error.
-        if (!m_engine.notifyConnectionLost())
-            m_engine.onTunnelError();
+        // AVPN (анти-авто-коннект): РАНЬШЕ обрыв из Connected → notifyConnectionLost() → реактивный
+        // авто-failover (реконнект). Это давало НЕЖЕЛАТЕЛЬНЫЙ авто-коннект, когда туннель гасит ВНЕШНЕ
+        // (другой VPN / iOS / пользователь снял VPN): приложение тут же переподнимало туннель, «воюя»
+        // с другим VPN и самоподключаясь при входе в приложение. Теперь как обычное VPN-приложение:
+        // фиксируем факт, НЕ реконнектим сами. (Failover по РЕАЛЬНОЙ смерти ноды остаётся в health-loop
+        // tick — onTick→m_engine.tick, см. §анти-авто-коннект ниже + CONNECT-INVARIANTS §13.)
+        m_engine.onTunnelError();
         break;
     case Vpn::Disconnected:
-        // Неожиданный обрыв при активном туннеле → failover; иначе честно отражаем «отключено».
-        // Отложенный старт смены ноды теперь ведёт reconcile() (ниже), а не разовый m_pendingStart.
-        if (!m_engine.notifyConnectionLost())
-            m_engine.onTunnelDisconnected();
+        // onTunnelDisconnected САМ продолжит НАМЕРЕННЫЙ свитч ноды (Switching+pendingSwitch → up());
+        // если это не свитч — просто «отключено». БЕЗ реактивного failover на внешний обрыв (см. Error).
+        m_engine.onTunnelDisconnected();
         break;
     case Vpn::Reconnecting:
-        m_engine.notifyConnectionLost();
+        // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
         break;
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
         break;
+    }
+
+    // AVPN (анти-авто-коннект на внешний обрыв): если туннель ушёл в Disconnected/Error, и при этом мы
+    // НЕ ведём свою операцию (m_op==None: не наш start/stop) и движок НЕ в намеренном свитче/коннекте
+    // (switching/connecting/selecting), значит туннель погас ВНЕШНЕ (другой VPN / iOS / пользователь).
+    // Снимаем намерение, чтобы reconcile() НЕ поднял туннель заново — подключение только вручную.
+    if (s == Vpn::Disconnected || s == Vpn::Error) {
+        const QString est = m_engine.debugSnapshot().state; // DebugSnapshot-структура (поле, не QVariantMap)
+        const bool weAreOperating = (m_op != Op::None); // наш guardedStart/guardedStop в полёте
+        const bool engineSwitching = (est == QLatin1String("switching")
+                                   || est == QLatin1String("connecting")
+                                   || est == QLatin1String("selecting"));
+        if (!weAreOperating && !engineSwitching)
+            m_wantConnected = false;
     }
 
     // AVPN (reconcile-машина): терминальное состояние снимает op-in-flight и разрешает следующий шаг;
@@ -381,10 +397,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 
 void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
 {
-    // Протокол-уровневая ошибка раньше терялась (сигнал не был подключён). Surface наружу в error();
-    // если падение из активного Connected — сначала пробуем свитч, иначе честно фиксируем Error.
-    if (!m_engine.notifyConnectionLost())
-        m_engine.onTunnelError();
+    // Протокол-уровневая ошибка раньше терялась (сигнал не был подключён). Surface наружу в error().
+    // AVPN (анти-авто-коннект): больше НЕ зовём notifyConnectionLost() (реактивный failover/реконнект) —
+    // фиксируем факт ошибки; подключение только вручную. См. onConnectionStateChanged выше.
+    m_engine.onTunnelError();
     // AVPN (фикс залипания): ошибка ОБЯЗАНА снять op-in-flight (раньше не трогала m_pendingStart →
     // следующий start() мгновенно return → орб залипал навсегда). Теперь машина разблокируется.
     const Op finished = m_op;
