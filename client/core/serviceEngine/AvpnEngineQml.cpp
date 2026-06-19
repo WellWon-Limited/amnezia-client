@@ -581,11 +581,12 @@ void AvpnEngineQml::resetLkg()
     emit changed();
 }
 
-// AVPN (live-node picker): «Выбрать» сервер из шторки. Новая модель «выбор = задать цель, коннект —
-// кнопкой»: НЕ коннектим автоматически. setPinnedNode только закрепляет узел; если сейчас онлайн ДРУГОЙ
-// узел — гасим туннель (как stop(): requestStop()+down()), чтобы orb стал OFF и пользователь поднял
-// выбранную ноду кнопкой Connect. Это убирает iOS-storm (back-to-back up() без реального Disconnected →
-// «Operation Cancelled»/«Network error»): между down() и up() теперь стоит человек (нажатие Connect).
+// AVPN (live-node picker): «Выбрать» сервер из шторки. Модель «выбор = задать цель, коннект —
+// ВРУЧНУЮ кнопкой Connect» (по требованию пользователя): НЕ коннектим автоматически. setPinnedNode
+// закрепляет узел; если сейчас онлайн — опускаем туннель (намерение «офлайн»), чтобы орб стал OFF и
+// показал выбранную ноду. Пользователь подключается сам — это надёжный COLD-connect на закреплённую
+// ноду (он не ловит iOS-гонку «старт поверх teardown», в отличие от авто-switch на подключённом).
+// Шторка закрывается в QML (sheet.close()).
 void AvpnEngineQml::switchToNode(const QString &nodeId)
 {
     QString err;
@@ -593,18 +594,13 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
         emit error(err);
         return;
     }
-    // AVPN (новая модель): выбор ноды = подключиться к ней (как в любом VPN-клиенте — тап по стране
-    // коннектит). reconcile() сам сделает stop→ждём Disconnected→start на выбранной (iOS-safe, без
-    // шторма), если сейчас онлайн ДРУГАЯ нода; если офлайн — просто поднимет выбранную. Это убирает
-    // прежний баг «выбрал Финляндию → нажал Connect → ничего» (выбор не коннектил, а Connect делал stop).
-    const DebugSnapshot s = m_engine.debugSnapshot();
-    const bool sameLive = (s.state == QLatin1String("connected") && s.currentNodeId == nodeId);
-    m_wantConnected = true;
+    // Намерение: офлайн. Если онлайн — reconcile сделает guardedStop (орб OFF); офлайн — no-op.
+    // Цель (pin) запомнена → следующий ручной Connect поднимет именно её.
+    m_wantConnected = false;
+    m_needsRestart = false;
     m_startAttempts = 0;
-    if (!sameLive)
-        m_needsRestart = true;   // переехать на выбранную (онлайн другая) / поднять её (офлайн)
-    emit changed();
     reconcile();
+    emit changed();
 }
 
 // AVPN (live-node picker): «Авто (быстрейший)» в шторке — переключение в авто-режим БЕЗ реконнекта.
