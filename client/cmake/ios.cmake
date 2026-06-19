@@ -76,7 +76,10 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks"
     XCODE_EMBED_APP_EXTENSIONS networkextension
-    XCODE_EMBED_EXTENSIONKIT_EXTENSIONS appintentsextension
+    # AVPN (фикс краша ЗАПУСКА, билд 24): App Intents Extension временно НЕ встраиваем — он крашил старт
+    # приложения на устройстве (появилось в билде 21). Десктоп-сборка из qrc подтвердила: QML и движок
+    # грузятся чисто ⇒ виновато именно iOS-расширение (ExtensionKit через CMake). Вернём после починки.
+    # XCODE_EMBED_EXTENSIONKIT_EXTENSIONS appintentsextension
 )
 
 set_target_properties(${PROJECT} PROPERTIES
@@ -129,6 +132,11 @@ set_property(TARGET ${PROJECT} APPEND PROPERTY RESOURCE
 add_subdirectory(ios/networkextension)
 add_dependencies(${PROJECT} networkextension)
 
-# AVPN: App Intents Extension — команды Shortcuts в отдельном процессе (без подъёма Qt-приложения в фоне).
-add_subdirectory(ios/appintentsextension)
-add_dependencies(${PROJECT} appintentsextension)
+# AVPN (фикс краша ЗАПУСКА, билд 24): App Intents Extension ВРЕМЕННО ОТКЛЮЧЁН — он крашил запуск
+# приложения на устройстве (появилось в билде 21; 22/23 унаследовали). Десктоп-сборка из qrc БЕЗ
+# dev-превью подтвердила: QML и serviceEngine грузятся чисто ⇒ виновато именно iOS-расширение
+# (App Intents/ExtensionKit, собранный не нативным Xcode-шаблоном, а через CMake). Команд Shortcuts
+# пока не будет — это НЕ роняет запуск (в app-таргете их нет, AvpnAppIntents.swift только в расширении).
+# Вернём расширение после починки причины краша (нужна сигнатура краша с устройства).
+# add_subdirectory(ios/appintentsextension)
+# add_dependencies(${PROJECT} appintentsextension)
