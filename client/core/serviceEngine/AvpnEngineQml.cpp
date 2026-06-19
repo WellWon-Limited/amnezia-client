@@ -360,8 +360,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     emit changed();
 
     // AVPN: довести факт до намерения — поднять отложенный старт после Disconnected (смена ноды) или
-    // погасить туннель, если намерение изменилось. No-op, если op в полёте / состояние промежуточное.
-    reconcile();
+    // погасить туннель, если намерение изменилось. ОТКЛАДЫВАЕМ через singleShot(0): этот слот вызван из
+    // сигнала VpnConnection (возможно — изнутри вложенного QEventLoop сетевого вызова); прямой reconcile()
+    // → guardedStart мог бы повторно войти в обработку поверх текущего стека → re-entrancy/abort. Деферим
+    // на верх цикла событий. No-op, если op в полёте / состояние промежуточное.
+    QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
 void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
@@ -495,10 +498,17 @@ void AvpnEngineQml::guardedStart()
     if (m_engine.identityEnsureKeys(m_store, err))
         m_tunnel.setClientKeys(m_engine.clientKeys());
 
-    if (!m_engine.startFlow(m_nam, m_baseUrl, m_store, err)) {
-        // Контрол-плейн/enroll провалился ДО подъёма туннеля (терминального колбэка не будет) —
-        // снимаем op-in-flight здесь, считаем попытку и показываем ошибку. Авто-ретрай не запускаем
-        // (нет сети/enroll — пусть пользователь повторит); орб станет «Connect».
+    // AVPN (КОРНЕВОЙ фикс зависания UI + краша на 2-м коннекте): если подписка УЖЕ загружена
+    // (bootstrap при старте или прошлый connect) — поднимаем туннель ЛОКАЛЬНО через m_engine.connect(),
+    // БЕЗ синхронного сетевого startFlow. startFlow крутит ВЛОЖЕННЫЙ QEventLoop на ГЛАВНОМ потоке
+    // (enroll + GET /v1/subscription); на 2-м коннекте, когда летят сигналы дисконнекта, это давало
+    // повторный вход вложенного цикла → «Hang UIKit-runloop» (по логам устройства) → abort(). В Amnezia
+    // кнопка коннекта в сеть НЕ ходит — конфиг уже готов, она только поднимает туннель. Делаем так же.
+    const bool ok = m_engine.hasSubscription() ? m_engine.connect(err)
+                                               : m_engine.startFlow(m_nam, m_baseUrl, m_store, err);
+    if (!ok) {
+        // Подъём не удался ДО туннеля (терминального колбэка не будет) — снимаем op-in-flight, считаем
+        // попытку, показываем ошибку. Авто-ретрай не запускаем; орб станет «Connect».
         m_op = Op::None;
         m_opInFlight = false;
         m_busy = false;
