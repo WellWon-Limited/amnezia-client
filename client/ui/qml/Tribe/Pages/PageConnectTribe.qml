@@ -25,6 +25,7 @@ PageType {
     property bool previewSim: false
     property bool simConnected: false
     property bool simConnecting: false
+
     // AVPN (фикс рассинхрона орба): состояние орба берём из TribeEngine (наша стейт-машина), а НЕ из
     // ванильного ConnectionController — иначе орб решал stop/start по чужому состоянию и расходился с
     // движком (повторный Connect делал stop, смена ноды «не коннектила»). Фолбэк на ConnectionController
@@ -307,7 +308,8 @@ PageType {
         id: orb
         width: 256; height: 256
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: header.bottom; anchors.topMargin: 76 + root.sceneShift   // сцена опущена (мобайл: ещё ~20% вниз), шапка на месте
+        // мобайл: сцена опущена (~20% вниз); десктоп: поднимаем выше (короче окно) — подпись не налезает на карточку // AVPN
+        anchors.top: header.bottom; anchors.topMargin: root.isMobile ? (76 + root.sceneShift) : 40
         z: 10
 
         // внешнее свечение (КРУГЛОЕ — задаём радиусы = половине ширины, иначе квадрат)
@@ -332,13 +334,26 @@ PageType {
             }
         }
 
-        // 2 внешних кольца (эталон: -inset-18 → 292, -inset-36 → 328)
-        Rectangle { anchors.centerIn: parent; width: 292; height: 292; radius: 146
-            color: "transparent"; border.width: 1.5; border.color: Qt.rgba(1,1,1,0.15) }
-        Rectangle { anchors.centerIn: parent; width: 328; height: 328; radius: 164
-            color: "transparent"; border.width: 1; border.color: Qt.rgba(1,1,1,0.10) }
+        // ── КОНЦЕНТРИЧЕСКИЕ КОНТУРЫ (5 шт; шаг и толщина ПЛАВНО УБЫВАЮТ к центру) ──
+        // Радиусы 160 / 138 / 119 / 102 / 87 → gap 22/19/17/15 (к центру меньше).
+        // r=119 ≈ периметр кнопки (240) — самый заметный, ЧУТЬ толще; по нему идёт дуга-спиннер.
+        // Рендер через Shape (CurveRenderer) — гарантированно гладкие круги (не ломаные линии).
+        // Белые контуры, все тонкие/неброские, ярче на синей кнопке. Хардкоды — сценические. // AVPN (scenic)
+        property bool ringActive: root.isBusy
 
-        // основная сфера (эталон: inset-2 от 256 → 240)
+        // 2 ВНЕШНИХ контура (вне кнопки) — под сферой.
+        Shape {
+            anchors.centerIn: parent; width: 340; height: 340
+            preferredRendererType: Shape.CurveRenderer; antialiasing: true
+            ShapePath { fillColor: "transparent"; strokeWidth: 0.75            // r1 внешний (самый бледный)
+                strokeColor: Qt.rgba(1,1,1, root.isOn ? 0.14 : 0.10)
+                PathAngleArc { centerX: 170; centerY: 170; radiusX: 160; radiusY: 160; startAngle: 0; sweepAngle: 360 } }
+            ShapePath { fillColor: "transparent"; strokeWidth: 0.9             // r2
+                strokeColor: Qt.rgba(1,1,1, root.isOn ? 0.18 : 0.12)
+                PathAngleArc { centerX: 170; centerY: 170; radiusX: 138; radiusY: 138; startAngle: 0; sweepAngle: 360 } }
+        }
+
+        // основная сфера (кнопка) — белая (idle/connecting) / синяя (connected)
         Rectangle {
             id: sphere
             anchors.centerIn: parent
@@ -349,9 +364,56 @@ PageType {
             }
             scale: orbMa.pressed ? 0.97 : 1.0
             Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-            Rectangle { anchors.fill: parent; anchors.margins: 3;  radius: width/2; color: "transparent"; border.width: 1.5; border.color: Qt.rgba(1,1,1,0.40) }
-            Rectangle { anchors.fill: parent; anchors.margins: 13; radius: width/2; color: "transparent"; border.width: 1;   border.color: Qt.rgba(1,1,1,0.20) }
-            Rectangle { anchors.fill: parent; anchors.margins: 26; radius: width/2; color: "transparent"; border.width: 1;   border.color: Qt.rgba(1,1,1,0.10) }
+        }
+
+        // 3-й (ПЕРИМЕТР кнопки, r=119) + 2 ВНУТРЕННИХ контура — ПОВЕРХ кнопки (видны на синей).
+        Shape {
+            anchors.centerIn: parent; width: 256; height: 256
+            preferredRendererType: Shape.CurveRenderer; antialiasing: true
+            ShapePath { fillColor: "transparent"; strokeWidth: 1.25           // r3 периметр — чуть толще, самый заметный
+                strokeColor: Qt.rgba(1,1,1, root.isOn ? 0.34 : 0.16)
+                PathAngleArc { centerX: 128; centerY: 128; radiusX: 119; radiusY: 119; startAngle: 0; sweepAngle: 360 } }
+            ShapePath { fillColor: "transparent"; strokeWidth: 0.9            // r4 внутр.
+                strokeColor: Qt.rgba(1,1,1, root.isOn ? 0.20 : 0.08)
+                PathAngleArc { centerX: 128; centerY: 128; radiusX: 102; radiusY: 102; startAngle: 0; sweepAngle: 360 } }
+            ShapePath { fillColor: "transparent"; strokeWidth: 0.75           // r5 внутр. — гаснет к центру
+                strokeColor: Qt.rgba(1,1,1, root.isOn ? 0.12 : 0.05)
+                PathAngleArc { centerX: 128; centerY: 128; radiusX: 87; radiusY: 87; startAngle: 0; sweepAngle: 360 } }
+        }
+
+        // Вращающаяся дуга-спиннер ИДЁТ ПО 3-му контуру (периметр кнопки, r=119) — только connecting.
+        // КОНУСОМ: голова толстая (5px) → к хвосту всё тоньше (0.5px). Цвет сплошной blue300 (без прозрачности).
+        // Толщину вдоль штриха QML не сужает → набираем дугу из сегментов с убывающей strokeWidth.
+        Item {
+            id: spinnerArc
+            anchors.centerIn: parent; width: 256; height: 256
+            visible: orb.ringActive
+            readonly property int  segs: 28
+            readonly property real span: 180          // суммарный угол дуги, ° (50% круга)
+            readonly property real step: span / segs
+            readonly property real headW: 5.0
+            readonly property real tailW: 0.5
+            Repeater {
+                model: spinnerArc.segs
+                Shape {
+                    anchors.fill: parent
+                    preferredRendererType: Shape.CurveRenderer; antialiasing: true
+                    ShapePath {
+                        fillColor: "transparent"; strokeColor: root.blue300; capStyle: ShapePath.RoundCap
+                        // index 0 = ХВОСТ (тонкий, сзади) → последний = ГОЛОВА (толстая, по ходу движения CW)
+                        strokeWidth: spinnerArc.tailW + (spinnerArc.headW - spinnerArc.tailW) * (index / (spinnerArc.segs - 1))
+                        PathAngleArc {
+                            centerX: 128; centerY: 128; radiusX: 119; radiusY: 119
+                            startAngle: -90 + index * spinnerArc.step
+                            sweepAngle: spinnerArc.step + 0.8     // лёгкое перекрытие — без швов (штрих непрозрачный)
+                        }
+                    }
+                }
+            }
+            RotationAnimation on rotation {
+                running: orb.ringActive && !Theme.motion.reduceMotion
+                from: 0; to: 360; duration: 1050; loops: Animation.Infinite
+            }
         }
 
         Text {
@@ -427,7 +489,9 @@ PageType {
         id: bottomBlock
         anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
         anchors.bottomMargin: Theme.space.lg
-        anchors.leftMargin: Theme.space.xl; anchors.rightMargin: Theme.space.xl
+        // десктоп: боковые отступы чуть меньше (lg вместо xl) — чипам/карточке больше ширины // AVPN
+        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
         spacing: Theme.space.lg
         z: 30
 
