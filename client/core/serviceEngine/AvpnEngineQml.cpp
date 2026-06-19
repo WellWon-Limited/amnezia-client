@@ -291,8 +291,15 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
         // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
         flushPendingPushToken();
-        // AVPN (чипы доступности): через ~1с после поднятия (маршруты/DNS осели) пробуем сервисы.
-        QTimer::singleShot(1000, this, &AvpnEngineQml::probeServices);
+        // AVPN (порядок по требованию пользователя): СНАЧАЛА чипы доступности сервисов (Telegram/YouTube/
+        // Instagram), ПОТОМ скорость (RTT-палочки). Чипы — через ~0.6с после поднятия (маршруты/DNS осели);
+        // первый замер скорости — через ~1.8с (уже ПОСЛЕ чипов), дальше по каденсу onTick (4с). Иначе
+        // скорость «появлялась долго» (ждала следующего health-тика до 4с) и нередко раньше чипов.
+        QTimer::singleShot(600, this, &AvpnEngineQml::probeServices);
+        QTimer::singleShot(1800, this, [this]() {
+            if (m_probe && state() == QLatin1String("connected"))
+                m_probe->measure();
+        });
         break;
     case Vpn::Error:
         // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;
@@ -617,14 +624,19 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
     emit changed();
 }
 
-// AVPN (live-node picker): «Авто (быстрейший)» в шторке — переключение в авто-режим БЕЗ реконнекта.
-// Только снимаем закрепление: если оффлайн → карточка станет «Умный выбор сервера», следующий Connect
-// выберет узел по скорингу/weight; если онлайн → остаёмся на текущем узле, появляется бейдж «auto»
-// (узел движок дальше ведёт сам). НЕ зовём connect() онлайн (был бы back-to-back up() без down() —
-// iOS-storm). Сознательно НЕ реконнектим ради «самого быстрого»: модель без авто-переподключений.
+// AVPN (live-node picker): «Авто (быстрейший)» в шторке — СИММЕТРИЧНО ручному выбору узла (switchToNode):
+// снимаем закрепление И уводим намерение в OFF. Пользователь жал «Авто» на ПОДКЛЮЧЁННОМ узле (напр.
+// Poland) и ждёт, что главный экран ВЫЙДЕТ из «подключено к Польше» в состояние «авто — можно подключиться»
+// (а НЕ останется висеть на старом узле — это была жалоба). reconcile сделает чистый guardedStop (орб OFF);
+// карточка станет «Умный выбор сервера», следующий РУЧНОЙ Connect поднимет быстрейший по скорингу/weight.
+// Модель «выбор = задать цель, коннект — кнопкой»: НЕ реконнектим автоматически (без back-to-back up()).
 void AvpnEngineQml::selectAuto()
 {
     m_engine.clearPin();
+    m_wantConnected = false;
+    m_needsRestart = false;
+    m_startAttempts = 0;
+    reconcile();        // онлайн → guardedStop (орб OFF); оффлайн → no-op
     emit changed();
 }
 

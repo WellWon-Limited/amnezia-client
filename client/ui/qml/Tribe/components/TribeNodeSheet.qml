@@ -6,10 +6,11 @@ import ".."   // Theme
 
 // AVPN (live-node picker): нижняя шторка выбора сервера. Паттерн seatSheet из PageAccountTribe:
 // затемнение фона + перехват кликов + нижняя TribeCard (elevated) с грабером сверху.
-// Содержимое: «Авто (быстрейший)» → TribeEngine.selectAuto() (авто-режим без реконнекта); ListView
-// ТОЛЬКО живых узлов (modelData.alive) из TribeEngine.nodePool — TribeFlag + имя + сигнал-бары (health
-// 0..1 → 0..5); текущий (modelData.current) — акцент + галка. Тап по узлу → TribeEngine.switchToNode(nodeId):
-// ПОДКЛЮЧАЕТСЯ к выбранной (движок сам stop→Disconnected→start, если онлайн другая; reconcile, iOS-safe).
+// Содержимое: «Авто (быстрейший)» → TribeEngine.selectAuto() (авто-режим: уход в OFF + следующий
+// Connect выберет быстрейший); ListView ТОЛЬКО живых узлов (modelData.alive) из TribeEngine.nodePool —
+// TribeFlag + имя + сигнал-бары (текущий узел = реальные liveBars, остальные = backend-health 0..1→1..5);
+// текущий (modelData.current) — акцент-рамка (БЕЗ галки: рамки достаточно). Тап по узлу → ЗАКРЫТЬ шторку
+// СРАЗУ, затем TribeEngine.switchToNode(nodeId): задаёт цель + уводит орб в OFF (коннект — ВРУЧНУЮ).
 // Без шевронов. open() → отложенный refreshPool() (Timer, НЕ из кадра показа — refreshPool синхронный
 // nested-loop fetch, прямой вызов в onOpened крашит). Только токены Theme.qml.
 Item {
@@ -131,11 +132,13 @@ Item {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        // авто-режим без реконнекта: снимаем закрепление. Оффлайн → «Умный выбор сервера»
-                        // (следующий Connect выберет узел); онлайн → остаёмся на текущем + бейдж «auto».
+                        // СНАЧАЛА закрываем шторку (мгновенно, без ожидания движка — пользователь уже выбрал),
+                        // затем переключаем в авто-режим: selectAuto уводит туннель в OFF (если был онлайн) и
+                        // снимает закрепление → главный экран выходит из «подключено к <узлу>» в «Умный выбор
+                        // сервера», следующий ручной Connect поднимет быстрейший по скорингу.
+                        sheet.close()
                         if (sheet.hasEngine && typeof TribeEngine.selectAuto === "function")
                             TribeEngine.selectAuto()
-                        sheet.close()
                     }
                 }
             }
@@ -213,31 +216,26 @@ Item {
                             }
 
                             // сигнал-бары: тот же 5-баровый LoadBars, что и на карточке Connect.
-                            // Для НЕактивных узлов живого RTT нет (AWG UDP-only ⇒ не пингуется), поэтому
-                            // уровень берём из backend-агрегата health (0..1). Живой узел всегда ≥3 баров
-                            // (он прошёл фильтр alive), здоровый → 5; health пусто = 1.0 (backend-контракт). // AVPN
+                            // ТЕКУЩИЙ узел показывает РЕАЛЬНЫЕ измеренные палочки (TribeEngine.liveBars —
+                            // app-layer RTT через туннель, см. SignalQuality.h). Для остальных живого RTT нет
+                            // (AWG UDP-only ⇒ не пингуется), уровень берём из backend-агрегата health (0..1→1..5)
+                            // БЕЗ искусственного пола (раньше max(3,…) делал всех ≥3 ⇒ «всегда зелёные»; теперь
+                            // слабые ноды показывают меньше). health пусто = 1.0 (backend-контракт). // AVPN
                             LoadBars {
                                 Layout.alignment: Qt.AlignVCenter
                                 level: {
-                                    var h = nodeRow.modelData ? Number(nodeRow.modelData.health) : 1
-                                    if (isNaN(h)) h = 1   // health отсутствует = живой = 1.0
-                                    return Math.max(3, Math.min(5, Math.round(h * 5)))
+                                    var h = nodeRow.modelData ? Number(nodeRow.modelData.health) : NaN
+                                    if (isNaN(h)) h = 1.0   // health отсутствует = здоров = 1.0 (backend-контракт)
+                                    var fromHealth = Math.max(1, Math.min(5, Math.round(h * 5)))
+                                    // текущий узел: реальный liveBars приоритетнее health; 0 = ещё не мерили → health-фолбэк.
+                                    if (nodeRow.isCurrent && sheet.hasEngine) {
+                                        var lb = Number(TribeEngine.liveBars)
+                                        return lb > 0 ? lb : fromHealth
+                                    }
+                                    return fromHealth
                                 }
                                 // текущий узел — акцентные бары; остальные — стандартный зелёный «сигнал».
                                 barColor: nodeRow.isCurrent ? Theme.color.accent : Theme.color.connected
-                            }
-
-                            // галка у текущего узла (Tabler check, inline-вектор)
-                            Shape {
-                                Layout.preferredWidth: 18; Layout.preferredHeight: 18
-                                Layout.alignment: Qt.AlignVCenter
-                                visible: nodeRow.isCurrent
-                                preferredRendererType: Shape.CurveRenderer
-                                ShapePath {
-                                    strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 2
-                                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                                    PathSvg { path: "M4 10 L8 14 L15 5" }
-                                }
                             }
                         }
 
@@ -249,9 +247,10 @@ Item {
                             enabled: nodeRow.isAlive
                             onClicked: {
                                 var id = nodeRow.modelData ? (nodeRow.modelData.nodeId || "") : ""
+                                // СНАЧАЛА закрываем шторку (мгновенно — выбор уже сделан), потом просим движок.
+                                sheet.close()
                                 if (id !== "" && sheet.hasEngine && typeof TribeEngine.switchToNode === "function")
                                     TribeEngine.switchToNode(id)   // «Выбрать» цель (НЕ коннектит; orb→OFF, ждём Connect)
-                                sheet.close()
                             }
                         }
                     }
