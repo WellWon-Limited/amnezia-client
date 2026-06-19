@@ -379,7 +379,11 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     m_watchdog.stop();
     if (finished == Op::Starting)
         ++m_startAttempts;
-    emit error(errorString(code));
+    // AVPN: на iOS «InternalError» (код 101) — ЛОЖНЫЙ: m_vpnProtocol там всегда null (туннель ведёт
+    // IosController, это норма), а VpnConnection::lastError() из-за этого отдаёт InternalError. Не пугаем
+    // им пользователя (он лез тостом при смене сервера/rotateNext). Реальные ошибки показываем.
+    if (code != amnezia::ErrorCode::InternalError)
+        emit error(errorString(code));
     emit changed();
     reconcile();
 }
