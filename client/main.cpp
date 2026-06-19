@@ -71,7 +71,7 @@ int main(int argc, char *argv[])
 
     app.setApplicationName(APPLICATION_NAME);
     app.setOrganizationName(ORGANIZATION_NAME);
-    app.setApplicationDisplayName(APPLICATION_NAME);
+    app.setApplicationDisplayName(APPLICATION_DISPLAY_NAME); // AVPN: продуктовое имя пользователю, не внутренний ключ
 
     app.loadFonts();
 
