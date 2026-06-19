@@ -50,7 +50,7 @@ Row {
             Row {
                 id: row
                 anchors.centerIn: parent
-                spacing: Theme.space.sm
+                spacing: Theme.space.xs   // плотнее (было sm) — чтобы полный лейбл влезал в узкий чип // AVPN
 
                 // лого сервиса (фирменный цвет — бренд-исключение)
                 Loader {
@@ -65,11 +65,11 @@ Row {
                     text: modelData ? (modelData.label || chip.key) : ""
                     color: Theme.color.text1
                     font.family: Theme.font.body
-                    font.pixelSize: Theme.font.bodyS
+                    font.pixelSize: Theme.font.caption   // 12 (было bodyS 14) — полные Telegram/YouTube/Instagram влезают // AVPN
                     font.weight: Theme.font.wMedium
-                    // эллипсис, если лейбл не влезает в равную долю чипа // AVPN
+                    // эллипсис только если совсем не влезает; накладные = лого 18 + дот 8 + 2 зазора xs
                     elide: Text.ElideRight
-                    width: Math.min(implicitWidth, chip.width - 18 - 8 - 3 * Theme.space.sm)
+                    width: Math.min(implicitWidth, chip.width - 18 - 8 - 2 * Theme.space.xs)
                 }
                 // статус-дот (цвет = статус)
                 Rectangle {
