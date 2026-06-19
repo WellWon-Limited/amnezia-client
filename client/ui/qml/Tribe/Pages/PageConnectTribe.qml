@@ -637,7 +637,10 @@ PageType {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: (root.hasEngine && TribeEngine.busy) ? qsTr("Подбираем сервер…") : qsTr("Обновить подключение")
+                    // AVPN: «Подбираем сервер…» ТОЛЬКО в авто-режиме (узел выбирает движок). При РУЧНОМ
+                    // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
+                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Обновить подключение")
+                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
             }
