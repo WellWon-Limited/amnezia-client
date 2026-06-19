@@ -300,6 +300,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
             if (m_probe && state() == QLatin1String("connected"))
                 m_probe->measure();
         });
+        // AVPN (анти-ложный-красный): повторная проба сервисов через ~4.5с. На первой пробе (600мс) DNS
+        // через свежий туннель мог ещё не подняться → YouTube/Instagram (идут по DNS, в отличие от
+        // Telegram по голому IP) ловили HostNotFound → ложный «заблок». К 4.5с маршруты/DNS осели →
+        // результат корректируется. Не поллинг (всего один повтор за коннект).
+        QTimer::singleShot(4500, this, &AvpnEngineQml::probeServices);
         break;
     case Vpn::Error:
         // Если туннель упал из активного Connected → пробуем реактивный свитч на живую ноду;

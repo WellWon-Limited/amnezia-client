@@ -149,6 +149,7 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
 
     auto *clock = new QElapsedTimer();
     auto *ttfb = new qint64(-1);
+    auto *done = new bool(false);   // гасит повторную классификацию (encrypted vs finished)
     clock->start();
     QNetworkReply *reply = m_nam->head(req);
 
@@ -157,22 +158,37 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     timer->start(timeoutMs);
 
-    connect(reply, &QNetworkReply::metaDataChanged, reply, [clock, ttfb]() {
-        if (*ttfb < 0) *ttfb = clock->elapsed(); // TLS завершился, заголовки пошли
-    });
-    connect(reply, &QNetworkReply::finished, reply, [this, reply, c, clock, ttfb]() {
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        // AVPN: достижимость = TLS установился / пришёл ЛЮБОЙ HTTP-ответ (включая 4xx/405/redirect).
-        // 4xx/405 на HEAD ≠ блокировка: значит SNI прошёл и DPI НЕ срезал соединение. Прежняя проверка
-        // (только 2xx/3xx) давала ЛОЖНЫЙ красный (Instagram отдаёт 4xx/redirect на «/», хотя работает).
-        // «Заблокировано» теперь только при сетевой/TLS-ошибке или таймауте БЕЗ какого-либо ответа. // AVPN
-        const bool reachable = httpStatus > 0 || *ttfb >= 0;
-        const int rtt = (*ttfb >= 0) ? int(*ttfb) : int(clock->elapsed());
+    // Единая точка классификации (works/slow/blocked). Идемпотентна по *done.
+    auto settle = [this, c, done](bool reachable, int rtt) {
+        if (*done) return;
+        *done = true;
         ServiceState st = !reachable ? ServiceState::Blocked
                                      : (rtt > c.slowMs ? ServiceState::Slow : ServiceState::Works);
-        delete clock; delete ttfb;
-        reply->deleteLater();
         finish(c.key, st, reachable ? rtt : -1);
+    };
+
+    // КЛЮЧЕВОЙ позитивный сигнал (фикс ложного «заблок» у YouTube/Instagram): TLS-handshake к РЕАЛЬНОМУ
+    // SNI завершился ⇒ DPI путь к сервису НЕ срезал ⇒ works. НЕ ждём HTTP-ответ: HEAD к крупным CDN
+    // (Google/Meta) часто не отдаёт заголовки/закрывает рано, и раньше это давало ЛОЖНЫЙ красный, хотя
+    // сервис работает. SNI-блокировка/DPI-reset случились бы ДО `encrypted`, поэтому его приход = «жив». // AVPN
+    connect(reply, &QNetworkReply::encrypted, reply, [clock, ttfb, settle]() {
+        if (*ttfb < 0) *ttfb = clock->elapsed();
+        settle(true, int(*ttfb));
+    });
+    connect(reply, &QNetworkReply::metaDataChanged, reply, [clock, ttfb]() {
+        if (*ttfb < 0) *ttfb = clock->elapsed(); // заголовки пошли (фолбэк-метка времени)
+    });
+    connect(reply, &QNetworkReply::finished, reply, [reply, c, clock, ttfb, done, settle]() {
+        // Фолбэк, если `encrypted` не пришёл (переиспользованное TLS-соединение / редкий plain-HTTP):
+        // любой HTTP-статус или начавшиеся заголовки = достижимо (вкл. 4xx/405/redirect — SNI прошёл);
+        // «заблок» только при сетевой/TLS-ошибке или таймауте БЕЗ единого признака ответа. // AVPN
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool reachable = httpStatus > 0 || *ttfb >= 0;
+        const int rtt = (*ttfb >= 0) ? int(*ttfb) : int(clock->elapsed());
+        Q_UNUSED(c);
+        settle(reachable, rtt);
+        delete clock; delete ttfb; delete done;
+        reply->deleteLater();
     });
 }
 
