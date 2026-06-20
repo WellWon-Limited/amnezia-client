@@ -18,7 +18,7 @@ using namespace QKeychain;
 namespace {
     constexpr const char *settingsKeyTag = "settingsKeyTag";
     constexpr const char *settingsIvTag = "settingsIvTag";
-    constexpr const char *keyChainName = "AVPN-Keychain";
+    constexpr const char *keyChainName = "AVPN-Keychain";   // AVPN: свой keychain (изоляция от офиц. Amnezia)
 }
 
 SecureQSettings::SecureQSettings(const QString &organization, const QString &application, QObject *parent, bool enableEncryption)
