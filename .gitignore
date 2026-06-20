@@ -144,3 +144,7 @@ macos-with-sign-build.sh
 DeveloperIdApplicationCertificate.p12
 DeveloperIdInstallerCertificate.p12
 
+
+# AVPN: мусорные артефакты (не тащить в дерево)
+aqtinstall.log
+client/VPN/

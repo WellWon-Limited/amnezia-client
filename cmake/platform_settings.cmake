@@ -12,7 +12,7 @@ if(APPLE)
         set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
     else()
         set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "" FORCE)
-        set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+        set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)  # AVPN: desktop форсим arm64-only (апстрим — universal x86_64;arm64)
     endif()
 endif()
 

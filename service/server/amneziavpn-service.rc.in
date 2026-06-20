@@ -1,6 +1,7 @@
 #include <windows.h>
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
+// AVPN: бренд version-info (Tribe вместо AmneziaVPN) — изоляция от офиц.
 #define VER_COMPANYNAME_STR         "Tribe"
 #define VER_FILEDESCRIPTION_STR     "Tribe VPN Service"
 #define VER_INTERNALNAME_STR        VER_FILEDESCRIPTION_STR
