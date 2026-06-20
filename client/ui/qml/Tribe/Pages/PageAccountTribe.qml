@@ -32,7 +32,6 @@ PageType {
         id: avpnSettings
         category: "AvpnSettings"
         property bool autoPauseRu: true
-        property bool autoConnect: false
     }
 
     // AVPN (Task 14): активация ключа (redeem) через движок — POST /v1/code/redeem.
@@ -171,15 +170,16 @@ PageType {
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
-    // AVPN (#17): весь контент — в прокрутке; Flickable заканчивается НАД нижней навигацией
-    // (bottomMargin = высота TribeBottomNav 72 + safe-area), чтобы доскроллить и не лезть под меню.
+    // AVPN (#17): весь контент — в прокрутке. Хост страниц (tabBarStackView в PageStart) уже
+    // заканчивается на avpnBottomNav.top — высоту навбара отдельно вычитать НЕ нужно. Иначе
+    // двойной отступ давал тёмно-синюю полосу снизу (контент не доходил до меню). Теперь контент
+    // идёт до низа области, как на остальных вкладках; нижний воздух — через contentHeight (+lg).
     Flickable {
         id: settingsFlick
         anchors.fill: parent
         anchors.topMargin: Theme.space.xl + PageController.safeAreaTopMargin // iOS: натив-инсет
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
-        anchors.bottomMargin: 72 + PageController.safeAreaBottomMargin       // выше нижнего меню
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         contentWidth: width
@@ -578,36 +578,6 @@ PageType {
                         Layout.alignment: Qt.AlignVCenter
                         checked: avpnSettings.autoPauseRu
                         onToggled: avpnSettings.autoPauseRu = checked
-                    }
-                }
-
-                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.color.border }
-
-                // Автоподключение при запуске
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.space.md
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-                        Text {
-                            text: qsTr("Автоподключение при запуске")
-                            color: Theme.color.text1
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                            font.weight: Theme.font.wMedium
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        }
-                        Text {
-                            text: qsTr("Включать VPN сразу при открытии приложения")
-                            color: Theme.color.text3
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        }
-                    }
-                    TribeToggle {
-                        Layout.alignment: Qt.AlignVCenter
-                        checked: avpnSettings.autoConnect
-                        onToggled: avpnSettings.autoConnect = checked
                     }
                 }
             }
