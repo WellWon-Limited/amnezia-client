@@ -126,7 +126,29 @@ find_package(openvpnadapter REQUIRED)
 target_link_libraries(AmneziaVPNNetworkExtension PRIVATE amnezia::openvpnadapter)
 
 find_package(awg-apple REQUIRED)
-target_link_libraries(AmneziaVPNNetworkExtension PRIVATE amnezia::awg-apple)
+# AVPN (macOS NE линк-фикс): libwg-go.a (awg) и OpenVPNAdapter оба статически тащат Go cgo-рантайм →
+# 9 дублей символов (_x_crosscall2_ptr, __cgo_set_stacklo, …) после обновления amneziawg (#2743).
+# -ld_classic это больше НЕ давит (deprecated). -load_hidden (спрятать ВСЁ) ломает API (_wgTurnOn/LibXray*).
+# Решение: предлинк libwg-go.a в один .o, локализовав ТОЛЬКО 9 cgo-рантайм-символов (-unexported_symbols_list):
+# они становятся local и не конфликтуют с OpenVPNAdapter; внутренние ссылки awg резолвятся к своим копиям,
+# а ПУБЛИЧНОЕ API awg/Xray (_wgTurnOn, _LibXray*) остаётся глобальным для Swift. Заголовки awg — из таргета.
+get_target_property(_AWG_INC amnezia::awg-apple INTERFACE_INCLUDE_DIRECTORIES)
+if(_AWG_INC)
+    target_include_directories(AmneziaVPNNetworkExtension PRIVATE ${_AWG_INC})
+endif()
+set(_AWG_CGO_SYMS "${CMAKE_CURRENT_BINARY_DIR}/awg_cgo_localize.txt")
+file(WRITE "${_AWG_CGO_SYMS}"
+"__cgo_get_context_function\n__cgo_set_stacklo\n__cgo_try_pthread_create\n__cgo_wait_runtime_init_done\n_x_cgo_bindm\n_x_cgo_notify_runtime_init_done\n_x_cgo_pthread_key_created\n_x_cgo_sys_thread_create\n_x_crosscall2_ptr\n")
+set(_AWG_LOCALIZED "${CMAKE_CURRENT_BINARY_DIR}/libwg-go-localized.o")
+add_custom_command(OUTPUT "${_AWG_LOCALIZED}"
+    COMMAND ld -r -arch arm64 -platform_version macos 11.0 11.0 -all_load "$<TARGET_FILE:amnezia::awg-apple>"
+            -unexported_symbols_list "${_AWG_CGO_SYMS}" -o "${_AWG_LOCALIZED}"
+    DEPENDS amnezia::awg-apple "${_AWG_CGO_SYMS}"
+    COMMENT "AVPN: локализую 9 cgo-дублей в libwg-go (anti-collision с OpenVPNAdapter)"
+    VERBATIM)
+add_custom_target(awg_localize_ne DEPENDS "${_AWG_LOCALIZED}")
+add_dependencies(AmneziaVPNNetworkExtension awg_localize_ne)
+target_link_libraries(AmneziaVPNNetworkExtension PRIVATE "${_AWG_LOCALIZED}")
 
 find_package(hev-socks5-tunnel REQUIRED)
 target_link_libraries(AmneziaVPNNetworkExtension PRIVATE heiher::hev-socks5-tunnel)
