@@ -38,13 +38,17 @@ Enrollment.{h,cpp}            — /v1/trial: REUSE networkManager форка; ч
 NodePool.h                    — реестр нод текущей подписки                                        [stub]
 Prober.{h,cpp}                — TCP-ping пула (QtNetwork), параллельно + таймаут                   ✅ протестирован (вкл. live)
 Selector.h                    — выбор: score=rtt/weight + гистерезис + джиттер (чистые score/choose) ✅ протестирован
+IRttProbe.h                   — шов прямого per-node RTT off-tunnel (как ITunnelControl)
+RttProbeIcmp.{h,cpp}          — ICMP-пробер: POSIX unprivileged (Darwin/iOS/Linux/Android), Win=стаб ✅ протестирован (live ICMP)
+NodeRanking.h                 — RTT→палочки + сортировка «быстрые внизу» для шторки выбора          ✅ протестирован
 HealthLoop.h                  — DEAD-детект (one-way death: tx растёт+rx стоит+handshake устарел, N циклов) ✅ протестирован
 Switcher.h                    — переключение на кандидата через applyPeer (MVP: down+up)
 DebugSnapshot.h               — данные для диагностической панели (5 тапов); UI — Pages2/PageDiagnostics.qml ✅
 ServiceEngine.{h,cpp}         — оркестратор (+ startFlow: enroll→subscription→connect; switchLog; snapshot)
 AvpnEngineQml.{h,cpp}         — QObject-фасад для QML (context property "AvpnEngine"): start/stop/reprobe/
                                 manualSwitch/resetLkg + debugSnapshot()→QVariantMap; health-QTimer; реактивный failover
-tests/                        — фикстура + автономная проверка (парсер + билдер + enrollment + selector + health)
+tests/                        — фикстура + автономная проверка (парсер + билдер + enrollment + selector + health
+                                + node_ranking_check + rtt_icmp_check[live ICMP])
 
 ## Интеграция в приложение (C-7, выполнена)
 - **Сборка:** `client/cmake/avpn.cmake` подключён 1 строкой в `CMakeLists.txt` (`// AVPN`). Опция

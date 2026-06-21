@@ -35,6 +35,9 @@ list(APPEND HEADERS
     ${AVPN_SE}/MtprotoProbe.h
     ${AVPN_SE}/QualityProbe.h
     ${AVPN_SE}/ServiceProbe.h
+    ${AVPN_SE}/NodeRanking.h
+    ${AVPN_SE}/IRttProbe.h
+    ${AVPN_SE}/RttProbeIcmp.h
     ${AVPN_SE}/Switcher.h
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/ServiceEngine.h
@@ -50,6 +53,7 @@ list(APPEND SOURCES
     ${AVPN_SE}/Prober.cpp
     ${AVPN_SE}/QualityProbe.cpp
     ${AVPN_SE}/ServiceProbe.cpp
+    ${AVPN_SE}/RttProbeIcmp.cpp
     ${AVPN_SE}/Identity.cpp
     ${AVPN_SE}/Enrollment.cpp
     ${AVPN_SE}/VpnConnectionTunnelControl.cpp

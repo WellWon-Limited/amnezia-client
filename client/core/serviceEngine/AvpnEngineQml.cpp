@@ -6,6 +6,8 @@
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
+#include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
+#include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 
@@ -36,6 +38,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 
     m_engine.setTunnel(&m_tunnel);
 
+    // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
+    // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
+    m_rttProbe = new RttProbeIcmp(this);
+
     // health-loop driver: периодический tick (3–5с).
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
@@ -51,6 +57,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_liveBars = m_signal.feed(rttMs, reachable);
         m_liveRtt = m_signal.smoothedRtt();
         m_liveReachable = reachable;
+        // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
+        // и «связь подтверждённо мертва» (m_liveDead=true → 0 зелёных + все красные). Один таймаут
+        // в «мертво» НЕ роняем — ждём kLiveDeadStreak неудач подряд (анти-фликер на транзиентном дропе).
+        if (reachable) {
+            m_liveFailStreak = 0;
+            m_liveDead = false;
+        } else if (++m_liveFailStreak >= kLiveDeadStreak) {
+            m_liveDead = true;
+        }
         emit liveQualityChanged();
     });
 
@@ -245,10 +260,68 @@ QVariantMap AvpnEngineQml::currentNode() const
     return node;
 }
 
-// AVPN: весь пул нод для страницы «Серверы».
+// AVPN: весь пул нод для страницы «Серверы» / шторки выбора.
+// Обогащаем измеренным RTT (m_nodeRtt) → measuredRttMs + measuredBars (0..5; -1 = не мерили), затем
+// сортируем «быстрые ВНИЗУ» (неизмеренные сверху). Без измерений порядок не меняется (все rtt=-1 ⇒
+// rankFastestAtBottom стабилен) и палочки берутся из health, как и раньше (поведение идентично).
 QVariantList AvpnEngineQml::nodePool() const
 {
-    return debugSnapshot().value(QStringLiteral("pool")).toList();
+    QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
+
+    QHash<QString, QVariantMap> byId;
+    QList<RankRow> rows;
+    rows.reserve(pool.size());
+    for (const QVariant &v : pool) {
+        QVariantMap n = v.toMap();
+        const QString id = n.value(QStringLiteral("nodeId")).toString();
+        const int rtt = m_nodeRtt.value(id, -1);
+        n[QStringLiteral("measuredRttMs")] = rtt;
+        n[QStringLiteral("measuredBars")] = (rtt >= 0) ? barsForNode(rtt) : -1;
+        byId.insert(id, n);
+        rows.append({ id, rtt });
+    }
+
+    rows = rankFastestAtBottom(rows);
+    QVariantList out;
+    out.reserve(rows.size());
+    for (const RankRow &r : rows)
+        out.append(byId.value(r.nodeId));
+    return out;
+}
+
+// AVPN (выбор по скорости): прямой ICMP-замер RTT до всех живых нод (off-tunnel). См. заголовок.
+void AvpnEngineQml::probeNodeRtt()
+{
+    if (!m_rttProbe)
+        return;
+    // Через поднятый туннель замер к чужим нодам идёт ВНУТРИ туннеля (смазан) — держим кэш, не мерим.
+    if (state() == QLatin1String("connected")) {
+        m_rttProbe->cancel();
+        return;
+    }
+    const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
+    QList<RttTarget> targets;
+    for (const QVariant &v : pool) {
+        const QVariantMap n = v.toMap();
+        if (!n.value(QStringLiteral("alive")).toBool())
+            continue; // мёртвые по backend-данным не пингуем
+        const QString id = n.value(QStringLiteral("nodeId")).toString();
+        const QString host = n.value(QStringLiteral("ip")).toString(); // host без порта (см. debugSnapshot)
+        if (id.isEmpty() || host.isEmpty())
+            continue;
+        targets.append({ id, host, 0 });
+    }
+    if (targets.isEmpty())
+        return;
+
+    m_rttProbe->probeAll(
+        targets, 1500,
+        [this](const QString &nodeId, int rttMs) {
+            m_nodeRtt.insert(nodeId, rttMs);
+            m_engine.setMeasuredRtt(m_nodeRtt); // AVPN: авто-выбор «быстрейший» берёт RTT отсюда (pickByMeasuredRtt)
+            emit changed(); // шторка пересортируется + палочки обновятся по мере прихода пингов
+        },
+        []() {});
 }
 
 void AvpnEngineQml::onTick()
@@ -279,6 +352,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     switch (s) {
     case Vpn::Connected:
         m_engine.onTunnelConnected();
+        if (m_rttProbe)
+            m_rttProbe->cancel(); // подключились → off-tunnel ICMP больше не нужен (был бы внутри туннеля)
         // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
         // поднялся), а не на холодном старте. Один раз за установку (persist). Мост дёрнет натив
         // (UNUserNotificationCenter + registerForRemoteNotifications); на desktop — no-op.
@@ -363,11 +438,14 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
-    if (state() != QLatin1String("connected") && (m_liveBars != 0 || m_liveReachable || m_liveRtt >= 0)) {
+    if (state() != QLatin1String("connected")
+        && (m_liveBars != 0 || m_liveReachable || m_liveRtt >= 0 || m_liveDead || m_liveFailStreak)) {
         m_signal.reset();
         m_liveBars = 0;
         m_liveRtt = -1;
         m_liveReachable = false;
+        m_liveDead = false;        // обрыв/смена ноды → «мертво» снимаем, при новом Connected мерим заново
+        m_liveFailStreak = 0;
         emit liveQualityChanged();
 
         // AVPN (чипы доступности): обрыв/смена ноды → статусы сервисов больше не актуальны → «неизвестно».
@@ -434,8 +512,11 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
 
     // Тихая прогрузка подписки БЕЗ подъёма туннеля. Оффлайн/нет токена → мягко (не показываем error()),
     // бейдж просто останется на дефолтах до первого успешного start()/bootstrap().
-    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err))
+    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err)) {
         emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
+        probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
+                        // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
+    }
     // при провале — тихо: bootstrap не должен пугать пользователя ошибкой при холодном старте.
 
     // AVPN (Task 9): если первичный авто-enroll создал subscription_token, а device token уже пришёл
@@ -689,8 +770,10 @@ void AvpnEngineQml::rotateNext()
 void AvpnEngineQml::refreshPool()
 {
     QString err;
-    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err))
+    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err)) {
         emit changed(); // nodePool/health обновлены → шторка перерисуется
+        probeNodeRtt(); // AVPN (выбор по скорости): тёплый прямой замер RTT (no-op при connected)
+    }
     // при провале — тихо (silent fail)
 }
 

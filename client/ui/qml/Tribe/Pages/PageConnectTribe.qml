@@ -391,8 +391,8 @@ PageType {
             readonly property int  segs: 28
             readonly property real span: 180          // суммарный угол дуги, ° (50% круга)
             readonly property real step: span / segs
-            readonly property real headW: 5.0
-            readonly property real tailW: 0.5
+            readonly property real headW: 6.5   // голова чуть толще (было 5.0)
+            readonly property real tailW: 1.0   // хвост тоже чуть плотнее (было 0.5)
             Repeater {
                 model: spinnerArc.segs
                 Shape {
@@ -584,18 +584,24 @@ PageType {
                 // всё выровнено вправо; отступ справа = lg, как слева у флага. // AVPN
                 Column {
                     id: sigGroup
-                    visible: root.curNode.hasNode
+                    // AVPN: палочки ТОЛЬКО когда подключены — никаких серых-плейсхолдеров при connecting/idle.
+                    visible: root.isOn && root.curNode.hasNode
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                     spacing: 2
-                    LoadBars {  // 5 баров, зелёные/серые. 0 = нет связи/ещё не мерили.
+                    readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
+                    // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд), не «ещё мерю». // AVPN
+                    readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
+                    LoadBars {
                         anchors.right: parent.right
-                        level: root.hasEngine ? Number(TribeEngine.liveBars) : 0
+                        // подключены: мёртвая связь → 0 зелёных + ВСЕ красные; иначе МИНИМУМ 1 зелёная,
+                        // reachable уточняет уровень 1..5 («ещё мерю» = плейсхолдер 1, без серых/красных). // AVPN
+                        failed: sigGroup.dead
+                        level: sigGroup.dead ? 0 : (sigGroup.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
                     }
                     // число мс — второй (не-цветовой) носитель уровня; виден, когда проба дошла. // AVPN
                     Text {
                         anchors.right: parent.right
-                        visible: root.hasEngine && TribeEngine.liveReachable === true
-                                 && Number(TribeEngine.liveRttMs) >= 0
+                        visible: sigGroup.reachable && Number(TribeEngine.liveRttMs) >= 0
                         text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
                         color: root.slate500
                         font.family: Theme.font.mono; font.pixelSize: 10

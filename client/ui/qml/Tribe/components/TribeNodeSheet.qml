@@ -20,6 +20,9 @@ Item {
     z: 100
 
     property bool opened: false
+    // AVPN: десктоп — боковой отступ как у контента/нижнего блока (lg), мобайл — xl.
+    readonly property bool isMobile: Qt.platform.os === "ios" || Qt.platform.os === "android"
+    readonly property int sideMargin: isMobile ? Theme.space.xl : Theme.space.lg
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
     // живые узлы из пула (фильтруем «только живые»). Гард на undefined-движок (dev-превью).
     readonly property var pool: hasEngine ? TribeEngine.nodePool : []
@@ -31,6 +34,10 @@ Item {
         // (тот же класс краша, из-за которого bootstrap/refreshDevices деферят таймером). Список и так
         // рисуется из уже наполненного nodePool; обновление пула откладываем «после показа».
         poolRefreshTimer.restart()
+        // AVPN (выбор по скорости): прямой ICMP-замер RTT до всех живых нод (АСИНХРОННО, НЕ nested loop —
+        // безопасно из кадра показа). No-op при connected (через туннель смазан) и при пустом пуле.
+        // Ответы прилетают по одному → changed() → список пересортируется (быстрые вниз) + палочки живые.
+        if (hasEngine) TribeEngine.probeNodeRtt()
     }
     function close() { opened = false; poolRefreshTimer.stop() }
 
@@ -55,10 +62,10 @@ Item {
     TribeCard {
         id: panel
         elevated: true
-        width: parent.width - 2 * Theme.space.xl
+        width: parent.width - 2 * sheet.sideMargin
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: Theme.space.xl + PageController.safeAreaBottomMargin
+        anchors.bottomMargin: sheet.sideMargin + PageController.safeAreaBottomMargin
         // высота по контенту, но не выше ~70% экрана (длинный список скроллится внутри ListView)
         implicitHeight: Math.min(sheetCol.implicitHeight + 2 * Theme.space.lg,
                                  sheet.height * 0.7)
@@ -216,22 +223,27 @@ Item {
                             }
 
                             // сигнал-бары: тот же 5-баровый LoadBars, что и на карточке Connect.
-                            // ТЕКУЩИЙ узел показывает РЕАЛЬНЫЕ измеренные палочки (TribeEngine.liveBars —
-                            // app-layer RTT через туннель, см. SignalQuality.h). Для остальных живого RTT нет
-                            // (AWG UDP-only ⇒ не пингуется), уровень берём из backend-агрегата health (0..1→1..5)
-                            // БЕЗ искусственного пола (раньше max(3,…) делал всех ≥3 ⇒ «всегда зелёные»; теперь
-                            // слабые ноды показывают меньше). health пусто = 1.0 (backend-контракт). // AVPN
+                            // Приоритет источника уровня (по убыванию правдивости):
+                            //  1) ТЕКУЩИЙ подключённый узел → TribeEngine.liveBars (реальный through-tunnel RTT);
+                            //  2) measuredBars — прямой ICMP-замер RTT off-tunnel (ЛЮБАЯ нода; -1 = не мерили);
+                            //  3) фолбэк §11 — backend-агрегат health (0..1→1..5) БЕЗ искусственного пола.
+                            // measuredBars приходит из nodePool (NodeRanking::barsForNode), список тоже
+                            // отсортирован «быстрые внизу» на стороне движка. // AVPN
                             LoadBars {
                                 Layout.alignment: Qt.AlignVCenter
                                 level: {
                                     var h = nodeRow.modelData ? Number(nodeRow.modelData.health) : NaN
                                     if (isNaN(h)) h = 1.0   // health отсутствует = здоров = 1.0 (backend-контракт)
                                     var fromHealth = Math.max(1, Math.min(5, Math.round(h * 5)))
-                                    // текущий узел: реальный liveBars приоритетнее health; 0 = ещё не мерили → health-фолбэк.
+                                    // 1) текущий подключённый узел: реальный through-tunnel liveBars приоритетнее.
                                     if (nodeRow.isCurrent && sheet.hasEngine) {
                                         var lb = Number(TribeEngine.liveBars)
-                                        return lb > 0 ? lb : fromHealth
+                                        if (lb > 0) return lb
                                     }
+                                    // 2) прямой ICMP-замер RTT (off-tunnel), если есть (>=0, включая «медленно»=0..2).
+                                    var mb = nodeRow.modelData ? Number(nodeRow.modelData.measuredBars) : -1
+                                    if (!isNaN(mb) && mb >= 0) return mb
+                                    // 3) фолбэк: backend-health.
                                     return fromHealth
                                 }
                                 // текущий узел — акцентные бары; остальные — стандартный зелёный «сигнал».
