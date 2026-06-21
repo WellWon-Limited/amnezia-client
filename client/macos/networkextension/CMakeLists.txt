@@ -22,11 +22,9 @@ set_target_properties(AmneziaVPNNetworkExtension PROPERTIES
     XCODE_ATTRIBUTE_APPLICATION_EXTENSION_API_ONLY "YES"
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
     XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "11.0"
-    # AVPN: appex линкует два Go-рантайма (openvpnadapter + awg-apple с Xray) → дубли cgo-символов.
-    # Новый линкер Xcode 26.5 делает это hard-error; классический линкер (как в Xcode ≤26.1) —
-    # warning, «первое определение побеждает». -ld_classic возвращает это поведение без хрупких
-    # патчей conan-кэша. Только на macOS-NE appex (iOS не затронут — там свой appex).
-    XCODE_ATTRIBUTE_OTHER_LDFLAGS "-ld_classic"
+    # AVPN: дубли cgo-рантайма (openvpnadapter ↔ awg) решены точечной локализацией 9 символов
+    # ниже (ld -r -unexported_symbols_list libwg-go.a). -ld_classic убран — он deprecated (Xcode 26.5
+    # сыпал warning и больше не давил эти дубли). Локализация — единственный и достаточный фикс.
 
     XCODE_ATTRIBUTE_INFOPLIST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../../../Frameworks @loader_path/../../../../Frameworks"
