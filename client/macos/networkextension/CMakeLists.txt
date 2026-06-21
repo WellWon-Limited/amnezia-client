@@ -6,9 +6,10 @@ add_executable(AmneziaVPNNetworkExtension)
 
 message("executable_path is: @executable_path/../../Frameworks")
 set_target_properties(AmneziaVPNNetworkExtension PROPERTIES
-    XCODE_PRODUCT_TYPE com.apple.product-type.app-extension
+    # AVPN: System Extension (Developer ID/dmg вне App Store требует sysext, не appex).
+    XCODE_PRODUCT_TYPE com.apple.product-type.system-extension
     # MACOSX_BUNDLE YES
-    BUNDLE_EXTENSION appex
+    BUNDLE_EXTENSION systemextension
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${APPLE_PROJECT_VERSION}"
     MACOSX_BUNDLE_INFO_STRING "AmneziaVPNNetworkExtension"
     MACOSX_BUNDLE_BUNDLE_NAME "AmneziaVPNNetworkExtension"
@@ -27,7 +28,8 @@ set_target_properties(AmneziaVPNNetworkExtension PROPERTIES
     # сыпал warning и больше не давил эти дубли). Локализация — единственный и достаточный фикс.
 
     XCODE_ATTRIBUTE_INFOPLIST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
-    XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../../../Frameworks @loader_path/../../../../Frameworks"
+    # AVPN: sysext на уровень глубже appex (Contents/Library/SystemExtensions/X.systemextension/…) → +1 ../
+    XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../../../../Frameworks @loader_path/../../../../../Frameworks"
 )
 
 if(DEPLOY)
@@ -77,6 +79,7 @@ message("WG_APPLE_SOURCE_DIR is: ${WG_APPLE_SOURCE_DIR}")
 message("CLIENT_ROOT_DIR is: ${CLIENT_ROOT_DIR}")
 
 target_sources(AmneziaVPNNetworkExtension PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.swift   # AVPN: точка входа sysext (startSystemExtensionMode)
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift

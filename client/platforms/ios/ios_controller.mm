@@ -12,6 +12,51 @@
 #import "ios_controller_wrapper.h"
 #import "StoreKitController.h"
 
+#if TARGET_OS_OSX
+#import <SystemExtensions/SystemExtensions.h>
+
+// AVPN: активатор macOS System Extension. На dmg/Developer ID (вне App Store) packet-tunnel грузится
+// ТОЛЬКО как System Extension (не appex) — иначе startTunnel висит вечно (провайдера нет). Здесь просим
+// систему установить наш sysext; при первом запуске пользователь один раз жмёт «Разрешить» в Настройках
+// системы. Делегат держим статически (живёт до завершения асинхронного запроса). Только macOS.
+@interface AvpnSysExtActivator : NSObject <OSSystemExtensionRequestDelegate>
+@end
+@implementation AvpnSysExtActivator
+- (void)activate:(NSString *)identifier {
+    OSSystemExtensionRequest *req =
+        [OSSystemExtensionRequest activationRequestForExtension:identifier queue:dispatch_get_main_queue()];
+    req.delegate = self;
+    [[OSSystemExtensionManager sharedManager] submitRequest:req];
+}
+- (OSSystemExtensionReplacementAction)request:(OSSystemExtensionRequest *)request
+                  actionForReplacingExtension:(OSSystemExtensionProperties *)existing
+                                withExtension:(OSSystemExtensionProperties *)ext {
+    return OSSystemExtensionReplacementActionReplace;   // новая версия заменяет старую
+}
+- (void)requestNeedsUserApproval:(OSSystemExtensionRequest *)request {
+    qDebug() << "AVPN sysext: needs user approval (System Settings -> Allow)";
+}
+- (void)request:(OSSystemExtensionRequest *)request didFinishWithResult:(OSSystemExtensionRequestResult)result {
+    qDebug() << "AVPN sysext: activation finished, result=" << (long)result;   // 0 = completed
+}
+- (void)request:(OSSystemExtensionRequest *)request didFailWithError:(NSError *)error {
+    qWarning() << "AVPN sysext: activation failed:" << error.localizedDescription.UTF8String
+               << "code:" << (long)error.code;
+}
+@end
+
+static AvpnSysExtActivator *g_avpnSysExtActivator = nil;
+
+// Идемпотентно: один раз за запуск просим установку/обновление sysext.
+static void avpnEnsureSystemExtension() {
+    static bool requested = false;
+    if (requested) return;
+    requested = true;
+    if (!g_avpnSysExtActivator) g_avpnSysExtActivator = [[AvpnSysExtActivator alloc] init];
+    [g_avpnSysExtActivator activate:@"hk.wellwon.vpn.network-extension"];
+}
+#endif
+
 const char* Action::start = "start";
 const char* Action::restart = "restart";
 const char* Action::stop = "stop";
@@ -177,6 +222,10 @@ IosController* IosController::Instance() {
 
 bool IosController::initialize()
 {
+#if TARGET_OS_OSX
+    // AVPN: до любых VPN-операций на macOS гарантируем установку System Extension (provider туннеля).
+    avpnEnsureSystemExtension();
+#endif
     __block bool ok = true;
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
         @try {

@@ -29,19 +29,24 @@
 	<key>CFBundleDisplayName</key>
 	<string>AmneziaVPNNetworkExtension</string>
 
-	<key>NSExtension</key>
+	<!-- AVPN: System Extension (Developer ID/dmg вне App Store требует sysext, не appex).
+	     NEProviderClasses вместо NSExtension; NEMachServiceName — канал app↔sysext. -->
+	<key>NetworkExtension</key>
 	<dict>
-		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.networkextension.packet-tunnel</string>
-		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+		<key>NEMachServiceName</key>
+		<string>$(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<key>NEProviderClasses</key>
+		<dict>
+			<key>com.apple.networkextension.packet-tunnel</key>
+			<string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+		</dict>
 	</dict>
 
-	<!-- AVPN: своя app group — общий контейнер с официальной Amnezia недопустим -->
+	<!-- AVPN: своя app group (hk.wellwon.zanaves); WireGuard macOS читает её для контейнера конфига. -->
 	<key>com.wireguard.ios.app_group_id</key>
-	<string>group.org.antivpn.client</string>
+	<string>group.hk.wellwon.zanaves</string>
 
 	<key>com.wireguard.macos.app_group_id</key>
-	<string>$(DEVELOPMENT_TEAM).group.org.antivpn.client</string>
+	<string>$(DEVELOPMENT_TEAM).group.hk.wellwon.zanaves</string>
 </dict>
 </plist>
