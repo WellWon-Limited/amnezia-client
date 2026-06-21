@@ -94,7 +94,7 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_OBJC_INTEROP_MODE "objcxx"
 )
 set_target_properties(${PROJECT} PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "6D75W6GFC2"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "Q7DVH5MCWF"  # AVPN: WellWon Limited (НЕ апстрим X7UJ388FXK, НЕ личный 6D75W6GFC2). Сборка дополнительно переопределяет DEVELOPMENT_TEAM=Q7DVH5MCWF (archive-*.sh).
 )
 target_include_directories(${PROJECT} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(${PROJECT} PRIVATE
