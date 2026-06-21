@@ -86,6 +86,9 @@ PageType {
             // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
 
+            // реальные метрики шрифта поля — для ТОЧНОГО вертикального центрирования 1 строки. // AVPN
+            FontMetrics { id: inputFm; font: input.font }
+
             RowLayout {
                 id: composerRow
                 anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -122,7 +125,10 @@ PageType {
                             id: input
                             width: scroller.availableWidth
                             wrapMode: TextArea.Wrap
-                            topPadding: 11; bottomPadding: 11   // (44 − ~22 строка)/2 → текст по центру на 1 строке
+                            // вертикальное центрирование 1 строки в капсуле minH по РЕАЛЬНОЙ высоте
+                            // шрифта (inputFm.height), а не по хардкоду 11px (он врал — строка bodyM ≠ 22). // AVPN
+                            topPadding: Math.max(6, Math.round((capsule.minH - inputFm.height) / 2))
+                            bottomPadding: topPadding
                             leftPadding: 0; rightPadding: 0
                             placeholderText: qsTr("Сообщение…")
                             color: Theme.color.text1
@@ -152,8 +158,12 @@ PageType {
                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fast } }
                     Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
+                    // стрелка нарисована в сетке 24 (центр пути = 12,12). Шейп 24×24, масштаб к 20
+                    // ВОКРУГ ЦЕНТРА (Item.scale + transformOrigin) — иначе 24-путь в 20-боксе уезжал
+                    // вниз-вправо (центр контента 12 vs центр бокса 10). // AVPN
                     Shape {
-                        anchors.centerIn: parent; width: 20; height: 20
+                        anchors.centerIn: parent; width: 24; height: 24
+                        scale: 20 / 24; transformOrigin: Item.Center
                         preferredRendererType: Shape.CurveRenderer
                         ShapePath {
                             strokeColor: sendBtn.ready ? Theme.color.bg900 : Theme.color.text3
