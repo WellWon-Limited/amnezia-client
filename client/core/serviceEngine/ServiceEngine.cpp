@@ -1,4 +1,5 @@
 #include "ServiceEngine.h"
+#include "NodeRanking.h" // AVPN (выбор по скорости): fastestMeasuredNodeId
 #include "SubscriptionParser.h"
 
 #include <QDateTime>
@@ -56,6 +57,30 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
     return tier.at(idx);
 }
 
+// AVPN (выбор по скорости): среди ЖИВЫХ нод (excl) с кэшем off-tunnel ICMP RTT — нода с минимальным RTT.
+// Без I/O (использует уже накопленный m_measuredRtt — CONNECT-INVARIANTS §1). nullptr = ни одна не измерена.
+const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, const QString &exclB) const
+{
+    const QList<SubscriptionNode> &nodes = m_pool.nodes();
+    QList<RankRow> rows;
+    for (const SubscriptionNode &n : nodes) {
+        if (!exclA.isEmpty() && n.nodeId == exclA)
+            continue;
+        if (!exclB.isEmpty() && n.nodeId == exclB)
+            continue;
+        if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
+            continue;
+        rows.append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) });
+    }
+    const QString id = fastestMeasuredNodeId(rows);
+    if (id.isEmpty())
+        return nullptr;
+    for (const SubscriptionNode &n : nodes)
+        if (n.nodeId == id)
+            return &n;
+    return nullptr;
+}
+
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
 {
     Subscription sub;
@@ -98,6 +123,13 @@ bool ServiceEngine::connect(QString &error)
                 candidate = n;
                 break;
             }
+    }
+    if (!candidate) {
+        // AVPN (выбор по скорости): «Авто (быстрейший)» — приоритет ноде с МИНИМАЛЬНЫМ ИЗМЕРЕННЫМ RTT
+        // (off-tunnel ICMP, кэш из AvpnEngineQml::probeNodeRtt). Это и есть настоящий «быстрейший». Пусто
+        // (кэш холодный / UDP-фильтр) → ниже Selector::pick (TCP) → pickByWeight (backend-weight). Без I/O.
+        if (const SubscriptionNode *fast = pickByMeasuredRtt(QString(), QString())) // AVPN
+            candidate = *fast;
     }
     if (!candidate)
         // AVPN: случайный seed для джиттера среди near-best (иначе seed=0 → всегда первый кандидат).

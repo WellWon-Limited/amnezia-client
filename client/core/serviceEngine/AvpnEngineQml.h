@@ -11,6 +11,7 @@
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
 #include "core/utils/errorCodes.h"      // AVPN: amnezia::ErrorCode
 
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -25,6 +26,7 @@ namespace avpn {
 
 class QualityProbe; // AVPN: app-layer RTT-проба через туннель (QualityProbe.h)
 class ServiceProbe; // AVPN: проба доступности сервисов (Telegram/YouTube) через туннель (ServiceProbe.h)
+class IRttProbe;    // AVPN (выбор по скорости): прямой RTT до нод off-tunnel (IRttProbe.h / RttProbeIcmp)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -52,11 +54,15 @@ class AvpnEngineQml : public QObject {
     // AVPN (Task 7): туннель на «авто-паузе для покупок» (реально down, ждём авто-возврат). // AVPN
     Q_PROPERTY(bool paused READ paused NOTIFY changed)
     // AVPN (реальные палочки): живое качество ТЕКУЩЕГО соединения, измеренное app-layer RTT-пробой
-    // ЧЕРЕЗ туннель (AWG UDP-only ⇒ ICMP/TCP-пинг бессмыслен). liveBars 0..5 (EWMA+гистерезис),
+    // ЧЕРЕЗ туннель (TCP-пинг до AWG-UDP-порта не достукивается; per-node RTT остальных нод off-tunnel
+    // меряет RttProbeIcmp, см. probeNodeRtt). liveBars 0..5 (EWMA+гистерезис),
     // liveRttMs — сглаженный RTT (−1 = ещё не мерили/нет связи), liveReachable — дошла ли проба.
     Q_PROPERTY(int liveRttMs READ liveRttMs NOTIFY liveQualityChanged)
     Q_PROPERTY(int liveBars READ liveBars NOTIFY liveQualityChanged)
     Q_PROPERTY(bool liveReachable READ liveReachable NOTIFY liveQualityChanged)
+    // AVPN (красные палочки): true ТОЛЬКО когда проба подтверждённо не доходит (kLiveDeadStreak подряд) —
+    // отличает «ещё мерю / только подключились» от «связь мертва». UI рисует 0 зелёных + все красные.
+    Q_PROPERTY(bool liveDead READ liveDead NOTIFY liveQualityChanged)
     // AVPN (чипы доступности): статус сервисов через ЭТУ ноду. Список [{key,label,state,rttMs}],
     // state: -1 неизв / 0 заблок / 1 медленно(троттл) / 2 работает. Замер — с устройства через туннель.
     Q_PROPERTY(QVariantList serviceStatus READ serviceStatus NOTIFY serviceStatusChanged)
@@ -173,10 +179,16 @@ public:
     int liveRttMs() const { return m_liveRtt; }
     int liveBars() const { return m_liveBars; }
     bool liveReachable() const { return m_liveReachable; }
+    bool liveDead() const { return m_liveDead; }
     // AVPN (чипы доступности): текущий статус сервисов (кэш последней пробы).
     QVariantList serviceStatus() const { return m_serviceStatus; }
     // Запустить пробу сервисов через туннель (on-connect авто + по тапу из UI). No-op, если не Connected.
     Q_INVOKABLE void probeServices();
+    // AVPN (выбор по скорости): прямой ICMP-замер RTT до ВСЕХ живых нод (off-tunnel). Зовётся при
+    // открытии шторки выбора сервера. No-op при connected (через туннель замер смазан — держим кэш) и
+    // если пул пуст. Каждый ответ → m_nodeRtt[nodeId] + emit changed() (шторка пересортируется/обновит
+    // палочки вживую по мере прихода пингов). Неизмеренные/недостижимые → -1 (фолбэк на health в UI).
+    Q_INVOKABLE void probeNodeRtt();
     // AVPN (Task 7): состояние тумблера #6 (AvpnSettings/autoPauseRu) — для авто-инициатора (iOS
     // App Intent / Shortcuts, Task 8): проверить ПЕРЕД авто-вызовом pauseForShopping. Ручной/intent
     // вызов pauseForShopping работает независимо от этого флага.
@@ -232,9 +244,15 @@ private:
     int                          m_liveRtt = -1;      // сглаженный RTT, мс (−1 = нет данных)
     int                          m_liveBars = 0;      // 0..5
     bool                         m_liveReachable = false;
+    bool                         m_liveDead = false;     // проба подтверждённо не доходит → 0 зелёных + все красные
+    int                          m_liveFailStreak = 0;   // неуспешных проб подряд (анти-фликер до «мертво»)
+    static constexpr int         kLiveDeadStreak = 2;    // столько неудач подряд = связь мертва (≈1-я проба+1 тик)
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
     ServiceProbe                *m_svcProbe = nullptr;
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
+    // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
+    IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
+    QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().

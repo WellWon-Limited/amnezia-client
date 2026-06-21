@@ -14,6 +14,7 @@
 #include "dto/Subscription.h"
 
 #include <QByteArray>
+#include <QHash>
 #include <QString>
 
 namespace avpn {
@@ -26,6 +27,10 @@ public:
 
     // Платформенный туннель-адаптер (владение — у вызывающего).
     void setTunnel(ITunnelControl *tunnel) { m_tunnel = tunnel; m_switcher = Switcher(tunnel); }
+
+    // AVPN (выбор по скорости): кэш измеренного RTT по nodeId (off-tunnel ICMP, из AvpnEngineQml::probeNodeRtt).
+    // connect() предпочитает ноду с минимальным RTT отсюда (pickByMeasuredRtt); пусто → фолбэк на weight.
+    void setMeasuredRtt(const QHash<QString, int> &rtt) { m_measuredRtt = rtt; }
 
     // Первый вход: genkey (Identity, reuse форка) → POST /v1/trial → сохранить токен. [IN-FORK]
     // store/nam отдаёт приложение (SecureAppSettingsRepository, amnApp->networkManager()).
@@ -130,6 +135,11 @@ private:
     // Не делает I/O (в отличие от Selector::pick) — чистый выбор по данным подписки. nullptr = нет.
     const SubscriptionNode *pickByWeight(const QString &exclA, const QString &exclB) const; // AVPN
 
+    // AVPN (выбор по скорости): среди ЖИВЫХ нод (health-агрегат > 0, исключая exclA/exclB) выбрать с
+    // МИНИМАЛЬНЫМ измеренным RTT (m_measuredRtt, off-tunnel ICMP). nullptr = ни одна не измерена → caller
+    // откатывается на Selector::pick/pickByWeight. Без I/O (использует уже накопленный кэш — CONNECT-INVARIANTS §1).
+    const SubscriptionNode *pickByMeasuredRtt(const QString &exclA, const QString &exclB) const; // AVPN
+
     // AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч. requestSwitch ставит m_state=Switching
     // (→ transient Disconnected/Error от down() НЕ запускает failover) и: при tunnelUp — down(), ждём
     // реальный Disconnected (onTunnelDisconnected→continuePendingSwitch→up); при !tunnelUp — up() сразу.
@@ -146,6 +156,7 @@ private:
     EngineState   m_state = EngineState::Disconnected;
     QString       m_currentNodeId;
     QString       m_pinnedNodeId; // AVPN: закреплённая пользователем нода (switchToNode); пусто = авто
+    QHash<QString, int> m_measuredRtt; // AVPN (выбор по скорости): off-tunnel ICMP RTT по nodeId (кэш)
     QString       m_pendingSwitchNodeId; // AVPN: целевая нода во время двухфазного свитча (пусто = нет)
     QString       m_pendingSwitchReason; // AVPN: причина для switchLog (pinned/rotate/dead)
     QString       m_token;
