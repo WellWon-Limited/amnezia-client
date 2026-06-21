@@ -38,6 +38,8 @@ namespace amnezia
         XrayServerConfigInvalid = 215,
         XrayServerNoVlessClients = 216,
         XrayRealityKeysReadFailed = 217,
+        ServerContainerRuntimeNotSupported = 218,
+        ContainerRuntimeServiceNotRunning = 219,
 
         // Ssh connection errors
         SshRequestDeniedError = 300,
@@ -124,5 +126,3 @@ namespace amnezia
 Q_DECLARE_METATYPE(amnezia::ErrorCode)
 
 #endif // ERRORCODES_H
-
-

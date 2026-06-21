@@ -836,8 +836,8 @@ ErrorCode InstallController::installDockerWorker(const ServerCredentials &creden
     qDebug().noquote() << "InstallController::installDockerWorker" << stdOut;
 
     if (container == DockerContainer::Awg2) {
-        QRegularExpression regex(R"(Linux\s+(\d+)\.(\d+)[^\d]*)");
-        QRegularExpressionMatch match = regex.match(stdOut);
+        QRegularExpression kernelVersionRegex(R"(Linux\s+(\d+)\.(\d+)[^\d]*)");
+        QRegularExpressionMatch match = kernelVersionRegex.match(stdOut);
         if (match.hasMatch()) {
             int majorVersion = match.captured(1).toInt();
             int minorVersion = match.captured(2).toInt();
@@ -850,8 +850,19 @@ ErrorCode InstallController::installDockerWorker(const ServerCredentials &creden
 
     if (stdOut.contains("lock"))
         return ErrorCode::ServerPacketManagerError;
-    if (stdOut.contains("command not found"))
+    if (stdOut.contains("Container runtime is not supported"))
+        return ErrorCode::ServerContainerRuntimeNotSupported;
+    
+    QRegularExpression notFoundRegex(
+        R"(^.*(?:sudo:|docker:).*not found.*$)",
+        QRegularExpression::MultilineOption);
+
+    if (notFoundRegex.match(stdOut).hasMatch()) {
         return ErrorCode::ServerDockerFailedError;
+    }
+    
+    if (stdOut.contains("Container runtime service not running"))
+        return ErrorCode::ContainerRuntimeServiceNotRunning;
 
     return error;
 }
@@ -888,7 +899,7 @@ ErrorCode InstallController::isUserInSudo(const ServerCredentials &credentials, 
         return ErrorCode::ServerUserNotInSudo;
     if (stdOut.contains("can't cd to") || stdOut.contains("Permission denied") || stdOut.contains("No such file or directory"))
         return ErrorCode::ServerUserDirectoryNotAccessible;
-    if (stdOut.contains("sudoers") || stdOut.contains("is not allowed to run sudo on"))
+    if (stdOut.contains(QRegularExpression(R"(\bsudoers\b)")) || stdOut.contains("is not allowed to") || stdOut.contains("can't do that"))
         return ErrorCode::ServerUserNotAllowedInSudoers;
     if (stdOut.contains("password is required") || stdOut.contains("authentication is required"))
         return ErrorCode::ServerUserPasswordRequired;
