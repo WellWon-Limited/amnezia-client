@@ -43,7 +43,7 @@ set_target_properties(networkextension PROPERTIES
 )
 
 set_target_properties("networkextension" PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "6D75W6GFC2"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "Q7DVH5MCWF"  # AVPN: WellWon Limited (НЕ личный 6D75W6GFC2). Сборка переопределяет DEVELOPMENT_TEAM=Q7DVH5MCWF (archive-*.sh).
 )
 
 find_library(FW_ASSETS_LIBRARY AssetsLibrary)
