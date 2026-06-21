@@ -13,7 +13,7 @@
 // AVPN: имя ДОЛЖНО совпадать с бинарём root-демона (target в service/server/CMakeLists):
 // isServiceReady() ищет процесс по этому имени (pgrep -f, case-sensitive) — расхождение
 // даёт ErrorCode 103 при живом демоне. Мы полностью отделены от официальной Amnezia:
-// свой демон Tribe-service + свой сокет (ipc.h) — оба могут стоять рядом (AVPN-iOS-DEV §15).
+// свой демон Tribe-service + свой сокет (ipc.h) — оба могут стоять рядом (TRIBE-iOS-DEV §15).
 // AVPN: APPLICATION_NAME — ВНУТРЕННИЙ ключ (демон/сокет/QSettings/лог/конфиг), НЕ переименовывать.
 // Продуктовое имя для пользователя (трей, applicationDisplayName) — отдельно:
 #define APPLICATION_DISPLAY_NAME "Tribe VPN"
