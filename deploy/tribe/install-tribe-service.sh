@@ -50,7 +50,7 @@ install() {
     case "$src" in */AmneziaVPN.app/*) die "это бинарь официальной Amnezia — отказ";; esac
 
     # ⚠️ launchd МОЛЧА не запускает системных демонов из user-writable путей —
-    # кладём бинарь в root-овый /Library/PrivilegedHelperTools (см. AVPN-iOS-DEV §15).
+    # кладём бинарь в root-овый /Library/PrivilegedHelperTools (см. TRIBE-iOS-DEV §15).
     local destdir="/Library/PrivilegedHelperTools/TribeVPN"
     local bin="$destdir/$LABEL"
     mkdir -p "$destdir"
