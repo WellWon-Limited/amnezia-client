@@ -60,6 +60,16 @@ struct TransferMintResponse {
     QString deepLink;           // tribe://transfer?t=…
 };
 
+// AVPN (auth self-heal): исход запроса к /v1/subscription по HTTP-коду + сетевому флагу.
+enum class FetchOutcome { Ok, Unauthorized, RateLimited, NetworkError, HttpError };
+
+// AVPN (auth self-heal): что делать после запроса с токеном.
+//   Proceed           — успех, работаем дальше;
+//   ReEnrollThenRetry — токен мёртв (401) и он из стора → сбросить токен + один ре-энролл + ретрай;
+//   Fail              — отдать ошибку (свежий токен всё равно 401 / уже ретраили / сеть / лимит).
+// Лечит корень бага «subscription unauthorized (token)»: стейл-токен после ротации secret на бэкенде.
+enum class AuthRecoveryAction { Proceed, ReEnrollThenRetry, Fail };
+
 class Enrollment {
 public:
     // --- чистые (тестируемые) ---
@@ -75,6 +85,30 @@ public:
         if (!model.isEmpty())
             o.insert(QStringLiteral("model"), model);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
+    }
+
+    // AVPN (auth self-heal): классификация исхода запроса к /v1/subscription по HTTP-коду.
+    // Сетевой сбой (код 0 + netErr) важен только когда HTTP-кода нет; при наличии кода решает код
+    // (401 → Unauthorized даже если выставлен netErr). Зеркалит ветвление в fetchSubscription().
+    static FetchOutcome classifyFetch(int httpCode, bool hadNetworkError)
+    {
+        if (httpCode == 0 && hadNetworkError)  return FetchOutcome::NetworkError;
+        if (httpCode == 401)                   return FetchOutcome::Unauthorized;
+        if (httpCode == 429)                   return FetchOutcome::RateLimited;
+        if (httpCode >= 200 && httpCode < 300) return FetchOutcome::Ok;
+        return FetchOutcome::HttpError;
+    }
+
+    // AVPN (auth self-heal): решение о восстановлении. 401 лечим РОВНО для токена из стора и РОВНО
+    // один раз — иначе петля enroll↔401. Сеть/лимит/HTTP токен не трогают (важно для LKG-кэша).
+    static AuthRecoveryAction decideAuthRecovery(FetchOutcome outcome, bool tokenFromStore,
+                                                 bool alreadyReEnrolled)
+    {
+        if (outcome == FetchOutcome::Ok)
+            return AuthRecoveryAction::Proceed;
+        if (outcome == FetchOutcome::Unauthorized && tokenFromStore && !alreadyReEnrolled)
+            return AuthRecoveryAction::ReEnrollThenRetry;
+        return AuthRecoveryAction::Fail;
     }
 
     // AVPN: имя устройства (показывается в кабинете). Hostname (user-set), фолбэк — продукт.
@@ -224,8 +258,10 @@ public:
                        TrialResponse &out, QString &error);
 
     // GET {base}/v1/subscription с Bearer-токеном. true + body (сырое тело) при 2xx. [IN-FORK]
+    // outcome (необяз.) — машиночитаемый исход (classifyFetch) для авто-хила 401 в startFlow/bootstrap.
     static bool fetchSubscription(QNetworkAccessManager *nam, const QString &baseUrl,
-                                  const QString &token, QByteArray &body, QString &error);
+                                  const QString &token, QByteArray &body, QString &error,
+                                  FetchOutcome *outcome = nullptr);
 
     // AVPN: POST {base}/v1/code/redeem — вход/восстановление по коду доступа (код = креденшл).
     // 200 → Ok + out + РОТАЦИЯ токена (saveToken). 401 → BadCode. 409 → SeatLimit + devices[] (для

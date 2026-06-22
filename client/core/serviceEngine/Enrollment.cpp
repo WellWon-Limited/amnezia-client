@@ -79,9 +79,14 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
 }
 
 bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &baseUrl,
-                                   const QString &token, QByteArray &body, QString &error)
+                                   const QString &token, QByteArray &body, QString &error,
+                                   FetchOutcome *outcome)
 {
-    if (!nam) { error = QStringLiteral("no network manager"); return false; }
+    if (!nam) {
+        error = QStringLiteral("no network manager");
+        if (outcome) *outcome = FetchOutcome::NetworkError;
+        return false;
+    }
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/subscription"))};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
@@ -95,13 +100,26 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &ba
     const QString netErrStr = reply->errorString();
     reply->deleteLater();
 
-    if (netErr != QNetworkReply::NoError && code == 0) {
+    // AVPN (auth self-heal): единый источник истины об исходе — classifyFetch (покрыт auth_heal_check).
+    const FetchOutcome out = classifyFetch(code, netErr != QNetworkReply::NoError);
+    if (outcome) *outcome = out;
+    switch (out) {
+    case FetchOutcome::Ok:
+        return true;
+    case FetchOutcome::NetworkError:
         error = QStringLiteral("network error: %1").arg(netErrStr);
         return false;
+    case FetchOutcome::Unauthorized:
+        error = QStringLiteral("subscription unauthorized (token)");
+        return false;
+    case FetchOutcome::RateLimited:
+        error = QStringLiteral("subscription rate-limited (429)");
+        return false;
+    case FetchOutcome::HttpError:
+        error = QStringLiteral("subscription HTTP %1").arg(code);
+        return false;
     }
-    if (code == 401) { error = QStringLiteral("subscription unauthorized (token)"); return false; }
-    if (code < 200 || code >= 300) { error = QStringLiteral("subscription HTTP %1").arg(code); return false; }
-    return true;
+    return false;
 }
 
 // AVPN: вход/восстановление по коду доступа (P-B12; код = креденшл). Синхронно, паттерн как enroll().

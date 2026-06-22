@@ -161,12 +161,13 @@ bool ServiceEngine::connect(QString &error)
     return true;
 }
 
-bool ServiceEngine::startFlow(QNetworkAccessManager *nam, const QString &baseUrl,
-                              SecureAppSettingsRepository *store, QString &error)
+bool ServiceEngine::ensureSubscription(QNetworkAccessManager *nam, const QString &baseUrl,
+                                       SecureAppSettingsRepository *store, QString &error) // AVPN
 {
     // 1) токен: из хранилища, иначе enroll (genkey + POST /v1/trial)
     QString token = Enrollment::loadToken(); // AVPN: SecureQSettings-backed
-    if (token.isEmpty()) {
+    const bool tokenFromStore = !token.isEmpty();
+    if (!tokenFromStore) {
         if (!enroll(nam, baseUrl, store, error))
             return false;
         token = m_token;
@@ -176,12 +177,34 @@ bool ServiceEngine::startFlow(QNetworkAccessManager *nam, const QString &baseUrl
         if (!m_identity.ensureKeys(store, error))
             return false;
     }
-    // 2) GET /v1/subscription
-    QByteArray body;
-    if (!Enrollment::fetchSubscription(nam, baseUrl, token, body, error))
-        return false;
-    // 3) распарсить + 4) подключиться
-    if (!loadSubscription(body, error))
+
+    // 2) GET /v1/subscription с авто-хилом 401 (стейл-токен после ротации secret на бэкенде):
+    //    Ok? грузим. Unauthorized на токен ИЗ СТОРА и ещё не лечили → clearToken + ре-энролл + ретрай
+    //    РОВНО один раз. Сеть/лимит/HTTP — токен не виноват, не трогаем (важно для LKG-кэша).
+    bool reEnrolled = false;
+    for (;;) {
+        QByteArray body;
+        FetchOutcome outcome = FetchOutcome::HttpError;
+        if (Enrollment::fetchSubscription(nam, baseUrl, token, body, error, &outcome))
+            return loadSubscription(body, error); // 3) распарсить (NodePool + лимиты/expiresAt)
+
+        if (Enrollment::decideAuthRecovery(outcome, tokenFromStore, reEnrolled)
+            != AuthRecoveryAction::ReEnrollThenRetry)
+            return false; // error уже выставлен fetchSubscription
+
+        Enrollment::clearToken();            // токен мёртв — выкинуть стейл
+        if (!enroll(nam, baseUrl, store, error))
+            return false;
+        token = m_token;                     // свежевыданный токен
+        reEnrolled = true;                   // больше не лечим (decideAuthRecovery → Fail) — без петли
+    }
+}
+
+bool ServiceEngine::startFlow(QNetworkAccessManager *nam, const QString &baseUrl,
+                              SecureAppSettingsRepository *store, QString &error)
+{
+    // токен → GET /v1/subscription (с авто-хилом 401) → load → connect.
+    if (!ensureSubscription(nam, baseUrl, store, error))
         return false;
     return connect(error);
 }
@@ -190,22 +213,8 @@ bool ServiceEngine::bootstrap(QNetworkAccessManager *nam, const QString &baseUrl
                               SecureAppSettingsRepository *store, QString &error) // AVPN
 {
     // Тихая прогрузка подписки без подъёма туннеля (Task 11). Состояние движка не меняем —
-    // остаёмся Disconnected; наполняем только NodePool/Subscription для живого бейджа.
-    // 1) токен: из хранилища, иначе enroll (genkey + POST /v1/trial)
-    QString token = Enrollment::loadToken(); // AVPN: SecureQSettings-backed
-    if (token.isEmpty()) {
-        if (!enroll(nam, baseUrl, store, error))
-            return false; // оффлайн/без сети — мягко (вызывающий не считает фатальным)
-        token = m_token;
-    } else {
-        m_token = token;
-    }
-    // 2) GET /v1/subscription
-    QByteArray body;
-    if (!Enrollment::fetchSubscription(nam, baseUrl, token, body, error))
-        return false;
-    // 3) распарсить (NodePool + лимиты/expiresAt для бейджа). БЕЗ connect().
-    return loadSubscription(body, error);
+    // остаёмся Disconnected; наполняем только NodePool/Subscription для живого бейджа. БЕЗ connect().
+    return ensureSubscription(nam, baseUrl, store, error);
 }
 
 bool ServiceEngine::tick(qint64 nowEpoch)
