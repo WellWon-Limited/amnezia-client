@@ -20,9 +20,28 @@ PageType {
     Settings {
         id: store
         category: "AvpnBypass"
-        property bool masterOn: false
+        // AVPN: РФ-доступ ВКЛЮЧЁН ПО УМОЛЧАНИЮ (новые установки). Существующим юзерам (у кого уже
+        // сохранён false) включаем одноразовой миграцией ниже (defaultOnMigrated). Дальше выбор
+        // пользователя уважается. Конфиг сидится тихо при старте → байпас в первом же коннекте,
+        // без обрыва VPN и без тоста (см. Component.onCompleted + apply(silent)).
+        property bool masterOn: true
+        property bool defaultOnMigrated: false   // одноразовый форс-вкл для старых юзеров
         property string disabledServices: "[]"   // JSON: id выключенных сервисов (дефолт — все вкл)
         property string customHosts: "[]"        // JSON: [{host, on}]
+    }
+
+    // AVPN: РФ-доступ должен быть включён по умолчанию у ВСЕХ, не только у новых установок.
+    // Одноразовая миграция: первый запуск этой версии форсит masterOn=true (даже если был false),
+    // затем флаг defaultOnMigrated блокирует повтор. После — ТИХО (silent) сидим конфиг обхода в
+    // движок: пока не подключены, reconnectTimer = no-op → ни тоста, ни рестарта; байпас применится
+    // в ближайший коннект. На каждом открытии вкладки тихий re-seed безвреден (без reconnect). // AVPN
+    Component.onCompleted: {
+        if (!store.defaultOnMigrated) {
+            store.masterOn = true
+            store.defaultOnMigrated = true
+        }
+        if (store.masterOn)
+            root.apply(true /* silent: без reconnectTimer */)
     }
     property var disabledIds: JSON.parse(store.disabledServices)
     property var customHosts: JSON.parse(store.customHosts)
@@ -106,8 +125,11 @@ PageType {
 
     // полная реконсиляция: собрать все активные записи → в split tunneling Amnezia.
     // Корзина routeMode=VpnAllExceptSites своя, ванильные списки юзера не трогаем.
-    function apply() {
-        reconnectTimer.restart()
+    function apply(silent) {
+        // silent=true (старт/дефолт-сид): только пишем конфиг в движок, БЕЗ авто-реконнекта —
+        // применится при следующем коннекте. Обычные правки юзера (silent отсутствует) дебаунсят
+        // reconnectTimer как раньше. // AVPN
+        if (!silent) reconnectTimer.restart()
         if (!store.masterOn) {
             IpSplitTunnelingController.toggleSplitTunneling(false)
             return
@@ -246,22 +268,25 @@ PageType {
                         anchors.leftMargin: Theme.space.lg
                         anchors.rightMargin: Theme.space.lg
                         spacing: Theme.space.md
-                        // флаг РФ (круглый, как флаги серверов)
-                        Rectangle {
+                        // флаг РФ (круглый, как флаги серверов) — триколор заполняет ВЕСЬ круг
+                        // (без внутреннего зазора): три полосы во всю плашку + круговая маска. // AVPN
+                        Item {
                             Layout.preferredWidth: 44; Layout.preferredHeight: 44
-                            radius: 22
-                            color: Qt.rgba(0x0F / 255, 0x17 / 255, 0x2A / 255, 0.8)
-                            border.width: 1; border.color: Qt.rgba(0x33 / 255, 0x41 / 255, 0x55 / 255, 0.5)
                             Item {
-                                anchors.centerIn: parent; width: 28; height: 28
+                                anchors.fill: parent
                                 layer.enabled: true
-                                layer.effect: Fx.OpacityMask { maskSource: Rectangle { width: 28; height: 28; radius: 14 } }
+                                layer.effect: Fx.OpacityMask { maskSource: Rectangle { width: 44; height: 44; radius: 22 } }
                                 Column {
                                     anchors.fill: parent
                                     Rectangle { width: parent.width; height: parent.height / 3; color: "#EEF2F7" }
                                     Rectangle { width: parent.width; height: parent.height / 3; color: "#3A5BA0" }
                                     Rectangle { width: parent.width; height: parent.height / 3; color: "#B8434E" }
                                 }
+                            }
+                            // тонкий борд-ринг поверх — отделяет светлую верхнюю полосу от фона (как TribeFlag)
+                            Rectangle {
+                                anchors.fill: parent; radius: 22; color: "transparent"
+                                border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.14)
                             }
                         }
                         Column {

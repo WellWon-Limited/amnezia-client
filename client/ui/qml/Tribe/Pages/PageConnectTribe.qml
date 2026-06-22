@@ -538,73 +538,94 @@ PageType {
                         }
                     }
                 }
+                // имя+бары (верхняя строка) и IP+мс (нижняя строка) — ДВЕ выровненные строки:
+                // бары РОВНО над именем, мс РОВНО на линии IP и ТОГО ЖЕ размера (mono 10). // AVPN
                 Column {
-                    anchors.verticalCenter: parent.verticalCenter; spacing: 2
+                    id: infoCol
+                    anchors.verticalCenter: parent.verticalCenter
                     anchors.left: regionFlag.right; anchors.leftMargin: Theme.space.lg
-                    // при узле — до сигнал-блока справа; без узла — до правого края карточки // AVPN
-                    anchors.right: root.curNode.hasNode ? sigGroup.left : parent.right
-                    anchors.rightMargin: Theme.space.lg
-                    // строка имени + бейдж «auto» (только когда подключены в авто-режиме). // AVPN
-                    Row {
+                    anchors.right: parent.right
+                    spacing: 3
+
+                    // палочки/мс показываем ТОЛЬКО когда подключены к живому узлу. // AVPN
+                    readonly property bool sig: root.isOn && root.curNode.hasNode
+                    readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
+                    // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд). // AVPN
+                    readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
+
+                    // ── верхняя строка: имя сервера (+бейдж auto) слева, палочки справа ──
+                    Item {
                         width: parent.width
-                        spacing: Theme.space.sm
-                        Text {
-                            id: nodeName
-                            text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
-                            color: "white"; elide: Text.ElideRight
-                            // оставляем место под бейдж, чтобы имя не наезжало на него
-                            width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
-                            font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
-                        }
-                        // нежный blue-accent бейдж «auto» (green зарезервирован под статус соединения).
-                        // accent #7CA2D0 (токен Theme.color.accent) translucent — как прочие rgba-плашки
-                        // этого сценического экрана. Виден ТОЛЬКО при auto-режиме подключения. // AVPN
-                        Rectangle {
-                            id: autoBadge
-                            visible: root.curNode.auto === true
-                            anchors.verticalCenter: nodeName.verticalCenter
-                            height: 20; width: autoLabel.implicitWidth + 2 * Theme.space.sm
-                            radius: Theme.radius.pill
-                            color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.16)
-                            border.width: 1; border.color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.45)
+                        height: nameRow.implicitHeight
+                        Row {
+                            id: nameRow
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: infoCol.sig ? topBars.left : parent.right
+                            anchors.rightMargin: infoCol.sig ? Theme.space.md : 0
+                            spacing: Theme.space.sm
                             Text {
-                                id: autoLabel
-                                anchors.centerIn: parent
-                                text: qsTr("auto")
-                                color: Theme.color.accent
-                                font.family: Theme.font.body; font.pixelSize: 11; font.weight: Theme.font.wBold
+                                id: nodeName
+                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
+                                color: "white"; elide: Text.ElideRight
+                                // оставляем место под бейдж, чтобы имя не наезжало на него
+                                width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
+                                font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
+                            }
+                            // нежный blue-accent бейдж «auto» (виден ТОЛЬКО при auto-подключении). // AVPN
+                            Rectangle {
+                                id: autoBadge
+                                visible: root.curNode.auto === true
+                                anchors.verticalCenter: nodeName.verticalCenter
+                                height: 20; width: autoLabel.implicitWidth + 2 * Theme.space.sm
+                                radius: Theme.radius.pill
+                                color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.16)
+                                border.width: 1; border.color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.45)
+                                Text {
+                                    id: autoLabel
+                                    anchors.centerIn: parent
+                                    text: qsTr("auto")
+                                    color: Theme.color.accent
+                                    font.family: Theme.font.body; font.pixelSize: 11; font.weight: Theme.font.wBold
+                                }
                             }
                         }
+                        LoadBars {
+                            id: topBars
+                            visible: infoCol.sig
+                            anchors.right: parent.right
+                            anchors.verticalCenter: nameRow.verticalCenter
+                            // мёртвая связь → 0 зелёных + красные; иначе мин. 1 зелёная, reachable уточняет 1..5. // AVPN
+                            failed: infoCol.dead
+                            level: infoCol.dead ? 0 : (infoCol.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
+                        }
                     }
-                    Text { text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
-                        color: root.slate500
-                        font.family: Theme.font.mono; font.pixelSize: 10 }
-                }
-                // правый сигнал-блок: бары (в строке с именем сервера) над мс (в строке с IP),
-                // всё выровнено вправо; отступ справа = lg, как слева у флага. // AVPN
-                Column {
-                    id: sigGroup
-                    // AVPN: палочки ТОЛЬКО когда подключены — никаких серых-плейсхолдеров при connecting/idle.
-                    visible: root.isOn && root.curNode.hasNode
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
-                    readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
-                    // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд), не «ещё мерю». // AVPN
-                    readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
-                    LoadBars {
-                        anchors.right: parent.right
-                        // подключены: мёртвая связь → 0 зелёных + ВСЕ красные; иначе МИНИМУМ 1 зелёная,
-                        // reachable уточняет уровень 1..5 («ещё мерю» = плейсхолдер 1, без серых/красных). // AVPN
-                        failed: sigGroup.dead
-                        level: sigGroup.dead ? 0 : (sigGroup.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
-                    }
-                    // число мс — второй (не-цветовой) носитель уровня; виден, когда проба дошла. // AVPN
-                    Text {
-                        anchors.right: parent.right
-                        visible: sigGroup.reachable && Number(TribeEngine.liveRttMs) >= 0
-                        text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
-                        color: root.slate500
-                        font.family: Theme.font.mono; font.pixelSize: 10
+
+                    // ── нижняя строка: IP слева, мс справа (тот же размер/линия) ──
+                    Item {
+                        width: parent.width
+                        height: ipText.implicitHeight
+                        Text {
+                            id: ipText
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: msText.visible ? msText.left : parent.right
+                            anchors.rightMargin: msText.visible ? Theme.space.md : 0
+                            elide: Text.ElideRight
+                            text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
+                            color: root.slate500
+                            font.family: Theme.font.mono; font.pixelSize: 10
+                        }
+                        // число мс — на линии IP, того же размера; виден, когда проба дошла. // AVPN
+                        Text {
+                            id: msText
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: infoCol.sig && infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
+                            text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                            color: root.slate500
+                            font.family: Theme.font.mono; font.pixelSize: 10
+                        }
                     }
                 }
             }
