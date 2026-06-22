@@ -126,6 +126,13 @@ public:
     Identity &identity() { return m_identity; }
 
 private:
+    // AVPN (auth self-heal): общий путь startFlow/bootstrap — токен (из стора / enroll) → GET
+    // /v1/subscription → loadSubscription. На 401 от токена ИЗ СТОРА: clearToken + один ре-энролл +
+    // ретрай (стейл-токен после ротации secret на бэкенде; корень бага «unauthorized (token)»).
+    // Решения вынесены в Enrollment::classifyFetch/decideAuthRecovery (покрыты auth_heal_check).
+    bool ensureSubscription(QNetworkAccessManager *nam, const QString &baseUrl,
+                            SecureAppSettingsRepository *store, QString &error);
+
     // tunnelStillUp=true (health-DEAD из tick — туннель ещё «поднят») → down()→ждём Disconnected→up();
     // false (failover из реального Disconnected/Error — туннель уже опущен) → up() сразу.
     bool onDead(bool tunnelStillUp); // выбрать кандидата (исключая текущую) и переключиться

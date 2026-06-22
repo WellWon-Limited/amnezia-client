@@ -4,6 +4,7 @@
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
@@ -185,6 +186,11 @@ QString AvpnEngineQml::state() const
         return QStringLiteral("paused");
     return debugSnapshot().value(QStringLiteral("state")).toString();
 }
+
+// AVPN: текущее устройство — нативная маркетинговая модель/ОС (DeviceModel.h). Перекрывают
+// невнятный backend-label (часто «macos») в разделе «Устройства».
+QString AvpnEngineQml::thisDeviceName() const { return avpn::deviceMarketingName(); }
+QString AvpnEngineQml::thisDeviceOs() const { return avpn::deviceOsName(); }
 
 // AVPN: статус подписки (Task 3) — единый источник debugSnapshot() (как state()).
 qlonglong AvpnEngineQml::trafficUsed() const

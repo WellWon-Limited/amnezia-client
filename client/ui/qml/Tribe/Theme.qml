@@ -29,9 +29,9 @@ QtObject {
         readonly property color accentBright: "#A5C1E2"   // hover
         readonly property color accentDeep: "#5E84B3"
         readonly property color accentGlow: Qt.rgba(0x7C / 255, 0xA2 / 255, 0xD0 / 255, 0.35)
-        // primary-button gradient stops
-        readonly property color gradTop: "#5A9BF2"
-        readonly property color gradBottom: "#3068D6"
+        // primary-button gradient stops — наш accent (night-sky azure), НЕ роял-блю апстрима
+        readonly property color gradTop: "#7CA2D0"
+        readonly property color gradBottom: "#5E84B3"
         // text
         readonly property color text1: "#F1F5F9"   // headings
         readonly property color text2: "#94A3B8"   // body (slate-400)

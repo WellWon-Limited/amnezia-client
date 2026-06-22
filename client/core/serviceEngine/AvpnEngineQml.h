@@ -46,6 +46,10 @@ class AvpnEngineQml : public QObject {
     // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
     // позже выбор сервера гейтится этим одним флагом. CONSTANT — значение не меняется в рантайме.
     Q_PROPERTY(bool proSelectionEnabled READ proSelectionEnabled CONSTANT)
+    // AVPN: имя/ОС ТЕКУЩЕГО устройства, добытые НАТИВНО (DeviceModel.h: IOKit на macOS, sysctl+таблица
+    // на iOS). Перекрывают невнятный backend-label (часто = платформа «macos»). CONSTANT — не меняется.
+    Q_PROPERTY(QString thisDeviceName READ thisDeviceName CONSTANT)
+    Q_PROPERTY(QString thisDeviceOs READ thisDeviceOs CONSTANT)
     // AVPN (анти-фриз/анти-краш): устройства и статус аккаунта грузятся АСИНХРОННО (без вложенного
     // QEventLoop на GUI-потоке). UI биндится на эти property; refreshDevices()/refreshAccount() лишь
     // запускают фоновый GET, результат прилетает через devicesChanged()/accountChanged().
@@ -85,6 +89,11 @@ public:
     QVariantList nodePool() const;
     // AVPN (live-node picker): Pro-гейт-заглушка — выбор сервера доступен (сейчас всегда true).
     bool proSelectionEnabled() const { return true; }
+
+    // AVPN: текущее устройство (нативно). Реализация в .cpp — DeviceModel.h тянет Apple-фреймворки,
+    // держим их вне этого заголовка (его инклудят многие TU).
+    QString thisDeviceName() const;
+    QString thisDeviceOs() const;
 
     // AVPN: кэш последнего async-ответа /v1/devices и /v1/account (для биндинга в QML).
     QVariantList devices() const { return m_devices; }

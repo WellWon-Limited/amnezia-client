@@ -21,37 +21,45 @@ AbstractButton {
     opacity: enabled ? 1.0 : 0.45
     hoverEnabled: true
 
-    contentItem: RowLayout {
-        id: contentRow
-        spacing: Theme.space.sm
-        layoutDirection: Qt.LeftToRight
+    // AVPN: contentItem растягивается AbstractButton'ом на всю площадь кнопки; RowLayout как прямой
+    // contentItem паковал бы детей слева. Оборачиваем в Item и центрируем строку через anchors.centerIn
+    // (надёжно для full-width кнопок — текст строго по центру).
+    contentItem: Item {
+        implicitWidth: contentRow.implicitWidth
+        implicitHeight: contentRow.implicitHeight
 
-        BusyIndicator {
-            visible: control.loading
-            running: control.loading
-            Layout.alignment: Qt.AlignVCenter
-            implicitWidth: 18; implicitHeight: 18
-        }
-        Image {
-            visible: control.iconSource !== "" && !control.loading
-            source: control.iconSource
-            sourceSize.width: 20; sourceSize.height: 20
-            Layout.alignment: Qt.AlignVCenter
-        }
-        Text {
-            visible: control.text !== "" && !control.isIcon && !control.loading
-            text: control.text
-            Layout.alignment: Qt.AlignVCenter
-            font.family: Theme.font.body
-            font.pixelSize: 15
-            font.weight: Theme.font.wSemibold
-            color: control.variant === "primary" ? "white"
-                 : control.variant === "ghost" ? Theme.color.text2
-                 : Theme.color.text1
+        RowLayout {
+            id: contentRow
+            anchors.centerIn: parent
+            spacing: Theme.space.sm
+            layoutDirection: Qt.LeftToRight
+
+            BusyIndicator {
+                visible: control.loading
+                running: control.loading
+                Layout.alignment: Qt.AlignVCenter
+                implicitWidth: 18; implicitHeight: 18
+            }
+            Image {
+                visible: control.iconSource !== "" && !control.loading
+                source: control.iconSource
+                sourceSize.width: 20; sourceSize.height: 20
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                visible: control.text !== "" && !control.isIcon && !control.loading
+                text: control.text
+                Layout.alignment: Qt.AlignVCenter
+                horizontalAlignment: Text.AlignHCenter
+                font.family: Theme.font.body
+                font.pixelSize: 15
+                font.weight: Theme.font.wSemibold
+                color: control.variant === "primary" ? "white"
+                     : control.variant === "ghost" ? Theme.color.text2
+                     : Theme.color.text1
+            }
         }
     }
-    // center content
-    Component.onCompleted: contentRow.anchors.centerIn = control
 
     background: Rectangle {
         id: bg

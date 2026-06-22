@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
-import QtCore                 // AVPN: Settings (персист тумблеров)
 
 import ".."              // Theme
 import "../components"
@@ -27,13 +26,6 @@ PageType {
     // «Поделиться» молча не работала). Сайт деплоит веб-команда.
     readonly property string shareUrl: "https://tribevpn.com"
 
-    // AVPN: персист настроек подключения (QtCore.Settings). Авто-пауза для РФ-приложений — ВКЛ по умолчанию.
-    Settings {
-        id: avpnSettings
-        category: "AvpnSettings"
-        property bool autoPauseRu: true
-    }
-
     // AVPN (Task 14): активация ключа (redeem) через движок — POST /v1/code/redeem.
     // TribeEngine.redeemCode(code[, evictDeviceId]) синхронный (QEventLoop):
     //   200 → ротация токена + re-fetch подписки → changed(); 401 → error(); 409 → seatLimitReached(devices[]).
@@ -49,7 +41,7 @@ PageType {
         var c = (code || "").trim()
         if (c.length === 0) {
             root.redeemError = true
-            root.redeemHint = qsTr("Введите ключ или код активации")
+            root.redeemHint = qsTr("Введите ключ активации")
             return
         }
         if (!(root.hasEngine && typeof TribeEngine.redeemCode === "function")) {
@@ -142,6 +134,32 @@ PageType {
         if (isNaN(d.getTime())) return ""
         return d.toLocaleDateString(Qt.locale(), Locale.ShortFormat)
     }
+    // человекочитаемое имя платформы (движок шлёт raw «macos/ios/...»). Для строки устройства.
+    function prettyPlatform(p) {
+        switch (("" + (p || "")).toLowerCase()) {
+        case "macos": case "osx": return "macOS"
+        case "ios":     return "iOS"
+        case "android": return "Android"
+        case "windows": return "Windows"
+        case "linux":   return "Linux"
+        default:        return p ? p : qsTr("Устройство")
+        }
+    }
+    // нативные имя/ОС ТЕКУЩЕГО устройства из движка (маркетинговая модель «MacBook Pro» и т.п.).
+    function thisDeviceName() { return (root.hasEngine && TribeEngine.thisDeviceName) ? TribeEngine.thisDeviceName : "" }
+    // ОС без версии в скобках: «macOS Tahoe (26.5.1)» → «macOS Tahoe» (короче, влезает в подзаголовок)
+    function thisDeviceOs() {
+        var s = (root.hasEngine && TribeEngine.thisDeviceOs) ? ("" + TribeEngine.thisDeviceOs) : ""
+        return s.replace(/\s*\(.*\)\s*$/, "")
+    }
+    // отображаемое имя устройства из backend-данных: label, если осмысленный (не пуст и не равен
+    // платформе, как часто бывает «macos»), иначе — человекочитаемая платформа.
+    function deviceDisplayName(d) {
+        var lbl = ("" + (d.label || "")).trim()
+        var plat = "" + (d.platform || "")
+        var meaningful = lbl !== "" && lbl.toLowerCase() !== plat.toLowerCase()
+        return meaningful ? lbl : root.prettyPlatform(plat)
+    }
 
     // AVPN (краш/freeze-фикс): refreshDevices/refreshAccount делают СИНХРОННЫЙ сетевой вызов.
     // Из Component.onCompleted это блокирует главный поток во время построения страницы
@@ -194,135 +212,154 @@ PageType {
             height: implicitHeight
             spacing: Theme.space.md
 
-        // AVPN (#16): заголовок «Настройки» убран (нижняя навигация уже подписана). Оставляем только
-        // admin-кнопки справа: мост в Amnezia (виден в adminMode) + тумблер Dev.adminMode (shield).
-        RowLayout {
+        // AVPN: заголовок «Настройки» убран (нижняя навигация уже подписана). Admin-кнопки
+        // (мост в Amnezia + тумблер Dev.adminMode) скрыты — контент начинается сразу с баннера.
+
+        // ── БАННЕР «ПОДЕЛИТЬСЯ» ──────────────────────────────────────────────
+        // Самый верх, без заголовка раздела. Accent-градиент + soft-визуал, ровно 2 строки текста.
+        // Тап → открыть сайт (root.shareUrl, Apple-safe: только URL, без цен/рефералов §10).
+        Rectangle {
+            id: shareBanner
             Layout.fillWidth: true
-            spacing: 2
-            Item { Layout.fillWidth: true }
-            Item {
-                Layout.preferredWidth: 36; Layout.preferredHeight: 36
-                visible: Dev.adminMode
-                Image {
-                    anchors.centerIn: parent
-                    source: "qrc:/images/controls/amnezia.svg"
-                    sourceSize: Qt.size(22, 22)
-                    opacity: amneziaMa.containsMouse ? 1.0 : 0.65
-                }
-                MouseArea { id: amneziaMa; anchors.fill: parent; hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor; onClicked: root.requestAmnezia() }
+            Layout.topMargin: Theme.space.xs
+            implicitHeight: shareRow.implicitHeight + 2 * Theme.space.lg
+            radius: Theme.radius.lg
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: Theme.color.gradTop }
+                GradientStop { position: 1.0; color: Theme.color.gradBottom }
             }
-            Item {
-                Layout.preferredWidth: 36; Layout.preferredHeight: 36
-                opacity: Dev.adminMode ? 1.0 : 0.55
-                Shape {
-                    anchors.centerIn: parent
-                    width: 22; height: 22
-                    preferredRendererType: Shape.CurveRenderer
-                    ShapePath {
-                        strokeColor: Dev.adminMode ? Theme.color.accent
-                                                   : (adminMa.containsMouse ? Theme.color.text1 : Theme.color.text3)
-                        fillColor: Dev.adminMode ? Theme.color.chipSelected : "transparent"
-                        strokeWidth: 1.7
-                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                        PathSvg { path: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }
+            // мягкий внутренний хайлайт сверху — даёт «стеклянный» объём без тяжёлого Glow
+            border.width: 1
+            border.color: Qt.rgba(1, 1, 1, 0.14)
+
+            RowLayout {
+                id: shareRow
+                anchors.fill: parent
+                anchors.leftMargin: Theme.space.lg
+                anchors.rightMargin: Theme.space.lg
+                spacing: Theme.space.md
+
+                // иконка «подарок» в полупрозрачном круге — доносит, что друг получает бонус
+                Rectangle {
+                    Layout.alignment: Qt.AlignVCenter
+                    width: 40; height: 40; radius: 20
+                    color: Qt.rgba(1, 1, 1, 0.18)
+                    Shape {
+                        anchors.centerIn: parent
+                        width: 22; height: 22
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: "white"; fillColor: "transparent"; strokeWidth: 1.7
+                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                            PathSvg { path: "M4 9 h16 v3 h-16 z" }                                  // крышка
+                            PathSvg { path: "M5 12 v7 a1 1 0 0 0 1 1 h12 a1 1 0 0 0 1-1 v-7" }      // коробка
+                            PathSvg { path: "M12 9 v12" }                                           // лента
+                            PathSvg { path: "M12 9 C12 6 10 4 8.5 4 a2 2 0 0 0 0 5 z" }             // левый бант
+                            PathSvg { path: "M12 9 C12 6 14 4 15.5 4 a2 2 0 0 0 0 5 z" }            // правый бант
+                        }
                     }
                 }
-                MouseArea { id: adminMa; anchors.fill: parent; hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor; onClicked: Dev.adminMode = !Dev.adminMode }
+                // 2 строки: заголовок + оффер (друг получает подарок при установке по ссылке)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                        text: qsTr("Поделиться с друзьями")
+                        color: "white"
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                        font.weight: Theme.font.wSemibold
+                        Layout.fillWidth: true; elide: Text.ElideRight
+                    }
+                    Text {
+                        text: qsTr("7 дней и 3 ГБ за каждого друга")
+                        color: Qt.rgba(1, 1, 1, 0.92)
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    }
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: Qt.openUrlExternally(root.shareUrl)
             }
         }
 
-        // ── ПРОФИЛЬ ──────────────────────────────────────────────────────────
+        // ── ПОДПИСКА ─────────────────────────────────────────────────────────
+        // Единый блок: статус/срок/трафик/устройства. Отдельного «Профиля» нет — устройство
+        // и так видно в списке УСТРОЙСТВА ниже; всё остальное сведено сюда (без дублирования).
         Text {
-            text: qsTr("ПРОФИЛЬ")
-            color: Theme.color.accent
+            text: qsTr("ПОДПИСКА")
+            color: Theme.color.text3
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
             Layout.topMargin: Theme.space.sm
         }
 
-        // плашка пользователя / триала
         TribeCard {
             Layout.fillWidth: true
-            implicitHeight: 64
-            RowLayout {
+            implicitHeight: planCol.implicitHeight + 2 * Theme.space.lg
+            ColumnLayout {
+                id: planCol
                 anchors.fill: parent
-                anchors.leftMargin: Theme.space.lg
-                anchors.rightMargin: Theme.space.lg
+                anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
-                Rectangle {
-                    width: 40; height: 40; radius: 20
-                    color: Theme.color.surface2
-                    // Tabler "user" (inline vector, без emoji)
-                    Shape {
-                        anchors.centerIn: parent
-                        width: 24; height: 24
-                        preferredRendererType: Shape.CurveRenderer
-                        ShapePath {
-                            strokeColor: Theme.color.text2; fillColor: "transparent"; strokeWidth: 1.8
-                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                            PathSvg { path: "M12 12 a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" }
-                            PathSvg { path: "M6 20 v-1 a6 6 0 0 1 12 0 v1" }
-                        }
-                    }
-                }
-                Text {
+
+                // название плана + статус (active/trial/expired из движка, fallback — пробный)
+                RowLayout {
                     Layout.fillWidth: true
-                    text: qsTr("Пробный доступ")
-                    color: Theme.color.text1
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.bodyM
-                    font.weight: Theme.font.wMedium
-                }
-                // остаток триала — реальные данные (не кнопка; вход по кодам появится с бэкендом P-B12)
-                TribeBadge {
-                    variant: "warn"
-                    text: root.daysLeftN >= 0 ? qsTr("%1 дн.").arg(root.daysLeftN) : qsTr("Активен")
-                }
-            }
-        }
-
-        // строка статуса аккаунта (GET /v1/account). Видна только когда движок вернул данные.
-        TribeListRow {
-            Layout.fillWidth: true
-            visible: root.accountStatusLabel() !== ""
-            interactive: false
-            title: qsTr("Статус аккаунта")
-            // левая иконка badge (Tabler, inline-вектор)
-            leftItem: Shape {
-                width: 22; height: 22
-                anchors.verticalCenter: parent.verticalCenter
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 1.8
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M9 12 l2 2 l4-4" }
-                    PathSvg { path: "M12 3 a9 9 0 1 0 0 18 a9 9 0 0 0 0-18z" }
-                }
-            }
-            rightItem: RowLayout {
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Theme.space.sm
-                Text {
-                    text: {
-                        var d = root.fmtDate(root.accountData ? root.accountData.expires_at : "")
-                        return d !== "" ? qsTr("до ") + d : ""
+                    Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Tribe Trial"); color: Theme.color.text1
+                        font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                     }
-                    visible: text !== ""
-                    color: Theme.color.text3
-                    font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
-                    Layout.alignment: Qt.AlignVCenter
+                    TribeBadge {
+                        variant: (root.accountData && root.accountData.status === "active") ? "on"
+                               : (root.accountData && root.accountData.status === "expired") ? "off" : "warn"
+                        text: (root.accountData && root.accountData.status === "active") ? qsTr("Активна")
+                            : (root.accountData && root.accountData.status === "expired") ? qsTr("Истекла")
+                            : qsTr("Пробный")
+                    }
                 }
-                TribeBadge {
-                    variant: (root.accountData && root.accountData.status === "active") ? "on"
-                           : (root.accountData && root.accountData.status === "expired") ? "off" : "warn"
-                    text: root.accountStatusLabel()
+
+                // срок действия: остаток дней + дата окончания (бывшая отдельная строка статуса)
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: qsTr("Действует"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
+                    Text {
+                        text: {
+                            var parts = []
+                            if (root.daysLeftN >= 0) parts.push(qsTr("%1 дн.").arg(root.daysLeftN))
+                            var d = root.fmtDate(root.accountData ? root.accountData.expires_at : "")
+                            if (d !== "") parts.push(qsTr("до ") + d)
+                            return parts.length ? parts.join(" · ") : qsTr("Активен")
+                        }
+                        color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
+                    }
+                }
+
+                // трафик
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: qsTr("Трафик"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
+                    Text {
+                        text: root.trafficLimitB > 0
+                              ? (root.fmtGb(root.trafficUsedB) + " / " + root.fmtGb(root.trafficLimitB) + qsTr(" ГБ"))
+                              : qsTr("Безлимит")
+                        color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true; height: 6; radius: 3; color: Theme.color.surface3
+                    visible: root.trafficLimitB > 0
+                    Rectangle { width: parent.width * root.usedFrac; height: parent.height; radius: 3; color: Theme.color.accent }
                 }
             }
         }
 
-        // активировать ключ (redeem) — поле + accent-кнопка. Движок: TribeEngine.redeemCode (POST /v1/code/redeem).
+        // активировать ключ (redeem) — часть раздела ПОДПИСКА. Поле сверху, accent-кнопка во всю
+        // ширину снизу; кнопка активна только когда введён ключ. Движок: TribeEngine.redeemCode (POST /v1/code/redeem).
         TribeCard {
             Layout.fillWidth: true
             implicitHeight: redeemCol.implicitHeight + 2 * Theme.space.lg
@@ -339,26 +376,32 @@ PageType {
                     font.weight: Theme.font.wMedium
                     Layout.fillWidth: true
                 }
+                Text {
+                    text: qsTr("Введите ключ активации, чтобы продлить доступ.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                }
 
-                RowLayout {
+                TribeField {
+                    id: redeemField
                     Layout.fillWidth: true
-                    spacing: Theme.space.md
-                    TribeField {
-                        id: redeemField
-                        Layout.fillWidth: true
-                        enabled: !root.redeeming
-                        placeholderText: qsTr("Ключ или код")
-                        error: root.redeemError
-                        onTextChanged: { root.redeemError = false; root.redeemHint = "" }
-                        onAccepted: root.redeemKey(text)
-                    }
-                    TribeButton {
-                        variant: "primary"
-                        text: qsTr("Активировать")
-                        loading: root.redeeming
-                        enabled: !root.redeeming
-                        onClicked: root.redeemKey(redeemField.text)
-                    }
+                    Layout.topMargin: Theme.space.xs
+                    enabled: !root.redeeming
+                    placeholderText: qsTr("Введите ключ активации")
+                    error: root.redeemError
+                    onTextChanged: { root.redeemError = false; root.redeemHint = "" }
+                    onAccepted: root.redeemKey(text)
+                }
+
+                // accent-кнопка во всю ширину; активна только при непустом поле
+                TribeButton {
+                    variant: "primary"
+                    text: qsTr("Активировать")
+                    loading: root.redeeming
+                    enabled: !root.redeeming && redeemField.text.trim().length > 0
+                    Layout.fillWidth: true
+                    onClicked: root.redeemKey(redeemField.text)
                 }
 
                 // пояснительный текст (text3): «Проверяем…» / ошибка валидации непустоты
@@ -372,53 +415,34 @@ PageType {
             }
         }
 
-        // ── ПОДПИСКА ─────────────────────────────────────────────────────────
-        Text {
-            text: qsTr("ПОДПИСКА")
-            color: Theme.color.accent
-            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
-            Layout.topMargin: Theme.space.sm
-        }
-
+        // перенос подписки «как SIM» — тоже часть ПОДПИСКИ. Вторичная (glass) кнопка во всю ширину.
         TribeCard {
             Layout.fillWidth: true
-            implicitHeight: planCol.implicitHeight + 2 * Theme.space.lg
+            implicitHeight: transferCol.implicitHeight + 2 * Theme.space.lg
             ColumnLayout {
-                id: planCol
+                id: transferCol
                 anchors.fill: parent
                 anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
-                RowLayout {
-                    Layout.fillWidth: true
-                    Text {
-                        Layout.fillWidth: true
-                        text: qsTr("Tribe Trial"); color: Theme.color.text1
-                        font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
-                    }
-                    TribeBadge { variant: "warn"; text: qsTr("Пробный") }
+
+                Text {
+                    text: qsTr("Перенести подписку на другое устройство")
+                    color: Theme.color.text1
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                    font.weight: Theme.font.wMedium
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
-                // traffic
-                RowLayout {
-                    Layout.fillWidth: true
-                    Text { text: qsTr("Трафик"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
-                    Text {
-                        text: root.trafficLimitB > 0
-                              ? (root.fmtGb(root.trafficUsedB) + " / " + root.fmtGb(root.trafficLimitB) + qsTr(" ГБ"))
-                              : qsTr("Безлимит")
-                        color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
-                    }
+                Text {
+                    text: qsTr("Создайте одноразовую ссылку и откройте её на другом устройстве. Текущее устройство отключится автоматически.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
-                Rectangle {
-                    Layout.fillWidth: true; height: 6; radius: 3; color: Theme.color.surface3
-                    visible: root.trafficLimitB > 0
-                    Rectangle { width: parent.width * root.usedFrac; height: parent.height; radius: 3; color: Theme.color.accent }
-                }
-                // devices
-                RowLayout {
+                TribeButton {
+                    variant: "glass"
+                    text: qsTr("Перенести подписку")
                     Layout.fillWidth: true
-                    Text { text: qsTr("Устройства"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
-                    Text { text: "1 / 1"; color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData }
+                    onClicked: root.createTransfer()
                 }
             }
         }
@@ -426,7 +450,7 @@ PageType {
         // ── УСТРОЙСТВА ───────────────────────────────────────────────────────
         Text {
             text: qsTr("УСТРОЙСТВА")
-            color: Theme.color.accent
+            color: Theme.color.text3
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
             Layout.topMargin: Theme.space.sm
@@ -455,15 +479,26 @@ PageType {
                 required property var modelData
                 Layout.fillWidth: true
                 interactive: false
-                title: {
-                    var lbl = modelData.label || modelData.platform || qsTr("Устройство")
-                    return modelData.is_current ? (lbl + qsTr(" (это устройство)")) : lbl
-                }
+                // заголовок: текущее устройство — нативная маркетинговая модель из движка
+                // («MacBook Pro», «iPhone 15 Pro»); остальные — осмысленный backend-label или
+                // человекочитаемая платформа. Метку «это устройство» в заголовок НЕ клеим (обрезается).
+                title: (modelData.is_current && root.thisDeviceName() !== "")
+                       ? root.thisDeviceName()
+                       : root.deviceDisplayName(modelData)
                 subtitle: {
                     var parts = []
-                    if (modelData.platform && modelData.platform !== "") parts.push(modelData.platform)
-                    var seen = root.fmtDate(modelData.last_seen)
-                    if (seen !== "") parts.push(qsTr("активность ") + seen)
+                    if (modelData.is_current) {
+                        var os = root.thisDeviceOs()
+                        if (os !== "") parts.push(os)               // «macOS Sequoia (15.5)»
+                        parts.push(qsTr("это устройство"))
+                    } else {
+                        var lbl = ("" + (modelData.label || "")).trim()
+                        var plat = "" + (modelData.platform || "")
+                        if (lbl !== "" && lbl.toLowerCase() !== plat.toLowerCase())
+                            parts.push(root.prettyPlatform(plat))
+                        var seen = root.fmtDate(modelData.last_seen)
+                        if (seen !== "") parts.push(qsTr("активность ") + seen)
+                    }
                     return parts.join(" · ")
                 }
                 // левая иконка device (Tabler, inline-вектор)
@@ -479,11 +514,16 @@ PageType {
                         PathSvg { path: "M11 18 h2" }
                     }
                 }
-                // кнопка кика (своё устройство = «Выйти», иначе «Отключить»)
+                // кнопка кика только для ЧУЖИХ устройств. Своё не выкидываем кнопкой — перенос
+                // подписки сам отключит это устройство (см. карточку «Перенести подписку»).
                 rightItem: TribeButton {
                     anchors.verticalCenter: parent.verticalCenter
+                    visible: modelData.is_current !== true
+                    // скрытая кнопка НЕ должна резервировать ширину (TribeListRow считает правый слот
+                    // по childrenRect — invisible иначе крадёт ~120px и обрезает имя устройства).
+                    width: visible ? implicitWidth : 0
                     variant: "ghost"
-                    text: modelData.is_current ? qsTr("Выйти") : qsTr("Отключить")
+                    text: qsTr("Отключить")
                     enabled: !root.kicking
                     onClicked: {
                         kickConfirm.deviceId = modelData.device_id || ""
@@ -495,115 +535,6 @@ PageType {
             }
         }
 
-        // ── ПЕРЕНОС НА НОВОЕ УСТРОЙСТВО ──────────────────────────────────────
-        Text {
-            text: qsTr("ПЕРЕНОС НА НОВОЕ УСТРОЙСТВО")
-            color: Theme.color.accent
-            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
-            Layout.topMargin: Theme.space.sm
-        }
-
-        TribeCard {
-            Layout.fillWidth: true
-            implicitHeight: transferCol.implicitHeight + 2 * Theme.space.lg
-            ColumnLayout {
-                id: transferCol
-                anchors.fill: parent
-                anchors.margins: Theme.space.lg
-                spacing: Theme.space.md
-
-                Text {
-                    text: qsTr("Перенести подписку как SIM-карту")
-                    color: Theme.color.text1
-                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                    font.weight: Theme.font.wMedium
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                }
-                Text {
-                    text: qsTr("Создайте одноразовую ссылку и откройте её на новом устройстве. Текущее устройство будет отключено.")
-                    color: Theme.color.text3
-                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                }
-                TribeButton {
-                    variant: "primary"
-                    text: qsTr("Перенести подписку")
-                    Layout.alignment: Qt.AlignRight
-                    onClicked: root.createTransfer()
-                }
-            }
-        }
-
-        // ── ПОДКЛЮЧЕНИЕ ──────────────────────────────────────────────────────
-        Text {
-            text: qsTr("ПОДКЛЮЧЕНИЕ")
-            color: Theme.color.accent
-            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
-            Layout.topMargin: Theme.space.sm
-        }
-
-        TribeCard {
-            Layout.fillWidth: true
-            implicitHeight: togglesCol.implicitHeight + 2 * Theme.space.lg
-            ColumnLayout {
-                id: togglesCol
-                anchors.fill: parent
-                anchors.margins: Theme.space.lg
-                spacing: Theme.space.lg
-
-                // Авто-пауза для РФ-приложений
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.space.md
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-                        Text {
-                            text: qsTr("Авто-пауза для РФ-приложений")
-                            color: Theme.color.text1
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                            font.weight: Theme.font.wMedium
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        }
-                        Text {
-                            text: qsTr("VPN автоматически выключается для российских сервисов")
-                            color: Theme.color.text3
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap
-                        }
-                    }
-                    TribeToggle {
-                        Layout.alignment: Qt.AlignVCenter
-                        checked: avpnSettings.autoPauseRu
-                        onToggled: avpnSettings.autoPauseRu = checked
-                    }
-                }
-            }
-        }
-
-        // AVPN: Apple-safe share. URL-only (никаких цен/промо/рефералов — §10). root.shareUrl.
-        TribeListRow {
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.space.sm
-            title: qsTr("Поделиться приложением")
-            iconSource: ""
-            // левая иконка share (Tabler, inline-вектор)
-            leftItem: Shape {
-                width: 22; height: 22
-                anchors.verticalCenter: parent.verticalCenter
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 1.8
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M6 12 a3 3 0 1 0 0-0.01 M18 6 a3 3 0 1 0 0-0.01 M18 18 a3 3 0 1 0 0-0.01" }
-                    PathSvg { path: "M8.5 10.5 L15.5 7 M8.5 13.5 L15.5 17" }
-                }
-            }
-            rightItem: Text { text: "›"; color: Theme.color.text3; font.pixelSize: Theme.font.h3; anchors.verticalCenter: parent.verticalCenter }
-            onClicked: Qt.openUrlExternally(root.shareUrl)
-        }
         }   // ColumnLayout settingsCol
     }       // Flickable settingsFlick
 
