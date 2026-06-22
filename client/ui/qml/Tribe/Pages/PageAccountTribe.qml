@@ -160,6 +160,19 @@ PageType {
         var meaningful = lbl !== "" && lbl.toLowerCase() !== plat.toLowerCase()
         return meaningful ? lbl : root.prettyPlatform(plat)
     }
+    // AVPN: идентификаторы для поддержки. account_id (номер аккаунта, /v1/account) и device_id
+    // ТЕКУЩЕГО устройства (/v1/devices, где is_current). Оба уже у клиента — копируем и шлём в саппорт.
+    function accountNumber() { return root.accountData ? ("" + (root.accountData.account_id || "")) : "" }
+    function currentDeviceId() {
+        var l = root.devicesList || []
+        for (var i = 0; i < l.length; i++)
+            if (l[i].is_current === true) return "" + (l[i].device_id || "")
+        // Фолбэк: локальный installation-UUID из движка (тот же, что ушёл на backend) — доступен
+        // ВСЕГДА, без сети/подписки. Так раздел «Устройства» показывает ID этого устройства всегда.
+        if (root.hasEngine && typeof TribeEngine.localDeviceId === "function")
+            return "" + TribeEngine.localDeviceId()
+        return ""
+    }
 
     // AVPN (краш/freeze-фикс): refreshDevices/refreshAccount делают СИНХРОННЫЙ сетевой вызов.
     // Из Component.onCompleted это блокирует главный поток во время построения страницы
@@ -222,179 +235,146 @@ PageType {
             id: shareBanner
             Layout.fillWidth: true
             Layout.topMargin: Theme.space.xs
-            implicitHeight: shareRow.implicitHeight + 2 * Theme.space.lg
+            implicitHeight: shareCol.implicitHeight + 2 * Theme.space.lg
             radius: Theme.radius.lg
+            // более ТЁМНАЯ плашка: углублённый azure-градиент (Qt.darker от accent-токенов). // AVPN
             gradient: Gradient {
-                orientation: Gradient.Horizontal
-                GradientStop { position: 0.0; color: Theme.color.gradTop }
-                GradientStop { position: 1.0; color: Theme.color.gradBottom }
+                orientation: Gradient.Vertical
+                GradientStop { position: 0.0; color: Qt.darker(Theme.color.gradTop, 1.28) }
+                GradientStop { position: 1.0; color: Qt.darker(Theme.color.gradBottom, 1.6) }
             }
-            // мягкий внутренний хайлайт — даёт «стеклянный» объём без тяжёлого Glow
             border.width: 1
             border.color: Theme.color.border2
             scale: shareMa.pressed ? 0.99 : 1.0
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
-            RowLayout {
-                id: shareRow
+            ColumnLayout {
+                id: shareCol
                 anchors.fill: parent
-                anchors.leftMargin: Theme.space.lg
-                anchors.rightMargin: Theme.space.lg
+                anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
 
-                // ── бейдж «подарок»: светящийся круг + объёмный подарок + золотой «+» + блёстки ──
-                // подарок периодически «вздрагивает» (наклон у основания), привлекая внимание. // AVPN
-                Item {
-                    id: giftBadge
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.preferredWidth: 56; Layout.preferredHeight: 56
+                // верхний ряд: подарок + заголовок (2 строки) + шеврон
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.space.md
 
-                    // светящийся круг-подложка
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 52; height: 52; radius: 26
-                        color: Qt.rgba(1, 1, 1, 0.20)
-                        border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.28)
-                    }
+                    // ── бейдж «подарок»: светящийся круг + объёмный подарок + золотой «+» + блёстки ──
+                    // подарок периодически «вздрагивает» (наклон у основания), привлекая внимание. // AVPN
+                    Item {
+                        id: giftBadge
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredWidth: 56; Layout.preferredHeight: 56
 
-                    // блёстки (4-конечные звёзды) — статичный декор
-                    Shape {
-                        anchors.right: parent.right; anchors.top: parent.top
-                        anchors.rightMargin: 2; anchors.topMargin: 4
-                        width: 9; height: 9
-                        preferredRendererType: Shape.CurveRenderer
-                        ShapePath {
-                            fillColor: Qt.rgba(1, 1, 1, 0.85); strokeColor: "transparent"
-                            PathSvg { path: "M4.5 0 L5.6 3.4 L9 4.5 L5.6 5.6 L4.5 9 L3.4 5.6 L0 4.5 L3.4 3.4 Z" }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 52; height: 52; radius: 26
+                            color: Qt.rgba(1, 1, 1, 0.20)
+                            border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.28)
                         }
-                    }
-                    Shape {
-                        anchors.left: parent.left; anchors.bottom: parent.bottom
-                        anchors.leftMargin: 1; anchors.bottomMargin: 8
-                        width: 6; height: 6
-                        preferredRendererType: Shape.CurveRenderer
-                        ShapePath {
-                            fillColor: Qt.rgba(1, 1, 1, 0.6); strokeColor: "transparent"
-                            PathSvg { path: "M3 0 L3.7 2.3 L6 3 L3.7 3.7 L3 6 L2.3 3.7 L0 3 L2.3 2.3 Z" }
-                        }
-                    }
-
-                    // объёмный подарок (заполненный) — вздрагивает вокруг основания
-                    Shape {
-                        id: giftShape
-                        anchors.centerIn: parent
-                        width: 30; height: 30
-                        transformOrigin: Item.Bottom
-                        preferredRendererType: Shape.CurveRenderer
-                        ShapePath {   // коробка (светлая)
-                            fillColor: "#DCE8F7"; strokeColor: "transparent"
-                            PathSvg { path: "M6 14 H24 V25 a2 2 0 0 1 -2 2 H8 a2 2 0 0 1 -2 -2 Z" }
-                        }
-                        ShapePath {   // крышка (белая)
-                            fillColor: "#FFFFFF"; strokeColor: "transparent"
-                            PathSvg { path: "M4 10 H26 V14 H4 Z" }
-                        }
-                        ShapePath {   // вертикальная лента (золото)
-                            fillColor: Theme.color.cta; strokeColor: "transparent"
-                            PathSvg { path: "M13.4 10 H16.6 V27 H13.4 Z" }
-                        }
-                        ShapePath {   // левый бант
-                            fillColor: Theme.color.cta; strokeColor: "transparent"
-                            PathSvg { path: "M15 10 C12 5 8 5.5 9 8.6 C9.7 10.4 13 10.8 15 10 Z" }
-                        }
-                        ShapePath {   // правый бант
-                            fillColor: Theme.color.cta; strokeColor: "transparent"
-                            PathSvg { path: "M15 10 C18 5 22 5.5 21 8.6 C20.3 10.4 17 10.8 15 10 Z" }
-                        }
-                    }
-
-                    // золотой бейдж «+» (бонус) в правом-нижнем углу круга
-                    Rectangle {
-                        anchors.right: parent.right; anchors.bottom: parent.bottom
-                        anchors.rightMargin: 1; anchors.bottomMargin: 1
-                        width: 19; height: 19; radius: width / 2
-                        color: Theme.color.cta
-                        border.width: 2; border.color: Theme.color.gradBottom
                         Shape {
-                            anchors.centerIn: parent; width: 11; height: 11
+                            anchors.right: parent.right; anchors.top: parent.top
+                            anchors.rightMargin: 2; anchors.topMargin: 4
+                            width: 9; height: 9
                             preferredRendererType: Shape.CurveRenderer
                             ShapePath {
-                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
-                                capStyle: ShapePath.RoundCap
-                                PathSvg { path: "M5.5 1.6 V9.4 M1.6 5.5 H9.4" }
+                                fillColor: Qt.rgba(1, 1, 1, 0.85); strokeColor: "transparent"
+                                PathSvg { path: "M4.5 0 L5.6 3.4 L9 4.5 L5.6 5.6 L4.5 9 L3.4 5.6 L0 4.5 L3.4 3.4 Z" }
                             }
                         }
+                        Shape {
+                            anchors.left: parent.left; anchors.bottom: parent.bottom
+                            anchors.leftMargin: 1; anchors.bottomMargin: 8
+                            width: 6; height: 6
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                fillColor: Qt.rgba(1, 1, 1, 0.6); strokeColor: "transparent"
+                                PathSvg { path: "M3 0 L3.7 2.3 L6 3 L3.7 3.7 L3 6 L2.3 3.7 L0 3 L2.3 2.3 Z" }
+                            }
+                        }
+                        Shape {
+                            id: giftShape
+                            anchors.centerIn: parent
+                            width: 30; height: 30
+                            transformOrigin: Item.Bottom
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                fillColor: "#DCE8F7"; strokeColor: "transparent"
+                                PathSvg { path: "M6 14 H24 V25 a2 2 0 0 1 -2 2 H8 a2 2 0 0 1 -2 -2 Z" }
+                            }
+                            ShapePath {
+                                fillColor: "#FFFFFF"; strokeColor: "transparent"
+                                PathSvg { path: "M4 10 H26 V14 H4 Z" }
+                            }
+                            ShapePath {
+                                fillColor: Theme.color.cta; strokeColor: "transparent"
+                                PathSvg { path: "M13.4 10 H16.6 V27 H13.4 Z" }
+                            }
+                            ShapePath {
+                                fillColor: Theme.color.cta; strokeColor: "transparent"
+                                PathSvg { path: "M15 10 C12 5 8 5.5 9 8.6 C9.7 10.4 13 10.8 15 10 Z" }
+                            }
+                            ShapePath {
+                                fillColor: Theme.color.cta; strokeColor: "transparent"
+                                PathSvg { path: "M15 10 C18 5 22 5.5 21 8.6 C20.3 10.4 17 10.8 15 10 Z" }
+                            }
+                        }
+                        Rectangle {
+                            anchors.right: parent.right; anchors.bottom: parent.bottom
+                            anchors.rightMargin: 1; anchors.bottomMargin: 1
+                            width: 19; height: 19; radius: width / 2
+                            color: Theme.color.cta
+                            border.width: 2; border.color: Qt.darker(Theme.color.gradBottom, 1.6)
+                            Shape {
+                                anchors.centerIn: parent; width: 11; height: 11
+                                preferredRendererType: Shape.CurveRenderer
+                                ShapePath {
+                                    strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
+                                    capStyle: ShapePath.RoundCap
+                                    PathSvg { path: "M5.5 1.6 V9.4 M1.6 5.5 H9.4" }
+                                }
+                            }
+                        }
+                        SequentialAnimation {
+                            running: !Theme.motion.reduceMotion
+                            loops: Animation.Infinite
+                            PauseAnimation { duration: 2600 }
+                            NumberAnimation { target: giftShape; property: "rotation"; to: -9; duration: 90 }
+                            NumberAnimation { target: giftShape; property: "rotation"; to: 9;  duration: 150; easing.type: Easing.InOutSine }
+                            NumberAnimation { target: giftShape; property: "rotation"; to: -6; duration: 120; easing.type: Easing.InOutSine }
+                            NumberAnimation { target: giftShape; property: "rotation"; to: 0;  duration: 130; easing.type: Easing.OutBack }
+                        }
                     }
 
-                    // петля вздрагивания: длинная пауза → быстрый «качок». Глушится reduceMotion.
-                    SequentialAnimation {
-                        running: !Theme.motion.reduceMotion
-                        loops: Animation.Infinite
-                        PauseAnimation { duration: 2600 }
-                        NumberAnimation { target: giftShape; property: "rotation"; to: -9; duration: 90 }
-                        NumberAnimation { target: giftShape; property: "rotation"; to: 9;  duration: 150; easing.type: Easing.InOutSine }
-                        NumberAnimation { target: giftShape; property: "rotation"; to: -6; duration: 120; easing.type: Easing.InOutSine }
-                        NumberAnimation { target: giftShape; property: "rotation"; to: 0;  duration: 130; easing.type: Easing.OutBack }
-                    }
-                }
-
-                // ── текст: заголовок (2 строки) + пилюля-оффер + подпись ──
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                    spacing: Theme.space.xs
-
+                    // заголовок (2 строки)
                     Text {
-                        text: qsTr("Пригласи друзей —\nполучай подарки")
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        text: qsTr("Поделиться с друзьями\nЗа каждого друга — подарок")
                         color: "white"
                         font.family: Theme.font.display
-                        font.pixelSize: Theme.font.bodyM
+                        font.pixelSize: Theme.font.bodyS
                         font.weight: Theme.font.wExtra
-                        lineHeight: 1.05
-                        Layout.fillWidth: true
+                        lineHeight: 1.15
                         wrapMode: Text.WordWrap
                     }
-                    // пилюля: числа золотом (CTA), остальное белым; короткая — влезает на узких экранах
-                    Rectangle {
-                        Layout.alignment: Qt.AlignLeft
-                        implicitWidth: pillText.implicitWidth + 2 * Theme.space.sm
-                        implicitHeight: pillText.implicitHeight + 2 * Theme.space.xs
-                        radius: Theme.radius.pill
-                        color: Qt.rgba(0, 0, 0, 0.20)
-                        Text {
-                            id: pillText
-                            anchors.centerIn: parent
-                            textFormat: Text.StyledText
-                            text: "<b><font color='" + Theme.color.cta + "'>+7 дней</font></b> и <b><font color='"
-                                  + Theme.color.cta + "'>+3 ГБ</font></b>"
-                            color: "white"
-                            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
-                            font.weight: Theme.font.wSemibold
-                        }
-                    }
-                    Text {
-                        text: qsTr("за каждого друга по твоей ссылке")
-                        color: Qt.rgba(1, 1, 1, 0.78)
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    }
+
                 }
 
-                // ── шеврон в полупрозрачном круге ──
+                // пилюля во всю ширину плашки: «7 дней + 3 ГБ» золотом, «бесплатно» белым
                 Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.preferredWidth: 30; Layout.preferredHeight: 30
-                    radius: width / 2
-                    color: Qt.rgba(1, 1, 1, 0.18)
-                    Shape {
-                        anchors.centerIn: parent; width: 24; height: 24; scale: 16 / 24
-                        transformOrigin: Item.Center
-                        preferredRendererType: Shape.CurveRenderer
-                        ShapePath {
-                            strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2.4
-                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                            PathSvg { path: "M9 6 L15 12 L9 18" }
-                        }
+                    Layout.fillWidth: true
+                    implicitHeight: pillText.implicitHeight + 2 * Theme.space.sm
+                    radius: Theme.radius.pill
+                    color: Qt.rgba(0, 0, 0, 0.24)
+                    Text {
+                        id: pillText
+                        anchors.centerIn: parent
+                        textFormat: Text.StyledText
+                        text: "<b><font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font></b> бесплатно"
+                        color: "white"
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                        font.weight: Theme.font.wSemibold
                     }
                 }
             }
@@ -650,6 +630,129 @@ PageType {
                         kickConfirm.deviceLabel = modelData.label || modelData.platform || qsTr("устройство")
                         kickConfirm.isSelf = modelData.is_current === true
                         kickConfirm.open()
+                    }
+                }
+            }
+        }
+
+        // ── ДЛЯ ПОДДЕРЖКИ: копируемые идентификаторы ────────────────────────
+        // Номер аккаунта (account_id) + ID этого устройства (device_id текущего) — чтобы скопировать
+        // и отправить в поддержку. Копирование — паттерн форка: read-only TextEdit + selectAll()/copy()
+        // (без зависимостей, как в блоке переноса подписки). // AVPN
+        TribeCard {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.sm
+            visible: root.accountNumber() !== "" || root.currentDeviceId() !== ""
+            implicitHeight: supportIdsCol.implicitHeight + 2 * Theme.space.lg
+            ColumnLayout {
+                id: supportIdsCol
+                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                anchors.topMargin: Theme.space.lg
+                spacing: Theme.space.md
+
+                // Номер аккаунта
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.accountNumber() !== ""
+                    spacing: Theme.space.sm
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+                        Text {
+                            text: qsTr("Номер аккаунта")
+                            color: Theme.color.text3
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        }
+                        TextEdit {
+                            id: acctIdEdit
+                            Layout.fillWidth: true
+                            text: root.accountNumber()
+                            readOnly: true; selectByMouse: true
+                            color: Theme.color.text1; selectionColor: Theme.color.accent
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
+                            wrapMode: TextEdit.WrapAnywhere
+                        }
+                    }
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        width: 36; height: 36; radius: Theme.radius.md
+                        color: acctCopyMa.pressed ? Theme.color.surface3 : Theme.color.surface2
+                        border.width: 1; border.color: Theme.color.border
+                        Shape {
+                            anchors.centerIn: parent; width: 18; height: 18
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.6
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M9 9 h9 a1 1 0 0 1 1 1 v9 a1 1 0 0 1 -1 1 h-9 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 z" }
+                                PathSvg { path: "M5 15 h-1 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 h9 a1 1 0 0 1 1 1 v1" }
+                            }
+                        }
+                        MouseArea {
+                            id: acctCopyMa
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                acctIdEdit.selectAll(); acctIdEdit.copy(); acctIdEdit.deselect()
+                                PageController.showNotificationMessage(qsTr("Номер аккаунта скопирован"))
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true; height: 1; color: Theme.color.border
+                    visible: root.accountNumber() !== "" && root.currentDeviceId() !== ""
+                }
+
+                // ID этого устройства
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.currentDeviceId() !== ""
+                    spacing: Theme.space.sm
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+                        Text {
+                            text: qsTr("ID этого устройства")
+                            color: Theme.color.text3
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        }
+                        TextEdit {
+                            id: devIdEdit
+                            Layout.fillWidth: true
+                            text: root.currentDeviceId()
+                            readOnly: true; selectByMouse: true
+                            color: Theme.color.text1; selectionColor: Theme.color.accent
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
+                            wrapMode: TextEdit.WrapAnywhere
+                        }
+                    }
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        width: 36; height: 36; radius: Theme.radius.md
+                        color: devCopyMa.pressed ? Theme.color.surface3 : Theme.color.surface2
+                        border.width: 1; border.color: Theme.color.border
+                        Shape {
+                            anchors.centerIn: parent; width: 18; height: 18
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.6
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M9 9 h9 a1 1 0 0 1 1 1 v9 a1 1 0 0 1 -1 1 h-9 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 z" }
+                                PathSvg { path: "M5 15 h-1 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 h9 a1 1 0 0 1 1 1 v1" }
+                            }
+                        }
+                        MouseArea {
+                            id: devCopyMa
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                devIdEdit.selectAll(); devIdEdit.copy(); devIdEdit.deselect()
+                                PageController.showNotificationMessage(qsTr("ID устройства скопирован"))
+                            }
+                        }
                     }
                 }
             }
