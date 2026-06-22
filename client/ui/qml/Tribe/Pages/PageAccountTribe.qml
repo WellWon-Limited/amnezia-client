@@ -229,9 +229,11 @@ PageType {
                 GradientStop { position: 0.0; color: Theme.color.gradTop }
                 GradientStop { position: 1.0; color: Theme.color.gradBottom }
             }
-            // мягкий внутренний хайлайт сверху — даёт «стеклянный» объём без тяжёлого Glow
+            // мягкий внутренний хайлайт — даёт «стеклянный» объём без тяжёлого Glow
             border.width: 1
-            border.color: Qt.rgba(1, 1, 1, 0.14)
+            border.color: Theme.color.border2
+            scale: shareMa.pressed ? 0.99 : 1.0
+            Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
             RowLayout {
                 id: shareRow
@@ -240,46 +242,164 @@ PageType {
                 anchors.rightMargin: Theme.space.lg
                 spacing: Theme.space.md
 
-                // иконка «подарок» в полупрозрачном круге — доносит, что друг получает бонус
-                Rectangle {
+                // ── бейдж «подарок»: светящийся круг + объёмный подарок + золотой «+» + блёстки ──
+                // подарок периодически «вздрагивает» (наклон у основания), привлекая внимание. // AVPN
+                Item {
+                    id: giftBadge
                     Layout.alignment: Qt.AlignVCenter
-                    width: 40; height: 40; radius: 20
-                    color: Qt.rgba(1, 1, 1, 0.18)
-                    Shape {
+                    Layout.preferredWidth: 56; Layout.preferredHeight: 56
+
+                    // светящийся круг-подложка
+                    Rectangle {
                         anchors.centerIn: parent
-                        width: 22; height: 22
+                        width: 52; height: 52; radius: 26
+                        color: Qt.rgba(1, 1, 1, 0.20)
+                        border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.28)
+                    }
+
+                    // блёстки (4-конечные звёзды) — статичный декор
+                    Shape {
+                        anchors.right: parent.right; anchors.top: parent.top
+                        anchors.rightMargin: 2; anchors.topMargin: 4
+                        width: 9; height: 9
                         preferredRendererType: Shape.CurveRenderer
                         ShapePath {
-                            strokeColor: "white"; fillColor: "transparent"; strokeWidth: 1.7
-                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                            PathSvg { path: "M4 9 h16 v3 h-16 z" }                                  // крышка
-                            PathSvg { path: "M5 12 v7 a1 1 0 0 0 1 1 h12 a1 1 0 0 0 1-1 v-7" }      // коробка
-                            PathSvg { path: "M12 9 v12" }                                           // лента
-                            PathSvg { path: "M12 9 C12 6 10 4 8.5 4 a2 2 0 0 0 0 5 z" }             // левый бант
-                            PathSvg { path: "M12 9 C12 6 14 4 15.5 4 a2 2 0 0 0 0 5 z" }            // правый бант
+                            fillColor: Qt.rgba(1, 1, 1, 0.85); strokeColor: "transparent"
+                            PathSvg { path: "M4.5 0 L5.6 3.4 L9 4.5 L5.6 5.6 L4.5 9 L3.4 5.6 L0 4.5 L3.4 3.4 Z" }
                         }
                     }
+                    Shape {
+                        anchors.left: parent.left; anchors.bottom: parent.bottom
+                        anchors.leftMargin: 1; anchors.bottomMargin: 8
+                        width: 6; height: 6
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            fillColor: Qt.rgba(1, 1, 1, 0.6); strokeColor: "transparent"
+                            PathSvg { path: "M3 0 L3.7 2.3 L6 3 L3.7 3.7 L3 6 L2.3 3.7 L0 3 L2.3 2.3 Z" }
+                        }
+                    }
+
+                    // объёмный подарок (заполненный) — вздрагивает вокруг основания
+                    Shape {
+                        id: giftShape
+                        anchors.centerIn: parent
+                        width: 30; height: 30
+                        transformOrigin: Item.Bottom
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {   // коробка (светлая)
+                            fillColor: "#DCE8F7"; strokeColor: "transparent"
+                            PathSvg { path: "M6 14 H24 V25 a2 2 0 0 1 -2 2 H8 a2 2 0 0 1 -2 -2 Z" }
+                        }
+                        ShapePath {   // крышка (белая)
+                            fillColor: "#FFFFFF"; strokeColor: "transparent"
+                            PathSvg { path: "M4 10 H26 V14 H4 Z" }
+                        }
+                        ShapePath {   // вертикальная лента (золото)
+                            fillColor: Theme.color.cta; strokeColor: "transparent"
+                            PathSvg { path: "M13.4 10 H16.6 V27 H13.4 Z" }
+                        }
+                        ShapePath {   // левый бант
+                            fillColor: Theme.color.cta; strokeColor: "transparent"
+                            PathSvg { path: "M15 10 C12 5 8 5.5 9 8.6 C9.7 10.4 13 10.8 15 10 Z" }
+                        }
+                        ShapePath {   // правый бант
+                            fillColor: Theme.color.cta; strokeColor: "transparent"
+                            PathSvg { path: "M15 10 C18 5 22 5.5 21 8.6 C20.3 10.4 17 10.8 15 10 Z" }
+                        }
+                    }
+
+                    // золотой бейдж «+» (бонус) в правом-нижнем углу круга
+                    Rectangle {
+                        anchors.right: parent.right; anchors.bottom: parent.bottom
+                        anchors.rightMargin: 1; anchors.bottomMargin: 1
+                        width: 19; height: 19; radius: width / 2
+                        color: Theme.color.cta
+                        border.width: 2; border.color: Theme.color.gradBottom
+                        Shape {
+                            anchors.centerIn: parent; width: 11; height: 11
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
+                                capStyle: ShapePath.RoundCap
+                                PathSvg { path: "M5.5 1.6 V9.4 M1.6 5.5 H9.4" }
+                            }
+                        }
+                    }
+
+                    // петля вздрагивания: длинная пауза → быстрый «качок». Глушится reduceMotion.
+                    SequentialAnimation {
+                        running: !Theme.motion.reduceMotion
+                        loops: Animation.Infinite
+                        PauseAnimation { duration: 2600 }
+                        NumberAnimation { target: giftShape; property: "rotation"; to: -9; duration: 90 }
+                        NumberAnimation { target: giftShape; property: "rotation"; to: 9;  duration: 150; easing.type: Easing.InOutSine }
+                        NumberAnimation { target: giftShape; property: "rotation"; to: -6; duration: 120; easing.type: Easing.InOutSine }
+                        NumberAnimation { target: giftShape; property: "rotation"; to: 0;  duration: 130; easing.type: Easing.OutBack }
+                    }
                 }
-                // 2 строки: заголовок + оффер (друг получает подарок при установке по ссылке)
+
+                // ── текст: заголовок (2 строки) + пилюля-оффер + подпись ──
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 2
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: Theme.space.xs
+
                     Text {
-                        text: qsTr("Поделиться с друзьями")
+                        text: qsTr("Пригласи друзей —\nполучай подарки")
                         color: "white"
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                        font.weight: Theme.font.wSemibold
-                        Layout.fillWidth: true; elide: Text.ElideRight
+                        font.family: Theme.font.display
+                        font.pixelSize: Theme.font.bodyM
+                        font.weight: Theme.font.wExtra
+                        lineHeight: 1.05
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                    }
+                    // пилюля: числа золотом (CTA), остальное белым; короткая — влезает на узких экранах
+                    Rectangle {
+                        Layout.alignment: Qt.AlignLeft
+                        implicitWidth: pillText.implicitWidth + 2 * Theme.space.sm
+                        implicitHeight: pillText.implicitHeight + 2 * Theme.space.xs
+                        radius: Theme.radius.pill
+                        color: Qt.rgba(0, 0, 0, 0.20)
+                        Text {
+                            id: pillText
+                            anchors.centerIn: parent
+                            textFormat: Text.StyledText
+                            text: "<b><font color='" + Theme.color.cta + "'>+7 дней</font></b> и <b><font color='"
+                                  + Theme.color.cta + "'>+3 ГБ</font></b>"
+                            color: "white"
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                            font.weight: Theme.font.wSemibold
+                        }
                     }
                     Text {
-                        text: qsTr("7 дней и 3 ГБ за каждого друга")
-                        color: Qt.rgba(1, 1, 1, 0.92)
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                        text: qsTr("за каждого друга по твоей ссылке")
+                        color: Qt.rgba(1, 1, 1, 0.78)
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    }
+                }
+
+                // ── шеврон в полупрозрачном круге ──
+                Rectangle {
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredWidth: 30; Layout.preferredHeight: 30
+                    radius: width / 2
+                    color: Qt.rgba(1, 1, 1, 0.18)
+                    Shape {
+                        anchors.centerIn: parent; width: 24; height: 24; scale: 16 / 24
+                        transformOrigin: Item.Center
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2.4
+                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                            PathSvg { path: "M9 6 L15 12 L9 18" }
+                        }
                     }
                 }
             }
             MouseArea {
+                id: shareMa
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: Qt.openUrlExternally(root.shareUrl)

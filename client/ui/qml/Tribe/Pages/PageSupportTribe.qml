@@ -91,9 +91,14 @@ PageType {
 
             RowLayout {
                 id: composerRow
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                anchors.left: parent.left; anchors.right: parent.right
                 anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                anchors.topMargin: Theme.space.md
+                // AVPN: прижато к НИЗУ над safe-area/IME-инсетом → острова капсулы сверху/снизу равны
+                // (md и md), а инсет (home-indicator/клавиатура) уходит ПОД низ. Раньше ряд был прижат
+                // к верху (topMargin md) + инсет снизу → на iOS капсула «висела высоко» (на маке инсет≈0,
+                // потому там было нормально). implicitHeight = row + 2·md + inset ⇒ верхний остров = md.
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Theme.space.md + composer.bottomInset
                 spacing: Theme.space.sm
 
                 // авто-растущая капсула с полем ввода (растёт вверх, кнопка остаётся на месте)
