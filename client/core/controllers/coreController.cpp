@@ -24,7 +24,7 @@
     #include "platforms/android/android_controller.h"
 #endif
 
-#if defined(Q_OS_IOS) || defined(Q_OS_MACOS)   // AVPN: IosController используется и на macOS (sysext-активация)
+#if defined(Q_OS_IOS)
     #include "platforms/ios/ios_controller.h"
     #include <AmneziaVPN-Swift.h>
 #endif
@@ -286,13 +286,8 @@ void CoreController::initAndroidController()
 
 void CoreController::initAppleController()
 {
-    // AVPN: initialize() нужен и на macOS — он триггерит активацию System Extension (provider туннеля
-    // на dmg/Developer ID). Раньше блок был только под Q_OS_IOS → на macOS initialize() не звался,
-    // sysext не активировался, коннект висел. toggleScreenshots остаётся iOS-only.
-#if defined(Q_OS_IOS) || defined(Q_OS_MACOS)
-    IosController::Instance()->initialize();
-#endif
 #ifdef Q_OS_IOS
+    IosController::Instance()->initialize();
     QTimer::singleShot(0, this, [this]() { AmneziaVPN::toggleScreenshots(m_appSettingsRepository->isScreenshotsEnabled()); });
 #endif
 }
