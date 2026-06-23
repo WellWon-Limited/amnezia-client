@@ -63,7 +63,7 @@ PageType {
         if (!(trafficLimitB > 0)) return "∞"           // безлимит / ещё не загружено (0 или NaN)
         var leftB = Math.max(0, trafficLimitB - trafficUsedB)
         if (isNaN(leftB)) return "∞"
-        return (leftB / 1099511627776).toFixed(1) + " GB"   // 1024⁴ — как fmtGb (бэк инфлейтит ×1024); чистые ГБ, шаг 0.1
+        return (leftB / 1073741824).toFixed(1) + " GB"   // ГиБ (1024³) — сырые байты, двоичная база (бэк подтвердил); как fmtGb
     }
     // daysLeft<0 = бессрочно/неизвестно → «∞»; иначе «N дн.»
     readonly property string daysLeftText: !hasEngine ? qsTr("12 дн.")
