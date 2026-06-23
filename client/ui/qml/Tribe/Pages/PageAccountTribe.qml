@@ -21,7 +21,9 @@ PageType {
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property int  daysLeftN:     hasEngine ? TribeEngine.daysLeft : -1
     readonly property real usedFrac: trafficLimitB > 0 ? Math.min(1, trafficUsedB / trafficLimitB) : 0
-    function fmtGb(b) { return (b / 1e9).toFixed(1) }
+    // AVPN: ГБ как в админке/бэкенде — двоичные ГиБ (1024³), а не десятичные 1e9. Иначе лимит
+    // «4 ГБ» (= 4·2³⁰ байт на бэке) показывался как «4.3». Теперь 4 ГиБ → «4.0», совпадает с админкой.
+    function fmtGb(b) { return (b / 1073741824).toFixed(1) }
     // AVPN: shareUrl ДОЛЖЕН быть на root (раньше был на ColumnLayout → root.shareUrl=undefined →
     // «Поделиться» молча не работала). Сайт деплоит веб-команда.
     readonly property string shareUrl: "https://tribevpn.com"
@@ -166,7 +168,8 @@ PageType {
     function currentDeviceId() {
         var l = root.devicesList || []
         for (var i = 0; i < l.length; i++)
-            if (l[i].is_current === true) return "" + (l[i].device_id || "")
+            // device_uuid (install-UUID) — публичный ID устройства; device_id (PK) deprecated.
+            if (l[i].is_current === true) return "" + (l[i].device_uuid || l[i].device_id || "")
         // Фолбэк: локальный installation-UUID из движка (тот же, что ушёл на backend) — доступен
         // ВСЕГДА, без сети/подписки. Так раздел «Устройства» показывает ID этого устройства всегда.
         if (root.hasEngine && typeof TribeEngine.localDeviceId === "function")
@@ -237,14 +240,15 @@ PageType {
             Layout.topMargin: Theme.space.xs
             implicitHeight: shareCol.implicitHeight + 2 * Theme.space.lg
             radius: Theme.radius.lg
-            // более ТЁМНАЯ плашка: углублённый azure-градиент (Qt.darker от accent-токенов). // AVPN
+            // ТЁМНАЯ плашка (night-slate, НЕ азур) + золотая рамка тёмного тона. Подарок остаётся
+            // светлым (контраст на тёмном). // AVPN
             gradient: Gradient {
                 orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: Qt.darker(Theme.color.gradTop, 1.28) }
-                GradientStop { position: 1.0; color: Qt.darker(Theme.color.gradBottom, 1.6) }
+                GradientStop { position: 0.0; color: Theme.color.surface2 }
+                GradientStop { position: 1.0; color: Theme.color.bg700 }
             }
-            border.width: 1
-            border.color: Theme.color.border2
+            border.width: 1.5
+            border.color: Theme.color.ctaDeep
             scale: shareMa.pressed ? 0.99 : 1.0
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
@@ -350,7 +354,7 @@ PageType {
                     Text {
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
-                        text: qsTr("Поделиться с друзьями\nЗа каждого друга — подарок")
+                        text: qsTr("Поделиться с друзьями\nЗа каждого друга — подарок!")
                         color: "white"
                         font.family: Theme.font.display
                         font.pixelSize: Theme.font.bodyS
@@ -359,6 +363,24 @@ PageType {
                         wrapMode: Text.WordWrap
                     }
 
+                    // иконка «поделиться» (iOS share: коробка + стрелка вверх) справа, высотой ~в две
+                    // строки заголовка. Символизирует «поделиться»; тап по всей плашке открывает шэр. // AVPN
+                    Item {
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredWidth: 30; Layout.preferredHeight: 34
+                        Shape {
+                            anchors.centerIn: parent; width: 24; height: 24; scale: 30 / 24
+                            transformOrigin: Item.Center
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M8.5 11 H6.5 a1.5 1.5 0 0 0 -1.5 1.5 V19.5 a1.5 1.5 0 0 0 1.5 1.5 H17.5 a1.5 1.5 0 0 0 1.5 -1.5 V12.5 a1.5 1.5 0 0 0 -1.5 -1.5 H15.5" }
+                                PathSvg { path: "M12 3.5 V15" }
+                                PathSvg { path: "M8 7 L12 3.5 L16 7" }
+                            }
+                        }
+                    }
                 }
 
                 // пилюля во всю ширину плашки: «7 дней + 3 ГБ» золотом, «бесплатно» белым
@@ -626,7 +648,7 @@ PageType {
                     text: qsTr("Отключить")
                     enabled: !root.kicking
                     onClicked: {
-                        kickConfirm.deviceId = modelData.device_id || ""
+                        kickConfirm.deviceId = modelData.device_uuid || modelData.device_id || ""
                         kickConfirm.deviceLabel = modelData.label || modelData.platform || qsTr("устройство")
                         kickConfirm.isSelf = modelData.is_current === true
                         kickConfirm.open()
@@ -660,7 +682,7 @@ PageType {
                         Layout.fillWidth: true
                         spacing: 1
                         Text {
-                            text: qsTr("Номер аккаунта")
+                            text: qsTr("ID вашего аккаунта")
                             color: Theme.color.text3
                             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                         }
@@ -695,7 +717,7 @@ PageType {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 acctIdEdit.selectAll(); acctIdEdit.copy(); acctIdEdit.deselect()
-                                PageController.showNotificationMessage(qsTr("Номер аккаунта скопирован"))
+                                PageController.showNotificationMessage(qsTr("ID аккаунта скопирован"))
                             }
                         }
                     }

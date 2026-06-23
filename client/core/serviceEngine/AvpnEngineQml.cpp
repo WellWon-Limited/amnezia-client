@@ -4,6 +4,7 @@
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
@@ -25,6 +26,11 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
+
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#include "MacServiceInstaller.h" // AVPN (macOS desktop): авто-установка root-демона из вшитого pkg (ноль терминала)
+#include <QThread>
+#endif
 
 namespace avpn {
 
@@ -214,6 +220,13 @@ bool AvpnEngineQml::subActive() const
     return debugSnapshot().value(QStringLiteral("subStatus")).toString() == QLatin1String("active");
 }
 
+QString AvpnEngineQml::localDeviceId() const
+{
+    // installation-UUID из secure-store — стабильный, генерится на первом запуске, тот же уходит
+    // на backend при enroll (=> совпадает с devices.device_id). Доступен всегда, без сети.
+    return Identity::deviceId(m_store);
+}
+
 int AvpnEngineQml::daysLeft() const
 {
     const QString iso = debugSnapshot().value(QStringLiteral("expiresAt")).toString();
@@ -223,7 +236,9 @@ int AvpnEngineQml::daysLeft() const
     if (!exp.isValid())
         return -1;
     const qint64 secs = QDateTime::currentDateTimeUtc().secsTo(exp.toUTC());
-    return secs <= 0 ? 0 : static_cast<int>(secs / 86400);
+    // AVPN: округление ВВЕРХ (ceil), а не вниз — чтобы совпадало с админкой/бэкендом: «осталось
+    // 6 дней 18 часов» = «7 дней» (раньше floor давал 6, юзер видел рассинхрон с выданными 7).
+    return secs <= 0 ? 0 : static_cast<int>((secs + 86399) / 86400);
 }
 
 // AVPN: текущий сервер для карточки Connect. Показываем ноду ТОЛЬКО когда реально подключены/
@@ -602,6 +617,27 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (ноль терминала): на macOS туннель поднимает root-демон Tribe-service. Нет демона —
+    // ставим из ВШИТОГО pkg одним системным промптом пароля (MacServiceInstaller). Если демон уже
+    // установлен/запущен — мгновенный выход, рабочий путь коннекта НЕ меняется. NB: без nested
+    // QEventLoop/processEvents (CONNECT-INVARIANTS) — только короткий msleep на первом запуске.
+    if (!avpn::macServiceRunning()) {
+        if (!avpn::macServiceInstalled()) {
+            QString ierr;
+            if (!avpn::macInstallService(&ierr)) {
+                ++m_startAttempts;
+                emit error(ierr.isEmpty() ? tr("Не удалось установить службу VPN") : ierr);
+                emit changed();
+                return;
+            }
+        }
+        // installer синхронно отработал postinstall (bootstrap демона) — ждём живой процесс до ~5с.
+        for (int i = 0; i < 16 && !avpn::macServiceRunning(); ++i)
+            QThread::msleep(300);
+    }
+#endif
+
     m_op = Op::Starting;
     m_opInFlight = true;
     m_busy = true;
@@ -1007,6 +1043,9 @@ void AvpnEngineQml::refreshDevices()
                     const QJsonObject d = v.toObject();
                     QVariantMap m;
                     m.insert(QStringLiteral("device_id"), d.value(QStringLiteral("device_id")).toString());
+                    // AVPN: device_uuid (install-UUID = localDeviceId) — публичный «ID устройства»
+                    // для UI и операций extend/delete; device_id (PK) deprecated. Контракт LIVE.
+                    m.insert(QStringLiteral("device_uuid"), d.value(QStringLiteral("device_uuid")).toString());
                     m.insert(QStringLiteral("platform"), d.value(QStringLiteral("platform")).toString());
                     m.insert(QStringLiteral("label"), d.value(QStringLiteral("label")).toString());
                     m.insert(QStringLiteral("last_seen"), d.value(QStringLiteral("last_seen")).toString());

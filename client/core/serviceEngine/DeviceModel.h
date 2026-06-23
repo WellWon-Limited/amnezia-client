@@ -107,9 +107,16 @@ inline QString deviceMarketingName()
     if (!mac.isEmpty())
         return mac;
 #elif defined(Q_OS_IOS)
-    const QString ios = iosMarketingName(sysctlStr("hw.machine"));
+    const QString machine = sysctlStr("hw.machine");
+    const QString ios = iosMarketingName(machine);
     if (!ios.isEmpty())
         return ios;
+    // AVPN: НЕ фоллбечить на hostname — на iOS он = "localhost" (показывался как имя устройства).
+    // Неизвестная/новая модель → родовое имя по префиксу машины, в крайнем случае версия ОС.
+    if (machine.startsWith(QLatin1String("iPhone"))) return QStringLiteral("iPhone");
+    if (machine.startsWith(QLatin1String("iPad")))   return QStringLiteral("iPad");
+    if (machine.startsWith(QLatin1String("iPod")))   return QStringLiteral("iPod touch");
+    return QSysInfo::prettyProductName(); // напр. "iOS 18.x", но НИКОГДА "localhost"
 #endif
     const QString host = QSysInfo::machineHostName();
     return host.isEmpty() ? QSysInfo::prettyProductName() : host;
