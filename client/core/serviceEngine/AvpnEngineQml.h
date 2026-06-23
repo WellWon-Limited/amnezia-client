@@ -120,6 +120,10 @@ public:
     Q_INVOKABLE void rotateNext();
     Q_INVOKABLE void refreshPool();
 
+    // AVPN: ЛОКАЛЬНЫЙ device_id (installation-UUID из secure-store) — тот же, что уходит на backend
+    // при enroll. Доступен ВСЕГДА, без сети/подписки → раздел «Устройства» показывает ID всегда.
+    Q_INVOKABLE QString localDeviceId() const;
+
     // AVPN (Task C): вход/восстановление по коду доступа (POST /v1/code/redeem). Синхронно.
     // 200 → РОТАЦИЯ токена (Enrollment::saveToken) → re-fetch подписки → emit changed().
     // 401 → emit error («неверный код»). 409 → emit seatLimitReached(devices[]) (UI-выбор кого отключить).
@@ -206,6 +210,9 @@ public:
 signals:
     void changed();
     void error(const QString &message);
+    // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
+    // конфликт маршрутов («крутится, не подключается»). UI показывает уведомление «отключите другой VPN».
+    void vpnConflict(const QString &name);
     // AVPN (Task C): redeem вернул 409 (мест нет) — devices[] для UI-выбора кого отключить
     // (DELETE /v1/devices/{id} или повторный redeemCode(code, evictDeviceId)). Каждый элемент —
     // QVariantMap {deviceId, platform, label, lastSeen, isCurrent}.

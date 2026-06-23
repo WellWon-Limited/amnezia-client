@@ -64,6 +64,12 @@ list(APPEND SOURCES
     ${AVPN_SE}/AvpnIntentBridge.cpp
 )
 
+# AVPN: авто-установка root-демона из вшитого pkg — только macOS-desktop (НЕ NE, НЕ iOS).
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    list(APPEND HEADERS ${AVPN_SE}/MacServiceInstaller.h)
+    list(APPEND SOURCES ${AVPN_SE}/MacServiceInstaller.mm)
+endif()
+
 # AVPN: нативные iOS-исходники — только для iOS-таргета.
 if(IOS)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnSafeArea.mm)

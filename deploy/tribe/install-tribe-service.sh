@@ -53,8 +53,24 @@ install() {
     # кладём бинарь в root-овый /Library/PrivilegedHelperTools (см. TRIBE-iOS-DEV §15).
     local destdir="/Library/PrivilegedHelperTools/TribeVPN"
     local bin="$destdir/$LABEL"
+    local srcdir="$(cd "$(dirname "$src")" && pwd)"
     mkdir -p "$destdir"
     cp -f "$src" "$bin"
+
+    # amneziawg-go демон запускает из своего же каталога (applicationDirPath) — кладём рядом.
+    [ -x "$srcdir/amneziawg-go" ] && cp -f "$srcdir/amneziawg-go" "$destdir/amneziawg-go" \
+        || echo "  ⚠️ amneziawg-go не найден рядом с демоном — туннель не поднимется"
+
+    # Вшитый Qt+openssl (bundle-daemon-qt.sh): демон ищет их по rpath @loader_path/Frameworks.
+    # Без этого на машине без ~/Qt демон не стартует (dyld). Если каталога нет — демон рассчитывает
+    # на dev-Qt в ~/Qt (только для этой машины).
+    if [ -d "$srcdir/Frameworks" ]; then
+        rm -rf "$destdir/Frameworks"
+        cp -aR "$srcdir/Frameworks" "$destdir/Frameworks"
+        echo "  + вшитый Qt/openssl скопирован в $destdir/Frameworks"
+    else
+        echo "  ⚠️ нет $srcdir/Frameworks — демон будет грузить Qt из ~/Qt (не для раздачи!)"
+    fi
 
     # pf-правила демон читает из каталога pf рядом с бинарём (ResourceDir).
     mkdir -p "$destdir/pf"

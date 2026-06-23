@@ -618,6 +618,13 @@ void AvpnEngineQml::reconcile()
 void AvpnEngineQml::guardedStart()
 {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN: другой активный VPN (чужой full-tunnel/демон) дерётся за маршрут → «крутится, не
+    // подключается». Предупреждаем (не блокируем — на случай ложного срабатывания).
+    {
+        const QString foreign = avpn::macForeignVpnName();
+        if (!foreign.isEmpty())
+            emit vpnConflict(foreign);
+    }
     // AVPN (ноль терминала): на macOS туннель поднимает root-демон Tribe-service. Нет демона —
     // ставим из ВШИТОГО pkg одним системным промптом пароля (MacServiceInstaller). Если демон уже
     // установлен/запущен — мгновенный выход, рабочий путь коннекта НЕ меняется. NB: без nested
