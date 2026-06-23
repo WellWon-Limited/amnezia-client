@@ -63,7 +63,7 @@ PageType {
         if (!(trafficLimitB > 0)) return "∞"           // безлимит / ещё не загружено (0 или NaN)
         var leftB = Math.max(0, trafficLimitB - trafficUsedB)
         if (isNaN(leftB)) return "∞"
-        return (leftB / 1e9).toFixed(1) + " GB"
+        return (leftB / 1073741824).toFixed(1) + " GB"   // ГиБ (1024³) — как карточка «Настройки» (fmtGb), синхрон с админкой
     }
     // daysLeft<0 = бессрочно/неизвестно → «∞»; иначе «N дн.»
     readonly property string daysLeftText: !hasEngine ? qsTr("12 дн.")
@@ -114,6 +114,11 @@ PageType {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) { PageController.showErrorMessage(message) }
+        // AVPN (macOS): обнаружен другой активный VPN → конфликт маршрутов/демонов. Предупреждаем.
+        function onVpnConflict(name) {
+            PageController.showNotificationMessage(
+                qsTr("Обнаружен другой активный VPN (%1). Отключите его — Tribe VPN может не подключиться из-за конфликта.").arg(name))
+        }
     }
 
     // AVPN (Task 13): активация после покупки по диплинку → re-fetch подписки (бейдж оживёт).
