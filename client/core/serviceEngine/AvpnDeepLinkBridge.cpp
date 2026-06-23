@@ -1,5 +1,6 @@
 // AVPN (Task 13) — реализация моста диплинка ПЕРЕНОСА. См. AvpnDeepLinkBridge.h.
 #include "AvpnDeepLinkBridge.h"
+#include "Enrollment.h" // AVPN (рефералы): savePendingReferral — pending-код до первого /v1/trial
 
 #include <QMetaObject>
 #include <QUrl>
@@ -25,6 +26,34 @@ void AvpnDeepLinkBridge::handleUrl(const QString &url)
 void AvpnDeepLinkBridge::applyUrl(const QString &url)
 {
     const QUrl u(url);
+
+    // AVPN (рефералы): tribe://r/<code>|tribe://a/<code> ИЛИ https://*.tribevpn.com/r/<code>|/a/<code>.
+    // Извлекаем код приглашения, сохраняем до ПЕРВОГО /v1/trial (first-touch). Бэк сам различит
+    // peer(/r/)/affiliate(/a/) по самому коду. Не редимим тут — только запоминаем.
+    {
+        QString refCode;
+        if (u.scheme() == QLatin1String("tribe")
+            && (u.host() == QLatin1String("r") || u.host() == QLatin1String("a"))) {
+            refCode = u.path();
+            if (refCode.startsWith(QLatin1Char('/'))) refCode = refCode.mid(1);
+        } else if (u.scheme() == QLatin1String("https")
+                   && u.host().endsWith(QLatin1String("tribevpn.com"))) {
+            const QString p = u.path();
+            if (p.startsWith(QLatin1String("/r/")) || p.startsWith(QLatin1String("/a/")))
+                refCode = p.mid(3);
+        }
+        // только код: отрезаем возможный хвостовой сегмент/слэш
+        const int slash = refCode.indexOf(QLatin1Char('/'));
+        if (slash >= 0)
+            refCode = refCode.left(slash);
+        refCode = refCode.trimmed();
+        if (!refCode.isEmpty()) {
+            Enrollment::savePendingReferral(refCode);
+            emit referralCaptured(refCode);
+            return; // реферал-ссылка обработана
+        }
+    }
+
     // Принимаем: tribe://transfer?t=…  ИЛИ  https://*.tribevpn.com/transfer?t=… (Universal Link).
     const bool isScheme = (u.scheme() == QLatin1String("tribe")
                            && u.host() == QLatin1String("transfer"));

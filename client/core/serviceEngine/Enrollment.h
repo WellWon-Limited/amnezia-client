@@ -291,12 +291,20 @@ public:
 
     // Ключи в защ. хранилище (наш namespace, чтобы не пересекаться с настройками форка).
     static constexpr QLatin1String kTokenKey{"avpn/subscriptionToken"};
+    // AVPN (рефералы): код приглашения из deep-link /r/<code>(друзья)|/a/<code>(блогеры), сохранён
+    // до ПЕРВОГО /v1/trial (first-touch). Бэк сам различит peer/affiliate по коду.
+    static constexpr QLatin1String kReferralKey{"avpn/pendingReferral"};
 
     // AVPN: токен храним через SecureQSettings (публичный API форка) — value/setValue у
     // SecureAppSettingsRepository приватные. Org/App из version.h → тот же зашифрованный стор.
     static void    saveToken(const QString &token);
     static QString loadToken();
     static void    clearToken();
+    // AVPN (рефералы): pending-код приглашения. Пишет мост (AvpnDeepLinkBridge) при открытии /r//a/;
+    // читает+чистит enroll() (передаёт в referral_code тела /v1/trial). Не секрет, тот же стор.
+    static void    savePendingReferral(const QString &code);
+    static QString loadPendingReferral();
+    static void    clearPendingReferral();
 };
 
 } // namespace avpn

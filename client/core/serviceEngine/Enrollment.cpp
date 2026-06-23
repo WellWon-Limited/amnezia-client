@@ -32,6 +32,23 @@ void Enrollment::clearToken()
     s.setValue(kTokenKey, QString());
 }
 
+// AVPN (рефералы): pending-код приглашения (first-touch) в том же сторе.
+void Enrollment::savePendingReferral(const QString &code)
+{
+    SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    s.setValue(kReferralKey, code.trimmed());
+}
+QString Enrollment::loadPendingReferral()
+{
+    SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    return s.value(kReferralKey).toString();
+}
+void Enrollment::clearPendingReferral()
+{
+    SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    s.setValue(kReferralKey, QString());
+}
+
 bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Identity &identity,
                         SecureAppSettingsRepository *store, TrialResponse &out, QString &error)
 {
@@ -43,7 +60,9 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
         return false;
 
     const QString deviceId = Identity::deviceId(store);
-    const QByteArray body = buildTrialBody(identity.publicKey(), deviceId, detectPlatform(), deviceModel());
+    // AVPN (рефералы): передаём pending referral_code (из deep-link /r//a/, если был) — first-touch.
+    const QByteArray body = buildTrialBody(identity.publicKey(), deviceId, detectPlatform(),
+                                           deviceModel(), loadPendingReferral());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/trial"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -75,6 +94,7 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
 
     Q_UNUSED(store)
     saveToken(out.subscriptionToken); // токен — в защ. хранилище (AVPN)
+    clearPendingReferral();           // реферал атрибутирован на бэке (first-touch) — больше не нужен
     return true;
 }
 
