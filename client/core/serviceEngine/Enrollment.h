@@ -74,9 +74,11 @@ class Enrollment {
 public:
     // --- чистые (тестируемые) ---
 
-    // Тело POST /v1/trial: { public_key, device_id, platform, model } (model — имя устройства для кабинета)
+    // Тело POST /v1/trial: { public_key, device_id, platform, model, referral_code? }. referral_code —
+    // опциональная реферал-атрибуция (код из deep-link /r/<code> друзья или /a/<code> блогеры). LIVE.
     static QByteArray buildTrialBody(const QString &publicKey, const QString &deviceId,
-                                     const QString &platform, const QString &model = QString())
+                                     const QString &platform, const QString &model = QString(),
+                                     const QString &referralCode = QString())
     {
         QJsonObject o;
         o.insert(QStringLiteral("public_key"), publicKey);
@@ -84,6 +86,8 @@ public:
         o.insert(QStringLiteral("platform"), platform);
         if (!model.isEmpty())
             o.insert(QStringLiteral("model"), model);
+        if (!referralCode.isEmpty())
+            o.insert(QStringLiteral("referral_code"), referralCode.trimmed());
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
     }
 
