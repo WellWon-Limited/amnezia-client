@@ -55,6 +55,8 @@ class AvpnEngineQml : public QObject {
     // запускают фоновый GET, результат прилетает через devicesChanged()/accountChanged().
     Q_PROPERTY(QVariantList devices READ devices NOTIFY devicesChanged)
     Q_PROPERTY(QVariantMap account READ account NOTIFY accountChanged)
+    // AVPN (рефералы #37): GET /v1/referral → {code, link, invited, days_earned} для баннера «Поделиться».
+    Q_PROPERTY(QVariantMap referral READ referral NOTIFY referralChanged)
     // AVPN (Task 7): туннель на «авто-паузе для покупок» (реально down, ждём авто-возврат). // AVPN
     Q_PROPERTY(bool paused READ paused NOTIFY changed)
     // AVPN (реальные палочки): живое качество ТЕКУЩЕГО соединения, измеренное app-layer RTT-пробой
@@ -98,6 +100,7 @@ public:
     // AVPN: кэш последнего async-ответа /v1/devices и /v1/account (для биндинга в QML).
     QVariantList devices() const { return m_devices; }
     QVariantMap account() const { return m_account; }
+    QVariantMap referral() const { return m_referral; }   // AVPN (#37): кэш GET /v1/referral
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
     void setBaseUrl(const QString &url) { m_baseUrl = url; }
@@ -167,6 +170,10 @@ public:
     // traffic_limit, traffic_used} и эмитит accountChanged(). Нет токена / 401 / сеть → пустая мапа.
     Q_INVOKABLE void refreshAccount();
 
+    // AVPN (#37 рефералы): GET /v1/referral (АСИНХРОННО, Bearer) → property `referral`
+    // {code, link, invited, days_earned} + emit referralChanged(). 401/сеть → пустая мапа.
+    Q_INVOKABLE void refreshReferral();
+
     // AVPN (Task 9 — APNs): зарегистрировать push device token на бэке (POST /v1/devices/push-token,
     // Bearer = authToken()). body {token, platform:"ios", environment, app_version}. АСИНХРОННО (как
     // refreshAccount, без nested loop). environment: "sandbox"|"production" (TestFlight/Debug vs App
@@ -223,6 +230,7 @@ signals:
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
+    void referralChanged();   // AVPN (#37): async-ответ /v1/referral готов (property referral обновлена)
     // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
     void liveQualityChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
@@ -288,6 +296,7 @@ private:
     // AVPN: кэш последних async-ответов /v1/devices и /v1/account (см. refreshDevices/refreshAccount).
     QVariantList                 m_devices;
     QVariantMap                  m_account;
+    QVariantMap                  m_referral;   // AVPN (#37): кэш GET /v1/referral {code,link,invited,days_earned}
     // AVPN (Task 9 — APNs): последний device token/окружение от AvpnPushBridge — для ПЕРЕ-регистрации
     // после ротации subscription_token (redeemCode/redeemTransfer: старый токен на сервере сброшен).
     QString                      m_pushToken;

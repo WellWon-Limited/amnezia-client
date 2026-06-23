@@ -121,6 +121,14 @@ PageType {
         if (root.hasEngine && typeof TribeEngine.refreshAccount === "function")
             TribeEngine.refreshAccount()
     }
+    // AVPN (#37): GET /v1/referral → ссылка/код/статистика для баннера «Поделиться с друзьями».
+    function refreshReferral() {
+        if (root.hasEngine && typeof TribeEngine.refreshReferral === "function")
+            TribeEngine.refreshReferral()
+    }
+    // реф-данные движка (link/invited/days_earned); пустая мапа до загрузки/без токена.
+    readonly property var referralData: root.hasEngine ? TribeEngine.referral : ({})
+    readonly property string referralLink: referralData && referralData.link ? ("" + referralData.link) : ""
 
     // человекочитаемый статус аккаунта для строки ПРОФИЛЬ.
     function accountStatusLabel() {
@@ -186,7 +194,7 @@ PageType {
     Component.onCompleted: settingsLoadTimer.start()
     Timer {
         id: settingsLoadTimer; interval: 400; repeat: false
-        onTriggered: { root.refreshDevices(); root.refreshAccount() }
+        onTriggered: { root.refreshDevices(); root.refreshAccount(); root.refreshReferral() }
     }
 
     // ── ПЕРЕНОС НА НОВОЕ УСТРОЙСТВО (createTransfer) ─────────────────────────────────────
@@ -380,18 +388,37 @@ PageType {
                         id: pillText
                         anchors.centerIn: parent
                         textFormat: Text.StyledText
-                        text: "<font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font> бесплатно"
+                        // если уже приглашал друзей — показываем его статистику; иначе оффер. // AVPN (#37)
+                        text: {
+                            var r = root.referralData
+                            if (r && r.invited > 0)
+                                return "<font color='" + Theme.color.cta + "'>Приглашено " + r.invited
+                                       + "</font> · +" + (r.days_earned || 0) + " дней"
+                            return "<font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font> бесплатно"
+                        }
                         color: "white"
                         font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS   // мельче (было bodyM)
                         font.weight: Theme.font.wMedium                                  // не жирно (было Semibold + <b>)
                     }
                 }
             }
+            // скрытый носитель реф-ссылки для копирования в буфер (паттерн форка: selectAll()+copy()). // AVPN
+            TextEdit { id: refLinkEdit; width: 0; height: 0; opacity: 0; readOnly: true }
             MouseArea {
                 id: shareMa
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(root.shareUrl)
+                // #37: делимся реальной реф-ссылкой (в ней зашит код пользователя → бонус начислится).
+                // Копируем в буфер + тост (надёжно, Apple-safe). Если ссылка ещё не загрузилась — сайт.
+                onClicked: {
+                    if (root.referralLink.length > 0) {
+                        refLinkEdit.text = root.referralLink
+                        refLinkEdit.selectAll(); refLinkEdit.copy(); refLinkEdit.deselect()
+                        PageController.showNotificationMessage(qsTr("Ссылка скопирована — отправь другу"))
+                    } else {
+                        Qt.openUrlExternally(root.shareUrl)
+                    }
+                }
             }
         }
 

@@ -1157,6 +1157,45 @@ void AvpnEngineQml::refreshAccount()
     });
 }
 
+// AVPN (#37 рефералы): GET /v1/referral → {code, link, invited, days_earned}. Тот же async-паттерн,
+// что refreshAccount (без вложенного QEventLoop). Код привязывается к устройству при первом вызове
+// (issued lazily) — поэтому бонус-дни от установки друга падают на ЭТО устройство.
+void AvpnEngineQml::refreshReferral()
+{
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        if (!m_referral.isEmpty()) { m_referral.clear(); emit referralChanged(); }
+        return;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/referral"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QVariantMap result;
+        if (code >= 200 && code < 300) {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isObject()) {
+                const QJsonObject o = doc.object();
+                result.insert(QStringLiteral("code"), o.value(QStringLiteral("code")).toString());
+                result.insert(QStringLiteral("link"), o.value(QStringLiteral("link")).toString());
+                result.insert(QStringLiteral("invited"),
+                              static_cast<int>(o.value(QStringLiteral("invited")).toDouble()));
+                result.insert(QStringLiteral("days_earned"),
+                              static_cast<int>(o.value(QStringLiteral("days_earned")).toDouble()));
+            }
+        }
+        // 401/сеть/таймаут → пустая мапа (баннер покажет дефолтный оффер). Эмитим всегда.
+        m_referral = result;
+        emit referralChanged();
+    });
+}
+
 // AVPN (Task 9 — APNs): POST /v1/devices/push-token (Bearer = subscription_token). АСИНХРОННО (как
 // refreshAccount — без вложенного QEventLoop: зовётся из сигнала моста на GUI-потоке). body
 // {token, platform:"ios", environment, app_version}. Нет токена подписки / сеть / таймаут → тихо
