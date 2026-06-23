@@ -36,6 +36,9 @@ signals:
     // AVPN (Task 13): из ссылки извлечён токен переноса. coreController связывает это с
     // AvpnEngineQml::redeemTransfer(token) (POST /v1/transfer/redeem + РОТАЦИЯ токена).
     void transferRequested(const QString &transferToken);
+    // AVPN (рефералы): из /r/<code>|/a/<code> извлечён код приглашения (уже сохранён в pending-стор
+    // через Enrollment::savePendingReferral — уйдёт в referral_code первого /v1/trial). Сигнал — для UI.
+    void referralCaptured(const QString &code);
 
 private:
     explicit AvpnDeepLinkBridge(QObject *parent = nullptr);
