@@ -21,9 +21,11 @@ PageType {
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property int  daysLeftN:     hasEngine ? TribeEngine.daysLeft : -1
     readonly property real usedFrac: trafficLimitB > 0 ? Math.min(1, trafficUsedB / trafficLimitB) : 0
-    // AVPN: ГБ как в админке/бэкенде — двоичные ГиБ (1024³), а не десятичные 1e9. Иначе лимит
-    // «4 ГБ» (= 4·2³⁰ байт на бэке) показывался как «4.3». Теперь 4 ГиБ → «4.0», совпадает с админкой.
-    function fmtGb(b) { return (b / 1073741824).toFixed(1) }
+    // AVPN: ГБ из backend-величины трафика. После per-device-переработки бэк отдаёт traffic_limit/used
+    // в масштабе ×1024 больше true-байт (÷1024³ давало 3024 вместо ~3) → делим на 1024⁴ → чистые ГБ,
+    // остаток убывает по 0.1 ГБ (лимит и used инфлейтятся одинаково). Если бэк начнёт слать настоящие
+    // байты — вернуть 1073741824 (1024³). Единица согласована с владельцем 2026-06-23.
+    function fmtGb(b) { return (b / 1099511627776).toFixed(1) }
     // AVPN: shareUrl ДОЛЖЕН быть на root (раньше был на ColumnLayout → root.shareUrl=undefined →
     // «Поделиться» молча не работала). Сайт деплоит веб-команда.
     readonly property string shareUrl: "https://tribevpn.com"
@@ -247,8 +249,8 @@ PageType {
                 GradientStop { position: 0.0; color: Theme.color.surface2 }
                 GradientStop { position: 1.0; color: Theme.color.bg700 }
             }
-            border.width: 1.5
-            border.color: Theme.color.ctaDeep
+            border.width: 0.5                     // золотая рамка — тонкий хайрлайн (Retina ~1px)
+            border.color: Theme.color.cta         // чистое золото
             scale: shareMa.pressed ? 0.99 : 1.0
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
 
@@ -358,9 +360,10 @@ PageType {
                         color: "white"
                         font.family: Theme.font.display
                         font.pixelSize: Theme.font.bodyS
-                        font.weight: Theme.font.wExtra
+                        font.weight: Theme.font.wSemibold   // не пережир (было wExtra 800)
                         lineHeight: 1.15
-                        wrapMode: Text.WordWrap
+                        wrapMode: Text.NoWrap               // ровно 2 строки по \n, без переноса в 3-ю
+                        // без elide — текст «подарок» показывается полностью (место есть)
                     }
 
                     // иконка «поделиться» (iOS share: коробка + стрелка вверх) справа, высотой ~в две
@@ -369,11 +372,11 @@ PageType {
                         Layout.alignment: Qt.AlignVCenter
                         Layout.preferredWidth: 30; Layout.preferredHeight: 34
                         Shape {
-                            anchors.centerIn: parent; width: 24; height: 24; scale: 30 / 24
+                            anchors.centerIn: parent; width: 24; height: 24
                             transformOrigin: Item.Center
                             preferredRendererType: Shape.CurveRenderer
                             ShapePath {
-                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
+                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 1.4   // тоньше (было 2 + апскейл)
                                 capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
                                 PathSvg { path: "M8.5 11 H6.5 a1.5 1.5 0 0 0 -1.5 1.5 V19.5 a1.5 1.5 0 0 0 1.5 1.5 H17.5 a1.5 1.5 0 0 0 1.5 -1.5 V12.5 a1.5 1.5 0 0 0 -1.5 -1.5 H15.5" }
                                 PathSvg { path: "M12 3.5 V15" }
@@ -389,14 +392,16 @@ PageType {
                     implicitHeight: pillText.implicitHeight + 2 * Theme.space.sm
                     radius: Theme.radius.pill
                     color: Qt.rgba(0, 0, 0, 0.24)
+                    border.width: 0.5                     // серый хайрлайн-контур (тоньше, не голубой)
+                    border.color: Theme.color.border3
                     Text {
                         id: pillText
                         anchors.centerIn: parent
                         textFormat: Text.StyledText
-                        text: "<b><font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font></b> бесплатно"
+                        text: "<font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font> бесплатно"
                         color: "white"
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                        font.weight: Theme.font.wSemibold
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS   // мельче (было bodyM)
+                        font.weight: Theme.font.wMedium                                  // не жирно (было Semibold + <b>)
                     }
                 }
             }
