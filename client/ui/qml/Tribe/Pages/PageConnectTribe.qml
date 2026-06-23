@@ -652,6 +652,16 @@ PageType {
             model: root.hasEngine ? TribeEngine.serviceStatus : []
             onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
+        // AVPN: авто-перепроба чипов в реал-тайме, пока подключены — статусы (красный→зелёный)
+        // обновляются САМИ, без тапа по бейджу. Раньше красный «висел» до ручного тапа. При обрыве
+        // таймер останавливается (running ← isOn). Движок дополнительно пробует при коннекте (600мс +
+        // ~4.5с DNS-warm); этот таймер держит актуальность дальше.
+        Timer {
+            interval: 12000
+            repeat: true
+            running: root.isOn && root.hasEngine
+            onTriggered: TribeEngine.probeServices()
+        }
 
         // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────
         // subExpired → ЗОЛОТАЯ кнопка «Получить ключ» (CTA, монетизация).
