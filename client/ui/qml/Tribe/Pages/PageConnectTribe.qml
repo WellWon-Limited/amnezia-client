@@ -705,11 +705,16 @@ PageType {
             MouseArea {
                 id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    // Личный кабинет с JWT-авторизацией: токен подписки (если движок его отдаёт) → query.
-                    // TODO(AVPN): экспонировать TribeEngine.authToken (JWT) из C++ для сквозной авторизации.
+                    // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Передаём JWT (сквозная
+                    // авторизация) + device_uuid, чтобы дни зачислились на ЭТО устройство (бэк: checkout
+                    // per device_uuid, оплата-на-устройство). // AVPN
                     var base = "https://tribevpn.com/account"
+                    var params = []
                     var tok = (root.hasEngine && TribeEngine.authToken !== undefined) ? String(TribeEngine.authToken) : ""
-                    Qt.openUrlExternally(tok.length > 0 ? (base + "?token=" + encodeURIComponent(tok)) : base)
+                    if (tok.length > 0) params.push("token=" + encodeURIComponent(tok))
+                    var dev = (root.hasEngine && typeof TribeEngine.localDeviceId === "function") ? String(TribeEngine.localDeviceId()) : ""
+                    if (dev.length > 0) params.push("device_uuid=" + encodeURIComponent(dev))
+                    Qt.openUrlExternally(params.length > 0 ? (base + "?" + params.join("&")) : base)
                 }
             }
         }
