@@ -21,11 +21,10 @@ PageType {
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property int  daysLeftN:     hasEngine ? TribeEngine.daysLeft : -1
     readonly property real usedFrac: trafficLimitB > 0 ? Math.min(1, trafficUsedB / trafficLimitB) : 0
-    // AVPN: ГБ из backend-величины трафика. После per-device-переработки бэк отдаёт traffic_limit/used
-    // в масштабе ×1024 больше true-байт (÷1024³ давало 3024 вместо ~3) → делим на 1024⁴ → чистые ГБ,
-    // остаток убывает по 0.1 ГБ (лимит и used инфлейтятся одинаково). Если бэк начнёт слать настоящие
-    // байты — вернуть 1073741824 (1024³). Единица согласована с владельцем 2026-06-23.
-    function fmtGb(b) { return (b / 1099511627776).toFixed(1) }
+    // AVPN: traffic_limit/used = СЫРЫЕ БАЙТЫ, двоичная база (бэк подтвердил по openapi/schemas/models/
+    // collector + живым значениям: триал=10·1024³, кап=100·1024³). ГиБ = ÷1024³ → ровно. НЕ ×1e9 и НЕ
+    // ×1024⁴. (Откат ошибочного ÷1024⁴ из build 38; 2026-06-23.)
+    function fmtGb(b) { return (b / 1073741824).toFixed(1) }
     // AVPN: shareUrl ДОЛЖЕН быть на root (раньше был на ColumnLayout → root.shareUrl=undefined →
     // «Поделиться» молча не работала). Сайт деплоит веб-команда.
     readonly property string shareUrl: "https://tribevpn.com"
@@ -356,6 +355,7 @@ PageType {
                     Text {
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
+                        Layout.leftMargin: Theme.space.xs   // чуть больше отступ от иконки подарка
                         text: qsTr("Поделиться с друзьями\nЗа каждого друга — подарок!")
                         color: "white"
                         font.family: Theme.font.display
@@ -365,25 +365,7 @@ PageType {
                         wrapMode: Text.NoWrap               // ровно 2 строки по \n, без переноса в 3-ю
                         // без elide — текст «подарок» показывается полностью (место есть)
                     }
-
-                    // иконка «поделиться» (iOS share: коробка + стрелка вверх) справа, высотой ~в две
-                    // строки заголовка. Символизирует «поделиться»; тап по всей плашке открывает шэр. // AVPN
-                    Item {
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.preferredWidth: 30; Layout.preferredHeight: 34
-                        Shape {
-                            anchors.centerIn: parent; width: 24; height: 24
-                            transformOrigin: Item.Center
-                            preferredRendererType: Shape.CurveRenderer
-                            ShapePath {
-                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 1.4   // тоньше (было 2 + апскейл)
-                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                                PathSvg { path: "M8.5 11 H6.5 a1.5 1.5 0 0 0 -1.5 1.5 V19.5 a1.5 1.5 0 0 0 1.5 1.5 H17.5 a1.5 1.5 0 0 0 1.5 -1.5 V12.5 a1.5 1.5 0 0 0 -1.5 -1.5 H15.5" }
-                                PathSvg { path: "M12 3.5 V15" }
-                                PathSvg { path: "M8 7 L12 3.5 L16 7" }
-                            }
-                        }
-                    }
+                    // иконка «поделиться» убрана (по запросу) — вся плашка кликабельна на шэр.
                 }
 
                 // пилюля во всю ширину плашки: «7 дней + 3 ГБ» золотом, «бесплатно» белым
