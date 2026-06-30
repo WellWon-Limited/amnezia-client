@@ -284,6 +284,11 @@ private:
     bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
     bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
+    bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
+                                                                   // QEventLoop (awaitReply) → запрет повторного
+                                                                   // входа guardedStart. НЕ сбрасывается сменой
+                                                                   // состояния (в отличие от m_opInFlight) — иначе
+                                                                   // reconcile внутри цикла застекал бы 2-й loop.exec
     int                          m_startAttempts = 0;              // подряд неудачных connect — анти-зацикливание
     enum class Op { None, Starting, Stopping };
     Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)

@@ -28,7 +28,10 @@ static NSString *avpnPushEnvironment(void)
             NSDictionary *plist = [NSPropertyListSerialization
                 propertyListWithData:[plistStr dataUsingEncoding:NSISOLatin1StringEncoding]
                              options:0 format:nil error:nil];
-            NSString *aps = plist[@"Entitlements"][@"aps-environment"];
+            // AVPN (краш-фикс): защита от NSInvalidArgumentException. Если Entitlements присутствует, но
+            // НЕ словарь, keyed-subscript бросил бы NSException → uncaught → abort(). Проверяем класс.
+            NSDictionary *ent = [plist isKindOfClass:[NSDictionary class]] ? plist[@"Entitlements"] : nil;
+            NSString *aps = [ent isKindOfClass:[NSDictionary class]] ? ent[@"aps-environment"] : nil;
             if ([aps isEqualToString:@"development"]) return @"sandbox";
             if ([aps isEqualToString:@"production"]) return @"production";
         }

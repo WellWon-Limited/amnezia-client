@@ -369,7 +369,9 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
 
     // AVPN: таймаут вместо DISPATCH_TIME_FOREVER — если completion не пришёл (битые prefs / лимит NE-профилей),
     // не виснем на потоке навсегда; считаем ошибкой и выходим.
-    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) != 0) {
+    // AVPN (краш-фикс): 3 c < iOS-watchdog 5 c. Блокировка потока на 10 c при suspend/terminate
+    // (главный поток ждёт join этого воркера) перебивала watchdog → 0x8BADF00D. Таймаут = ошибка коннекта.
+    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC))) != 0) {
         qDebug() << "IosController::connectVpn : loadAllFromPreferences timed out";
         return false;
     }

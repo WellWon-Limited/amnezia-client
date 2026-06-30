@@ -18,9 +18,13 @@
 
 namespace avpn {
 
-inline constexpr int kNetTimeoutMs = 15000;
+inline constexpr int kNetTimeoutMs  = 15000; // АСИНХРОННЫЙ путь (armTimeout) — UI не блокируется
+// AVPN (краш-фикс iOS): СИНХРОННЫЙ awaitReply крутит вложенный QEventLoop, блокирующий ГЛАВНЫЙ поток.
+// 15 c здесь > iOS-watchdog 5 c → при suspend/медленном бэке давало 0x8BADF00D («Hang UIKit-runloop»).
+// Держим СТРОГО < 5 c: операция при таймауте уходит в штатную ветку «сеть недоступна» (code 0) + ретрай.
+inline constexpr int kSyncTimeoutMs = 4000;
 
-inline void awaitReply(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
+inline void awaitReply(QNetworkReply *reply, int timeoutMs = kSyncTimeoutMs)
 {
     if (!reply)
         return;
@@ -39,7 +43,11 @@ inline void awaitReply(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
     });
 
     timer.start(timeoutMs);
-    loop.exec();
+    // AVPN (краш-фикс iOS): ExcludeUserInputEvents — пока крутится вложенный цикл, НЕ доставляем
+    // UIKit-тачи в QML. Иначе очередной тач хит-тестит всё ещё включённую кнопку → повторный
+    // onClicked → второй awaitReply застекает ещё один loop.exec() → re-entrancy → abort().
+    // Тачи не теряются: отрабатывают после выхода из цикла. Сетевой/таймаут-выход не затронут.
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
 }
 
 // AVPN: «жёсткий» таймаут для АСИНХРОННОГО reply (без вложенного QEventLoop — для GUI-потока).
