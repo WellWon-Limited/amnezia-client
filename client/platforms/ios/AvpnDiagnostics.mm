@@ -3,7 +3,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-@import MetricKit; // clang-module auto-link MetricKit.framework (как UserNotifications в AvpnPush)
+#import <MetricKit/MetricKit.h> // НЕ @import: в .mm C++-модули выключены (-fcxx-modules off) → @import не компилится; фреймворк линкуется явно в ios.cmake (FW_METRICKIT)
 
 // Куда шлём payload'ы. Совпадает с дефолтным control-plane движка (AvpnEngineQml m_baseUrl).
 static NSString *const kAvpnDiagUrl = @"https://api.tribevpn.com/v1/diag/crash";
