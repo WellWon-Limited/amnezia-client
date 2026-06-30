@@ -172,6 +172,12 @@ public:
     // traffic_limit, traffic_used} и эмитит accountChanged(). Нет токена / 401 / сеть → пустая мапа.
     Q_INVOKABLE void refreshAccount();
 
+    // DEV TOOL (TEMPORARY — remove with backend routers/devtools.py): factory-reset
+    // THIS account's trial via POST /v1/dev/reset-trial (Bearer = subscription_token).
+    // 2xx → refreshAccount()+bootstrap() so the header (daysLeft/traffic) updates;
+    // 404 (server flag off)/401/net → emit error(). Isolated: one method, one QML row.
+    Q_INVOKABLE void resetTrialDev();
+
     // AVPN (#37 рефералы): GET /v1/referral (АСИНХРОННО, Bearer) → property `referral`
     // {code, link, invited, days_earned} + emit referralChanged(). 401/сеть → пустая мапа.
     Q_INVOKABLE void refreshReferral();
