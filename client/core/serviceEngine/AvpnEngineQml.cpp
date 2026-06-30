@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
+#include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
 // AVPN (Devices+Account): синхронные REST-вызовы к control plane, как fetchSubscription.
 #include "NetAwait.h" // AVPN: awaitReply() — ожидание с таймаутом (анти-фриз GUI)
 #include <QJsonArray>
@@ -617,6 +618,15 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+    // AVPN (краш-фикс iOS, анти-реэнтрантность): startFlow ниже крутит вложенный QEventLoop на главном
+    // потоке. Если guardedStart переисполнен ИЗ этого цикла (queued onConnectionStateChanged очищает
+    // m_opInFlight, затем отложенный reconcile→guardedStart прилетает внутри того же loop.exec()),
+    // второй вход застекал бы ещё один loop.exec() → re-entrancy → abort() (см. комментарий ниже + NetAwait.h).
+    // Деферим на верх цикла событий — намерение не теряется, повтор отработает после раскрутки стека.
+    if (m_inSyncNetCall) {
+        QTimer::singleShot(0, this, [this]() { guardedStart(); });
+        return;
+    }
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN: другой активный VPN (чужой full-tunnel/демон) дерётся за маршрут → «крутится, не
     // подключается». Предупреждаем (не блокируем — на случай ложного срабатывания).
@@ -662,8 +672,15 @@ void AvpnEngineQml::guardedStart()
     // (enroll + GET /v1/subscription); на 2-м коннекте, когда летят сигналы дисконнекта, это давало
     // повторный вход вложенного цикла → «Hang UIKit-runloop» (по логам устройства) → abort(). В Amnezia
     // кнопка коннекта в сеть НЕ ходит — конфиг уже готов, она только поднимает туннель. Делаем так же.
-    const bool ok = m_engine.hasSubscription() ? m_engine.connect(err)
-                                               : m_engine.startFlow(m_nam, m_baseUrl, m_store, err);
+    // AVPN (краш-фикс): startFlow() входит во вложенный QEventLoop (awaitReply). Держим m_inSyncNetCall
+    // на время вызова, чтобы переисполнение guardedStart из этого цикла отложилось (см. гард выше), а не
+    // застекало второй loop.exec(). QScopedValueRollback гарантирует сброс даже при исключении.
+    bool ok;
+    {
+        QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
+        ok = m_engine.hasSubscription() ? m_engine.connect(err)
+                                        : m_engine.startFlow(m_nam, m_baseUrl, m_store, err);
+    }
     if (!ok) {
         // Подъём не удался ДО туннеля (терминального колбэка не будет) — снимаем op-in-flight, считаем
         // попытку, показываем ошибку. Авто-ретрай не запускаем; орб станет «Connect».
