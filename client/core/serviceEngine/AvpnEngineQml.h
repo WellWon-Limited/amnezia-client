@@ -271,6 +271,12 @@ private:
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
 
+    // AVPN: холодный bootstrap подписки С РЕТРАЕМ. На транзиентном сетевом сбое (первый запуск после
+    // обновления: сеть/DNS/TLS/NE ещё не прогреты) одиночный фетч пуст → пул нод пустой до ручного
+    // перезапуска. Здесь переармируем фетч с бэкоффом (тихо, без error()). 401-самохил — в
+    // ServiceEngine::ensureSubscription; этот хелпер добивает именно сетевые сбои.
+    void tryBootstrapSubscription();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
@@ -308,7 +314,9 @@ private:
     enum class Op { None, Starting, Stopping };
     Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)
     QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
-    bool                         m_bootstrapped = false; // AVPN: bootstrap() выполняем один раз (Task 11)
+    bool                         m_bootstrapped = false; // AVPN: bootstrap() УСПЕШНО выполнен (Task 11)
+    bool                         m_bootstrapInFlight = false; // AVPN: цепочка ретраев идёт (дедуп QML-вызовов)
+    int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф)
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume
     bool                         m_paused = false;       // туннель реально down, ждём авто-возврат

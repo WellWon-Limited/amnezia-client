@@ -521,30 +521,57 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
 
 void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ/дней/subActive) ДО первого Connect.
 {
-    // Идемпотентно: один раз за жизнь движка (защита от повторного вызова из QML Component.onCompleted
-    // нескольких экранов + дефер-вызова из конструктора).
-    if (m_bootstrapped)
+    // Дедуп: не стартуем вторую цепочку, если уже успешно прогрузились ИЛИ ретраи в полёте
+    // (защита от повторного вызова из QML Component.onCompleted нескольких экранов + дефер-вызова
+    // из конструктора). m_bootstrapped теперь ставится ТОЛЬКО при успехе → после исчерпания ретраев
+    // повторный заход (навигация/Connect) снова разрешён.
+    if (m_bootstrapped || m_bootstrapInFlight)
         return;
-    m_bootstrapped = true;
+    m_bootstrapInFlight = true;
+    m_bootstrapRetries = 0;
 
     // Ключи клиента (zero-knowledge) — для enroll и последующего connect; ошибка не фатальна для бейджа.
     QString err;
     if (m_engine.identityEnsureKeys(m_store, err))
         m_tunnel.setClientKeys(m_engine.clientKeys());
 
-    // Тихая прогрузка подписки БЕЗ подъёма туннеля. Оффлайн/нет токена → мягко (не показываем error()),
-    // бейдж просто останется на дефолтах до первого успешного start()/bootstrap().
-    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err)) {
-        emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
-        probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
-                        // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
-    }
-    // при провале — тихо: bootstrap не должен пугать пользователя ошибкой при холодном старте.
+    // Тихая прогрузка подписки БЕЗ подъёма туннеля, С РЕТРАЕМ при транзиентном сетевом сбое (см. ниже).
+    tryBootstrapSubscription();
 
     // AVPN (Task 9): если первичный авто-enroll создал subscription_token, а device token уже пришёл
     // из APNs ДО enroll — флашим отложенный push-токен (дедуп защитит от повтора). authToken() пуст →
     // registerPushToken снова тихо отложит до следующего коннекта/ротации.
     flushPendingPushToken();
+}
+
+// AVPN: тихий фетч подписки на холодном старте С САМОВОССТАНОВЛЕНИЕМ. Корень бага «после обновления нет
+// нод»: одиночный фетч на первом запуске падал транзиентно (сеть/DNS/TLS/NE ещё не прогреты сразу после
+// апдейта) → пул пустой до ручного перезапуска ( retry отсутствовал; 401-самохил в ensureSubscription
+// сетевые сбои не покрывает). Решение: переарм с бэкоффом 2/4/8/16/30с (кап 5 попыток ≈ 60с покрытия),
+// тихо (без error()). Успех → m_bootstrapped=true (дедуп), пул наполнен, RTT-проба. Исчерпали → отпускаем
+// m_bootstrapInFlight, чтобы следующий заход/Connect мог попробовать заново.
+void AvpnEngineQml::tryBootstrapSubscription()
+{
+    QString err;
+    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err)) {
+        m_bootstrapped = true;
+        m_bootstrapInFlight = false;
+        m_bootstrapRetries = 0;
+        emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
+        probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
+                        // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
+        return;
+    }
+    // Провал — тихо. Переарм с бэкоффом, пока не исчерпаем кап.
+    static constexpr int kBootstrapBackoffMs[] = {2000, 4000, 8000, 16000, 30000};
+    static constexpr int kBootstrapMaxRetries = 5;
+    if (m_bootstrapRetries >= kBootstrapMaxRetries) {
+        m_bootstrapInFlight = false; // сдались тихо; следующий заход/ручной Connect попробует снова
+        return;
+    }
+    const int delayMs = kBootstrapBackoffMs[m_bootstrapRetries];
+    ++m_bootstrapRetries;
+    QTimer::singleShot(delayMs, this, &AvpnEngineQml::tryBootstrapSubscription);
 }
 
 void AvpnEngineQml::start()
