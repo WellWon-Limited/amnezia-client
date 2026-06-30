@@ -4,6 +4,9 @@
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 
+#include "ru_prefixes.h"                // AVPN RU-split: «весь рунет» для AllowedIPs RU-пира
+#include <QSettings>                    // AVPN RU-split: чтение экспериментального флага avpn/ruSplit
+
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
 // уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
 // чтобы не трогать кросс-платформенный VpnConnection. Android — свой путь через JNI (см. ниже, TODO).
@@ -67,7 +70,28 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         return TunnelResult::fail(QStringLiteral("no VpnConnection"));
     if (m_keys.privateKey.isEmpty())
         return TunnelResult::fail(QStringLiteral("client keys not set"));
-    const QJsonObject cfg = AwgConfigBuilder::build(sub, node, m_keys);
+
+    // AVPN RU-split (экспериментальный флаг avpn/ruSplit, default OFF — обратимо, см. PageSettings):
+    // добавить RU-ноду из пула вторым пиром в ТОТ ЖЕ туннель и завернуть в неё «весь рунет» (ru_prefixes.h).
+    // Основной (загран) пир остаётся 0.0.0.0/0 → Ozon/банки/любой РФ-хост идут через РФ, а WhatsApp/Telegram
+    // (зарубежные серверы) — через загранузел. ВАЖНО: параметры обфускации [Interface] общие на туннель →
+    // RU-нода ОБЯЗАНА делить их с основной нодой (выровнено операционно на стороне ноды).
+    QList<SubscriptionNode> extraPeers;
+    {
+        QSettings s;
+        if (s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool()) {
+            for (const SubscriptionNode &n : sub.nodes) {
+                if (n.region.compare(QStringLiteral("ru"), Qt::CaseInsensitive) == 0 && n.nodeId != node.nodeId) {
+                    SubscriptionNode ru = n;
+                    ru.allowedIps = ruPrefixes();   // весь рунет
+                    extraPeers << ru;
+                    break;
+                }
+            }
+        }
+    }
+
+    const QJsonObject cfg = AwgConfigBuilder::build(sub, node, m_keys, extraPeers);
     if (!invokeConnect(cfg, node.nodeId))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();
