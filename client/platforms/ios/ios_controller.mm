@@ -160,6 +160,7 @@ Vpn::ConnectionState iosStatusToState(NEVPNStatus status) {
 namespace {
 constexpr int kHandshakeTimeoutMs = 12000;
 constexpr uint64_t kHandshakeRxThreshold = 4096;
+constexpr int kHandshakeMaxTimeouts = 3;   // AVPN: столько таймаутов без рукопожатия → Error + stop (нода недоступна)
 bool isWireGuardBasedProto(amnezia::Proto proto) {
     return proto == amnezia::Proto::WireGuard || proto == amnezia::Proto::Awg;
 }
@@ -312,6 +313,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_handshakeConfirmed = false;
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
+    m_handshakeTimeouts = 0;
     m_statusRequestInFlight = false;
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
     m_rxBytes = 0;
@@ -461,22 +463,41 @@ void IosController::checkStatus()
         QMetaObject::invokeMethod(this, [this, txBytes, rxBytes, last_handshake_time_sec]() {
             if (isWireGuardBasedProto(m_proto) && m_handshakeAwaiting) {
                 const bool hasHandshakeData = (last_handshake_time_sec >= 0);
+                // AVPN: tx НЕ доказывает рукопожатие — init-ретраи можно бесконечно слать в чёрную дыру
+                // без ответа (на сотовой rx=0, а tx рос → срабатывал старый txBytes-клауз → ЛОЖНЫЙ Connected,
+                // «зелёный орб, трафика нет»). Реальный handshake подтверждают ТОЛЬКО: last_handshake_time_sec>0
+                // (авторитетно, wireguard-go ставит время завершённого рукопожатия) или приход данных назад (rx).
                 const bool hasFreshHandshake = hasHandshakeData &&
                         ((last_handshake_time_sec > 0) ||
-                         (rxBytes >= kHandshakeRxThreshold) ||
-                         (txBytes >= kHandshakeRxThreshold));
+                         (rxBytes >= kHandshakeRxThreshold));
 
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
                     m_handshakeTimer.invalidate();
+                    m_handshakeTimeouts = 0;
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
                 } else if (m_handshakeTimer.isValid() &&
                            m_handshakeTimer.elapsed() > kHandshakeTimeoutMs) {
                     m_handshakeTimer.restart();
-                    qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive";
-                    emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                    // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов
+                    // честно отдаём Error и гасим туннель (типично: IP:порт ноды режется оператором).
+                    if (++m_handshakeTimeouts >= kHandshakeMaxTimeouts) {
+                        qWarning() << "IosController::checkStatus : handshake failed after"
+                                   << m_handshakeTimeouts << "timeouts — stopping tunnel";
+                        m_handshakeAwaiting = false;
+                        m_handshakeTimer.invalidate();
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                        if (m_currentTunnel &&
+                            [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
+                            [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
+                        }
+                    } else {
+                        qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive"
+                                 << m_handshakeTimeouts << "/" << kHandshakeMaxTimeouts;
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                    }
                 }
             }
 
@@ -608,12 +629,14 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 if (!m_handshakeAwaiting) {
                     m_handshakeAwaiting = true;
                     m_handshakeTimer.restart();
+                    m_handshakeTimeouts = 0;
                 }
             }
         } else if (session.status != NEVPNStatusConnected) {
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
             m_handshakeTimer.invalidate();
+            m_handshakeTimeouts = 0;
             m_statusRequestInFlight = false;
         }
         emitConnectionStateIfChanged(nextState);
