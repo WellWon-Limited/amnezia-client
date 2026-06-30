@@ -109,7 +109,6 @@ PageType {
         backup,
         about,
         resetTrial,
-        ruSplit,
         devConsole
     ]
 
@@ -194,24 +193,6 @@ PageType {
         property bool isVisible: true
         readonly property var clickedHandler: function() {
             TribeEngine.resetTrialDev()
-        }
-    }
-
-    // DEV TOOL (EXPERIMENTAL — remove together with ru_prefixes.h + AwgConfigBuilder/WGConfig RU-split).
-    // Тумблер RU-split: Ozon/банки/весь рунет → через РФ-ноду, остальное (WhatsApp/Telegram) → загранузел.
-    // После переключения нужно ПЕРЕПОДКЛЮЧИТЬСЯ (применяется при поднятии туннеля).
-    QtObject {
-        id: ruSplit
-
-        property string title: qsTr("RU-split (Ozon→РФ): ") + (TribeEngine.ruSplitEnabled ? qsTr("ВКЛ") : qsTr("ВЫКЛ"))
-        readonly property string leftImagePath: "qrc:/images/controls/globe-2.svg"
-        property bool isVisible: true
-        readonly property var clickedHandler: function() {
-            TribeEngine.setRuSplitEnabled(!TribeEngine.ruSplitEnabled)
-            PageController.showNotificationMessage(
-                TribeEngine.ruSplitEnabled
-                    ? qsTr("RU-split включён — переподключитесь, чтобы применить")
-                    : qsTr("RU-split выключен — переподключитесь, чтобы применить"))
         }
     }
 

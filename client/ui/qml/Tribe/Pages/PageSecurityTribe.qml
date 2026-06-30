@@ -313,6 +313,50 @@ PageType {
                     }
                 }
 
+                // ── RU-split (эксперимент): рунет через РФ-ноду вторым пиром ──
+                // AVPN: тумблер флага AvpnSettings/ruSplit (TribeEngine). Применяется при следующем
+                // подъёме туннеля. Отдельный механизм от «Доступа к сайтам РФ» выше (тот — exclude/bypass).
+                Rectangle {
+                    width: parent.width
+                    height: 76
+                    radius: Theme.radius.lg
+                    color: Theme.color.surface1
+                    border.width: 1; border.color: Theme.color.border
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.space.lg
+                        anchors.rightMargin: Theme.space.lg
+                        spacing: Theme.space.md
+                        IconChip { path: "M2 12 a10 10 0 0 1 20 0 a10 10 0 0 1 -20 0 M2 12 H22 M12 2 a14 10 0 0 1 0 20 M12 2 a14 10 0 0 0 0 20" }
+                        Column {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: qsTr("RU-split: рунет через РФ-ноду")
+                                color: Theme.color.text1
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                                font.weight: Theme.font.wSemibold
+                            }
+                            Text {
+                                text: TribeEngine.ruSplitEnabled
+                                      ? qsTr("ВКЛ · переподключитесь, чтобы применить")
+                                      : qsTr("эксперимент · по умолчанию выкл")
+                                color: Theme.color.text3
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                            }
+                        }
+                        TribeToggle {
+                            checked: TribeEngine.ruSplitEnabled
+                            onToggled: {
+                                TribeEngine.setRuSplitEnabled(checked)
+                                PageController.showNotificationMessage(
+                                    checked ? qsTr("RU-split включён — переподключитесь, чтобы применить")
+                                            : qsTr("RU-split выключен — переподключитесь, чтобы применить"))
+                            }
+                        }
+                    }
+                }
+
                 // ── свои исключения ────────────────────────────────────────
                 SectionLabel { width: parent.width; text: qsTr("СВОИ ИСКЛЮЧЕНИЯ") }
 
