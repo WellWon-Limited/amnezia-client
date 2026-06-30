@@ -1279,6 +1279,39 @@ void AvpnEngineQml::registerPushToken(const QString &token, const QString &envir
     });
 }
 
+// DEV TOOL (TEMPORARY — remove with backend routers/devtools.py): POST /v1/dev/reset-trial
+// (Bearer = subscription_token, пустое тело). Заводской сброс триала ЭТОГО аккаунта; при успехе
+// перечитываем account+подписку, чтобы шапка (дни/трафик) обновилась. 404 = флаг выключен на сервере.
+// Изолировано: один метод + один пункт в настройках; удаляется вместе с бэкенд-роутером devtools.
+void AvpnEngineQml::resetTrialDev()
+{
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty()) {
+        emit error(QStringLiteral("Сначала войдите или подключитесь"));
+        return;
+    }
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/dev/reset-trial"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+
+    QNetworkReply *reply = m_nam->post(req, QByteArrayLiteral("{}"));
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code >= 200 && code < 300) {
+            refreshAccount(); // обновить property account (дни/трафик)
+            bootstrap();      // перечитать подписку
+            emit changed();
+        } else if (code == 404) {
+            emit error(QStringLiteral("Сброс триала выключен на сервере"));
+        } else {
+            emit error(QStringLiteral("Не удалось сбросить триал (код %1)").arg(code));
+        }
+    });
+}
+
 // AVPN (Task 9 — APNs): флаш отложенного push-токена после появления subscription_token. Закрывает
 // гэп первичного авто-enroll: device token пришёл из APNs ДО enroll (registerPushToken запомнил
 // m_pushToken, но не отправил, т.к. authToken был пуст). После успешного bootstrap/enroll subscription_token

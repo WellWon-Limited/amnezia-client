@@ -108,6 +108,7 @@ PageType {
         news,
         backup,
         about,
+        resetTrial,
         ruSplit,
         devConsole
     ]
@@ -180,6 +181,19 @@ PageType {
         property bool isVisible: true
         readonly property var clickedHandler: function() {
             PageController.goToPage(PageEnum.PageSettingsAbout)
+        }
+    }
+
+    // DEV TOOL (TEMPORARY — remove together with backend routers/devtools.py).
+    // Admin row: factory-reset this account's trial. Isolated single entry.
+    QtObject {
+        id: resetTrial
+
+        property string title: qsTr("Администрирование — обнулить триал")
+        readonly property string leftImagePath: "qrc:/images/controls/refresh-cw.svg"
+        property bool isVisible: true
+        readonly property var clickedHandler: function() {
+            TribeEngine.resetTrialDev()
         }
     }
 
