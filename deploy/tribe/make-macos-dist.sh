@@ -86,8 +86,15 @@ codesign --force --timestamp --sign "$DEVID" "$DMG"
 
 if [ "$STAGE" = notarize ]; then
   echo "=== 9. Нотаризация dmg ==="
+  # КРИТИЧНО: смонтированный dmg ВЕШАЕТ pre-submission checks notarytool намертво
+  # (висит на «initiating connection», submission ID не приходит). Перед сабмитом —
+  # отмонтировать ВСЕ инстансы образа (Finder/прошлый прогон могли смонтировать).
+  for dev in $(hdiutil info | grep -A30 "Tribe VPN.dmg" | grep -oE "/dev/disk[0-9]+" | sort -u); do
+    hdiutil detach "$dev" -force 2>/dev/null || true
+  done
   xcrun notarytool submit "$DMG" --keychain-profile AC_NOTARY --wait
   xcrun stapler staple "$DMG"
+  codesign -v -R=notarized --verbose=1 "$DMG" && echo "  ✅ dmg notarized (codesign -R=notarized exit0)"
   spctl -a -t open --context context:primary-signature -vv "$DMG" || true
 fi
 echo "=== ГОТОВО: $DMG ==="
