@@ -15,6 +15,7 @@ find_library(FW_FOUNDATION Foundation)
 find_library(FW_STOREKIT StoreKit)
 find_library(FW_USERNOTIFICATIONS UserNotifications)
 find_library(FW_NETWORKEXTENSION NetworkExtension)
+find_library(FW_METRICKIT MetricKit)   # AVPN: авто-диагностика вылетов (AvpnDiagnostics.mm); @import заменён на #import → нужен явный линк
 
 set(LIBS ${LIBS}
     ${FW_AUTHENTICATIONSERVICES}
@@ -24,6 +25,7 @@ set(LIBS ${LIBS}
     ${FW_STOREKIT}
     ${FW_USERNOTIFICATIONS}
     ${FW_NETWORKEXTENSION}
+    ${FW_METRICKIT}
 )
 
 
