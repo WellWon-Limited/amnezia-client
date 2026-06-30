@@ -119,7 +119,7 @@ private:
     void sendVpnExtensionMessage(NSDictionary *message, std::function<void(NSDictionary *)> callback = nullptr);
 #endif
 
-    amnezia::Proto m_proto;
+    amnezia::Proto m_proto = amnezia::Proto::Awg;   // AVPN: дефолт до connectVpn (AWG-only продукт; иначе uninit enum)
     QJsonObject m_rawConfig;
     QString m_tunnelId;
     uint64_t m_txBytes = 0;
@@ -127,6 +127,7 @@ private:
     bool m_handshakeAwaiting = false;
     bool m_handshakeConfirmed = false;
     QElapsedTimer m_handshakeTimer;
+    int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;
     std::atomic_bool m_statusRequestInFlight { false };
 };
