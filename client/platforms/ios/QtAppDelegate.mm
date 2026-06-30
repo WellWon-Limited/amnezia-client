@@ -1,6 +1,7 @@
 #import "QtAppDelegate.h"
 #import "ios_controller.h"
 #import "AvpnPushController.h" // AVPN (Task 9): APNs регистрация + входящие пуши
+#import "AvpnDiagnostics.h"    // AVPN: авто-сбор диагностики вылетов (MetricKit) → POST /v1/diag/crash
 
 #include <QFile>
 
@@ -20,6 +21,10 @@ extern "C" void Avpn_consumeIntentFlags(void);
     [application setMinimumBackgroundFetchInterval: UIApplicationBackgroundFetchIntervalMinimum];
     // Override point for customization after application launch.
     NSLog(@"Application didFinishLaunchingWithOptions");
+
+    // AVPN: подписка на MetricKit — если в ПРОШЛЫЙ запуск был вылет/зависание, iOS отдаст его
+    // диагностику сейчас, и мы зашлём её на бэк (POST /v1/diag/crash). Идемпотентно, без UI.
+    AvpnDiagnostics_install();
 
     // AVPN (Task 9): НЕ показываем промпт на холодном старте — разрешение спрашиваем контекстно,
     // после первого успешного коннекта (AvpnEngineQml::onConnectionStateChanged → AvpnPush.requestAuthorization).

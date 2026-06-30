@@ -80,4 +80,8 @@ if(IOS)
     # Здесь же реализован extern "C" Avpn_consumeIntentFlags() (на desktop — no-op в AvpnIntentBridge.cpp).
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnIntentController.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnIntentController.mm)
+    # AVPN: авто-сбор диагностики вылетов (MetricKit, iOS 14+) → POST /v1/diag/crash. MetricKit.framework
+    # авто-линкуется clang-модулем (@import MetricKit) — отдельный target_link_libraries не нужен.
+    list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.h)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.mm)
 endif()
