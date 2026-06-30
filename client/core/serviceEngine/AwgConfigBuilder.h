@@ -7,6 +7,7 @@
 #include "dto/Subscription.h"
 #include <QJsonObject>
 #include <QString>
+#include <QList>
 
 namespace avpn {
 
@@ -18,13 +19,19 @@ struct ClientKeys {
 class AwgConfigBuilder {
 public:
     // Полный QJsonObject для connectToVpn (proto=awg). address берётся из подписки (стабильный /32).
-    static QJsonObject build(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys);
+    // extraPeers (AVPN RU-split): доп. [Peer]-ы в ТОМ ЖЕ туннеле (cryptokey-routing по AllowedIPs).
+    // Пусто (дефолт) => поведение байт-в-байт прежнее (single-peer full-tunnel). Параметры обфускации
+    // ([Interface] Jc/H/S) общие на туннель → сервер доп-пира ОБЯЗАН делить их с основной нодой.
+    static QJsonObject build(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                             const QList<SubscriptionNode> &extraPeers = {});
 
     // Внутренний awg_config_data (отдельно — удобно тестировать/переиспользовать).
-    static QJsonObject buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys);
+    static QJsonObject buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                                  const QList<SubscriptionNode> &extraPeers = {});
 
     // Native wg-quick текст (ключ "config") в формате AmneziaWG. TODO(in-fork): сверить с шаблоном форка.
-    static QString wgQuick(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys);
+    static QString wgQuick(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                           const QList<SubscriptionNode> &extraPeers = {});
 
     // host из "host:port".
     static QString host(const QString &endpoint);

@@ -16,7 +16,25 @@ int AwgConfigBuilder::port(const QString &endpoint)
     return i > 0 ? endpoint.mid(i + 1).toInt() : 0;
 }
 
-QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys)
+// AVPN RU-split: один [Peer]-блок (AmneziaWG-параметры обфускации НЕ дублируются — они
+// уровня [Interface], общие на туннель). allowedIps пустой => full-tunnel 0.0.0.0/0,::/0.
+static void appendPeerBlock(QStringList &l, const SubscriptionNode &p)
+{
+    l << QString();
+    l << QStringLiteral("[Peer]");
+    l << QStringLiteral("PublicKey = %1").arg(p.serverPubkey);
+    if (!p.presharedKey.isEmpty())
+        l << QStringLiteral("PresharedKey = %1").arg(p.presharedKey);
+    const QStringList aips = p.allowedIps.isEmpty()
+        ? QStringList{QStringLiteral("0.0.0.0/0"), QStringLiteral("::/0")}
+        : p.allowedIps;
+    l << QStringLiteral("AllowedIPs = %1").arg(aips.join(QStringLiteral(", ")));
+    l << QStringLiteral("Endpoint = %1").arg(p.endpoint);
+    l << QStringLiteral("PersistentKeepalive = %1").arg(p.persistentKeepalive);
+}
+
+QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                                  const QList<SubscriptionNode> &extraPeers)
 {
     QStringList l;
     l << QStringLiteral("[Interface]");
@@ -46,21 +64,14 @@ QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNod
     if (!a.I4.isEmpty()) l << QStringLiteral("I4 = %1").arg(a.I4);
     if (!a.I5.isEmpty()) l << QStringLiteral("I5 = %1").arg(a.I5);
 
-    l << QString();
-    l << QStringLiteral("[Peer]");
-    l << QStringLiteral("PublicKey = %1").arg(node.serverPubkey);
-    if (!node.presharedKey.isEmpty())
-        l << QStringLiteral("PresharedKey = %1").arg(node.presharedKey);
-    const QStringList aips = node.allowedIps.isEmpty()
-        ? QStringList{QStringLiteral("0.0.0.0/0"), QStringLiteral("::/0")}
-        : node.allowedIps;
-    l << QStringLiteral("AllowedIPs = %1").arg(aips.join(QStringLiteral(", ")));
-    l << QStringLiteral("Endpoint = %1").arg(node.endpoint);
-    l << QStringLiteral("PersistentKeepalive = %1").arg(node.persistentKeepalive);
+    appendPeerBlock(l, node);                 // основной (загран) пир
+    for (const SubscriptionNode &p : extraPeers)
+        appendPeerBlock(l, p);                // RU-split: доп. пир(ы) с RU-AllowedIPs
     return l.join(QLatin1Char('\n')) + QLatin1Char('\n');
 }
 
-QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys)
+QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                                         const QList<SubscriptionNode> &extraPeers)
 {
     QJsonObject o;
     // ключи — configKeys.h
@@ -108,15 +119,40 @@ QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const Subscrip
     if (!a.I5.isEmpty()) o.insert(QStringLiteral("I5"), a.I5);
 
     o.insert(QStringLiteral("isObfuscationEnabled"), true); // AWG-ноды: иначе Android тихо обычный WG (§6.4)
-    o.insert(QStringLiteral("config"), wgQuick(sub, node, keys));
+    o.insert(QStringLiteral("config"), wgQuick(sub, node, keys, extraPeers));
+
+    // AVPN RU-split: доп. пиры структурно (iOS WGConfig.swift декодит "extra_peers" → доп. [Peer]).
+    // Параметры обфускации НЕ кладём (они уровня [Interface]); только маршрут+ключи+endpoint пира.
+    if (!extraPeers.isEmpty()) {
+        QJsonArray peers;
+        for (const SubscriptionNode &p : extraPeers) {
+            QJsonObject pe;
+            pe.insert(QStringLiteral("server_pub_key"), p.serverPubkey);
+            if (!p.presharedKey.isEmpty())
+                pe.insert(QStringLiteral("psk_key"), p.presharedKey);
+            QJsonArray paips;
+            const QStringList pallowed = p.allowedIps.isEmpty()
+                ? QStringList{QStringLiteral("0.0.0.0/0"), QStringLiteral("::/0")}
+                : p.allowedIps;
+            for (const QString &s : pallowed)
+                paips.append(s);
+            pe.insert(QStringLiteral("allowed_ips"), paips);
+            pe.insert(QStringLiteral("hostName"), host(p.endpoint));
+            pe.insert(QStringLiteral("port"), port(p.endpoint));
+            pe.insert(QStringLiteral("persistent_keep_alive"), QString::number(p.persistentKeepalive));
+            peers.append(pe);
+        }
+        o.insert(QStringLiteral("extra_peers"), peers);
+    }
     return o;
 }
 
-QJsonObject AwgConfigBuilder::build(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys)
+QJsonObject AwgConfigBuilder::build(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys,
+                                   const QList<SubscriptionNode> &extraPeers)
 {
     QJsonObject root;
     root.insert(QStringLiteral("protocol"), QStringLiteral("awg")); // configKey::vpnProto
-    root.insert(QStringLiteral("awg_config_data"), buildInner(sub, node, keys));
+    root.insert(QStringLiteral("awg_config_data"), buildInner(sub, node, keys, extraPeers));
     root.insert(QStringLiteral("hostName"), host(node.endpoint));
     if (node.dns.size() > 0)
         root.insert(QStringLiteral("dns1"), node.dns.value(0));

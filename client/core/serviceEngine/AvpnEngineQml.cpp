@@ -982,6 +982,25 @@ bool AvpnEngineQml::autoPauseEnabled() const
     return s.value(QStringLiteral("AvpnSettings/autoPauseRu"), true).toBool();
 }
 
+// AVPN RU-split (экспериментальный флаг). Тот же стор/ключ, что читает VpnConnectionTunnelControl::up.
+// Дефолт false → дефолтное поведение single-peer. Применяется при СЛЕДУЮЩЕМ поднятии туннеля
+// (намеренно НЕ дёргаем reconcile из сеттера — чтобы не лезть в стейт-машину; см. CONNECT-INVARIANTS).
+bool AvpnEngineQml::ruSplitEnabled() const
+{
+    QSettings s;
+    return s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool();
+}
+
+void AvpnEngineQml::setRuSplitEnabled(bool on)
+{
+    QSettings s;
+    if (s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool() == on)
+        return;
+    s.setValue(QStringLiteral("AvpnSettings/ruSplit"), on);
+    s.sync();
+    emit changed();
+}
+
 // AVPN (Task 7): пауза туннеля «для покупок». Будет дёргаться iOS App Intent (Task 8).
 // Семантика бездействия БЕЗ foreground-API: ставим одноразовый таймер на `seconds`; если за это
 // время пользователь не вернул туннель руками (resumeFromPause) и не остановил VPN — считаем, что

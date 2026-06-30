@@ -845,6 +845,11 @@ bool IosController::setupAwg()
     wgConfig.insert(configKey::specialJunk4, config[configKey::specialJunk4]);
     wgConfig.insert(configKey::specialJunk5, config[configKey::specialJunk5]);
 
+    // AVPN RU-split: прокинуть доп. пиры в Swift (WGConfig.extra_peers → доп. [Peer] в одном туннеле).
+    // Присутствует ТОЛЬКО при включённом флаге avpn/ruSplit; иначе ключа нет и поведение прежнее.
+    if (config.contains(QStringLiteral("extra_peers")) && config.value(QStringLiteral("extra_peers")).isArray())
+        wgConfig.insert(QStringLiteral("extra_peers"), config.value(QStringLiteral("extra_peers")));
+
     QJsonDocument wgConfigDoc(wgConfig);
     QString wgConfigDocStr(wgConfigDoc.toJson(QJsonDocument::Compact));
 

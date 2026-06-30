@@ -72,6 +72,8 @@ class AvpnEngineQml : public QObject {
     // AVPN (чипы доступности): статус сервисов через ЭТУ ноду. Список [{key,label,state,rttMs}],
     // state: -1 неизв / 0 заблок / 1 медленно(троттл) / 2 работает. Замер — с устройства через туннель.
     Q_PROPERTY(QVariantList serviceStatus READ serviceStatus NOTIFY serviceStatusChanged)
+    // AVPN RU-split (экспериментальный тумблер). NOTIFY changed → биндинг в PageSettings обновляется.
+    Q_PROPERTY(bool ruSplitEnabled READ ruSplitEnabled WRITE setRuSplitEnabled NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -213,6 +215,13 @@ public:
     // App Intent / Shortcuts, Task 8): проверить ПЕРЕД авто-вызовом pauseForShopping. Ручной/intent
     // вызов pauseForShopping работает независимо от этого флага.
     Q_INVOKABLE bool autoPauseEnabled() const;
+
+    // AVPN RU-split (ЭКСПЕРИМЕНТАЛЬНО, default OFF, легко удалить вместе с ru_prefixes.h и правками
+    // AwgConfigBuilder/WGConfig). Флаг AvpnSettings/ruSplit: при ON в туннель добавляется 2-й пир —
+    // RU-нода с «весь рунет» в AllowedIPs (Ozon/банки/РФ → через РФ, остальное → загранузел). Применяется
+    // при следующем поднятии туннеля — после переключения нужно переподключиться.
+    Q_INVOKABLE bool ruSplitEnabled() const;
+    Q_INVOKABLE void setRuSplitEnabled(bool on);
 
 signals:
     void changed();
