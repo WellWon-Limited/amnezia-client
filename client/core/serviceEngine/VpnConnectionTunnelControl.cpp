@@ -4,8 +4,7 @@
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 
-#include "ru_prefixes.h"                // AVPN RU-split: «весь рунет» для AllowedIPs RU-пира
-#include <QSettings>                    // AVPN RU-split: чтение экспериментального флага avpn/ruSplit
+#include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
 
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
 // уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
@@ -71,34 +70,20 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     if (m_keys.privateKey.isEmpty())
         return TunnelResult::fail(QStringLiteral("client keys not set"));
 
-    // AVPN RU-split (экспериментальный флаг avpn/ruSplit, default OFF — обратимо, см. PageSettings):
-    // добавить RU-ноду из пула вторым пиром в ТОТ ЖЕ туннель и завернуть в неё «весь рунет» (ru_prefixes.h).
-    // Основной (загран) пир остаётся 0.0.0.0/0 → Ozon/банки/любой РФ-хост идут через РФ, а WhatsApp/Telegram
-    // (зарубежные серверы) — через загранузел. ВАЖНО: параметры обфускации [Interface] общие на туннель →
-    // RU-нода ОБЯЗАНА делить их с основной нодой (выровнено операционно на стороне ноды).
-    QList<SubscriptionNode> extraPeers;
-    SubscriptionNode primary = node;   // мутабельная копия основного пира (для DNS-override в сплите)
+    // AVPN RU-direct (единый «Доступ к сайтам РФ», AvpnBypass/masterOn, default ON): DNS = РУССКИЙ резолвер
+    // (Яндекс 77.88.8.8/.1 ∈ 77.88.0.0/18 ⊂ рунет → уходит МИМО туннеля вместе с рунетом → residential-
+    // резолвер). Иначе DNS шёл бы на дефолтный 1.1.1.1 через загранузел, и инфра-сервисы со своим
+    // авторитативным DNS (Госуслуги/VK/Кинопоиск) палили бы «нероссийский резолвер» → мягкое «возможно VPN».
+    // Магазинам (Ozon/WB) DNS-гео не важно. Сам site-split (рунет CIDR мимо туннеля) сеет движок в
+    // репозиторий — AvpnEngineQml::applyRuBypassSplit. RU-нода вторым пиром больше НЕ используется.
+    SubscriptionNode primary = node;   // мутабельная копия (DNS-override под РФ-доступ)
     {
         QSettings s;
-        if (s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool()) {
-            for (const SubscriptionNode &n : sub.nodes) {
-                if (n.region.compare(QStringLiteral("ru"), Qt::CaseInsensitive) == 0 && n.nodeId != node.nodeId) {
-                    SubscriptionNode ru = n;
-                    ru.allowedIps = ruPrefixes();   // весь рунет
-                    extraPeers << ru;
-                    break;
-                }
-            }
-            // AVPN RU-split: DNS через РУССКИЙ резолвер (Яндекс 77.88.8.8/.1 ∈ 77.88.0.0/18 → идёт по RU-пиру).
-            // Иначе DNS уходит на дефолтный 1.1.1.1 через загранузел, и инфра-сервисы со своим авторитативным
-            // DNS (Госуслуги/VK/Кинопоиск) палят «нероссийский резолвер» → мягкое «возможно VPN». Магазинам
-            // (Ozon/WB) DNS-гео не важно. Подмена только при активном сплите; дефолтный путь не трогаем.
-            if (!extraPeers.isEmpty())
-                primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
-        }
+        if (s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+            primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
     }
 
-    const QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys, extraPeers);
+    const QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
     if (!invokeConnect(cfg, primary.nodeId))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();
