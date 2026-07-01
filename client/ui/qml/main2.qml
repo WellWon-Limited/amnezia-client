@@ -56,11 +56,13 @@ Window  {
     visible: true
     width: GC.screenWidth
     height: GC.screenHeight
-    minimumWidth: GC.isDesktop() ? 360 : 0
-    minimumHeight: GC.isDesktop() ? 640 : 0
+    minimumWidth: GC.isDesktop() ? 380 : 0
+    // AVPN: подняли высоту окна на десктопе — на главном экране появилась карточка «АвтоVPN» над
+    // «Умный выбор сервера»; при 640 контент (орб+кольца+2 карточки+кнопки) наезжал (экран без скролла).
+    minimumHeight: GC.isDesktop() ? 760 : 0
     // AVPN: клампить окно только на десктопе — на iPhone (высота > 800pt) кламп даёт letterbox
     maximumWidth: GC.isDesktop() ? 600 : 16777215
-    maximumHeight: GC.isDesktop() ? 800 : 16777215
+    maximumHeight: GC.isDesktop() ? 1000 : 16777215
     // AVPN: с Qt 6.9 окно на iOS НЕ заходит под статус-бар/home-индикатор без этого флага —
     // без него фон обрезан сверху и снизу. Отступы контента — SafeArea.margins в страницах.
     flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint) : Qt.Window
