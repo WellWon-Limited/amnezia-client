@@ -19,27 +19,6 @@ struct WGConfig: Decodable {
   var persistentKeepAlive: String
   let splitTunnelType: Int
   let splitTunnelSites: [String]
-  let extraPeers: [WGExtraPeer]?   // AVPN RU-split: доп. пиры в ТОМ ЖЕ туннеле (nil на дефолтном пути)
-
-  // AVPN RU-split: доп. [Peer] (RU-нода с «весь рунет» в AllowedIPs). Параметры обфускации НЕ нужны —
-  // они уровня [Interface], общие на туннель.
-  struct WGExtraPeer: Decodable {
-    let serverPublicKey: String
-    let presharedKey: String?
-    let allowedIPs: [String]
-    let hostName: String
-    let port: Int
-    let persistentKeepAlive: String?
-
-    enum CodingKeys: String, CodingKey {
-      case serverPublicKey = "server_pub_key"
-      case presharedKey = "psk_key"
-      case allowedIPs = "allowed_ips"
-      case hostName
-      case port
-      case persistentKeepAlive = "persistent_keep_alive"
-    }
-  }
 
   enum CodingKeys: String, CodingKey {
     case initPacketMagicHeader = "H1", responsePacketMagicHeader = "H2"
@@ -60,23 +39,6 @@ struct WGConfig: Decodable {
     case persistentKeepAlive = "persistent_keep_alive"
     case splitTunnelType
     case splitTunnelSites
-    case extraPeers = "extra_peers"
-  }
-
-  // AVPN RU-split: дополнительные [Peer]-блоки (пусто, если extraPeers nil/пуст → дефолтный single-peer).
-  var extraPeersBlock: String {
-    guard let extraPeers, !extraPeers.isEmpty else { return "" }
-    return extraPeers.map { p in
-      """
-
-      [Peer]
-      PublicKey = \(p.serverPublicKey)
-      \(p.presharedKey == nil ? "" : "PresharedKey = \(p.presharedKey!)")
-      AllowedIPs = \(p.allowedIPs.joined(separator: ", "))
-      Endpoint = \(p.hostName):\(p.port)
-      PersistentKeepalive = \(p.persistentKeepAlive ?? "25")
-      """
-    }.joined(separator: "\n")
   }
 
   var settings: String {
@@ -155,7 +117,6 @@ struct WGConfig: Decodable {
     AllowedIPs = \(allowedIPs.joined(separator: ", "))
     Endpoint = \(hostName):\(port)
     PersistentKeepalive = \(persistentKeepAlive)
-    \(extraPeersBlock)
     """
   }
 
