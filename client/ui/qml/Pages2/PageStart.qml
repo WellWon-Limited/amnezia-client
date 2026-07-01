@@ -31,13 +31,13 @@ PageType {
     Settings { id: avpnOnboard; category: "AvpnOnboarding"; property bool done: false }
     property bool onboardingActive: false
 
-    // AVPN: единый роутер наших вкладок (0 Главная / 1 Серверы / 2 Анти-VPN / 3 Профиль).
+    // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
         avpnBottomNav.currentIndex = index
         if (index === 1)
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSupportTribe.qml")
         else if (index === 2)
-            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSecurityTribe.qml")
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageReferralTribe.qml")
         else if (index === 3)
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAccountTribe.qml")
         else
