@@ -1036,6 +1036,18 @@ void AvpnEngineQml::applyRuBypassSplit()
     const QStringList ru = avpn::ruPrefixes();
     for (const QString &cidr : ru)
         sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
+
+    // AVPN RU-direct: foreign-эндпоинты, которые РФ-приложения дёргают для гео/анти-фрод проверок и которые
+    // ПАЛЯТ загран-IP → гоним их тоже direct (residential РФ-IP), иначе приложение видит «VPN». Найдено
+    // ЗАХВАТОМ (rvi0/PKTAP, 2026-07-01): процесс Gosuslugi через туннель ходит ТОЛЬКО в эти два, оба отвечают
+    // (видят наш выход). Узкие /24 — не весь Google/Level3. Расширять по мере находок из захватов др. РФ-прил.
+    static const char *const kBypassExtra[] = {
+        "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
+        "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
+    };
+    for (const char *cidr : kBypassExtra)
+        sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+
     m_store->addVpnSites(RouteMode::VpnAllExceptSites, sites);
 }
 
