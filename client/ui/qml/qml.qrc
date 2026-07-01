@@ -79,7 +79,6 @@
         <file>Tribe/qmldir</file>
         <file>Tribe/Theme.qml</file>
         <file>Tribe/Dev.qml</file>
-        <file>Tribe/data/presets.js</file>
         <file>Tribe/components/TribeButton.qml</file>
         <file>Tribe/components/TribeCard.qml</file>
         <file>Tribe/components/TribeToggle.qml</file>
@@ -98,7 +97,7 @@
         <file>Tribe/Pages/PageConnectTribe.qml</file>
         <file>Tribe/Pages/PageLocationsTribe.qml</file>
         <file>Tribe/Pages/PageAccountTribe.qml</file>
-        <file>Tribe/Pages/PageSecurityTribe.qml</file>
+        <file>Tribe/Pages/PageReferralTribe.qml</file>
         <file>Tribe/Pages/PageOnboardingTribe.qml</file>
         <file>Tribe/Pages/PageSupportTribe.qml</file>
         <file>Tribe/Pages/PageNotificationsTribe.qml</file>

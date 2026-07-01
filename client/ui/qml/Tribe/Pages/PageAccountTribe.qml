@@ -25,9 +25,7 @@ PageType {
     // collector + живым значениям: триал=10·1024³, кап=100·1024³). ГиБ = ÷1024³ → ровно. НЕ ×1e9 и НЕ
     // ×1024⁴. (Откат ошибочного ÷1024⁴ из build 38; 2026-06-23.)
     function fmtGb(b) { return (b / 1073741824).toFixed(1) }
-    // AVPN: shareUrl ДОЛЖЕН быть на root (раньше был на ColumnLayout → root.shareUrl=undefined →
-    // «Поделиться» молча не работала). Сайт деплоит веб-команда.
-    readonly property string shareUrl: "https://tribevpn.com"
+    // AVPN (#37): реферальный баннер перенесён на вкладку «Рефералка» (PageReferralTribe).
 
     // AVPN (Task 14): активация ключа (redeem) через движок — POST /v1/code/redeem.
     // TribeEngine.redeemCode(code[, evictDeviceId]) синхронный (QEventLoop):
@@ -121,14 +119,6 @@ PageType {
         if (root.hasEngine && typeof TribeEngine.refreshAccount === "function")
             TribeEngine.refreshAccount()
     }
-    // AVPN (#37): GET /v1/referral → ссылка/код/статистика для баннера «Поделиться с друзьями».
-    function refreshReferral() {
-        if (root.hasEngine && typeof TribeEngine.refreshReferral === "function")
-            TribeEngine.refreshReferral()
-    }
-    // реф-данные движка (link/invited/days_earned); пустая мапа до загрузки/без токена.
-    readonly property var referralData: root.hasEngine ? TribeEngine.referral : ({})
-    readonly property string referralLink: referralData && referralData.link ? ("" + referralData.link) : ""
 
     // человекочитаемый статус аккаунта для строки ПРОФИЛЬ.
     function accountStatusLabel() {
@@ -194,7 +184,7 @@ PageType {
     Component.onCompleted: settingsLoadTimer.start()
     Timer {
         id: settingsLoadTimer; interval: 400; repeat: false
-        onTriggered: { root.refreshDevices(); root.refreshAccount(); root.refreshReferral() }
+        onTriggered: { root.refreshDevices(); root.refreshAccount() }
     }
 
     // ── ПЕРЕНОС НА НОВОЕ УСТРОЙСТВО (createTransfer) ─────────────────────────────────────
@@ -240,187 +230,6 @@ PageType {
         // AVPN: заголовок «Настройки» убран (нижняя навигация уже подписана). Admin-кнопки
         // (мост в Amnezia + тумблер Dev.adminMode) скрыты — контент начинается сразу с баннера.
 
-        // ── БАННЕР «ПОДЕЛИТЬСЯ» ──────────────────────────────────────────────
-        // Самый верх, без заголовка раздела. Accent-градиент + soft-визуал, ровно 2 строки текста.
-        // Тап → открыть сайт (root.shareUrl, Apple-safe: только URL, без цен/рефералов §10).
-        Rectangle {
-            id: shareBanner
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.space.xs
-            implicitHeight: shareCol.implicitHeight + 2 * Theme.space.lg
-            radius: Theme.radius.lg
-            // ТЁМНАЯ плашка (night-slate, НЕ азур) + золотая рамка тёмного тона. Подарок остаётся
-            // светлым (контраст на тёмном). // AVPN
-            gradient: Gradient {
-                orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: Theme.color.surface2 }
-                GradientStop { position: 1.0; color: Theme.color.bg700 }
-            }
-            border.width: 0.5                     // золотая рамка — тонкий хайрлайн (Retina ~1px)
-            border.color: Theme.color.cta         // чистое золото
-            scale: shareMa.pressed ? 0.99 : 1.0
-            Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
-
-            ColumnLayout {
-                id: shareCol
-                anchors.fill: parent
-                anchors.margins: Theme.space.lg
-                spacing: Theme.space.md
-
-                // верхний ряд: подарок + заголовок (2 строки) + шеврон
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.space.md
-
-                    // ── бейдж «подарок»: светящийся круг + объёмный подарок + золотой «+» + блёстки ──
-                    // подарок периодически «вздрагивает» (наклон у основания), привлекая внимание. // AVPN
-                    Item {
-                        id: giftBadge
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.preferredWidth: 56; Layout.preferredHeight: 56
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 52; height: 52; radius: 26
-                            color: Qt.rgba(1, 1, 1, 0.20)
-                            border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.28)
-                        }
-                        Shape {
-                            anchors.right: parent.right; anchors.top: parent.top
-                            anchors.rightMargin: 2; anchors.topMargin: 4
-                            width: 9; height: 9
-                            preferredRendererType: Shape.CurveRenderer
-                            ShapePath {
-                                fillColor: Qt.rgba(1, 1, 1, 0.85); strokeColor: "transparent"
-                                PathSvg { path: "M4.5 0 L5.6 3.4 L9 4.5 L5.6 5.6 L4.5 9 L3.4 5.6 L0 4.5 L3.4 3.4 Z" }
-                            }
-                        }
-                        Shape {
-                            anchors.left: parent.left; anchors.bottom: parent.bottom
-                            anchors.leftMargin: 1; anchors.bottomMargin: 8
-                            width: 6; height: 6
-                            preferredRendererType: Shape.CurveRenderer
-                            ShapePath {
-                                fillColor: Qt.rgba(1, 1, 1, 0.6); strokeColor: "transparent"
-                                PathSvg { path: "M3 0 L3.7 2.3 L6 3 L3.7 3.7 L3 6 L2.3 3.7 L0 3 L2.3 2.3 Z" }
-                            }
-                        }
-                        Shape {
-                            id: giftShape
-                            anchors.centerIn: parent
-                            width: 30; height: 30
-                            transformOrigin: Item.Bottom
-                            preferredRendererType: Shape.CurveRenderer
-                            ShapePath {
-                                fillColor: "#DCE8F7"; strokeColor: "transparent"
-                                PathSvg { path: "M6 14 H24 V25 a2 2 0 0 1 -2 2 H8 a2 2 0 0 1 -2 -2 Z" }
-                            }
-                            ShapePath {
-                                fillColor: "#FFFFFF"; strokeColor: "transparent"
-                                PathSvg { path: "M4 10 H26 V14 H4 Z" }
-                            }
-                            ShapePath {
-                                fillColor: Theme.color.cta; strokeColor: "transparent"
-                                PathSvg { path: "M13.4 10 H16.6 V27 H13.4 Z" }
-                            }
-                            ShapePath {
-                                fillColor: Theme.color.cta; strokeColor: "transparent"
-                                PathSvg { path: "M15 10 C12 5 8 5.5 9 8.6 C9.7 10.4 13 10.8 15 10 Z" }
-                            }
-                            ShapePath {
-                                fillColor: Theme.color.cta; strokeColor: "transparent"
-                                PathSvg { path: "M15 10 C18 5 22 5.5 21 8.6 C20.3 10.4 17 10.8 15 10 Z" }
-                            }
-                        }
-                        Rectangle {
-                            anchors.right: parent.right; anchors.bottom: parent.bottom
-                            anchors.rightMargin: 1; anchors.bottomMargin: 1
-                            width: 19; height: 19; radius: width / 2
-                            color: Theme.color.cta
-                            border.width: 2; border.color: Qt.darker(Theme.color.gradBottom, 1.6)
-                            Shape {
-                                anchors.centerIn: parent; width: 11; height: 11
-                                preferredRendererType: Shape.CurveRenderer
-                                ShapePath {
-                                    strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
-                                    capStyle: ShapePath.RoundCap
-                                    PathSvg { path: "M5.5 1.6 V9.4 M1.6 5.5 H9.4" }
-                                }
-                            }
-                        }
-                        SequentialAnimation {
-                            running: !Theme.motion.reduceMotion
-                            loops: Animation.Infinite
-                            PauseAnimation { duration: 2600 }
-                            NumberAnimation { target: giftShape; property: "rotation"; to: -9; duration: 90 }
-                            NumberAnimation { target: giftShape; property: "rotation"; to: 9;  duration: 150; easing.type: Easing.InOutSine }
-                            NumberAnimation { target: giftShape; property: "rotation"; to: -6; duration: 120; easing.type: Easing.InOutSine }
-                            NumberAnimation { target: giftShape; property: "rotation"; to: 0;  duration: 130; easing.type: Easing.OutBack }
-                        }
-                    }
-
-                    // заголовок (2 строки)
-                    Text {
-                        Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.leftMargin: Theme.space.xs   // чуть больше отступ от иконки подарка
-                        text: qsTr("Поделиться с друзьями\nЗа каждого друга — подарок!")
-                        color: "white"
-                        font.family: Theme.font.display
-                        font.pixelSize: Theme.font.bodyS
-                        font.weight: Theme.font.wSemibold   // не пережир (было wExtra 800)
-                        lineHeight: 1.15
-                        wrapMode: Text.NoWrap               // ровно 2 строки по \n, без переноса в 3-ю
-                        // без elide — текст «подарок» показывается полностью (место есть)
-                    }
-                    // иконка «поделиться» убрана (по запросу) — вся плашка кликабельна на шэр.
-                }
-
-                // пилюля во всю ширину плашки: «7 дней + 3 ГБ» золотом, «бесплатно» белым
-                Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: pillText.implicitHeight + 2 * Theme.space.sm
-                    radius: Theme.radius.pill
-                    color: Qt.rgba(0, 0, 0, 0.24)
-                    border.width: 0.5                     // серый хайрлайн-контур (тоньше, не голубой)
-                    border.color: Theme.color.border3
-                    Text {
-                        id: pillText
-                        anchors.centerIn: parent
-                        textFormat: Text.StyledText
-                        // если уже приглашал друзей — показываем его статистику; иначе оффер. // AVPN (#37)
-                        text: {
-                            var r = root.referralData
-                            if (r && r.invited > 0)
-                                return "<font color='" + Theme.color.cta + "'>Приглашено " + r.invited
-                                       + "</font> · +" + (r.days_earned || 0) + " дней"
-                            return "<font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font> бесплатно"
-                        }
-                        color: "white"
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS   // мельче (было bodyM)
-                        font.weight: Theme.font.wMedium                                  // не жирно (было Semibold + <b>)
-                    }
-                }
-            }
-            // скрытый носитель реф-ссылки для копирования в буфер (паттерн форка: selectAll()+copy()). // AVPN
-            TextEdit { id: refLinkEdit; width: 0; height: 0; opacity: 0; readOnly: true }
-            MouseArea {
-                id: shareMa
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                // #37: делимся реальной реф-ссылкой (в ней зашит код пользователя → бонус начислится).
-                // Копируем в буфер + тост (надёжно, Apple-safe). Если ссылка ещё не загрузилась — сайт.
-                onClicked: {
-                    if (root.referralLink.length > 0) {
-                        refLinkEdit.text = root.referralLink
-                        refLinkEdit.selectAll(); refLinkEdit.copy(); refLinkEdit.deselect()
-                        PageController.showNotificationMessage(qsTr("Ссылка скопирована — отправь другу"))
-                    } else {
-                        Qt.openUrlExternally(root.shareUrl)
-                    }
-                }
-            }
-        }
 
         // ── ПОДПИСКА ─────────────────────────────────────────────────────────
         // Единый блок: статус/срок/трафик/устройства. Отдельного «Профиля» нет — устройство
