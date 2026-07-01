@@ -42,6 +42,18 @@ public:
         if (scored.isEmpty())
             return std::nullopt;
 
+        // AVPN (RU-нода): исключить российские ноды (countryCode==RU) из АВТО-выбора — на них работают
+        // только РФ-сайты. Fallback: если после исключения не осталось НИ ОДНОЙ — оставляем как есть
+        // (не рвём коннект/failover). Ручной форс RU идёт мимо Selector (pin в connect()).
+        {
+            QList<ScoredNodeS> nonRu;
+            for (const ScoredNodeS &s : scored)
+                if (s.node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) != 0)
+                    nonRu.append(s);
+            if (!nonRu.isEmpty())
+                scored = nonRu;
+        }
+
         std::sort(scored.begin(), scored.end(),
                   [](const ScoredNodeS &a, const ScoredNodeS &b) { return a.score < b.score; });
         const ScoredNodeS best = scored.first();

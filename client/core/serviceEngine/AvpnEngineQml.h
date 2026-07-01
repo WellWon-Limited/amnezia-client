@@ -220,6 +220,11 @@ public:
     // вызов pauseForShopping работает независимо от этого флага.
     Q_INVOKABLE bool autoPauseEnabled() const;
 
+    // AVPN RU-direct: тумблер «АвтоVPN» (AvpnBypass/masterOn) сменился на главном экране. Если хотим быть
+    // онлайн — безопасно передёрнуть туннель через reconcile-машину (needsRestart), чтобы применился новый
+    // split-конфиг (applyRuBypassSplit пересеет в guardedStart). Офлайн → применится при следующем Connect.
+    Q_INVOKABLE void reapplyBypass();
+
 signals:
     void changed();
     void error(const QString &message);

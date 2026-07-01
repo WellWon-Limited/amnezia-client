@@ -23,7 +23,27 @@ static double healthAggregate(const SubscriptionNode &n) // AVPN
     return sum / static_cast<double>(n.health.size());
 }
 
+// AVPN (RU-нода): российская нода (countryCode==RU) обслуживает ТОЛЬКО РФ-сайты (full-tunnel через РФ) —
+// в общем VPN на ней не работает ничего. Поэтому её ИСКЛЮЧАЕМ из АВТО-выбора/failover (иначе часто цепляется
+// как ближайшая по RTT). Ручной форс (pin) её оставляет — для сценария «за границей зайти на РФ-сайт».
+static bool isRuNode(const SubscriptionNode &n)
+{
+    return n.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
+}
+
+// AVPN (RU-нода): закреплена ли сейчас РФ-нода. Используется для гейта RU-direct-сплита (T2).
+bool ServiceEngine::pinnedNodeIsRu() const
+{
+    if (m_pinnedNodeId.isEmpty())
+        return false;
+    for (const SubscriptionNode &n : m_pool.nodes())
+        if (n.nodeId == m_pinnedNodeId)
+            return isRuNode(n);
+    return false;
+}
+
 // AVPN (live-node picker): выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB. Без I/O.
+// RU-ноды — в отдельный fallback-ярус: берём их ТОЛЬКО если живых НЕ-RU нет (не рвём коннект).
 const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const QString &exclB) const // AVPN
 {
     const QList<SubscriptionNode> &all = m_pool.nodes();
@@ -32,8 +52,8 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
     // весах детерминированно первый в JSON-порядке = Польша; Финляндия не выбиралась НИКОГДА. Теперь:
     // собираем верхний «ярус» (узлы у максимального weight) среди живых и выбираем СЛУЧАЙНО — авто
     // реально распределяет/чередует равноценные ноды.
-    QList<const SubscriptionNode *> tier;
-    double maxW = -1.0;
+    QList<const SubscriptionNode *> tier, ruTier;
+    double maxW = -1.0, maxWru = -1.0;
     for (const SubscriptionNode &n : all) {
         if (!exclA.isEmpty() && n.nodeId == exclA)
             continue;
@@ -41,6 +61,11 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
+        if (isRuNode(n)) {             // RU — отдельный fallback-ярус (не в основном выборе)
+            if (n.weight > maxWru + 1e-9) { maxWru = n.weight; ruTier.clear(); ruTier.append(&n); }
+            else if (n.weight >= maxWru - 1e-9) { ruTier.append(&n); }
+            continue;
+        }
         if (n.weight > maxW + 1e-9) {   // новый максимум — ярус обнуляем
             maxW = n.weight;
             tier.clear();
@@ -49,12 +74,13 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             tier.append(&n);
         }
     }
-    if (tier.isEmpty())
+    const QList<const SubscriptionNode *> &pick = tier.isEmpty() ? ruTier : tier; // fallback на RU если не-RU нет
+    if (pick.isEmpty())
         return nullptr;
-    if (tier.size() == 1)
-        return tier.first();
-    const int idx = static_cast<int>(QRandomGenerator::global()->bounded(tier.size()));
-    return tier.at(idx);
+    if (pick.size() == 1)
+        return pick.first();
+    const int idx = static_cast<int>(QRandomGenerator::global()->bounded(pick.size()));
+    return pick.at(idx);
 }
 
 // AVPN (выбор по скорости): среди ЖИВЫХ нод (excl) с кэшем off-tunnel ICMP RTT — нода с минимальным RTT.
@@ -62,7 +88,7 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
 const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, const QString &exclB) const
 {
     const QList<SubscriptionNode> &nodes = m_pool.nodes();
-    QList<RankRow> rows;
+    QList<RankRow> rows, ruRows;
     for (const SubscriptionNode &n : nodes) {
         if (!exclA.isEmpty() && n.nodeId == exclA)
             continue;
@@ -70,9 +96,9 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        rows.append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) });
+        (isRuNode(n) ? ruRows : rows).append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) }); // RU — в fallback
     }
-    const QString id = fastestMeasuredNodeId(rows);
+    const QString id = fastestMeasuredNodeId(rows.isEmpty() ? ruRows : rows); // fallback на RU если не-RU нет
     if (id.isEmpty())
         return nullptr;
     for (const SubscriptionNode &n : nodes)

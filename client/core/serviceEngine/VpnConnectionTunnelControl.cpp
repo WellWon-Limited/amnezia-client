@@ -76,10 +76,13 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // авторитативным DNS (Госуслуги/VK/Кинопоиск) палили бы «нероссийский резолвер» → мягкое «возможно VPN».
     // Магазинам (Ozon/WB) DNS-гео не важно. Сам site-split (рунет CIDR мимо туннеля) сеет движок в
     // репозиторий — AvpnEngineQml::applyRuBypassSplit. RU-нода вторым пиром больше НЕ используется.
+    // T2: на самой РФ-ноде (countryCode==RU, форс-pin) DNS не подменяем — там full-tunnel через РФ,
+    // резолвер и так российский (сплит на РФ-ноде выключен в applyRuBypassSplit).
     SubscriptionNode primary = node;   // мутабельная копия (DNS-override под РФ-доступ)
     {
         QSettings s;
-        if (s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+        const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
+        if (!ruNode && s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
             primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
     }
 
