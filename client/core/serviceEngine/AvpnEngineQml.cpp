@@ -1024,12 +1024,19 @@ bool AvpnEngineQml::autoPauseEnabled() const
 // Кросс-платформенно (общий serviceEngine → iOS excludeRoutes / macOS десктоп-маршруты). OFF → no-op.
 void AvpnEngineQml::applyRuBypassSplit()
 {
-    QSettings s;
-    if (!s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
-        return; // РФ-доступ выключен пользователем — не вмешиваемся в split-настройки
     if (!m_store)
         return;
     using amnezia::RouteMode;
+    QSettings s;
+    const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    // AVPN (T2): full-tunnel (сплит ВЫКЛ), если РФ-доступ выключен ЛИБО закреплена РФ-нода. RU-нода
+    // достижима только ручным pin (авто её не берёт, T1); на ней нужен полный туннель через РФ (за границей
+    // «зайти на РФ-сайт» → всё через РФ-IP). Активно ВЫКЛЮЧАЕМ (а не просто пропускаем сев): иначе прежний
+    // seed остался бы в репозитории и рунет исключался бы даже при OFF / на РФ-ноде.
+    if (!masterOn || m_engine.pinnedNodeIsRu()) {
+        m_store->setSitesSplitTunnelingEnabled(false);
+        return;
+    }
     m_store->setRouteMode(RouteMode::VpnAllExceptSites);
     m_store->setSitesSplitTunnelingEnabled(true);
     QMap<QString, QString> sites;
@@ -1049,6 +1056,19 @@ void AvpnEngineQml::applyRuBypassSplit()
         sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
 
     m_store->addVpnSites(RouteMode::VpnAllExceptSites, sites);
+}
+
+// AVPN RU-direct: применить смену тумблера «АвтоVPN» на живом туннеле. Если намерение — быть онлайн
+// (подключены/подключаемся), передёргиваем через reconcile-машину: needsRestart → guardedStop → на
+// пришедшем Disconnected reconcile сам поднимет заново (applyRuBypassSplit пересеет новый сплит-конфиг).
+// Без back-to-back down+up (CONNECT-INVARIANTS). Офлайн → no-op (применится при следующем Connect).
+void AvpnEngineQml::reapplyBypass()
+{
+    if (!m_wantConnected)
+        return;
+    m_needsRestart = true;
+    reconcile();
+    emit changed();
 }
 
 // AVPN (Task 7): пауза туннеля «для покупок». Будет дёргаться iOS App Intent (Task 8).

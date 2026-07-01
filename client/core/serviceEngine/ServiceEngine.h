@@ -79,6 +79,9 @@ public:
     // фасад использует для «Обновить подключение» через единый reconcile). Пусто = некуда ротировать.
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
+    // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
+    // (авто-выбор её исключает) → по этому флагу RU-direct-сплит отключается (full-tunnel через РФ).
+    bool pinnedNodeIsRu() const;
     // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация
     // (rotateNext) снимают pin — иначе connect() всегда отдаёт приоритет закреплённой ноде, и
     // возврат-в-авто / offline-ротация молча ломаются (reselect закреплённой).
