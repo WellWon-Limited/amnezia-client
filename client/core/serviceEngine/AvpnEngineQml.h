@@ -72,8 +72,6 @@ class AvpnEngineQml : public QObject {
     // AVPN (чипы доступности): статус сервисов через ЭТУ ноду. Список [{key,label,state,rttMs}],
     // state: -1 неизв / 0 заблок / 1 медленно(троттл) / 2 работает. Замер — с устройства через туннель.
     Q_PROPERTY(QVariantList serviceStatus READ serviceStatus NOTIFY serviceStatusChanged)
-    // AVPN RU-split (экспериментальный тумблер). NOTIFY changed → биндинг в PageSettings обновляется.
-    Q_PROPERTY(bool ruSplitEnabled READ ruSplitEnabled WRITE setRuSplitEnabled NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -222,13 +220,6 @@ public:
     // вызов pauseForShopping работает независимо от этого флага.
     Q_INVOKABLE bool autoPauseEnabled() const;
 
-    // AVPN RU-split (ЭКСПЕРИМЕНТАЛЬНО, default OFF, легко удалить вместе с ru_prefixes.h и правками
-    // AwgConfigBuilder/WGConfig). Флаг AvpnSettings/ruSplit: при ON в туннель добавляется 2-й пир —
-    // RU-нода с «весь рунет» в AllowedIPs (Ozon/банки/РФ → через РФ, остальное → загранузел). Применяется
-    // при следующем поднятии туннеля — после переключения нужно переподключиться.
-    Q_INVOKABLE bool ruSplitEnabled() const;
-    Q_INVOKABLE void setRuSplitEnabled(bool on);
-
 signals:
     void changed();
     void error(const QString &message);
@@ -276,6 +267,13 @@ private:
     // перезапуска. Здесь переармируем фетч с бэкоффом (тихо, без error()). 401-самохил — в
     // ServiceEngine::ensureSubscription; этот хелпер добивает именно сетевые сбои.
     void tryBootstrapSubscription();
+
+    // AVPN RU-direct (единый «Доступ к сайтам РФ», флаг AvpnBypass/masterOn, default ON): перед коннектом
+    // сеет split-tunnel репозиторий — routeMode=VpnAllExceptSites + весь рунет CIDR (ru_prefixes.h) →
+    // рунет идёт МИМО туннеля через реальный residential РФ-IP (бьёт датацентр-детект Госуслуг/Кинопоиска;
+    // Ozon-приложение — реальный IP телефона). Кросс-платформенно (iOS excludeRoutes / macOS маршруты).
+    // OFF → не трогаем (юзер сам рулит с экрана «Защита»). DNS=Яндекс ставится в VpnConnectionTunnelControl.
+    void applyRuBypassSplit();
 
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку

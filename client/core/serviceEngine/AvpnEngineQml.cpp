@@ -12,6 +12,9 @@
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
+#include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
+#include "core/utils/routeModes.h" // AVPN RU-direct: amnezia::RouteMode::VpnAllExceptSites
+#include <QMap>                    // AVPN RU-direct: bulk addVpnSites
 
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
 #include <QDateTime>
@@ -693,6 +696,10 @@ void AvpnEngineQml::guardedStart()
     if (m_engine.identityEnsureKeys(m_store, err))
         m_tunnel.setClientKeys(m_engine.clientKeys());
 
+    // AVPN RU-direct: засеять split-tunnel (рунет CIDR мимо туннеля) ДО подъёма — конфиг должен быть готов
+    // к appendSplitTunnelingConfig, который читает routeMode/vpnSites из репозитория при openConnection.
+    applyRuBypassSplit();
+
     // AVPN (КОРНЕВОЙ фикс зависания UI + краша на 2-м коннекте): если подписка УЖЕ загружена
     // (bootstrap при старте или прошлый connect) — поднимаем туннель ЛОКАЛЬНО через m_engine.connect(),
     // БЕЗ синхронного сетевого startFlow. startFlow крутит ВЛОЖЕННЫЙ QEventLoop на ГЛАВНОМ потоке
@@ -1009,23 +1016,27 @@ bool AvpnEngineQml::autoPauseEnabled() const
     return s.value(QStringLiteral("AvpnSettings/autoPauseRu"), true).toBool();
 }
 
-// AVPN RU-split (экспериментальный флаг). Тот же стор/ключ, что читает VpnConnectionTunnelControl::up.
-// Дефолт false → дефолтное поведение single-peer. Применяется при СЛЕДУЮЩЕМ поднятии туннеля
-// (намеренно НЕ дёргаем reconcile из сеттера — чтобы не лезть в стейт-машину; см. CONNECT-INVARIANTS).
-bool AvpnEngineQml::ruSplitEnabled() const
+// AVPN RU-direct: сев split-tunnel под единый тумблер «Доступ к сайтам РФ» (AvpnBypass/masterOn, default
+// ON). Зовётся из guardedStart ПЕРЕД коннектом → конфиг готов к appendSplitTunnelingConfig. Сеет ВЕСЬ рунет
+// CIDR в режим VpnAllExceptSites → рунет мимо туннеля (реальный РФ-IP). Домены отсекает сам движок
+// (checkIpSubnetFormat), потому кормим ТОЛЬКО CIDR из ru_prefixes.h. Пустой список движок сам роняет в
+// VpnAllSites (защита от блэкхола). Идемпотентно: addVpnSites — один bulk-setValue с merge (не растёт).
+// Кросс-платформенно (общий serviceEngine → iOS excludeRoutes / macOS десктоп-маршруты). OFF → no-op.
+void AvpnEngineQml::applyRuBypassSplit()
 {
     QSettings s;
-    return s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool();
-}
-
-void AvpnEngineQml::setRuSplitEnabled(bool on)
-{
-    QSettings s;
-    if (s.value(QStringLiteral("AvpnSettings/ruSplit"), false).toBool() == on)
+    if (!s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+        return; // РФ-доступ выключен пользователем — не вмешиваемся в split-настройки
+    if (!m_store)
         return;
-    s.setValue(QStringLiteral("AvpnSettings/ruSplit"), on);
-    s.sync();
-    emit changed();
+    using amnezia::RouteMode;
+    m_store->setRouteMode(RouteMode::VpnAllExceptSites);
+    m_store->setSitesSplitTunnelingEnabled(true);
+    QMap<QString, QString> sites;
+    const QStringList ru = avpn::ruPrefixes();
+    for (const QString &cidr : ru)
+        sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
+    m_store->addVpnSites(RouteMode::VpnAllExceptSites, sites);
 }
 
 // AVPN (Task 7): пауза туннеля «для покупок». Будет дёргаться iOS App Intent (Task 8).
