@@ -115,6 +115,7 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int timeoutMs, Samp
                             DoneCb onDone)
 {
     cancel(); // снять предыдущий замер, если был
+    ++m_gen;  // AVPN (аудит N8): инвалидируем отложенные DNS-колбэки прошлого прогона (см. lookupHost)
     m_onSample = std::move(onSample);
     m_onDone = std::move(onDone);
     m_doneFired = false;
@@ -171,8 +172,12 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int timeoutMs, Samp
         } else if (!lit.isNull()) {
             finishIdx(i, -1); // IPv6-литерал — v1 не меряем
         } else {
-            QHostInfo::lookupHost(host, this, [this, i](const QHostInfo &info) {
-                if (i >= m_pending.size() || m_pending[i].done)
+            // AVPN (аудит N8): гвард по поколению — колбэк отменённого прогона мог сработать после
+            // нового probeAll и записать адрес СТАРОГО хоста в новый m_pending[i] (индексы совпадают)
+            // → RTT приписался бы чужой ноде. Проверки size/done это не ловили (список пересоздан).
+            const int gen = m_gen;
+            QHostInfo::lookupHost(host, this, [this, i, gen](const QHostInfo &info) {
+                if (gen != m_gen || i >= m_pending.size() || m_pending[i].done)
                     return;
                 for (const QHostAddress &a : info.addresses()) {
                     if (a.protocol() == QAbstractSocket::IPv4Protocol) {

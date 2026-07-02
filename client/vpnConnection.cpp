@@ -331,7 +331,10 @@ void VpnConnection::connectToVpn(const QString &serverId, DockerContainer contai
 #elif defined Q_OS_IOS || defined(MACOS_NE)
     Proto proto = ContainerUtils::defaultProtocol(container);
     IosController::Instance()->connectVpn(proto, m_vpnConfiguration);
-    connect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus);
+    // AVPN (аудит N5): UniqueConnection — путь Error→повторный connectToVpn не проходит через
+    // disconnectFromVpn (там единственный disconnect этого коннекта) → дубликаты копились.
+    connect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus,
+            Qt::UniqueConnection);
     return;
 #endif
 

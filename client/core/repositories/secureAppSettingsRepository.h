@@ -40,6 +40,9 @@ public:
     void setRouteMode(RouteMode mode);
     bool addVpnSite(RouteMode mode, const QString &site, const QString &ip = "");
     void addVpnSites(RouteMode mode, const QMap<QString, QString> &sites);
+    // AVPN (RU-direct, «apply = реконсиляция»): ПОЛНАЯ замена списка сайтов режима. addVpnSites —
+    // merge-only (никогда не удаляет) → стейл-CIDR прошлых севов жили в сторе навсегда.
+    void replaceVpnSites(RouteMode mode, const QMap<QString, QString> &sites);
     void removeVpnSite(RouteMode mode, const QString &site);
     void removeAllVpnSites(RouteMode mode);
     QVariantMap vpnSites(RouteMode mode) const;

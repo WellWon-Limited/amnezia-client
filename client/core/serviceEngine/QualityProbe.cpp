@@ -5,6 +5,7 @@
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QUrl>
+#include <memory>
 
 namespace avpn {
 
@@ -52,7 +53,9 @@ void QualityProbe::tryEndpoint(int idx)
     m_reply = reply;
 
     // TTFB: заголовки получены = ~RTT пути. Завершаем по finished (для HEAD тело пустое).
-    qint64 *ttfb = new qint64(-1);
+    // AVPN (аудит N10): shared_ptr вместо голого new — при уничтожении реплая без finished
+    // (shutdown) память освобождается вместе с лямбдами, ручной delete не нужен.
+    auto ttfb = std::make_shared<qint64>(-1);
     connect(reply, &QNetworkReply::metaDataChanged, this, [this, ttfb]() {
         if (*ttfb < 0) *ttfb = m_clock.elapsed();
     });
@@ -63,7 +66,6 @@ void QualityProbe::tryEndpoint(int idx)
                          || reply->error() == QNetworkReply::ContentOperationNotPermittedError) // HEAD не разрешён, но статус есть
                         && httpStatus >= 200 && httpStatus < 400;
         const int rtt = (*ttfb >= 0) ? int(*ttfb) : int(m_clock.elapsed());
-        delete ttfb;
         reply->deleteLater();
         m_reply.clear();
         if (ok)
