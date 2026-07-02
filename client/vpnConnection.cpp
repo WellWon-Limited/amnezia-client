@@ -29,6 +29,7 @@
     #include "platforms/ios/ios_controller.h"
 #endif
 
+#include "core/serviceEngine/CidrValidate.h" // AVPN: IPv6-CIDR для split-фильтра (header-only)
 #include "core/utils/networkUtilities.h"
 #include "core/utils/serverConfigUtils.h"
 #include "vpnConnection.h"
@@ -438,6 +439,19 @@ void VpnConnection::appendSplitTunnelingConfig()
                 } else if (NetworkUtilities::checkIpSubnetFormat(i.value().toString())) {
                     sites.append(i.value().toString());
                 }
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID) || defined(MACOS_NE)
+                // AVPN (IPv6 split): checkIpSubnetFormat — IPv4-only и молча выбрасывал 2174 v6-префикса
+                // ru_prefixes.h, при том что туннель забирает ::/0 → на dual-stack операторах AAAA-трафик
+                // рунета шёл В туннель (загран-IP) при включённом «АвтоVPN». iOS (IPAddressRange →
+                // ipv6ExcludedRoutes) и Android (InetNetwork/excludeRoute) v6 переваривают. Desktop-путь
+                // НЕ гейтим: localsocketcontroller хардкодит isIpv6:false — v6 туда слать нельзя,
+                // пока демон-тракт не научен (там остаётся прежнее v4-only поведение).
+                else if (avpn::isIpv6Cidr(i.key())) {
+                    sites.append(i.key());
+                } else if (avpn::isIpv6Cidr(i.value().toString())) {
+                    sites.append(i.value().toString());
+                }
+#endif
             }
             sites.removeDuplicates();
             for (const auto &site : sites) {

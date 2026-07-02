@@ -11,11 +11,14 @@
 // (2) выбор мгновенный (< 1.5с; старый код на недостижимых endpoint'ах блокировал ≥3с);
 // (3) RU-нода в failover не берётся, пока есть живая не-RU (§14.3), но берётся, когда осталась одна.
 
+#include "../CidrValidate.h"
 #include "../ServiceEngine.h"
+#include "../ru_prefixes.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QHostAddress>
 #include <cstdio>
 
 using namespace avpn;
@@ -158,6 +161,36 @@ int main(int argc, char **argv)
 
         CHECK(eng.notifyConnectionLost());
         CHECK(tun.lastUpNodeId == QLatin1String("ruC"));          // fallback на RU вместо смерти failover
+    }
+
+    // --- 4) IPv6-CIDR валидатор (фикс «v6-половина ru_prefixes молча выбрасывается») ---
+    {
+        CHECK(isIpv6Cidr(QStringLiteral("2a00:1450::/32")));
+        CHECK(isIpv6Cidr(QStringLiteral("2a00:1450:4010:c05::be"))); // одиночный v6-адрес без маски
+        CHECK(isIpv6Cidr(QStringLiteral("::1/128")));
+        CHECK(!isIpv6Cidr(QStringLiteral("2a00:1450::/129")));       // маска за пределом
+        CHECK(!isIpv6Cidr(QStringLiteral("2a00:1450::/-1")));
+        CHECK(!isIpv6Cidr(QStringLiteral("2a00:1450::/32/32")));
+        CHECK(!isIpv6Cidr(QStringLiteral("8.8.8.0/24")));            // v4 — путь checkIpSubnetFormat
+        CHECK(!isIpv6Cidr(QStringLiteral("gosuslugi.ru")));
+        CHECK(!isIpv6Cidr(QString()));
+
+        // ru_prefixes: с v6-валидатором НИ одна запись списка больше не теряется молча.
+        int v4 = 0, v6 = 0, lost = 0;
+        const QStringList ru = avpn::ruPrefixes();
+        for (const QString &cidr : ru) {
+            const QString addr = cidr.section(QLatin1Char('/'), 0, 0);
+            if (QHostAddress(addr).protocol() == QAbstractSocket::IPv4Protocol)
+                ++v4;
+            else if (isIpv6Cidr(cidr))
+                ++v6;
+            else
+                ++lost;
+        }
+        printf("cidr: ru_prefixes v4=%d v6=%d lost=%d\n", v4, v6, lost);
+        CHECK(v4 > 8000);
+        CHECK(v6 > 2000); // раньше ВСЕ они выбрасывались фильтром IPv4-only
+        CHECK(lost == 0);
     }
 
     if (g_failed) {

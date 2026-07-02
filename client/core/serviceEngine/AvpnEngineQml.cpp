@@ -48,6 +48,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_baseUrl = QString::fromUtf8(envUrl);
 
     m_engine.setTunnel(&m_tunnel);
+    m_tunnel.setStore(store); // AVPN RU-direct: гейт сплита по фактической ноде — в up() (T2)
 
     // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
     // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
@@ -1035,10 +1036,12 @@ bool AvpnEngineQml::autoPauseEnabled() const
 
 // AVPN RU-direct: сев split-tunnel под единый тумблер «Доступ к сайтам РФ» (AvpnBypass/masterOn, default
 // ON). Зовётся из guardedStart ПЕРЕД коннектом → конфиг готов к appendSplitTunnelingConfig. Сеет ВЕСЬ рунет
-// CIDR в режим VpnAllExceptSites → рунет мимо туннеля (реальный РФ-IP). Домены отсекает сам движок
-// (checkIpSubnetFormat), потому кормим ТОЛЬКО CIDR из ru_prefixes.h. Пустой список движок сам роняет в
-// VpnAllSites (защита от блэкхола). Идемпотентно: addVpnSites — один bulk-setValue с merge (не растёт).
-// Кросс-платформенно (общий serviceEngine → iOS excludeRoutes / macOS десктоп-маршруты). OFF → no-op.
+// CIDR в режим VpnAllExceptSites → рунет мимо туннеля (реальный РФ-IP). Домены отсекает сам движок,
+// потому кормим ТОЛЬКО CIDR из ru_prefixes.h: v4 проходит checkIpSubnetFormat везде; v6 — isIpv6Cidr
+// на iOS/Android (десктоп-демон v6-сплит не умеет, там v6 отсеется — см. appendSplitTunnelingConfig).
+// Пустой список движок сам роняет в VpnAllSites (защита от блэкхола). Идемпотентно: addVpnSites — один
+// bulk-setValue с merge (не растёт). Кросс-платформенно (iOS excludeRoutes / Android excludeRoute /
+// macOS десктоп-маршруты). OFF → активное ВЫКЛ флага.
 void AvpnEngineQml::applyRuBypassSplit()
 {
     if (!m_store)
@@ -1046,11 +1049,11 @@ void AvpnEngineQml::applyRuBypassSplit()
     using amnezia::RouteMode;
     QSettings s;
     const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-    // AVPN (T2): full-tunnel (сплит ВЫКЛ), если РФ-доступ выключен ЛИБО закреплена РФ-нода. RU-нода
-    // достижима только ручным pin (авто её не берёт, T1); на ней нужен полный туннель через РФ (за границей
-    // «зайти на РФ-сайт» → всё через РФ-IP). Активно ВЫКЛЮЧАЕМ (а не просто пропускаем сев): иначе прежний
-    // seed остался бы в репозитории и рунет исключался бы даже при OFF / на РФ-ноде.
-    if (!masterOn || m_engine.pinnedNodeIsRu()) {
+    // AVPN (T2, аудит 2026-07-02): здесь — только СЕВ списка при masterOn (и активное ВЫКЛ при OFF,
+    // иначе прежний seed продолжил бы исключать рунет). Вкл/выкл сплита под РФ-ноду решается ПО
+    // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
+    // RU-pin — прежний гейт по pinnedNodeIsRu() тут расходился с реальностью, когда нода ≠ pin).
+    if (!masterOn) {
         m_store->setSitesSplitTunnelingEnabled(false);
         return;
     }
