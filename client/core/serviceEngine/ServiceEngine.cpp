@@ -1,5 +1,6 @@
 #include "ServiceEngine.h"
-#include "NodeRanking.h" // AVPN (выбор по скорости): fastestMeasuredNodeId
+#include "NodeRanking.h"  // AVPN (выбор по скорости): fastestMeasuredNodeId
+#include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
 #include "SubscriptionParser.h"
 
 #include <QDateTime>
@@ -10,26 +11,9 @@
 
 namespace avpn {
 
-// AVPN (live-node picker): агрегат backend-health узла в [0..1]. Пустой health = 1.0 (живой) — бэкенд
-// провижинит узлы /v1/subscription уже живыми, отсутствие телеметрии не значит «мёртв». Среднее по
-// всем target'ам (telegram/google/…). См. spec §13-14.
-static double healthAggregate(const SubscriptionNode &n) // AVPN
-{
-    if (n.health.isEmpty())
-        return 1.0;
-    double sum = 0.0;
-    for (auto it = n.health.constBegin(); it != n.health.constEnd(); ++it)
-        sum += it.value();
-    return sum / static_cast<double>(n.health.size());
-}
-
-// AVPN (RU-нода): российская нода (countryCode==RU) обслуживает ТОЛЬКО РФ-сайты (full-tunnel через РФ) —
-// в общем VPN на ней не работает ничего. Поэтому её ИСКЛЮЧАЕМ из АВТО-выбора/failover (иначе часто цепляется
-// как ближайшая по RTT). Ручной форс (pin) её оставляет — для сценария «за границей зайти на РФ-сайт».
-static bool isRuNode(const SubscriptionNode &n)
-{
-    return n.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
-}
+// AVPN (live-node picker): healthAggregate (агрегат backend-health, пустой = живой) и isRuNode
+// (RU — только ручной pin, вне любого авто-выбора) переехали в NodeRotation.h — общие для
+// pick*/ротации и покрыты автономным тестом tests/node_rotation_check.cpp. См. spec §13-14, §14.3.
 
 // AVPN (RU-нода): закреплена ли сейчас РФ-нода. Используется для гейта RU-direct-сплита (T2).
 bool ServiceEngine::pinnedNodeIsRu() const
@@ -505,28 +489,11 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
 }
 
 // AVPN: следующая живая нода после текущей — чистая версия rotateNext (без свитча/connect). Фасад
-// использует для «Обновить подключение» через единый reconcile-контур. Та же сортировка, что rotateNext.
+// использует для «Обновить подключение» через единый reconcile-контур. Логика (вкл. исключение
+// RU-нод из кольца — §14.3) — в NodeRotation.h, тест tests/node_rotation_check.cpp.
 QString ServiceEngine::nextLiveNodeId() const
 {
-    QList<SubscriptionNode> live;
-    for (const SubscriptionNode &n : m_pool.nodes())
-        if (healthAggregate(n) > 0.0)
-            live.append(n);
-    if (live.size() < 2)
-        return QString();
-    std::sort(live.begin(), live.end(), [](const SubscriptionNode &a, const SubscriptionNode &b) {
-        if (a.weight != b.weight)
-            return a.weight > b.weight;
-        const double ha = healthAggregate(a), hb = healthAggregate(b);
-        if (ha != hb)
-            return ha > hb;
-        return a.nodeId < b.nodeId;
-    });
-    int cur = -1;
-    for (int i = 0; i < live.size(); ++i)
-        if (live.at(i).nodeId == m_currentNodeId) { cur = i; break; }
-    const int next = (cur < 0) ? 0 : (cur + 1) % live.size();
-    return live.at(next).nodeId;
+    return avpn::nextLiveNodeId(m_pool.nodes(), m_currentNodeId);
 }
 
 } // namespace avpn

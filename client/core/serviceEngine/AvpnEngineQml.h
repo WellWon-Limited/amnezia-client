@@ -232,6 +232,11 @@ public:
     // онлайн — безопасно передёрнуть туннель через reconcile-машину (needsRestart), чтобы применился новый
     // split-конфиг (applyRuBypassSplit пересеет в guardedStart). Офлайн → применится при следующем Connect.
     Q_INVOKABLE void reapplyBypass();
+    // AVPN RU-direct: ЕДИНСТВЕННО правильный вход тумблера из QML — синхронно пишет masterOn в QSettings
+    // и передёргивает (reapplyBypass). ❌ НЕ полагаться на запись через QML Settings + голый reapplyBypass():
+    // QML-стор флашится с батч-задержкой ~500 мс, туннель гасится быстрее → guardedStart читал СТАРОЕ
+    // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
+    Q_INVOKABLE void setBypassMasterOn(bool on);
 
 signals:
     void changed();
