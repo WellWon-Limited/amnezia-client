@@ -76,12 +76,10 @@ if(WIN32)
     )
 endif()
 
-if (APPLE AND NOT IOS AND NOT MACOS_NE)
-    install(FILES ${CMAKE_SOURCE_DIR}/deploy/data/macos/AntiVPN.plist
-        DESTINATION "AntiVPN.app/Contents/Resources"
-        COMPONENT AmneziaVPN
-    )
-endif()
+# AVPN: апстримный блок install(FILES deploy/data/macos/AmneziaVPN.plist → AmneziaVPN.app/…) удалён.
+# Наш pkg-postflight (deploy/data/macos/post_install.sh) ставит root-демон через tribe-daemon.sh,
+# который САМ генерирует /Library/LaunchDaemons/Tribe-service.plist — статический плист не нужен,
+# а под legacy-именем AntiVPN он создавал фантомный /Applications/AntiVPN.app в payload (аудит 2026-07-02).
 
 include(CPackIFW)
 cpack_ifw_configure_component(AmneziaVPN
