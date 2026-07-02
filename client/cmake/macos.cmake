@@ -20,6 +20,7 @@ set(LIBS ${LIBS}
 
 set_target_properties(${PROJECT} PROPERTIES
     MACOSX_BUNDLE TRUE
+    # AVPN: rebrand — имя/идентификатор бандла Tribe (upstream этих трёх строк не задаёт)
     OUTPUT_NAME "TribeVPN"
     MACOSX_BUNDLE_BUNDLE_NAME "Tribe VPN"
     MACOSX_BUNDLE_GUI_IDENTIFIER "hk.wellwon.vpn"

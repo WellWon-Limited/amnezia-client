@@ -6,6 +6,7 @@
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<!-- AVPN: rebrand Tribe VPN — DisplayName/Name, IconFile, app_group group.org.antivpn.client, UTType hk.wellwon.vpn.* -->
 	<key>CFBundleDisplayName</key>
 	<string>Tribe VPN</string>
 	<key>CFBundleExecutable</key>
