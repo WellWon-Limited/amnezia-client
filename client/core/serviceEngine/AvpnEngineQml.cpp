@@ -81,9 +81,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     });
 
     // AVPN (чипы доступности): проба «работает ли сервис через ЭТУ ноду» — с устройства через туннель
-    // (бэкенд знать не может: доступность = f(юзер,сеть,регион,нода,время)). Telegram — login-free
-    // MTProto handshake к seed-DC-IP (детект троттлинга сильнее, чем reachability); YouTube/прочие —
-    // TLS-complete с реальным SNI (грубая reachability; точный троттл-детект YouTube — TODO, см. ServiceProbe.h).
+    // (бэкенд знать не может: доступность = f(юзер,сеть,регион,нода,время)). Все три меряются РЕАЛЬНОЙ
+    // работоспособностью, а не reachability (иначе ложно-зелёный при DPI-троттлинге):
+    //   • Telegram — login-free MTProto-handshake к seed-DC-IP (resPQ ⇒ дата-плейн жив);
+    //   • YouTube/Instagram — GOODPUT: качаем ~128 КБ с реального душимого CDN (googlevideo/cdninstagram)
+    //     и меряем kbit/s (RU-троттл ~128 кбит/с ⇒ slow; норм ⇒ works; путь срезан ⇒ blocked). См. ServiceProbe.h.
     {
         QList<ServiceProbeConfig> cfgs;
         // Telegram: несколько seed-DC-IP (OONI-стабильные DC2/DC4/DC5) — первый ответивший resPQ ⇒
@@ -91,10 +93,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         cfgs.append({QStringLiteral("telegram"),  ServiceProbeConfig::Mtproto,
                      QStringLiteral("149.154.167.51"), 443, 1500,
                      QStringList{QStringLiteral("149.154.167.91"), QStringLiteral("91.108.56.130")}});
-        cfgs.append({QStringLiteral("youtube"),   ServiceProbeConfig::Https,
-                     QStringLiteral("www.youtube.com"), 443, 1500});
-        cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Https,
-                     QStringLiteral("www.instagram.com"), 443, 1500});
+        // host = fallback-SNI на душимом CDN (reachability, если byte-source не резолвится). port по умолчанию,
+        // sampleBytes/пороги goodput — дефолтные (128 КБ; works≥1000, slow≥100 кбит/с).
+        cfgs.append({QStringLiteral("youtube"),   ServiceProbeConfig::Goodput,
+                     QStringLiteral("redirector.googlevideo.com")});
+        cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Goodput,
+                     QStringLiteral("static.cdninstagram.com")});
         m_svcProbe = new ServiceProbe(m_nam, this);
         m_svcProbe->setServices(cfgs);
 
@@ -115,6 +119,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         }
         connect(m_svcProbe, &ServiceProbe::result, this,
                 [this](const QString &key, int state, int rttMs) {
+                    // rttMs для goodput-сервисов (youtube/instagram) несёт kbit/s, для telegram — RTT в мс.
+                    static const char *stName[] = {"blocked", "slow", "works"};
+                    qInfo("[AVPN svc] %s state=%s metric=%d",
+                          key.toUtf8().constData(),
+                          (state >= 0 && state <= 2) ? stName[state] : "unknown", rttMs);
                     for (int i = 0; i < m_serviceStatus.size(); ++i) {
                         QVariantMap m = m_serviceStatus.at(i).toMap();
                         if (m.value(QStringLiteral("key")).toString() == key) {
@@ -391,20 +400,16 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
         // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
         flushPendingPushToken();
-        // AVPN (порядок по требованию пользователя): СНАЧАЛА чипы доступности сервисов (Telegram/YouTube/
-        // Instagram), ПОТОМ скорость (RTT-палочки). Чипы — через ~0.6с после поднятия (маршруты/DNS осели);
-        // первый замер скорости — через ~1.8с (уже ПОСЛЕ чипов), дальше по каденсу onTick (4с). Иначе
-        // скорость «появлялась долго» (ждала следующего health-тика до 4с) и нередко раньше чипов.
-        QTimer::singleShot(600, this, &AvpnEngineQml::probeServices);
+        // AVPN: чипы доступности + скорость после поднятия. Чипы youtube/instagram теперь GOODPUT (качают
+        // ~128 КБ каждый) — дороже по трафику и дольше (до ~20с при троттле), поэтому ОДНА проба за коннект
+        // (~1.5с — DNS/маршруты через свежий туннель уже осели; раньше давало HostNotFound → ложный «заблок»).
+        // Дальше — только по тапу «перепроверить» (см. UI), НЕ поллинг: goodput каждые N секунд = лишний трафик.
+        // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
+        QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
         QTimer::singleShot(1800, this, [this]() {
             if (m_probe && state() == QLatin1String("connected"))
                 m_probe->measure();
         });
-        // AVPN (анти-ложный-красный): повторная проба сервисов через ~4.5с. На первой пробе (600мс) DNS
-        // через свежий туннель мог ещё не подняться → YouTube/Instagram (идут по DNS, в отличие от
-        // Telegram по голому IP) ловили HostNotFound → ложный «заблок». К 4.5с маршруты/DNS осели →
-        // результат корректируется. Не поллинг (всего один повтор за коннект).
-        QTimer::singleShot(4500, this, &AvpnEngineQml::probeServices);
         break;
     case Vpn::Error:
         // AVPN (анти-авто-коннект): РАНЬШЕ обрыв из Connected → notifyConnectionLost() → реактивный

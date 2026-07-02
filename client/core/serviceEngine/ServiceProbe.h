@@ -13,6 +13,8 @@
 // Кэш результата per-нода и каденс (on-connect + по тапу, НЕ поллинг) — на стороне вызывающего (AvpnEngineQml).
 #pragma once
 
+#include "GoodputProbe.h"
+
 #include <QHostAddress>
 #include <QList>
 #include <QObject>
@@ -24,19 +26,25 @@ class QNetworkAccessManager;
 namespace avpn {
 
 // Статус сервиса для чипа. blocked: путь не отвечает корректно (заблокирован/задушен в ноль).
-// slow: ответил, но медленно (вероятный троттлинг). works: ответил быстро.
+// slow: ответил, но медленно (вероятный троттлинг). works: ответил быстро/на нормальной скорости.
+// unknown: не смогли ЧЕСТНО измерить (напр. резолв byte-source сломался, но путь достижим) — не врём зелёным.
 enum class ServiceState { Unknown = -1, Blocked = 0, Slow = 1, Works = 2 };
 
 struct ServiceProbeConfig {
-    enum Kind { Mtproto, Https };
-    QString     key;            // "telegram","youtube","instagram",…
-    Kind        kind = Https;
-    QString     host;           // Mtproto: ПЕРВЫЙ seed DC IP; Https: хост для SNI/GET (реальный SNI обязателен)
-    int         port = 443;
-    int         slowMs = 1500;  // RTT/TTFB выше ⇒ Slow (троттлинг/далёкий путь)
-    QStringList fallbackHosts;  // Mtproto: запасные seed DC IP (пробуем по очереди; первый resPQ → works).
-                                // Зачем: один IP мог смениться/лечь → ложный «заблок». DC-IP не статичны
-                                // (core.telegram.org/api/datacenter); правильный рефреш — help.getConfig (TODO).
+    // Goodput: РЕАЛЬНЫЙ замер kbit/s на душимом пути (YouTube/Instagram). Mtproto: Telegram-handshake.
+    // Https: TLS-reachability (устаревшее для соцсетей — оставлено как деградация).
+    enum Kind { Mtproto, Https, Goodput };
+    QString          key;            // "telegram","youtube","instagram",…
+    Kind             kind = Https;
+    QString          host;           // Mtproto: ПЕРВЫЙ seed DC IP; Https: SNI/GET-хост; Goodput: fallback-хост
+                                     // reachability на душимом CDN (напр. redirector.googlevideo.com / static.cdninstagram.com).
+    int              port = 443;
+    int              slowMs = 1500;  // Https: RTT/TTFB выше ⇒ Slow. Goodput не использует (там пороги kbit/s).
+    QStringList      fallbackHosts;  // Mtproto: запасные seed DC IP (пробуем по очереди; первый resPQ → works).
+                                     // Зачем: один IP мог смениться/лечь → ложный «заблок». DC-IP не статичны
+                                     // (core.telegram.org/api/datacenter); правильный рефреш — help.getConfig (TODO).
+    qint64           sampleBytes = 131072;  // Goodput: сколько байт качаем для замера (128 КБ — хватает и дёшево).
+    GoodputThresholds goodput;              // Goodput: пороги works/slow/blocked (kbit/s).
 };
 
 class ServiceProbe : public QObject {
@@ -62,6 +70,17 @@ private:
     void attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
                             int perHostMs, int slowMs);
     void probeHttps(const ServiceProbeConfig &c, int timeoutMs);
+
+    // Goodput: качаем sampleBytes с реального byte-source на душимом CDN и классифицируем kbit/s.
+    void probeGoodput(const ServiceProbeConfig &c);
+    void resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx);
+    void resolveInstagram(const ServiceProbeConfig &c);
+    // Скачать N байт по готовому URL и померить скорость → finish(works/slow/blocked). rttMs слот = kbit/s.
+    void measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery);
+    // Fail-safe: byte-source не резолвится → проверить хотя бы TLS-достижимость CDN. reachable ⇒ Unknown
+    // (честно «не смогли измерить»), reset/timeout ⇒ Blocked. Никогда не выдаём ложный works.
+    void goodputFallback(const ServiceProbeConfig &c);
+
     void finish(const QString &key, ServiceState st, int rttMs);
 
     QNetworkAccessManager    *m_nam = nullptr;
