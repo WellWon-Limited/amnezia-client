@@ -319,14 +319,6 @@ PageType {
                 font.family: Theme.font.display; font.pixelSize: Theme.font.h2; font.weight: Theme.font.wExtra
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
-            // серый слоган под wordmark (реш. 2026-07-02)
-            Text {
-                anchors.left: brandText.left
-                anchors.top: brandText.bottom; anchors.topMargin: 1
-                text: qsTr("Умный VPN, который работает")
-                color: root.slate400
-                font.family: Theme.font.body; font.pixelSize: 10; font.weight: Theme.font.wMedium
-            }
         }
         // AVPN: админ-вход в просмотр пула нод (server/stack, vector). Только Dev.adminMode.
         // Маленькая иконка справа от бренда; тап → requestAdminServers() → PageLocationsTribe (админ).
@@ -491,9 +483,10 @@ PageType {
         anchors.horizontalCenter: parent.horizontalCenter
         // якорь ПОД карточкой «АвтоVPN»: внешнее кольцо (r=160) выступает на 32px за Item орба
         // (256×256), поэтому марджин = 32 + видимый зазор lg от кольца до карточки.
-        // Десктоп: сцена дополнительно опущена на 36 (реш. 2026-07-02) — воздух уходит вниз, к подписи. // AVPN
+        // Десктоп: добавочный сдвиг 16 (итерации 2026-07-02: 36 → 0 после тайтлбара → 16 финал) —
+        // сцена чуть ниже, но подпись НЕ заходит на круг. // AVPN
         anchors.top: autoVpnCard.bottom
-        anchors.topMargin: 32 + Theme.space.lg + (root.isMobile ? root.sceneShift : 36)
+        anchors.topMargin: 32 + Theme.space.lg + (root.isMobile ? root.sceneShift : 16)
         z: 10
 
         // внешнее свечение (КРУГЛОЕ — задаём радиусы = половине ширины, иначе квадрат)
