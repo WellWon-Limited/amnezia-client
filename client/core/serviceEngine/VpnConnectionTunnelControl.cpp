@@ -3,6 +3,7 @@
 // [IN-FORK BUILD] заголовки форка:
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
+#include "core/repositories/secureAppSettingsRepository.h" // AVPN RU-direct: флаг сплита по факт-ноде
 
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
 
@@ -76,14 +77,31 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // авторитативным DNS (Госуслуги/VK/Кинопоиск) палили бы «нероссийский резолвер» → мягкое «возможно VPN».
     // Магазинам (Ozon/WB) DNS-гео не важно. Сам site-split (рунет CIDR мимо туннеля) сеет движок в
     // репозиторий — AvpnEngineQml::applyRuBypassSplit. RU-нода вторым пиром больше НЕ используется.
-    // T2: на самой РФ-ноде (countryCode==RU, форс-pin) DNS не подменяем — там full-tunnel через РФ,
-    // резолвер и так российский (сплит на РФ-ноде выключен в applyRuBypassSplit).
+    // T2: на самой РФ-ноде (countryCode==RU) DNS не подменяем — там full-tunnel через РФ,
+    // резолвер и так российский (сплит на РФ-ноде выключается здесь же, ниже).
     SubscriptionNode primary = node;   // мутабельная копия (DNS-override под РФ-доступ)
     {
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
-        if (!ruNode && s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+        const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+        if (!ruNode && masterOn)
             primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
+
+        // AVPN RU-direct (T2, аудит 2026-07-02): вкл/выкл сплита — ПО ФАКТИЧЕСКОЙ ноде, здесь, а не по
+        // pin в applyRuBypassSplit. Прежний гейт по pinnedNodeIsRu() расходился с реальностью на всех
+        // путях, где нода ≠ pin: (а) авто-RU-fallback (все не-RU мертвы) оставлял сплит ВКЛ на РФ-ноде;
+        // (б) мёртвый RU-pin → авто не-RU, а сплит остался ВЫКЛ (фича молча отключена); (в) failover
+        // (continuePendingSwitch → up() напрямую) сев вообще не пере-выполнял. up() — единственная
+        // точка, через которую проходит КАЖДЫЙ подъём туннеля (connect/failover/rotate/pin), поэтому
+        // решение тут покрывает все пути. Список CIDR к этому моменту уже засеян (guardedStart →
+        // applyRuBypassSplit при masterOn); appendSplitTunnelingConfig прочтёт флаг из этого же стора
+        // в connectToVpn (queued — строго после нас). Паттерн тот же, что у DNS-гейта выше.
+        if (m_appStore) {
+            const bool splitOn = masterOn && !ruNode;
+            if (splitOn)
+                m_appStore->setRouteMode(amnezia::RouteMode::VpnAllExceptSites);
+            m_appStore->setSitesSplitTunnelingEnabled(splitOn);
+        }
     }
 
     const QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);

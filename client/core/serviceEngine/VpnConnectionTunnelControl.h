@@ -9,7 +9,8 @@
 #include <QObject>
 #include <QJsonObject>
 
-class VpnConnection; // forward (vpnConnection.h в форке)
+class VpnConnection;               // forward (vpnConnection.h в форке)
+class SecureAppSettingsRepository; // forward (core/repositories) — RU-direct-гейт в up()
 
 namespace avpn {
 
@@ -20,6 +21,10 @@ public:
 
     // Ключи из Identity (приватный — из Keychain; на бэкенд не уходит).
     void setClientKeys(const ClientKeys &keys) { m_keys = keys; }
+
+    // AVPN RU-direct: репозиторий настроек для гейта сплита ПО ФАКТИЧЕСКОЙ ноде в up() (см. .cpp).
+    // Сев списка CIDR остаётся в AvpnEngineQml::applyRuBypassSplit; здесь — только вкл/выкл флага.
+    void setStore(SecureAppSettingsRepository *store) { m_appStore = store; }
 
     // up: построить конфиг и вызвать connectToVpn (async; фактический исход — через connectionStateChanged,
     // его слушает ServiceEngine). Возвращает success(), если вызов поставлен в очередь.
@@ -47,6 +52,7 @@ private:
     VpnConnection *m_conn = nullptr;
     ClientKeys     m_keys;
     TunnelStats    m_stats;
+    ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде
 };
 
 } // namespace avpn
