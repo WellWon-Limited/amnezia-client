@@ -108,7 +108,7 @@ PageType {
         news,
         backup,
         about,
-        resetTrial,
+        resetTrial, // AVPN: dev-инструмент (гейт isDevModeEnabled ниже)
         devConsole
     ]
 
@@ -175,7 +175,7 @@ PageType {
     QtObject {
         id: about
 
-        property string title: qsTr("About Tribe VPN")
+        property string title: qsTr("About Tribe VPN") // AVPN: rebrand (was "About AmneziaVPN")
         readonly property string leftImagePath: "qrc:/images/controls/amnezia.svg"
         property bool isVisible: true
         readonly property var clickedHandler: function() {
@@ -183,14 +183,16 @@ PageType {
         }
     }
 
-    // DEV TOOL (TEMPORARY — remove together with backend routers/devtools.py).
+    // AVPN DEV TOOL (TEMPORARY — remove together with backend routers/devtools.py).
     // Admin row: factory-reset this account's trial. Isolated single entry.
     QtObject {
         id: resetTrial
 
         property string title: qsTr("Администрирование — обнулить триал")
         readonly property string leftImagePath: "qrc:/images/controls/refresh-cw.svg"
-        property bool isVisible: true
+        // AVPN (аудит 2026-07-02): dev-only — тот же гейт, что у devConsole ниже; isVisible:true
+        // был виден ВСЕМ пользователям TestFlight 48/49 (сервер без флага отвечает 404).
+        property bool isVisible: SettingsController.isDevModeEnabled
         readonly property var clickedHandler: function() {
             TribeEngine.resetTrialDev()
         }
