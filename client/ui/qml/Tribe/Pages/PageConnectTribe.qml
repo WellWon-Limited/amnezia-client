@@ -421,13 +421,77 @@ PageType {
         }
     }
 
+    // ── карточка «АвтоVPN» — НАД кнопкой Connect (перенос из bottomBlock, реш. 2026-07-02):
+    //    РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
+    Rectangle {
+        id: autoVpnCard
+        anchors.top: header.bottom; anchors.topMargin: Theme.space.lg
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        implicitHeight: 68; height: 68   // ниже серверной карточки (84) — компактный баннер
+        radius: Theme.radius.xl
+        color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
+        border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
+        z: 10
+        Item {
+            anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+            AutoVpnIcon {
+                id: avCardIcon
+                width: 52; height: 52
+                anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                active: bypassStore.masterOn
+            }
+            TribeToggle {
+                id: avCardToggle
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                checked: bypassStore.masterOn
+                // тост при переключении убран (реш. 2026-07-02) — состояние видно по текстовке баннера
+                onToggled: {
+                    // bypassStore (QML Settings) флашится с задержкой ~500 мс — для UI-биндингов этого
+                    // достаточно, но движок читает QSettings РАНЬШЕ (teardown быстрее записи). Поэтому
+                    // значение передаём явно: setBypassMasterOn пишет синхронно и передёргивает туннель.
+                    bypassStore.masterOn = checked
+                    if (root.hasEngine) TribeEngine.setBypassMasterOn(checked)
+                }
+            }
+            Column {
+                // отступы уже (md/sm, не lg/md) — обе текстовки влезают без обрезки // AVPN
+                anchors.left: avCardIcon.right; anchors.leftMargin: Theme.space.md
+                anchors.right: avCardToggle.left; anchors.rightMargin: Theme.space.sm
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 0   // подзаголовок вплотную к заголовку (реш. 2026-07-02)
+                // текстовки зависят от тумблера (реш. 2026-07-02): off = оффер, on = подтверждение
+                Text {
+                    width: parent.width
+                    text: bypassStore.masterOn ? qsTr("AntiVPN активирован!")
+                                               : qsTr("Надоело выключать VPN?")
+                    color: "white"; elide: Text.ElideRight
+                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 10
+                    font.family: Theme.font.display; font.pixelSize: 16; font.weight: Theme.font.wBold
+                }
+                Text {
+                    width: parent.width
+                    text: bypassStore.masterOn ? qsTr("Теперь VPN выключать не нужно.")
+                                               : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
+                    color: root.slate500; elide: Text.ElideRight
+                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 9
+                    font.family: Theme.font.body; font.pixelSize: 11
+                }
+            }
+        }
+    }
+
     // ── ОРБ (центрирован, z10) ──────────────────────────────────────────
     Item {
         id: orb
         width: 256; height: 256
         anchors.horizontalCenter: parent.horizontalCenter
-        // мобайл: сцена опущена (~20% вниз); десктоп: поднимаем выше (короче окно) — подпись не налезает на карточку // AVPN
-        anchors.top: header.bottom; anchors.topMargin: root.isMobile ? (76 + root.sceneShift) : 40
+        // якорь ПОД карточкой «АвтоVPN»: внешнее кольцо (r=160) выступает на 32px за Item орба
+        // (256×256), поэтому марджин = 32 + видимый зазор lg от кольца до карточки.
+        // Десктоп: сцена дополнительно опущена на 36 (реш. 2026-07-02) — воздух уходит вниз, к подписи. // AVPN
+        anchors.top: autoVpnCard.bottom
+        anchors.topMargin: 32 + Theme.space.lg + (root.isMobile ? root.sceneShift : 36)
         z: 10
 
         // внешнее свечение (КРУГЛОЕ — задаём радиусы = половине ширины, иначе квадрат)

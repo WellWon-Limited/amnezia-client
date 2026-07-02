@@ -1079,6 +1079,20 @@ void AvpnEngineQml::applyRuBypassSplit()
 // (подключены/подключаемся), передёргиваем через reconcile-машину: needsRestart → guardedStop → на
 // пришедшем Disconnected reconcile сам поднимет заново (applyRuBypassSplit пересеет новый сплит-конфиг).
 // Без back-to-back down+up (CONNECT-INVARIANTS). Офлайн → no-op (применится при следующем Connect).
+// AVPN RU-direct (фикс «тумблер на лету не применяется», 2026-07-02): QML Settings (QtCore) пишет в
+// QSettings с батч-задержкой ~500 мс (settingsWriteDelay в qqmlsettings), а NE-туннель на iOS гасится
+// быстрее → applyRuBypassSplit (guardedStart) и DNS-гейт в up() читали СТАРЫЙ masterOn и поднимали
+// туннель со старым сплит-конфигом. Симптом: тумблер на подключённом VPN → реконнект есть, сплит нет;
+// ручной stop→toggle→start работал (запись успевала флашнуться). Пишем СИНХРОННО до передёрга —
+// движок не должен зависеть от дебаунса UI-стора.
+void AvpnEngineQml::setBypassMasterOn(bool on)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnBypass/masterOn"), on);
+    s.sync();
+    reapplyBypass();
+}
+
 void AvpnEngineQml::reapplyBypass()
 {
     if (!m_wantConnected)
