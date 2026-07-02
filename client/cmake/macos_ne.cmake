@@ -18,7 +18,6 @@ find_library(FW_STOREKIT StoreKit)
 find_library(FW_SERVICEMGMT ServiceManagement)
 find_library(FW_USERNOTIFICATIONS UserNotifications)
 find_library(FW_NETWORKEXTENSION NetworkExtension)
-find_library(FW_SYSTEMEXTENSIONS SystemExtensions)   # AVPN: активация sysext (OSSystemExtensionRequest)
 
 set(LIBS ${LIBS}
     ${FW_AUTHENTICATIONSERVICES}
@@ -28,7 +27,6 @@ set(LIBS ${LIBS}
     ${FW_SERVICEMGMT}
     ${FW_USERNOTIFICATIONS}
     ${FW_NETWORKEXTENSION}
-    ${FW_SYSTEMEXTENSIONS}
 )
 
 
@@ -90,9 +88,7 @@ set_target_properties(${PROJECT} PROPERTIES
 
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../Frameworks"
-    # AVPN: NE теперь System Extension → встраиваем в Contents/Library/SystemExtensions/ (а не PlugIns).
-    XCODE_EMBED_SYSTEM_EXTENSIONS AmneziaVPNNetworkExtension
-    XCODE_EMBED_SYSTEM_EXTENSIONS_CODE_SIGN_ON_COPY "NO"
+    XCODE_EMBED_APP_EXTENSIONS AmneziaVPNNetworkExtension
 )
 
 if(DEPLOY)
@@ -117,7 +113,7 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_SWIFT_OBJC_INTEROP_MODE "objcxx"
 )
 set_target_properties(${PROJECT} PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "Q7DVH5MCWF"  # AVPN: WellWon Limited (НЕ апстрим X7UJ388FXK, НЕ личный Vlad Frolov 6D75W6GFC2)
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
 )
 target_include_directories(${PROJECT} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(${PROJECT} PRIVATE
@@ -148,22 +144,6 @@ set_property(TARGET ${PROJECT} APPEND PROPERTY RESOURCE
 
 add_subdirectory(macos/networkextension)
 add_dependencies(${PROJECT} AmneziaVPNNetworkExtension)
-
-# AVPN: cmake XCODE_EMBED_SYSTEM_EXTENSIONS (выше) молча НЕ создаёт Embed-фазу → встраиваем sysext
-# вручную POST_BUILD: копируем собранный .systemextension в Contents/Library/SystemExtensions/ приложения.
-# Зависимость add_dependencies гарантирует, что sysext собран раньше. Library/SystemExtensions не пересекается
-# с macdeployqt (Frameworks/PlugIns) — порядок не критичен.
-add_custom_command(TARGET ${PROJECT} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "$<TARGET_BUNDLE_DIR:${PROJECT}>/Contents/Library/SystemExtensions"
-    COMMAND ${CMAKE_COMMAND} -E rm -rf
-        "$<TARGET_BUNDLE_DIR:${PROJECT}>/Contents/Library/SystemExtensions/AmneziaVPNNetworkExtension.systemextension"
-    # cmake не видит NE бандлом → TARGET_FILE_DIR = config-каталог (.../Release), а реальный бандл лежит
-    # как Release/AmneziaVPNNetworkExtension.systemextension. Берём его явно.
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "$<TARGET_FILE_DIR:AmneziaVPNNetworkExtension>/AmneziaVPNNetworkExtension.systemextension"
-        "$<TARGET_BUNDLE_DIR:${PROJECT}>/Contents/Library/SystemExtensions/AmneziaVPNNetworkExtension.systemextension"
-    COMMENT "AVPN: встраиваю System Extension в Contents/Library/SystemExtensions/")
 
 get_target_property(QtCore_location Qt6::Core LOCATION)
 message("QtCore_location")

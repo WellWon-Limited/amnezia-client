@@ -5,7 +5,7 @@
 # ── TRIBE_VERSION: МАЖОР.МИНОР.ПАТЧ.BUILD (4 части) ──────────────────────────────────────────
 #   МАЖОР.МИНОР.ПАТЧ — marketing-версия, идёт ВО ВСЕ платформы из одного значения:
 #       • iOS    → CFBundleShortVersionString / MARKETING_VERSION  (client/cmake/ios.cmake)
-#       • macOS  → MARKETING_VERSION                                (client/cmake/macos_ne.cmake)
+#       • macOS  → MACOSX_BUNDLE_SHORT_VERSION_STRING                (client/cmake/macos.cmake; NE-вариант откачен)
 #       • Android→ versionName  (= APP_MAJOR_VERSION)               (client/cmake/android.cmake)
 #       • Windows→ APP_MAJOR_VERSION (FILEVERSION/инсталлятор)
 #   BUILD           — CFBundleVersion (iOS/macOS), монотонно растёт. Для Android номер сборки —

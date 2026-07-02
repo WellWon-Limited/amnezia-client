@@ -12,68 +12,6 @@
 #import "ios_controller_wrapper.h"
 #import "StoreKitController.h"
 
-#if TARGET_OS_OSX
-#import <SystemExtensions/SystemExtensions.h>
-
-// AVPN: активатор macOS System Extension. На dmg/Developer ID (вне App Store) packet-tunnel грузится
-// ТОЛЬКО как System Extension (не appex) — иначе startTunnel висит вечно (провайдера нет). Здесь просим
-// систему установить наш sysext; при первом запуске пользователь один раз жмёт «Разрешить» в Настройках
-// системы. Делегат держим статически (живёт до завершения асинхронного запроса). Только macOS.
-// AVPN (диагностика): пишем жизненный цикл активации в файл — qDebug в release подавлен, sysextd-лог
-// требует sudo+тайминг. Файл /tmp/avpn-sysext.log читается без привилегий (главный app не в песочнице).
-static void avpnSxLog(NSString *msg) {
-    NSString *line = [NSString stringWithFormat:@"%@ | %@\n", NSDate.date, msg];
-    FILE *f = fopen("/tmp/avpn-sysext.log", "a");
-    if (f) { fputs(line.UTF8String, f); fclose(f); }
-    qDebug() << "AVPN sysext:" << msg.UTF8String;
-}
-
-@interface AvpnSysExtActivator : NSObject <OSSystemExtensionRequestDelegate>
-// КРИТИЧНО: держим strong-ссылку на запрос до его завершения. Иначе req освобождается после
-// submitRequest → его dealloc зовёт xpc_connection_cancel → sysextd отменяет активацию, диалога нет.
-@property (nonatomic, strong) OSSystemExtensionRequest *pendingRequest;
-@end
-@implementation AvpnSysExtActivator
-- (void)activate:(NSString *)identifier {
-    avpnSxLog([NSString stringWithFormat:@"submit activation request for %@", identifier]);
-    OSSystemExtensionRequest *req =
-        [OSSystemExtensionRequest activationRequestForExtension:identifier queue:dispatch_get_main_queue()];
-    req.delegate = self;
-    self.pendingRequest = req;   // удержать до didFinish/didFail
-    [[OSSystemExtensionManager sharedManager] submitRequest:req];
-    avpnSxLog(@"submitRequest returned");
-}
-- (OSSystemExtensionReplacementAction)request:(OSSystemExtensionRequest *)request
-                  actionForReplacingExtension:(OSSystemExtensionProperties *)existing
-                                withExtension:(OSSystemExtensionProperties *)ext {
-    avpnSxLog([NSString stringWithFormat:@"actionForReplacing existing=%@ with=%@ -> replace",
-               existing.bundleShortVersion, ext.bundleShortVersion]);
-    return OSSystemExtensionReplacementActionReplace;   // новая версия заменяет старую
-}
-- (void)requestNeedsUserApproval:(OSSystemExtensionRequest *)request {
-    avpnSxLog(@"needs user approval (System Settings -> Allow)");
-}
-- (void)request:(OSSystemExtensionRequest *)request didFinishWithResult:(OSSystemExtensionRequestResult)result {
-    avpnSxLog([NSString stringWithFormat:@"FINISHED result=%ld (0=completed,1=needsReboot)", (long)result]);
-}
-- (void)request:(OSSystemExtensionRequest *)request didFailWithError:(NSError *)error {
-    avpnSxLog([NSString stringWithFormat:@"FAILED: %@ | domain=%@ code=%ld",
-               error.localizedDescription, error.domain, (long)error.code]);
-}
-@end
-
-static AvpnSysExtActivator *g_avpnSysExtActivator = nil;
-
-// Идемпотентно: один раз за запуск просим установку/обновление sysext.
-static void avpnEnsureSystemExtension() {
-    static bool requested = false;
-    if (requested) return;
-    requested = true;
-    if (!g_avpnSysExtActivator) g_avpnSysExtActivator = [[AvpnSysExtActivator alloc] init];
-    [g_avpnSysExtActivator activate:@"hk.wellwon.vpn.network-extension"];
-}
-#endif
-
 const char* Action::start = "start";
 const char* Action::restart = "restart";
 const char* Action::stop = "stop";
@@ -240,10 +178,6 @@ IosController* IosController::Instance() {
 
 bool IosController::initialize()
 {
-#if TARGET_OS_OSX
-    // AVPN: до любых VPN-операций на macOS гарантируем установку System Extension (provider туннеля).
-    avpnEnsureSystemExtension();
-#endif
     __block bool ok = true;
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
         @try {
@@ -283,11 +217,6 @@ bool IosController::initialize()
 
 bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configuration)
 {
-#if TARGET_OS_OSX
-    // AVPN (страховка): гарантируем активацию System Extension и на пути коннекта (идемпотентно —
-    // статический гард внутри). Если sysext ещё не одобрен — система покажет запрос «Разрешить».
-    avpnEnsureSystemExtension();
-#endif
     m_proto = proto;
     m_rawConfig = configuration;
     m_serverAddress = configuration.value(configKey::hostName).toString().toNSString();
@@ -934,6 +863,7 @@ bool IosController::startOpenVPN(const QString &config)
                        << QString::fromNSString(payloadPreview);
 
     startTunnel();
+    return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
 }
 
 bool IosController::startWireGuard(const QString &config)
@@ -950,6 +880,7 @@ bool IosController::startWireGuard(const QString &config)
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
 
     startTunnel();
+    return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
 }
 
 bool IosController::startXray(const QString &config)
@@ -966,6 +897,7 @@ bool IosController::startXray(const QString &config)
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
 
     startTunnel();
+    return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
 }
 
 void IosController::startTunnel()
@@ -1168,7 +1100,7 @@ QString IosController::openFile() {
     documentPicker.delegate = documentPickerDelegate;
 
     UIViewController *qtController = getViewController();
-    if (!qtController) return;
+    if (!qtController) return QString(); // AVPN(N3): был голый return в QString-функции
 
     [qtController presentViewController:documentPicker animated:YES completion:nil];
 
