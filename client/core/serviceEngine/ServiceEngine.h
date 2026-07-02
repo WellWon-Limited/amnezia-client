@@ -44,6 +44,13 @@ public:
     // Список не-фатальных проблем текущей подписки (см. SubscriptionParser::validate).
     QStringList subscriptionIssues() const;
 
+    // AVPN (#35 живой трафик): освежить счётчики подписки из GET /v1/account (used/limit/expires),
+    // не перезагружая ноды. Зовётся периодически из onTick, пока подключены → бейдж ГБ/дней «живой».
+    void updateSubscriptionTraffic(qint64 used, qint64 limit, const QString &expiresAt)
+    {
+        m_pool.updateTraffic(used, limit, expiresAt);
+    }
+
     // Подключиться: выбрать ноду и поднять туннель. [СКАФФОЛД: выбор=первый, реальный скоринг в C-4]
     bool connect(QString &error);
 

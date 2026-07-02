@@ -368,6 +368,18 @@ void AvpnEngineQml::onTick()
     // и держим бары на 0 (hard-gate сбросит при следующем reachable=false, см. ниже onConnectionStateChanged).
     if (m_probe && state() == QLatin1String("connected"))
         m_probe->measure();
+
+    // AVPN (#35 живой трафик): пока подключены — каждый 5-й тик (~20с) освежаем счётчики из /v1/account
+    // (бэк-истина; used растёт по мере расхода). refreshAccount пишет назад в подписку + emit changed()
+    // → бейдж «остаток ГБ» убывает постепенно (3.1→2.9→…). Не каждый тик — беречь батарею/трафик.
+    if (state() == QLatin1String("connected")) {
+        if (++m_trafficSyncTicks >= 5) {
+            m_trafficSyncTicks = 0;
+            refreshAccount();
+        }
+    } else {
+        m_trafficSyncTicks = 0; // сброс, чтобы первый ре-синк после коннекта был через полный интервал
+    }
 }
 
 void AvpnEngineQml::probeServices()
@@ -1265,6 +1277,17 @@ void AvpnEngineQml::refreshAccount()
         }
         m_account = result;
         emit accountChanged();
+        // AVPN (#35 живой трафик): свежие used/limit/expires из /v1/account — назад в подписку движка,
+        // чтобы ЕДИНЫЙ источник числа (Q_PROPERTY trafficUsed/trafficLimit/daysLeft, читают snapshot →
+        // подписку) обновился на ОБЕИХ страницах. changed() уведомляет бейдж/бар. Только при успешном
+        // парсе (иначе не затираем валидные значения нулями от сетевого сбоя).
+        if (!result.isEmpty()) {
+            m_engine.updateSubscriptionTraffic(
+                result.value(QStringLiteral("traffic_used")).toLongLong(),
+                result.value(QStringLiteral("traffic_limit")).toLongLong(),
+                result.value(QStringLiteral("expires_at")).toString());
+            emit changed();
+        }
     });
 }
 

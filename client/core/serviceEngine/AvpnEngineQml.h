@@ -305,6 +305,7 @@ private:
     bool                         m_busy = false;
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
     Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // ФАКТ: реальное состояние туннеля
+    int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)
     bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
     bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
