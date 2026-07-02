@@ -8,7 +8,8 @@ import "../../Controls2" // PageType
 
 // AVPN: Настройки (таб 3). Профиль (триал/плашка) + подписка + тумблеры подключения.
 // Поддержка вынесена в отдельный таб — кнопки поддержки здесь больше нет.
-// NO purchase button / price / payment link (Apple compliance, UI-DESIGN.md §10).
+// NO price / payment UI in-app (Apple compliance, UI-DESIGN.md §10); «Управлять подпиской» лишь
+// открывает web-кабинет во ВНЕШНЕМ браузере (web-link, одноразовый авто-логин) — цен в апке нет.
 PageType {
     id: root
 
@@ -37,6 +38,23 @@ PageType {
     property bool   redeemError: false
     property bool   redeemFailed: false  // взводится onError/onSeatLimitReached в рамках синхронного вызова
     property string redeemLastCode: ""   // для повторного redeem с evict_device_id после кика
+
+    // AVPN (оплата): «Управлять подпиской» — минт одноразовой ссылки (TribeEngine.requestCabinetLink,
+    // POST /v1/cabinet/web-link) и открытие web-кабинета во ВНЕШНЕМ браузере (НЕ webview — §3.1.1).
+    // Фиче-флаг на случай придирок ревью Apple: false + пересборка = кнопки нет, бэк не затронут.
+    readonly property bool manageSubEnabled: true
+    property bool cabinetLinking: false   // loading кнопки; сбрасывается в onCabinetLinkReady (приходит всегда)
+
+    function manageSubscription() {
+        if (root.cabinetLinking) return
+        if (!(root.hasEngine && typeof TribeEngine.requestCabinetLink === "function")) {
+            // dev-превью / стейл-бинарник без движка: кабинет без авто-логина (юзер войдёт сам)
+            Qt.openUrlExternally("https://tribevpn.com/account")
+            return
+        }
+        root.cabinetLinking = true
+        TribeEngine.requestCabinetLink()  // async; ссылка одноразовая (TTL ~90с) — минт строго по тапу
+    }
 
     function redeemKey(code) {
         var c = (code || "").trim()
@@ -98,6 +116,13 @@ PageType {
         // НЕ синхронно в обработчике: changed() может прилетать пачкой (connect/state) — дебаунсим
         // через таймер, иначе каждый сигнал = 2 сетевых вызова прямо в слоте (джанк/фриз).
         function onChanged() { settingsLoadTimer.restart() }
+        // ссылка web-кабинета готова (успех или fallback — эмитится всегда). Гард по cabinetLinking:
+        // сигнал общий на движок — не реагируем на запросы, инициированные другими страницами.
+        function onCabinetLinkReady(url) {
+            if (!root.cabinetLinking) return
+            root.cabinetLinking = false
+            Qt.openUrlExternally(url)
+        }
     }
 
     // ── УСТРОЙСТВА + АККАУНТ (TribeEngine.listDevices/kickDevice/accountInfo) ──────────────
@@ -299,6 +324,19 @@ PageType {
                     Layout.fillWidth: true; height: 6; radius: 3; color: Theme.color.surface3
                     visible: root.trafficLimitB > 0
                     Rectangle { width: parent.width * root.usedFrac; height: parent.height; radius: 3; color: Theme.color.accent }
+                }
+
+                // AVPN (оплата): открыть web-кабинет (продление/тарифы — ТОЛЬКО на сайте). Без цен
+                // и слов про оплату в UI. loading до cabinetLinkReady — сигнал приходит всегда.
+                TribeButton {
+                    visible: root.manageSubEnabled
+                    variant: "glass"
+                    text: qsTr("Управлять подпиской")
+                    loading: root.cabinetLinking
+                    enabled: !root.cabinetLinking
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.xs
+                    onClicked: root.manageSubscription()
                 }
             }
         }

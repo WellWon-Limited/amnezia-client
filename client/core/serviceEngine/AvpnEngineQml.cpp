@@ -1330,6 +1330,40 @@ void AvpnEngineQml::refreshReferral()
     });
 }
 
+// AVPN (оплата): POST /v1/cabinet/web-link (Bearer, тело пустое) → { url: "…?wl=<token>", expires_in }.
+// Тот же async-паттерн, что refreshReferral (armTimeout, без вложенного QEventLoop). Сигнал
+// cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка + device_uuid (кабинет откроет шит
+// тарифов на этом устройстве), провал → fallback https://tribevpn.com/account + device_uuid.
+void AvpnEngineQml::requestCabinetLink()
+{
+    const QString fallback = Enrollment::appendDeviceUuid(
+        QStringLiteral("https://tribevpn.com/account"), localDeviceId());
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        emit cabinetLinkReady(fallback);
+        return;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/cabinet/web-link"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->post(req, QByteArray());
+    armTimeout(reply); // жёсткий таймаут без nested loop
+    connect(reply, &QNetworkReply::finished, this, [this, reply, fallback]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QString url = fallback;
+        if (code >= 200 && code < 300) {
+            WebLinkResponse wl;
+            QString err;
+            if (Enrollment::parseWebLinkResponse(reply->readAll(), wl, err))
+                url = Enrollment::appendDeviceUuid(wl.url, localDeviceId());
+        }
+        emit cabinetLinkReady(url);
+    });
+}
+
 // AVPN (Task 9 — APNs): POST /v1/devices/push-token (Bearer = subscription_token). АСИНХРОННО (как
 // refreshAccount — без вложенного QEventLoop: зовётся из сигнала моста на GUI-потоке). body
 // {token, platform:"ios", environment, app_version}. Нет токена подписки / сеть / таймаут → тихо

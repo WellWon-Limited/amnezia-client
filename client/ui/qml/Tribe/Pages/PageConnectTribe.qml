@@ -50,6 +50,10 @@ PageType {
     // trafficLimit/daysLeft/subActive — читают загруженную Subscription через движок. Гард на
     // undefined-движок (dev-превью) с литеральными фолбэками.
     readonly property bool hasEngine:     (typeof TribeEngine !== "undefined")
+    // AVPN (оплата): гард двойного тапа по золотой CTA — ждём cabinetLinkReady (приходит всегда).
+    property bool ctaLinking: false
+    // AVPN (оплата): троттл foreground-рефреша статуса подписки (мс, Date.now()).
+    property double lastFgRefreshMs: 0
     readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
@@ -119,6 +123,13 @@ PageType {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) { PageController.showErrorMessage(message) }
+        // AVPN (оплата): ссылка web-кабинета готова (успех или fallback). Гард по ctaLinking —
+        // сигнал общий на движок, не реагируем на запросы других страниц (кнопка в Настройках).
+        function onCabinetLinkReady(url) {
+            if (!root.ctaLinking) return
+            root.ctaLinking = false
+            Qt.openUrlExternally(url)
+        }
         // AVPN (macOS): обнаружен другой активный VPN → конфликт маршрутов/демонов. Предупреждаем.
         function onVpnConflict(name) {
             PageController.showNotificationMessage(
@@ -134,6 +145,23 @@ PageType {
             if (typeof TribeEngine !== "undefined" && typeof TribeEngine.bootstrap === "function")
                 TribeEngine.bootstrap()
             PageController.showNotificationMessage(qsTr("Доступ активирован на этом устройстве"))
+        }
+    }
+
+    // AVPN (оплата): возврат приложения в foreground (например, из Safari после оплаты в кабинете)
+    // → освежить статус подписки: GET /v1/account (best-effort async, без nested loop) — новый
+    // expires_at приедет в бейдж/Настройки через accountChanged/changed. Троттл 30с, чтобы не дёргать
+    // бэк на каждый свап приложений. bootstrap() тут НЕ зовём — он трогает подписку/туннель-флоу
+    // (CONNECT-INVARIANTS); полная перечитка и так случится при следующем connect.
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive) return
+            if (!(root.hasEngine && typeof TribeEngine.refreshAccount === "function")) return
+            var now = Date.now()
+            if (now - root.lastFgRefreshMs < 30000) return
+            root.lastFgRefreshMs = now
+            TribeEngine.refreshAccount()
         }
     }
 
@@ -839,16 +867,17 @@ PageType {
             MouseArea {
                 id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Передаём JWT (сквозная
-                    // авторизация) + device_uuid, чтобы дни зачислились на ЭТО устройство (бэк: checkout
-                    // per device_uuid, оплата-на-устройство). // AVPN
-                    var base = "https://tribevpn.com/account"
-                    var params = []
-                    var tok = (root.hasEngine && TribeEngine.authToken !== undefined) ? String(TribeEngine.authToken) : ""
-                    if (tok.length > 0) params.push("token=" + encodeURIComponent(tok))
-                    var dev = (root.hasEngine && typeof TribeEngine.localDeviceId === "function") ? String(TribeEngine.localDeviceId()) : ""
-                    if (dev.length > 0) params.push("device_uuid=" + encodeURIComponent(dev))
-                    Qt.openUrlExternally(params.length > 0 ? (base + "?" + params.join("&")) : base)
+                    // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Одноразовый web-link
+                    // (POST /v1/cabinet/web-link, авто-логин, TTL ~90с) вместо JWT в query —
+                    // долгоживущий токен не светится в истории браузера/логах. device_uuid дописывает
+                    // движок (дни зачислятся на ЭТО устройство). Ошибка/нет движка → голый кабинет. // AVPN
+                    if (root.hasEngine && typeof TribeEngine.requestCabinetLink === "function") {
+                        if (root.ctaLinking) return
+                        root.ctaLinking = true
+                        TribeEngine.requestCabinetLink()  // ответ всегда придёт в onCabinetLinkReady
+                    } else {
+                        Qt.openUrlExternally("https://tribevpn.com/account")
+                    }
                 }
             }
         }
