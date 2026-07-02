@@ -146,7 +146,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // не прилетит за таймаут (iOS NE иногда не рапортует чистый Disconnected) — разблокируем машину,
     // чтобы отложенный старт/стоп не залип навсегда. Один таймер (не накапливаем singleShot, как раньше).
     m_watchdog.setSingleShot(true);
-    m_watchdog.setInterval(15000); // > 12с iOS handshake-timeout, чтобы не прерывать нормальный connect
+    m_watchdog.setInterval(15000); // > 12с iOS handshake-timeout, чтобы не прерывать нормальный connect.
+                                   // NB (аудит N9): для app-инициированных стартов именно ЭТОТ сторож
+                                   // ограничивает ожидание (~1 handshake-таймаут); политика «3 таймаута»
+                                   // в ios_controller работает для OS-инициированных стартов (интент/Настройки).
     connect(&m_watchdog, &QTimer::timeout, this, &AvpnEngineQml::onWatchdog);
 
     // AVPN (Task E): консьюмер «намерений» фонового iOS App Intent (Task 8). Интент в фоне уже
@@ -537,7 +540,9 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     if (code != amnezia::ErrorCode::InternalError)
         emit error(errorString(code));
     emit changed();
-    reconcile();
+    // AVPN (аудит N6, §3): только отложенно — слот вызван из сигнала VpnConnection; при живом вложенном
+    // цикле (awaitReply в redeemCode/kickDevice) queued-события доставляются ВНУТРЬ него → re-entrancy.
+    QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
 void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ/дней/subActive) ДО первого Connect.
@@ -1039,9 +1044,12 @@ bool AvpnEngineQml::autoPauseEnabled() const
 // CIDR в режим VpnAllExceptSites → рунет мимо туннеля (реальный РФ-IP). Домены отсекает сам движок,
 // потому кормим ТОЛЬКО CIDR из ru_prefixes.h: v4 проходит checkIpSubnetFormat везде; v6 — isIpv6Cidr
 // на iOS/Android (десктоп-демон v6-сплит не умеет, там v6 отсеется — см. appendSplitTunnelingConfig).
-// Пустой список движок сам роняет в VpnAllSites (защита от блэкхола). Идемпотентно: addVpnSites — один
-// bulk-setValue с merge (не растёт). Кросс-платформенно (iOS excludeRoutes / Android excludeRoute /
-// macOS десктоп-маршруты). OFF → активное ВЫКЛ флага.
+// Пустой список движок сам роняет в VpnAllSites (защита от блэкхола). Сев = РЕКОНСИЛЯЦИЯ
+// (replaceVpnSites, полная замена): merge-only addVpnSites копил стейл-CIDR прошлых регенераций
+// ru_prefixes навсегда (аудит; инвариант №3 vpn-bypass/README «apply = реконсиляция»). Список
+// полностью наш — ручные сайты amnezia-UI затираются осознанно (в Tribe-навигации экрана нет).
+// Кросс-платформенно (iOS excludeRoutes / Android excludeRoute / macOS десктоп-маршруты).
+// OFF → активное ВЫКЛ флага.
 void AvpnEngineQml::applyRuBypassSplit()
 {
     if (!m_store)
@@ -1075,7 +1083,7 @@ void AvpnEngineQml::applyRuBypassSplit()
     for (const char *cidr : kBypassExtra)
         sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
 
-    m_store->addVpnSites(RouteMode::VpnAllExceptSites, sites);
+    m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
 
 // AVPN RU-direct: применить смену тумблера «АвтоVPN» на живом туннеле. Если намерение — быть онлайн
@@ -1107,6 +1115,11 @@ void AvpnEngineQml::pauseForShopping(int seconds)
         return;
     }
 
+    // AVPN (аудит N7): не роняем туннель ПОВЕРХ незавершённой операции — down() поверх поднимающегося
+    // = iOS-churn (§2). Пауза в момент перехода бессмысленна (туннель ещё/уже не несёт трафик) — игнор.
+    if (m_opInFlight)
+        return;
+
     // Запоминаем, был ли активный туннель: только тогда есть смысл поднимать его обратно по таймауту.
     // Если VPN и так не был поднят — пауза вырождается в no-op подъёма (просто ничего не роняем).
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
@@ -1115,11 +1128,10 @@ void AvpnEngineQml::pauseForShopping(int seconds)
 
     m_paused = true;
     // Реально опускаем туннель: на паузе utun-детект ДОЛЖЕН показывать туннель опущенным (трафик
-    // покупки идёт мимо VPN). requestStop() гасит failover, чтобы прилетевший Disconnected не
-    // переподнял ноду немедленно (как в stop()).
-    m_healthTimer.stop();
-    m_engine.requestStop();
-    m_tunnel.down();
+    // покупки идёт мимо VPN). AVPN (аудит N7): через guardedStop() — та же последовательность
+    // (healthTimer.stop + requestStop + down), но с Op::Stopping/opInFlight/watchdog, т.е. внутри
+    // reconcile-машины; на пришедшем Disconnected reconcile no-op по гейту m_paused.
+    guardedStop();
 
     m_pauseTimer.start(qMax(1, seconds) * 1000);
     emit changed();

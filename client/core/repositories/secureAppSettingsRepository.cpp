@@ -154,6 +154,16 @@ void SecureAppSettingsRepository::addVpnSites(RouteMode mode, const QMap<QString
     emit sitesChanged(mode);
 }
 
+// AVPN (RU-direct): реконсиляция — список заменяется целиком (см. заголовок).
+void SecureAppSettingsRepository::replaceVpnSites(RouteMode mode, const QMap<QString, QString> &sites)
+{
+    QVariantMap allSites;
+    for (auto i = sites.constBegin(); i != sites.constEnd(); ++i)
+        allSites.insert(i.key(), i.value());
+    setVpnSites(mode, allSites);
+    emit sitesChanged(mode);
+}
+
 void SecureAppSettingsRepository::removeVpnSite(RouteMode mode, const QString &site)
 {
     QVariantMap sites = vpnSites(mode);

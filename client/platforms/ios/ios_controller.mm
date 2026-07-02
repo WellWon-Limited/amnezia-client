@@ -98,7 +98,10 @@ Vpn::ConnectionState iosStatusToState(NEVPNStatus status) {
 namespace {
 constexpr int kHandshakeTimeoutMs = 12000;
 constexpr uint64_t kHandshakeRxThreshold = 4096;
-constexpr int kHandshakeMaxTimeouts = 3;   // AVPN: столько таймаутов без рукопожатия → Error + stop (нода недоступна)
+constexpr int kHandshakeMaxTimeouts = 3;   // AVPN: столько таймаутов без рукопожатия → Error + stop (нода недоступна).
+                                           // NB (аудит N9): полный цикл 3×12с достижим только для OS-инициированных
+                                           // стартов (App Intent/Настройки iOS); app-старт ограничен сторожем
+                                           // reconcile-машины 15с (AvpnEngineQml m_watchdog) — это осознанно.
 bool isWireGuardBasedProto(amnezia::Proto proto) {
     return proto == amnezia::Proto::WireGuard || proto == amnezia::Proto::Awg;
 }

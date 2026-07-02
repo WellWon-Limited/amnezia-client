@@ -53,6 +53,7 @@ private:
     quint16          m_seqBase = 0;
 
     QList<Pending>      m_pending;
+    int                 m_gen = 0; // AVPN (аудит N8): поколение прогона — гвард стейл-DNS-колбэков
     QHash<quint16, int> m_seqToIdx;
     int                 m_remaining = 0;
     bool                m_doneFired = false;
