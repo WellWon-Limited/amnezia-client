@@ -1,6 +1,8 @@
 #include "ServiceProbe.h"
 
+#include "InstagramSource.h"
 #include "MtprotoProbe.h"
+#include "YoutubeSource.h"
 
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -11,6 +13,15 @@
 #include <QTcpSocket>
 #include <QTimer>
 #include <QUrl>
+#include <QUrlQuery>
+
+namespace {
+// Goodput качает до 128 КБ; при жёстком троттле (128 кбит/с) это ~8с ⇒ таймаут щедрее обычных проб.
+// Частично скачанное на таймауте всё равно классифицируется (медленно/мало ⇒ slow/blocked — честно).
+constexpr int kGoodputTimeoutMs = 20000;
+// User-Agent клиента iOS YouTube: InnerTube отдаёт ПРЯМОЙ url (без signature-cipher) только «своим» клиентам.
+constexpr const char *kYtIosVersion = "19.29.1";
+} // namespace
 
 namespace avpn {
 
@@ -27,6 +38,8 @@ void ServiceProbe::probeAll(int timeoutMs)
     for (const ServiceProbeConfig &c : m_cfgs) {
         if (c.kind == ServiceProbeConfig::Mtproto)
             probeMtproto(c, timeoutMs);
+        else if (c.kind == ServiceProbeConfig::Goodput)
+            probeGoodput(c);
         else
             probeHttps(c, timeoutMs);
     }
@@ -188,6 +201,192 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
         Q_UNUSED(c);
         settle(reachable, rtt);
         delete clock; delete ttfb; delete done;
+        reply->deleteLater();
+    });
+}
+
+// ─── Goodput: РЕАЛЬНЫЙ замер kbit/s на душимом пути (сильный сигнал, как MTProto у Telegram) ──────────
+// reachability («TLS собрался») врёт зелёным при DPI-троттлинге. Правда — сколько байт/с реально идёт
+// через туннель на CDN сервиса: качаем sampleBytes и классифицируем скорость (GoodputProbe). // AVPN
+
+void ServiceProbe::probeGoodput(const ServiceProbeConfig &c)
+{
+    if (!m_nam) { finish(c.key, ServiceState::Unknown, -1); return; }
+    if (c.key == QLatin1String("youtube"))
+        resolveYoutube(c, YoutubeSource::evergreenVideoIds(), 0);
+    else if (c.key == QLatin1String("instagram"))
+        resolveInstagram(c);
+    else
+        goodputFallback(c); // неизвестный сервис goodput ⇒ хотя бы reachability
+}
+
+// YouTube: InnerTube `player` (iOS-клиент ⇒ прямой url без cipher) для evergreen-видео по очереди.
+// Нашли googlevideo url → меряем; ни одно видео не резолвится → fail-safe reachability.
+void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx)
+{
+    if (idx >= videoIds.size()) { goodputFallback(c); return; }
+
+    QUrl url(QStringLiteral("https://youtubei.googleapis.com/youtubei/v1/player"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("key"), YoutubeSource::innerTubeKey());
+    q.addQueryItem(QStringLiteral("prettyPrint"), QStringLiteral("false"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setRawHeader("User-Agent",
+                     QByteArrayLiteral("com.google.ios.youtube/") + kYtIosVersion
+                         + QByteArrayLiteral(" (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)"));
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+
+    const QByteArray body = YoutubeSource::buildPlayerRequest(
+        videoIds.at(idx), QStringLiteral("IOS"), QString::fromLatin1(kYtIosVersion),
+        QStringLiteral("iPhone16,2"), QStringLiteral("17.5.1.21F90"));
+
+    auto *done = new bool(false);
+    QNetworkReply *reply = m_nam->post(req, body);
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
+    timer->start(6000); // резолв URL — лёгкий JSON, короткий таймаут
+
+    connect(reply, &QNetworkReply::finished, reply, [this, c, videoIds, idx, reply, done]() {
+        if (*done) return;
+        *done = true;
+        const QString url = (reply->error() == QNetworkReply::NoError)
+                                ? YoutubeSource::extractVideoplaybackUrl(reply->readAll())
+                                : QString();
+        reply->deleteLater();
+        delete done;
+        if (url.isEmpty())
+            resolveYoutube(c, videoIds, idx + 1); // это видео не отдало прямой url → следующее
+        else
+            measureGoodput(c, url, /*rangeAsQuery=*/true); // googlevideo уважает &range=
+    });
+}
+
+// Instagram: публичная homepage (без логина) → вытащить sizeable ассет на *.cdninstagram.com → мерим.
+void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
+{
+    QUrl url(QStringLiteral("https://www.instagram.com/"));
+    QNetworkRequest req(url);
+    req.setRawHeader("User-Agent",
+                     QByteArrayLiteral("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+                                       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"));
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    auto *done = new bool(false);
+    QNetworkReply *reply = m_nam->get(req);
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
+    timer->start(6000);
+
+    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, done]() {
+        if (*done) return;
+        *done = true;
+        const QString asset = (reply->error() == QNetworkReply::NoError)
+                                  ? InstagramSource::extractCdnAssetUrl(reply->readAll())
+                                  : QString();
+        reply->deleteLater();
+        delete done;
+        if (asset.isEmpty())
+            goodputFallback(c); // не нашли CDN-ассет / homepage недостижима → reachability(Unknown)/blocked
+        else
+            measureGoodput(c, asset, /*rangeAsQuery=*/false); // CDN уважает Range-заголовок
+    });
+}
+
+// Скачать sampleBytes по готовому URL, померить скорость окна данных (firstByte→конец) → classify().
+void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery)
+{
+    const qint64 N = c.sampleBytes;
+    QString finalUrl = url;
+    QNetworkRequest req;
+    if (rangeAsQuery) {
+        finalUrl = YoutubeSource::withRange(url, 0, N - 1); // &range=0-(N-1)
+    } else {
+        req.setRawHeader("Range", QByteArrayLiteral("bytes=0-") + QByteArray::number(N - 1));
+    }
+    req.setUrl(QUrl(finalUrl));
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setRawHeader("Cache-Control", "no-cache");
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    auto *clock = new QElapsedTimer();
+    auto *firstByte = new qint64(-1);
+    auto *bytes = new qint64(0);
+    auto *done = new bool(false);
+    clock->start();
+    QNetworkReply *reply = m_nam->get(req);
+
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); }); // частичное всё равно классифицируем
+    timer->start(kGoodputTimeoutMs);
+
+    // Считаем принятые байты; окно замера стартует с ПЕРВОГО байта (исключаем TLS/TTFB — честнее для goodput).
+    connect(reply, &QNetworkReply::readyRead, reply, [reply, clock, firstByte, bytes, N]() {
+        if (*firstByte < 0) *firstByte = clock->elapsed();
+        *bytes += reply->readAll().size();
+        if (*bytes >= N) reply->abort(); // набрали семпл — стоп (не тянем всё видео)
+    });
+    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, clock, firstByte, bytes, done]() {
+        if (*done) return;
+        *done = true;
+        const qint64 dur = (*firstByte >= 0) ? (clock->elapsed() - *firstByte) : clock->elapsed();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const qint64 got = *bytes;
+        delete clock; delete firstByte; delete bytes; delete done;
+        reply->deleteLater();
+
+        if (got >= c.goodput.minBytes) {
+            // Честный замер: набрали достаточно байт ⇒ классифицируем скорость.
+            const int state = GoodputProbe::classify(got, dur, c.goodput);
+            finish(c.key, static_cast<ServiceState>(state), int(GoodputProbe::kbitPerSec(got, dur)));
+        } else if (httpStatus == 200 || httpStatus == 206) {
+            // Сервер ОТДАВАЛ данные (2xx/partial), но их пришло мало ⇒ реально задушено/рано закрыто ⇒ blocked.
+            finish(c.key, ServiceState::Blocked, got > 0 ? int(GoodputProbe::kbitPerSec(got, dur)) : -1);
+        } else {
+            // Не-2xx (403 PoToken/auth) или сетевая ошибка без данных — это НЕ вердикт цензуры.
+            // Деградируем в reachability CDN: reachable ⇒ Unknown (честно «не смогли измерить»), иначе Blocked.
+            goodputFallback(c);
+        }
+    });
+}
+
+// Fail-safe: byte-source не резолвится → хотя бы TLS-достижимость душимого CDN. reachable ⇒ Unknown
+// (честно «не смогли измерить скорость»), reset/timeout ⇒ Blocked. Никогда не ложный works.
+void ServiceProbe::goodputFallback(const ServiceProbeConfig &c)
+{
+    if (!m_nam || c.host.isEmpty()) { finish(c.key, ServiceState::Unknown, -1); return; }
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(c.host); // реальный SNI душимого CDN (redirector.googlevideo.com / static.cdninstagram.com)
+    url.setPath(QStringLiteral("/"));
+    QNetworkRequest req(url);
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    auto *done = new bool(false);
+    QNetworkReply *reply = m_nam->head(req);
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
+    timer->start(6000);
+
+    auto settle = [this, c, done](bool reachable) {
+        if (*done) return;
+        *done = true;
+        finish(c.key, reachable ? ServiceState::Unknown : ServiceState::Blocked, -1);
+    };
+    connect(reply, &QNetworkReply::encrypted, reply, [settle]() { settle(true); });
+    connect(reply, &QNetworkReply::finished, reply, [reply, done, settle]() {
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        settle(httpStatus > 0); // ошибка/таймаут без ответа ⇒ Blocked
+        delete done;
         reply->deleteLater();
     });
 }

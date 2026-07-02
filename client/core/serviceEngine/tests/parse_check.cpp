@@ -2,14 +2,18 @@
 // Сборка/запуск: core/serviceEngine/tests/build_check.sh
 #include "../AwgConfigBuilder.h"
 #include "../Enrollment.h"
+#include "../GoodputProbe.h"
 #include "../HealthLoop.h"
+#include "../InstagramSource.h"
 #include "../MtprotoProbe.h"
 #include "../Selector.h"
 #include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
+#include "../YoutubeSource.h"
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <cstdio>
@@ -302,6 +306,103 @@ int main(int argc, char **argv)
         printf("mtprotoprobe: OK (req_pq_multi build, intermediate frame, resPQ parse, nonce/ctor/short reject)\n");
     }
 
-    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto\n");
+    // --- GoodputProbe: kbit/s + классификация works/slow/blocked (детерминированно, чистая арифметика) ---
+    {
+        using GP = GoodputProbe;
+        const GP::Thresholds th; // works≥1000, slow≥100, minBytes=32768
+        const qint64 N = 262144; // 256 КБ
+
+        // kbit/s = bytes*8/ms. 1000 байт за 8 мс = 1000 кбит/с.
+        bool rateOk = qFuzzyCompare(GP::kbitPerSec(1000, 8), 1000.0)
+                      && GP::kbitPerSec(N, 0) == 0.0;      // деление на 0 → 0
+
+        // 256КБ за 200мс ≈ 10485 кбит/с → works.
+        int cFast = GP::classify(N, 200, th);
+        // 256КБ за 15000мс ≈ 140 кбит/с (RU-троттл ~128) → slow.
+        int cThrottle = GP::classify(N, 15000, th);
+        // 256КБ за 30000мс ≈ 70 кбит/с → blocked (задушено ниже порога полезности).
+        int cDead = GP::classify(N, 30000, th);
+        // байт меньше minBytes → недостоверно → blocked.
+        int cTiny = GP::classify(1024, 50, th);
+        // ноль байт → blocked.
+        int cZero = GP::classify(0, 100, th);
+
+        printf("goodput: rate=%d fast=%d throttle=%d dead=%d tiny=%d zero=%d\n",
+               rateOk, cFast, cThrottle, cDead, cTiny, cZero);
+
+        bool gpOk = rateOk && cFast == 2 && cThrottle == 1 && cDead == 0 && cTiny == 0 && cZero == 0;
+        if (!gpOk) { fprintf(stderr, "FAIL: GoodputProbe classify/rate mismatch\n"); return 11; }
+        printf("goodputprobe: OK (kbit/s, works/slow/blocked, min-bytes/zero guard)\n");
+    }
+
+    // --- YoutubeSource: InnerTube билдер запроса + парс url + ranged-URL (чистая логика) ---
+    {
+        using YT = YoutubeSource;
+
+        // 1) Evergreen-список непустой и содержит «Me at the zoo»; ключ непустой.
+        bool listOk = YT::evergreenVideoIds().contains(QStringLiteral("jNQXAC9IVRw"))
+                      && !YT::innerTubeKey().isEmpty();
+
+        // 2) Тело player: context.client.clientName == "IOS", videoId прокинут.
+        const QByteArray body = YT::buildPlayerRequest(QStringLiteral("jNQXAC9IVRw"),
+                                                       QStringLiteral("IOS"), QStringLiteral("19.09.3"));
+        const QJsonObject bo = QJsonDocument::fromJson(body).object();
+        const QJsonObject client = bo.value(QStringLiteral("context")).toObject()
+                                       .value(QStringLiteral("client")).toObject();
+        bool bodyOk = client.value(QStringLiteral("clientName")).toString() == QLatin1String("IOS")
+                      && client.value(QStringLiteral("clientVersion")).toString() == QLatin1String("19.09.3")
+                      && bo.value(QStringLiteral("videoId")).toString() == QLatin1String("jNQXAC9IVRw");
+
+        // 3) Парс прямого url из adaptiveFormats (поле `url`, googlevideo).
+        const QByteArray okJson = R"({"streamingData":{"adaptiveFormats":[
+            {"itag":140,"url":"https://rr3---sn-abc.googlevideo.com/videoplayback?a=1&b=2"}]}})";
+        const QString url = YT::extractVideoplaybackUrl(okJson);
+        bool urlOk = url == QLatin1String("https://rr3---sn-abc.googlevideo.com/videoplayback?a=1&b=2");
+
+        // 4) Только signatureCipher (нет прямого url) ⇒ пусто (не дешифруем — деградация в reachability).
+        const QByteArray cipherJson = R"({"streamingData":{"adaptiveFormats":[
+            {"itag":140,"signatureCipher":"s=SIG&url=https%3A%2F%2Fx.googlevideo.com%2Fvideoplayback"}]}})";
+        bool cipherSkipped = YT::extractVideoplaybackUrl(cipherJson).isEmpty();
+
+        // 5) url не на googlevideo ⇒ пусто (бьём только реально-душимый путь).
+        const QByteArray offJson = R"({"streamingData":{"adaptiveFormats":[
+            {"itag":140,"url":"https://www.youtube.com/watch?v=x"}]}})";
+        bool offSkipped = YT::extractVideoplaybackUrl(offJson).isEmpty();
+
+        // 6) withRange добавляет &range=first-last.
+        const QString ranged = YT::withRange(QStringLiteral("https://x.googlevideo.com/videoplayback?a=1"), 0, 262143);
+        bool rangeOk = ranged == QLatin1String("https://x.googlevideo.com/videoplayback?a=1&range=0-262143");
+
+        printf("youtube: list=%d body=%d url=%d cipher=%d off=%d range=%d\n",
+               listOk, bodyOk, urlOk, cipherSkipped, offSkipped, rangeOk);
+
+        bool ytOk = listOk && bodyOk && urlOk && cipherSkipped && offSkipped && rangeOk;
+        if (!ytOk) { fprintf(stderr, "FAIL: YoutubeSource build/parse mismatch\n"); return 12; }
+        printf("youtubesource: OK (evergreen+key, player body, direct-url parse, cipher/off-path skip, ranged url)\n");
+    }
+
+    // --- InstagramSource: парс публичного CDN-ассета из HTML (чистая логика) ---
+    {
+        using IG = InstagramSource;
+
+        // 1) Достаём https://static.cdninstagram.com/....js из href/src.
+        const QByteArray html = R"(<html><head>
+            <link rel="preload" href="https://static.cdninstagram.com/rsrc.php/v3/yA/abc123.js" as="script"/>
+            <script src="https://www.instagram.com/local.js"></script></head></html>)";
+        const QString asset = IG::extractCdnAssetUrl(html);
+        bool assetOk = asset == QLatin1String("https://static.cdninstagram.com/rsrc.php/v3/yA/abc123.js");
+
+        // 2) Нет cdninstagram-ассета ⇒ пусто (раннер деградирует в reachability).
+        const QByteArray htmlNone = R"(<html><head><script src="/only/local.js"></script></head></html>)";
+        bool noneOk = IG::extractCdnAssetUrl(htmlNone).isEmpty();
+
+        printf("instagram: asset=%d none=%d\n", assetOk, noneOk);
+
+        bool igOk = assetOk && noneOk;
+        if (!igOk) { fprintf(stderr, "FAIL: InstagramSource parse mismatch\n"); return 13; }
+        printf("instagramsource: OK (cdn asset extract, no-asset guard)\n");
+    }
+
+    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + instagram\n");
     return 0;
 }
