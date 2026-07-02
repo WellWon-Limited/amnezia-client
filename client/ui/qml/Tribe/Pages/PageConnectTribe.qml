@@ -94,11 +94,14 @@ PageType {
     readonly property bool isMobile: Qt.platform.os === "ios" || Qt.platform.os === "android"
     readonly property real sceneShift: {
         if (!isMobile) return 0
-        var orbBase = safeTop + 16 + 40 + 76          // header top+height + базовый отступ орба
+        // орб теперь под баннером АнтиВПН: header (safeTop+16+40) + отступ lg (24) + баннер (68)
+        // + 56 (кольцо 32 + зазор lg) — база на 72 ниже старой (76)
+        var orbBase = safeTop + 16 + 40 + 24 + 68 + 56
         var captionBottom = orbBase + 256 + 30 + 18   // орб + отступ подписи + высота подписи
         var maxShift = bottomBlock.y - captionBottom - 24
-        // сцена опущена на ~20% высоты, но приподнята на ~высоту кнопки «Обновить» (52, чуть меньше — 44)
-        return Math.max(0, Math.min(Math.round(root.height * 0.20) - 44, maxShift))
+        // прежний целевой сдвиг (~20% высоты − 44) уменьшен ещё на 72 — ровно настолько сцену
+        // уже опустил баннер сверху (итого −116)
+        return Math.max(0, Math.min(Math.round(root.height * 0.20) - 116, maxShift))
     }
 
     function onOrbClicked() {
@@ -187,67 +190,58 @@ PageType {
         }
     }
 
-    // AVPN: иконка «АвтоVPN» — окно-браузер (акцентная неон-рамка) + РФ-кружок (SVG-триколор, не эмодзи) +
-    // галочка-бейдж. Анимация: рамка «дышит» свечением когда active; галочка масштабируется при включении.
+    // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
+    // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
+    // и белым «RU». Хардкод-цвета шара — сценические (бренд-мотив, вне палитры токенов).
     component AutoVpnIcon: Item {
         id: avIcon
         property bool active: true
-        // рамка-окно
+        // круглая подложка — РОВНО по контуру шара (совпадающие круги); видна когда шар притушен.
+        // Сам Item остаётся 52×52 для выравнивания 1:1 с иконкой карточки сервера
         Rectangle {
-            id: avWin
-            anchors.fill: parent
-            radius: Theme.radius.md
-            color: "transparent"
-            border.width: 2
-            border.color: Theme.color.accent
+            width: ruBall.width; height: ruBall.height
+            anchors.centerIn: parent
+            radius: width / 2
+            color: Qt.rgba(0x0F/255, 0x17/255, 0x2A/255, 0.8)
+        }
+        // круг-шар с градиентом (~87% подложки — тонкий тёмный кант; синий верх-право → красный низ-лево).
+        // Ширина ЧЁТНАЯ: нечётная в чётном родителе даёт полупиксельный офсет, и слой-маска
+        // снапится к пикселю не так, как кольцо → шар «уезжает» влево-вверх от контура.
+        Item {
+            id: ruBall
+            width: 2 * Math.round(avIcon.width * 0.87 / 2); height: width
+            anchors.centerIn: parent
             opacity: avIcon.active ? 1.0 : 0.4
             Behavior on opacity { NumberAnimation { duration: Theme.motion.normal } }
-            // тулбар-линия
-            Rectangle { x: 0; y: parent.height * 0.30; width: parent.width; height: 1.5
-                        color: Theme.color.accent; opacity: 0.55 }
-            // 3 точки окна
-            Row { x: 6; y: parent.height * 0.13; spacing: 3
-                Repeater { model: 3; delegate: Rectangle { width: 3.5; height: 3.5; radius: 1.75; color: Theme.color.accent } } }
-            // мягкое неон-дыхание рамки когда active
-            SequentialAnimation on border.color {
-                running: avIcon.active; loops: Animation.Infinite
-                ColorAnimation { to: Qt.lighter(Theme.color.accent, 1.5); duration: 1150; easing.type: Easing.InOutSine }
-                ColorAnimation { to: Theme.color.accent; duration: 1150; easing.type: Easing.InOutSine }
-            }
-        }
-        // РФ-кружок в центре (три полосы + круговая маска)
-        Item {
-            id: ruDot
-            width: 22; height: 22
-            anchors.centerIn: parent
             layer.enabled: true
-            layer.effect: Fx.OpacityMask { maskSource: Rectangle { width: 22; height: 22; radius: 11 } }
-            Column {
-                anchors.fill: parent
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#EEF2F7" }
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#3A5BA0" }
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#B8434E" }
+            layer.effect: Fx.OpacityMask {
+                maskSource: Rectangle { width: ruBall.width; height: ruBall.height; radius: width / 2 }
             }
-        }
-        // галочка-бейдж (низ-право) — появляется/масштабируется при active
-        Rectangle {
-            id: avCheck
-            width: 20; height: 20; radius: 10
-            anchors.right: parent.right; anchors.bottom: parent.bottom
-            color: Theme.color.accent
-            scale: avIcon.active ? 1.0 : 0.0
-            opacity: avIcon.active ? 1.0 : 0.0
-            Behavior on scale { NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutBack } }
-            Behavior on opacity { NumberAnimation { duration: Theme.motion.normal } }
-            Shape {
-                anchors.centerIn: parent; width: 12; height: 12
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M2 6 L5 9 L10 3" }
+            Fx.LinearGradient {
+                anchors.fill: parent
+                start: Qt.point(width * 0.85, 0); end: Qt.point(width * 0.15, height)
+                gradient: Gradient {
+                    GradientStop { position: 0.0;  color: "#4E7FCB" }   // scenic: RU-шар синий
+                    GradientStop { position: 0.45; color: "#4E7FCB" }
+                    GradientStop { position: 1.0;  color: "#C1524E" }   // scenic: RU-шар красный
                 }
             }
+            Text {
+                anchors.centerIn: parent
+                text: "RU"; color: "white"
+                font.family: Theme.font.display
+                font.pixelSize: Math.round(parent.height * 0.42)
+                font.weight: Theme.font.wBold
+            }
+        }
+        // контурное кольцо вокруг шара: НЕ по самому краю (там его съедает антиалиасинг маски),
+        // а с зазором 2px — тонкий читаемый контур, концентричный шару
+        Rectangle {
+            width: ruBall.width + 6; height: width   // чётная ширина — интовый офсет центрирования
+            anchors.centerIn: parent
+            radius: width / 2
+            color: "transparent"
+            border.width: 1; border.color: Qt.rgba(0x64/255, 0x74/255, 0x8B/255, 0.55)
         }
     }
 
@@ -324,6 +318,14 @@ PageType {
                 text: "Tribe VPN"; color: "#EEF3F9"
                 font.family: Theme.font.display; font.pixelSize: Theme.font.h2; font.weight: Theme.font.wExtra
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
+            }
+            // серый слоган под wordmark (реш. 2026-07-02)
+            Text {
+                anchors.left: brandText.left
+                anchors.top: brandText.bottom; anchors.topMargin: 1
+                text: qsTr("Умный VPN, который работает")
+                color: root.slate400
+                font.family: Theme.font.body; font.pixelSize: 10; font.weight: Theme.font.wMedium
             }
         }
         // AVPN: админ-вход в просмотр пула нод (server/stack, vector). Только Dev.adminMode.
@@ -682,56 +684,8 @@ PageType {
         spacing: Theme.space.lg
         z: 30
 
-        // ── карточка «АвтоVPN»: РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
-        Rectangle {
-            id: autoVpnCard
-            width: parent.width; implicitHeight: 84; height: 84
-            radius: 24
-            color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
-            border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
-            Item {
-                anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                AutoVpnIcon {
-                    id: avCardIcon
-                    width: 52; height: 52
-                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                    active: bypassStore.masterOn
-                }
-                TribeToggle {
-                    id: avCardToggle
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    checked: bypassStore.masterOn
-                    onToggled: {
-                        bypassStore.masterOn = checked
-                        if (root.hasEngine) TribeEngine.reapplyBypass()
-                        PageController.showNotificationMessage(
-                            checked ? qsTr("АвтоVPN включён — российские сайты работают напрямую")
-                                    : qsTr("АвтоVPN выключен"))
-                    }
-                }
-                Column {
-                    anchors.left: avCardIcon.right; anchors.leftMargin: Theme.space.lg
-                    anchors.right: avCardToggle.left; anchors.rightMargin: Theme.space.md
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
-                    Text {
-                        width: parent.width
-                        text: qsTr("АвтоVPN — RU сайты всегда работают!")
-                        color: "white"; elide: Text.ElideRight
-                        fontSizeMode: Text.HorizontalFit; minimumPixelSize: 11
-                        font.family: Theme.font.display; font.pixelSize: 14; font.weight: Theme.font.wBold
-                    }
-                    Text {
-                        width: parent.width
-                        text: qsTr("Теперь выключать VPN не нужно.")
-                        color: root.slate500; elide: Text.ElideRight
-                        font.family: Theme.font.body; font.pixelSize: 11
-                    }
-                }
-            }
-        }
-
         // карточка сервера — тап открывает шторку выбора сервера (TribeNodeSheet). // AVPN
+        // (карточка «АвтоVPN» перенесена НАД орб — см. autoVpnCard выше, реш. 2026-07-02)
         Rectangle {
             id: serverCard
             width: parent.width; implicitHeight: 84; height: 84
@@ -883,12 +837,12 @@ PageType {
             model: root.hasEngine ? TribeEngine.serviceStatus : []
             onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
-        // AVPN: авто-перепроба чипов в реал-тайме, пока подключены — статусы (красный→зелёный)
-        // обновляются САМИ, без тапа по бейджу. Раньше красный «висел» до ручного тапа. При обрыве
-        // таймер останавливается (running ← isOn). Движок дополнительно пробует при коннекте (600мс +
-        // ~4.5с DNS-warm); этот таймер держит актуальность дальше.
+        // AVPN: редкий авто-self-heal чипов, пока подключены. Чипы youtube/instagram теперь GOODPUT
+        // (качают ~128 КБ каждый), а статус цензуры/троттлинга меняется медленно (не раз в секунды) —
+        // поэтому 3 мин, а не 12с (иначе лишний фоновый трафик). Мгновенно — тап по чипу (onRecheck).
+        // Движок делает первую пробу при коннекте (~1.5с, DNS-warm). При обрыве таймер стоит (running←isOn).
         Timer {
-            interval: 12000
+            interval: 180000
             repeat: true
             running: root.isOn && root.hasEngine
             onTriggered: TribeEngine.probeServices()
@@ -1010,4 +964,5 @@ PageType {
         id: nodeSheet
         z: 200
     }
+
 }
