@@ -19,8 +19,14 @@ namespace {
 // Goodput качает до 128 КБ; при жёстком троттле (128 кбит/с) это ~8с ⇒ таймаут щедрее обычных проб.
 // Частично скачанное на таймауте всё равно классифицируется (медленно/мало ⇒ slow/blocked — честно).
 constexpr int kGoodputTimeoutMs = 20000;
-// User-Agent клиента iOS YouTube: InnerTube отдаёт ПРЯМОЙ url (без signature-cipher) только «своим» клиентам.
-constexpr const char *kYtIosVersion = "19.29.1";
+// InnerTube iOS-клиент: отдаёт ПРЯМОЙ videoplayback-url (без signature-cipher). Версия/UA/os ДОЛЖНЫ быть
+// свежими — YouTube отклоняет устаревший клиент («Precondition check failed» 400). Держать в актуале по
+// yt-dlp INNERTUBE_CLIENTS['ios']. Ключ НЕ нужен (и web-ключ ломает iOS-клиент). PoToken по политике
+// «required», но GVS-семпл 128 КБ по факту отдаётся; при ужесточении → measureGoodput деградирует в fallback.
+constexpr const char *kYtIosVersion   = "21.02.3";
+constexpr const char *kYtIosOsVersion = "18.3.2.22D82";
+constexpr const char *kYtIosUA        = "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)";
+constexpr const char *kYtClientNameId = "5"; // INNERTUBE_CONTEXT_CLIENT_NAME для IOS
 } // namespace
 
 namespace avpn {
@@ -228,20 +234,19 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
 
     QUrl url(QStringLiteral("https://youtubei.googleapis.com/youtubei/v1/player"));
     QUrlQuery q;
-    q.addQueryItem(QStringLiteral("key"), YoutubeSource::innerTubeKey());
-    q.addQueryItem(QStringLiteral("prettyPrint"), QStringLiteral("false"));
+    q.addQueryItem(QStringLiteral("prettyPrint"), QStringLiteral("false")); // БЕЗ key: iOS-клиент не требует; web-ключ его ломает
     url.setQuery(q);
 
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    req.setRawHeader("User-Agent",
-                     QByteArrayLiteral("com.google.ios.youtube/") + kYtIosVersion
-                         + QByteArrayLiteral(" (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)"));
+    req.setRawHeader("User-Agent", kYtIosUA);
+    req.setRawHeader("X-YouTube-Client-Name", kYtClientNameId);
+    req.setRawHeader("X-YouTube-Client-Version", kYtIosVersion);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
 
     const QByteArray body = YoutubeSource::buildPlayerRequest(
         videoIds.at(idx), QStringLiteral("IOS"), QString::fromLatin1(kYtIosVersion),
-        QStringLiteral("iPhone16,2"), QStringLiteral("17.5.1.21F90"));
+        QStringLiteral("iPhone16,2"), QString::fromLatin1(kYtIosOsVersion));
 
     auto *done = new bool(false);
     QNetworkReply *reply = m_nam->post(req, body);
