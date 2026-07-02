@@ -580,8 +580,17 @@ void VpnConnection::disconnectFromVpn()
 void VpnConnection::setConnectionState(Vpn::ConnectionState state) {
     onConnectionStateChanged(state);
 
+#if !defined(Q_OS_IOS) && !defined(MACOS_NE)
+    // AVPN: этот swallow — ТОЛЬКО для десктопного onReconnect() (protocol stop→start под маской
+    // Reconnecting: транзитный Disconnected от stop() не должен ронять UI). На iOS/NE Reconnecting
+    // эмитит IosController в окне handshake-ретраев (12–24с), и настоящий Disconnected от ОС
+    // (NE убит/jetsam, другой VPN перехватил туннель, выключили в Настройках iOS) ОБЯЗАН дойти до
+    // reconcile-машины: проглоченный сигнал оставлял m_connectionState в Reconnecting навсегда —
+    // reconcile вечно ждал терминала, кнопка Connect была мертва до перезапуска приложения.
+    // Состояние туннеля от ОС всегда авторитетно (CONNECT-INVARIANTS §7/§13).
     if (state == Vpn::Disconnected && m_connectionState == Vpn::Reconnecting)
         return;
+#endif
 
     m_connectionState = state;
     emit connectionStateChanged(state);

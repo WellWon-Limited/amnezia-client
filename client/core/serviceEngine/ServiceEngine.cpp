@@ -313,13 +313,16 @@ void ServiceEngine::requestStop() // AVPN
 bool ServiceEngine::onDead(bool tunnelStillUp)
 {
     m_state = EngineState::Switching;
-    // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду
-    std::optional<SubscriptionNode> candidate =
-        m_selector.pick(m_pool, QString(), 75, QRandomGenerator::global()->generate(), 3000, m_currentNodeId);
+    // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду. СТРОГО БЕЗ I/O (CONNECT-INVARIANTS §1):
+    // onDead зовётся из health-tick/notifyConnectionLost на GUI-потоке БЕЗ гарда m_inSyncNetCall —
+    // прежний Selector::pick крутил вложенный QEventLoop TCP-пинга до 3с, и queued Disconnected успевал
+    // войти в reconcile ПОВЕРХ этого стека (back-to-back up→down, запрещено §2). При AWG (UDP-only)
+    // TCP-пинг всё равно пуст почти всегда. Приоритет как в connect(): измеренный RTT → weight.
+    // Закрепление НЕ учитываем (spec §24-26): при смерти закреплённой уходим на лучшую живую.
+    std::optional<SubscriptionNode> candidate;
+    if (const SubscriptionNode *fast = pickByMeasuredRtt(m_currentNodeId, QString())) // AVPN
+        candidate = *fast;
     if (!candidate) {
-        // weight-фолбэк зеркалит connect() — чинит авто-failover при AWG-UDP, когда TCP-ping не
-        // достукивается ни до одной ноды. Закрепление НЕ учитываем (spec §24-26): при смерти
-        // закреплённой уходим на лучшую живую и остаёмся там — назад сам не прыгаем.
         if (const SubscriptionNode *best = pickByWeight(m_currentNodeId, QString())) // AVPN
             candidate = *best;
     }
