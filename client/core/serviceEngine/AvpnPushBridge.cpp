@@ -140,8 +140,14 @@ void AvpnPushBridge::setAuthStatus(const QString &status)
 
 void AvpnPushBridge::onRemoteNotification(const QString &title, const QString &body)
 {
+    onRemoteNotification(title, body, QString(), 0);
+}
+
+void AvpnPushBridge::onRemoteNotification(const QString &title, const QString &body,
+                                          const QString &type, int days)
+{
     QMetaObject::invokeMethod(
-        this, [this, title, body]() { applyRemoteNotification(title, body); },
+        this, [this, title, body, type, days]() { applyRemoteNotification(title, body, type, days); },
         Qt::QueuedConnection);
 }
 
@@ -173,7 +179,8 @@ void AvpnPushBridge::applyPushEnvironment(const QString &environment)
     m_environment = environment; // не эмитим changed(): служебное поле для регистрации, не для UI
 }
 
-void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString &body)
+void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString &body,
+                                             const QString &type, int days)
 {
     ensureLoaded();   // подгрузить прошлую историю, чтобы новый пуш не затёр её при persist()
     QVariantMap item;
@@ -181,6 +188,9 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     item[QStringLiteral("body")] = body;
     item[QStringLiteral("time")] = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm"));
     item[QStringLiteral("read")] = false;
+    // Тип для стиля делегата в центре: пустой payload (старый пуш) → "generic".
+    item[QStringLiteral("type")] = type.isEmpty() ? QStringLiteral("generic") : type;
+    item[QStringLiteral("days")] = days;
     m_items.prepend(item);
     // Не копим бесконечно — держим последние 50.
     while (m_items.size() > 50)

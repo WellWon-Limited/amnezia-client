@@ -62,56 +62,119 @@ PageType {
             model: root.items
 
             delegate: Rectangle {
+                id: card
                 width: ListView.view ? ListView.view.width : 0
-                implicitHeight: col.implicitHeight + 2 * Theme.space.lg
+                implicitHeight: row.implicitHeight + 2 * Theme.space.lg
                 radius: Theme.radius.lg
-                color: Theme.color.surface1
-                border.width: 1; border.color: Theme.color.border
+                // AVPN (бонусы): типовой стиль по modelData.type (мост AvpnPushBridge кладёт type/days).
+                // bonus_gift → «золотой подарок» (золотая рамка/подложка иконки); payment → accent; иначе нейтрально.
+                readonly property string kind: modelData.type ? String(modelData.type) : "generic"
+                readonly property bool isGift: kind === "bonus_gift"
+                readonly property int giftDays: modelData.days ? Number(modelData.days) : 0
+                color: isGift ? Qt.rgba(0xE8/255, 0xB2/255, 0x3A/255, 0.06) : Theme.color.surface1
+                border.width: 1
+                border.color: isGift ? Qt.rgba(0xE8/255, 0xB2/255, 0x3A/255, 0.45) : Theme.color.border
 
-                // непрочитанные — точка accent в левом верхнем углу
+                // непрочитанные — точка (золотая у подарка) в левом верхнем углу
                 Rectangle {
                     visible: !modelData.read
                     width: 8; height: 8; radius: 4
-                    color: Theme.color.accent
+                    color: card.isGift ? Theme.color.cta : Theme.color.accent
                     anchors.left: parent.left; anchors.top: parent.top
                     anchors.leftMargin: Theme.space.md; anchors.topMargin: Theme.space.lg + 4
                 }
 
-                Column {
-                    id: col
+                RowLayout {
+                    id: row
                     anchors.left: parent.left; anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.leftMargin: Theme.space.xl
                     anchors.rightMargin: Theme.space.lg
                     anchors.topMargin: Theme.space.lg
-                    spacing: Theme.space.xs
+                    spacing: Theme.space.md
 
-                    RowLayout {
-                        width: parent.width
-                        spacing: Theme.space.sm
-                        Text {
-                            Layout.fillWidth: true
-                            text: modelData.title
-                            color: Theme.color.text1
-                            font.family: Theme.font.display
-                            font.pixelSize: Theme.font.bodyM
-                            font.weight: modelData.read ? Theme.font.wMedium : Theme.font.wBold
-                            elide: Text.ElideRight
+                    // иконка-медальон: подарок (золото) для бонуса, галочка для оплаты, колокол иначе
+                    Rectangle {
+                        visible: card.isGift || card.kind === "payment"
+                        Layout.alignment: Qt.AlignTop
+                        width: 36; height: 36; radius: 18
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: card.isGift ? Theme.color.cta : Theme.color.accent }
+                            GradientStop { position: 1.0; color: card.isGift ? Theme.color.ctaDeep : Theme.color.accentDeep }
                         }
-                        Text {
-                            text: modelData.time
-                            color: Theme.color.text3
-                            font.family: Theme.font.mono
-                            font.pixelSize: Theme.font.caption
+                        // lucide gift (24-grid → 20px), белый контур
+                        Shape {
+                            anchors.centerIn: parent; width: 20; height: 20
+                            transform: Scale { xScale: 20/24; yScale: 20/24 }
+                            preferredRendererType: Shape.CurveRenderer
+                            visible: card.isGift
+                            ShapePath {
+                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M20 12 v10 H4 V12 M2 7 h20 v5 H2 z M12 22 V7 M12 7 H7.5 a2.5 2.5 0 0 1 0 -5 C11 2 12 7 12 7z M12 7 h4.5 a2.5 2.5 0 0 0 0 -5 C13 2 12 7 12 7z" }
+                            }
+                        }
+                        // галочка для payment
+                        Shape {
+                            anchors.centerIn: parent; width: 16; height: 16
+                            preferredRendererType: Shape.CurveRenderer
+                            visible: card.kind === "payment"
+                            ShapePath {
+                                strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2.2
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M3 8.5 L6.5 12 L13 4" }
+                            }
                         }
                     }
-                    Text {
-                        width: parent.width
-                        text: modelData.body
-                        color: Theme.color.text2
-                        font.family: Theme.font.body
-                        font.pixelSize: Theme.font.bodyS
-                        wrapMode: Text.WordWrap
+
+                    Column {
+                        Layout.fillWidth: true
+                        spacing: Theme.space.xs
+
+                        RowLayout {
+                            width: parent.width
+                            spacing: Theme.space.sm
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.title
+                                color: Theme.color.text1
+                                font.family: Theme.font.display
+                                font.pixelSize: Theme.font.bodyM
+                                font.weight: modelData.read ? Theme.font.wMedium : Theme.font.wBold
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: modelData.time
+                                color: Theme.color.text3
+                                font.family: Theme.font.mono
+                                font.pixelSize: Theme.font.caption
+                            }
+                        }
+                        Text {
+                            width: parent.width
+                            text: modelData.body
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            wrapMode: Text.WordWrap
+                        }
+                        // золотой чип «+N дней» для бонуса
+                        Rectangle {
+                            visible: card.isGift && card.giftDays > 0
+                            implicitWidth: giftChip.implicitWidth + 2 * Theme.space.md
+                            implicitHeight: giftChip.implicitHeight + Theme.space.xs
+                            radius: height / 2
+                            color: Qt.rgba(0xE8/255, 0xB2/255, 0x3A/255, 0.15)
+                            border.width: 1; border.color: Qt.rgba(0xE8/255, 0xB2/255, 0x3A/255, 0.5)
+                            Text {
+                                id: giftChip
+                                anchors.centerIn: parent
+                                text: qsTr("+%1 дней").arg(card.giftDays)
+                                color: Theme.color.cta
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                                font.weight: Theme.font.wBold
+                            }
+                        }
                     }
                 }
             }

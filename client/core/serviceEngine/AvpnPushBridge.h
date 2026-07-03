@@ -26,7 +26,9 @@ class AvpnPushBridge : public QObject {
     Q_PROPERTY(QString platform READ platform NOTIFY changed)
     // Статус разрешения на пуши: "unknown" | "granted" | "denied".
     Q_PROPERTY(QString authStatus READ authStatus NOTIFY changed)
-    // Последние входящие уведомления (для центра уведомлений #3): [{title, body, time, read}].
+    // Последние входящие уведомления (для центра уведомлений #3): [{title, body, time, read, type, days}].
+    // type: "bonus_gift" | "payment" | "reminder" | "generic" (для типовых стилей делегата в QML,
+    // «золотой подарок» и т.п.); days: >0 для бонус/оплата (показать «+N дней»), иначе 0.
     Q_PROPERTY(QVariantList items READ items NOTIFY changed)
 
 public:
@@ -54,7 +56,12 @@ public:
     // Натив ОБЯЗАН звать ПЕРЕД setDeviceToken (обе вызова FIFO-маршалятся → env применится первым).
     void setPushEnvironment(const QString &environment);
     // Прилетел пуш: добавить в ленту и поднять бейдж непрочитанных.
+    // type/days — из custom-полей payload (APNs top-level "type"/"days", FCM data): типовой стиль
+    // в центре (bonus_gift → «золотой подарок» +N дней). Пустой type → "generic" (старый пуш).
+    // 2-арг перегрузка — обратная совместимость со старым натив-слоем/местами вызова.
     void onRemoteNotification(const QString &title, const QString &body);
+    void onRemoteNotification(const QString &title, const QString &body,
+                              const QString &type, int days);
     // Регистрация запрошена из QML — натив-слой подменит это (см. setAuthorizationRequester).
     void setAuthorizationRequester(void (*fn)());
     // AVPN: сброс системного бейджа иконки — натив ставит C-функцию (iOS: setBadgeCount:0).
@@ -74,7 +81,8 @@ private:
     void applyDeviceToken(const QString &token, const QString &platform);
     void applyAuthStatus(const QString &status);
     void applyPushEnvironment(const QString &environment);
-    void applyRemoteNotification(const QString &title, const QString &body);
+    void applyRemoteNotification(const QString &title, const QString &body,
+                                 const QString &type, int days);
     // AVPN: локальная история уведомлений (QSettings) — переживает перезапуск приложения.
     // ВАЖНО: НЕ грузить в конструкторе — он может выполниться из __attribute__((constructor)) ДО main()
     // (AvpnPushController.mm), а QSettings на Apple = CFPreferences → без org-name краш «CFEqual NULL».
