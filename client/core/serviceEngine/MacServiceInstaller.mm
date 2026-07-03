@@ -24,6 +24,28 @@ bool macServiceRunning()
     return p.exitCode() == 0;
 }
 
+bool macServiceOutdated()
+{
+    @autoreleasepool {
+        // Версия, вшитая в ЭТУ сборку app (ресурс tribe-svc.version). Нет ресурса (старая сборка
+        // без версионирования) → не можем судить → считаем НЕ устаревшим (не дёргаем зря промпт).
+        NSString *res = [[NSBundle mainBundle] pathForResource:@"tribe-svc" ofType:@"version"];
+        if (res == nil)
+            return false;
+        NSString *bundled = [[NSString stringWithContentsOfFile:res encoding:NSUTF8StringEncoding error:nil]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (bundled.length == 0)
+            return false;
+        // Версия УСТАНОВЛЕННОГО демона. Нет файла = демон старой сборки (без маркера) → устарел.
+        NSString *inst = [[NSString stringWithContentsOfFile:@"/Library/PrivilegedHelperTools/TribeVPN/VERSION"
+                                                    encoding:NSUTF8StringEncoding error:nil]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (inst == nil || inst.length == 0)
+            return true;
+        return ![bundled isEqualToString:inst];
+    }
+}
+
 static bool pgrepFull(const QString &pattern)
 {
     QProcess p;

@@ -76,6 +76,9 @@ install() {
     mkdir -p "$destdir/pf"
     cp -f "$REPO_PF_DIR/${PF_ANCHOR}."*.conf "$REPO_PF_DIR/${PF_ANCHOR}.conf" "$destdir/pf/" 2>/dev/null \
         || die "в $REPO_PF_DIR нет ${PF_ANCHOR}.*.conf (пересобери: cmake генерирует tribe.400.allowPIA.conf)"
+    # AVPN: маркер версии демона (хэш бинарей) — тот же расчёт, что в make-macos-dist.sh, чтобы
+    # приложение не считало ручную dev-установку устаревшей и не показывало лишний промпт.
+    cat "$bin" "$destdir/amneziawg-go" 2>/dev/null | shasum -a 256 | cut -c1-16 > "$destdir/VERSION"
     chown -R root:wheel "$destdir"
     chmod 755 "$destdir" "$bin"
 

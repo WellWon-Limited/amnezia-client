@@ -51,7 +51,14 @@ cp -f  "$SRV/Tribe-service" "$ST/Tribe-service"
 cp -f  "$SRV/amneziawg-go"  "$ST/amneziawg-go"
 cp -aR "$SRV/Frameworks"    "$ST/Frameworks"
 mkdir -p "$ST/pf"; cp -f "$REPO/deploy/data/macos/pf/tribe."*.conf "$REPO/deploy/data/macos/pf/tribe.conf" "$ST/pf/"
-( cd "$ST" && COPYFILE_DISABLE=1 tar czf "$APP/Contents/Resources/tribe-svc.tar.gz" Tribe-service amneziawg-go Frameworks pf )
+# AVPN: маркер версии демона = хэш бинарей (меняется ⟺ меняется демон). Кладём В tarball (установщик
+# перенесёт в /Library/.../VERSION) И в ресурс app (приложение сверяет с установленным → авто-
+# переустановка при апдейте, ноль терминала). См. MacServiceInstaller::macServiceOutdated.
+DVER="$(cat "$SRV/Tribe-service" "$SRV/amneziawg-go" | shasum -a 256 | cut -c1-16)"
+echo "$DVER" > "$ST/VERSION"
+echo "$DVER" > "$APP/Contents/Resources/tribe-svc.version"
+echo "  daemon version: $DVER"
+( cd "$ST" && COPYFILE_DISABLE=1 tar czf "$APP/Contents/Resources/tribe-svc.tar.gz" Tribe-service amneziawg-go Frameworks pf VERSION )
 rm -rf "$ST"
 cp -f "$REPO/deploy/tribe/tribe-svc-install.sh" "$APP/Contents/Resources/tribe-svc-install.sh"
 chmod +x "$APP/Contents/Resources/tribe-svc-install.sh"
