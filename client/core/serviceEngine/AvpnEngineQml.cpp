@@ -11,7 +11,10 @@
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
+#include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
+
+#include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
@@ -65,9 +68,29 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_benchStage = st;
         emit benchChanged();
     });
+    // сторож фаз свипа нод + продвижение фазовой машины по каждому changed() (queued: не входить
+    // в reconcile-стек синхронно)
+    m_sweepGuard.setSingleShot(true);
+    connect(&m_sweepGuard, &QTimer::timeout, this, [this] { sweepGuardFired(); });
+    connect(this, &AvpnEngineQml::changed, this, [this] { sweepAdvance(); }, Qt::QueuedConnection);
+
     connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
         m_benchRunning = false;
         emit benchChanged();
+
+        // свип нод: результат забирает фазовая машина (в историю меток не пишем, наружу не эмитим)
+        if (m_sweepPhase == SweepPhase::Bench) {
+            m_sweepGuard.stop();
+            m_sweepResults.append(result);
+            QTimer::singleShot(0, this, [this, e = m_sweepEpoch] { if (e == m_sweepEpoch) sweepNextNode(); });
+            return;
+        }
+
+        // история: последний замер каждой метки (для A/B между запусками)
+        const QString label = result.value(QStringLiteral("label")).toString();
+        const QString json = QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact));
+        QSettings().setValue(QStringLiteral("AvpnBench/last_%1").arg(label), json);
+
         QVariantMap s; // плоская сводка для мини-таблицы в UI
         s.insert(QStringLiteral("label"), result.value(QStringLiteral("label")).toString());
         s.insert(QStringLiteral("dns_ms"), result.value(QStringLiteral("dns")).toObject().value(QStringLiteral("median_ms")).toVariant());
@@ -84,6 +107,37 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         const QJsonObject eg = result.value(QStringLiteral("network")).toObject().value(QStringLiteral("egress")).toObject();
         s.insert(QStringLiteral("egress"), QStringLiteral("%1/%2").arg(eg.value(QStringLiteral("loc")).toString(QStringLiteral("-")),
                                                                        eg.value(QStringLiteral("cf_colo")).toString(QStringLiteral("-"))));
+        // вердикты замера (BenchAnalysis) — тексты в UI
+        QStringList verdictTexts;
+        for (const QJsonValue &v : result.value(QStringLiteral("verdicts")).toArray())
+            verdictTexts << v.toObject().value(QStringLiteral("text")).toString();
+        s.insert(QStringLiteral("verdicts"), verdictTexts);
+        // A/B против истории: существенные ухудшения текущего замера относительно эталонов.
+        auto loadPrev = [this](const char *lbl) {
+            const QString j = benchLastJson(QLatin1String(lbl));
+            return j.isEmpty() ? QJsonObject() : QJsonDocument::fromJson(j.toUtf8()).object();
+        };
+        auto sigList = [](const QJsonObject &cmp) {
+            QStringList out;
+            for (const QJsonValue &v : cmp.value(QStringLiteral("significant")).toArray())
+                out << v.toString();
+            return out;
+        };
+        if (label != QLatin1String("baseline")) {
+            const QJsonObject base = loadPrev("baseline");
+            if (!base.isEmpty())
+                s.insert(QStringLiteral("vs_baseline"), sigList(bench::compare(base, result)));
+        }
+        // главная пара методики: tribe-bypass-off ↔ amnezia (одинаковый full-tunnel, та же нода)
+        if (label == QLatin1String("amnezia")) {
+            const QJsonObject tribe = loadPrev("tribe-bypass-off");
+            if (!tribe.isEmpty())
+                s.insert(QStringLiteral("tribe_vs_amnezia"), sigList(bench::compare(result, tribe)));
+        } else if (label == QLatin1String("tribe-bypass-off")) {
+            const QJsonObject amn = loadPrev("amnezia");
+            if (!amn.isEmpty())
+                s.insert(QStringLiteral("tribe_vs_amnezia"), sigList(bench::compare(amn, result)));
+        }
         emit benchFinished(s, QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact)));
     });
 
@@ -445,7 +499,7 @@ void AvpnEngineQml::probeServices()
 // замер ванильной Amnezia = её NE-туннель системный). extra фиксирует контекст запуска в результат.
 void AvpnEngineQml::startBench(const QString &label)
 {
-    if (m_benchRunning || !m_bench)
+    if (m_benchRunning || sweepRunning() || !m_bench)
         return;
     QJsonObject extra;
     extra.insert(QStringLiteral("platform"), QSysInfo::productType());
@@ -466,6 +520,260 @@ void AvpnEngineQml::cancelBench()
     m_benchRunning = false;
     m_benchStage.clear();
     emit benchChanged();
+}
+
+// ── AVPN (панель администратора): авто-свип нод ────────────────────────────────────────────────
+// Фазовая машина поверх ПУБЛИЧНЫХ переходов движка: switchToNode() (pin + guardedStop) → start() →
+// wait connected → lite-бенч → следующая нода → восстановление исходного pin/подключения.
+// Продвижение — из sweepAdvance() (по сигналу changed, queued) и sweepGuardFired() (сторож фазы).
+// Инварианты коннекта не трогаем: НИКАКИХ прямых up()/down(), только те же вызовы, что жмёт юзер.
+
+static const int kSweepGuardDownMs = 25000;  // стоп туннеля обязан завершиться быстро
+static const int kSweepGuardUpMs = 75000;    // connect: enroll+handshake на медленной сети
+static const int kSweepGuardBenchMs = 120000;
+
+// display-имя ноды для прогресса/строк отчёта (из пула снапшота)
+QString AvpnEngineQml::sweepNodeLabel(const QString &nodeId) const
+{
+    const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
+    for (const QVariant &v : pool) {
+        const QVariantMap n = v.toMap();
+        if (n.value(QStringLiteral("nodeId")).toString() == nodeId) {
+            const QString name = n.value(QStringLiteral("name")).toString();
+            return name.isEmpty() ? n.value(QStringLiteral("region")).toString() : name;
+        }
+    }
+    return nodeId;
+}
+
+void AvpnEngineQml::startNodeSweep()
+{
+    if (sweepRunning() || m_benchRunning || !m_bench)
+        return;
+    // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера)
+    m_sweepQueue.clear();
+    const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
+    for (const QVariant &v : pool)
+        m_sweepQueue << v.toMap().value(QStringLiteral("nodeId")).toString();
+    m_sweepQueue.removeAll(QString());
+    if (m_sweepQueue.isEmpty()) {
+        emit error(tr("Свип: пул нод пуст — обнови подписку"));
+        return;
+    }
+    ++m_sweepEpoch;
+    m_sweepIdx = -1;
+    m_sweepResults = QJsonArray();
+    m_sweepOrigPin = m_engine.pinnedNodeId();
+    m_sweepOrigConnected = (state() == QLatin1String("connected"));
+    sweepNextNode();
+}
+
+void AvpnEngineQml::cancelNodeSweep()
+{
+    if (!sweepRunning())
+        return;
+    ++m_sweepEpoch;
+    m_sweepGuard.stop();
+    if (m_benchRunning)
+        cancelBench();
+    m_sweepPhase = SweepPhase::Idle;
+    m_sweepProgress.clear();
+    emit sweepChanged();
+    // вернуть исходное состояние (без ожиданий — юзер прервал; восстановление цели достаточно)
+    if (m_sweepOrigPin.isEmpty()) selectAuto(); else switchToNode(m_sweepOrigPin);
+    if (m_sweepOrigConnected)
+        start();
+}
+
+void AvpnEngineQml::sweepEnterPhase(SweepPhase ph, int guardMs)
+{
+    m_sweepPhase = ph;
+    m_sweepGuard.start(guardMs);
+    emit sweepChanged();
+}
+
+void AvpnEngineQml::sweepNextNode()
+{
+    ++m_sweepIdx;
+    if (m_sweepIdx >= m_sweepQueue.size()) {
+        sweepBeginRestore();
+        return;
+    }
+    const QString id = m_sweepQueue.at(m_sweepIdx);
+    m_sweepProgress = QStringLiteral("%1/%2 · %3").arg(m_sweepIdx + 1).arg(m_sweepQueue.size())
+                          .arg(sweepNodeLabel(id));
+    switchToNode(id);                        // pin + намерение OFF (guardedStop, если были online)
+    sweepEnterPhase(SweepPhase::WaitDown, kSweepGuardDownMs);
+    // возможно, уже disconnected (no-op reconcile) — проверим отложенно, не дожидаясь changed
+    QTimer::singleShot(0, this, [this, e = m_sweepEpoch] { if (e == m_sweepEpoch) sweepAdvance(); });
+}
+
+void AvpnEngineQml::sweepAdvance()
+{
+    const QString st = state();
+    switch (m_sweepPhase) {
+    case SweepPhase::Idle:
+        return;
+    case SweepPhase::WaitDown:
+        if (st == QLatin1String("disconnected") || st == QLatin1String("error")) {
+            m_sweepConnT.start();
+            start();                          // коннект к запиненной ноде
+            sweepEnterPhase(SweepPhase::WaitUp, kSweepGuardUpMs);
+        }
+        return;
+    case SweepPhase::WaitUp:
+        if (st == QLatin1String("connected")) {
+            m_sweepGuard.stop();
+            sweepStartBench();
+        } else if (st == QLatin1String("error")) {
+            sweepNodeFailed(QStringLiteral("connect-error"));
+        }
+        return;
+    case SweepPhase::Bench:
+        return; // продвижение придёт из benchFinished-лямбды
+    case SweepPhase::RestoreWaitDown:
+        if (st == QLatin1String("disconnected") || st == QLatin1String("error")) {
+            if (m_sweepOrigConnected) {
+                start();
+                sweepEnterPhase(SweepPhase::RestoreWaitUp, kSweepGuardUpMs);
+            } else {
+                sweepFinish();
+            }
+        }
+        return;
+    case SweepPhase::RestoreWaitUp:
+        if (st == QLatin1String("connected") || st == QLatin1String("error"))
+            sweepFinish();
+        return;
+    }
+}
+
+void AvpnEngineQml::sweepStartBench()
+{
+    const QString id = m_sweepQueue.at(m_sweepIdx);
+    const QString actual = debugSnapshot().value(QStringLiteral("currentNodeId")).toString();
+    QJsonObject extra;
+    extra.insert(QStringLiteral("platform"), QSysInfo::productType());
+    extra.insert(QStringLiteral("app_ver"), QCoreApplication::applicationVersion());
+    extra.insert(QStringLiteral("tunnel_state"), QStringLiteral("connected"));
+    extra.insert(QStringLiteral("node_id"), actual);
+    extra.insert(QStringLiteral("node_label"), sweepNodeLabel(id));
+    extra.insert(QStringLiteral("connect_ms"), double(m_sweepConnT.elapsed()));
+    if (actual != id) // движок мог failover'нуться — честно фиксируем (замер не той ноды)
+        extra.insert(QStringLiteral("failover_from"), id);
+    m_benchRunning = true;
+    m_benchStage = QStringLiteral("start");
+    emit benchChanged();
+    sweepEnterPhase(SweepPhase::Bench, kSweepGuardBenchMs);
+    m_bench->start(QStringLiteral("node-%1").arg(id), extra, /*lite=*/true);
+}
+
+void AvpnEngineQml::sweepNodeFailed(const QString &reason)
+{
+    m_sweepGuard.stop();
+    QJsonObject r;
+    r.insert(QStringLiteral("label"), QStringLiteral("node-%1").arg(m_sweepQueue.value(m_sweepIdx)));
+    r.insert(QStringLiteral("extra"), QJsonObject{
+        { QStringLiteral("node_id"), m_sweepQueue.value(m_sweepIdx) },
+        { QStringLiteral("node_label"), sweepNodeLabel(m_sweepQueue.value(m_sweepIdx)) },
+    });
+    r.insert(QStringLiteral("error"), reason);
+    m_sweepResults.append(r);
+    if (m_benchRunning)
+        cancelBench();
+    stop(); // не оставляем полуподнятый туннель перед следующей нодой
+    QTimer::singleShot(0, this, [this, e = m_sweepEpoch] { if (e == m_sweepEpoch) sweepNextNode(); });
+}
+
+void AvpnEngineQml::sweepGuardFired()
+{
+    switch (m_sweepPhase) {
+    case SweepPhase::Idle: return;
+    case SweepPhase::WaitDown:  sweepNodeFailed(QStringLiteral("stop-timeout")); return;
+    case SweepPhase::WaitUp:    sweepNodeFailed(QStringLiteral("connect-timeout")); return;
+    case SweepPhase::Bench:     sweepNodeFailed(QStringLiteral("bench-timeout")); return;
+    case SweepPhase::RestoreWaitDown:
+    case SweepPhase::RestoreWaitUp:
+        sweepFinish(); // восстановление зависло — отдаём отчёт, юзер увидит состояние на орбе
+        return;
+    }
+}
+
+void AvpnEngineQml::sweepBeginRestore()
+{
+    m_sweepProgress = tr("восстановление…");
+    if (m_sweepOrigPin.isEmpty()) selectAuto(); else switchToNode(m_sweepOrigPin);
+    sweepEnterPhase(SweepPhase::RestoreWaitDown, kSweepGuardDownMs);
+    QTimer::singleShot(0, this, [this, e = m_sweepEpoch] { if (e == m_sweepEpoch) sweepAdvance(); });
+}
+
+void AvpnEngineQml::sweepFinish()
+{
+    m_sweepGuard.stop();
+    m_sweepPhase = SweepPhase::Idle;
+    m_sweepProgress.clear();
+
+    // строки отчёта: выжимка per node, лучшие сверху (по скорости, ошибки — вниз)
+    struct Row { QVariantMap m; double down; bool ok; };
+    QList<Row> rows;
+    for (const QJsonValue &v : m_sweepResults) {
+        const QJsonObject r = v.toObject();
+        const QJsonObject extra = r.value(QStringLiteral("extra")).toObject();
+        QVariantMap m;
+        m.insert(QStringLiteral("node_id"), extra.value(QStringLiteral("node_id")).toString());
+        m.insert(QStringLiteral("label"), extra.value(QStringLiteral("node_label")).toString());
+        const bool ok = !r.contains(QStringLiteral("error"));
+        m.insert(QStringLiteral("ok"), ok);
+        if (!ok) {
+            m.insert(QStringLiteral("verdict"), r.value(QStringLiteral("error")).toString());
+            rows.append({ m, -1, false });
+            continue;
+        }
+        m.insert(QStringLiteral("connect_ms"), extra.value(QStringLiteral("connect_ms")).toDouble());
+        m.insert(QStringLiteral("ttfb_ms"), r.value(QStringLiteral("http")).toObject().value(QStringLiteral("median_ttfb_ms")).toDouble(-1));
+        const double down = r.value(QStringLiteral("throughput")).toObject().value(QStringLiteral("down_mbit")).toDouble();
+        m.insert(QStringLiteral("down_mbit"), down);
+        m.insert(QStringLiteral("base_rtt_ms"), r.value(QStringLiteral("network_quality")).toObject().value(QStringLiteral("base_rtt_ms")).toDouble(-1));
+        m.insert(QStringLiteral("loaded_rtt_ms"), r.value(QStringLiteral("network_quality")).toObject().value(QStringLiteral("loaded_rtt_ms")).toDouble(-1));
+        QString verdict = extra.contains(QStringLiteral("failover_from")) ? QStringLiteral("failover! ") : QString();
+        const QJsonArray vs = r.value(QStringLiteral("verdicts")).toArray();
+        verdict += vs.isEmpty() ? QStringLiteral("ok")
+                                : vs.first().toObject().value(QStringLiteral("code")).toString()
+                                      + (vs.size() > 1 ? QStringLiteral(" +%1").arg(vs.size() - 1) : QString());
+        m.insert(QStringLiteral("verdict"), verdict);
+        rows.append({ m, down, true });
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+        if (a.ok != b.ok) return a.ok;
+        return a.down > b.down;
+    });
+    QVariantList outRows;
+    for (const Row &r : rows) outRows << r.m;
+
+    QJsonObject report;
+    report.insert(QStringLiteral("schema"), 1);
+    report.insert(QStringLiteral("type"), QStringLiteral("node-sweep"));
+    report.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    report.insert(QStringLiteral("nodes"), m_sweepResults);
+    const QString json = QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
+    QSettings().setValue(QStringLiteral("AvpnBench/last_node-sweep"), json);
+
+    emit sweepChanged();
+    emit sweepFinished(outRows, json);
+}
+
+// история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
+QString AvpnEngineQml::benchLastJson(const QString &label) const
+{
+    return QSettings().value(QStringLiteral("AvpnBench/last_%1").arg(label)).toString();
+}
+
+void AvpnEngineQml::clearBenchHistory()
+{
+    QSettings s;
+    s.beginGroup(QStringLiteral("AvpnBench"));
+    s.remove(QString());
+    s.endGroup();
 }
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN

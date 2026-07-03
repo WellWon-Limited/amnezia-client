@@ -23,9 +23,13 @@ PageType {
     readonly property string benchStage: hasEngine ? TribeEngine.benchStage : ""
 
     property string selectedLabel: "baseline"
-    property var lastSummary: null   // плоская мапа из benchFinished
+    property var lastSummary: null   // плоская мапа из benchFinished (+verdicts, vs_baseline, tribe_vs_amnezia)
     property string lastJson: ""
+    property var sweepRows: null     // строки свипа нод из sweepFinished (лучшие сверху)
+    property string sweepJson: ""
 
+    readonly property bool sweepRunning: hasEngine ? TribeEngine.sweepRunning : false
+    readonly property string sweepProgress: hasEngine ? TribeEngine.sweepProgress : ""
     readonly property var labels: ["baseline", "tribe-bypass-on", "tribe-bypass-off", "amnezia"]
 
     function stageTitle(st) {
@@ -51,6 +55,10 @@ PageType {
         function onBenchFinished(summary, json) {
             root.lastSummary = summary
             root.lastJson = json
+        }
+        function onSweepFinished(rows, json) {
+            root.sweepRows = rows
+            root.sweepJson = json
         }
     }
 
@@ -134,7 +142,7 @@ PageType {
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
                                             : qsTr("Запустить замер (~40 МБ трафика)")
                     variant: root.benchRunning ? "ghost" : "primary"
-                    enabled: root.hasEngine
+                    enabled: root.hasEngine && !root.sweepRunning // во время свипа одиночный бенч занят им
                     onClicked: {
                         if (!root.hasEngine)
                             return
@@ -150,6 +158,107 @@ PageType {
                     text: qsTr("Не переключай VPN во время замера (~2 мин)")
                     color: Theme.color.warning
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                }
+
+                // ── авто-свип всех нод ──────────────────────────────────────
+                TribeButton {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    text: root.sweepRunning ? qsTr("Отменить проверку (%1)").arg(root.sweepProgress)
+                                            : qsTr("Проверить все ноды (~1 мин и ~10 МБ на ноду)")
+                    variant: root.sweepRunning ? "ghost" : "glass"
+                    enabled: root.hasEngine && (root.sweepRunning || !root.benchRunning)
+                    onClicked: {
+                        if (!root.hasEngine)
+                            return
+                        if (root.sweepRunning)
+                            TribeEngine.cancelNodeSweep()
+                        else
+                            TribeEngine.startNodeSweep()
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.sweepRunning
+                    wrapMode: Text.WordWrap
+                    text: qsTr("VPN будет сам переключаться между всеми серверами: коннект (замер времени) → короткий бенч → следующий. В конце вернётся исходное подключение.")
+                    color: Theme.color.warning
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                }
+
+                // результаты свипа: таблица нод (лучшие сверху)
+                TribeCard {
+                    Layout.fillWidth: true
+                    visible: root.sweepRows !== null && !root.sweepRunning
+                    implicitHeight: sweepCol.implicitHeight + 2 * Theme.space.lg
+                    ColumnLayout {
+                        id: sweepCol
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        anchors.topMargin: Theme.space.lg
+                        spacing: Theme.space.sm
+
+                        Text {
+                            text: qsTr("Ноды (лучшие сверху)")
+                            color: Theme.color.accent
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
+                        }
+                        Repeater {
+                            model: root.sweepRows === null ? [] : root.sweepRows
+                            delegate: ColumnLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 1
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.space.sm
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.label || modelData.node_id
+                                        color: modelData.ok ? Theme.color.text1 : Theme.color.danger
+                                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        text: modelData.ok
+                                              ? qsTr("%1 Мбит · %2 мс").arg(Math.round(modelData.down_mbit * 10) / 10)
+                                                                       .arg(Math.round(modelData.base_rtt_ms))
+                                              : qsTr("недоступна")
+                                        color: Theme.color.text1
+                                        font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.ok
+                                          ? qsTr("коннект %1 с · ttfb %2 мс · %3")
+                                                .arg(Math.round(modelData.connect_ms / 100) / 10)
+                                                .arg(Math.round(modelData.ttfb_ms))
+                                                .arg(modelData.verdict)
+                                          : String(modelData.verdict)
+                                    color: Theme.color.text3
+                                    font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Theme.space.xs
+                            variant: "glass"
+                            text: qsTr("Скопировать отчёт по нодам")
+                            onClicked: {
+                                sweepJsonEdit.selectAll(); sweepJsonEdit.copy(); sweepJsonEdit.deselect()
+                                PageController.showNotificationMessage(qsTr("Отчёт скопирован"))
+                            }
+                        }
+                        TextEdit {
+                            id: sweepJsonEdit
+                            Layout.preferredWidth: 1; Layout.preferredHeight: 1
+                            visible: false; readOnly: true
+                            text: root.sweepJson
+                        }
+                    }
                 }
 
                 // результат последнего замера
@@ -199,6 +308,40 @@ PageType {
                             }
                         }
 
+                        // авто-диагнозы замера (BenchAnalysis: bufferbloat, потери, низкий goodput…)
+                        Repeater {
+                            model: (root.lastSummary && root.lastSummary.verdicts) ? root.lastSummary.verdicts : []
+                            delegate: Text {
+                                required property string modelData
+                                Layout.fillWidth: true
+                                text: "⚠ " + modelData
+                                wrapMode: Text.WordWrap
+                                color: Theme.color.warning
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                            }
+                        }
+                        // A/B против сохранённых меток: чем текущий замер существенно хуже
+                        Text {
+                            Layout.fillWidth: true
+                            visible: !!(root.lastSummary && root.lastSummary.vs_baseline !== undefined)
+                            text: (root.lastSummary && root.lastSummary.vs_baseline && root.lastSummary.vs_baseline.length > 0)
+                                  ? qsTr("vs baseline: ") + root.lastSummary.vs_baseline.join("; ")
+                                  : qsTr("vs baseline: без существенных потерь")
+                            wrapMode: Text.WordWrap
+                            color: Theme.color.text2
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: !!(root.lastSummary && root.lastSummary.tribe_vs_amnezia !== undefined)
+                            text: (root.lastSummary && root.lastSummary.tribe_vs_amnezia && root.lastSummary.tribe_vs_amnezia.length > 0)
+                                  ? qsTr("Tribe vs Amnezia: ") + root.lastSummary.tribe_vs_amnezia.join("; ")
+                                  : qsTr("Tribe vs Amnezia: паритет ✓")
+                            wrapMode: Text.WordWrap
+                            color: (root.lastSummary && root.lastSummary.tribe_vs_amnezia && root.lastSummary.tribe_vs_amnezia.length > 0)
+                                   ? Theme.color.warning : Theme.color.connected
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                        }
                         TribeButton {
                             Layout.fillWidth: true
                             Layout.topMargin: Theme.space.sm

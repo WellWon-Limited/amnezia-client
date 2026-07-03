@@ -1,6 +1,7 @@
 // AVPN serviceEngine — автономная проверка парсера подписки (без Qt Test, только QtCore).
 // Сборка/запуск: core/serviceEngine/tests/build_check.sh
 #include "../AwgConfigBuilder.h"
+#include "../BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #include "../BenchRunner.h" // AVPN (панель администратора): чистая математика бенча (median/mbit)
 #include "../Enrollment.h"
 #include "../GoodputProbe.h"
@@ -137,6 +138,43 @@ int main(int argc, char **argv)
         printf("bench math: median=%d mbit=%d\n", medOk ? 1 : 0, mbitOk ? 1 : 0);
         if (!medOk || !mbitOk) { fprintf(stderr, "FAIL: BenchRunner math\n"); return 7; }
         printf("benchrunner: OK (median edge-cases, mbit conversion)\n");
+    }
+
+    // --- BenchAnalysis: вердикты по одному замеру + A/B-сравнение ---
+    {
+        auto mk = [](double dns, double ttfb, double down, double base, double loaded, int fails) {
+            QJsonObject r;
+            r.insert("dns", QJsonObject{{"median_ms", dns}});
+            r.insert("http", QJsonObject{{"median_ttfb_ms", ttfb}, {"median_total_ms", ttfb * 1.6}, {"failures", fails}});
+            r.insert("throughput", QJsonObject{{"down_mbit", down}, {"up_mbit", down / 3}});
+            r.insert("network_quality", QJsonObject{{"base_rtt_ms", base}, {"loaded_rtt_ms", loaded}});
+            r.insert("ping", QJsonArray{QJsonObject{{"target", "1.1.1.1"}, {"rtt_avg", base}, {"loss_pct", 0.0}}});
+            return r;
+        };
+        auto hasCode = [](const QJsonArray &vs, const char *code) {
+            for (const QJsonValue &v : vs)
+                if (v.toObject().value("code").toString() == QLatin1String(code)) return true;
+            return false;
+        };
+        const QJsonArray good = bench::verdicts(mk(25, 250, 80, 90, 110, 0));
+        const QJsonArray bloat = bench::verdicts(mk(25, 250, 80, 90, 400, 0));   // loaded/base > 2.5
+        const QJsonArray slowDns = bench::verdicts(mk(120, 250, 80, 90, 110, 0));
+        const QJsonArray lowGp = bench::verdicts(mk(25, 250, 2.0, 90, 110, 0));  // 2 Мбит при RTT 90
+        const bool vOk = good.isEmpty()
+                      && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
+                      && hasCode(slowDns, "dns-slow")
+                      && hasCode(lowGp, "low-goodput");
+        // A/B: b хуже a по TTFB на 30% (существенно) и лучше по загрузке (не в significant)
+        const QJsonObject cmp = bench::compare(mk(25, 200, 50, 90, 110, 0), mk(25, 260, 70, 90, 110, 0));
+        const QJsonArray sig = cmp.value("significant").toArray();
+        bool ttfbFlagged = false;
+        for (const QJsonValue &s : sig)
+            if (s.toString().startsWith(QLatin1String("TTFB"))) ttfbFlagged = true;
+        const bool cOk = ttfbFlagged && sig.size() >= 2 /* TTFB + Страница */
+                      && cmp.value("deltas").toArray().size() == 7;
+        printf("bench analysis: verdicts=%d compare=%d (sig=%d)\n", vOk ? 1 : 0, cOk ? 1 : 0, int(sig.size()));
+        if (!vOk || !cOk) { fprintf(stderr, "FAIL: BenchAnalysis verdicts/compare\n"); return 8; }
+        printf("benchanalysis: OK (bufferbloat/dns-slow/low-goodput, A/B significant deltas)\n");
     }
 
     // --- Enrollment: чистые builders/parsers ---

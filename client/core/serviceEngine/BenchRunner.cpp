@@ -1,5 +1,6 @@
 #include "BenchRunner.h"
 
+#include "BenchAnalysis.h"
 #include "RttProbeIcmp.h"
 
 #include <QDateTime>
@@ -8,10 +9,12 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSslSocket>
 #include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
+#include <memory>
 
 namespace avpn {
 
@@ -22,15 +25,26 @@ static const QStringList kHosts = {
     QStringLiteral("www.apple.com"),    QStringLiteral("ya.ru"),
     QStringLiteral("vk.com"),           QStringLiteral("www.ozon.ru"),
 };
-static const int kHttpRuns = 2;
+// lite (свип по нодам): минимум, но с обеих сторон занавеса (заруб + RU)
+static const QStringList kHostsLite = {
+    QStringLiteral("www.google.com"), QStringLiteral("ya.ru"), QStringLiteral("en.wikipedia.org"),
+};
 static const qint64 kHttpReadCap = 1536 * 1024;      // страница: дальше 1.5МБ не читаем (total = до капа)
 static const char *kDownUrl = "https://speed.cloudflare.com/__down?bytes=26214400"; // 25 МБ
+static const char *kDownUrlLite = "https://speed.cloudflare.com/__down?bytes=8388608"; // 8 МБ
 static const char *kUpUrl = "https://speed.cloudflare.com/__up";
-static const qint64 kUpBytes = 5 * 1024 * 1024;      // 5 МБ
+static const qint64 kUpBytes = 5 * 1024 * 1024;      // 5 МБ (в lite отдача не меряется)
 static const char *kRttUrl = "https://connectivitycheck.gstatic.com/generate_204";
-static const int kIdleRttCount = 5;
 static const int kLoadRttPeriodMs = 500;
 static const int kStageTimeoutMs = 30000;
+static const int kTlsTimeoutMs = 8000;
+
+QStringList BenchRunner::hosts() const { return m_lite ? kHostsLite : kHosts; }
+// TCP/TLS-фазы: по одному хосту с каждой стороны занавеса (разложение DNS/TCP/TLS вместо общего TTFB)
+QStringList BenchRunner::tlsHosts() const
+{
+    return { QStringLiteral("www.google.com"), QStringLiteral("ya.ru") };
+}
 
 BenchRunner::BenchRunner(QNetworkAccessManager *nam, QObject *parent)
     : QObject(parent), m_nam(nam), m_icmp(new RttProbeIcmp(this))
@@ -44,18 +58,20 @@ BenchRunner::~BenchRunner()
     cancel();
 }
 
-void BenchRunner::start(const QString &label, const QJsonObject &extra)
+void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lite)
 {
     if (m_running)
         return;
     m_running = true;
+    m_lite = lite;
     ++m_epoch;
     m_label = label.isEmpty() ? QStringLiteral("unlabeled") : label;
     m_extra = extra;
     m_loc.clear(); m_colo.clear();
     m_dnsIdx = 0; m_dnsProbes = QJsonArray();
+    m_tlsIdx = 0; m_tlsProbes = QJsonArray(); m_tlsTcpMs = -1;
     m_httpIdx = 0; m_httpProbes = QJsonArray();
-    m_pingProbes = QJsonArray();
+    m_pingRound = 0; m_icmpSamples.clear(); m_pingProbes = QJsonArray();
     m_idleIdx = 0; m_idleRtt.clear(); m_loadedRtt.clear();
     m_downBytes = 0; m_downFirstByteMs = -1; m_downEndMs = -1;
     m_upMbit = 0;
@@ -77,6 +93,12 @@ void BenchRunner::cancel()
         m_dns->abort();
         m_dns->deleteLater();
         m_dns = nullptr;
+    }
+    if (m_ssl) {
+        m_ssl->disconnect(this);
+        m_ssl->abort();
+        m_ssl->deleteLater();
+        m_ssl = nullptr;
     }
     m_icmp->cancel();
 }
@@ -122,12 +144,12 @@ void BenchRunner::stageDns()
 
 void BenchRunner::dnsNext()
 {
-    if (m_dnsIdx >= kHosts.size()) {
-        stageHttp();
+    if (m_dnsIdx >= hosts().size()) {
+        stageTls();
         return;
     }
     const int epoch = m_epoch;
-    const QString host = kHosts.at(m_dnsIdx);
+    const QString host = hosts().at(m_dnsIdx);
     m_dns = new QDnsLookup(QDnsLookup::A, host, this);
     m_t.start();
     connect(m_dns, &QDnsLookup::finished, this, [this, epoch, host] {
@@ -151,7 +173,68 @@ void BenchRunner::dnsNext()
     m_dns->lookup();
 }
 
-// --- стадия 2: HTTP-тайминги корпуса (TTFB/total, 2 прогона) ----------------------------------
+// --- стадия 1b: TCP/TLS-фазы (разложение пути: connect vs handshake) ---------------------------
+void BenchRunner::stageTls()
+{
+    emit stageChanged(QStringLiteral("tls"));
+    m_tlsIdx = 0;
+    tlsNext();
+}
+
+void BenchRunner::tlsNext()
+{
+    if (m_tlsIdx >= tlsHosts().size()) {
+        stageHttp();
+        return;
+    }
+    const int epoch = m_epoch;
+    const QString host = tlsHosts().at(m_tlsIdx);
+    m_tlsTcpMs = -1;
+    m_ssl = new QSslSocket(this);
+    m_t.start();
+    QSslSocket *s = m_ssl;
+    auto done = std::make_shared<bool>(false); // сторож-таймер может пережить deleteLater → один вызов
+    auto finish = [this, s, epoch, host, done](qint64 tcpMs, qint64 tlsMs) {
+        if (*done) return;
+        *done = true;
+        if (m_ssl == s) m_ssl = nullptr;
+        s->disconnect(this);
+        s->abort();
+        s->deleteLater();
+        if (epoch != m_epoch) return;
+        QJsonObject o;
+        o.insert(QStringLiteral("host"), host);
+        if (tcpMs >= 0) o.insert(QStringLiteral("tcp_ms"), double(tcpMs));
+        if (tlsMs >= 0) {
+            o.insert(QStringLiteral("tls_ms"), double(tlsMs)); // полный до encrypted
+            if (tcpMs >= 0)
+                o.insert(QStringLiteral("handshake_ms"), double(tlsMs - tcpMs));
+        }
+        if (tlsMs < 0) o.insert(QStringLiteral("error"), true);
+        m_tlsProbes.append(o);
+        ++m_tlsIdx;
+        tlsNext();
+    };
+    connect(s, &QSslSocket::connected, this, [this, epoch] {
+        if (epoch != m_epoch) return;
+        m_tlsTcpMs = m_t.elapsed();
+    });
+    connect(s, &QSslSocket::encrypted, this, [this, epoch, finish] {
+        if (epoch != m_epoch) return;
+        finish(m_tlsTcpMs, m_t.elapsed());
+    });
+    connect(s, &QSslSocket::errorOccurred, this, [this, epoch, finish](QAbstractSocket::SocketError) {
+        if (epoch != m_epoch) return;
+        finish(m_tlsTcpMs, -1);
+    });
+    QTimer::singleShot(kTlsTimeoutMs, s, [this, epoch, finish] {
+        if (epoch != m_epoch) return;
+        finish(m_tlsTcpMs, -1); // не дождались encrypted
+    });
+    s->connectToHostEncrypted(host, 443);
+}
+
+// --- стадия 2: HTTP-тайминги корпуса (TTFB/total; 2 прогона, lite — 1) --------------------------
 void BenchRunner::stageHttp()
 {
     emit stageChanged(QStringLiteral("http"));
@@ -161,13 +244,14 @@ void BenchRunner::stageHttp()
 
 void BenchRunner::httpNext()
 {
-    if (m_httpIdx >= kHosts.size() * kHttpRuns) {
+    const int runs = m_lite ? 1 : 2;
+    if (m_httpIdx >= hosts().size() * runs) {
         stagePing();
         return;
     }
     const int epoch = m_epoch;
-    const QString host = kHosts.at(m_httpIdx / kHttpRuns);
-    const int run = m_httpIdx % kHttpRuns + 1;
+    const QString host = hosts().at(m_httpIdx / runs);
+    const int run = m_httpIdx % runs + 1;
     QNetworkRequest req{QUrl(QStringLiteral("https://%1/").arg(host))};
     req.setTransferTimeout(25000);
     m_httpTtfbMs = -1;
@@ -206,30 +290,60 @@ void BenchRunner::httpNext()
     });
 }
 
-// --- стадия 3: ICMP (1.1.1.1 / 8.8.8.8; unprivileged, Win — стаб → пусто) ---------------------
+// --- стадия 3: серия ICMP → loss/jitter (1.1.1.1 / 8.8.8.8; unprivileged, Win — стаб) ----------
 void BenchRunner::stagePing()
 {
     emit stageChanged(QStringLiteral("ping"));
+    m_pingRound = 0;
+    m_icmpSamples.clear();
+    pingRound();
+}
+
+void BenchRunner::pingRound()
+{
+    const int rounds = m_lite ? 3 : 5;
+    if (m_pingRound >= rounds) {
+        // финализация: loss = недошедшие раунды, jitter = max-min удачных
+        for (auto it = m_icmpSamples.constBegin(); it != m_icmpSamples.constEnd(); ++it) {
+            const QVector<double> &s = it.value();
+            QJsonObject o;
+            o.insert(QStringLiteral("target"), it.key());
+            if (s.isEmpty()) {
+                o.insert(QStringLiteral("unreachable"), true);
+            } else {
+                double mn = s.first(), mx = s.first(), sum = 0;
+                for (double v : s) { mn = std::min(mn, v); mx = std::max(mx, v); sum += v; }
+                o.insert(QStringLiteral("rtt_min"), mn);
+                o.insert(QStringLiteral("rtt_avg"), sum / s.size());
+                o.insert(QStringLiteral("rtt_max"), mx);
+                o.insert(QStringLiteral("jitter_ms"), mx - mn);
+                o.insert(QStringLiteral("loss_pct"), double(rounds - s.size()) / rounds * 100.0);
+            }
+            m_pingProbes.append(o);
+        }
+        stageIdleRtt();
+        return;
+    }
     const int epoch = m_epoch;
     const QList<RttTarget> targets = {
         { QStringLiteral("1.1.1.1"), QStringLiteral("1.1.1.1"), 0 },
         { QStringLiteral("8.8.8.8"), QStringLiteral("8.8.8.8"), 0 },
     };
+    // цели фиксируем в сэмплах заранее: полная тишина раунда тоже учитывается (loss)
+    for (const RttTarget &t : targets)
+        if (!m_icmpSamples.contains(t.nodeId))
+            m_icmpSamples.insert(t.nodeId, {});
     m_icmp->probeAll(
-        targets, 3000,
+        targets, 2000,
         [this, epoch](const QString &id, int rttMs) {
             if (epoch != m_epoch) return;
-            QJsonObject o;
-            o.insert(QStringLiteral("target"), id);
             if (rttMs >= 0)
-                o.insert(QStringLiteral("rtt_avg"), double(rttMs));
-            else
-                o.insert(QStringLiteral("unreachable"), true);
-            m_pingProbes.append(o);
+                m_icmpSamples[id].append(double(rttMs));
         },
         [this, epoch] {
             if (epoch != m_epoch) return;
-            stageIdleRtt();
+            ++m_pingRound;
+            pingRound();
         });
 }
 
@@ -250,7 +364,7 @@ void BenchRunner::stageIdleRtt()
 
 void BenchRunner::idleRttNext()
 {
-    if (m_idleIdx >= kIdleRttCount) {
+    if (m_idleIdx >= (m_lite ? 3 : 5)) {
         stageDown();
         return;
     }
@@ -273,7 +387,7 @@ void BenchRunner::stageDown()
 {
     emit stageChanged(QStringLiteral("down"));
     const int epoch = m_epoch;
-    QNetworkRequest req{QUrl(QString::fromLatin1(kDownUrl))};
+    QNetworkRequest req{QUrl(QString::fromLatin1(m_lite ? kDownUrlLite : kDownUrl))};
     req.setTransferTimeout(kStageTimeoutMs * 2); // 25МБ на медленной сети
     QElapsedTimer *dl = new QElapsedTimer();
     dl->start();
@@ -314,9 +428,13 @@ void BenchRunner::stageDown()
     });
 }
 
-// --- стадия 6: upload 5МБ ----------------------------------------------------------------------
+// --- стадия 6: upload 5МБ (в lite пропускается — экономия трафика при свипе) --------------------
 void BenchRunner::stageUp()
 {
+    if (m_lite) {
+        assemble();
+        return;
+    }
     emit stageChanged(QStringLiteral("up"));
     const int epoch = m_epoch;
     QNetworkRequest req{QUrl(QString::fromLatin1(kUpUrl))};
@@ -378,17 +496,32 @@ void BenchRunner::assemble()
     nq.insert(QStringLiteral("base_rtt_ms"), num(median(m_idleRtt)));
     nq.insert(QStringLiteral("loaded_rtt_ms"), num(median(m_loadedRtt)));
 
+    // TCP/TLS-фазы: медианы по пробам (разложение «где именно медленно»)
+    QVector<double> tcpMs, hsMs;
+    for (const QJsonValue &v : m_tlsProbes) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("tcp_ms")).isDouble()) tcpMs.append(o.value(QStringLiteral("tcp_ms")).toDouble());
+        if (o.value(QStringLiteral("handshake_ms")).isDouble()) hsMs.append(o.value(QStringLiteral("handshake_ms")).toDouble());
+    }
+    QJsonObject tls;
+    tls.insert(QStringLiteral("probes"), m_tlsProbes);
+    tls.insert(QStringLiteral("median_tcp_ms"), num(median(tcpMs)));
+    tls.insert(QStringLiteral("median_handshake_ms"), num(median(hsMs)));
+
     QJsonObject out;
     out.insert(QStringLiteral("schema"), 1);
     out.insert(QStringLiteral("label"), m_label);
+    out.insert(QStringLiteral("mode"), m_lite ? QStringLiteral("lite") : QStringLiteral("full"));
     out.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
     out.insert(QStringLiteral("network"), network);
     out.insert(QStringLiteral("dns"), dns);
+    out.insert(QStringLiteral("tls"), tls);
     out.insert(QStringLiteral("http"), http);
     out.insert(QStringLiteral("ping"), m_pingProbes);
     out.insert(QStringLiteral("throughput"), thr);
     out.insert(QStringLiteral("network_quality"), nq);
     out.insert(QStringLiteral("extra"), m_extra);
+    out.insert(QStringLiteral("verdicts"), bench::verdicts(out)); // авто-диагнозы (BenchAnalysis.h)
 
     m_running = false;
     emit stageChanged(QStringLiteral("done"));

@@ -1,13 +1,15 @@
 // AVPN serviceEngine — in-app бенч соединения (для «Панели администратора» в настройках).
 // Меряет ТЕКУЩИЙ сетевой путь устройства (NE-туннель системный ⇒ неважно, чей VPN активен):
-// DNS-тайминги + A-записи (гео-CDN), HTTP TTFB/total по корпусу сайтов, ICMP, down/up throughput,
-// latency-under-load (аналог RPM networkQuality). Результат — JSON schema:1, совместимый с
-// tools/connect-bench (репо tribe-front): сводится общим summarize.sh с замерами с Mac.
-// Строго async (сигналы QNAM/QDnsLookup/таймеры), БЕЗ nested QEventLoop (правило NetAwait.h).
+// DNS-тайминги + A-записи (гео-CDN), TCP/TLS-фазы, HTTP TTFB/total по корпусу сайтов, серия ICMP
+// (loss/jitter), down/up throughput, latency-under-load (аналог RPM networkQuality) + авто-вердикты
+// (BenchAnalysis.h). Результат — JSON schema:1, совместимый с tools/connect-bench (репо tribe-front).
+// Режимы: полный (~2 мин, ~40 МБ) и lite (~30-40 с, ~8 МБ) — lite использует свип по нодам (BenchSweep).
+// Строго async (сигналы QNAM/QDnsLookup/QSslSocket/таймеры), БЕЗ nested QEventLoop (правило NetAwait.h).
 // PII нет: публичный IP не сохраняется (из cdn-cgi/trace берём только loc/colo).
 #pragma once
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
@@ -20,6 +22,7 @@
 class QNetworkAccessManager;
 class QNetworkReply;
 class QDnsLookup;
+class QSslSocket;
 class QTimer;
 
 namespace avpn {
@@ -35,8 +38,9 @@ public:
 
     bool running() const { return m_running; }
 
-    // extra — вклеивается в результат как extra{} (tunnel_state, node_id, platform, app_ver).
-    void start(const QString &label, const QJsonObject &extra);
+    // extra — вклеивается в результат как extra{} (tunnel_state, node_id, platform, app_ver,
+    // connect_ms при свипе). lite — короткий замер для пер-нодного свипа.
+    void start(const QString &label, const QJsonObject &extra, bool lite = false);
     void cancel(); // идемпотентно; никаких сигналов после cancel
 
     // --- чистая математика (inline в хедере: тестируется в tests/parse_check.cpp без moc) ---
@@ -56,7 +60,7 @@ public:
     }
 
 signals:
-    void stageChanged(const QString &stage); // "dns" | "http" | "ping" | "down" | "up" | "done"
+    void stageChanged(const QString &stage); // "dns"|"tls"|"http"|"ping"|"rtt"|"down"|"up"|"done"
     void finished(const QJsonObject &result);
     void failed(const QString &error);
 
@@ -64,6 +68,7 @@ private:
     // конвейер стадий; каждая по завершении зовёт следующую (всё на главном потоке)
     void stageTrace();
     void stageDns();
+    void stageTls();
     void stageHttp();
     void stagePing();
     void stageIdleRtt();
@@ -72,15 +77,20 @@ private:
     void assemble();
 
     void dnsNext();
+    void tlsNext();
     void httpNext();
+    void pingRound();
     void idleRttNext();
     QNetworkReply *head204(); // HEAD generate_204 (rtt-зонд)
     void abortReply();
+    QStringList hosts() const;    // корпус по режиму (lite = 3 хоста: заруб+RU)
+    QStringList tlsHosts() const; // подмножество для TCP/TLS-фаз
 
     QNetworkAccessManager *m_nam = nullptr;
     IRttProbe *m_icmp = nullptr; // собственная RttProbeIcmp (Win — стаб)
 
     bool m_running = false;
+    bool m_lite = false;
     int  m_epoch = 0;  // анти-UAF/анти-стейл: колбэки старого запуска игнорируются
     QString m_label;
     QJsonObject m_extra;
@@ -88,6 +98,7 @@ private:
     QPointer<QNetworkReply> m_reply;
     QPointer<QNetworkReply> m_loadPending; // rtt-зонд под нагрузкой (не более одного в полёте)
     QDnsLookup *m_dns = nullptr;
+    QSslSocket *m_ssl = nullptr;
     QTimer *m_loadTimer = nullptr;   // rtt-зонды во время down-стадии
     QElapsedTimer m_t;
 
@@ -95,10 +106,15 @@ private:
     QString m_loc, m_colo;
     int m_dnsIdx = 0;
     QJsonArray m_dnsProbes;
-    int m_httpIdx = 0; // url*2+run
+    int m_tlsIdx = 0;
+    QJsonArray m_tlsProbes;
+    qint64 m_tlsTcpMs = -1;
+    int m_httpIdx = 0; // url*runs+run
     QJsonArray m_httpProbes;
     qint64 m_httpTtfbMs = -1;
     qint64 m_httpBytes = 0;
+    int m_pingRound = 0;                          // серия ICMP: несколько раундов → loss/jitter
+    QHash<QString, QVector<double>> m_icmpSamples; // target → удачные RTT по раундам
     QJsonArray m_pingProbes;
     int m_idleIdx = 0;
     QVector<double> m_idleRtt;
