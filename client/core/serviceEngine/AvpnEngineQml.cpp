@@ -10,6 +10,7 @@
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
+#include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
@@ -18,6 +19,8 @@
 
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
 #include <QDateTime>
+#include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
+#include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
 #include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
@@ -53,6 +56,35 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
     // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
     m_rttProbe = new RttProbeIcmp(this);
+
+    // AVPN (панель администратора): in-app бенч соединения. Запуск ТОЛЬКО вручную (startBench из QML),
+    // коннект-путь не трогает; результат — schema:1 (сводится с Mac-замерами tools/connect-bench).
+    m_bench = new BenchRunner(m_nam, this);
+    connect(m_bench, &BenchRunner::stageChanged, this, [this](const QString &st) {
+        m_benchStage = st;
+        emit benchChanged();
+    });
+    connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
+        m_benchRunning = false;
+        emit benchChanged();
+        QVariantMap s; // плоская сводка для мини-таблицы в UI
+        s.insert(QStringLiteral("label"), result.value(QStringLiteral("label")).toString());
+        s.insert(QStringLiteral("dns_ms"), result.value(QStringLiteral("dns")).toObject().value(QStringLiteral("median_ms")).toVariant());
+        const QJsonObject http = result.value(QStringLiteral("http")).toObject();
+        s.insert(QStringLiteral("ttfb_ms"), http.value(QStringLiteral("median_ttfb_ms")).toVariant());
+        s.insert(QStringLiteral("total_ms"), http.value(QStringLiteral("median_total_ms")).toVariant());
+        s.insert(QStringLiteral("failures"), http.value(QStringLiteral("failures")).toInt());
+        const QJsonObject thr = result.value(QStringLiteral("throughput")).toObject();
+        s.insert(QStringLiteral("down_mbit"), thr.value(QStringLiteral("down_mbit")).toDouble());
+        s.insert(QStringLiteral("up_mbit"), thr.value(QStringLiteral("up_mbit")).toDouble());
+        const QJsonObject nq = result.value(QStringLiteral("network_quality")).toObject();
+        s.insert(QStringLiteral("base_rtt_ms"), nq.value(QStringLiteral("base_rtt_ms")).toVariant());
+        s.insert(QStringLiteral("loaded_rtt_ms"), nq.value(QStringLiteral("loaded_rtt_ms")).toVariant());
+        const QJsonObject eg = result.value(QStringLiteral("network")).toObject().value(QStringLiteral("egress")).toObject();
+        s.insert(QStringLiteral("egress"), QStringLiteral("%1/%2").arg(eg.value(QStringLiteral("loc")).toString(QStringLiteral("-")),
+                                                                       eg.value(QStringLiteral("cf_colo")).toString(QStringLiteral("-"))));
+        emit benchFinished(s, QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact)));
+    });
 
     // health-loop driver: периодический tick (3–5с).
     m_healthTimer.setInterval(4000);
@@ -392,6 +424,33 @@ void AvpnEngineQml::probeServices()
     // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
     if (m_svcProbe && state() == QLatin1String("connected"))
         m_svcProbe->probeAll();
+}
+
+// AVPN (панель администратора): in-app бенч. Валиден в ЛЮБОМ состоянии туннеля (baseline = VPN off;
+// замер ванильной Amnezia = её NE-туннель системный). extra фиксирует контекст запуска в результат.
+void AvpnEngineQml::startBench(const QString &label)
+{
+    if (m_benchRunning || !m_bench)
+        return;
+    QJsonObject extra;
+    extra.insert(QStringLiteral("platform"), QSysInfo::productType());
+    extra.insert(QStringLiteral("app_ver"), QCoreApplication::applicationVersion());
+    extra.insert(QStringLiteral("tunnel_state"), state());
+    extra.insert(QStringLiteral("node_id"), debugSnapshot().value(QStringLiteral("currentNodeId")).toString());
+    m_benchRunning = true;
+    m_benchStage = QStringLiteral("start");
+    emit benchChanged();
+    m_bench->start(label, extra);
+}
+
+void AvpnEngineQml::cancelBench()
+{
+    if (!m_bench)
+        return;
+    m_bench->cancel();
+    m_benchRunning = false;
+    m_benchStage.clear();
+    emit benchChanged();
 }
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN

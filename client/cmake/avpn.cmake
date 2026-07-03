@@ -39,6 +39,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/NodeRotation.h
     ${AVPN_SE}/IRttProbe.h
     ${AVPN_SE}/RttProbeIcmp.h
+    ${AVPN_SE}/BenchRunner.h
     ${AVPN_SE}/Switcher.h
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/ServiceEngine.h
@@ -55,6 +56,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/QualityProbe.cpp
     ${AVPN_SE}/ServiceProbe.cpp
     ${AVPN_SE}/RttProbeIcmp.cpp
+    ${AVPN_SE}/BenchRunner.cpp
     ${AVPN_SE}/Identity.cpp
     ${AVPN_SE}/Enrollment.cpp
     ${AVPN_SE}/VpnConnectionTunnelControl.cpp

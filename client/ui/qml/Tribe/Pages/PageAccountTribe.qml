@@ -15,6 +15,8 @@ PageType {
 
     // мост в полный интерфейс Amnezia (PageStart включает Dev.amneziaMode)
     signal requestAmnezia()
+    // AVPN: «Панель администратора» (низ настроек) → PageAdminTribe (бенч соединения, тесты)
+    signal requestAdminPanel()
 
     // AVPN: модель — анонимный триал-по-device (кодов на бэке пока нет). Реальные данные из движка.
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
@@ -638,6 +640,52 @@ PageType {
                         }
                     }
                 }
+            }
+        }
+
+        // ── ПАНЕЛЬ АДМИНИСТРАТОРА (низ настроек) ────────────────────────────
+        // Бенч соединения и тест-инструменты (PageAdminTribe). Пока видна всем;
+        // скрыть из релиза — Dev.adminPanelVisible=false (Tribe/Dev.qml, одна строка). // AVPN
+        TribeCard {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.sm
+            visible: Dev.adminPanelVisible
+            implicitHeight: adminRow.implicitHeight + 2 * Theme.space.lg
+            RowLayout {
+                id: adminRow
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                spacing: Theme.space.md
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Text {
+                        text: qsTr("Панель администратора")
+                        color: Theme.color.text1
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                    }
+                    Text {
+                        text: qsTr("Бенчмарк соединения и тесты")
+                        color: Theme.color.text3
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    }
+                }
+                Shape { // шеврон ›
+                    width: 16; height: 16
+                    Layout.alignment: Qt.AlignVCenter
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.text3; fillColor: "transparent"; strokeWidth: 1.8
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M6 3 l6 5 -6 5" }
+                    }
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.requestAdminPanel()
             }
         }
 

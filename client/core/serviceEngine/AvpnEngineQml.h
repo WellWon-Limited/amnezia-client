@@ -27,6 +27,7 @@ namespace avpn {
 class QualityProbe; // AVPN: app-layer RTT-проба через туннель (QualityProbe.h)
 class ServiceProbe; // AVPN: проба доступности сервисов (Telegram/YouTube) через туннель (ServiceProbe.h)
 class IRttProbe;    // AVPN (выбор по скорости): прямой RTT до нод off-tunnel (IRttProbe.h / RttProbeIcmp)
+class BenchRunner;  // AVPN (панель администратора): in-app бенч соединения (BenchRunner.h)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -72,6 +73,11 @@ class AvpnEngineQml : public QObject {
     // AVPN (чипы доступности): статус сервисов через ЭТУ ноду. Список [{key,label,state,rttMs}],
     // state: -1 неизв / 0 заблок / 1 медленно(троттл) / 2 работает. Замер — с устройства через туннель.
     Q_PROPERTY(QVariantList serviceStatus READ serviceStatus NOTIFY serviceStatusChanged)
+    // AVPN (панель администратора): in-app бенч соединения (BenchRunner; схема результата =
+    // tools/connect-bench репо tribe-front, сводится общим summarize.sh). Меряет ТЕКУЩИЙ путь
+    // (NE-туннель системный ⇒ подходит и для замера ванильной Amnezia). Итог — сигнал benchFinished.
+    Q_PROPERTY(bool benchRunning READ benchRunning NOTIFY benchChanged)
+    Q_PROPERTY(QString benchStage READ benchStage NOTIFY benchChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -107,6 +113,13 @@ public:
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
+
+    // AVPN (панель администратора): запустить/прервать in-app бенч. label — метка методики
+    // (baseline / tribe-bypass-on / tribe-bypass-off / amnezia). Один прогон ~1.5–2 мин, ~40 МБ трафика.
+    Q_INVOKABLE void startBench(const QString &label);
+    Q_INVOKABLE void cancelBench();
+    bool benchRunning() const { return m_benchRunning; }
+    QString benchStage() const { return m_benchStage; }
     Q_INVOKABLE void bootstrap();                    // AVPN: тихая прогрузка подписки при старте (Task 11; без connect)
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
@@ -263,6 +276,11 @@ signals:
     void liveQualityChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
     void serviceStatusChanged();
+    // AVPN (панель администратора): смена состояния бенча (benchRunning/benchStage).
+    void benchChanged();
+    // AVPN (панель администратора): бенч завершён. summary — плоская мапа для мини-таблицы в UI,
+    // json — полный результат (schema:1, компактный) для «Копировать/Сохранить».
+    void benchFinished(const QVariantMap &summary, const QString &json);
 
 private slots:
     void onTick();
@@ -318,6 +336,10 @@ private:
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
+    // AVPN (панель администратора): in-app бенч (создаётся в конструкторе, владелец — this).
+    BenchRunner                 *m_bench = nullptr;
+    bool                         m_benchRunning = false;
+    QString                      m_benchStage;
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().

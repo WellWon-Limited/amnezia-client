@@ -57,6 +57,8 @@ PageType {
         function onBack() { root.goAvpnTab(0) }
         // AVPN: админ-вход (Dev.adminMode) → просмотр пула нод (#5)
         function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
+        // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
+        function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
         function onRequestStart() {
             avpnOnboard.done = true
