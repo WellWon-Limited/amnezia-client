@@ -168,6 +168,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                         }
                     }
                     emit serviceStatusChanged();
+                    // AVPN (анти-«вечно серый», 2026-07-03): Unknown (state=-1) = «не смогли измерить»
+                    // (транзиент сразу после коннекта: маршруты/DNS не осели, туннель нагружен) — раньше
+                    // серая точка висела до ручного тапа, т.к. проба одноразовая. Один авто-ретрай через
+                    // 20с (per-key, per-connect: m_svcRetried сбрасывается в probeServices). Blocked/slow/
+                    // works НЕ ретраим — это честные вердикты.
+                    if (state == -1 && !m_svcRetried.contains(key)) {
+                        m_svcRetried.insert(key);
+                        QTimer::singleShot(20000, this, [this, key]() {
+                            if (m_svcProbe && this->state() == QLatin1String("connected"))
+                                m_svcProbe->probeOne(key);
+                        });
+                    }
                 });
     }
 
@@ -424,6 +436,7 @@ void AvpnEngineQml::probeServices()
 {
     // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
     // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
+    m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
     if (m_svcProbe && state() == QLatin1String("connected"))
         m_svcProbe->probeAll();
 }
@@ -1137,6 +1150,9 @@ void AvpnEngineQml::applyRuBypassSplit()
     // ПАЛЯТ загран-IP → гоним их тоже direct (residential РФ-IP), иначе приложение видит «VPN». Найдено
     // ЗАХВАТОМ (rvi0/PKTAP, 2026-07-01): процесс Gosuslugi через туннель ходит ТОЛЬКО в эти два, оба отвечают
     // (видят наш выход). Узкие /24 — не весь Google/Level3. Расширять по мере находок из захватов др. РФ-прил.
+    // ⚠️ НЕ добавлять сюда CIDR, куда резолвятся эндпоинты НАШИХ проб (ServiceProbe/QualityProbe):
+    // 216.239.38.0/24 уже накрывал youtubei.googleapis.com (216.239.38.223) → резолв YouTube-пробы уходил
+    // мимо туннеля через РФ и таймаутился → «вечно серый чип» (2026-07-03; проба ушла на www.youtube.com).
     static const char *const kBypassExtra[] = {
         "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
         "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
@@ -1450,10 +1466,19 @@ void AvpnEngineQml::refreshReferral()
 // Тот же async-паттерн, что refreshReferral (armTimeout, без вложенного QEventLoop). Сигнал
 // cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка + device_uuid (кабинет откроет шит
 // тарифов на этом устройстве), провал → fallback https://tribevpn.com/account + device_uuid.
-void AvpnEngineQml::requestCabinetLink()
+void AvpnEngineQml::requestCabinetLink(const QString &intent)
 {
-    const QString fallback = Enrollment::appendDeviceUuid(
-        QStringLiteral("https://tribevpn.com/account"), localDeviceId());
+    // intent → query-параметр (реш. 2026-07-03): "renew" (золотая CTA) — кабинет сразу выдвигает шит
+    // тарифов; пусто («Управлять подпиской») — чистый ЛК. Дописываем к ЛЮБОМУ исходу (и к fallback).
+    const auto withIntent = [&intent](const QString &url) {
+        if (intent.isEmpty())
+            return url;
+        const QString sep = url.contains(QLatin1Char('?')) ? QStringLiteral("&") : QStringLiteral("?");
+        return url + sep + QStringLiteral("intent=")
+               + QString::fromLatin1(QUrl::toPercentEncoding(intent));
+    };
+    const QString fallback = withIntent(Enrollment::appendDeviceUuid(
+        QStringLiteral("https://tribevpn.com/account"), localDeviceId()));
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
         emit cabinetLinkReady(fallback);
@@ -1466,7 +1491,7 @@ void AvpnEngineQml::requestCabinetLink()
 
     QNetworkReply *reply = m_nam->post(req, QByteArray());
     armTimeout(reply); // жёсткий таймаут без nested loop
-    connect(reply, &QNetworkReply::finished, this, [this, reply, fallback]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, fallback, withIntent]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QString url = fallback;
@@ -1474,7 +1499,7 @@ void AvpnEngineQml::requestCabinetLink()
             WebLinkResponse wl;
             QString err;
             if (Enrollment::parseWebLinkResponse(reply->readAll(), wl, err))
-                url = Enrollment::appendDeviceUuid(wl.url, localDeviceId());
+                url = withIntent(Enrollment::appendDeviceUuid(wl.url, localDeviceId()));
         }
         emit cabinetLinkReady(url);
     });

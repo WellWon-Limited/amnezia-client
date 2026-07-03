@@ -61,6 +61,8 @@ public:
     // Запустить пробу всех сервисов (идемпотентно, пока серия в полёте). Результат — сигнал result()
     // на каждый сервис + allDone() в конце.
     void probeAll(int timeoutMs = 6000);
+    // Повторная проба одного сервиса по key (авто-ретрай Unknown; см. AvpnEngineQml result-handler).
+    void probeOne(const QString &key, int timeoutMs = 6000);
     bool inFlight() const { return m_remaining > 0; }
 
 signals:

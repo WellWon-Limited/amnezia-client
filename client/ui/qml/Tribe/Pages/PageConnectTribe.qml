@@ -897,9 +897,11 @@ PageType {
                     if (root.hasEngine && typeof TribeEngine.requestCabinetLink === "function") {
                         if (root.ctaLinking) return
                         root.ctaLinking = true
-                        TribeEngine.requestCabinetLink()  // ответ всегда придёт в onCabinetLinkReady
+                        // intent=renew: с золотой CTA кабинет сразу выдвигает шит тарифов
+                        // (из «Управлять подпиской» в Настройках — чистый ЛК, без intent). // AVPN
+                        TribeEngine.requestCabinetLink("renew")  // ответ всегда придёт в onCabinetLinkReady
                     } else {
-                        Qt.openUrlExternally("https://tribevpn.com/account")
+                        Qt.openUrlExternally("https://tribevpn.com/account?intent=renew")
                     }
                 }
             }

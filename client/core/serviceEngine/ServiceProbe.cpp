@@ -51,6 +51,27 @@ void ServiceProbe::probeAll(int timeoutMs)
     }
 }
 
+// AVPN (анти-«вечно серый», 2026-07-03): повторная проба ОДНОГО сервиса — для авто-ретрая Unknown
+// (транзиентный провал резолва сразу после коннекта не должен оставлять чип серым до ручного тапа).
+// Тот же контракт, что probeAll: result(key) прилетит ровно один раз; идемпотентно пока серия в полёте.
+void ServiceProbe::probeOne(const QString &key, int timeoutMs)
+{
+    if (m_remaining > 0)
+        return;
+    for (const ServiceProbeConfig &c : m_cfgs) {
+        if (c.key != key)
+            continue;
+        m_remaining = 1;
+        if (c.kind == ServiceProbeConfig::Mtproto)
+            probeMtproto(c, timeoutMs);
+        else if (c.kind == ServiceProbeConfig::Goodput)
+            probeGoodput(c);
+        else
+            probeHttps(c, timeoutMs);
+        return;
+    }
+}
+
 void ServiceProbe::finish(const QString &key, ServiceState st, int rttMs)
 {
     emit result(key, int(st), rttMs);
@@ -232,7 +253,13 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
 {
     if (idx >= videoIds.size()) { goodputFallback(c); return; }
 
-    QUrl url(QStringLiteral("https://youtubei.googleapis.com/youtubei/v1/player"));
+    // Хост = www.youtube.com, НЕ youtubei.googleapis.com (корень «серый чип при работающем YouTube»,
+    // 2026-07-03): youtubei.googleapis.com резолвится в 216.239.3x.223, а 216.239.38.0/24 состоит в
+    // kBypassExtra RU-direct (Госуслуги-attestation) → при включённом «Доступе к сайтам РФ» резолв уходил
+    // МИМО туннеля через РФ, где youtubei.googleapis.com недоступен (timeout, проверено вживую с РФ-IP)
+    // → fallback → Unknown. www.youtube.com несёт тот же InnerTube API (/youtubei/v1/player, путь yt-dlp),
+    // резолвится в обычные Google-фронты вне байпас-CIDR → всегда идёт ЧЕРЕЗ туннель.
+    QUrl url(QStringLiteral("https://www.youtube.com/youtubei/v1/player"));
     QUrlQuery q;
     q.addQueryItem(QStringLiteral("prettyPrint"), QStringLiteral("false")); // БЕЗ key: iOS-клиент не требует; web-ключ его ломает
     url.setQuery(q);
@@ -282,20 +309,39 @@ void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
 
     auto *done = new bool(false);
+    auto *buf = new QByteArray();
+    auto *found = new QString();
     QNetworkReply *reply = m_nam->get(req);
     auto *timer = new QTimer(reply);
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     timer->start(6000);
 
-    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, done]() {
+    // ИНКРЕМЕНТАЛЬНЫЙ поиск ассета (фикс «серый Instagram», 2026-07-03): homepage ~600 КБ, а первый
+    // cdninstagram-ассет (.css в <head>) появляется в первых десятках КБ. Раньше ждали ВЕСЬ body —
+    // через нагруженный туннель 600 КБ часто не влезали в 6с → abort → Unknown. Теперь ищем по мере
+    // прихода и рвём соединение сразу после находки. Гард «за матчем есть ещё байт» отсекает URL,
+    // обрезанный границей чанка (нет терминатора — ждём следующий чанк).
+    connect(reply, &QNetworkReply::readyRead, reply, [reply, buf, found]() {
+        if (!found->isEmpty())
+            return;
+        buf->append(reply->readAll());
+        const QString a = InstagramSource::extractCdnAssetUrl(*buf);
+        if (!a.isEmpty() && buf->indexOf(a.toUtf8()) + a.toUtf8().size() < buf->size()) {
+            *found = a;
+            reply->abort(); // хвост HTML не нужен — экономим туннель и укладываемся в таймаут
+        }
+    });
+    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, done, buf, found]() {
         if (*done) return;
         *done = true;
-        const QString asset = (reply->error() == QNetworkReply::NoError)
-                                  ? InstagramSource::extractCdnAssetUrl(reply->readAll())
-                                  : QString();
+        QString asset = *found;
+        if (asset.isEmpty() && reply->error() == QNetworkReply::NoError) {
+            buf->append(reply->readAll());
+            asset = InstagramSource::extractCdnAssetUrl(*buf); // полный body — терминатор не требуем
+        }
         reply->deleteLater();
-        delete done;
+        delete done; delete buf; delete found;
         if (asset.isEmpty())
             goodputFallback(c); // не нашли CDN-ассет / homepage недостижима → reachability(Unknown)/blocked
         else

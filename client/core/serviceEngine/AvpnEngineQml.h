@@ -11,8 +11,11 @@
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
 #include "core/utils/errorCodes.h"      // AVPN: amnezia::ErrorCode
 
+#include <QElapsedTimer> // AVPN (панель администратора): connect_ms в свипе нод
 #include <QHash>
+#include <QJsonArray>    // AVPN (панель администратора): результаты свипа
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QTimer>
 #include <QVariantList>
@@ -120,6 +123,20 @@ public:
     Q_INVOKABLE void cancelBench();
     bool benchRunning() const { return m_benchRunning; }
     QString benchStage() const { return m_benchStage; }
+
+    // AVPN (панель администратора): авто-свип нод (~40-60 с и ~10 МБ на ноду). Фазовая машина поверх
+    // ПУБЛИЧНЫХ переходов движка (switchToNode→start→stop — те же, что жмёт юзер из шторки;
+    // CONNECT-INVARIANTS не трогаем: никаких back-to-back up, ожидание реальных состояний по changed()
+    // + сторожа на фазу). После свипа восстанавливается исходное состояние (pin/авто + подключение).
+    Q_INVOKABLE void startNodeSweep();
+    Q_INVOKABLE void cancelNodeSweep();
+    bool sweepRunning() const { return m_sweepPhase != SweepPhase::Idle; }
+    QString sweepProgress() const { return m_sweepProgress; }
+
+    // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
+    // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
+    Q_INVOKABLE QString benchLastJson(const QString &label) const;
+    Q_INVOKABLE void clearBenchHistory();
     Q_INVOKABLE void bootstrap();                    // AVPN: тихая прогрузка подписки при старте (Task 11; без connect)
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
@@ -205,7 +222,10 @@ public:
     // TTL ~90с) + device_uuid; любая ошибка (нет токена/401/429/сеть/таймаут) → fallback
     // https://tribevpn.com/account + device_uuid (юзер войдёт сам). Минтим строго в момент тапа,
     // НЕ кэшируем. В приложении НЕТ цен/оплаты (Apple §3.1.1) — только открытие внешнего браузера.
-    Q_INVOKABLE void requestCabinetLink();
+    // intent (реш. 2026-07-03): "renew" — золотая CTA «Обновить ключ» на главной → кабинет сразу
+    // выдвигает шит тарифов; пусто — «Управлять подпиской» в Настройках → чистый ЛК (шит тарифов
+    // только по кнопке «Продлить» ВНУТРИ кабинета). Параметр уходит в URL как &intent=…, читает web.
+    Q_INVOKABLE void requestCabinetLink(const QString &intent = QString());
 
     // AVPN (Task 9 — APNs): зарегистрировать push device token на бэке (POST /v1/devices/push-token,
     // Bearer = authToken()). body {token, platform:"ios", environment, app_version}. АСИНХРОННО (как
@@ -339,6 +359,7 @@ private:
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
     ServiceProbe                *m_svcProbe = nullptr;
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
+    QSet<QString>                m_svcRetried;        // ключи, уже получившие авто-ретрай Unknown (сброс на probeServices)
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
