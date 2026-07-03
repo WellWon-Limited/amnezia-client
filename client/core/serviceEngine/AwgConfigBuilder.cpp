@@ -1,8 +1,26 @@
 #include "AwgConfigBuilder.h"
 
+#include "../utils/constants/protocolConstants.h"
+
 #include <QJsonArray>
 
 namespace avpn {
+
+// AVPN parity: наш service-путь (VpnConnectionTunnelControl::invokeConnect → connectToVpn напрямую)
+// ОБХОДИТ ConnectionController::createConnectionConfiguration, где upstream подставляет дефолты.
+// Поэтому дефолты — обязанность билдера: без dns1 iOS WGConfig.swift (dns1/dns2 non-optional String)
+// не декодится вовсе (туннель молча не поднимается), без mtu демон берёт 1420 (daemon.cpp) вместо
+// awg-дефолта 1376 desktop / 1280 mobile. Значения = upstream (secureAppSettingsRepository 1.1.1.1/
+// 1.0.0.1; protocols::awg::defaultMtu).
+static QStringList dnsOrDefault(const QStringList &dns)
+{
+    return dns.isEmpty() ? QStringList{QStringLiteral("1.1.1.1"), QStringLiteral("1.0.0.1")} : dns;
+}
+
+static QString mtuOrDefault(int mtu)
+{
+    return mtu > 0 ? QString::number(mtu) : QLatin1String(amnezia::protocols::awg::defaultMtu);
+}
 
 QString AwgConfigBuilder::host(const QString &endpoint)
 {
@@ -41,10 +59,8 @@ QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNod
     l << QStringLiteral("PrivateKey = %1").arg(keys.privateKey);
     if (!sub.address.isEmpty())
         l << QStringLiteral("Address = %1").arg(sub.address.join(QStringLiteral(", ")));
-    if (!node.dns.isEmpty())
-        l << QStringLiteral("DNS = %1").arg(node.dns.join(QStringLiteral(", ")));
-    if (node.mtu > 0)
-        l << QStringLiteral("MTU = %1").arg(node.mtu);
+    l << QStringLiteral("DNS = %1").arg(dnsOrDefault(node.dns).join(QStringLiteral(", ")));
+    l << QStringLiteral("MTU = %1").arg(mtuOrDefault(node.mtu));
     // AmneziaWG-обфускация (бандл обязателен целиком)
     const AwgParams &a = node.awg;
     l << QStringLiteral("Jc = %1").arg(a.Jc);
@@ -91,8 +107,7 @@ QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const Subscrip
     o.insert(QStringLiteral("allowed_ips"), aips);
 
     o.insert(QStringLiteral("persistent_keep_alive"), QString::number(node.persistentKeepalive));
-    if (node.mtu > 0)
-        o.insert(QStringLiteral("mtu"), QString::number(node.mtu));
+    o.insert(QStringLiteral("mtu"), mtuOrDefault(node.mtu)); // всегда: демон без mtu берёт 1420 (≠ awg-дефолт)
 
     // AmneziaWG-параметры. AVPN: ТОЛЬКО строки — форк (awgProtocolConfig.h) и iOS WGConfig.swift
     // объявляют Jc..H4 как QString/String?. Если слать числами, Swift JSONDecoder падает typeMismatch
@@ -126,9 +141,9 @@ QJsonObject AwgConfigBuilder::build(const Subscription &sub, const SubscriptionN
     root.insert(QStringLiteral("protocol"), QStringLiteral("awg")); // configKey::vpnProto
     root.insert(QStringLiteral("awg_config_data"), buildInner(sub, node, keys));
     root.insert(QStringLiteral("hostName"), host(node.endpoint));
-    if (node.dns.size() > 0)
-        root.insert(QStringLiteral("dns1"), node.dns.value(0));
-    root.insert(QStringLiteral("dns2"), node.dns.value(node.dns.size() > 1 ? 1 : 0)); // iOS: dns2 обязателен
+    const QStringList dns = dnsOrDefault(node.dns); // iOS: dns1 И dns2 обязательны (non-optional в WGConfig.swift)
+    root.insert(QStringLiteral("dns1"), dns.value(0));
+    root.insert(QStringLiteral("dns2"), dns.value(dns.size() > 1 ? 1 : 0));
     // AVPN: iOS setupAwg читает splitTunnelType из КОРНЯ (m_rawConfig), а WGConfig.swift объявляет его
     // Int (non-optional) → без него декод падает. 0 = full-tunnel (совпадает с allowed_ips 0.0.0.0/0).
     root.insert(QStringLiteral("splitTunnelType"), 0);
