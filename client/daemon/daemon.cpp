@@ -14,6 +14,9 @@
 
 #include "leakdetector.h"
 #include "logger.h"
+#ifdef Q_OS_MACOS
+#  include "../platforms/macos/daemon/splitdnsresolverfiles.h" // AVPN (Tribe split-DNS)
+#endif
 
 constexpr const char* JSON_ALLOWEDIPADDRESSRANGES = "allowedIPAddressRanges";
 constexpr int HANDSHAKE_POLL_MSEC = 250;
@@ -183,6 +186,12 @@ bool Daemon::maybeUpdateResolvers(const InterfaceConfig& config) {
     if (!dnsutils()->updateResolvers(wgutils()->interfaceName(), resolvers)) {
       return false;
     }
+
+#ifdef Q_OS_MACOS
+    // AVPN (Tribe split-DNS): RU-суффиксы → отдельный резолвер мимо туннеля (/etc/resolver/*).
+    // apply = реконсиляция (пустой список → только очистка). См. splitdnsresolverfiles.h.
+    SplitDnsResolverFiles::apply(config.m_splitDnsSuffixes, config.m_splitDnsServer);
+#endif
   }
 
   return true;
@@ -387,6 +396,12 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
   if (!parseStringList(obj, "allowedDnsServers", config.m_allowedDnsServers)) {
     return false;
   }
+  // AVPN (Tribe split-DNS): опциональные поля (нет в конфиге = выключено, парс не валим)
+  if (obj.contains("splitDnsSuffixes") &&
+      !parseStringList(obj, "splitDnsSuffixes", config.m_splitDnsSuffixes)) {
+    return false;
+  }
+  config.m_splitDnsServer = obj.value("splitDnsServer").toString();
 
   config.m_killSwitchEnabled = QVariant(obj.value("killSwitchOption").toString()).toBool();
 
@@ -463,6 +478,11 @@ bool Daemon::deactivate(bool emitSignals) {
   if (!dnsutils()->restoreResolvers()) {
     logger.warning() << "Failed to restore DNS resolvers.";
   }
+
+#ifdef Q_OS_MACOS
+  // AVPN (Tribe split-DNS): убрать наши /etc/resolver/* (по маркеру; чужие файлы не трогаем)
+  SplitDnsResolverFiles::clear();
+#endif
 
   // Cleanup peers and routing
   for (const ConnectionState& state : m_connections) {

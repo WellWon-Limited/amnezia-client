@@ -40,6 +40,8 @@ class InterfaceConfig {
   QStringList m_excludedAddresses;
   QStringList m_vpnDisabledApps;
   QStringList m_allowedDnsServers;
+  QStringList m_splitDnsSuffixes; // AVPN (Tribe split-DNS): RU-суффиксы → отдельный резолвер (macOS /etc/resolver)
+  QString m_splitDnsServer;       // AVPN (Tribe split-DNS): адрес RU-резолвера (Яндекс 77.88.8.8)
   bool m_killSwitchEnabled;
 #if defined(MZ_ANDROID) || defined(MZ_IOS)
   QString m_installationId;
