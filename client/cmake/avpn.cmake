@@ -26,6 +26,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/ITunnelControl.h
     ${AVPN_SE}/VpnConnectionTunnelControl.h
     ${AVPN_SE}/Identity.h
+    ${AVPN_SE}/IdentityAnchor.h
     ${AVPN_SE}/Enrollment.h
     ${AVPN_SE}/NodePool.h
     ${AVPN_SE}/Prober.h
@@ -59,6 +60,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/RttProbeIcmp.cpp
     ${AVPN_SE}/BenchRunner.cpp
     ${AVPN_SE}/Identity.cpp
+    ${AVPN_SE}/IdentityAnchor.cpp
     ${AVPN_SE}/Enrollment.cpp
     ${AVPN_SE}/VpnConnectionTunnelControl.cpp
     ${AVPN_SE}/ServiceEngine.cpp

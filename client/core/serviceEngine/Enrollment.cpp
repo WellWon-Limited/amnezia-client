@@ -5,6 +5,7 @@
 #include "secureQSettings.h"
 #include "version.h"
 
+#include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -18,6 +19,9 @@ void Enrollment::saveToken(const QString &token)
 {
     SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
     s.setValue(kTokenKey, token);
+    // AVPN (анти-фрод): каждая ротация токена (enroll/redeem/transfer) освежает Keychain-якорь —
+    // иначе после переустановки восстановился бы отозванный токен (self-heal спас бы, но лишний раунд).
+    IdentityAnchor::updateFromStore();
 }
 
 QString Enrollment::loadToken()

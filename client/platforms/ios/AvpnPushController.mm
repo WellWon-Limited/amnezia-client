@@ -174,7 +174,20 @@ void AvpnPush_onRemoteNotification(const char *userInfoJson)
         body = alert;
     }
 
+    // AVPN (бонусы): типовые custom-поля на ВЕРХНЕМ уровне payload (рядом с "aps"), как их кладёт
+    // бэкенд push.py (_apns_send): "type" (bonus_gift|payment|reminder|…), "days" (для «+N дней»).
+    // Отсутствуют (старый пуш) → generic-стиль в центре.
+    NSString *type = @"";
+    int days = 0;
+    if ([userInfo isKindOfClass:[NSDictionary class]]) {
+        id t = userInfo[@"type"];
+        if ([t isKindOfClass:[NSString class]]) type = t;
+        id d = userInfo[@"days"];
+        if ([d respondsToSelector:@selector(intValue)]) days = [d intValue];
+    }
+
     if (auto *bridge = avpn::AvpnPushBridge::instance()) {
-        bridge->onRemoteNotification(QString::fromNSString(title), QString::fromNSString(body));
+        bridge->onRemoteNotification(QString::fromNSString(title), QString::fromNSString(body),
+                                     QString::fromNSString(type), days);
     }
 }
