@@ -36,6 +36,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/QualityProbe.h
     ${AVPN_SE}/ServiceProbe.h
     ${AVPN_SE}/NodeRanking.h
+    ${AVPN_SE}/NodeRotation.h
     ${AVPN_SE}/IRttProbe.h
     ${AVPN_SE}/RttProbeIcmp.h
     ${AVPN_SE}/Switcher.h

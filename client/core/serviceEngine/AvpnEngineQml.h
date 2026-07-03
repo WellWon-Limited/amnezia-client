@@ -180,6 +180,14 @@ public:
     // {code, link, invited, days_earned} + emit referralChanged(). 401/сеть → пустая мапа.
     Q_INVOKABLE void refreshReferral();
 
+    // AVPN (оплата): «Управлять подпиской» — минт одноразовой ссылки авто-логина в web-кабинет
+    // (POST /v1/cabinet/web-link, Bearer = authToken()). АСИНХРОННО (armTimeout, без nested loop).
+    // Ответ ВСЕГДА приходит сигналом cabinetLinkReady(url): успех → url бэка (?wl=…, single-use,
+    // TTL ~90с) + device_uuid; любая ошибка (нет токена/401/429/сеть/таймаут) → fallback
+    // https://tribevpn.com/account + device_uuid (юзер войдёт сам). Минтим строго в момент тапа,
+    // НЕ кэшируем. В приложении НЕТ цен/оплаты (Apple §3.1.1) — только открытие внешнего браузера.
+    Q_INVOKABLE void requestCabinetLink();
+
     // AVPN (Task 9 — APNs): зарегистрировать push device token на бэке (POST /v1/devices/push-token,
     // Bearer = authToken()). body {token, platform:"ios", environment, app_version}. АСИНХРОННО (как
     // refreshAccount, без nested loop). environment: "sandbox"|"production" (TestFlight/Debug vs App
@@ -224,6 +232,11 @@ public:
     // онлайн — безопасно передёрнуть туннель через reconcile-машину (needsRestart), чтобы применился новый
     // split-конфиг (applyRuBypassSplit пересеет в guardedStart). Офлайн → применится при следующем Connect.
     Q_INVOKABLE void reapplyBypass();
+    // AVPN RU-direct: ЕДИНСТВЕННО правильный вход тумблера из QML — синхронно пишет masterOn в QSettings
+    // и передёргивает (reapplyBypass). ❌ НЕ полагаться на запись через QML Settings + голый reapplyBypass():
+    // QML-стор флашится с батч-задержкой ~500 мс, туннель гасится быстрее → guardedStart читал СТАРОЕ
+    // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
+    Q_INVOKABLE void setBypassMasterOn(bool on);
 
 signals:
     void changed();
@@ -242,6 +255,10 @@ signals:
     void devicesChanged();
     void accountChanged();
     void referralChanged();   // AVPN (#37): async-ответ /v1/referral готов (property referral обновлена)
+    // AVPN (оплата): готова ссылка web-кабинета (см. requestCabinetLink). Эмитится ВСЕГДА (успех или
+    // fallback) — QML-кнопка не залипнет в loading. Открывать ТОЛЬКО во внешнем браузере
+    // (Qt.openUrlExternally), НЕ в webview (Apple §3.1.1).
+    void cabinetLinkReady(const QString &url);
     // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
     void liveQualityChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).

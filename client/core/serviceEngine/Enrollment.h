@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QString>
 #include <QSysInfo>
+#include <QUrl>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -58,6 +59,13 @@ enum class TransferRedeemResult { Ok, BadToken, SeatLimit, Failed };
 struct TransferMintResponse {
     QString transferToken;
     QString deepLink;           // tribe://transfer?t=…
+};
+
+// AVPN (оплата): ответ POST /v1/cabinet/web-link — одноразовый авто-логин в web-кабинет.
+// Контракт: { url: "https://tribevpn.com/account?wl=<token>", expires_in } (wl single-use, TTL ~90с).
+struct WebLinkResponse {
+    QString url;
+    int     expiresIn = 0;
 };
 
 // AVPN (auth self-heal): исход запроса к /v1/subscription по HTTP-коду + сетевому флагу.
@@ -218,6 +226,32 @@ public:
         out.deepLink = o.value(QStringLiteral("deep_link")).toString();
         if (out.transferToken.isEmpty()) { error = QStringLiteral("missing transfer_token"); return false; }
         return true;
+    }
+
+    // AVPN (оплата): разбор ответа POST /v1/cabinet/web-link ({ url, expires_in }).
+    // false + error при провале (UI уходит на fallback https://tribevpn.com/account).
+    static bool parseWebLinkResponse(const QByteArray &json, WebLinkResponse &out, QString &error)
+    {
+        QJsonParseError pe;
+        const QJsonDocument doc = QJsonDocument::fromJson(json, &pe);
+        if (pe.error != QJsonParseError::NoError) { error = pe.errorString(); return false; }
+        if (!doc.isObject()) { error = QStringLiteral("web-link response is not an object"); return false; }
+        const QJsonObject o = doc.object();
+        out.url = o.value(QStringLiteral("url")).toString();
+        out.expiresIn = o.value(QStringLiteral("expires_in")).toInt();
+        if (out.url.isEmpty()) { error = QStringLiteral("missing url"); return false; }
+        return true;
+    }
+
+    // AVPN (оплата): дописать device_uuid=<install id> к URL кабинета (кабинет откроет шит тарифов
+    // на этом устройстве). URL от бэка уже несёт ?wl=… → &; голый fallback → ?. Пустой uuid — no-op.
+    static QString appendDeviceUuid(const QString &url, const QString &deviceUuid)
+    {
+        if (deviceUuid.isEmpty())
+            return url;
+        const QString sep = url.contains(QLatin1Char('?')) ? QStringLiteral("&") : QStringLiteral("?");
+        return url + sep + QStringLiteral("device_uuid=")
+               + QString::fromLatin1(QUrl::toPercentEncoding(deviceUuid));
     }
 
     // AVPN: разбор devices[] из тела 409 (device_limit_reached). Каждый элемент — DeviceInfo

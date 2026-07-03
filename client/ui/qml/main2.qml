@@ -3,6 +3,8 @@ import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import Qt5Compat.GraphicalEffects as Fx // AVPN (macOS): OpacityMask для скругления окна
+import QtQuick.Shapes                   // AVPN (macOS): глифы светофоров тайтлбара
 
 import PageEnum 1.0
 import Style 1.0
@@ -11,6 +13,7 @@ import "Config"
 import "Controls2"
 import "Components"
 import "Pages2"
+import "Tribe"   // AVPN (macOS): Theme-токены для кастомного тайтлбара
 
 Window  {
     id: root
@@ -63,11 +66,15 @@ Window  {
     // AVPN: клампить окно только на десктопе — на iPhone (высота > 800pt) кламп даёт letterbox
     maximumWidth: GC.isDesktop() ? 600 : 16777215
     maximumHeight: GC.isDesktop() ? 1000 : 16777215
+    // AVPN (macOS): окно со скруглением 24 — frameless + прозрачный фон, углы режет OpacityMask
+    // на appContent. Перемещение окна — DragHandler (startSystemMove) за любую пустую область.
+    readonly property bool roundedMac: Qt.platform.os === "osx" && GC.isDesktop()
     // AVPN: с Qt 6.9 окно на iOS НЕ заходит под статус-бар/home-индикатор без этого флага —
     // без него фон обрезан сверху и снизу. Отступы контента — SafeArea.margins в страницах.
-    flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint) : Qt.Window
+    flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint)
+         : (roundedMac ? (Qt.Window | Qt.FramelessWindowHint) : Qt.Window)
 
-    color: AmneziaStyle.color.midnightBlack
+    color: roundedMac ? "transparent" : AmneziaStyle.color.midnightBlack
 
     onClosing: function(close) {
         close.accepted = false
@@ -105,6 +112,23 @@ Window  {
             }
         }
     }
+
+    // AVPN (macOS rounded): ВЕСЬ визуальный контент — внутри appContent, чтобы маска резала углы
+    // у всего сразу (страницы, шторки, тосты). Функции/FileDialog остаются на root (scope-вызовы).
+    Item {
+        id: appContent
+        anchors.fill: parent
+        layer.enabled: root.roundedMac
+        layer.effect: Fx.OpacityMask {
+            maskSource: Rectangle { width: appContent.width; height: appContent.height; radius: 24 }
+        }
+
+        // frameless-окно двигаем за любую «пустую» область (клики по контролам не задевает)
+        DragHandler {
+            enabled: root.roundedMac
+            target: null
+            onActiveChanged: if (active) root.startSystemMove()
+        }
 
     Loader {
         active: Qt.platform.os === "android"
@@ -169,7 +193,109 @@ Window  {
     PageStart {
         objectName: "pageStart"
         width: root.width
-        height: root.height
+        // AVPN (macOS rounded): контент — ПОД кастомным тайтлбаром (frameless-окно)
+        y: root.roundedMac ? macTitleBar.height : 0
+        height: root.height - (root.roundedMac ? macTitleBar.height : 0)
+    }
+
+    // AVPN (macOS rounded): кастомный тайтлбар — светофоры (закрыть/свернуть/развернуть) в капсуле
+    // + серый слоган по центру. Окно frameless, системных кнопок нет — это их замена.
+    Rectangle {
+        id: macTitleBar
+        visible: root.roundedMac
+        anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+        height: root.roundedMac ? 40 : 0
+        color: Theme.color.bg800
+
+        // капсула со светофорами (референс-дизайн 2026-07-02). Как в macOS: глифы (×/−/зум)
+        // проявляются во ВСЕХ трёх кружках при наведении на любую часть капсулы.
+        Rectangle {
+            id: lightsPill
+            anchors.left: parent.left; anchors.leftMargin: Theme.space.md
+            anchors.verticalCenter: parent.verticalCenter
+            width: lightsRow.width + 2 * Theme.space.md; height: 26
+            radius: Theme.radius.pill
+            color: Theme.color.surface1
+            border.width: 1; border.color: Theme.color.border
+
+            HoverHandler { id: pillHover }
+            readonly property bool showGlyphs: pillHover.hovered
+            readonly property color glyphColor: Qt.rgba(0, 0, 0, 0.55)
+
+            Row {
+                id: lightsRow
+                anchors.centerIn: parent
+                spacing: Theme.space.sm
+
+                // закрыть (в трей — как системный крестик через onClosing)
+                Rectangle {
+                    width: 12; height: 12; radius: 6
+                    color: Theme.color.danger
+                    opacity: lightsPill.showGlyphs ? 1.0 : 0.85
+                    Shape {
+                        anchors.centerIn: parent; width: 8; height: 8
+                        visible: lightsPill.showGlyphs
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: lightsPill.glyphColor; fillColor: "transparent"
+                            strokeWidth: 1.4; capStyle: ShapePath.RoundCap
+                            PathSvg { path: "M2 2 L6 6 M6 2 L2 6" }
+                        }
+                    }
+                    MouseArea { anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor; onClicked: PageController.closeWindow() }
+                }
+                // свернуть
+                Rectangle {
+                    width: 12; height: 12; radius: 6
+                    color: Theme.color.warning
+                    opacity: lightsPill.showGlyphs ? 1.0 : 0.85
+                    Shape {
+                        anchors.centerIn: parent; width: 8; height: 8
+                        visible: lightsPill.showGlyphs
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: lightsPill.glyphColor; fillColor: "transparent"
+                            strokeWidth: 1.6; capStyle: ShapePath.RoundCap
+                            PathSvg { path: "M1.6 4 L6.4 4" }
+                        }
+                    }
+                    MouseArea { anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor; onClicked: root.showMinimized() }
+                }
+                // развернуть/вернуть (глиф — два треугольника, как системный зум)
+                Rectangle {
+                    width: 12; height: 12; radius: 6
+                    color: Theme.color.connected
+                    opacity: lightsPill.showGlyphs ? 1.0 : 0.85
+                    Shape {
+                        anchors.centerIn: parent; width: 8; height: 8
+                        visible: lightsPill.showGlyphs
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: "transparent"; fillColor: lightsPill.glyphColor
+                            PathSvg { path: "M1.6 5.8 L1.6 1.6 L5.8 1.6 Z" }
+                        }
+                        ShapePath {
+                            strokeColor: "transparent"; fillColor: lightsPill.glyphColor
+                            PathSvg { path: "M6.4 2.2 L6.4 6.4 L2.2 6.4 Z" }
+                        }
+                    }
+                    MouseArea { anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.visibility === Window.Maximized ? root.showNormal() : root.showMaximized() }
+                }
+            }
+        }
+
+        // серый слоган по ПРАВОМУ краю тайтлбара (реш. 2026-07-02)
+        Text {
+            anchors.right: parent.right; anchors.rightMargin: Theme.space.lg
+            anchors.verticalCenter: parent.verticalCenter
+            text: qsTr("Умный VPN, который реально работает")
+            color: Theme.color.text2
+            font.family: Theme.font.body; font.pixelSize: 12; font.weight: Theme.font.wMedium
+        }
     }
 
     Item {
@@ -400,6 +526,17 @@ Window  {
         }
     }
 
+    Item {
+        anchors.fill: parent
+
+        ChangelogDrawer {
+            id: changelogDrawer
+
+            anchors.fill: parent
+        }
+    }
+    } // конец appContent // AVPN (macOS rounded)
+
     function showUnsupportedConnectDrawer() {
         let headerText = qsTr("This subscription format is no longer supported")
         let descriptionText = qsTr("This legacy Amnezia subscription type can no longer be used to connect in this application version.\nRemove the server from the app to continue.")
@@ -455,13 +592,4 @@ Window  {
         onRejected: SystemController.fileDialogClosed(false)
     }
 
-    Item {
-        anchors.fill: parent
-
-        ChangelogDrawer {
-            id: changelogDrawer
-
-            anchors.fill: parent
-        }
-    }
 }

@@ -2,12 +2,15 @@
 //
 // Зачем: в РФ Telegram/YouTube чаще НЕ блокируют, а ДУШАТ по SNI/IP — reachability («200 OK») = ложно-зелёный.
 // Замер обязан идти С УСТРОЙСТВА через туннель (доступность = f(юзер,сеть,регион,нода,время); бэкенд её не
-// знает — см. memory tribe-real-signal-quality). Два вида проб:
+// знает — см. memory tribe-real-signal-quality). Три вида проб — все меряют РЕАЛЬНУЮ работоспособность:
 //   • Mtproto (Telegram): login-free handshake к seed-DC-IP — TCP→intermediate-тег→req_pq_multi→resPQ
 //     (MtprotoProbe). resPQ с нашим nonce ⇒ DC реально говорит по MTProto через туннель (сильнее TCP-connect).
-//   • Https (YouTube/прочие): TLS-complete с РЕАЛЬНЫМ SNI + TTFB. NB: точный детект троттлинга YouTube
-//     требует SNI *.googlevideo.com и резолва подписанного videoplayback-URL (yt-dlp/n-cipher) — это
-//     раннер пока НЕ делает; https-проба к www.youtube.com = грубая reachability, помечена TODO.
+//   • Goodput (YouTube/Instagram): качаем ~128 КБ с РЕАЛЬНО-душимого CDN и меряем kbit/s (GoodputProbe):
+//     YouTube — InnerTube `player` (iOS-клиент ⇒ прямой url без cipher, YoutubeSource) → ranged-GET по
+//     SNI *.googlevideo.com; Instagram — homepage → ассет *.cdninstagram.com (InstagramSource) → ranged-GET.
+//     Троттл (RU ~128 кбит/с) ⇒ slow; норм ⇒ works; путь срезан ⇒ blocked. Fail-safe: резолв сломался/403 →
+//     reachability CDN (reachable ⇒ Unknown «не измерили», reset ⇒ Blocked) — НИКОГДА ложный works.
+//   • Https: TLS-reachability с реальным SNI (устаревшее для соцсетей — оставлено как деградация/для прочего).
 //
 // АСИНХРОННО (анти-фриз §tribe-engine-net-async): сокеты/таймеры event-driven, БЕЗ nested QEventLoop.
 // Кэш результата per-нода и каденс (on-connect + по тапу, НЕ поллинг) — на стороне вызывающего (AvpnEngineQml).
