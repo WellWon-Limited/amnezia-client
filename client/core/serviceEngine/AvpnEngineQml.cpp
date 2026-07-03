@@ -6,6 +6,7 @@
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
 #include "SubscriptionParser.h" // AVPN (оплата): refreshSubscription() — device-часы для шапки/CTA
 #include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
+#include "IdentityAnchor.h" // AVPN (анти-фрод): Keychain-якорь identity — restore на старте (переустановка)
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
@@ -49,6 +50,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                              QNetworkAccessManager *nam, QObject *parent)
     : QObject(parent), m_tunnel(conn, this), m_store(store), m_nam(nam), m_conn(conn)
 {
+    // AVPN (анти-фрод, DEVICE-FIRST-SPEC §4): восстановить identity из Keychain ДО первого
+    // использования (переустановка на iOS стирает QSettings → без этого новый триал и потеря
+    // оплаченных дней). Один блокирующий Keychain-раунд ~мс со сторожем; не-Apple — no-op.
+    IdentityAnchor::syncAtStartup();
+
     // dev/E2E: переопределение control plane (напр. http://127.0.0.1:48480 — локальный бэкенд)
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
@@ -1485,6 +1491,21 @@ void AvpnEngineQml::setBypassMasterOn(bool on)
 {
     QSettings s;
     s.setValue(QStringLiteral("AvpnBypass/masterOn"), on);
+    s.sync();
+    reapplyBypass();
+}
+
+// AVPN (звонки): «RU-DNS маскировка» — гейт Яндекс-DNS-подмены (читается в
+// VpnConnectionTunnelControl::up). Синхронная запись + передёрг туннеля, как setBypassMasterOn.
+bool AvpnEngineQml::bypassDnsMaskOn() const
+{
+    return QSettings().value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool();
+}
+
+void AvpnEngineQml::setBypassDnsMaskOn(bool on)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnBypass/dnsMaskOn"), on);
     s.sync();
     reapplyBypass();
 }

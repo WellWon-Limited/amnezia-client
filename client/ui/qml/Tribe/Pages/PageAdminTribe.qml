@@ -261,6 +261,42 @@ PageType {
                     }
                 }
 
+                // ── эксперимент «RU-DNS маскировка» (звонки vs стелс, реш. 2026-07-03) ──
+                // Измерено: Яндекс-DNS с загран-egress подсовывает RU-гео edge → WhatsApp-инфра
+                // +75% RTT. OFF = DNS 1.1.1.1 через туннель (честный гео), RU-маршруты сохраняются.
+                TribeCard {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    implicitHeight: dnsMaskRow.implicitHeight + 2 * Theme.space.lg
+                    RowLayout {
+                        id: dnsMaskRow
+                        anchors.left: parent.left; anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        spacing: Theme.space.md
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+                            Text {
+                                text: qsTr("RU-DNS маскировка")
+                                color: Theme.color.text1
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: qsTr("ВЫКЛ = лучше звонки (WhatsApp/FaceTime): честный гео-DNS через туннель. Доступ к RU-сайтам сохраняется; Госуслуги/Кинопоиск могут заподозрить VPN.")
+                                color: Theme.color.text3
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                            }
+                        }
+                        TribeToggle {
+                            checked: root.hasEngine ? TribeEngine.bypassDnsMaskOn() : true
+                            onToggled: if (root.hasEngine) TribeEngine.setBypassDnsMaskOn(checked)
+                        }
+                    }
+                }
+
                 // результат последнего замера
                 TribeCard {
                     Layout.fillWidth: true
