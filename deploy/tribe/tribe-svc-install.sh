@@ -31,6 +31,10 @@ cp -f  "$SRC/Tribe-service" "$DEST/Tribe-service"
 cp -f  "$SRC/amneziawg-go"  "$DEST/amneziawg-go"
 rm -rf "$DEST/Frameworks"; cp -aR "$SRC/Frameworks" "$DEST/Frameworks"
 mkdir -p "$DEST/pf"; cp -f "$SRC/pf/"*.conf "$DEST/pf/" 2>/dev/null || true
+# AVPN: маркер версии демона (хэш бинарей) — приложение сверяет и переустанавливает при отличии
+# (иначе апдейт логики демона не доезжал бы до юзеров с уже установленным демоном). Нет файла в
+# tarball (старая сборка) → пишем метку "legacy", чтобы след. апдейт всё равно триггернул замену.
+[ -f "$SRC/VERSION" ] && cp -f "$SRC/VERSION" "$DEST/VERSION" || echo "legacy" > "$DEST/VERSION"
 chown -R root:wheel "$DEST"
 chmod 755 "$DEST" "$DEST/Tribe-service" "$DEST/amneziawg-go"
 xattr -cr "$DEST" 2>/dev/null || true

@@ -13,6 +13,12 @@ bool macServiceInstalled();
 // Демон реально запущен? (живой процесс Tribe-service)
 bool macServiceRunning();
 
+// Установленный демон УСТАРЕЛ относительно вшитого в app? Сверяет маркер версии (хэш бинарей):
+// ресурс app `tribe-svc.version` vs `/Library/PrivilegedHelperTools/TribeVPN/VERSION`. true, если
+// отличаются или установленного маркера нет (демон от старой сборки без версии). Мгновенно (крошечные
+// файлы). Нужно, чтобы апдейт логики демона (split-DNS и т.п.) сам доезжал через обновление .app.
+bool macServiceOutdated();
+
 // Поставить вшитый Tribe-service.pkg через osascript с админ-промптом (БЛОКИРУЮЩЕ — installer
 // синхронно выполняет postinstall, который bootstrap'ит демон). true = installer вышел с 0.
 // errOut — текст для UI при отмене/ошибке.

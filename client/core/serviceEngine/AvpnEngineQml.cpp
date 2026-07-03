@@ -25,6 +25,7 @@
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
 #include <QDateTime>
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
+#include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
 #include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
@@ -79,6 +80,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_sweepGuard.setSingleShot(true);
     connect(&m_sweepGuard, &QTimer::timeout, this, [this] { sweepGuardFired(); });
     connect(this, &AvpnEngineQml::changed, this, [this] { sweepAdvance(); }, Qt::QueuedConnection);
+    // AVPN (авто-A/B байпаса): та же схема — сторож фазы + queued-продвижение по changed()
+    m_abGuard.setSingleShot(true);
+    connect(&m_abGuard, &QTimer::timeout, this, [this] { abGuardFired(); });
+    connect(this, &AvpnEngineQml::changed, this, [this] { abAdvance(); }, Qt::QueuedConnection);
 
     connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
         m_benchRunning = false;
@@ -96,6 +101,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         const QString label = result.value(QStringLiteral("label")).toString();
         const QString json = QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact));
         QSettings().setValue(QStringLiteral("AvpnBench/last_%1").arg(label), json);
+
+        // авто-A/B байпаса: замер забирает фазовая машина (история выше УЖЕ записана — полный
+        // отчёт собирает last_<label>); в UI не эмитим — по завершении пары придёт abFinished
+        if (m_abPhase == AbPhase::BenchA || m_abPhase == AbPhase::BenchB) {
+            abOnBenchDone(result);
+            return;
+        }
 
         QVariantMap s; // плоская сводка для мини-таблицы в UI
         s.insert(QStringLiteral("label"), result.value(QStringLiteral("label")).toString());
@@ -501,21 +513,58 @@ void AvpnEngineQml::probeServices()
         m_svcProbe->probeAll();
 }
 
-// AVPN (панель администратора): in-app бенч. Валиден в ЛЮБОМ состоянии туннеля (baseline = VPN off;
-// замер ванильной Amnezia = её NE-туннель системный). extra фиксирует контекст запуска в результат.
-void AvpnEngineQml::startBench(const QString &label)
+// AVPN (панель администратора): контекст замера. Пишем ФАКТЫ конфигурации из QSettings (не метки!) —
+// иначе замер невозможно интерпретировать постфактум (реальный случай: 4 замера с метками
+// baseline/bypass-on/off/amnezia оказались одним и тем же путём — метки врали, extra молчал).
+QJsonObject AvpnEngineQml::benchExtra() const
 {
-    if (m_benchRunning || sweepRunning() || !m_bench)
-        return;
     QJsonObject extra;
     extra.insert(QStringLiteral("platform"), QSysInfo::productType());
     extra.insert(QStringLiteral("app_ver"), QCoreApplication::applicationVersion());
     extra.insert(QStringLiteral("tunnel_state"), state());
     extra.insert(QStringLiteral("node_id"), debugSnapshot().value(QStringLiteral("currentNodeId")).toString());
+    QSettings s;
+    extra.insert(QStringLiteral("bypass_on"), s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool());
+    extra.insert(QStringLiteral("liauto_on"), s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool());
+    extra.insert(QStringLiteral("dns_mask_on"), s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool());
+    // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить
+    static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
+    if (niLoaded) {
+        if (auto *ni = QNetworkInformation::instance()) {
+            switch (ni->transportMedium()) {
+            case QNetworkInformation::TransportMedium::Ethernet:  extra.insert(QStringLiteral("net_type"), QStringLiteral("ethernet")); break;
+            case QNetworkInformation::TransportMedium::WiFi:      extra.insert(QStringLiteral("net_type"), QStringLiteral("wifi")); break;
+            case QNetworkInformation::TransportMedium::Cellular:  extra.insert(QStringLiteral("net_type"), QStringLiteral("cellular")); break;
+            default: break; // unknown/bluetooth — не пишем, чтобы не врать
+            }
+        }
+    }
+    return extra;
+}
+
+// AVPN (панель администратора): in-app бенч. Валиден в ЛЮБОМ состоянии туннеля (baseline = VPN off;
+// замер ванильной Amnezia = её NE-туннель системный). extra фиксирует контекст запуска в результат.
+// Гард методики: baseline/amnezia — замеры ЧУЖОГО пути, при поднятом Tribe-туннеле они бессмысленны
+// (реальный случай: «baseline» с tunnel_state=connected обесценил всю серию). Пустая метка →
+// авто-метка по факту: подключены — tribe-bypass-on/off из настроек, отключены — manual.
+void AvpnEngineQml::startBench(const QString &label)
+{
+    if (m_benchRunning || sweepRunning() || abRunning() || !m_bench)
+        return;
+    const bool connected = (state() == QLatin1String("connected"));
+    QString effLabel = label;
+    if ((effLabel == QLatin1String("baseline") || effLabel == QLatin1String("amnezia")) && connected) {
+        emit error(tr("Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.").arg(effLabel));
+        return;
+    }
+    if (effLabel.isEmpty())
+        effLabel = connected
+            ? bypassLabel(QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool())
+            : QStringLiteral("manual");
     m_benchRunning = true;
     m_benchStage = QStringLiteral("start");
     emit benchChanged();
-    m_bench->start(label, extra);
+    m_bench->start(effLabel, benchExtra());
 }
 
 void AvpnEngineQml::cancelBench()
@@ -554,7 +603,7 @@ QString AvpnEngineQml::sweepNodeLabel(const QString &nodeId) const
 
 void AvpnEngineQml::startNodeSweep()
 {
-    if (sweepRunning() || m_benchRunning || !m_bench)
+    if (sweepRunning() || m_benchRunning || abRunning() || !m_bench)
         return;
     // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера)
     m_sweepQueue.clear();
@@ -658,11 +707,7 @@ void AvpnEngineQml::sweepStartBench()
 {
     const QString id = m_sweepQueue.at(m_sweepIdx);
     const QString actual = debugSnapshot().value(QStringLiteral("currentNodeId")).toString();
-    QJsonObject extra;
-    extra.insert(QStringLiteral("platform"), QSysInfo::productType());
-    extra.insert(QStringLiteral("app_ver"), QCoreApplication::applicationVersion());
-    extra.insert(QStringLiteral("tunnel_state"), QStringLiteral("connected"));
-    extra.insert(QStringLiteral("node_id"), actual);
+    QJsonObject extra = benchExtra(); // общий контекст (факты конфигурации, сеть) + пер-нодные поля
     extra.insert(QStringLiteral("node_label"), sweepNodeLabel(id));
     extra.insert(QStringLiteral("connect_ms"), double(m_sweepConnT.elapsed()));
     if (actual != id) // движок мог failover'нуться — честно фиксируем (замер не той ноды)
@@ -768,10 +813,257 @@ void AvpnEngineQml::sweepFinish()
     emit sweepFinished(outRows, json);
 }
 
+// ── AVPN (панель администратора): авто-A/B байпаса ─────────────────────────────────────────────
+// Одна кнопка при подключённом Tribe: full-бенч на ТЕКУЩЕМ тумблере → setBypassMasterOn(!x)
+// (reconcile штатно передёргивает туннель — БЕЗ прямых up/down, CONNECT-INVARIANTS не трогаем) →
+// второй full-бенч → возврат тумблера + реконнект → отчёт type:"ab-bypass" (пара + compare +
+// длительности реконнектов). Метки выводятся из фактического состояния настроек.
+
+static const int kAbGuardBenchMs = 240000; // full-бенч ~2 мин + запас на медленной сети
+
+void AvpnEngineQml::startBypassAb()
+{
+    if (abRunning() || m_benchRunning || sweepRunning() || !m_bench)
+        return;
+    if (state() != QLatin1String("connected")) {
+        emit error(tr("Авто-A/B байпаса: сначала подключи Tribe VPN"));
+        return;
+    }
+    ++m_abEpoch;
+    m_abOrigOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    m_abFirst = QJsonObject();
+    m_abSecond = QJsonObject();
+    m_abSwitchMs = m_abRestoreMs = -1;
+    abStartBench(/*second=*/false);
+}
+
+void AvpnEngineQml::cancelBypassAb()
+{
+    if (!abRunning())
+        return;
+    ++m_abEpoch;
+    m_abGuard.stop();
+    if (m_benchRunning)
+        cancelBench();
+    // вернуть исходный тумблер, если успели переключить (реконнект доделает reconcile)
+    if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
+        setBypassMasterOn(m_abOrigOn);
+    m_abPhase = AbPhase::Idle;
+    m_abProgress.clear();
+    emit abChanged();
+}
+
+void AvpnEngineQml::abEnterPhase(AbPhase ph, int guardMs)
+{
+    m_abPhase = ph;
+    m_abGuard.start(guardMs);
+    emit abChanged();
+}
+
+void AvpnEngineQml::abStartBench(bool second)
+{
+    const bool on = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    m_abProgress = tr("замер %1/2 · байпас %2").arg(second ? 2 : 1).arg(on ? tr("ВКЛ") : tr("ВЫКЛ"));
+    m_benchRunning = true;
+    m_benchStage = QStringLiteral("start");
+    emit benchChanged();
+    abEnterPhase(second ? AbPhase::BenchB : AbPhase::BenchA, kAbGuardBenchMs);
+    m_bench->start(bypassLabel(on), benchExtra());
+}
+
+// benchFinished при фазе BenchA/BenchB (история last_<label> уже записана вызывающей лямбдой)
+void AvpnEngineQml::abOnBenchDone(const QJsonObject &result)
+{
+    m_abGuard.stop();
+    const bool wasFirst = (m_abPhase == AbPhase::BenchA);
+    (wasFirst ? m_abFirst : m_abSecond) = result;
+    m_abProgress = wasFirst ? tr("переключение байпаса и реконнект…")
+                            : tr("возврат настроек и реконнект…");
+    m_abConnT.start();
+    // синхронная запись тумблера + штатный передёрг туннеля (reapplyBypass → reconcile)
+    setBypassMasterOn(wasFirst ? !m_abOrigOn : m_abOrigOn);
+    abEnterPhase(wasFirst ? AbPhase::WaitDown : AbPhase::RestoreDown, kSweepGuardDownMs);
+    QTimer::singleShot(0, this, [this, e = m_abEpoch] { if (e == m_abEpoch) abAdvance(); });
+}
+
+void AvpnEngineQml::abAdvance()
+{
+    const QString st = state();
+    switch (m_abPhase) {
+    case AbPhase::Idle:
+    case AbPhase::BenchA:
+    case AbPhase::BenchB:
+        return; // продвижение придёт из abOnBenchDone
+    case AbPhase::WaitDown:
+    case AbPhase::RestoreDown:
+        // reconcile передёргивает сам; «вниз» мы можем не застать (queued-снапшоты) — фактом начала
+        // передёрга считаем ЛЮБОЕ не-connected состояние. Залипший connected отловит сторож фазы.
+        if (st == QLatin1String("error")) {
+            abFail(QStringLiteral("reconnect-error"));
+        } else if (st != QLatin1String("connected")) {
+            abEnterPhase(m_abPhase == AbPhase::WaitDown ? AbPhase::WaitUp : AbPhase::RestoreUp,
+                         kSweepGuardUpMs);
+        }
+        return;
+    case AbPhase::WaitUp:
+        if (st == QLatin1String("connected")) {
+            m_abGuard.stop();
+            m_abSwitchMs = double(m_abConnT.elapsed());
+            abStartBench(/*second=*/true);
+        } else if (st == QLatin1String("error")) {
+            abFail(QStringLiteral("reconnect-error"));
+        }
+        return;
+    case AbPhase::RestoreUp:
+        if (st == QLatin1String("connected")) {
+            m_abRestoreMs = double(m_abConnT.elapsed());
+            abFinish();
+        } else if (st == QLatin1String("error")) {
+            abFinish(); // пара уже собрана — отчёт отдаём, состояние юзер увидит на орбе
+        }
+        return;
+    }
+}
+
+void AvpnEngineQml::abGuardFired()
+{
+    switch (m_abPhase) {
+    case AbPhase::Idle:
+        return;
+    case AbPhase::BenchA:
+    case AbPhase::BenchB:
+        abFail(QStringLiteral("bench-timeout"));
+        return;
+    case AbPhase::WaitDown:
+    case AbPhase::WaitUp:
+        abFail(QStringLiteral("reconnect-timeout"));
+        return;
+    case AbPhase::RestoreDown:
+    case AbPhase::RestoreUp:
+        abFinish(); // восстановление зависло — отчёт всё равно отдаём
+        return;
+    }
+}
+
+void AvpnEngineQml::abFail(const QString &reason)
+{
+    m_abGuard.stop();
+    ++m_abEpoch;
+    if (m_benchRunning)
+        cancelBench();
+    if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
+        setBypassMasterOn(m_abOrigOn);
+    m_abPhase = AbPhase::Idle;
+    m_abProgress.clear();
+    emit abChanged();
+    emit error(tr("Авто-A/B прерван: %1. Тумблер байпаса возвращён.").arg(reason));
+}
+
+void AvpnEngineQml::abFinish()
+{
+    m_abGuard.stop();
+    m_abPhase = AbPhase::Idle;
+    m_abProgress.clear();
+
+    // раскладываем пару по фактическим меткам (первый замер шёл на исходном тумблере)
+    const QJsonObject &onRun = m_abOrigOn ? m_abFirst : m_abSecond;
+    const QJsonObject &offRun = m_abOrigOn ? m_abSecond : m_abFirst;
+
+    QJsonObject report;
+    report.insert(QStringLiteral("schema"), 1);
+    report.insert(QStringLiteral("type"), QStringLiteral("ab-bypass"));
+    report.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    report.insert(QStringLiteral("orig_bypass_on"), m_abOrigOn);
+    if (m_abSwitchMs >= 0) report.insert(QStringLiteral("reconnect_switch_ms"), m_abSwitchMs);
+    if (m_abRestoreMs >= 0) report.insert(QStringLiteral("reconnect_restore_ms"), m_abRestoreMs);
+    QJsonObject runs;
+    runs.insert(QStringLiteral("tribe-bypass-on"), onRun);
+    runs.insert(QStringLiteral("tribe-bypass-off"), offRun);
+    report.insert(QStringLiteral("runs"), runs);
+    // «цена байпаса»: on относительно off (b относительно a в bench::compare)
+    const QJsonObject cost = bench::compare(offRun, onRun);
+    report.insert(QStringLiteral("bypass_cost"), cost);
+
+    const QString json = QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
+    QSettings().setValue(QStringLiteral("AvpnBench/last_ab-bypass"), json);
+
+    // плоская сводка для UI: пара ключевых метрик + существенные ухудшения
+    auto flat = [](const QJsonObject &r) {
+        QVariantMap m;
+        const QJsonObject http = r.value(QStringLiteral("http")).toObject();
+        m.insert(QStringLiteral("ttfb_ms"), http.value(QStringLiteral("median_ttfb_ms")).toVariant());
+        m.insert(QStringLiteral("failures"), http.value(QStringLiteral("failures")).toInt());
+        const QJsonObject thr = r.value(QStringLiteral("throughput")).toObject();
+        m.insert(QStringLiteral("down_mbit"), thr.value(QStringLiteral("down_mbit")).toVariant());
+        m.insert(QStringLiteral("up_mbit"), thr.value(QStringLiteral("up_mbit")).toVariant());
+        const QJsonObject nq = r.value(QStringLiteral("network_quality")).toObject();
+        m.insert(QStringLiteral("base_rtt_ms"), nq.value(QStringLiteral("base_rtt_ms")).toVariant());
+        return m;
+    };
+    QStringList costTexts;
+    for (const QJsonValue &v : cost.value(QStringLiteral("significant")).toArray())
+        costTexts << v.toString();
+    QVariantMap summary;
+    summary.insert(QStringLiteral("on"), flat(onRun));
+    summary.insert(QStringLiteral("off"), flat(offRun));
+    summary.insert(QStringLiteral("cost"), costTexts);
+    if (m_abSwitchMs >= 0) summary.insert(QStringLiteral("reconnect_ms"), m_abSwitchMs);
+
+    emit abChanged();
+    emit abFinished(summary, json);
+}
+
 // история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
 QString AvpnEngineQml::benchLastJson(const QString &label) const
 {
     return QSettings().value(QStringLiteral("AvpnBench/last_%1").arg(label)).toString();
+}
+
+// AVPN (авто-A/B): сводный отчёт всех собранных меток одним JSON — вместо пересылки 4 файлов.
+// compares: baseline↔off (цена туннеля), off↔on (цена байпаса), amnezia↔off (Tribe vs ванилла).
+QString AvpnEngineQml::buildFullReport() const
+{
+    static const char *const kLabels[] = { "baseline", "tribe-bypass-on", "tribe-bypass-off", "amnezia" };
+    QJsonObject runs;
+    for (const char *l : kLabels) {
+        const QString j = benchLastJson(QLatin1String(l));
+        if (!j.isEmpty())
+            runs.insert(QLatin1String(l), QJsonDocument::fromJson(j.toUtf8()).object());
+    }
+    if (runs.size() < 2)
+        return {};
+    QJsonObject report;
+    report.insert(QStringLiteral("schema"), 1);
+    report.insert(QStringLiteral("type"), QStringLiteral("full-report"));
+    report.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    report.insert(QStringLiteral("runs"), runs);
+    QJsonObject compares; // bench::compare(a,b) = «b относительно a», significant = ухудшения b
+    auto add = [&](const char *name, const char *a, const char *b) {
+        if (runs.contains(QLatin1String(a)) && runs.contains(QLatin1String(b)))
+            compares.insert(QLatin1String(name),
+                            bench::compare(runs.value(QLatin1String(a)).toObject(),
+                                           runs.value(QLatin1String(b)).toObject()));
+    };
+    add("tunnel_cost_off_vs_baseline", "baseline", "tribe-bypass-off");
+    add("bypass_cost_on_vs_off", "tribe-bypass-off", "tribe-bypass-on");
+    add("tribe_off_vs_amnezia", "amnezia", "tribe-bypass-off");
+    report.insert(QStringLiteral("compares"), compares);
+    return QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
+}
+
+// метка → ts последнего замера (для карточки «собрано N/4»; свежесть видна по датам)
+QVariantMap AvpnEngineQml::benchHistoryInfo() const
+{
+    static const char *const kLabels[] = { "baseline", "tribe-bypass-on", "tribe-bypass-off", "amnezia" };
+    QVariantMap out;
+    for (const char *l : kLabels) {
+        const QString j = benchLastJson(QLatin1String(l));
+        if (j.isEmpty())
+            continue;
+        out.insert(QLatin1String(l),
+                   QJsonDocument::fromJson(j.toUtf8()).object().value(QStringLiteral("ts")).toString());
+    }
+    return out;
 }
 
 void AvpnEngineQml::clearBenchHistory()
@@ -1082,12 +1374,15 @@ void AvpnEngineQml::guardedStart()
         if (!foreign.isEmpty())
             emit vpnConflict(foreign);
     }
-    // AVPN (ноль терминала): на macOS туннель поднимает root-демон Tribe-service. Нет демона —
-    // ставим из ВШИТОГО pkg одним системным промптом пароля (MacServiceInstaller). Если демон уже
-    // установлен/запущен — мгновенный выход, рабочий путь коннекта НЕ меняется. NB: без nested
-    // QEventLoop/processEvents (CONNECT-INVARIANTS) — только короткий msleep на первом запуске.
-    if (!avpn::macServiceRunning()) {
-        if (!avpn::macServiceInstalled()) {
+    // AVPN (ноль терминала): на macOS туннель поднимает root-демон Tribe-service. Ставим/обновляем из
+    // ВШИТОГО tarball одним системным промптом пароля (MacServiceInstaller). Триггер: демон не запущен
+    // ЛИБО устарел (macServiceOutdated: хэш бинарей вшитого ≠ установленного). Без апдейт-триггера
+    // правки логики демона (split-DNS и т.п.) не доезжали бы до юзеров с уже стоящим демоном.
+    // Актуальный запущенный демон → мгновенный выход, путь коннекта НЕ меняется. Без nested QEventLoop
+    // (CONNECT-INVARIANTS) — только короткий msleep на (пере)установке.
+    const bool needInstall = !avpn::macServiceInstalled() || avpn::macServiceOutdated();
+    if (!avpn::macServiceRunning() || needInstall) {
+        if (needInstall) {
             QString ierr;
             if (!avpn::macInstallService(&ierr)) {
                 ++m_startAttempts;
