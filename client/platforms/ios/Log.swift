@@ -15,7 +15,7 @@ struct Log {
     }
   }
 
-  private static let appGroupID = "group.hk.wellwon.zanaves"
+  private static let appGroupID = "group.hk.wellwon.tribe"
 
   static let appLogURL = {
     let sharedContainerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)!

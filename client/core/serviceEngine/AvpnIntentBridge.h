@@ -2,7 +2,7 @@
 //
 // Сценарий: фоновый iOS App Intent (AvpnAppIntents.swift) не может позвать Q_INVOKABLE движка
 // напрямую (Qt event loop в фоне не крутится). Поэтому интент пишет «намерение» в App Group
-// UserDefaults(suiteName:"group.hk.wellwon.zanaves") (ключи AvpnIntent/pauseRequested,
+// UserDefaults(suiteName:"group.hk.wellwon.tribe") (ключи AvpnIntent/pauseRequested,
 // AvpnIntent/resumeRequested, AvpnIntent/lastActionAt) и реально опускает/поднимает туннель сам.
 // Движок согласует своё состояние (m_paused/failover) ПОЗЖЕ — когда приложение выходит в foreground.
 //

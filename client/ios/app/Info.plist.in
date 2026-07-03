@@ -83,7 +83,7 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
 	<key>com.wireguard.ios.app_group_id</key>
-	<string>group.hk.wellwon.zanaves</string>
+	<string>group.hk.wellwon.tribe</string>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
