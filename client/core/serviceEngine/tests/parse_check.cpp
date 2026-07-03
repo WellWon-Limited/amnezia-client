@@ -1,6 +1,7 @@
 // AVPN serviceEngine — автономная проверка парсера подписки (без Qt Test, только QtCore).
 // Сборка/запуск: core/serviceEngine/tests/build_check.sh
 #include "../AwgConfigBuilder.h"
+#include "../BenchRunner.h" // AVPN (панель администратора): чистая математика бенча (median/mbit)
 #include "../Enrollment.h"
 #include "../GoodputProbe.h"
 #include "../HealthLoop.h"
@@ -120,6 +121,22 @@ int main(int argc, char **argv)
                         && wg.contains(QStringLiteral("MTU = %1").arg(wantMtu));
         if (!defOk) { fprintf(stderr, "FAIL: builder must inject upstream defaults (dns1/dns2/mtu)\n"); return 6; }
         printf("config builder defaults: OK (dns 1.1.1.1/1.0.0.1, mtu %s)\n", wantMtu.toUtf8().constData());
+    }
+
+    // --- BenchRunner: чистая математика (median/mbit) ---
+    {
+        const bool medOk = BenchRunner::median({}) == -1.0                       // нет данных
+                        && BenchRunner::median({42}) == 42.0                     // одиночное
+                        && BenchRunner::median({3, 1, 2}) == 2.0                 // нечётное, несортированное
+                        && BenchRunner::median({4, 1, 3, 2}) == 2.5;             // чётное → среднее середины
+        const bool mbitOk = BenchRunner::mbit(0, 1000) == 0.0                    // нет байт
+                         && BenchRunner::mbit(1000, 0) == 0.0                    // нет времени (защита от деления)
+                         && BenchRunner::mbit(1250000, 1000) == 10.0             // 1.25МБ/с = 10 Mbit/s
+                         && BenchRunner::mbit(26214400, 2000) > 104.0            // 25МБ за 2с ≈ 104.9 Mbit/s
+                         && BenchRunner::mbit(26214400, 2000) < 105.0;
+        printf("bench math: median=%d mbit=%d\n", medOk ? 1 : 0, mbitOk ? 1 : 0);
+        if (!medOk || !mbitOk) { fprintf(stderr, "FAIL: BenchRunner math\n"); return 7; }
+        printf("benchrunner: OK (median edge-cases, mbit conversion)\n");
     }
 
     // --- Enrollment: чистые builders/parsers ---

@@ -10,4 +10,7 @@ QtObject {
     // полный интерфейс Amnezia (ванильный TabBar + их страницы) вместо Tribe-UI;
     // вход — иконка «А» на Connect (видна в adminMode), выход — кнопка «‹ Tribe»
     property bool amneziaMode: false
+    // «Панель администратора» внизу настроек (бенч соединения и будущие тест-инструменты).
+    // Пока открыта всем; чтобы скрыть из релиза — false (одна строка, PageAccountTribe гейтится ей).
+    property bool adminPanelVisible: true
 }

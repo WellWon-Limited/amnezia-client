@@ -101,6 +101,7 @@
         <file>Tribe/Pages/PageOnboardingTribe.qml</file>
         <file>Tribe/Pages/PageSupportTribe.qml</file>
         <file>Tribe/Pages/PageNotificationsTribe.qml</file>
+        <file>Tribe/Pages/PageAdminTribe.qml</file>
         <file>Pages2/PageProtocolAwgSettings.qml</file>
         <file>Pages2/PageProtocolOpenVpnSettings.qml</file>
         <file>Pages2/PageProtocolRaw.qml</file>
