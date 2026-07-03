@@ -62,6 +62,13 @@ PageType {
     readonly property bool subExpired: root.hasEngine && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
                               || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))
+    // Причина CTA для текста кнопки: подписка/срок живы, кончился ТОЛЬКО трафик → «Продлить трафик»
+    // (иначе юзер видит «Обновить ключ» при непросроченном сроке и не понимает, что случилось —
+    // реальный кейс did=40: expires_at в будущем, а 4 GiB триала выбраны). Гард как у subExpired:
+    // при !hasEngine subExpired=false → до TribeEngine не дойдёт (короткое замыкание). // AVPN
+    readonly property bool ctaTrafficOnly: root.subExpired && root.subActive
+                              && (TribeEngine.daysLeft !== 0)
+                              && (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB)
     // остаток трафика: «∞» при безлимите/неизвестно (limit 0 или NaN). Компактно: ≥1024 ГиБ → «N TB»,
     // иначе «N GB»; хвост «.0» убираем (чтобы влезало в узкое macOS-окно). Двоичная база (ГиБ, бэк подтвердил).
     function fmtTrafficLeft() {
@@ -870,7 +877,7 @@ PageType {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Обновить ключ")
+                    text: root.ctaTrafficOnly ? qsTr("Продлить трафик") : qsTr("Обновить ключ")
                     color: Theme.color.bg900
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
                 }
