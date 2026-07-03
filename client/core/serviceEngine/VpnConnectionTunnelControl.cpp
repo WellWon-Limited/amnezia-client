@@ -84,7 +84,15 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
         const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-        if (!ruNode && masterOn)
+        // AVPN (звонки, 2026-07-03): dnsMaskOn — саб-опция «RU-DNS маскировка» (дефолт ВКЛ = прежнее
+        // поведение). Измерено: Яндекс-DNS с загран-egress выдаёт RU-гео edge → WhatsApp-инфра отвечает
+        // за 131мс против 75мс у честного гео (+75%) — страдают звонки/realtime. OFF ⇒ DNS остаётся
+        // бэкендовский (1.1.1.1 через туннель, гео=egress), МАРШРУТНЫЙ байпас НЕ трогается (RU-CIDR
+        // по-прежнему мимо туннеля) — теряется только стелс «российского резолвера» (Госуслуги/Кинопоиск
+        // могут показать «возможно VPN»). Полное решение (split-DNS: .ru/.su/.рф → Яндекс, прочее →
+        // 1.1.1.1) — в плане; ручка = AvpnEngineQml::setBypassDnsMaskOn (синхронная запись + reapply).
+        const bool dnsMaskOn = s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool();
+        if (!ruNode && masterOn && dnsMaskOn)
             primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
 
         // AVPN RU-direct (T2, аудит 2026-07-02): вкл/выкл сплита — ПО ФАКТИЧЕСКОЙ ноде, здесь, а не по

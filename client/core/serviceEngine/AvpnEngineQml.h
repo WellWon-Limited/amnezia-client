@@ -281,6 +281,12 @@ public:
     // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
     Q_INVOKABLE void setBypassMasterOn(bool on);
 
+    // AVPN (звонки, 2026-07-03): саб-опция «RU-DNS маскировка» (AvpnBypass/dnsMaskOn, default ВКЛ).
+    // OFF ⇒ DNS = бэкендовский 1.1.1.1 через туннель (честный гео для звонков/CDN), маршрутный
+    // RU-байпас сохраняется. Тот же синхронный паттерн, что setBypassMasterOn (QML Settings лагает).
+    Q_INVOKABLE bool bypassDnsMaskOn() const;
+    Q_INVOKABLE void setBypassDnsMaskOn(bool on);
+
 signals:
     void changed();
     void error(const QString &message);
