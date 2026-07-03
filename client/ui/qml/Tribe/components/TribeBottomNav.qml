@@ -20,10 +20,12 @@ Item {
 
     implicitHeight: 72 + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
-    // фон: без скруглений (плоская панель во всю ширину, реш. 2026-06-11)
+    // фон: без скруглений (плоская панель во всю ширину, реш. 2026-06-11).
+    // macOS: НЕПРОЗРАЧНЫЙ bg800 — окно frameless/transparent, и через альфу токена nav (0.95)
+    // просвечивал рабочий стол ЗА окном (реш. 2026-07-02)
     Rectangle {
         anchors.fill: parent
-        color: Theme.color.nav
+        color: Qt.platform.os === "osx" ? Theme.color.bg800 : Theme.color.nav
     }
     // top hairline
     Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.color.border }

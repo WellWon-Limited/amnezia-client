@@ -50,6 +50,10 @@ PageType {
     // trafficLimit/daysLeft/subActive — читают загруженную Subscription через движок. Гард на
     // undefined-движок (dev-превью) с литеральными фолбэками.
     readonly property bool hasEngine:     (typeof TribeEngine !== "undefined")
+    // AVPN (оплата): гард двойного тапа по золотой CTA — ждём cabinetLinkReady (приходит всегда).
+    property bool ctaLinking: false
+    // AVPN (оплата): троттл foreground-рефреша статуса подписки (мс, Date.now()).
+    property double lastFgRefreshMs: 0
     readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
@@ -58,6 +62,13 @@ PageType {
     readonly property bool subExpired: root.hasEngine && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
                               || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))
+    // Причина CTA для текста кнопки: подписка/срок живы, кончился ТОЛЬКО трафик → «Продлить трафик»
+    // (иначе юзер видит «Обновить ключ» при непросроченном сроке и не понимает, что случилось —
+    // реальный кейс did=40: expires_at в будущем, а 4 GiB триала выбраны). Гард как у subExpired:
+    // при !hasEngine subExpired=false → до TribeEngine не дойдёт (короткое замыкание). // AVPN
+    readonly property bool ctaTrafficOnly: root.subExpired && root.subActive
+                              && (TribeEngine.daysLeft !== 0)
+                              && (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB)
     // остаток трафика: «∞» при безлимите/неизвестно (limit 0 или NaN). Компактно: ≥1024 ГиБ → «N TB»,
     // иначе «N GB»; хвост «.0» убираем (чтобы влезало в узкое macOS-окно). Двоичная база (ГиБ, бэк подтвердил).
     function fmtTrafficLeft() {
@@ -90,11 +101,14 @@ PageType {
     readonly property bool isMobile: Qt.platform.os === "ios" || Qt.platform.os === "android"
     readonly property real sceneShift: {
         if (!isMobile) return 0
-        var orbBase = safeTop + 16 + 40 + 76          // header top+height + базовый отступ орба
+        // орб теперь под баннером АнтиВПН: header (safeTop+16+40) + отступ lg (24) + баннер (68)
+        // + 56 (кольцо 32 + зазор lg) — база на 72 ниже старой (76)
+        var orbBase = safeTop + 16 + 40 + 24 + 68 + 56
         var captionBottom = orbBase + 256 + 30 + 18   // орб + отступ подписи + высота подписи
         var maxShift = bottomBlock.y - captionBottom - 24
-        // сцена опущена на ~20% высоты, но приподнята на ~высоту кнопки «Обновить» (52, чуть меньше — 44)
-        return Math.max(0, Math.min(Math.round(root.height * 0.20) - 44, maxShift))
+        // прежний целевой сдвиг (~20% высоты − 44) уменьшен ещё на 72 — ровно настолько сцену
+        // уже опустил баннер сверху (итого −116)
+        return Math.max(0, Math.min(Math.round(root.height * 0.20) - 116, maxShift))
     }
 
     function onOrbClicked() {
@@ -119,6 +133,13 @@ PageType {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) { PageController.showErrorMessage(message) }
+        // AVPN (оплата): ссылка web-кабинета готова (успех или fallback). Гард по ctaLinking —
+        // сигнал общий на движок, не реагируем на запросы других страниц (кнопка в Настройках).
+        function onCabinetLinkReady(url) {
+            if (!root.ctaLinking) return
+            root.ctaLinking = false
+            Qt.openUrlExternally(url)
+        }
         // AVPN (macOS): обнаружен другой активный VPN → конфликт маршрутов/демонов. Предупреждаем.
         function onVpnConflict(name) {
             PageController.showNotificationMessage(
@@ -134,6 +155,23 @@ PageType {
             if (typeof TribeEngine !== "undefined" && typeof TribeEngine.bootstrap === "function")
                 TribeEngine.bootstrap()
             PageController.showNotificationMessage(qsTr("Доступ активирован на этом устройстве"))
+        }
+    }
+
+    // AVPN (оплата): возврат приложения в foreground (например, из Safari после оплаты в кабинете)
+    // → освежить статус подписки: GET /v1/account (best-effort async, без nested loop) — новый
+    // expires_at приедет в бейдж/Настройки через accountChanged/changed. Троттл 30с, чтобы не дёргать
+    // бэк на каждый свап приложений. bootstrap() тут НЕ зовём — он трогает подписку/туннель-флоу
+    // (CONNECT-INVARIANTS); полная перечитка и так случится при следующем connect.
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive) return
+            if (!(root.hasEngine && typeof TribeEngine.refreshAccount === "function")) return
+            var now = Date.now()
+            if (now - root.lastFgRefreshMs < 30000) return
+            root.lastFgRefreshMs = now
+            TribeEngine.refreshAccount()
         }
     }
 
@@ -159,67 +197,58 @@ PageType {
         }
     }
 
-    // AVPN: иконка «АвтоVPN» — окно-браузер (акцентная неон-рамка) + РФ-кружок (SVG-триколор, не эмодзи) +
-    // галочка-бейдж. Анимация: рамка «дышит» свечением когда active; галочка масштабируется при включении.
+    // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
+    // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
+    // и белым «RU». Хардкод-цвета шара — сценические (бренд-мотив, вне палитры токенов).
     component AutoVpnIcon: Item {
         id: avIcon
         property bool active: true
-        // рамка-окно
+        // круглая подложка — РОВНО по контуру шара (совпадающие круги); видна когда шар притушен.
+        // Сам Item остаётся 52×52 для выравнивания 1:1 с иконкой карточки сервера
         Rectangle {
-            id: avWin
-            anchors.fill: parent
-            radius: Theme.radius.md
-            color: "transparent"
-            border.width: 2
-            border.color: Theme.color.accent
+            width: ruBall.width; height: ruBall.height
+            anchors.centerIn: parent
+            radius: width / 2
+            color: Qt.rgba(0x0F/255, 0x17/255, 0x2A/255, 0.8)
+        }
+        // круг-шар с градиентом (~87% подложки — тонкий тёмный кант; синий верх-право → красный низ-лево).
+        // Ширина ЧЁТНАЯ: нечётная в чётном родителе даёт полупиксельный офсет, и слой-маска
+        // снапится к пикселю не так, как кольцо → шар «уезжает» влево-вверх от контура.
+        Item {
+            id: ruBall
+            width: 2 * Math.round(avIcon.width * 0.87 / 2); height: width
+            anchors.centerIn: parent
             opacity: avIcon.active ? 1.0 : 0.4
             Behavior on opacity { NumberAnimation { duration: Theme.motion.normal } }
-            // тулбар-линия
-            Rectangle { x: 0; y: parent.height * 0.30; width: parent.width; height: 1.5
-                        color: Theme.color.accent; opacity: 0.55 }
-            // 3 точки окна
-            Row { x: 6; y: parent.height * 0.13; spacing: 3
-                Repeater { model: 3; delegate: Rectangle { width: 3.5; height: 3.5; radius: 1.75; color: Theme.color.accent } } }
-            // мягкое неон-дыхание рамки когда active
-            SequentialAnimation on border.color {
-                running: avIcon.active; loops: Animation.Infinite
-                ColorAnimation { to: Qt.lighter(Theme.color.accent, 1.5); duration: 1150; easing.type: Easing.InOutSine }
-                ColorAnimation { to: Theme.color.accent; duration: 1150; easing.type: Easing.InOutSine }
-            }
-        }
-        // РФ-кружок в центре (три полосы + круговая маска)
-        Item {
-            id: ruDot
-            width: 22; height: 22
-            anchors.centerIn: parent
             layer.enabled: true
-            layer.effect: Fx.OpacityMask { maskSource: Rectangle { width: 22; height: 22; radius: 11 } }
-            Column {
-                anchors.fill: parent
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#EEF2F7" }
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#3A5BA0" }
-                Rectangle { width: parent.width; height: parent.height / 3; color: "#B8434E" }
+            layer.effect: Fx.OpacityMask {
+                maskSource: Rectangle { width: ruBall.width; height: ruBall.height; radius: width / 2 }
             }
-        }
-        // галочка-бейдж (низ-право) — появляется/масштабируется при active
-        Rectangle {
-            id: avCheck
-            width: 20; height: 20; radius: 10
-            anchors.right: parent.right; anchors.bottom: parent.bottom
-            color: Theme.color.accent
-            scale: avIcon.active ? 1.0 : 0.0
-            opacity: avIcon.active ? 1.0 : 0.0
-            Behavior on scale { NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutBack } }
-            Behavior on opacity { NumberAnimation { duration: Theme.motion.normal } }
-            Shape {
-                anchors.centerIn: parent; width: 12; height: 12
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: "white"; fillColor: "transparent"; strokeWidth: 2
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M2 6 L5 9 L10 3" }
+            Fx.LinearGradient {
+                anchors.fill: parent
+                start: Qt.point(width * 0.85, 0); end: Qt.point(width * 0.15, height)
+                gradient: Gradient {
+                    GradientStop { position: 0.0;  color: "#4E7FCB" }   // scenic: RU-шар синий
+                    GradientStop { position: 0.45; color: "#4E7FCB" }
+                    GradientStop { position: 1.0;  color: "#C1524E" }   // scenic: RU-шар красный
                 }
             }
+            Text {
+                anchors.centerIn: parent
+                text: "RU"; color: "white"
+                font.family: Theme.font.display
+                font.pixelSize: Math.round(parent.height * 0.42)
+                font.weight: Theme.font.wBold
+            }
+        }
+        // контурное кольцо вокруг шара: НЕ по самому краю (там его съедает антиалиасинг маски),
+        // а с зазором 2px — тонкий читаемый контур, концентричный шару
+        Rectangle {
+            width: ruBall.width + 6; height: width   // чётная ширина — интовый офсет центрирования
+            anchors.centerIn: parent
+            radius: width / 2
+            color: "transparent"
+            border.width: 1; border.color: Qt.rgba(0x64/255, 0x74/255, 0x8B/255, 0.55)
         }
     }
 
@@ -393,13 +422,78 @@ PageType {
         }
     }
 
+    // ── карточка «АвтоVPN» — НАД кнопкой Connect (перенос из bottomBlock, реш. 2026-07-02):
+    //    РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
+    Rectangle {
+        id: autoVpnCard
+        anchors.top: header.bottom; anchors.topMargin: Theme.space.lg
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        implicitHeight: 68; height: 68   // ниже серверной карточки (84) — компактный баннер
+        radius: Theme.radius.xl
+        color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
+        border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
+        z: 10
+        Item {
+            anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+            AutoVpnIcon {
+                id: avCardIcon
+                width: 52; height: 52
+                anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                active: bypassStore.masterOn
+            }
+            TribeToggle {
+                id: avCardToggle
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                checked: bypassStore.masterOn
+                // тост при переключении убран (реш. 2026-07-02) — состояние видно по текстовке баннера
+                onToggled: {
+                    // bypassStore (QML Settings) флашится с задержкой ~500 мс — для UI-биндингов этого
+                    // достаточно, но движок читает QSettings РАНЬШЕ (teardown быстрее записи). Поэтому
+                    // значение передаём явно: setBypassMasterOn пишет синхронно и передёргивает туннель.
+                    bypassStore.masterOn = checked
+                    if (root.hasEngine) TribeEngine.setBypassMasterOn(checked)
+                }
+            }
+            Column {
+                // отступы уже (md/sm, не lg/md) — обе текстовки влезают без обрезки // AVPN
+                anchors.left: avCardIcon.right; anchors.leftMargin: Theme.space.md
+                anchors.right: avCardToggle.left; anchors.rightMargin: Theme.space.sm
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 0   // подзаголовок вплотную к заголовку (реш. 2026-07-02)
+                // текстовки зависят от тумблера (реш. 2026-07-02): off = оффер, on = подтверждение
+                Text {
+                    width: parent.width
+                    text: bypassStore.masterOn ? qsTr("AntiVPN активирован!")
+                                               : qsTr("Надоело выключать VPN?")
+                    color: "white"; elide: Text.ElideRight
+                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 10
+                    font.family: Theme.font.display; font.pixelSize: 16; font.weight: Theme.font.wBold
+                }
+                Text {
+                    width: parent.width
+                    text: bypassStore.masterOn ? qsTr("Теперь VPN выключать не нужно.")
+                                               : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
+                    color: root.slate500; elide: Text.ElideRight
+                    fontSizeMode: Text.HorizontalFit; minimumPixelSize: 9
+                    font.family: Theme.font.body; font.pixelSize: 11
+                }
+            }
+        }
+    }
+
     // ── ОРБ (центрирован, z10) ──────────────────────────────────────────
     Item {
         id: orb
         width: 256; height: 256
         anchors.horizontalCenter: parent.horizontalCenter
-        // мобайл: сцена опущена (~20% вниз); десктоп: поднимаем выше (короче окно) — подпись не налезает на карточку // AVPN
-        anchors.top: header.bottom; anchors.topMargin: root.isMobile ? (76 + root.sceneShift) : 40
+        // якорь ПОД карточкой «АвтоVPN»: внешнее кольцо (r=160) выступает на 32px за Item орба
+        // (256×256), поэтому марджин = 32 + видимый зазор lg от кольца до карточки.
+        // Десктоп: добавочный сдвиг 16 (итерации 2026-07-02: 36 → 0 после тайтлбара → 16 финал) —
+        // сцена чуть ниже, но подпись НЕ заходит на круг. // AVPN
+        anchors.top: autoVpnCard.bottom
+        anchors.topMargin: 32 + Theme.space.lg + (root.isMobile ? root.sceneShift : 16)
         z: 10
 
         // внешнее свечение (КРУГЛОЕ — задаём радиусы = половине ширины, иначе квадрат)
@@ -590,56 +684,8 @@ PageType {
         spacing: Theme.space.lg
         z: 30
 
-        // ── карточка «АвтоVPN»: РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
-        Rectangle {
-            id: autoVpnCard
-            width: parent.width; implicitHeight: 84; height: 84
-            radius: 24
-            color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
-            border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
-            Item {
-                anchors.fill: parent; anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                AutoVpnIcon {
-                    id: avCardIcon
-                    width: 52; height: 52
-                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                    active: bypassStore.masterOn
-                }
-                TribeToggle {
-                    id: avCardToggle
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    checked: bypassStore.masterOn
-                    onToggled: {
-                        bypassStore.masterOn = checked
-                        if (root.hasEngine) TribeEngine.reapplyBypass()
-                        PageController.showNotificationMessage(
-                            checked ? qsTr("АвтоVPN включён — российские сайты работают напрямую")
-                                    : qsTr("АвтоVPN выключен"))
-                    }
-                }
-                Column {
-                    anchors.left: avCardIcon.right; anchors.leftMargin: Theme.space.lg
-                    anchors.right: avCardToggle.left; anchors.rightMargin: Theme.space.md
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
-                    Text {
-                        width: parent.width
-                        text: qsTr("АвтоVPN — RU сайты всегда работают!")
-                        color: "white"; elide: Text.ElideRight
-                        fontSizeMode: Text.HorizontalFit; minimumPixelSize: 11
-                        font.family: Theme.font.display; font.pixelSize: 14; font.weight: Theme.font.wBold
-                    }
-                    Text {
-                        width: parent.width
-                        text: qsTr("Теперь выключать VPN не нужно.")
-                        color: root.slate500; elide: Text.ElideRight
-                        font.family: Theme.font.body; font.pixelSize: 11
-                    }
-                }
-            }
-        }
-
         // карточка сервера — тап открывает шторку выбора сервера (TribeNodeSheet). // AVPN
+        // (карточка «АвтоVPN» перенесена НАД орб — см. autoVpnCard выше, реш. 2026-07-02)
         Rectangle {
             id: serverCard
             width: parent.width; implicitHeight: 84; height: 84
@@ -791,12 +837,12 @@ PageType {
             model: root.hasEngine ? TribeEngine.serviceStatus : []
             onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
-        // AVPN: авто-перепроба чипов в реал-тайме, пока подключены — статусы (красный→зелёный)
-        // обновляются САМИ, без тапа по бейджу. Раньше красный «висел» до ручного тапа. При обрыве
-        // таймер останавливается (running ← isOn). Движок дополнительно пробует при коннекте (600мс +
-        // ~4.5с DNS-warm); этот таймер держит актуальность дальше.
+        // AVPN: редкий авто-self-heal чипов, пока подключены. Чипы youtube/instagram теперь GOODPUT
+        // (качают ~128 КБ каждый), а статус цензуры/троттлинга меняется медленно (не раз в секунды) —
+        // поэтому 3 мин, а не 12с (иначе лишний фоновый трафик). Мгновенно — тап по чипу (onRecheck).
+        // Движок делает первую пробу при коннекте (~1.5с, DNS-warm). При обрыве таймер стоит (running←isOn).
         Timer {
-            interval: 12000
+            interval: 180000
             repeat: true
             running: root.isOn && root.hasEngine
             onTriggered: TribeEngine.probeServices()
@@ -831,7 +877,7 @@ PageType {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Обновить ключ")
+                    text: root.ctaTrafficOnly ? qsTr("Продлить трафик") : qsTr("Обновить ключ")
                     color: Theme.color.bg900
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
                 }
@@ -839,16 +885,17 @@ PageType {
             MouseArea {
                 id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Передаём JWT (сквозная
-                    // авторизация) + device_uuid, чтобы дни зачислились на ЭТО устройство (бэк: checkout
-                    // per device_uuid, оплата-на-устройство). // AVPN
-                    var base = "https://tribevpn.com/account"
-                    var params = []
-                    var tok = (root.hasEngine && TribeEngine.authToken !== undefined) ? String(TribeEngine.authToken) : ""
-                    if (tok.length > 0) params.push("token=" + encodeURIComponent(tok))
-                    var dev = (root.hasEngine && typeof TribeEngine.localDeviceId === "function") ? String(TribeEngine.localDeviceId()) : ""
-                    if (dev.length > 0) params.push("device_uuid=" + encodeURIComponent(dev))
-                    Qt.openUrlExternally(params.length > 0 ? (base + "?" + params.join("&")) : base)
+                    // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Одноразовый web-link
+                    // (POST /v1/cabinet/web-link, авто-логин, TTL ~90с) вместо JWT в query —
+                    // долгоживущий токен не светится в истории браузера/логах. device_uuid дописывает
+                    // движок (дни зачислятся на ЭТО устройство). Ошибка/нет движка → голый кабинет. // AVPN
+                    if (root.hasEngine && typeof TribeEngine.requestCabinetLink === "function") {
+                        if (root.ctaLinking) return
+                        root.ctaLinking = true
+                        TribeEngine.requestCabinetLink()  // ответ всегда придёт в onCabinetLinkReady
+                    } else {
+                        Qt.openUrlExternally("https://tribevpn.com/account")
+                    }
                 }
             }
         }
@@ -917,4 +964,5 @@ PageType {
         id: nodeSheet
         z: 200
     }
+
 }

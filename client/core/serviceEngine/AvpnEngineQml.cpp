@@ -1090,6 +1090,20 @@ void AvpnEngineQml::applyRuBypassSplit()
 // (подключены/подключаемся), передёргиваем через reconcile-машину: needsRestart → guardedStop → на
 // пришедшем Disconnected reconcile сам поднимет заново (applyRuBypassSplit пересеет новый сплит-конфиг).
 // Без back-to-back down+up (CONNECT-INVARIANTS). Офлайн → no-op (применится при следующем Connect).
+// AVPN RU-direct (фикс «тумблер на лету не применяется», 2026-07-02): QML Settings (QtCore) пишет в
+// QSettings с батч-задержкой ~500 мс (settingsWriteDelay в qqmlsettings), а NE-туннель на iOS гасится
+// быстрее → applyRuBypassSplit (guardedStart) и DNS-гейт в up() читали СТАРЫЙ masterOn и поднимали
+// туннель со старым сплит-конфигом. Симптом: тумблер на подключённом VPN → реконнект есть, сплит нет;
+// ручной stop→toggle→start работал (запись успевала флашнуться). Пишем СИНХРОННО до передёрга —
+// движок не должен зависеть от дебаунса UI-стора.
+void AvpnEngineQml::setBypassMasterOn(bool on)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnBypass/masterOn"), on);
+    s.sync();
+    reapplyBypass();
+}
+
 void AvpnEngineQml::reapplyBypass()
 {
     if (!m_wantConnected)
@@ -1342,6 +1356,40 @@ void AvpnEngineQml::refreshReferral()
         // 401/сеть/таймаут → пустая мапа (баннер покажет дефолтный оффер). Эмитим всегда.
         m_referral = result;
         emit referralChanged();
+    });
+}
+
+// AVPN (оплата): POST /v1/cabinet/web-link (Bearer, тело пустое) → { url: "…?wl=<token>", expires_in }.
+// Тот же async-паттерн, что refreshReferral (armTimeout, без вложенного QEventLoop). Сигнал
+// cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка + device_uuid (кабинет откроет шит
+// тарифов на этом устройстве), провал → fallback https://tribevpn.com/account + device_uuid.
+void AvpnEngineQml::requestCabinetLink()
+{
+    const QString fallback = Enrollment::appendDeviceUuid(
+        QStringLiteral("https://tribevpn.com/account"), localDeviceId());
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        emit cabinetLinkReady(fallback);
+        return;
+    }
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/cabinet/web-link"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->post(req, QByteArray());
+    armTimeout(reply); // жёсткий таймаут без nested loop
+    connect(reply, &QNetworkReply::finished, this, [this, reply, fallback]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QString url = fallback;
+        if (code >= 200 && code < 300) {
+            WebLinkResponse wl;
+            QString err;
+            if (Enrollment::parseWebLinkResponse(reply->readAll(), wl, err))
+                url = Enrollment::appendDeviceUuid(wl.url, localDeviceId());
+        }
+        emit cabinetLinkReady(url);
     });
 }
 

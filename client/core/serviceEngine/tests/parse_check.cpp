@@ -10,6 +10,7 @@
 #include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
 #include "../YoutubeSource.h"
+#include "../../utils/constants/protocolConstants.h" // AVPN: паритет-дефолты mtu (awg::defaultMtu)
 
 #include <QCoreApplication>
 #include <QFile>
@@ -91,6 +92,34 @@ int main(int argc, char **argv)
                      && wg.contains(QLatin1String("Endpoint = 203.0.113.10:51820"));
         if (!cfgOk) { fprintf(stderr, "FAIL: AwgConfigBuilder output mismatch\n"); return 5; }
         printf("config builder: OK (inner has client_ip/keys/awg, dns2 present, wg-quick text valid)\n");
+    }
+
+    // --- AVPN parity: нода БЕЗ dns/mtu → билдер ОБЯЗАН подставить upstream-дефолты ---
+    // Upstream подставляет их в ConnectionController::createConnectionConfiguration, который наш
+    // service-путь ОБХОДИТ (VpnConnectionTunnelControl::invokeConnect → connectToVpn напрямую).
+    // Без dns1 iOS WGConfig.swift (dns1/dns2 non-optional String) не декодится ⇒ туннель молча не
+    // поднимается; без mtu демон берёт 1420 (daemon.cpp parseConfig) вместо awg-дефолта 1376/1280.
+    if (!sub.nodes.isEmpty()) {
+        const ClientKeys keys{QStringLiteral("PRIVb64..."), QStringLiteral("PUBb64...")};
+        SubscriptionNode bare = sub.nodes.first();
+        bare.dns.clear();
+        bare.mtu = 0;
+        const QJsonObject cfg = AwgConfigBuilder::build(sub, bare, keys);
+        const QJsonObject inner = cfg.value(QStringLiteral("awg_config_data")).toObject();
+        const QString wg = inner.value(QStringLiteral("config")).toString();
+        const QString wantMtu = QLatin1String(amnezia::protocols::awg::defaultMtu);
+        printf("defaults: dns1=%s dns2=%s mtu=%s (want %s)\n",
+               cfg.value(QStringLiteral("dns1")).toString().toUtf8().constData(),
+               cfg.value(QStringLiteral("dns2")).toString().toUtf8().constData(),
+               inner.value(QStringLiteral("mtu")).toString().toUtf8().constData(),
+               wantMtu.toUtf8().constData());
+        const bool defOk = cfg.value(QStringLiteral("dns1")).toString() == QLatin1String("1.1.1.1")
+                        && cfg.value(QStringLiteral("dns2")).toString() == QLatin1String("1.0.0.1")
+                        && inner.value(QStringLiteral("mtu")).toString() == wantMtu
+                        && wg.contains(QLatin1String("DNS = 1.1.1.1, 1.0.0.1"))
+                        && wg.contains(QStringLiteral("MTU = %1").arg(wantMtu));
+        if (!defOk) { fprintf(stderr, "FAIL: builder must inject upstream defaults (dns1/dns2/mtu)\n"); return 6; }
+        printf("config builder defaults: OK (dns 1.1.1.1/1.0.0.1, mtu %s)\n", wantMtu.toUtf8().constData());
     }
 
     // --- Enrollment: чистые builders/parsers ---
