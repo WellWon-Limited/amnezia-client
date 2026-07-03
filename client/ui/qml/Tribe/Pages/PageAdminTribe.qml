@@ -285,7 +285,7 @@ PageType {
                             Text {
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
-                                text: qsTr("ВЫКЛ = лучше звонки (WhatsApp/FaceTime): честный гео-DNS через туннель. Доступ к RU-сайтам сохраняется; Госуслуги/Кинопоиск могут заподозрить VPN.")
+                                text: qsTr("macOS: ВКЛ = split-DNS (и стелс RU-сервисов, и честный гео для звонков — идеал). iOS/Android пока выбор: ВКЛ = стелс (Яндекс-DNS на всё), ВЫКЛ = лучше звонки (WhatsApp/FaceTime). Доступ к RU-сайтам сохраняется всегда.")
                                 color: Theme.color.text3
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                             }

@@ -5,6 +5,7 @@
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 #include "core/repositories/secureAppSettingsRepository.h" // AVPN RU-direct: флаг сплита по факт-ноде
 
+#include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
 
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
@@ -80,20 +81,28 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // T2: на самой РФ-ноде (countryCode==RU) DNS не подменяем — там full-tunnel через РФ,
     // резолвер и так российский (сплит на РФ-ноде выключается здесь же, ниже).
     SubscriptionNode primary = node;   // мутабельная копия (DNS-override под РФ-доступ)
+    bool splitDns = false;             // AVPN split-DNS: поля в корень cfg (macOS-демон)
     {
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
         const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-        // AVPN (звонки, 2026-07-03): dnsMaskOn — саб-опция «RU-DNS маскировка» (дефолт ВКЛ = прежнее
-        // поведение). Измерено: Яндекс-DNS с загран-egress выдаёт RU-гео edge → WhatsApp-инфра отвечает
-        // за 131мс против 75мс у честного гео (+75%) — страдают звонки/realtime. OFF ⇒ DNS остаётся
-        // бэкендовский (1.1.1.1 через туннель, гео=egress), МАРШРУТНЫЙ байпас НЕ трогается (RU-CIDR
-        // по-прежнему мимо туннеля) — теряется только стелс «российского резолвера» (Госуслуги/Кинопоиск
-        // могут показать «возможно VPN»). Полное решение (split-DNS: .ru/.su/.рф → Яндекс, прочее →
-        // 1.1.1.1) — в плане; ручка = AvpnEngineQml::setBypassDnsMaskOn (синхронная запись + reapply).
+        // AVPN (звонки, 2026-07-03): dnsMaskOn — саб-опция «RU-DNS маскировка» (дефолт ВКЛ). Измерено:
+        // Яндекс-DNS-на-всё с загран-egress выдаёт RU-гео edge → WhatsApp-инфра 131мс vs 75мс честного
+        // гео (+75%) — страдают звонки/realtime. Поэтому:
+        //   • macOS-десктоп (root-демон): SPLIT-DNS — глобальный DNS остаётся бэкендовский (1.1.1.1
+        //     через туннель, гео=egress ⇒ звонки/CDN честные), а RU-суффиксы демон направляет на Яндекс
+        //     мимо туннеля через /etc/resolver/* (стелс Госуслуг/Кинопоиска сохраняется). ОБА свойства.
+        //   • iOS/Android: NE/VpnService дают ОДИН резолвер ⇒ пока прежнее поведение (Яндекс-на-всё);
+        //     полный split там = DNS-форвардер в туннель-движке (в плане, см. память tribe-ru-split).
+        // dnsMaskOn OFF ⇒ чистый 1.1.1.1 везде (маршрутный RU-байпас не трогается).
         const bool dnsMaskOn = s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool();
-        if (!ruNode && masterOn && dnsMaskOn)
+        if (!ruNode && masterOn && dnsMaskOn) {
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+            splitDns = true; // DNS ноды (1.1.1.1) не подменяем — RU-суффиксы уйдут на Яндекс через демона
+#else
             primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
+#endif
+        }
 
         // AVPN RU-direct (T2, аудит 2026-07-02): вкл/выкл сплита — ПО ФАКТИЧЕСКОЙ ноде, здесь, а не по
         // pin в applyRuBypassSplit. Прежний гейт по pinnedNodeIsRu() расходился с реальностью на всех
@@ -112,7 +121,17 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         }
     }
 
-    const QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
+    QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
+    if (splitDns) {
+        // AVPN split-DNS: RU-суффиксы (TLD рунета + RU-сервисы вне .ru) → Яндекс мимо туннеля.
+        // Прокид: localsocketcontroller → демон → /etc/resolver/*. Яндекс отвечает ТОЛЬКО
+        // residential-IP (проверено: с ДЦ-egress UDP53 молчит) — потому строго мимо туннеля.
+        cfg.insert(QStringLiteral("splitDnsSuffixes"),
+                   QJsonArray{ QStringLiteral("ru"), QStringLiteral("su"), QStringLiteral("xn--p1ai"),
+                               QStringLiteral("vk.com"), QStringLiteral("userapi.com"),
+                               QStringLiteral("yandex.net"), QStringLiteral("yastatic.net") });
+        cfg.insert(QStringLiteral("splitDnsServer"), QStringLiteral("77.88.8.8"));
+    }
     if (!invokeConnect(cfg, primary.nodeId))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();

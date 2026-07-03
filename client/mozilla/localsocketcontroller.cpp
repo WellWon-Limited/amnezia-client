@@ -245,6 +245,13 @@ void LocalSocketController::activate(const QJsonObject &rawConfig) {
 
   json.insert("allowedDnsServers", allowedDns);
 
+  // AVPN (Tribe split-DNS): RU-суффиксы → отдельный резолвер мимо туннеля (macOS /etc/resolver,
+  // пишет демон). Поля кладёт сервисный путь (VpnConnectionTunnelControl::up); нет полей = выключено.
+  if (rawConfig.contains(QStringLiteral("splitDnsSuffixes"))) {
+    json.insert("splitDnsSuffixes", rawConfig.value(QStringLiteral("splitDnsSuffixes")));
+    json.insert("splitDnsServer", rawConfig.value(QStringLiteral("splitDnsServer")));
+  }
+
   json.insert(amnezia::configKey::killSwitchOption, rawConfig.value(amnezia::configKey::killSwitchOption));
 
   if (protocolName == amnezia::configKey::awg) {

@@ -17,6 +17,7 @@
 
 #include "leakdetector.h"
 #include "logger.h"
+#include "splitdnsresolverfiles.h" // AVPN (Tribe split-DNS)
 
 namespace {
 Logger logger("MacOSDaemon");
@@ -27,6 +28,9 @@ MacOSDaemon::MacOSDaemon() : Daemon(nullptr) {
   MZ_COUNT_CTOR(MacOSDaemon);
 
   logger.debug() << "Daemon created";
+
+  // AVPN (Tribe split-DNS): убрать возможных сирот /etc/resolver/* после краша прошлого демона
+  SplitDnsResolverFiles::clear();
 
   m_wgutils = new WireguardUtilsMacos(this);
   m_dnsutils = new DnsUtilsMacos(this);
