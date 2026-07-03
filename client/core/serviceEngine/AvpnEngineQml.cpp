@@ -1451,34 +1451,61 @@ void AvpnEngineQml::applyRuBypassSplit()
     using amnezia::RouteMode;
     QSettings s;
     const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-    // AVPN (T2, аудит 2026-07-02): здесь — только СЕВ списка при masterOn (и активное ВЫКЛ при OFF,
-    // иначе прежний seed продолжил бы исключать рунет). Вкл/выкл сплита под РФ-ноду решается ПО
+    // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
+    // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
+    const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
+    // AVPN (T2, аудит 2026-07-02): здесь — только СЕВ списка (и активное ВЫКЛ, если ОБА тумблера OFF,
+    // иначе прежний seed продолжил бы исключать трафик). Вкл/выкл сплита под РФ-ноду решается ПО
     // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
     // RU-pin — прежний гейт по pinnedNodeIsRu() тут расходился с реальностью, когда нода ≠ pin).
-    if (!masterOn) {
+    if (!masterOn && !liAutoOn) {
         m_store->setSitesSplitTunnelingEnabled(false);
         return;
     }
     m_store->setRouteMode(RouteMode::VpnAllExceptSites);
     m_store->setSitesSplitTunnelingEnabled(true);
     QMap<QString, QString> sites;
-    const QStringList ru = avpn::ruPrefixes();
-    for (const QString &cidr : ru)
-        sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
+    if (masterOn) {
+        const QStringList ru = avpn::ruPrefixes();
+        for (const QString &cidr : ru)
+            sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
 
-    // AVPN RU-direct: foreign-эндпоинты, которые РФ-приложения дёргают для гео/анти-фрод проверок и которые
-    // ПАЛЯТ загран-IP → гоним их тоже direct (residential РФ-IP), иначе приложение видит «VPN». Найдено
-    // ЗАХВАТОМ (rvi0/PKTAP, 2026-07-01): процесс Gosuslugi через туннель ходит ТОЛЬКО в эти два, оба отвечают
-    // (видят наш выход). Узкие /24 — не весь Google/Level3. Расширять по мере находок из захватов др. РФ-прил.
-    // ⚠️ НЕ добавлять сюда CIDR, куда резолвятся эндпоинты НАШИХ проб (ServiceProbe/QualityProbe):
-    // 216.239.38.0/24 уже накрывал youtubei.googleapis.com (216.239.38.223) → резолв YouTube-пробы уходил
-    // мимо туннеля через РФ и таймаутился → «вечно серый чип» (2026-07-03; проба ушла на www.youtube.com).
-    static const char *const kBypassExtra[] = {
-        "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
-        "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
-    };
-    for (const char *cidr : kBypassExtra)
-        sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+        // AVPN RU-direct: foreign-эндпоинты, которые РФ-приложения дёргают для гео/анти-фрод проверок и которые
+        // ПАЛЯТ загран-IP → гоним их тоже direct (residential РФ-IP), иначе приложение видит «VPN». Найдено
+        // ЗАХВАТОМ (rvi0/PKTAP, 2026-07-01): процесс Gosuslugi через туннель ходит ТОЛЬКО в эти два, оба отвечают
+        // (видят наш выход). Узкие /24 — не весь Google/Level3. Расширять по мере находок из захватов др. РФ-прил.
+        // ⚠️ НЕ добавлять сюда CIDR, куда резолвятся эндпоинты НАШИХ проб (ServiceProbe/QualityProbe):
+        // 216.239.38.0/24 уже накрывал youtubei.googleapis.com (216.239.38.223) → резолв YouTube-пробы уходил
+        // мимо туннеля через РФ и таймаутился → «вечно серый чип» (2026-07-03; проба ушла на www.youtube.com).
+        static const char *const kBypassExtra[] = {
+            "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
+            "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
+        };
+        for (const char *cidr : kBypassExtra)
+            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+    }
+
+    // AVPN (китайские сервисы, 2026-07-03): узкие /24 серверов Li Auto (理想汽车, app com.chehejia.oc.m01) →
+    // direct через РФ-IP. Из-за границы команды управления авто не проходят; с прямого РФ-IP работают.
+    // Харвест «глазами РФ» (Google DoH + EDNS РФ-операторов), проверено стабильным для 6 операторов и на
+    // пересечение с never-bypass — docs/amnezia-fork/CN-SERVICES-HARVEST.md. Только IPv4-CIDR (checkIpSubnetFormat).
+    // Все /24 — на carrier-IDC/Baidu самого Li Auto, НЕ общий CDN (побочки на чужие сервисы нет: китайская
+    // инфра из РФ и так direct). Хост команд api-app.lixiang.com за GSLB Baidu — при протухании регенерить
+    // (см. gen-скрипт в HARVEST-доке). НЕ брать announced-префикс целиком (там /18–/23 carrier — пол-Китая).
+    if (liAutoOn) {
+        static const char *const kLiAutoCidrs[] = {
+            "175.12.90.0/24",   // api-app.lixiang.com — КОМАНДЫ АВТО (CT Centralsouth AS151823)
+            "183.60.227.0/24",  // api-app.lixiang.com — КОМАНДЫ АВТО (CHINANET Guangdong IDC AS134763)
+            "103.103.244.0/24", // id.lixiang.com + account.lixiang.com — ЛОГИН/SSO (AS151373, РФ-вид)
+            "180.76.97.0/24",   // api.lixiang.com — general API (Baidu AS38365)
+            "106.13.244.0/23",  // likey-open/mindgpt/manage.chehejia.com — open-API apisix (CHINANET-IDC-BJ AS23724)
+            "106.12.251.0/24",  // ssai-apis.chehejia.com — AI/ASR API (CHINANET Nanjing AS134756)
+            "114.111.24.0/24",  // lianshan.lixiang.com / mindgpt — apisix gw (CT Hebei AS140903)
+            "193.118.54.0/24",  // account.lixiang.com — заграничный GSLB-edge логина, запасной (Zenlayer AS21859)
+        };
+        for (const char *cidr : kLiAutoCidrs)
+            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+    }
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
@@ -1512,6 +1539,21 @@ void AvpnEngineQml::setBypassDnsMaskOn(bool on)
 {
     QSettings s;
     s.setValue(QStringLiteral("AvpnBypass/dnsMaskOn"), on);
+    s.sync();
+    reapplyBypass();
+}
+
+// AVPN (китайские сервисы): «Li Auto» — узкие /24 серверов Li Auto мимо туннеля (default ВКЛ).
+// Синхронная запись + передёрг туннеля, как setBypassMasterOn (QML Settings лагает ~500 мс).
+bool AvpnEngineQml::bypassLiAutoOn() const
+{
+    return QSettings().value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
+}
+
+void AvpnEngineQml::setBypassLiAutoOn(bool on)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnBypass/liAutoOn"), on);
     s.sync();
     reapplyBypass();
 }

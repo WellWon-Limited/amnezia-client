@@ -113,8 +113,13 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         // решение тут покрывает все пути. Список CIDR к этому моменту уже засеян (guardedStart →
         // applyRuBypassSplit при masterOn); appendSplitTunnelingConfig прочтёт флаг из этого же стора
         // в connectToVpn (queued — строго после нас). Паттерн тот же, что у DNS-гейта выше.
+        // AVPN (китайские сервисы, 2026-07-03): сплит нужен, если активен ЛЮБОЙ байпас-тумблер — RU-байпас
+        // (masterOn) ИЛИ Li Auto (liAutoOn, default ВКЛ). На РФ-ноде сплит всё равно ВЫКЛ (full-tunnel через
+        // РФ-egress — и рунет, и Li Auto тогда и так идут через российский IP). Список к этому моменту засеян
+        // applyRuBypassSplit (объединяет оба набора по тем же тумблерам).
         if (m_appStore) {
-            const bool splitOn = masterOn && !ruNode;
+            const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
+            const bool splitOn = (masterOn || liAutoOn) && !ruNode;
             if (splitOn)
                 m_appStore->setRouteMode(amnezia::RouteMode::VpnAllExceptSites);
             m_appStore->setSitesSplitTunnelingEnabled(splitOn);
