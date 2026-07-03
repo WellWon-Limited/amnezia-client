@@ -37,11 +37,11 @@ PageType {
                                   : (hasEngine ? TribeEngine.busy : ConnectionController.isConnectionInProgress)
     // AVPN: «Connecting…»+спиннер — ТОЛЬКО на пути вверх. Движковый busy взводится и на stop(),
     // и при выключении орб мигал «Connecting…» (стоп быстрый — сбивало с толку, реш. 2026-07-03).
-    // Направление трекаем по клику (stopping), авто-reconnect движка кликом не является → busy
-    // без stopping показывает «Connecting…» как раньше.
-    property bool stopping: false
-    onIsBusyChanged: if (!isBusy) stopping = false   // сброс направления по успокоению движка
-    readonly property bool showBusy: isBusy && !stopping
+    // Направление — ИЗ ДВИЖКА (TribeEngine.stopping = busy && !wantConnected): переживает пересоздание
+    // страницы (таб-свитч), покрывает отмену недоехавшего коннекта и teardown из шторки (selectAuto).
+    // Гард на undefined — старый бинарь без свойства ведёт себя как раньше (busy = Connecting).
+    readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
+    readonly property bool showBusy: isBusy && !engineStopping
 
     signal requestTab(int index)
     signal requestSettings()
@@ -126,12 +126,12 @@ PageType {
             simConnecting = true; simTimer.restart()
         } else if (typeof TribeEngine !== "undefined") {
             // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
-            // Гард (ревью 2026-07-03): во время нашего же стопа орб уже показывает «Connect»,
-            // но движок ещё busy — повторный клик уходил бы в stop() и молча глотался
-            // (reconcile-дебаунс). Игнорируем клик до успокоения (окно — доли секунды).
-            if (root.stopping && isBusy) return
-            if (isOn || isBusy) { root.stopping = true; TribeEngine.stop() }
-            else { root.stopping = false; TribeEngine.start() }
+            // Во время нашего же стопа орб показывает «Connect» — клик по нему трактуем буквально:
+            // «включи обратно» (start задаёт намерение, reconcile доведёт из терминала). Раньше клик
+            // уходил в stop() и глотался reconcile-дебаунсом (ревью 2026-07-03).
+            if (root.engineStopping) { TribeEngine.start(); return }
+            if (isOn || isBusy) TribeEngine.stop()
+            else TribeEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
             // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
@@ -982,5 +982,4 @@ PageType {
         id: nodeSheet
         z: 200
     }
-
 }

@@ -998,6 +998,9 @@ void AvpnEngineQml::start()
     m_wantConnected = true;
     m_startAttempts = 0;        // ручной запуск — свежая серия попыток
     reconcile();
+    // reconcile мог ранне-выйти (op-in-flight) без эмита — а направление (stopping) уже сменилось;
+    // UI должен увидеть его сразу, не дожидаясь терминального колбэка. // AVPN
+    emit changed();
 }
 
 void AvpnEngineQml::stop()
@@ -1011,6 +1014,9 @@ void AvpnEngineQml::stop()
     m_needsRestart = false;
     m_startAttempts = 0;
     reconcile();
+    // как в start(): направление (stopping) сменилось сразу, даже если reconcile ранне-вышел
+    // (отмена недоехавшего коннекта) — эмитим, чтобы орб мгновенно перестал показывать Connecting. // AVPN
+    emit changed();
 }
 
 // AVPN (reconcile-машина): ЕДИНСТВЕННАЯ точка, поднимающая/опускающая туннель. Действует ТОЛЬКО из
