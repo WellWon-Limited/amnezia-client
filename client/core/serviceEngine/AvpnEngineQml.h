@@ -81,6 +81,10 @@ class AvpnEngineQml : public QObject {
     // (NE-туннель системный ⇒ подходит и для замера ванильной Amnezia). Итог — сигнал benchFinished.
     Q_PROPERTY(bool benchRunning READ benchRunning NOTIFY benchChanged)
     Q_PROPERTY(QString benchStage READ benchStage NOTIFY benchChanged)
+    // AVPN (панель администратора): авто-свип ВСЕХ нод — на каждой: pin→connect (замер connect_ms)→
+    // lite-бенч→next; в конце восстановление исходного pin/подключения. Итог — сигнал sweepFinished.
+    Q_PROPERTY(bool sweepRunning READ sweepRunning NOTIFY sweepChanged)
+    Q_PROPERTY(QString sweepProgress READ sweepProgress NOTIFY sweepChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -304,9 +308,14 @@ signals:
     void serviceStatusChanged();
     // AVPN (панель администратора): смена состояния бенча (benchRunning/benchStage).
     void benchChanged();
-    // AVPN (панель администратора): бенч завершён. summary — плоская мапа для мини-таблицы в UI,
-    // json — полный результат (schema:1, компактный) для «Копировать/Сохранить».
+    // AVPN (панель администратора): бенч завершён. summary — плоская мапа для мини-таблицы в UI
+    // (+ vs_baseline/vs_amnezia при наличии истории), json — полный результат (schema:1, компактный).
     void benchFinished(const QVariantMap &summary, const QString &json);
+    // AVPN (панель администратора): смена состояния свипа нод (sweepRunning/sweepProgress).
+    void sweepChanged();
+    // AVPN (панель администратора): свип завершён. rows — [{node_id,label,connect_ms,ttfb_ms,down_mbit,
+    // base_rtt_ms,loaded_rtt_ms,verdict,ok}] отсортированные (лучшие сверху), json — полный отчёт.
+    void sweepFinished(const QVariantList &rows, const QString &json);
 
 private slots:
     void onTick();
@@ -367,6 +376,30 @@ private:
     BenchRunner                 *m_bench = nullptr;
     bool                         m_benchRunning = false;
     QString                      m_benchStage;
+    // AVPN (панель администратора): фазовая машина авто-свипа нод. Продвигается ТОЛЬКО из
+    // sweepAdvance() (по changed()) и sweepGuardFired() (сторож фазы) — реентерабельность исключена
+    // отложенным продвижением (singleShot(0)); m_sweepEpoch отбрасывает стейл-колбэки.
+    enum class SweepPhase { Idle, WaitDown, WaitUp, Bench, RestoreWaitDown, RestoreWaitUp };
+    SweepPhase                   m_sweepPhase = SweepPhase::Idle;
+    int                          m_sweepEpoch = 0;
+    int                          m_sweepIdx = 0;
+    QStringList                  m_sweepQueue;        // nodeId в порядке обхода
+    QJsonArray                   m_sweepResults;      // полные lite-результаты + ошибки per node
+    QString                      m_sweepProgress;     // «2/5 · POLAND» для UI
+    QString                      m_sweepOrigPin;      // исходный pin ("" = авто)
+    bool                         m_sweepOrigConnected = false;
+    QElapsedTimer                m_sweepConnT;        // замер connect_ms текущей ноды
+    QTimer                       m_sweepGuard;        // сторож текущей фазы
+
+    QString sweepNodeLabel(const QString &nodeId) const; // display-имя из пула снапшота
+    void sweepEnterPhase(SweepPhase ph, int guardMs);
+    void sweepAdvance();       // реакция на changed(): проверка достижения целевого состояния фазы
+    void sweepGuardFired();    // фаза не завершилась за сторож — зафиксировать ошибку и дальше
+    void sweepNextNode();      // pin следующей ноды (или переход к восстановлению)
+    void sweepStartBench();    // lite-бенч на подключённой ноде
+    void sweepNodeFailed(const QString &reason);
+    void sweepBeginRestore();
+    void sweepFinish();        // сборка отчёта + emit sweepFinished + сброс в Idle
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
