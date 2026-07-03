@@ -59,7 +59,9 @@ PageType {
     readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
     // AVPN: триал/подписка исчерпаны → монетизационный CTA «Получить ключ» вместо ротации.
     // Исчерпан, если: подписка неактивна, ИЛИ дней не осталось (0), ИЛИ лимит трафика выбран.
-    readonly property bool subExpired: root.hasEngine && (!root.subActive
+    // Гейт daysLeft >= 0: ПОКА данные не загружены (пустой снапшот, daysLeft = -1) CTA не показываем —
+    // «не знаем» ≠ «истёк»; после foreground-рефетча /v1/subscription состояние догонит правду.
+    readonly property bool subExpired: root.hasEngine && TribeEngine.daysLeft >= 0 && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
                               || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))
     // Причина CTA для текста кнопки: подписка/срок живы, кончился ТОЛЬКО трафик → «Продлить трафик»
@@ -158,20 +160,23 @@ PageType {
         }
     }
 
-    // AVPN (оплата): возврат приложения в foreground (например, из Safari после оплаты в кабинете)
-    // → освежить статус подписки: GET /v1/account (best-effort async, без nested loop) — новый
-    // expires_at приедет в бейдж/Настройки через accountChanged/changed. Троттл 30с, чтобы не дёргать
-    // бэк на каждый свап приложений. bootstrap() тут НЕ зовём — он трогает подписку/туннель-флоу
-    // (CONNECT-INVARIANTS); полная перечитка и так случится при следующем connect.
+    // AVPN (оплата): возврат приложения в foreground (например, из Safari после оплаты в кабинете) —
+    // освежить ЧАСЫ УСТРОЙСТВА (GET /v1/subscription, их продлевает платёж): новый expires_at/трафик
+    // приедет в бейдж, CTA «Обновить ключ» погаснет сам. refreshAccount — справочно (account_id,
+    // списки в Настройках), в бейдж НЕ пишет. Троттл 30с, чтобы не дёргать бэк на каждый свап
+    // приложений. bootstrap() тут НЕ зовём — он трогает подписку/туннель-флоу (CONNECT-INVARIANTS).
     Connections {
         target: Qt.application
         function onStateChanged() {
             if (Qt.application.state !== Qt.ApplicationActive) return
-            if (!(root.hasEngine && typeof TribeEngine.refreshAccount === "function")) return
+            if (!root.hasEngine) return
             var now = Date.now()
             if (now - root.lastFgRefreshMs < 30000) return
             root.lastFgRefreshMs = now
-            TribeEngine.refreshAccount()
+            if (typeof TribeEngine.refreshSubscription === "function")
+                TribeEngine.refreshSubscription()   // device-часы: бейдж/CTA
+            if (typeof TribeEngine.refreshAccount === "function")
+                TribeEngine.refreshAccount()        // account-справка: Настройки
         }
     }
 

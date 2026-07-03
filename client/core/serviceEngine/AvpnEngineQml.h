@@ -181,7 +181,13 @@ public:
 
     // GET /v1/account (АСИНХРОННО) → наполняет property `account` {account_id, status, expires_at,
     // traffic_limit, traffic_used} и эмитит accountChanged(). Нет токена / 401 / сеть → пустая мапа.
+    // ⚠️ ДВОЕ ЧАСОВ: это ЧАСЫ АККАУНТА (справочно, для саппорта/списков) — в снапшот подписки НЕ пишутся.
     Q_INVOKABLE void refreshAccount();
+
+    // AVPN (оплата, ДВОЕ ЧАСОВ): лёгкий рефетч /v1/subscription — ЧАСЫ УСТРОЙСТВА (их продлевает
+    // платёж) для бейджа ГБ/дней и CTA. Данные-only: пул/туннель не трогает (CONNECT-INVARIANTS).
+    // Зовётся при возврате в foreground (после оплаты в кабинете) и тиком живого трафика (#35).
+    Q_INVOKABLE void refreshSubscription();
 
     // DEV TOOL (TEMPORARY — remove with backend routers/devtools.py): factory-reset
     // THIS account's trial via POST /v1/dev/reset-trial (Bearer = subscription_token).
