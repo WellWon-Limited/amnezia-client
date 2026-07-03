@@ -4,6 +4,7 @@
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "SubscriptionParser.h" // AVPN (оплата): refreshSubscription() — device-часы для шапки/CTA
 #include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
@@ -405,13 +406,14 @@ void AvpnEngineQml::onTick()
     if (m_probe && state() == QLatin1String("connected"))
         m_probe->measure();
 
-    // AVPN (#35 живой трафик): пока подключены — каждый 5-й тик (~20с) освежаем счётчики из /v1/account
-    // (бэк-истина; used растёт по мере расхода). refreshAccount пишет назад в подписку + emit changed()
-    // → бейдж «остаток ГБ» убывает постепенно (3.1→2.9→…). Не каждый тик — беречь батарею/трафик.
+    // AVPN (#35 живой трафик): пока подключены — каждый 5-й тик (~20с) освежаем счётчики.
+    // ⚠️ ДВОЕ ЧАСОВ: берём /v1/subscription (ЧАСЫ УСТРОЙСТВА — их продлевает оплата), НЕ /v1/account
+    // (часы аккаунта: на оплаченном устройстве затирали 36 дн./100ГБ триальными числами аккаунта).
+    // refreshSubscription пишет traffic/expires в снапшот + emit changed() → бейдж живой.
     if (state() == QLatin1String("connected")) {
         if (++m_trafficSyncTicks >= 5) {
             m_trafficSyncTicks = 0;
-            refreshAccount();
+            refreshSubscription();
         }
     } else {
         m_trafficSyncTicks = 0; // сброс, чтобы первый ре-синк после коннекта был через полный интервал
@@ -1365,17 +1367,43 @@ void AvpnEngineQml::refreshAccount()
         }
         m_account = result;
         emit accountChanged();
-        // AVPN (#35 живой трафик): свежие used/limit/expires из /v1/account — назад в подписку движка,
-        // чтобы ЕДИНЫЙ источник числа (Q_PROPERTY trafficUsed/trafficLimit/daysLeft, читают snapshot →
-        // подписку) обновился на ОБЕИХ страницах. changed() уведомляет бейдж/бар. Только при успешном
-        // парсе (иначе не затираем валидные значения нулями от сетевого сбоя).
-        if (!result.isEmpty()) {
-            m_engine.updateSubscriptionTraffic(
-                result.value(QStringLiteral("traffic_used")).toLongLong(),
-                result.value(QStringLiteral("traffic_limit")).toLongLong(),
-                result.value(QStringLiteral("expires_at")).toString());
-            emit changed();
-        }
+        // AVPN (оплата, ДВОЕ ЧАСОВ): числа /v1/account — ЧАСЫ АККАУНТА, а платёж продлевает ЧАСЫ
+        // УСТРОЙСТВА (apply_paid → device.expires_at/traffic; account.status/expires не трогает).
+        // Прежний merge updateSubscriptionTraffic(/v1/account) ЗАТИРАЛ device-часы шапки аккаунт-
+        // часами: на оплаченном устройстве бейдж флипался «36 дн./100ГБ → триальные». Живой бейдж
+        // теперь кормит refreshSubscription() (device-часы); сюда merge НЕ возвращать.
+        // property account (account_id для саппорта, списки в Настройках) остаётся как есть.
+    });
+}
+
+// AVPN (оплата, ДВОЕ ЧАСОВ): лёгкий рефетч GET /v1/subscription — ЧАСЫ УСТРОЙСТВА (их продлевает
+// платёж) для бейджа ГБ/дней и CTA «Обновить ключ». Обновляет ТОЛЬКО traffic/expires снапшота
+// (updateSubscriptionTraffic) — пул нод/туннель/стейт-машину НЕ трогает (CONNECT-INVARIANTS:
+// никакой реконфигурации на лету). АСИНХРОННО (armTimeout, без nested loop). Зовётся: (а) возврат
+// в foreground — после оплаты в кабинете приедет новый expires_at и CTA погаснет сам; (б) тик #35.
+void AvpnEngineQml::refreshSubscription()
+{
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty())
+        return;
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code < 200 || code >= 300)
+            return; // 401/сеть/таймаут → тихо; данные обновятся при следующем connect/bootstrap
+        Subscription sub;
+        QString err;
+        if (!SubscriptionParser::parse(reply->readAll(), sub, err))
+            return; // битый ответ не затирает валидные числа
+        m_engine.updateSubscriptionTraffic(sub.trafficUsed, sub.trafficLimit, sub.expiresAt);
+        emit changed(); // daysLeft/traffic*/subExpired в QML пересчитаются
     });
 }
 
