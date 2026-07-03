@@ -24,7 +24,7 @@ import NetworkExtension
 // MARK: - App Group bridge (#7)
 
 /// Общий контейнер с приложением и network-extension. Совпадает с Log.swift / main.entitlements.
-private let kAvpnAppGroupID = "group.hk.wellwon.zanaves"
+private let kAvpnAppGroupID = "group.hk.wellwon.tribe"
 
 /// Ключи, которые читает Qt-движок (AvpnEngineQml) при следующем выходе в foreground, чтобы
 /// синхронизировать своё состояние паузы с тем, что интент уже сделал с туннелем.

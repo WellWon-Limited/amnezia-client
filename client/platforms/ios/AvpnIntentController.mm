@@ -6,7 +6,7 @@
 #include "core/serviceEngine/AvpnIntentBridge.h"
 
 // App Group — совпадает с AvpnAppIntents.swift / Log.swift / main.entitlements.
-static NSString *const kAvpnAppGroupID = @"group.hk.wellwon.zanaves";
+static NSString *const kAvpnAppGroupID = @"group.hk.wellwon.tribe";
 
 // Ключи, которые ПИШЕТ App Intent (AvpnAppIntents.swift, enum AvpnIntentBridgeKey). Читаем их здесь.
 static NSString *const kAvpnIntentPauseRequested = @"AvpnIntent/pauseRequested";

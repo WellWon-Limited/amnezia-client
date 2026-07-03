@@ -1,7 +1,7 @@
 // AVPN (Task E) — iOS-консьюмер «намерений» App Intent авто-паузы (Task 8) из App Group.
 //
 // Фоновый App Intent (AvpnAppIntents.swift) пишет флаги в App Group UserDefaults
-// (suite "group.hk.wellwon.zanaves": AvpnIntent/pauseRequested, AvpnIntent/resumeRequested,
+// (suite "group.hk.wellwon.tribe": AvpnIntent/pauseRequested, AvpnIntent/resumeRequested,
 // AvpnIntent/lastActionAt) и сам опускает/поднимает туннель. Прямой вызов Q_INVOKABLE движка из
 // фона невозможен, поэтому при следующем выходе в foreground QtAppDelegate.mm зовёт C-функцию
 // Avpn_consumeIntentFlags() — она читает эти флаги (NSUserDefaults App Group), эмитит через
