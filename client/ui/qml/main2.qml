@@ -69,6 +69,9 @@ Window  {
     // AVPN (macOS): окно со скруглением 24 — frameless + прозрачный фон, углы режет OpacityMask
     // на appContent. Перемещение окна — DragHandler (startSystemMove) за любую пустую область.
     readonly property bool roundedMac: Qt.platform.os === "osx" && GC.isDesktop()
+    // AVPN: верхняя полоса с версией — ТОЛЬКО десктоп (macOS + Windows); на мобилках её нет.
+    // На Windows окно остаётся с системной рамкой/кнопками — показываем только версию.
+    readonly property bool desktopBar: roundedMac || (Qt.platform.os === "windows" && GC.isDesktop())
     // AVPN: с Qt 6.9 окно на iOS НЕ заходит под статус-бар/home-индикатор без этого флага —
     // без него фон обрезан сверху и снизу. Отступы контента — SafeArea.margins в страницах.
     flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint)
@@ -193,24 +196,25 @@ Window  {
     PageStart {
         objectName: "pageStart"
         width: root.width
-        // AVPN (macOS rounded): контент — ПОД кастомным тайтлбаром (frameless-окно)
-        y: root.roundedMac ? macTitleBar.height : 0
-        height: root.height - (root.roundedMac ? macTitleBar.height : 0)
+        // AVPN (desktop bar): контент — ПОД верхней полосой (macOS: кастомный тайтлбар; Win: версия)
+        y: root.desktopBar ? macTitleBar.height : 0
+        height: root.height - (root.desktopBar ? macTitleBar.height : 0)
     }
 
     // AVPN (macOS rounded): кастомный тайтлбар — светофоры (закрыть/свернуть/развернуть) в капсуле
     // + серый слоган по центру. Окно frameless, системных кнопок нет — это их замена.
     Rectangle {
         id: macTitleBar
-        visible: root.roundedMac
+        visible: root.desktopBar
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        height: root.roundedMac ? 40 : 0
+        height: root.desktopBar ? 40 : 0
         color: Theme.color.bg800
 
         // капсула со светофорами (референс-дизайн 2026-07-02). Как в macOS: глифы (×/−/зум)
         // проявляются во ВСЕХ трёх кружках при наведении на любую часть капсулы.
         Rectangle {
             id: lightsPill
+            visible: root.roundedMac   // светофоры — только macOS (Win: системные кнопки рамки)
             anchors.left: parent.left; anchors.leftMargin: Theme.space.md
             anchors.verticalCenter: parent.verticalCenter
             width: lightsRow.width + 2 * Theme.space.md; height: 26
@@ -288,13 +292,15 @@ Window  {
             }
         }
 
-        // серый слоган по ПРАВОМУ краю тайтлбара (реш. 2026-07-02)
+        // версия приложения по правому краю (слоган убран, реш. 2026-07-03); mono — версия это данные.
+        // Qt.application.version отдаёт голый билд-номер («52») → берём TRIBE_VERSION из
+        // SettingsController.getAppVersion() («5.1.25.50 (дата, хеш)» — первый токен).
         Text {
             anchors.right: parent.right; anchors.rightMargin: Theme.space.lg
             anchors.verticalCenter: parent.verticalCenter
-            text: qsTr("Умный VPN, который реально работает")
-            color: Theme.color.text2
-            font.family: Theme.font.body; font.pixelSize: 12; font.weight: Theme.font.wMedium
+            text: "v" + SettingsController.getAppVersion().split(" ")[0]
+            color: Theme.color.text3
+            font.family: Theme.font.mono; font.pixelSize: 11
         }
     }
 

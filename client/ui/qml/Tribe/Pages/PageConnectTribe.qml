@@ -35,6 +35,13 @@ PageType {
                                   : (hasEngine ? (TribeEngine.state === "connected") : ConnectionController.isConnected)
     readonly property bool isBusy: previewSim ? simConnecting
                                   : (hasEngine ? TribeEngine.busy : ConnectionController.isConnectionInProgress)
+    // AVPN: «Connecting…»+спиннер — ТОЛЬКО на пути вверх. Движковый busy взводится и на stop(),
+    // и при выключении орб мигал «Connecting…» (стоп быстрый — сбивало с толку, реш. 2026-07-03).
+    // Направление трекаем по клику (stopping), авто-reconnect движка кликом не является → busy
+    // без stopping показывает «Connecting…» как раньше.
+    property bool stopping: false
+    onIsBusyChanged: if (!isBusy) stopping = false   // сброс направления по успокоению движка
+    readonly property bool showBusy: isBusy && !stopping
 
     signal requestTab(int index)
     signal requestSettings()
@@ -119,8 +126,12 @@ PageType {
             simConnecting = true; simTimer.restart()
         } else if (typeof TribeEngine !== "undefined") {
             // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
-            if (isOn || isBusy) TribeEngine.stop()
-            else TribeEngine.start()
+            // Гард (ревью 2026-07-03): во время нашего же стопа орб уже показывает «Connect»,
+            // но движок ещё busy — повторный клик уходил бы в stop() и молча глотался
+            // (reconcile-дебаунс). Игнорируем клик до успокоения (окно — доли секунды).
+            if (root.stopping && isBusy) return
+            if (isOn || isBusy) { root.stopping = true; TribeEngine.stop() }
+            else { root.stopping = false; TribeEngine.start() }
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
             // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
@@ -507,16 +518,16 @@ PageType {
             width: 360; height: 360
             horizontalRadius: width / 2
             verticalRadius: height / 2
-            scale: root.isOn ? 1.2 : (root.isBusy ? 1.1 : 1.0)
+            scale: root.isOn ? 1.2 : (root.showBusy ? 1.1 : 1.0)
             Behavior on scale { NumberAnimation { duration: 700; easing.type: Easing.InOutSine } }
             SequentialAnimation on opacity {
-                running: root.isBusy && !Theme.motion.reduceMotion; loops: Animation.Infinite
+                running: root.showBusy && !Theme.motion.reduceMotion; loops: Animation.Infinite
                 NumberAnimation { from: 0.6; to: 0.3; duration: 700 }
                 NumberAnimation { from: 0.3; to: 0.6; duration: 700 }
             }
-            opacity: root.isOn ? 0.5 : (root.isBusy ? 0.6 : 0.22)
+            opacity: root.isOn ? 0.5 : (root.showBusy ? 0.6 : 0.22)
             gradient: Gradient {
-                GradientStop { position: 0.0;  color: root.isOn ? root.blueAccent : (root.isBusy ? root.blue400 : Qt.rgba(1,1,1,1)) }
+                GradientStop { position: 0.0;  color: root.isOn ? root.blueAccent : (root.showBusy ? root.blue400 : Qt.rgba(1,1,1,1)) }
                 GradientStop { position: 0.42; color: root.isOn ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.45) : Qt.rgba(1,1,1,0.22) }
                 GradientStop { position: 0.72; color: "transparent" }
                 GradientStop { position: 1.0;  color: "transparent" }
@@ -528,7 +539,7 @@ PageType {
         // r=119 ≈ периметр кнопки (240) — самый заметный, ЧУТЬ толще; по нему идёт дуга-спиннер.
         // Рендер через Shape (CurveRenderer) — гарантированно гладкие круги (не ломаные линии).
         // Белые контуры, все тонкие/неброские, ярче на синей кнопке. Хардкоды — сценические. // AVPN (scenic)
-        property bool ringActive: root.isBusy
+        property bool ringActive: root.showBusy
 
         // 2 ВНЕШНИХ контура (вне кнопки) — под сферой.
         Shape {
@@ -607,7 +618,7 @@ PageType {
 
         Text {
             anchors.centerIn: parent; z: 40
-            text: root.isBusy ? "Connecting…" : (root.isOn ? "Connected" : "Connect")
+            text: root.showBusy ? "Connecting…" : (root.isOn ? "Connected" : "Connect")
             color: root.isOn ? "white" : root.slate900
             font.family: Theme.font.display; font.pixelSize: 26; font.weight: Theme.font.wBold
         }
