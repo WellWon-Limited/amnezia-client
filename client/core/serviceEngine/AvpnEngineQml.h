@@ -36,6 +36,10 @@ class AvpnEngineQml : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString state READ state NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
+    // AVPN: направление активного перехода — движок занят ОПУСКАНИЕМ туннеля (намерение = офлайн).
+    // Источник правды для «не показывать Connecting… при выключении»: живёт в движке (не в странице),
+    // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
+    Q_PROPERTY(bool stopping READ stopping NOTIFY changed)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
     Q_PROPERTY(qlonglong trafficUsed READ trafficUsed NOTIFY changed)
@@ -91,6 +95,8 @@ public:
 
     QString state() const;
     bool busy() const { return m_busy; }
+    // busy при намерении «офлайн» = идёт teardown (вкл. отмену недоехавшего коннекта). // AVPN
+    bool stopping() const { return m_busy && !m_wantConnected; }
 
     // AVPN: статус подписки (Task 3). daysLeft<0 = бессрочно/неизвестно; trafficLimit==0 = безлимит.
     int daysLeft() const;
