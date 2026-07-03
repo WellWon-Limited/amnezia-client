@@ -293,6 +293,14 @@ public:
     Q_INVOKABLE bool bypassDnsMaskOn() const;
     Q_INVOKABLE void setBypassDnsMaskOn(bool on);
 
+    // AVPN (китайские сервисы, 2026-07-03): тумблер «Li Auto» (AvpnBypass/liAutoOn, default ВКЛ).
+    // ВКЛ ⇒ узкие /24 серверов Li Auto (команды авто api-app.lixiang.com + логин id/account.lixiang.com
+    // + API-шлюзы) идут МИМО туннеля через residential РФ-IP: из-за границы команды управления авто не
+    // проходят, а с прямого РФ-IP работают. Независим от masterOn (RU-байпас) — сплит включается, если
+    // включён ЛЮБОЙ из тумблеров. Тот же синхронный паттерн, что setBypassMasterOn (QML Settings лагает).
+    Q_INVOKABLE bool bypassLiAutoOn() const;
+    Q_INVOKABLE void setBypassLiAutoOn(bool on);
+
 signals:
     void changed();
     void error(const QString &message);

@@ -22,8 +22,16 @@
 	</array>
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
+	<!-- AVPN (identity-anchor): ВЫДЕЛЕННАЯ Tribe keychain-группа для якоря идентичности (device_id +
+	     WG-ключи + subscription_token). Первая в списке = дефолт для записи (QtKeychain пишет сюда).
+	     Не требует регистрации на портале (keychain-группа под своим Team-префиксом — implicit).
+	     Смысл: будущий Tribe-app (той же команды Q7DVH5MCWF, другой bundle — если старый забанят)
+	     объявит ЭТУ ЖЕ группу первой и прочитает якорь → подписка устройства продолжится.
+	     group.hk.wellwon.zanaves оставлен ВТОРЫМ read-fallback: чтение (SecItem без группы) ищет во
+	     ВСЕХ группах app → старые якоря build ≤52 находятся, следующая запись мигрирует их в tribe. -->
 	<key>keychain-access-groups</key>
 	<array>
+		<string>$(AppIdentifierPrefix)hk.wellwon.tribe</string>
 		<string>$(AppIdentifierPrefix)group.hk.wellwon.zanaves</string>
 	</array>
 </dict>
