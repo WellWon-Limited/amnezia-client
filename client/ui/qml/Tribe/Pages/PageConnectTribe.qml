@@ -212,6 +212,13 @@ PageType {
             bypassStore.defaultOnMigrated = true
         }
     }
+    // AVPN (гео-авто, 2026-07-04): движок сменил masterOn по географии (RU→ВКЛ / не-RU→ВЫКЛ,
+    // только пока пользователь не трогал тумблер руками). QML Settings НЕ видит записи в QSettings
+    // со стороны C++ — синхронизируем стор вручную, чтобы тумблер на экране щёлкнул сам.
+    Connections {
+        target: root.hasEngine ? TribeEngine : null
+        function onBypassMasterAutoChanged(on) { bypassStore.masterOn = on }
+    }
 
     // AVPN: иконка «RU-шар» (редизайн 2026-07-02, по эталон-скрину): тёмная скруглённая плитка,
     // внутри круг с мягким диагональным сине-красным градиентом (RU-мотив, НЕ триколор-полосы)
@@ -467,9 +474,10 @@ PageType {
                 onToggled: {
                     // bypassStore (QML Settings) флашится с задержкой ~500 мс — для UI-биндингов этого
                     // достаточно, но движок читает QSettings РАНЬШЕ (teardown быстрее записи). Поэтому
-                    // значение передаём явно: setBypassMasterOn пишет синхронно и передёргивает туннель.
+                    // значение передаём явно: setBypassMasterOnByUser пишет синхронно, ставит вечный
+                    // userLock (гео-авто-режим больше не трогает тумблер) и передёргивает туннель.
                     bypassStore.masterOn = checked
-                    if (root.hasEngine) TribeEngine.setBypassMasterOn(checked)
+                    if (root.hasEngine) TribeEngine.setBypassMasterOnByUser(checked)
                 }
             }
             Column {
