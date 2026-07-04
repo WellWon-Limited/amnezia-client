@@ -5,7 +5,9 @@
 
 #include <QDateTime>
 #include <QDnsLookup>
+#include <QHostInfo>
 #include <QJsonDocument>
+#include <QMetaEnum>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -40,10 +42,12 @@ static const int kStageTimeoutMs = 30000;
 static const int kTlsTimeoutMs = 8000;
 
 QStringList BenchRunner::hosts() const { return m_lite ? kHostsLite : kHosts; }
-// TCP/TLS-фазы: по одному хосту с каждой стороны занавеса (разложение DNS/TCP/TLS вместо общего TTFB)
+// TCP/TLS-фазы: хосты с обеих сторон занавеса (разложение DNS/TCP/TLS вместо общего TTFB).
+// vk.com — второй RU-хост на другом AS: при bypass-on ya+vk идут direct, google через туннель —
+// пара точек с каждой стороны отделяет «медленный маршрут» от «медленный конкретный хост».
 QStringList BenchRunner::tlsHosts() const
 {
-    return { QStringLiteral("www.google.com"), QStringLiteral("ya.ru") };
+    return { QStringLiteral("www.google.com"), QStringLiteral("ya.ru"), QStringLiteral("vk.com") };
 }
 
 BenchRunner::BenchRunner(QNetworkAccessManager *nam, QObject *parent)
@@ -74,7 +78,7 @@ void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lit
     m_pingRound = 0; m_icmpSamples.clear(); m_pingProbes = QJsonArray();
     m_idleIdx = 0; m_idleRtt.clear(); m_loadedRtt.clear();
     m_downBytes = 0; m_downFirstByteMs = -1; m_downEndMs = -1;
-    m_upMbit = 0;
+    m_upMbit = -1;
     stageTrace();
 }
 
@@ -93,6 +97,10 @@ void BenchRunner::cancel()
         m_dns->abort();
         m_dns->deleteLater();
         m_dns = nullptr;
+    }
+    if (m_hostLookup != -1) {
+        QHostInfo::abortHostLookup(m_hostLookup);
+        m_hostLookup = -1;
     }
     if (m_ssl) {
         m_ssl->disconnect(this);
@@ -157,20 +165,45 @@ void BenchRunner::dnsNext()
         m_dns = nullptr;
         if (d) d->deleteLater();
         if (epoch != m_epoch) return;
-        QJsonObject o;
-        o.insert(QStringLiteral("host"), host);
         if (d && d->error() == QDnsLookup::NoError && !d->hostAddressRecords().isEmpty()) {
+            QJsonObject o;
+            o.insert(QStringLiteral("host"), host);
             o.insert(QStringLiteral("query_ms"), double(m_t.elapsed()));
             o.insert(QStringLiteral("a"), d->hostAddressRecords().first().value().toString());
+            m_dnsProbes.append(o);
+            ++m_dnsIdx;
+            dnsNext();
+            return;
+        }
+        // iOS: QDnsLookup не реализован (нет res_*-API) — вся стадия молча давала null.
+        // Fallback на системный резолвер: query_ms сопоставим, A-запись честная.
+        dnsFallback(host);
+    });
+    m_dns->lookup();
+}
+
+void BenchRunner::dnsFallback(const QString &host)
+{
+    const int epoch = m_epoch;
+    m_t.start();
+    m_hostLookup = QHostInfo::lookupHost(host, this, [this, epoch, host](const QHostInfo &hi) {
+        if (epoch != m_epoch) return;
+        m_hostLookup = -1;
+        QJsonObject o;
+        o.insert(QStringLiteral("host"), host);
+        if (hi.error() == QHostInfo::NoError && !hi.addresses().isEmpty()) {
+            o.insert(QStringLiteral("query_ms"), double(m_t.elapsed()));
+            o.insert(QStringLiteral("a"), hi.addresses().first().toString());
+            o.insert(QStringLiteral("method"), QStringLiteral("system")); // может отдать из OS-кэша
         } else {
             o.insert(QStringLiteral("query_ms"), QJsonValue::Null);
             o.insert(QStringLiteral("a"), QJsonValue::Null);
+            o.insert(QStringLiteral("error"), hi.errorString()); // ПОЧЕМУ не разрезолвилось
         }
         m_dnsProbes.append(o);
         ++m_dnsIdx;
         dnsNext();
     });
-    m_dns->lookup();
 }
 
 // --- стадия 1b: TCP/TLS-фазы (разложение пути: connect vs handshake) ---------------------------
@@ -281,8 +314,15 @@ void BenchRunner::httpNext()
             o.insert(QStringLiteral("ttfb_ms"), double(m_httpTtfbMs));
             o.insert(QStringLiteral("total_ms"), double(total));
             o.insert(QStringLiteral("code"), code);
+            o.insert(QStringLiteral("bytes"), double(m_httpBytes)); // сколько реально дочитали (кап 1.5МБ)
         } else {
+            // ПОЧЕМУ упало — без этого «error:true» неотличим: таймаут (блокировка/дроп) vs
+            // TLS-ошибка (DPI/MitM) vs connection refused (гео-бан хоста, кейс ozon с загран-IP)
             o.insert(QStringLiteral("error"), true);
+            o.insert(QStringLiteral("error_kind"), QLatin1String(
+                QMetaEnum::fromType<QNetworkReply::NetworkError>().valueToKey(r->error())));
+            o.insert(QStringLiteral("error_str"), r->errorString());
+            if (code > 0) o.insert(QStringLiteral("code"), code);
         }
         m_httpProbes.append(o);
         ++m_httpIdx;
@@ -301,13 +341,16 @@ void BenchRunner::stagePing()
 
 void BenchRunner::pingRound()
 {
-    const int rounds = m_lite ? 3 : 5;
+    // 10/5 раундов: на 5 пингах один потерянный пакет = «20% потерь» — статистика из шума.
+    // Раунд на здоровом пути ~RTT (probeAll ждёт оба ответа), полная серия — секунды.
+    const int rounds = m_lite ? 5 : 10;
     if (m_pingRound >= rounds) {
         // финализация: loss = недошедшие раунды, jitter = max-min удачных
         for (auto it = m_icmpSamples.constBegin(); it != m_icmpSamples.constEnd(); ++it) {
             const QVector<double> &s = it.value();
             QJsonObject o;
             o.insert(QStringLiteral("target"), it.key());
+            o.insert(QStringLiteral("sent"), rounds); // размер серии — для честной оценки потерь
             if (s.isEmpty()) {
                 o.insert(QStringLiteral("unreachable"), true);
             } else {
@@ -355,6 +398,8 @@ QNetworkReply *BenchRunner::head204()
 }
 
 // --- стадия 4: базовый app-layer RTT (idle) ---------------------------------------------------
+// Первый HEAD несёт стоимость DNS+TCP+TLS до нового хоста (реальные данные: «базовый RTT 667 мс»
+// при пинге 161 на дальней ноде) — он уходит в conn_setup_ms, медиана считается по остальным.
 void BenchRunner::stageIdleRtt()
 {
     emit stageChanged(QStringLiteral("rtt"));
@@ -364,7 +409,7 @@ void BenchRunner::stageIdleRtt()
 
 void BenchRunner::idleRttNext()
 {
-    if (m_idleIdx >= (m_lite ? 3 : 5)) {
+    if (m_idleIdx >= (m_lite ? 4 : 6)) { // +1 к прежним 3/5: нулевой сэмпл — прогрев
         stageDown();
         return;
     }
@@ -487,14 +532,22 @@ void BenchRunner::assemble()
     http.insert(QStringLiteral("median_total_ms"), num(median(totalMs)));
     http.insert(QStringLiteral("failures"), httpFail);
 
-    QJsonObject thr;
-    thr.insert(QStringLiteral("down_mbit"), downWindow > 0 ? mbit(m_downBytes, downWindow) : 0);
-    thr.insert(QStringLiteral("up_mbit"), m_upMbit);
+    QJsonObject thr; // null = «не мерялось/упало», НЕ ноль (0 в сводке читается как «канал мёртв»)
+    thr.insert(QStringLiteral("down_mbit"), downWindow > 0 ? QJsonValue(mbit(m_downBytes, downWindow))
+                                                           : QJsonValue(QJsonValue::Null));
+    thr.insert(QStringLiteral("up_mbit"), num(m_upMbit));
+
+    // прогрев (DNS+TCP+TLS первого HEAD) — отдельная метрика, в медиану RTT не входит
+    double connSetup = -1;
+    QVector<double> idle = m_idleRtt;
+    if (idle.size() >= 2)
+        connSetup = idle.takeFirst();
 
     QJsonObject nq; // rpm считает только Apple networkQuality; наш аналог — loaded_rtt
     nq.insert(QStringLiteral("rpm"), QJsonValue::Null);
-    nq.insert(QStringLiteral("base_rtt_ms"), num(median(m_idleRtt)));
+    nq.insert(QStringLiteral("base_rtt_ms"), num(median(idle)));
     nq.insert(QStringLiteral("loaded_rtt_ms"), num(median(m_loadedRtt)));
+    nq.insert(QStringLiteral("conn_setup_ms"), num(connSetup));
 
     // TCP/TLS-фазы: медианы по пробам (разложение «где именно медленно»)
     QVector<double> tcpMs, hsMs;

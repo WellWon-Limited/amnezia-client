@@ -17,6 +17,8 @@
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
+#include "AvpnShareBridge.h" // AVPN: нативный share sheet (рефералка/перенос)
+#include "core/utils/qrCodeUtils.h" // AVPN: QR для ссылки переноса (makeQrCode)
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
 #include "core/utils/routeModes.h" // AVPN RU-direct: amnezia::RouteMode::VpnAllExceptSites
@@ -1715,7 +1717,70 @@ QVariantMap AvpnEngineQml::createTransfer()
     }
     result.insert(QStringLiteral("transfer_token"), resp.transferToken);
     result.insert(QStringLiteral("deep_link"), resp.deepLink);
+    // опциональные (бэк по TRANSFER-KEYS-BACKEND-HANDOFF; пусто/0 пока не докатил)
+    result.insert(QStringLiteral("web_link"), resp.webLink);
+    result.insert(QStringLiteral("expires_in_s"), resp.expiresInS);
     return result;
+}
+
+// AVPN (grant-ключи): активация TRIBE-XXXX-XXXX-XXXX (промо/подарок/компенсация) на текущий аккаунт.
+// Токен НЕ ротируется; успех = мапа с начислением, UI показывает «+N дней». Бэк — по handoff §3.B2.
+QVariantMap AvpnEngineQml::redeemGrantKey(const QString &key)
+{
+    QVariantMap result;
+    if (m_busy)
+        return result;
+
+    m_busy = true;
+    emit changed();
+
+    avpn::GrantKeyResponse resp;
+    QString err;
+    const auto res = Enrollment::redeemGrantKey(m_nam, m_baseUrl, authToken(), key, resp, err);
+
+    m_busy = false;
+    emit changed();
+
+    if (res != GrantKeyResult::Ok) {
+        QString msg;
+        switch (res) {
+        case GrantKeyResult::NotFound:    msg = QStringLiteral("Ключ не найден — проверьте ввод"); break;
+        case GrantKeyResult::AlreadyUsed: msg = QStringLiteral("Этот ключ уже использован"); break;
+        case GrantKeyResult::Expired:     msg = QStringLiteral("Ключ истёк или отозван"); break;
+        default: msg = err.isEmpty() ? QStringLiteral("Не удалось активировать ключ") : err; break;
+        }
+        emit error(msg);
+        return result;
+    }
+
+    result.insert(QStringLiteral("granted_days"), resp.grantedDays);
+    result.insert(QStringLiteral("granted_gib"), resp.grantedGib);
+    result.insert(QStringLiteral("plan"), resp.plan);
+    result.insert(QStringLiteral("new_expiry"), resp.newExpiry);
+    refreshSubscription(); // async данные-only: шапка (дни/ГБ) обновится, туннель не трогаем
+    return result;
+}
+
+// AVPN: системный share sheet для текста/ссылки — см. AvpnShareBridge (iOS/Android), desktop → false.
+bool AvpnEngineQml::shareText(const QString &text) const
+{
+    return AvpnShare::shareText(text);
+}
+
+// AVPN: QR для ссылки переноса — СЫРАЯ строка в QR (НЕ generateQrCodeImageSeries: тот заворачивает
+// в амнезиевский чанк-конверт magic+base64 для импорта конфигов — системная камера его не поймёт).
+// border=2 модуля — quiet zone для считывания. Data-URI SVG (чёрный на белом) для Image.source.
+QString AvpnEngineQml::makeQrCode(const QString &text) const
+{
+    if (text.isEmpty())
+        return QString();
+    try {
+        const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(text.toUtf8().constData(),
+                                                                   qrcodegen::QrCode::Ecc::MEDIUM);
+        return qrCodeUtils::svgToBase64(QString::fromStdString(qrcodegen::toSvgString(qr, 2)));
+    } catch (...) {
+        return QString(); // слишком длинно/не влезло — QML покажет плейсхолдер
+    }
 }
 
 // AVPN (Task 7): тумблер #6 — читаем из ТОГО ЖЕ стора, что QML Settings{category:"AvpnSettings"}.
@@ -2039,6 +2104,8 @@ void AvpnEngineQml::refreshAccount()
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // AVPN (перенос «как SIM»): 410 transferred — см. refreshSubscription (тот же флаг).
+        if (code == 410 && !m_transferredAway) { m_transferredAway = true; emit changed(); }
         QVariantMap result;
         if (code >= 200 && code < 300) {
             const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
@@ -2084,8 +2151,15 @@ void AvpnEngineQml::refreshSubscription()
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // AVPN (перенос «как SIM»): 410 transferred — подписка уехала на другое устройство.
+        // Взводим терминальный флаг для UI («Подписка перенесена»); НЕ ре-энроллим.
+        if (code == 410) {
+            if (!m_transferredAway) { m_transferredAway = true; emit changed(); }
+            return;
+        }
         if (code < 200 || code >= 300)
             return; // 401/сеть/таймаут → тихо; данные обновятся при следующем connect/bootstrap
+        if (m_transferredAway) { m_transferredAway = false; emit changed(); } // подписка снова валидна (новый ключ/энролл)
         Subscription sub;
         QString err;
         if (!SubscriptionParser::parse(reply->readAll(), sub, err))

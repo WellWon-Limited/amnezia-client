@@ -142,13 +142,16 @@ int main(int argc, char **argv)
 
     // --- BenchAnalysis: вердикты по одному замеру + A/B-сравнение ---
     {
-        auto mk = [](double dns, double ttfb, double down, double base, double loaded, int fails) {
+        auto mk = [](double dns, double ttfb, double down, double base, double loaded, int fails,
+                     double lossPct = 0.0, int sent = 10) {
             QJsonObject r;
             r.insert("dns", QJsonObject{{"median_ms", dns}});
             r.insert("http", QJsonObject{{"median_ttfb_ms", ttfb}, {"median_total_ms", ttfb * 1.6}, {"failures", fails}});
             r.insert("throughput", QJsonObject{{"down_mbit", down}, {"up_mbit", down / 3}});
             r.insert("network_quality", QJsonObject{{"base_rtt_ms", base}, {"loaded_rtt_ms", loaded}});
-            r.insert("ping", QJsonArray{QJsonObject{{"target", "1.1.1.1"}, {"rtt_avg", base}, {"loss_pct", 0.0}}});
+            r.insert("tls", QJsonObject{{"median_tcp_ms", base / 3}, {"median_handshake_ms", base / 2}});
+            r.insert("ping", QJsonArray{QJsonObject{{"target", "1.1.1.1"}, {"rtt_avg", base},
+                                                    {"loss_pct", lossPct}, {"sent", sent}}});
             return r;
         };
         auto hasCode = [](const QJsonArray &vs, const char *code) {
@@ -160,10 +163,18 @@ int main(int argc, char **argv)
         const QJsonArray bloat = bench::verdicts(mk(25, 250, 80, 90, 400, 0));   // loaded/base > 2.5
         const QJsonArray slowDns = bench::verdicts(mk(120, 250, 80, 90, 110, 0));
         const QJsonArray lowGp = bench::verdicts(mk(25, 250, 2.0, 90, 110, 0));  // 2 Мбит при RTT 90
+        // потери: 1 из 10 (10%) = шум → info, НЕ bad; 3 из 10 (30%) = bad; текст без «%%»
+        const QJsonArray loss1 = bench::verdicts(mk(25, 250, 80, 90, 110, 0, 10.0, 10));
+        const QJsonArray loss3 = bench::verdicts(mk(25, 250, 80, 90, 110, 0, 30.0, 10));
+        bool lossTextOk = true;
+        for (const QJsonValue &v : loss3)
+            if (v.toObject().value("text").toString().contains(QLatin1String("%%"))) lossTextOk = false;
         const bool vOk = good.isEmpty()
                       && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
                       && hasCode(slowDns, "dns-slow")
-                      && hasCode(lowGp, "low-goodput");
+                      && hasCode(lowGp, "low-goodput")
+                      && !hasCode(loss1, "packet-loss") && hasCode(loss1, "packet-loss-single")
+                      && hasCode(loss3, "packet-loss") && lossTextOk;
         // A/B: b хуже a по TTFB на 30% (существенно) и лучше по загрузке (не в significant)
         const QJsonObject cmp = bench::compare(mk(25, 200, 50, 90, 110, 0), mk(25, 260, 70, 90, 110, 0));
         const QJsonArray sig = cmp.value("significant").toArray();
@@ -171,10 +182,10 @@ int main(int argc, char **argv)
         for (const QJsonValue &s : sig)
             if (s.toString().startsWith(QLatin1String("TTFB"))) ttfbFlagged = true;
         const bool cOk = ttfbFlagged && sig.size() >= 2 /* TTFB + Страница */
-                      && cmp.value("deltas").toArray().size() == 7;
+                      && cmp.value("deltas").toArray().size() == 9; // 7 базовых + TCP/TLS-фазы
         printf("bench analysis: verdicts=%d compare=%d (sig=%d)\n", vOk ? 1 : 0, cOk ? 1 : 0, int(sig.size()));
         if (!vOk || !cOk) { fprintf(stderr, "FAIL: BenchAnalysis verdicts/compare\n"); return 8; }
-        printf("benchanalysis: OK (bufferbloat/dns-slow/low-goodput, A/B significant deltas)\n");
+        printf("benchanalysis: OK (bufferbloat/dns-slow/low-goodput, loss 1/10=info 3/10=bad, A/B deltas+tls)\n");
     }
 
     // --- Enrollment: чистые builders/parsers ---

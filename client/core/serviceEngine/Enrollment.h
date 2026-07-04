@@ -59,7 +59,23 @@ enum class TransferRedeemResult { Ok, BadToken, SeatLimit, Failed };
 struct TransferMintResponse {
     QString transferToken;
     QString deepLink;           // tribe://transfer?t=…
+    QString webLink;            // https://tribevpn.com/transfer?t=… (опционально; TRANSFER-KEYS-BACKEND-HANDOFF §4)
+    int     expiresInS = 0;     // TTL токена для таймера в модалке (0 = бэк ещё не отдаёт)
 };
+
+// AVPN (grant-ключи, TRANSFER-KEYS-BACKEND-HANDOFF §3.B2): ответ POST /v1/key/redeem —
+// промо/подарок/компенсация вида TRIBE-XXXX-XXXX-XXXX. Начисление на ТЕКУЩИЙ аккаунт (Bearer),
+// токен НЕ ротируется (в отличие от code/redeem — там код=логин).
+struct GrantKeyResponse {
+    int     grantedDays = 0;
+    double  grantedGib = 0;
+    QString plan;       // пусто = план не менялся
+    QString newExpiry;
+};
+
+// AVPN (grant-ключи): исход /v1/key/redeem — 200 / 404 (нет такого) / 409 (уже использован) /
+// 410 (истёк или отозван) / прочее.
+enum class GrantKeyResult { Ok, NotFound, AlreadyUsed, Expired, Failed };
 
 // AVPN (оплата): ответ POST /v1/cabinet/web-link — одноразовый авто-логин в web-кабинет.
 // Контракт: { url: "https://tribevpn.com/account?wl=<token>", expires_in } (wl single-use, TTL ~90с).
@@ -69,7 +85,9 @@ struct WebLinkResponse {
 };
 
 // AVPN (auth self-heal): исход запроса к /v1/subscription по HTTP-коду + сетевому флагу.
-enum class FetchOutcome { Ok, Unauthorized, RateLimited, NetworkError, HttpError };
+// Transferred (410) — устройство перенесено «как SIM» на другое (TRANSFER-KEYS-BACKEND-HANDOFF
+// §3.B1.4): терминально, НЕ лечится ре-энроллом (иначе молча выбили бы себе новый триал).
+enum class FetchOutcome { Ok, Unauthorized, RateLimited, NetworkError, HttpError, Transferred };
 
 // AVPN (auth self-heal): что делать после запроса с токеном.
 //   Proceed           — успех, работаем дальше;
@@ -106,6 +124,7 @@ public:
     {
         if (httpCode == 0 && hadNetworkError)  return FetchOutcome::NetworkError;
         if (httpCode == 401)                   return FetchOutcome::Unauthorized;
+        if (httpCode == 410)                   return FetchOutcome::Transferred; // перенос «как SIM» (handoff §3.B1.4)
         if (httpCode == 429)                   return FetchOutcome::RateLimited;
         if (httpCode >= 200 && httpCode < 300) return FetchOutcome::Ok;
         return FetchOutcome::HttpError;
@@ -113,6 +132,8 @@ public:
 
     // AVPN (auth self-heal): решение о восстановлении. 401 лечим РОВНО для токена из стора и РОВНО
     // один раз — иначе петля enroll↔401. Сеть/лимит/HTTP токен не трогают (важно для LKG-кэша).
+    // Transferred (410) НЕ лечим намеренно: перенос — законное состояние, ре-энролл здесь молча
+    // выбил бы новый триал (анти-фрод дыра + ломает «подписка полностью мигрировала»).
     static AuthRecoveryAction decideAuthRecovery(FetchOutcome outcome, bool tokenFromStore,
                                                  bool alreadyReEnrolled)
     {
@@ -224,6 +245,9 @@ public:
         const QJsonObject o = doc.object();
         out.transferToken = o.value(QStringLiteral("transfer_token")).toString();
         out.deepLink = o.value(QStringLiteral("deep_link")).toString();
+        // опциональные поля (бэк докатит по TRANSFER-KEYS-BACKEND-HANDOFF) — отсутствие НЕ ошибка
+        out.webLink = o.value(QStringLiteral("web_link")).toString();
+        out.expiresInS = o.value(QStringLiteral("expires_in_s")).toInt(0);
         if (out.transferToken.isEmpty()) { error = QStringLiteral("missing transfer_token"); return false; }
         return true;
     }
@@ -322,6 +346,28 @@ public:
     // + готовый deep_link (tribe://transfer?t=…) для QR/копирования в UI. true + out при 2xx. [IN-FORK]
     static bool createTransfer(QNetworkAccessManager *nam, const QString &baseUrl,
                                const QString &authToken, TransferMintResponse &out, QString &error);
+
+    // AVPN (grant-ключи): POST {base}/v1/key/redeem (Bearer authToken) — активировать промо/подарочный/
+    // компенсационный ключ TRIBE-XXXX-XXXX-XXXX на ТЕКУЩИЙ аккаунт. Токен НЕ ротируется. Бэк — по
+    // TRANSFER-KEYS-BACKEND-HANDOFF §3.B2 (до деплоя эндпоинта бэк ответит 404 = «ключ не найден»).
+    static GrantKeyResult redeemGrantKey(QNetworkAccessManager *nam, const QString &baseUrl,
+                                         const QString &authToken, const QString &key,
+                                         GrantKeyResponse &out, QString &error);
+
+    // AVPN (grant-ключи): разбор ответа /v1/key/redeem ({granted_days, granted_gib, plan, new_expiry}).
+    static bool parseGrantKeyResponse(const QByteArray &json, GrantKeyResponse &out, QString &error)
+    {
+        QJsonParseError pe;
+        const QJsonDocument doc = QJsonDocument::fromJson(json, &pe);
+        if (pe.error != QJsonParseError::NoError) { error = pe.errorString(); return false; }
+        if (!doc.isObject()) { error = QStringLiteral("key/redeem response is not an object"); return false; }
+        const QJsonObject o = doc.object();
+        out.grantedDays = o.value(QStringLiteral("granted_days")).toInt(0);
+        out.grantedGib = o.value(QStringLiteral("granted_gib")).toDouble(0);
+        out.plan = o.value(QStringLiteral("plan")).toString();
+        out.newExpiry = o.value(QStringLiteral("new_expiry")).toString();
+        return true;
+    }
 
     // Ключи в защ. хранилище (наш namespace, чтобы не пересекаться с настройками форка).
     static constexpr QLatin1String kTokenKey{"avpn/subscriptionToken"};

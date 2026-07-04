@@ -12,6 +12,10 @@
     #include "platforms/android/android_controller.h"
 #endif
 
+#ifdef AVPN_ENGINE_ENABLED
+    #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN: QR переноса из нативного сканера → мост
+#endif
+
 #if defined Q_OS_ANDROID
 ImportUiController* ImportUiController::mInstance = nullptr;
 static QMutex qrDecodeMutex;
@@ -194,6 +198,17 @@ bool ImportUiController::decodeQrCode(const QString &code)
     if (!mInstance) {
         return false;
     }
+
+#ifdef AVPN_ENGINE_ENABLED
+    // AVPN: QR переноса подписки/диплинка Tribe — это НЕ конфиг Amnezia. Отдаём мосту диплинка
+    // (tribe://transfer?t=… / https://tribevpn.com/transfer?t=…) и возвращаем true → нативный
+    // сканер (CameraActivity) закрывается. Дальше transferRequested → AvpnEngineQml::redeemTransfer.
+    if (code.startsWith(QStringLiteral("tribe://"))
+        || code.contains(QStringLiteral("tribevpn.com/transfer"))) {
+        AvpnDeepLink_handleUrl(code.toUtf8().constData());
+        return true;
+    }
+#endif
 
     if (!mInstance->m_importController->isQrDecodingActive()) {
         mInstance->m_importController->startDecodingQr();

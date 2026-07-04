@@ -74,6 +74,15 @@ class ImportConfigActivity : ComponentActivity() {
                     }
 
                     "vpn" -> intent.data?.toString()?.let(::startMainActivity)
+
+                    // AVPN: диплинки Tribe (tribe://transfer?t=…, tribe://r/…, https://tribevpn.com/transfer)
+                    // едут тем же конвейером до C++ (onConfigImported) — там AVPN-guard отдаёт их мосту
+                    // диплинка вместо импорта конфига (coreSignalHandlers.cpp).
+                    "tribe" -> intent.data?.toString()?.let(::startMainActivity)
+
+                    "https" -> intent.data?.let { uri ->
+                        if (uri.host == "tribevpn.com") uri.toString().let(::startMainActivity)
+                    }
                 }
 
             }

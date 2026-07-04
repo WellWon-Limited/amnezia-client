@@ -37,14 +37,19 @@ PageType {
             PageController.showNotificationMessage(qsTr("Ссылка ещё загружается…"))
         }
     }
-    // TODO(native share): iOS share-лист не подключён — «Поделиться» пока тоже копирует (надёжно везде).
+    // Нативный системный share sheet (TribeEngine.shareText: iOS UIActivityViewController /
+    // Android ACTION_SEND). Desktop и нет движка → fallback: копирование + тост. // AVPN
     function shareLink() {
-        if (root.referralLink.length > 0) {
+        if (root.referralLink.length === 0) {
+            PageController.showNotificationMessage(qsTr("Ссылка ещё загружается…"))
+            return
+        }
+        var shared = root.hasEngine && typeof TribeEngine.shareText === "function"
+                     && TribeEngine.shareText(root.referralLink)
+        if (!shared) {
             refLinkEdit.text = root.referralLink
             refLinkEdit.selectAll(); refLinkEdit.copy(); refLinkEdit.deselect()
             PageController.showNotificationMessage(qsTr("Ссылка скопирована — вставь в мессенджер"))
-        } else {
-            PageController.showNotificationMessage(qsTr("Ссылка ещё загружается…"))
         }
     }
 
@@ -108,7 +113,7 @@ PageType {
 
                 // ── БАННЕР «ПОДЕЛИТЬСЯ» с подарком (возвращён из Профиля, где жил до вкладки;
                 //    дизайн v2 f313fa9c: тёмная плашка + золотой хайрлайн + анимированный подарок).
-                //    Тап — копирует реф-ссылку (как раньше). // AVPN
+                //    Тап — системный share sheet (fallback: копирование). // AVPN
                 Rectangle {
                     id: shareBanner
                     width: parent.width
@@ -263,7 +268,7 @@ PageType {
                         id: shareMa
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.copyLink()
+                        onClicked: root.shareLink()
                     }
                 }
 
@@ -282,38 +287,58 @@ PageType {
 
                         Text {
                             width: parent.width
-                            text: qsTr("Делитесь ссылкой — за каждого, кто активирует ключ по ней, начисляем %1 бонусных дней.").arg(root.daysPerFriend)
+                            text: qsTr("Поделитесь ссылкой — за каждого друга добавим %1 дней бесплатно!").arg(root.daysPerFriend)
                             color: Theme.color.text1; wrapMode: Text.WordWrap
                             font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                         }
 
-                        // ссылка (mono, в тёмном боксе)
+                        // ссылка (mono, в тёмном боксе) + иконка копирования — тап по строке копирует. // AVPN
                         Rectangle {
+                            id: linkBox
                             width: parent.width
                             implicitHeight: linkText.implicitHeight + 2 * Theme.space.md
                             radius: Theme.radius.md
                             color: Theme.color.bg800
-                            border.width: 1; border.color: Theme.color.border
+                            border.width: 1
+                            border.color: linkMa.pressed ? Theme.color.accent : Theme.color.border
+                            Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
+
                             Text {
                                 id: linkText
-                                anchors.left: parent.left; anchors.right: parent.right
-                                anchors.leftMargin: Theme.space.md; anchors.rightMargin: Theme.space.md
+                                anchors.left: parent.left; anchors.right: copyIcon.left
+                                anchors.leftMargin: Theme.space.md; anchors.rightMargin: Theme.space.sm
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: root.referralLink.length > 0 ? root.referralLink : qsTr("Загрузка ссылки…")
                                 color: Theme.color.text2; elide: Text.ElideMiddle
                                 font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
+                            }
+                            // иконка «копировать» (Tabler copy, сетка 24): два наложенных квадрата
+                            Shape {
+                                id: copyIcon
+                                anchors.right: parent.right; anchors.rightMargin: Theme.space.md
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 24; height: 24
+                                scale: 18 / 24; transformOrigin: Item.Center
+                                preferredRendererType: Shape.CurveRenderer
+                                ShapePath {
+                                    strokeColor: linkMa.pressed ? Theme.color.accent : Theme.color.text3
+                                    fillColor: "transparent"; strokeWidth: 2
+                                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                    PathSvg { path: "M8 8 m2 0 h8 a2 2 0 0 1 2 2 v8 a2 2 0 0 1 -2 2 h-8 a2 2 0 0 1 -2 -2 v-8 a2 2 0 0 1 2 -2 M16 8 V6 a2 2 0 0 0 -2 -2 H6 a2 2 0 0 0 -2 2 v8 a2 2 0 0 0 2 2 h2" }
+                                }
+                            }
+                            MouseArea {
+                                id: linkMa
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.copyLink()
                             }
                         }
 
                         TribeButton {
                             width: parent.width
                             variant: "primary"
-                            text: qsTr("Скопировать ссылку")
-                            onClicked: root.copyLink()
-                        }
-                        TribeButton {
-                            width: parent.width
-                            variant: "glass"
+                            glow: false            // голубая, но без засветов (правка 2026-07-03)
                             text: qsTr("Поделиться")
                             onClicked: root.shareLink()
                         }

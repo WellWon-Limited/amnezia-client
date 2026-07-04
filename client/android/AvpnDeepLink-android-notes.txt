@@ -1,52 +1,26 @@
 AVPN (Task 13) — Android: обратный диплинк ПЕРЕНОСА («как SIM») на новое устройство.
-НЕ подключено к сборке (нет Android-окружения в этом цикле). План по аналогии с iOS-частью.
+✅ ПОДКЛЮЧЕНО (2026-07-03) — реализация ПРОЩЕ первоначального плана: без нового JNI-класса,
+переиспользован существующий конвейер доставки строк из ImportConfigActivity.
 
-Цель: поймать tribe://transfer?t=<token> (custom scheme) и https://tribevpn.com/transfer?t=...
-(App Link) → вызвать C++ AvpnDeepLink_handleUrl(url). Мост извлечёт токен переноса и эмитит
-transferRequested(token); coreController связал это с AvpnEngineQml::redeemTransfer(token) →
-POST /v1/transfer/redeem → РОТАЦИЯ subscription_token (Enrollment::saveToken) → подписка re-fetch,
-доступ переносится на ЭТО устройство (старое — гасится бэкендом fleet-wide).
+Реальный маршрут:
+1) AndroidManifest.xml (ImportConfigActivity): intent-filter scheme="tribe" (все tribe://-ссылки:
+   transfer + рефералка /r/) + App Link https://tribevpn.com/transfer (autoVerify; заработает после
+   выкладки /.well-known/assetlinks.json бэком — TRANSFER-KEYS-BACKEND-HANDOFF §3.B1.2). <!-- AVPN -->
+2) ImportConfigActivity.kt readConfig(): схемы "tribe" и "https"(host=tribevpn.com) →
+   startMainActivity(url) — тот же путь, что vpn://-конфиги (ACTION_IMPORT_CONFIG → AmneziaActivity →
+   QtAndroidController.onConfigImported). // AVPN
+3) coreSignalHandlers.cpp initAndroidConnectionHandler(): AVPN-guard в лямбде importConfigFromOutside —
+   строки tribe://… / …tribevpn.com/… НЕ конфиг → AvpnDeepLink_handleUrl(url) и return (импорт не
+   открывается). // AVPN, под #ifdef AVPN_ENGINE_ENABLED.
+4) Дальше общий кросс-платформенный путь (как iOS): AvpnDeepLinkBridge извлекает токен →
+   transferRequested → AvpnEngineQml::redeemTransfer → POST /v1/transfer/redeem → РОТАЦИЯ
+   subscription_token → подписка на ЭТОМ устройстве (старое бэкенд гасит fleet-wide).
 
-1) AndroidManifest.xml — в <activity> главной (AmneziaActivity / org.amnezia.vpn.*) добавить:
+Скан QR на Android: кнопка «Сканировать QR» (PageAccountTribe) → ImportController.startDecodingQr() →
+нативная CameraActivity → QtAndroidController.decodeQrCode → AVPN-guard в
+ImportUiController::decodeQrCode (tribe://… / tribevpn.com/transfer → AvpnDeepLink_handleUrl,
+return true = сканер закрывается). // AVPN
 
-    <!-- custom scheme -->
-    <intent-filter>
-        <action android:name="android.intent.action.VIEW"/>
-        <category android:name="android.intent.category.DEFAULT"/>
-        <category android:name="android.intent.category.BROWSABLE"/>
-        <data android:scheme="tribe" android:host="transfer"/>
-    </intent-filter>
-
-    <!-- App Links (https), autoVerify через assetlinks.json на tribevpn.com -->
-    <intent-filter android:autoVerify="true">
-        <action android:name="android.intent.action.VIEW"/>
-        <category android:name="android.intent.category.DEFAULT"/>
-        <category android:name="android.intent.category.BROWSABLE"/>
-        <data android:scheme="https" android:host="tribevpn.com" android:pathPrefix="/transfer"/>
-    </intent-filter>
-
-2) Activity (Kotlin) — onCreate + onNewIntent:
-
-    private fun handleAvpnDeepLink(intent: Intent?) {
-        val data = intent?.data ?: return
-        val s = data.toString()
-        if (s.startsWith("tribe://transfer") || s.contains("tribevpn.com/transfer"))
-            AvpnNative.handleDeepLink(s)   // JNI → C++ AvpnDeepLink_handleUrl
-    }
-    // onCreate: handleAvpnDeepLink(intent); onNewIntent(i): setIntent(i); handleAvpnDeepLink(i)
-
-3) JNI-мост — в platforms/android/android_controller.cpp (рядом с другими JNICALL) добавить:
-
-    extern "C" JNIEXPORT void JNICALL
-    Java_org_amnezia_vpn_AvpnNative_handleDeepLink(JNIEnv *env, jobject, jstring url) {
-        const char *u = env->GetStringUTFChars(url, nullptr);
-        AvpnDeepLink_handleUrl(u);          // объявлена в AvpnDeepLinkBridge.h (extern "C")
-        env->ReleaseStringUTFChars(url, u);
-    }
-
-4) assetlinks.json (хостит веб-команда на https://tribevpn.com/.well-known/assetlinks.json) —
-   для App Links autoVerify (sha256 подписи релизного keystore + package name).
-
-C++-мост (AvpnDeepLinkBridge) уже кросс-платформенный — Android-сторона только зовёт
-AvpnDeepLink_handleUrl(); остальное (извлечение токена, transferRequested→redeemTransfer в движке,
-РОТАЦИЯ токена, re-fetch подписки) общее с iOS.
+assetlinks.json (https://tribevpn.com/.well-known/assetlinks.json) — на бэк-команде (handoff §3.B1.2):
+sha256 релизного keystore + package name. До выкладки https-линки открываются через chooser/браузер,
+custom scheme tribe:// работает сразу.

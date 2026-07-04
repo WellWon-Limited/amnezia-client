@@ -123,6 +123,27 @@
                 <data android:scheme="vpn" android:host="*" />
             </intent-filter>
 
+            <!-- AVPN: диплинки Tribe — перенос подписки tribe://transfer?t=… и рефералка tribe://r/…
+                 (доставка: readConfig → startMainActivity → onConfigImported → AVPN-guard в
+                 coreSignalHandlers.cpp → AvpnDeepLink_handleUrl) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="tribe" />
+            </intent-filter>
+
+            <!-- AVPN: App Links https://tribevpn.com/transfer?t=… (autoVerify заработает, когда бэк
+                 выложит /.well-known/assetlinks.json — TRANSFER-KEYS-BACKEND-HANDOFF §3.B1.2) -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="https" android:host="tribevpn.com" android:pathPrefix="/transfer" />
+            </intent-filter>
+
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

@@ -79,9 +79,12 @@ PageType {
             id: composer
             Layout.fillWidth: true
             color: Theme.color.bg800
-            readonly property real bottomInset: Math.max(PageController.safeAreaBottomMargin, PageController.imeHeight)
-            // строка composer + по md-отступу сверху/снизу + safe-area/IME-инсет
-            implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md + bottomInset
+            // строка composer + по md-отступу сверху/снизу. БЕЗ safe-area/IME-инсетов: зона вкладки
+            // заканчивается на верхе навбара (PageStart: tabBarStackView.bottom = avpnBottomNav.top),
+            // а навбар САМ несёт home-indicator (bottomInset в implicitHeight) и САМ поднимается над
+            // клавиатурой (anchors.bottomMargin = imeHeight). Дублирование здесь давало лишний зазор
+            // ~34px на iOS (на маке инсеты≈0 — не воспроизводилось). // AVPN
+            implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md
 
             // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
@@ -93,12 +96,8 @@ PageType {
                 id: composerRow
                 anchors.left: parent.left; anchors.right: parent.right
                 anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
-                // AVPN: прижато к НИЗУ над safe-area/IME-инсетом → острова капсулы сверху/снизу равны
-                // (md и md), а инсет (home-indicator/клавиатура) уходит ПОД низ. Раньше ряд был прижат
-                // к верху (topMargin md) + инсет снизу → на iOS капсула «висела высоко» (на маке инсет≈0,
-                // потому там было нормально). implicitHeight = row + 2·md + inset ⇒ верхний остров = md.
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: Theme.space.md + composer.bottomInset
+                anchors.bottomMargin: Theme.space.md
                 spacing: Theme.space.sm
 
                 // авто-растущая капсула с полем ввода (растёт вверх, кнопка остаётся на месте)

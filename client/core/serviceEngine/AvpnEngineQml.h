@@ -45,6 +45,10 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(qlonglong trafficUsed READ trafficUsed NOTIFY changed)
     Q_PROPERTY(qlonglong trafficLimit READ trafficLimit NOTIFY changed)
     Q_PROPERTY(bool subActive READ subActive NOTIFY changed)
+    // AVPN (перенос «как SIM»): бэк ответил 410 transferred на /v1/subscription|/v1/account —
+    // подписка УЕХАЛА на другое устройство. Терминально до ре-энролла/нового ключа; self-heal
+    // НЕ ре-энроллит (Enrollment::decideAuthRecovery). UI показывает «Подписка перенесена».
+    Q_PROPERTY(bool transferredAway READ transferredAway NOTIFY changed)
     // AVPN: JWT подписки — для авторизованного редиректа в кабинет (кнопка «Обновить ключ»).
     Q_PROPERTY(QString authToken READ authToken NOTIFY changed)
     // AVPN: реальные серверы (вместо хардкода). currentNode = {region,endpoint,ip,connected,hasNode};
@@ -89,6 +93,12 @@ class AvpnEngineQml : public QObject {
     // lite-бенч→next; в конце восстановление исходного pin/подключения. Итог — сигнал sweepFinished.
     Q_PROPERTY(bool sweepRunning READ sweepRunning NOTIFY sweepChanged)
     Q_PROPERTY(QString sweepProgress READ sweepProgress NOTIFY sweepChanged)
+    // AVPN (панель администратора, авто-A/B): при подключённом Tribe одна кнопка сама меряет пару
+    // bypass-on↔bypass-off: full-бенч на текущем тумблере → setBypassMasterOn(!x) (reconcile сам
+    // передёргивает туннель) → второй бенч → возврат тумблера. Метки выводятся из ФАКТИЧЕСКОГО
+    // состояния настроек — ошибиться меткой невозможно. Итог — abFinished (type:"ab-bypass").
+    Q_PROPERTY(bool abRunning READ abRunning NOTIFY abChanged)
+    Q_PROPERTY(QString abProgress READ abProgress NOTIFY abChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -103,6 +113,7 @@ public:
     qlonglong trafficUsed() const;
     qlonglong trafficLimit() const;
     bool subActive() const;
+    bool transferredAway() const { return m_transferredAway; }
     QString authToken() const;  // AVPN: JWT из защищённого стора (Enrollment::loadToken)
 
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
@@ -143,10 +154,21 @@ public:
     bool sweepRunning() const { return m_sweepPhase != SweepPhase::Idle; }
     QString sweepProgress() const { return m_sweepProgress; }
 
+    // AVPN (панель администратора, авто-A/B байпаса): 2 full-бенча + 2 реконнекта (~90 МБ, ~5 мин).
+    // Только при подключённом Tribe; фазовая машина поверх ПУБЛИЧНЫХ переходов (как свип нод).
+    Q_INVOKABLE void startBypassAb();
+    Q_INVOKABLE void cancelBypassAb();
+    bool abRunning() const { return m_abPhase != AbPhase::Idle; }
+    QString abProgress() const { return m_abProgress; }
+
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
     Q_INVOKABLE QString benchLastJson(const QString &label) const;
     Q_INVOKABLE void clearBenchHistory();
+    // AVPN (авто-A/B): сводный отчёт всех собранных меток (baseline/on/off/amnezia) одним JSON
+    // (type:"full-report": замеры + парные сравнения). "" пока собрано <2 меток.
+    Q_INVOKABLE QString buildFullReport() const;
+    Q_INVOKABLE QVariantMap benchHistoryInfo() const; // метка → ts последнего замера (карточка «N/4»)
     Q_INVOKABLE void bootstrap();                    // AVPN: тихая прогрузка подписки при старте (Task 11; без connect)
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
@@ -173,6 +195,12 @@ public:
     // evictDeviceId — backend-id из devices[] для 1-seat «перенести сюда» (пусто = обычный redeem).
     Q_INVOKABLE void redeemCode(const QString &code, const QString &evictDeviceId = QString());
 
+    // AVPN (grant-ключи): активировать промо/подарочный/компенсационный ключ TRIBE-XXXX-XXXX-XXXX
+    // (POST /v1/key/redeem, Bearer; токен НЕ ротируется — начисление на текущий аккаунт). Синхронно.
+    // Возвращает {granted_days, granted_gib, plan, new_expiry}; пустая мапа + emit error при провале.
+    // Диспатч формата ввода (transfer-ссылка / TRIBE-… / access-code) делает QML (PageAccountTribe).
+    Q_INVOKABLE QVariantMap redeemGrantKey(const QString &key);
+
     // AVPN (Task 13): принять перенос «как SIM» на ЭТО устройство (POST /v1/transfer/redeem). Зовётся
     // мостом диплинка (AvpnDeepLinkBridge) при tribe://transfer?t=… . 200 → РОТАЦИЯ токена внутри
     // Enrollment::redeemTransfer (saveToken) → re-fetch подписки → emit transferRedeemed()+changed().
@@ -183,6 +211,15 @@ public:
     // Возвращает { transfer_token, deep_link } для рендера QR/копирования в UI. Пустая мапа при ошибке
     // (+ emit error). Синхронно (QEventLoop).
     Q_INVOKABLE QVariantMap createTransfer();
+
+    // AVPN: системный share sheet для текста/ссылки (рефералка, перенос). iOS = UIActivityViewController
+    // (non-blocking), Android = ACTION_SEND chooser, desktop = false → QML-fallback (copy + тост).
+    Q_INVOKABLE bool shareText(const QString &text) const;
+
+    // AVPN: QR-картинка для СЫРОЙ строки (ссылка переноса) — data:image/svg;base64,… для Image.source.
+    // Кодирует текст как есть (qrcodegen), БЕЗ амнезиевского чанк-конверта — читается системной камерой.
+    // Пустая строка при ошибке кодирования.
+    Q_INVOKABLE QString makeQrCode(const QString &text) const;
 
     // AVPN (Task 7): авто-пауза «для покупок». Опускает туннель (m_tunnel.down(), state→Paused) на
     // время покупки в РФ-приложении и АВТО-ВОЗВРАЩАЕТ его через `seconds` секунд бездействия
@@ -336,6 +373,11 @@ signals:
     // AVPN (панель администратора): свип завершён. rows — [{node_id,label,connect_ms,ttfb_ms,down_mbit,
     // base_rtt_ms,loaded_rtt_ms,verdict,ok}] отсортированные (лучшие сверху), json — полный отчёт.
     void sweepFinished(const QVariantList &rows, const QString &json);
+    // AVPN (авто-A/B байпаса): смена состояния (abRunning/abProgress).
+    void abChanged();
+    // AVPN (авто-A/B байпаса): пара замеров готова. summary — {on:{...}, off:{...}, cost:[тексты],
+    // reconnect_ms}; json — полный отчёт (type:"ab-bypass": оба замера + compare).
+    void abFinished(const QVariantMap &summary, const QString &json);
 
 private slots:
     void onTick();
@@ -411,6 +453,31 @@ private:
     QElapsedTimer                m_sweepConnT;        // замер connect_ms текущей ноды
     QTimer                       m_sweepGuard;        // сторож текущей фазы
 
+    // AVPN (авто-A/B байпаса): фазовая машина «бенч A → toggle+реконнект → бенч B → возврат».
+    // Тот же каркас, что свип: продвижение из abAdvance() (queued по changed()) + сторож фазы;
+    // m_abEpoch отбрасывает стейл. Реконнект делаем НЕ сами — setBypassMasterOn → reapplyBypass →
+    // reconcile (needsRestart) передёргивает туннель штатно; мы только ждём фактических состояний.
+    enum class AbPhase { Idle, BenchA, WaitDown, WaitUp, BenchB, RestoreDown, RestoreUp };
+    AbPhase                      m_abPhase = AbPhase::Idle;
+    int                          m_abEpoch = 0;
+    bool                         m_abOrigOn = true;    // исходный AvpnBypass/masterOn (вернём в конце)
+    QJsonObject                  m_abFirst, m_abSecond; // замер 1 (исходный тумблер) и 2 (инверсный)
+    double                       m_abSwitchMs = -1, m_abRestoreMs = -1; // длительность реконнектов
+    QElapsedTimer                m_abConnT;
+    QTimer                       m_abGuard;
+    QString                      m_abProgress;
+
+    void abEnterPhase(AbPhase ph, int guardMs);
+    void abOnBenchDone(const QJsonObject &result); // benchFinished при фазе BenchA/BenchB
+    void abAdvance();
+    void abGuardFired();
+    void abStartBench(bool second);
+    void abFail(const QString &reason); // прервать, вернуть исходный тумблер, error() наружу
+    void abFinish();
+    QJsonObject benchExtra() const;     // контекст замера: факты конфигурации + тип сети
+    static QString bypassLabel(bool on)
+    { return on ? QStringLiteral("tribe-bypass-on") : QStringLiteral("tribe-bypass-off"); }
+
     QString sweepNodeLabel(const QString &nodeId) const; // display-имя из пула снапшота
     void sweepEnterPhase(SweepPhase ph, int guardMs);
     void sweepAdvance();       // реакция на changed(): проверка достижения целевого состояния фазы
@@ -422,6 +489,7 @@ private:
     void sweepFinish();        // сборка отчёта + emit sweepFinished + сброс в Idle
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
     bool                         m_busy = false;
+    bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
     Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // ФАКТ: реальное состояние туннеля
     int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)
