@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
 
+import QRCodeReader 1.0  // AVPN: in-app сканер QR переноса (iOS натив; на desktop — no-op заглушка)
+
 import ".."              // Theme
 import "../components"
 import "../../Controls2" // PageType
@@ -58,11 +60,37 @@ PageType {
         TribeEngine.requestCabinetLink()  // async; ссылка одноразовая (TTL ~90с) — минт строго по тапу
     }
 
+    // ── УНИВЕРСАЛЬНОЕ ПОЛЕ «Активировать ключ» — диспатч по формату ввода (2026-07-03): ────
+    //   • ссылка переноса (tribe://transfer?t=… / https://tribevpn.com/transfer?t=…) → мост диплинка
+    //     (тот же путь, что скан QR/переход по ссылке) → POST /v1/transfer/redeem;
+    //   • grant-ключ TRIBE-XXXX-XXXX-XXXX (3 группы) → POST /v1/key/redeem (промо/подарок/компенсация);
+    //   • иначе (access-code, 4+ группы) → POST /v1/code/redeem как раньше.
+    function isTransferInput(c) {
+        return c.indexOf("tribe://transfer") === 0
+               || c.indexOf("tribevpn.com/transfer") >= 0
+               || c.indexOf("transfer?t=") >= 0
+    }
+    function isGrantKey(c) {
+        return /^TRIBE-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(c.toUpperCase().replace(/\s+/g, ""))
+    }
+
     function redeemKey(code) {
         var c = (code || "").trim()
         if (c.length === 0) {
             root.redeemError = true
             root.redeemHint = qsTr("Введите ключ активации")
+            return
+        }
+        if (isTransferInput(c)) {
+            if (typeof AvpnDeepLink !== "undefined") {
+                root.redeemError = false
+                redeemField.clear()
+                root.redeemHint = qsTr("Переносим подписку на это устройство…")
+                AvpnDeepLink.handleUrl(c)   // → transferRequested → TribeEngine.redeemTransfer
+            } else {
+                root.redeemError = true
+                root.redeemHint = qsTr("Движок недоступен — обновите приложение")
+            }
             return
         }
         if (!(root.hasEngine && typeof TribeEngine.redeemCode === "function")) {
@@ -76,7 +104,30 @@ PageType {
         root.redeeming = true
         root.redeemHint = qsTr("Проверяем…")
         root.redeemLastCode = c
-        doRedeem(c, "")
+        if (isGrantKey(c) && typeof TribeEngine.redeemGrantKey === "function")
+            doRedeemGrant(c)
+        else
+            doRedeem(c, "")
+    }
+
+    // grant-ключ (промо/подарок/компенсация): токен НЕ ротируется, показываем что начислено.
+    function doRedeemGrant(key) {
+        root.redeemFailed = false
+        root.redeeming = true
+        root.redeemHint = qsTr("Проверяем…")
+        var res = TribeEngine.redeemGrantKey(key)  // синхронно; провал = emit error → redeemFailed
+        root.redeeming = false
+        root.redeemHint = ""
+        if (root.redeemFailed)
+            return
+        root.redeemError = false
+        redeemField.clear()
+        var parts = []
+        if (res && Number(res.granted_days) > 0) parts.push(qsTr("+%1 дней").arg(Number(res.granted_days)))
+        if (res && Number(res.granted_gib) > 0)  parts.push(qsTr("+%1 ГБ").arg(Number(res.granted_gib)))
+        PageController.showNotificationMessage(parts.length > 0
+            ? qsTr("Ключ активирован: %1").arg(parts.join(" · "))
+            : qsTr("Ключ активирован — доступ обновлён"))
     }
 
     // общий вызов движка (обычный redeem и повтор с evict_device_id после кика устройства).
@@ -113,6 +164,15 @@ PageType {
             root.redeemHint = ""
             seatSheet.devices = devices
             seatSheet.open()
+        }
+        // перенос принят НА ЭТО устройство (скан QR / ссылка / ввод в поле): токен ротирован,
+        // подписка перечитана движком — даём явный фидбек и обновляем экран.
+        function onTransferRedeemed() {
+            root.redeemHint = ""
+            root.redeemError = false
+            scanSheet.close()
+            PageController.showNotificationMessage(qsTr("Подписка перенесена на это устройство"))
+            settingsLoadTimer.restart()
         }
         // движок перечитал данные (kick / redeem / transfer) → освежаем устройства и аккаунт.
         // НЕ синхронно в обработчике: changed() может прилетать пачкой (connect/state) — дебаунсим
@@ -214,8 +274,40 @@ PageType {
         onTriggered: { root.refreshDevices(); root.refreshAccount() }
     }
 
+    // ── СКАНЕР QR (приём переноса / ключа камерой) ──────────────────────────────────────
+    // iOS: in-app оверлей с апстрим-QRCodeReader (нативное превью камеры). Android: нативная
+    // CameraActivity апстрима (ImportController.startDecodingQr) — результат вернётся через
+    // AVPN-хук в ImportUiController::decodeQrCode → мост диплинка. Desktop: кнопка скрыта.
+    readonly property bool scanAvailable: Qt.platform.os === "ios" || Qt.platform.os === "android"
+
+    function openScanner() {
+        if (Qt.platform.os === "android") {
+            if (typeof ImportController !== "undefined" && typeof ImportController.startDecodingQr === "function")
+                ImportController.startDecodingQr()
+            return
+        }
+        scanSheet.open()
+    }
+
+    function handleScannedCode(code) {
+        var c = ("" + code).trim()
+        if (c.length === 0)
+            return
+        scanSheet.close()
+        if (isTransferInput(c)) {
+            root.redeemHint = qsTr("Переносим подписку на это устройство…")
+            if (typeof AvpnDeepLink !== "undefined")
+                AvpnDeepLink.handleUrl(c)
+        } else {
+            redeemField.text = c   // ключ в QR — прогоняем через тот же диспатчер поля
+            root.redeemKey(c)
+        }
+    }
+
     // ── ПЕРЕНОС НА НОВОЕ УСТРОЙСТВО (createTransfer) ─────────────────────────────────────
-    // Выпуск одноразового токена «как SIM» (POST /v1/transfer). Возвращает {transfer_token, deep_link}.
+    // Выпуск одноразового токена «как SIM» (POST /v1/transfer). Возвращает {transfer_token, deep_link,
+    // web_link?, expires_in_s?} (опциональные — бэк по TRANSFER-KEYS-BACKEND-HANDOFF). QR кодирует
+    // web_link (откроется и системной камерой), пока бэк не отдаёт — deep_link (in-app сканер понимает).
     function createTransfer() {
         if (!(root.hasEngine && typeof TribeEngine.createTransfer === "function")) {
             PageController.showErrorMessage(qsTr("Движок недоступен — обновите приложение"))
@@ -224,7 +316,11 @@ PageType {
         var res = TribeEngine.createTransfer()  // синхронно; пустая мапа + emit error при сбое
         if (!res || !res.deep_link || res.deep_link === "") return // onError уже показал тост
         transferSheet.deepLink = res.deep_link
+        transferSheet.webLink = res.web_link || ""
         transferSheet.token = res.transfer_token || ""
+        transferSheet.secsLeft = Number(res.expires_in_s) > 0 ? Number(res.expires_in_s) : 0
+        transferSheet.qrSource = (typeof TribeEngine.makeQrCode === "function")
+                                 ? TribeEngine.makeQrCode(transferSheet.shareUrl) : ""
         transferSheet.open()
     }
 
@@ -267,6 +363,33 @@ PageType {
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
             Layout.topMargin: Theme.space.sm
+        }
+
+        // перенос «как SIM» завершён С ЭТОГО устройства (бэк ответил 410 transferred):
+        // подписка уехала целиком — объясняем и показываем путь назад (новый ключ/перенос обратно).
+        TribeCard {
+            visible: root.hasEngine && TribeEngine.transferredAway === true
+            Layout.fillWidth: true
+            implicitHeight: transferredCol.implicitHeight + 2 * Theme.space.lg
+            ColumnLayout {
+                id: transferredCol
+                anchors.fill: parent
+                anchors.margins: Theme.space.lg
+                spacing: Theme.space.xs
+                Text {
+                    text: qsTr("Подписка перенесена на другое устройство")
+                    color: Theme.color.warning
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                    font.weight: Theme.font.wMedium
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                }
+                Text {
+                    text: qsTr("Это устройство отключено от подписки. Чтобы вернуть доступ — активируйте ключ или перенесите подписку обратно.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                }
+            }
         }
 
         TribeCard {
@@ -387,6 +510,15 @@ PageType {
                     enabled: !root.redeeming && redeemField.text.trim().length > 0
                     Layout.fillWidth: true
                     onClicked: root.redeemKey(redeemField.text)
+                }
+
+                // скан QR переноса/ключа камерой (моб. платформы; на desktop камеры-бэкенда нет)
+                TribeButton {
+                    visible: root.scanAvailable
+                    variant: "glass"
+                    text: qsTr("Сканировать QR")
+                    Layout.fillWidth: true
+                    onClicked: root.openScanner()
                 }
 
                 // пояснительный текст (text3): «Проверяем…» / ошибка валидации непустоты
@@ -887,8 +1019,9 @@ PageType {
         }
     }
 
-    // ── ПЕРЕНОС: ССЫЛКА / КОД ────────────────────────────────────────────
-    // Показ deep_link/transfer_token из createTransfer(). QR — TODO; для MVP ссылка + копирование.
+    // ── ПЕРЕНОС: QR + ССЫЛКА ─────────────────────────────────────────────
+    // Показ реального QR (TribeEngine.makeQrCode — сырая ссылка, читается системной камерой и нашим
+    // in-app сканером) + инструкция + копирование/share + таймер TTL (когда бэк отдаёт expires_in_s).
     Item {
         id: transferSheet
         anchors.fill: parent
@@ -896,9 +1029,38 @@ PageType {
         z: 100
         property bool   opened: false
         property string deepLink: ""
+        property string webLink: ""    // https-вариант (опционально, бэк по handoff)
         property string token: ""
+        property string qrSource: ""   // data:image/svg;base64,… или "" (плейсхолдер)
+        property int    secsLeft: 0    // TTL-обратный отсчёт (0 = бэк не отдал expires_in_s)
+        // что копируем/шарим/кодируем в QR: web_link предпочтительнее (откроется без приложения)
+        readonly property string shareUrl: webLink !== "" ? webLink : deepLink
         function open()  { opened = true }
         function close() { opened = false }
+
+        function copyShareUrl() {
+            linkText.selectAll(); linkText.copy(); linkText.deselect()
+            PageController.showNotificationMessage(qsTr("Ссылка скопирована"))
+        }
+        function shareUrlNative() {
+            var shared = root.hasEngine && typeof TribeEngine.shareText === "function"
+                         && TribeEngine.shareText(transferSheet.shareUrl)
+            if (!shared)
+                copyShareUrl() // desktop/стейл-бинарник: fallback = копирование + тост
+        }
+
+        // тик TTL; на нуле ссылку считаем истёкшей — закрываем с тостом
+        Timer {
+            interval: 1000; repeat: true
+            running: transferSheet.opened && transferSheet.secsLeft > 0
+            onTriggered: {
+                transferSheet.secsLeft--
+                if (transferSheet.secsLeft <= 0) {
+                    transferSheet.close()
+                    PageController.showNotificationMessage(qsTr("Ссылка переноса истекла — создайте новую"))
+                }
+            }
+        }
 
         Rectangle {
             anchors.fill: parent
@@ -928,21 +1090,33 @@ PageType {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 Text {
-                    text: qsTr("Перейдите по этой ссылке на новом устройстве, чтобы перенести подписку. Ссылка одноразовая и скоро истечёт.")
+                    text: qsTr("На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
 
-                // QR-плейсхолдер (полноценный QR — TODO). Контур + подпись.
+                // настоящий QR (сырая ссылка; белая подложка + quiet zone — читается камерой).
+                // Пустой qrSource (стейл-бинарник без makeQrCode) → контур-плейсхолдер как раньше.
                 Rectangle {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.topMargin: Theme.space.sm
-                    width: 160; height: 160
+                    width: 180; height: 180
                     radius: Theme.radius.md
-                    color: Theme.color.surface2
+                    color: transferSheet.qrSource !== "" ? "#FFFFFF" : Theme.color.surface2 // белое поле QR — намеренно вне токенов
                     border.width: 1; border.color: Theme.color.border
+
+                    Image {
+                        visible: transferSheet.qrSource !== ""
+                        anchors.fill: parent
+                        anchors.margins: Theme.space.sm
+                        source: transferSheet.qrSource
+                        sourceSize.width: width; sourceSize.height: height
+                        fillMode: Image.PreserveAspectFit
+                        smooth: false   // резкие модули QR, без мыла на ресайзе
+                    }
                     Shape {
+                        visible: transferSheet.qrSource === ""
                         anchors.centerIn: parent
                         width: 48; height: 48
                         preferredRendererType: Shape.CurveRenderer
@@ -953,6 +1127,17 @@ PageType {
                             PathSvg { path: "M13 13 h3 v3 h-3z M19 13 v3 M13 19 h3 v1 M19 19 h1" }
                         }
                     }
+                }
+
+                // TTL-отсчёт (виден только когда бэк отдаёт expires_in_s)
+                Text {
+                    visible: transferSheet.secsLeft > 0
+                    Layout.alignment: Qt.AlignHCenter
+                    text: qsTr("Ссылка истечёт через %1:%2")
+                          .arg(Math.floor(transferSheet.secsLeft / 60))
+                          .arg(("0" + (transferSheet.secsLeft % 60)).slice(-2))
+                    color: Theme.color.text3
+                    font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
                 }
 
                 // ссылка (mono, переносится) — read-only TextEdit: даёт нативное выделение и copy().
@@ -968,7 +1153,7 @@ PageType {
                         anchors.fill: parent
                         anchors.margins: Theme.space.md
                         verticalAlignment: Text.AlignVCenter
-                        text: transferSheet.deepLink
+                        text: transferSheet.shareUrl
                         readOnly: true
                         selectByMouse: true
                         color: Theme.color.text2
@@ -978,6 +1163,13 @@ PageType {
                     }
                 }
 
+                TribeButton {
+                    variant: "primary"
+                    glow: false
+                    text: qsTr("Поделиться")
+                    Layout.fillWidth: true
+                    onClicked: transferSheet.shareUrlNative()
+                }
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Theme.space.md
@@ -985,13 +1177,7 @@ PageType {
                         variant: "glass"
                         text: qsTr("Скопировать ссылку")
                         Layout.fillWidth: true
-                        onClicked: {
-                            // dependency-free copy: выделить весь read-only TextEdit и copy() в системный буфер
-                            linkText.selectAll()
-                            linkText.copy()
-                            linkText.deselect()
-                            PageController.showNotificationMessage(qsTr("Ссылка скопирована"))
-                        }
+                        onClicked: transferSheet.copyShareUrl()
                     }
                     TribeButton {
                         variant: "ghost"
@@ -999,6 +1185,81 @@ PageType {
                         onClicked: transferSheet.close()
                     }
                 }
+            }
+        }
+    }
+
+    // ── СКАНЕР QR (iOS in-app; см. openScanner) ──────────────────────────
+    // Камера живёт только пока открыт оверлей: Loader active → startReading, unload → stopReading.
+    Item {
+        id: scanSheet
+        anchors.fill: parent
+        visible: opened
+        z: 110
+        property bool opened: false
+        function open()  { opened = true }
+        function close() { opened = false }
+
+        Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
+
+        Loader {
+            anchors.fill: parent
+            active: scanSheet.opened
+            sourceComponent: Item {
+                id: scanRoot
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.topMargin: Theme.space.xl + PageController.safeAreaTopMargin
+                    anchors.leftMargin: Theme.space.xl
+                    anchors.rightMargin: Theme.space.xl
+                    anchors.bottomMargin: Theme.space.lg
+                    spacing: Theme.space.lg
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Сканирование QR")
+                        color: Theme.color.text1
+                        font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Наведите камеру на QR-код переноса или ключа и удержите пару секунд.")
+                        color: Theme.color.text3; wrapMode: Text.WordWrap
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                    }
+
+                    // область нативного превью камеры (координаты уходят в setCameraSize)
+                    Item {
+                        id: scanArea
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                    }
+
+                    TribeButton {
+                        variant: "glass"
+                        text: qsTr("Отмена")
+                        Layout.fillWidth: true
+                        onClicked: scanSheet.close()
+                    }
+                }
+
+                QRCodeReader {
+                    id: qrReader
+                    onCodeReaded: function(code) { root.handleScannedCode(code) }
+                }
+
+                // setCameraSize нужен ПОСЛЕ раскладки (в onCompleted у scanArea ещё нулевая ширина) —
+                // добиваем коротким ретраем, координаты в системе окна (mapToItem(null)).
+                function armCamera() {
+                    if (scanArea.width < 10) { armTimer.restart(); return }
+                    var p = scanArea.mapToItem(null, 0, 0)
+                    qrReader.setCameraSize(Qt.rect(p.x, p.y, scanArea.width, scanArea.height))
+                    qrReader.startReading()
+                }
+                Timer { id: armTimer; interval: 60; onTriggered: scanRoot.armCamera() }
+                Component.onCompleted: armCamera()
+                Component.onDestruction: qrReader.stopReading()
             }
         }
     }

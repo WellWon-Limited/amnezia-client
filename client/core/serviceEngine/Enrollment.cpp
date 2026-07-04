@@ -136,6 +136,9 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &ba
     case FetchOutcome::Unauthorized:
         error = QStringLiteral("subscription unauthorized (token)");
         return false;
+    case FetchOutcome::Transferred:
+        error = QStringLiteral("Подписка перенесена на другое устройство");
+        return false;
     case FetchOutcome::RateLimited:
         error = QStringLiteral("subscription rate-limited (429)");
         return false;
@@ -293,6 +296,47 @@ bool Enrollment::createTransfer(QNetworkAccessManager *nam, const QString &baseU
     if (code == 401) { error = QStringLiteral("transfer unauthorized (token)"); return false; }
     if (code < 200 || code >= 300) { error = QStringLiteral("transfer HTTP %1").arg(code); return false; }
     return parseTransferMintResponse(respBody, out, error);
+}
+
+// AVPN (grant-ключи, TRANSFER-KEYS-BACKEND-HANDOFF §3.B2): активировать промо/подарочный ключ на
+// ТЕКУЩИЙ аккаунт. Bearer = subscription_token; токен НЕ ротируется (в отличие от code/redeem).
+GrantKeyResult Enrollment::redeemGrantKey(QNetworkAccessManager *nam, const QString &baseUrl,
+                                          const QString &authToken, const QString &key,
+                                          GrantKeyResponse &out, QString &error)
+{
+    if (!nam) { error = QStringLiteral("no network manager"); return GrantKeyResult::Failed; }
+    if (authToken.isEmpty()) { error = QStringLiteral("not authorized (no token)"); return GrantKeyResult::Failed; }
+    if (key.trimmed().isEmpty()) { error = QStringLiteral("empty key"); return GrantKeyResult::Failed; }
+
+    QJsonObject o;
+    o.insert(QStringLiteral("key"), key.trimmed());
+
+    QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/key/redeem"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + authToken.toUtf8());
+
+    QNetworkReply *reply = nam->post(req, QJsonDocument(o).toJson(QJsonDocument::Compact));
+    awaitReply(reply); // с таймаутом (NetAwait) — не фризим UI на зависшем бэке
+
+    const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray respBody = reply->readAll();
+    const QNetworkReply::NetworkError netErr = reply->error();
+    const QString netErrStr = reply->errorString();
+    reply->deleteLater();
+
+    if (netErr != QNetworkReply::NoError && code == 0) {
+        error = QStringLiteral("network error: %1").arg(netErrStr);
+        return GrantKeyResult::Failed;
+    }
+    if (code == 404) { error = QStringLiteral("key not found (404)"); return GrantKeyResult::NotFound; }
+    if (code == 409) { error = QStringLiteral("key already used (409)"); return GrantKeyResult::AlreadyUsed; }
+    if (code == 410) { error = QStringLiteral("key expired or revoked (410)"); return GrantKeyResult::Expired; }
+    if (code == 429) { error = QStringLiteral("key redeem rate-limited (429)"); return GrantKeyResult::Failed; }
+    if (code < 200 || code >= 300) { error = QStringLiteral("key/redeem HTTP %1").arg(code); return GrantKeyResult::Failed; }
+    if (!parseGrantKeyResponse(respBody, out, error))
+        return GrantKeyResult::Failed;
+    return GrantKeyResult::Ok;
 }
 
 } // namespace avpn

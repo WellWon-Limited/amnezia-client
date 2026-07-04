@@ -77,6 +77,7 @@ private:
     void assemble();
 
     void dnsNext();
+    void dnsFallback(const QString &host); // iOS: QDnsLookup не реализован → системный резолвер (QHostInfo)
     void tlsNext();
     void httpNext();
     void pingRound();
@@ -97,6 +98,7 @@ private:
 
     QPointer<QNetworkReply> m_reply;
     QPointer<QNetworkReply> m_loadPending; // rtt-зонд под нагрузкой (не более одного в полёте)
+    int m_hostLookup = -1;                 // id активного QHostInfo::lookupHost (fallback DNS)
     QDnsLookup *m_dns = nullptr;
     QSslSocket *m_ssl = nullptr;
     QTimer *m_loadTimer = nullptr;   // rtt-зонды во время down-стадии
@@ -117,10 +119,10 @@ private:
     QHash<QString, QVector<double>> m_icmpSamples; // target → удачные RTT по раундам
     QJsonArray m_pingProbes;
     int m_idleIdx = 0;
-    QVector<double> m_idleRtt;
+    QVector<double> m_idleRtt;   // [0] = прогрев (DNS+TCP+TLS) → уходит в conn_setup_ms, НЕ в медиану
     QVector<double> m_loadedRtt;
     qint64 m_downBytes = 0, m_downFirstByteMs = -1, m_downEndMs = -1;
-    double m_upMbit = 0;
+    double m_upMbit = -1;        // -1 = не мерялось (lite/фейл) → в JSON null, НЕ ноль
 };
 
 } // namespace avpn

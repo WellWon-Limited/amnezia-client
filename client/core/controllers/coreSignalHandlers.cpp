@@ -2,6 +2,10 @@
 
 #include <QTimer>
 
+#ifdef AVPN_ENGINE_ENABLED
+    #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN: Android-диплинки Tribe → мост (не импорт)
+#endif
+
 #include "core/utils/selfhosted/sshSession.h"
 #include "core/utils/errorCodes.h"
 #include "core/utils/routeModes.h"
@@ -381,6 +385,14 @@ void CoreSignalHandlers::initAndroidConnectionHandler()
         m_coreController->m_connectionController->restoreConnection();
     });
     connect(AndroidController::instance(), &AndroidController::importConfigFromOutside, this, [this](QString data) {
+#ifdef AVPN_ENGINE_ENABLED
+        // AVPN: диплинки Tribe (перенос/рефералка) едут из ImportConfigActivity тем же конвейером,
+        // что и конфиги — но это НЕ конфиг: отдаём мосту диплинка и НЕ открываем импорт.
+        if (data.startsWith(QStringLiteral("tribe://")) || data.contains(QStringLiteral("tribevpn.com/"))) {
+            AvpnDeepLink_handleUrl(data.toUtf8().constData());
+            return;
+        }
+#endif
         emit m_coreController->m_pageController->goToPageHome();
         m_coreController->m_importController->extractConfigFromData(data);
         data.clear();

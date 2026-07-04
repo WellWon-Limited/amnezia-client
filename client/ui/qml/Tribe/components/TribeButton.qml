@@ -13,6 +13,7 @@ AbstractButton {
     property string variant: "primary"          // primary | glass | ghost | icon
     property string iconSource: ""
     property bool loading: false
+    property bool glow: true                    // primary: выключаемый Glow-ореол (рефералка — без засветов)
     readonly property bool isIcon: variant === "icon"
 
     implicitHeight: isIcon ? 44 : 46
@@ -74,7 +75,7 @@ AbstractButton {
         }
         border.width: control.variant === "primary" ? 0 : 1
         border.color: control.hovered ? Theme.color.border2 : Theme.color.border
-        layer.enabled: control.variant === "primary"
+        layer.enabled: control.variant === "primary" && control.glow
         layer.effect: Glow {
             color: Theme.color.accentGlow
             radius: 18; samples: 25; spread: 0.2

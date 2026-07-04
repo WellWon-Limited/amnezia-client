@@ -49,6 +49,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/AvpnPushBridge.h
     ${AVPN_SE}/AvpnDeepLinkBridge.h
     ${AVPN_SE}/AvpnIntentBridge.h
+    ${AVPN_SE}/AvpnShareBridge.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -68,6 +69,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/AvpnPushBridge.cpp
     ${AVPN_SE}/AvpnDeepLinkBridge.cpp
     ${AVPN_SE}/AvpnIntentBridge.cpp
+    ${AVPN_SE}/AvpnShareBridge.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
@@ -82,6 +84,9 @@ endif()
 if(IOS)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnSafeArea.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnSafeArea.mm)
+    # AVPN: нативный share sheet (UIActivityViewController) для ссылок — рефералка/перенос.
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnShare.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnShare.mm)
     # AVPN (Task 9): APNs контроллер (auth + device token + входящие пуши).
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.mm)

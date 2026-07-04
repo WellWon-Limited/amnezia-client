@@ -28,8 +28,9 @@ public:
 
     QString pendingTransferToken() const { return m_transferToken; }
 
-    // Натив-слой (iOS/Android), потокобезопасно (маршалит в Qt-поток).
-    void handleUrl(const QString &url);
+    // Натив-слой (iOS/Android), потокобезопасно (маршалит в Qt-поток). Q_INVOKABLE — тот же вход
+    // используют QML-сканеры QR (PageAccountTribe): отсканированная строка = тот же URL переноса.
+    Q_INVOKABLE void handleUrl(const QString &url);
 
 signals:
     void changed();

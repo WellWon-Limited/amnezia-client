@@ -73,21 +73,32 @@ inline QJsonArray verdicts(const QJsonObject &r)
         out.append(mkVerdict("http-failures", failures > 2 ? "bad" : "warn",
                              QStringLiteral("HTTP-ошибок: %1 из корпуса — часть сайтов не открылась").arg(failures)));
 
-    // ICMP: unreachable по всем целям = info (часто фильтруется), потери >порога = warn
-    int unreachable = 0, total = 0;
+    // ICMP: unreachable по всем целям = info (часто фильтруется). Потери = bad ТОЛЬКО при ≥2
+    // потерянных пакетах: серия короткая (sent=5–10), один недошедший пакет — 10–20% «потерь»,
+    // но это шум замера/rate-limit цели, а не нестабильный путь (реальные данные: baseline 0%,
+    // следом 20–40% на том же идеальном пути). Единичная потеря — отдельный info.
+    int unreachable = 0, total = 0, lostMax = 0;
     double lossMax = 0;
     for (const QJsonValue &v : r.value(QStringLiteral("ping")).toArray()) {
         const QJsonObject p = v.toObject();
         ++total;
-        if (p.value(QStringLiteral("unreachable")).toBool()) ++unreachable;
-        lossMax = std::max(lossMax, num(p, "loss_pct", 0));
+        if (p.value(QStringLiteral("unreachable")).toBool()) { ++unreachable; continue; }
+        const double loss = num(p, "loss_pct", 0);
+        const double sent = num(p, "sent", 0);
+        // старые замеры без sent: любые потери считаем значимыми (прежнее поведение)
+        const int lost = sent > 0 ? int(std::lround(loss * sent / 100.0)) : (loss > 0 ? 2 : 0);
+        lossMax = std::max(lossMax, loss);
+        lostMax = std::max(lostMax, lost);
     }
     if (total > 0 && unreachable == total)
         out.append(mkVerdict("icmp-blocked", "info",
                              QStringLiteral("ICMP не проходит (часто фильтруется — не обязательно проблема)")));
-    else if (lossMax >= kLossPctBad)
+    else if (lossMax >= kLossPctBad && lostMax >= 2)
         out.append(mkVerdict("packet-loss", "bad",
-                             QStringLiteral("Потери пакетов до %1%% — нестабильный путь").arg(qRound(lossMax))));
+                             QStringLiteral("Потери пакетов до %1% — нестабильный путь").arg(qRound(lossMax))));
+    else if (lostMax == 1)
+        out.append(mkVerdict("packet-loss-single", "info",
+                             QStringLiteral("Единичная потеря ICMP-пакета — скорее шум замера, чем проблема пути")));
 
     // связность вовсе мертва? (все стадии пустые)
     if (dnsMs < 0 && num(http, "median_ttfb_ms") < 0 && down <= 0)
@@ -108,6 +119,9 @@ inline QJsonObject compare(const QJsonObject &a, const QJsonObject &b)
         { "throughput", "up_mbit", "Отдача", false, kDeltaDownPct },
         { "network_quality", "base_rtt_ms", "RTT", true, kDeltaRttPct },
         { "network_quality", "loaded_rtt_ms", "RTT под нагрузкой", true, kDeltaRttPct },
+        // TCP/TLS-фазы: разложение «где именно медленнее» (маршрут/DPI до хоста vs шифрование)
+        { "tls", "median_tcp_ms", "TCP-connect", true, kDeltaRttPct },
+        { "tls", "median_handshake_ms", "TLS-handshake", true, kDeltaRttPct },
     };
     QJsonArray deltas;
     QJsonArray significant;
