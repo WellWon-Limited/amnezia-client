@@ -1962,7 +1962,11 @@ void AvpnEngineQml::maybeAutoBypassGeo()
         if (!down2 || m_opInFlight || m_wantConnected)
             return;
         const bool currentOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-        const int act = decideAutoBypass(false, currentOn, loc, localSignalsRu());
+        const bool localRu = localSignalsRu();
+        const int act = decideAutoBypass(false, currentOn, loc, localRu);
+        // Диагностика для разбора полётов (страна — не PII, IP не логируем).
+        qInfo("[AVPN geo-auto] loc=%s localRu=%d masterOn=%d -> act=%d",
+              loc.isEmpty() ? "?" : qUtf8Printable(loc), localRu ? 1 : 0, currentOn ? 1 : 0, act);
         if (act < 0)
             return; // неизвестность/чужой VPN/значение уже верное — не дёргаем
         const bool on = (act == 1);
