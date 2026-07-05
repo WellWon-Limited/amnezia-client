@@ -68,10 +68,49 @@ inline QJsonArray verdicts(const QJsonObject &r)
                              QStringLiteral("Скорость всего %1 Мбит/с при RTT %2 мс: подозрение на MTU/троттлинг/потери")
                                  .arg(QString::number(down, 'f', 1)).arg(qRound(base))));
 
+    // HTTP-ошибки: RU-корпус (ya.ru/vk/ozon) при bypass_on идёт RU-direct МИМО туннеля — его провал
+    // означает «прямой путь из текущей сети не работает» (за границей с ручным lock — норма), а НЕ
+    // проблему туннеля. Поэтому провалы делим: RU-direct → отдельный вердикт с причиной по error_kind
+    // (HostNotFound = DNS-маска не резолвит, Timeout = прямой маршрут молчит), заграничные — как раньше.
+    const bool bypassOn = r.value(QStringLiteral("extra")).toObject()
+                              .value(QStringLiteral("bypass_on")).toBool();
+    auto isRuUrl = [](const QString &u) {
+        return u.contains(QLatin1String("ya.ru")) || u.contains(QLatin1String("vk.com"))
+            || u.contains(QLatin1String("ozon.ru"));
+    };
+    int ruFail = 0, ruDns = 0, ruTimeout = 0, foreignFail = 0;
+    const QJsonArray httpProbes = http.value(QStringLiteral("probes")).toArray();
+    for (const QJsonValue &v : httpProbes) {
+        const QJsonObject p = v.toObject();
+        if (!p.value(QStringLiteral("error")).toBool())
+            continue;
+        if (isRuUrl(p.value(QStringLiteral("url")).toString())) {
+            ++ruFail;
+            const QString kind = p.value(QStringLiteral("error_kind")).toString();
+            if (kind.contains(QLatin1String("HostNotFound"))) ++ruDns;
+            else if (kind.contains(QLatin1String("Timeout"))) ++ruTimeout;
+        } else {
+            ++foreignFail;
+        }
+    }
     const int failures = http.value(QStringLiteral("failures")).toInt();
-    if (failures > 0)
-        out.append(mkVerdict("http-failures", failures > 2 ? "bad" : "warn",
-                             QStringLiteral("HTTP-ошибок: %1 из корпуса — часть сайтов не открылась").arg(failures)));
+    if (httpProbes.isEmpty())
+        foreignFail = failures; // старые замеры без probes[]: прежнее поведение (без RU-разбора)
+    if (ruFail > 0 && bypassOn && !httpProbes.isEmpty()) {
+        QString cause;
+        if (ruDns > 0 && ruTimeout > 0) cause = QStringLiteral("DNS-маска не отвечает и прямой маршрут молчит");
+        else if (ruDns > 0)             cause = QStringLiteral("DNS-маска не резолвит (Host not found)");
+        else if (ruTimeout > 0)         cause = QStringLiteral("прямой маршрут молчит (timeout)");
+        else                            cause = QStringLiteral("см. error_kind проб");
+        out.append(mkVerdict("ru-direct-down", "warn",
+                             QStringLiteral("RU-direct не работает из текущей сети: %1 RU-сайт(а) идут напрямую мимо VPN и не открылись — %2. Туннель это не характеризует; за пределами РФ при включённом байпасе — ожидаемо")
+                                 .arg(ruFail).arg(cause)));
+    } else {
+        foreignFail += (bypassOn && !httpProbes.isEmpty()) ? 0 : ruFail; // bypass off → RU шёл через туннель, считаем как обычные
+    }
+    if (foreignFail > 0)
+        out.append(mkVerdict("http-failures", foreignFail > 2 ? "bad" : "warn",
+                             QStringLiteral("HTTP-ошибок: %1 из корпуса — часть сайтов не открылась").arg(foreignFail)));
 
     // ICMP: unreachable по всем целям = info (часто фильтруется). Потери = bad ТОЛЬКО при ≥2
     // потерянных пакетах: серия короткая (sent=5–10), один недошедший пакет — 10–20% «потерь»,

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
+import QtCore // StandardPaths (сохранение отчёта бенча в файл)
 
 import ".."              // Theme, Dev
 import "../components"
@@ -59,6 +60,27 @@ PageType {
     function fmt(v, suffix) {
         if (v === null || v === undefined || v < 0) return "—"
         return Math.round(Number(v) * 10) / 10 + suffix
+    }
+    // Сохранение отчёта файлом (паттерн upstream PageSettingsLogging): mobile — имя без диалога
+    // (iOS отдаст файл в share sheet, Android — в SAF-диалог создания), desktop — диалог пути.
+    function saveReport(json, baseName) {
+        if (!root.hasEngine || json === "") return
+        var mobile = Qt.platform.os === "ios" || Qt.platform.os === "android"
+        var fileName = ""
+        if (mobile) {
+            fileName = baseName + ".json"
+        } else {
+            fileName = SystemController.getFileName(qsTr("Сохранить"),
+                                                    qsTr("JSON (*.json)"),
+                                                    StandardPaths.standardLocations(StandardPaths.DocumentsLocation) + "/" + baseName,
+                                                    true,
+                                                    ".json")
+        }
+        if (fileName === "") return
+        if (TribeEngine.saveReportFile(fileName, json))
+            PageController.showNotificationMessage(qsTr("Отчёт сохранён"))
+        else
+            PageController.showNotificationMessage(qsTr("Не удалось сохранить отчёт"))
     }
     function refreshHistory() {
         if (root.hasEngine)
@@ -507,6 +529,12 @@ PageType {
                                 PageController.showNotificationMessage(qsTr("Полный отчёт скопирован — перешли его в чат разработки"))
                             }
                         }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
+                            text: qsTr("Сохранить полный отчёт в файл")
+                            onClicked: root.saveReport(TribeEngine.buildFullReport(), "tribe-bench-full-report")
+                        }
                         TextEdit {
                             id: fullJsonEdit
                             Layout.preferredWidth: 1; Layout.preferredHeight: 1
@@ -607,6 +635,13 @@ PageType {
                                 jsonEdit.deselect()
                                 PageController.showNotificationMessage(qsTr("Замер скопирован — перешли его в чат разработки"))
                             }
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
+                            text: qsTr("Сохранить замер в файл")
+                            onClicked: root.saveReport(root.lastJson,
+                                                       "tribe-bench-" + (root.lastSummary ? root.lastSummary.label : "run"))
                         }
                         // скрытый буфер для dependency-free копирования (паттерн форка: TextEdit.copy())
                         TextEdit {
