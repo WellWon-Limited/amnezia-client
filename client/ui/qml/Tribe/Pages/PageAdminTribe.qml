@@ -521,7 +521,7 @@ PageType {
                             Layout.fillWidth: true
                             Layout.topMargin: Theme.space.sm
                             variant: "glass"
-                            text: qsTr("Скопировать полный отчёт (все метки + сравнения)")
+                            text: qsTr("Скопировать полный отчёт")
                             onClicked: {
                                 fullJsonEdit.text = TribeEngine.buildFullReport()
                                 if (fullJsonEdit.text === "") return
