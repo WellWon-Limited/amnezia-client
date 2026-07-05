@@ -106,6 +106,13 @@ class AvpnEngineQml : public QObject {
     // verify (данные реально ходят). Итог — ccFinished (type:"connect-cycle").
     Q_PROPERTY(bool ccRunning READ ccRunning NOTIFY ccChanged)
     Q_PROPERTY(QString ccProgress READ ccProgress NOTIFY ccChanged)
+    // AVPN (bench v5.2, мастер «Полный тест»): дирижёр поверх готовых машин — этап 1 сам
+    // (коннект-цикл → авто-A/B → свип нод), два ручных гейта (Amnezia / baseline, второй скипается),
+    // финал = единый мега-отчёт (ftFinished). ftStage — для карточки мастера в QML:
+    // "connect0|cc|ab|sweep|wait-amnezia|bench-amnezia|wait-baseline|bench-baseline".
+    Q_PROPERTY(bool ftRunning READ ftRunning NOTIFY ftChanged)
+    Q_PROPERTY(QString ftStage READ ftStage NOTIFY ftChanged)
+    Q_PROPERTY(QString ftProgress READ ftProgress NOTIFY ftChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -173,6 +180,16 @@ public:
     Q_INVOKABLE void cancelConnectCycle();
     bool ccRunning() const { return m_ccPhase != CcPhase::Idle; }
     QString ccProgress() const { return m_ccProgress; }
+
+    // AVPN (bench v5.2): мастер «Полный тест». fullTestContinue — подтверждение ручного шага
+    // (гейт: наш туннель disconnected), fullTestSkip — пропустить baseline-шаг.
+    Q_INVOKABLE void startFullTest();
+    Q_INVOKABLE void cancelFullTest();
+    Q_INVOKABLE void fullTestContinue();
+    Q_INVOKABLE void fullTestSkip();
+    bool ftRunning() const { return m_ftPhase != FtPhase::Idle; }
+    QString ftStage() const;
+    QString ftProgress() const { return m_ftProgress; }
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -396,6 +413,11 @@ signals:
     void abFinished(const QVariantMap &summary, const QString &json);
     // AVPN (bench v5, connect{}): смена состояния теста коннекта (ccRunning/ccProgress).
     void ccChanged();
+    // AVPN (bench v5.2, мастер): смена состояния/этапа мастера.
+    void ftChanged();
+    // AVPN (bench v5.2, мастер): полный тест завершён — единый мега-отчёт (все секции + methodology
+    // + summary). UI сразу предлагает сохранить файлом.
+    void ftFinished(const QString &json);
     // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
     // median_teardown_ms, median_first_byte_ms}; json — полный отчёт (type:"connect-cycle").
     void ccFinished(const QVariantMap &summary, const QString &json);
@@ -520,6 +542,23 @@ private:
     void ccNextCycle();       // зафиксировать m_ccCur и перейти к следующему циклу/финишу
     void ccFail(const QString &reason);
     void ccFinish();
+
+    // AVPN (bench v5.2): мастер «Полный тест» — дирижёр. НЕ содержит измерительной логики:
+    // последовательно зовёт готовые машины и ждёт их *Finished (подключено в конструкторе);
+    // зависший шаг добивает сторож (шаг помечается error, мастер идёт дальше — частичный отчёт
+    // ценнее прерванного). Ручные фазы Wait* сторожа не имеют (юзер может отойти).
+    enum class FtPhase { Idle, Connect0, Cc, Ab, Sweep, WaitAmnezia, BenchAmnezia,
+                         WaitBaseline, BenchBaseline };
+    FtPhase     m_ftPhase = FtPhase::Idle;
+    int         m_ftEpoch = 0;
+    QJsonArray  m_ftSteps;      // methodology: [{step, ts, status}]
+    QString     m_ftProgress;
+    QTimer      m_ftGuard;
+    void ftEnter(FtPhase ph, int guardMs = 0); // 0 = без сторожа (ручные фазы)
+    void ftRecord(const char *step, const char *status);
+    void ftStepDone(FtPhase donePhase, bool ok); // продвижение по *Finished/сторожу
+    void ftFinish();
+    QString assembleMegaReport() const; // buildFullReport + methodology + summary (+baseline-suspect)
     QJsonObject benchExtra() const;     // контекст замера: факты конфигурации + тип сети
     static QString bypassLabel(bool on)
     { return on ? QStringLiteral("tribe-bypass-on") : QStringLiteral("tribe-bypass-off"); }

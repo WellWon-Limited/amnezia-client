@@ -45,7 +45,12 @@ PageType {
     readonly property string ccProgress: hasEngine ? TribeEngine.ccProgress : ""
     property var ccSummary: null     // сводка теста коннекта из ccFinished
     property string ccJson: ""
-    readonly property bool anyBusy: benchRunning || sweepRunning || abRunning || ccRunning
+    readonly property bool ftRunning: hasEngine ? TribeEngine.ftRunning : false
+    readonly property string ftStage: hasEngine ? TribeEngine.ftStage : ""
+    readonly property string ftProgress: hasEngine ? TribeEngine.ftProgress : ""
+    readonly property bool ftManualStep: ftStage === "wait-amnezia" || ftStage === "wait-baseline"
+    property string ftJson: ""       // мега-отчёт мастера из ftFinished
+    readonly property bool anyBusy: benchRunning || sweepRunning || abRunning || ccRunning || ftRunning
 
     function stageTitle(st) {
         switch (st) {
@@ -114,6 +119,10 @@ PageType {
             root.ccSummary = summary
             root.ccJson = json
         }
+        function onFtFinished(json) {
+            root.ftJson = json
+            root.refreshHistory()
+        }
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -160,11 +169,129 @@ PageType {
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                 }
 
+                // ── bench v5.2: мастер «Полный тест» — главная кнопка сценария ──
+                TribeButton {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    visible: !root.ftRunning
+                    text: qsTr("Полный тест (~10 мин, ~100 МБ)")
+                    variant: "primary"
+                    enabled: root.hasEngine && !root.anyBusy
+                    onClicked: if (root.hasEngine) TribeEngine.startFullTest()
+                }
+                TribeCard {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    visible: root.ftRunning
+                    implicitHeight: ftCol.implicitHeight + 2 * Theme.space.lg
+                    ColumnLayout {
+                        id: ftCol
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        anchors.topMargin: Theme.space.lg
+                        spacing: Theme.space.sm
+
+                        Text {
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: root.ftProgress
+                            color: root.ftManualStep ? Theme.color.warning : Theme.color.accent
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: !root.ftManualStep
+                            wrapMode: Text.WordWrap
+                            text: qsTr("Мастер всё делает сам: тест коннекта → авто-A/B байпаса → свип нод. Не трогай VPN и тумблеры.")
+                            color: Theme.color.text3
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: root.ftManualStep && root.tunnelConnected
+                            wrapMode: Text.WordWrap
+                            text: qsTr("Сначала дождись, пока Tribe отключится (кнопка станет активной).")
+                            color: Theme.color.text3
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            visible: root.ftManualStep
+                            text: qsTr("Продолжить")
+                            variant: "primary"
+                            enabled: root.hasEngine && !root.tunnelConnected
+                            onClicked: if (root.hasEngine) TribeEngine.fullTestContinue()
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            visible: root.ftStage === "wait-baseline"
+                            text: qsTr("Пропустить baseline")
+                            variant: "glass"
+                            onClicked: if (root.hasEngine) TribeEngine.fullTestSkip()
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            text: qsTr("Отменить полный тест")
+                            variant: "ghost"
+                            onClicked: if (root.hasEngine) TribeEngine.cancelFullTest()
+                        }
+                    }
+                }
+                // финал мастера: мега-отчёт готов — сохранить/скопировать
+                TribeCard {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    visible: !root.ftRunning && root.ftJson !== ""
+                    implicitHeight: ftDoneCol.implicitHeight + 2 * Theme.space.lg
+                    ColumnLayout {
+                        id: ftDoneCol
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        anchors.topMargin: Theme.space.lg
+                        spacing: Theme.space.xs
+                        Text {
+                            text: qsTr("Полный тест завершён — отчёт готов")
+                            color: Theme.color.connected
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Theme.space.xs
+                            variant: "primary"
+                            text: qsTr("Сохранить отчёт в файл")
+                            onClicked: root.saveReport(root.ftJson, "tribe-full-test")
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
+                            text: qsTr("Скопировать отчёт")
+                            onClicked: {
+                                ftJsonEdit.selectAll(); ftJsonEdit.copy(); ftJsonEdit.deselect()
+                                PageController.showNotificationMessage(qsTr("Отчёт скопирован"))
+                            }
+                        }
+                        TextEdit {
+                            id: ftJsonEdit
+                            Layout.preferredWidth: 1; Layout.preferredHeight: 1
+                            visible: false; readOnly: true
+                            text: root.ftJson
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.md
+                    text: qsTr("Отдельные тесты")
+                    color: Theme.color.text3
+                    font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                }
+
                 // ── Tribe подключён: авто-A/B пары байпаса + одиночный замер текущего пути ──
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: root.tunnelConnected || root.abRunning
+                    visible: (root.tunnelConnected || root.abRunning) && !root.ftRunning
                     text: root.abRunning ? qsTr("Отменить A/B (%1)").arg(root.abProgress)
                                          : qsTr("Авто A/B байпаса (~5 мин)")
                     variant: root.abRunning ? "ghost" : "primary"
@@ -189,7 +316,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: root.tunnelConnected && !root.abRunning
+                    visible: root.tunnelConnected && !root.abRunning && !root.ftRunning
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
                                             : qsTr("Замер текущего пути")
                     variant: root.benchRunning ? "ghost" : "glass"
@@ -208,7 +335,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: root.tunnelConnected || root.ccRunning
+                    visible: (root.tunnelConnected || root.ccRunning) && !root.ftRunning
                     text: root.ccRunning ? qsTr("Отменить тест коннекта (%1)").arg(root.ccProgress)
                                          : qsTr("Тест коннекта (3 цикла)")
                     variant: root.ccRunning ? "ghost" : "glass"
@@ -235,7 +362,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: !root.tunnelConnected && !root.abRunning
+                    visible: !root.tunnelConnected && !root.abRunning && !root.ftRunning
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
                                             : qsTr("Замер без VPN — baseline")
                     variant: root.benchRunning ? "ghost" : "primary"
@@ -252,7 +379,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: !root.tunnelConnected && !root.abRunning && !root.benchRunning
+                    visible: !root.tunnelConnected && !root.abRunning && !root.benchRunning && !root.ftRunning
                     text: qsTr("Замер через другой VPN — amnezia")
                     variant: "glass"
                     enabled: root.hasEngine && !root.sweepRunning
