@@ -123,6 +123,9 @@ PageType {
             root.ftJson = json
             root.refreshHistory()
         }
+        function onReportUploadDone(ok, message) {
+            PageController.showNotificationMessage(message)
+        }
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -258,6 +261,12 @@ PageType {
                             Layout.fillWidth: true
                             Layout.topMargin: Theme.space.xs
                             variant: "primary"
+                            text: qsTr("Отправить разработчику")
+                            onClicked: if (root.hasEngine) TribeEngine.uploadReport(root.ftJson)
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
                             text: qsTr("Сохранить отчёт в файл")
                             onClicked: root.saveReport(root.ftJson, "tribe-full-test")
                         }
@@ -767,6 +776,12 @@ PageType {
                             variant: "glass"
                             text: qsTr("Сохранить полный отчёт в файл")
                             onClicked: root.saveReport(TribeEngine.buildFullReport(), "tribe-bench-full-report")
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
+                            text: qsTr("Отправить полный отчёт разработчику")
+                            onClicked: if (root.hasEngine) TribeEngine.uploadReport(TribeEngine.buildFullReport())
                         }
                         TextEdit {
                             id: fullJsonEdit
