@@ -19,6 +19,14 @@
 //
 // Тот же приём +load-свизла Qt-приватного класса уже применяется в
 // AmneziaSceneDelegateHooks.mm — фикс консистентен с существующим кодом.
+//
+// ДИАГНОСТИКА (2026-07-04): попап «Разрешить вставку» ЖИВ после свизла QUIView — при этом
+// анализ исходников Qt 6.11.1 (qiostextresponder/qiosclipboard/quiview) показал: canPerformAction
+// буфер НЕ читает (решает по выделению), единственное чтение контента = QIOSMimeData::retrieveData
+// (потребитель QClipboard). Явных чтений в коде приложения нет. Чтобы поймать реального виновника
+// на устройстве, ниже — ТРАССЕР: свизлим все промптящие геттеры UIPasteboard и логируем стек вызова
+// ([TRIBE-PB] в unified log → idevicesyslog/Console). Промпт триггерят ТОЛЬКО эти чтения, они редки —
+// лог не шумит; на решение «показывать ли попап» трассер не влияет (оригинал вызывается всегда).
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -43,6 +51,64 @@ static BOOL tribe_canPerformAction(id self, SEL _cmd, SEL action, id sender)
     return NO;
 }
 
+// ── Трассер промптящих чтений UIPasteboard ──────────────────────────────────────────────────
+// Логирует селектор + стек (кто прочитал буфер). Кадры 0-1 (сам трассер) пропускаем.
+static void tribeLogPasteboardRead(SEL sel)
+{
+    NSArray<NSString *> *syms = [NSThread callStackSymbols];
+    NSMutableString *bt = [NSMutableString string];
+    const NSUInteger n = MIN((NSUInteger)18, syms.count);
+    for (NSUInteger i = 2; i < n; ++i)
+        [bt appendFormat:@"\n    %@", syms[i]];
+    NSLog(@"[TRIBE-PB] чтение UIPasteboard -%@ (это триггер secure-paste промпта) — стек:%@",
+          NSStringFromSelector(sel), bt);
+}
+
+// Геттеры-свойства без аргументов (string/strings/URL/URLs/image/images/color/colors/items/itemProviders).
+static void tribeSwizzlePbGetter(SEL sel)
+{
+    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
+    if (!m)
+        return;
+    typedef id (*GetterIMP)(id, SEL);
+    GetterIMP orig = reinterpret_cast<GetterIMP>(method_getImplementation(m));
+    IMP repl = imp_implementationWithBlock(^id(id pb) {
+        tribeLogPasteboardRead(sel);
+        return orig(pb, sel);
+    });
+    method_setImplementation(m, repl);
+}
+
+// Методы с 1 объектным аргументом (dataForPasteboardType:, valueForPasteboardType:).
+static void tribeSwizzlePb1Arg(SEL sel)
+{
+    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
+    if (!m)
+        return;
+    typedef id (*OneArgIMP)(id, SEL, id);
+    OneArgIMP orig = reinterpret_cast<OneArgIMP>(method_getImplementation(m));
+    IMP repl = imp_implementationWithBlock(^id(id pb, id a1) {
+        tribeLogPasteboardRead(sel);
+        return orig(pb, sel, a1);
+    });
+    method_setImplementation(m, repl);
+}
+
+// Методы с 2 объектными аргументами (dataForPasteboardType:inItemSet:, valuesForPasteboardType:inItemSet:).
+static void tribeSwizzlePb2Arg(SEL sel)
+{
+    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
+    if (!m)
+        return;
+    typedef id (*TwoArgIMP)(id, SEL, id, id);
+    TwoArgIMP orig = reinterpret_cast<TwoArgIMP>(method_getImplementation(m));
+    IMP repl = imp_implementationWithBlock(^id(id pb, id a1, id a2) {
+        tribeLogPasteboardRead(sel);
+        return orig(pb, sel, a1, a2);
+    });
+    method_setImplementation(m, repl);
+}
+
 @interface TribePasteMenuFix : NSObject
 @end
 
@@ -50,6 +116,22 @@ static BOOL tribe_canPerformAction(id self, SEL _cmd, SEL action, id sender)
 
 + (void)load
 {
+    // Трассер чтений буфера (диагностика «попап жив»). Ставим ДО свизла QUIView — не зависят друг от друга.
+    tribeSwizzlePbGetter(@selector(string));
+    tribeSwizzlePbGetter(@selector(strings));
+    tribeSwizzlePbGetter(@selector(URL));
+    tribeSwizzlePbGetter(@selector(URLs));
+    tribeSwizzlePbGetter(@selector(image));
+    tribeSwizzlePbGetter(@selector(images));
+    tribeSwizzlePbGetter(@selector(color));
+    tribeSwizzlePbGetter(@selector(colors));
+    tribeSwizzlePbGetter(@selector(items));
+    tribeSwizzlePbGetter(@selector(itemProviders));
+    tribeSwizzlePb1Arg(@selector(dataForPasteboardType:));
+    tribeSwizzlePb1Arg(@selector(valueForPasteboardType:));
+    tribeSwizzlePb2Arg(@selector(dataForPasteboardType:inItemSet:));
+    tribeSwizzlePb2Arg(@selector(valuesForPasteboardType:inItemSet:));
+
     Class cls = objc_getClass("QUIView");
     if (!cls) {
         return;
