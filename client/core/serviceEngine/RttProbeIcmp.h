@@ -28,6 +28,13 @@ public:
                   DoneCb onDone) override;
     void cancel() override;
 
+    // AVPN bench v5 (MTU-проба): одиночный echo с паддингом до payloadLen байт и Don't-Fragment
+    // (Darwin IP_DONTFRAG / Linux+Android IP_MTU_DISCOVER=DO; Windows-стаб → done(false)).
+    // done(true) = reply дошёл ⇒ path-MTU ≥ payloadLen+28. Самодостаточна (свой сокет/таймер),
+    // состояние probeAll не трогает — можно звать между probeAll-прогонами.
+    void probeMtuOne(const QString &ipv4, int payloadLen, int timeoutMs,
+                     std::function<void(bool ok)> done) override;
+
 private:
     struct Pending {
         QString      nodeId;

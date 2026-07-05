@@ -226,11 +226,24 @@ int main(int argc, char **argv)
             && !hasCode(bench::verdicts(mkSplit(false, true, true, true)), "split-leak")   // сплит не сеялся (РФ-нода) → норма
             && hasCode(bench::verdicts(mkSplit(true, false, true, false)), "ipv6-dead")    // AAAA есть, v6 не ходит
             && !hasCode(bench::verdicts(mkSplit(true, false, false, false)), "ipv6-dead"); // v6 нет вовсе → молчим
+        // bench v5: mtu-mismatch — path < config при probed=true и наличии tunnel_config
+        auto mkMtu = [&](bool probed, int pathMtu, int cfgMtu) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, 0);
+            r.insert("extra", QJsonObject{{"tunnel_config", QJsonObject{{"mtu", cfgMtu}}}});
+            QJsonObject mp; mp.insert("probed", probed);
+            if (pathMtu > 0) mp.insert("path_mtu", pathMtu);
+            r.insert("mtu_probe", mp);
+            return r;
+        };
+        const bool mtuOk =
+               hasCode(bench::verdicts(mkMtu(true, 1380, 1420)), "mtu-mismatch")   // путь уже конфига → bad
+            && !hasCode(bench::verdicts(mkMtu(true, 1420, 1376)), "mtu-mismatch")  // путь шире → ок
+            && !hasCode(bench::verdicts(mkMtu(false, 0, 1420)), "mtu-mismatch");   // не мерили → молчим
         const QJsonArray legacy = bench::verdicts(mk(25, 250, 80, 90, 110, 3)); // failures без probes[]
         const bool ruOk = hasCode(ruOn, "ru-direct-down") && !hasCode(ruOn, "http-failures")
                        && !hasCode(ruOff, "ru-direct-down") && hasCode(ruOff, "http-failures")
                        && hasCode(legacy, "http-failures") && !hasCode(legacy, "ru-direct-down")
-                       && splitOk;
+                       && splitOk && mtuOk;
         const bool vOk = good.isEmpty()
                       && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
                       && hasCode(slowDns, "dns-slow")

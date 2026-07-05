@@ -33,6 +33,15 @@ public:
 
     // Прервать текущий замер (шторка закрылась / переключились в connected). Идемпотентно.
     virtual void cancel() = 0;
+
+    // AVPN bench v5 (MTU-проба): одиночный DF-echo с паддингом payloadLen; done(true) = reply дошёл
+    // ⇒ path-MTU ≥ payloadLen+28. Дефолт «не умею» (done(false)) — реализация в RttProbeIcmp (POSIX).
+    virtual void probeMtuOne(const QString &ipv4, int payloadLen, int timeoutMs,
+                             std::function<void(bool ok)> done)
+    {
+        Q_UNUSED(ipv4) Q_UNUSED(payloadLen) Q_UNUSED(timeoutMs)
+        if (done) done(false);
+    }
 };
 
 } // namespace avpn
