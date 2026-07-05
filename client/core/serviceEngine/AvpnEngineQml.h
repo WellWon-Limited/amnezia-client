@@ -13,6 +13,7 @@
 
 #include <QElapsedTimer> // AVPN (панель администратора): connect_ms в свипе нод
 #include <QHash>
+#include <QHostAddress> // AVPN RU-direct carve-out: IP API вне байпаса
 #include <QJsonArray>    // AVPN (панель администратора): результаты свипа
 #include <QObject>
 #include <QSet>
@@ -491,6 +492,10 @@ private:
     void sweepBeginRestore();
     void sweepFinish();        // сборка отчёта + emit sweepFinished + сброс в Idle
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
+    // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
+    // конструктора). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из байпаса —
+    // control plane всегда через туннель, см. CidrCarve.h.
+    QList<QHostAddress>          m_apiHostIps;
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
