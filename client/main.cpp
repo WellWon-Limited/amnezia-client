@@ -24,6 +24,20 @@ bool isAnotherInstanceRunning()
     // (clicking either icon raised whichever instance already held the socket).
     socket.connectToServer(QStringLiteral(APPLICATION_NAME "Instance"));
     if (socket.waitForConnected(500)) {
+#ifdef AVPN_ENGINE_ENABLED
+        // AVPN (перенос по QR): Windows/Linux URL-протокол запускает ВТОРОЙ инстанс с диплинком
+        // tribe:// в argv — пробрасываем его работающему инстансу через этот же instance-сокет
+        // (читает startLocalServer → AvpnDeepLink_handleUrl). macOS идёт через QFileOpenEvent.
+        const QStringList args = QCoreApplication::arguments();
+        for (const QString &a : args) {
+            if (a.startsWith(QStringLiteral("tribe://")) || a.contains(QStringLiteral("tribevpn.com/transfer"))) {
+                socket.write(a.toUtf8());
+                socket.flush();
+                socket.waitForBytesWritten(500);
+                break;
+            }
+        }
+#endif
         qWarning() << "AmneziaVPN is already running";
         return true;
     }
