@@ -158,6 +158,17 @@ inline QJsonArray verdicts(const QJsonObject &r)
         out.append(mkVerdict("ipv6-dead", "info",
                              QStringLiteral("IPv6 резолвится, но соединение не проходит — v6-путь битый (проверь маршруты/утечку v6)")));
 
+    // bench v5: path-MTU против конфигового. Меньше конфига = класс blackhole «большие пакеты
+    // молча тонут» (страницы наполовину, TLS-обрывы). Гейт: замер шёл через НАШ туннель
+    // (tunnel_config есть) и проба реально прошла.
+    const QJsonObject mtuP = r.value(QStringLiteral("mtu_probe")).toObject();
+    const int cfgMtu = int(num(extra.value(QStringLiteral("tunnel_config")).toObject(), "mtu", 0));
+    const int pathMtu = int(num(mtuP, "path_mtu", 0));
+    if (mtuP.value(QStringLiteral("probed")).toBool() && cfgMtu > 0 && pathMtu > 0 && pathMtu < cfgMtu)
+        out.append(mkVerdict("mtu-mismatch", "bad",
+                             QStringLiteral("MTU-конфликт: путь пропускает %1, конфиг туннеля %2 — пакеты полного размера тонут (класс «сайты наполовину грузятся»)")
+                                 .arg(pathMtu).arg(cfgMtu)));
+
     // связность вовсе мертва? (все стадии пустые)
     if (dnsMs < 0 && num(http, "median_ttfb_ms") < 0 && down <= 0)
         out.append(mkVerdict("no-connectivity", "bad", QStringLiteral("Сеть не отвечает ни по одной пробе")));

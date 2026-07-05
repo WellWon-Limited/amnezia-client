@@ -76,6 +76,9 @@ private:
     void stageSplit();
     void splitIpv6Lookup();
     void splitIpv6Http();
+    // bench v5: path-MTU (DF-ping нисходящим свипом размеров; probeMtuOne). Только full-режим.
+    void stageMtu();
+    void mtuNext();
     void stageIdleRtt();
     void stageDown();
     void stageUp();
@@ -114,6 +117,8 @@ private:
     QString m_traceIp;        // ip= из cf-trace: ТОЛЬКО в памяти для сравнения в stageSplit; в JSON НЕ пишется
     QJsonObject m_splitCheck; // bench v5: {ru_reachable, ru_equals_tunnel_egress}
     QJsonObject m_ipv6;       // bench v5: {aaaa_ok, https_ok}
+    int m_mtuIdx = 0;         // bench v5: индекс текущего размера в свипе MTU
+    QJsonObject m_mtu;        // bench v5: {path_mtu | probed:false}
     int m_dnsIdx = 0;
     QJsonArray m_dnsProbes;
     int m_tlsIdx = 0;

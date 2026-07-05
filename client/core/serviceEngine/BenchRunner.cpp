@@ -74,6 +74,7 @@ void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lit
     m_extra = extra;
     m_loc.clear(); m_colo.clear(); m_traceIp.clear();
     m_splitCheck = QJsonObject(); m_ipv6 = QJsonObject();
+    m_mtuIdx = 0; m_mtu = QJsonObject();
     m_dnsIdx = 0; m_dnsProbes = QJsonArray();
     m_tlsIdx = 0; m_tlsProbes = QJsonArray(); m_tlsTcpMs = -1;
     m_httpIdx = 0; m_httpProbes = QJsonArray();
@@ -462,7 +463,50 @@ void BenchRunner::splitIpv6Http()
         const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         m_ipv6.insert(QStringLiteral("https_ok"), r->error() == QNetworkReply::NoError
                                                   && (code == 204 || code == 200));
+        stageMtu();
+    });
+}
+
+// --- стадия 3c (bench v5): path-MTU через DF-ping ----------------------------------------------
+// Нисходящий свип паддингов: первый прошедший размер = path-MTU ≈ payload+28. Ловит класс
+// blackhole «конфиг MTU больше фактического пути» (страницы наполовину грузятся; awg S4-кейс).
+// Через туннель EMSGSIZE на первом же размере > MTU utun — свип быстро скатывается к реальному.
+namespace {
+// payload'ы → пакеты 1500/1452/1420/1400/1380/1360/1308/1280 (частые пороги: ethernet/pppoe/awg/wg-mobile)
+constexpr int kMtuPayloads[] = { 1472, 1424, 1392, 1372, 1352, 1332, 1280, 1252 };
+constexpr int kMtuPayloadCount = int(sizeof(kMtuPayloads) / sizeof(kMtuPayloads[0]));
+} // namespace
+
+void BenchRunner::stageMtu()
+{
+    if (m_lite) {
         stageIdleRtt();
+        return;
+    }
+    emit stageChanged(QStringLiteral("mtu"));
+    m_mtuIdx = 0;
+    mtuNext();
+}
+
+void BenchRunner::mtuNext()
+{
+    if (m_mtuIdx >= kMtuPayloadCount) {
+        m_mtu.insert(QStringLiteral("probed"), false); // ни один размер не прошёл (ICMP фильтруется?)
+        stageIdleRtt();
+        return;
+    }
+    const int epoch = m_epoch;
+    const int payload = kMtuPayloads[m_mtuIdx];
+    m_icmp->probeMtuOne(QStringLiteral("1.1.1.1"), payload, 1200, [this, epoch, payload](bool ok) {
+        if (epoch != m_epoch) return;
+        if (ok) {
+            m_mtu.insert(QStringLiteral("probed"), true);
+            m_mtu.insert(QStringLiteral("path_mtu"), payload + 28); // ICMP(8) + IPv4(20)
+            stageIdleRtt();
+            return;
+        }
+        ++m_mtuIdx;
+        mtuNext();
     });
 }
 
@@ -653,6 +697,8 @@ void BenchRunner::assemble()
         out.insert(QStringLiteral("split_check"), m_splitCheck);
     if (!m_ipv6.isEmpty())
         out.insert(QStringLiteral("ipv6"), m_ipv6);
+    if (!m_mtu.isEmpty())
+        out.insert(QStringLiteral("mtu_probe"), m_mtu);
     out.insert(QStringLiteral("extra"), m_extra);
     out.insert(QStringLiteral("verdicts"), bench::verdicts(out)); // авто-диагнозы (BenchAnalysis.h)
 

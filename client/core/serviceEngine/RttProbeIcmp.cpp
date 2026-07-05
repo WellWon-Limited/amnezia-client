@@ -276,6 +276,118 @@ void RttProbeIcmp::onTimeout()
             finishIdx(i, -1);
 }
 
+// AVPN bench v5 (MTU-проба): одиночный DF-echo с паддингом. Самодостаточна: свой сокет/нотифаер/
+// таймер живут в heap-контексте и умирают по done — состояние probeAll класса не трогается.
+// DF: Darwin IP_DONTFRAG; Linux/Android IP_MTU_DISCOVER=IP_PMTUDISC_DO. EMSGSIZE на sendto =
+// пакет больше MTU исходящего интерфейса (для туннеля — его MTU) → сразу done(false), это и есть ответ.
+void RttProbeIcmp::probeMtuOne(const QString &ipv4, int payloadLen, int timeoutMs,
+                               std::function<void(bool)> done)
+{
+    const QHostAddress lit(ipv4);
+    if (lit.isNull() || lit.protocol() != QAbstractSocket::IPv4Protocol || payloadLen < 8) {
+        if (done) done(false);
+        return;
+    }
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    if (fd < 0) {
+        if (done) done(false);
+        return;
+    }
+    ::fcntl(fd, F_SETFL, O_NONBLOCK);
+    int dfOk = -1;
+#if defined(Q_OS_DARWIN)
+    int on = 1;
+    dfOk = ::setsockopt(fd, IPPROTO_IP, IP_DONTFRAG, &on, sizeof(on));
+#elif defined(IP_MTU_DISCOVER)
+    int pmtud = IP_PMTUDISC_DO;
+    dfOk = ::setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &pmtud, sizeof(pmtud));
+#endif
+    if (dfOk != 0) { // без DF проба лжёт (фрагментация «пропустит» любой размер) — честно не меряем
+        ::close(fd);
+        if (done) done(false);
+        return;
+    }
+
+    const quint16 magic = static_cast<quint16>((reinterpret_cast<quintptr>(this) >> 4) & 0xffff) ^ 0x5A5A;
+    const quint16 seq = static_cast<quint16>(payloadLen); // seq = размер: матч ответа без таблиц
+
+    QByteArray pkt(int(sizeof(IcmpEchoHdr)) + payloadLen, '\0');
+    auto *h = reinterpret_cast<IcmpEchoHdr *>(pkt.data());
+    h->type = 8; h->code = 0; h->cksum = 0;
+    h->id = htons(magic);
+    h->seq = htons(seq);
+    quint8 *pl = reinterpret_cast<quint8 *>(pkt.data()) + sizeof(IcmpEchoHdr);
+    const quint16 nMagic = htons(magic), nSeq = htons(seq);
+    std::memcpy(pl, &nMagic, 2);
+    std::memcpy(pl + 2, &nSeq, 2);
+    h->cksum = inetChecksum(pkt.constData(), pkt.size());
+
+    sockaddr_in dst;
+    std::memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = htonl(lit.toIPv4Address());
+    if (::sendto(fd, pkt.constData(), size_t(pkt.size()), 0,
+                 reinterpret_cast<sockaddr *>(&dst), sizeof(dst)) < 0) {
+        ::close(fd); // EMSGSIZE: больше MTU интерфейса — легитимное «не проходит»
+        if (done) done(false);
+        return;
+    }
+
+    // heap-контекст: нотифаер+таймер, финиш ровно один раз
+    struct Ctx {
+        int fd;
+        QSocketNotifier *sn = nullptr;
+        QTimer *tm = nullptr;
+        std::function<void(bool)> done;
+        bool finished = false;
+    };
+    auto *ctx = new Ctx{ fd, nullptr, nullptr, std::move(done), false };
+    auto finish = [ctx](bool ok) {
+        if (ctx->finished) return; // повторные вызовы до удаления ctx — no-op
+        ctx->finished = true;
+        ctx->sn->setEnabled(false);
+        ctx->sn->deleteLater();
+        ctx->tm->stop();
+        ctx->tm->deleteLater();
+        ::close(ctx->fd);
+        auto cb = std::move(ctx->done);
+        // удаление — через очередь: уже поставленный queued-колбэк нотифаера успеет увидеть
+        // finished=true и выйти, вместо чтения освобождённой памяти
+        QTimer::singleShot(0, [ctx] { delete ctx; });
+        if (cb) cb(ok);
+    };
+    ctx->sn = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+    ctx->tm = new QTimer(this);
+    ctx->tm->setSingleShot(true);
+    QObject::connect(ctx->sn, &QSocketNotifier::activated, this, [ctx, finish, magic]() {
+        for (;;) {
+            quint8 buf[4096];
+            const ssize_t n = ::recvfrom(ctx->fd, buf, sizeof(buf), 0, nullptr, nullptr);
+            if (n <= 0)
+                return; // EAGAIN — ждём дальше
+            int off = 0;
+            if (n >= 1 && (buf[0] >> 4) == 4) {
+                const int ihl = (buf[0] & 0x0f) * 4;
+                if (ihl > 0 && n >= ihl + int(sizeof(IcmpEchoHdr)))
+                    off = ihl;
+            }
+            if (n - off < int(sizeof(IcmpEchoHdr)) + 4)
+                continue;
+            const auto *rh = reinterpret_cast<const IcmpEchoHdr *>(buf + off);
+            if (rh->type != 0)
+                continue;
+            quint16 rMagic;
+            std::memcpy(&rMagic, buf + off + sizeof(IcmpEchoHdr), 2);
+            if (ntohs(rMagic) != magic)
+                continue;
+            finish(true);
+            return;
+        }
+    });
+    QObject::connect(ctx->tm, &QTimer::timeout, this, [finish]() { finish(false); });
+    ctx->tm->start(timeoutMs > 0 ? timeoutMs : 1200);
+}
+
 } // namespace avpn
 
 // ─────────────────────────────── Windows (graceful-стаб) ───────────────────────────────
@@ -316,6 +428,12 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int /*timeoutMs*/, 
 void RttProbeIcmp::sendEcho(int) {}
 void RttProbeIcmp::onReadable() {}
 void RttProbeIcmp::onTimeout() {}
+
+// MTU-проба на Win не реализована (нет unprivileged ICMP-пути) → «не мерили», не «MTU плохой»
+void RttProbeIcmp::probeMtuOne(const QString &, int, int, std::function<void(bool)> done)
+{
+    if (done) done(false);
+}
 
 } // namespace avpn
 
