@@ -156,7 +156,7 @@ PageType {
                     Layout.topMargin: Theme.space.sm
                     visible: root.tunnelConnected || root.abRunning
                     text: root.abRunning ? qsTr("Отменить A/B (%1)").arg(root.abProgress)
-                                         : qsTr("Авто A/B байпаса (~90 МБ, ~5 мин)")
+                                         : qsTr("Авто A/B байпаса (~5 мин)")
                     variant: root.abRunning ? "ghost" : "primary"
                     enabled: root.hasEngine && (root.abRunning || !root.anyBusy)
                     onClicked: {
@@ -181,7 +181,7 @@ PageType {
                     Layout.topMargin: Theme.space.sm
                     visible: root.tunnelConnected && !root.abRunning
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
-                                            : qsTr("Замер текущего пути (~40 МБ)")
+                                            : qsTr("Замер текущего пути")
                     variant: root.benchRunning ? "ghost" : "glass"
                     enabled: root.hasEngine && !root.sweepRunning
                     onClicked: {
@@ -200,7 +200,7 @@ PageType {
                     Layout.topMargin: Theme.space.sm
                     visible: !root.tunnelConnected && !root.abRunning
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
-                                            : qsTr("Замер без VPN — baseline (~40 МБ)")
+                                            : qsTr("Замер без VPN — baseline")
                     variant: root.benchRunning ? "ghost" : "primary"
                     enabled: root.hasEngine && !root.sweepRunning
                     onClicked: {
@@ -216,7 +216,7 @@ PageType {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
                     visible: !root.tunnelConnected && !root.abRunning && !root.benchRunning
-                    text: qsTr("Замер через другой VPN — amnezia (~40 МБ)")
+                    text: qsTr("Замер через другой VPN — amnezia")
                     variant: "glass"
                     enabled: root.hasEngine && !root.sweepRunning
                     onClicked: if (root.hasEngine) TribeEngine.startBench("amnezia")
@@ -234,7 +234,7 @@ PageType {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
                     text: root.sweepRunning ? qsTr("Отменить проверку (%1)").arg(root.sweepProgress)
-                                            : qsTr("Проверить все ноды (~1 мин и ~10 МБ на ноду)")
+                                            : qsTr("Проверить все ноды (~1 мин на ноду)")
                     variant: root.sweepRunning ? "ghost" : "glass"
                     enabled: root.hasEngine && (root.sweepRunning || !root.anyBusy)
                     onClicked: {
