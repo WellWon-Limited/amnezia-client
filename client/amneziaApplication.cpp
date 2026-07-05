@@ -25,7 +25,10 @@
 #include "version.h"
 
 #include "platforms/ios/QRCodeReaderBase.h"
-         
+
+#ifdef AVPN_ENGINE_ENABLED
+    #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN: диплинк tribe:// от вторичного инстанса (Win/Linux)
+#endif
 
 bool AmneziaApplication::m_forceQuit = false;
 
@@ -273,7 +276,25 @@ void AmneziaApplication::startLocalServer() {
     QObject::connect(server, &QLocalServer::newConnection, this, [server, this]() {
         if (server) {
             QLocalSocket *clientConnection = server->nextPendingConnection();
-            clientConnection->deleteLater();
+#ifdef AVPN_ENGINE_ENABLED
+            // AVPN (перенос по QR): вторичный инстанс (Windows/Linux URL-протокол) шлёт сюда диплинк
+            // tribe:// (main.cpp isAnotherInstanceRunning). Мгновенный deleteLater убил бы сокет ДО
+            // прихода данных — читаем сразу + на readyRead; удаляем по disconnected или сторожем.
+            if (clientConnection) {
+                auto consume = [clientConnection]() {
+                    const QByteArray data = clientConnection->readAll();
+                    if (data.startsWith("tribe://") || data.contains("tribevpn.com/transfer"))
+                        AvpnDeepLink_handleUrl(data.constData());
+                };
+                QObject::connect(clientConnection, &QLocalSocket::readyRead, clientConnection, consume);
+                QObject::connect(clientConnection, &QLocalSocket::disconnected, clientConnection, &QObject::deleteLater);
+                QTimer::singleShot(3000, clientConnection, &QObject::deleteLater); // сторож на молчуна
+                consume(); // данные могли уже лежать в буфере
+            }
+#else
+            if (clientConnection)
+                clientConnection->deleteLater();
+#endif
         }
         emit m_coreController->pageController()->raiseMainWindow(); //TODO
     });
