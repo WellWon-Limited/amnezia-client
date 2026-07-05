@@ -1127,12 +1127,21 @@ void AvpnEngineQml::ccAdvance()
         if (st == QLatin1String("error")) {
             m_ccCur.insert(QStringLiteral("error"), QStringLiteral("teardown-error"));
             ccNextCycle();
-        } else if (st != QLatin1String("connected")) {
+        } else if (st == QLatin1String("disconnected")) {
+            // ждём именно disconnected (не «любой не-connected»): реальные данные iOS — «любой»
+            // давал teardown_ms=2 (первый же changed), метрика врала. Плюс 1с успокоения NE перед
+            // start — не гоним новый up() поверх недоехавшего teardown (класс m_pendingStart).
             m_ccCur.insert(QStringLiteral("teardown_ms"), double(m_ccT.elapsed()));
+            m_ccGuard.stop();
             m_ccProgress = tr("цикл %1/%2 · подключение…").arg(m_ccCycle + 1).arg(kCcCycles);
-            m_ccT.start();
-            start();
-            ccEnterPhase(CcPhase::Up, kSweepGuardUpMs);
+            const int epoch = m_ccEpoch;
+            QTimer::singleShot(1000, this, [this, epoch] {
+                if (epoch != m_ccEpoch || m_ccPhase != CcPhase::Down)
+                    return;
+                m_ccT.start();
+                start();
+                ccEnterPhase(CcPhase::Up, kSweepGuardUpMs);
+            });
         }
         return;
     case CcPhase::Up:
@@ -1199,10 +1208,16 @@ void AvpnEngineQml::ccVerify()
         if (ok)
             m_ccCur.insert(QStringLiteral("first_byte_ms"), double(m_ccT.elapsed()));
         m_ccCur.insert(QStringLiteral("verify_ok"), ok);
-        const qint64 rxAfter = m_tunnel.readStats().rxBytes;
-        if (rxAfter > 0 || rxBefore > 0) // счётчики живы только там, где платформа их отдаёт
-            m_ccCur.insert(QStringLiteral("rx_grew"), rxAfter > rxBefore);
-        ccNextCycle();
+        // rx-счётчики обновляются платформой с лагом (реальные данные iOS: чтение сразу после
+        // ответа = rx_grew:false при живом трафике) — читаем отложенно
+        QTimer::singleShot(1200, this, [this, epoch, rxBefore] {
+            if (epoch != m_ccEpoch)
+                return;
+            const qint64 rxAfter = m_tunnel.readStats().rxBytes;
+            if (rxAfter > 0 || rxBefore > 0) // счётчики живы только там, где платформа их отдаёт
+                m_ccCur.insert(QStringLiteral("rx_grew"), rxAfter > rxBefore);
+            ccNextCycle();
+        });
     });
 }
 
@@ -1291,8 +1306,11 @@ void AvpnEngineQml::ccFinish()
     summary.insert(QStringLiteral("median_teardown_ms"), report.value(QStringLiteral("median_teardown_ms")).toVariant());
     summary.insert(QStringLiteral("median_first_byte_ms"), report.value(QStringLiteral("median_first_byte_ms")).toVariant());
 
+    const QString json = QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
+    // история — попадает в единый полный отчёт (buildFullReport), как свип и A/B
+    QSettings().setValue(QStringLiteral("AvpnBench/last_connect-cycle"), json);
     emit ccChanged();
-    emit ccFinished(summary, QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact)));
+    emit ccFinished(summary, json);
 }
 
 // история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
@@ -1312,8 +1330,6 @@ QString AvpnEngineQml::buildFullReport() const
         if (!j.isEmpty())
             runs.insert(QLatin1String(l), QJsonDocument::fromJson(j.toUtf8()).object());
     }
-    if (runs.size() < 2)
-        return {};
     QJsonObject report;
     report.insert(QStringLiteral("schema"), 1);
     report.insert(QStringLiteral("type"), QStringLiteral("full-report"));
@@ -1330,6 +1346,21 @@ QString AvpnEngineQml::buildFullReport() const
     add("bypass_cost_on_vs_off", "tribe-bypass-off", "tribe-bypass-on");
     add("tribe_off_vs_amnezia", "amnezia", "tribe-bypass-off");
     report.insert(QStringLiteral("compares"), compares);
+    // v5.1 «всё-в-одном» (реальный фидбек: «неудобно каждый отчёт отдельным файлом»): вклеиваем
+    // последние свип нод / тест коннекта / авто-A/B — один файл покрывает все шаги методики.
+    auto attach = [&report](const char *section, const char *key) {
+        const QString j = QSettings().value(QStringLiteral("AvpnBench/last_%1").arg(QLatin1String(key))).toString();
+        if (!j.isEmpty())
+            report.insert(QLatin1String(section), QJsonDocument::fromJson(j.toUtf8()).object());
+    };
+    attach("node_sweep", "node-sweep");
+    attach("connect_cycle", "connect-cycle");
+    attach("ab_bypass", "ab-bypass");
+    // пусто только если совсем нечего отдавать (раньше требовали ≥2 метки — свип/коннект пропадали)
+    if (runs.isEmpty() && !report.contains(QStringLiteral("node_sweep"))
+        && !report.contains(QStringLiteral("connect_cycle"))
+        && !report.contains(QStringLiteral("ab_bypass")))
+        return {};
     return QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
 }
 

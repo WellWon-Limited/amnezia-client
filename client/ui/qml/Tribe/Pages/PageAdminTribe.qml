@@ -587,7 +587,7 @@ PageType {
                 // ── полный отчёт: последние замеры всех меток + сравнения одним JSON ──
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: Object.keys(root.historyInfo).length >= 2
+                    visible: Object.keys(root.historyInfo).length >= 1 || root.sweepRows !== null || root.ccSummary !== null
                     implicitHeight: fullCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: fullCol

@@ -197,9 +197,14 @@ void BenchRunner::dnsFallback(const QString &host)
         QJsonObject o;
         o.insert(QStringLiteral("host"), host);
         if (hi.error() == QHostInfo::NoError && !hi.addresses().isEmpty()) {
-            o.insert(QStringLiteral("query_ms"), double(m_t.elapsed()));
+            const double ms = double(m_t.elapsed());
+            o.insert(QStringLiteral("query_ms"), ms);
             o.insert(QStringLiteral("a"), hi.addresses().first().toString());
             o.insert(QStringLiteral("method"), QStringLiteral("system")); // может отдать из OS-кэша
+            // 0 мс = ответ из OS-кэша, не сетевой замер (реальные данные iOS: все 0 после первого
+            // прогона) — помечаем, из медианы исключается в assemble
+            if (ms <= 0)
+                o.insert(QStringLiteral("cached"), true);
         } else {
             o.insert(QStringLiteral("query_ms"), QJsonValue::Null);
             o.insert(QStringLiteral("a"), QJsonValue::Null);
@@ -408,6 +413,13 @@ void BenchRunner::stageSplit()
         return;
     }
     emit stageChanged(QStringLiteral("split"));
+    // Сплит-проверка имеет смысл ТОЛЬКО через НАШ туннель: у baseline/amnezia сплита нет по
+    // определению (реальный фидбек: «зачем мерять сплит через нативную Amnezia?!»). IPv6/MTU
+    // остаются — они полезны как референс любого пути.
+    if (m_extra.value(QStringLiteral("tunnel_state")).toString() != QLatin1String("connected")) {
+        splitIpv6Lookup();
+        return;
+    }
     const int epoch = m_epoch;
     QNetworkRequest req{QUrl(QStringLiteral("https://2ip.ru/"))};
     req.setTransferTimeout(6000);
@@ -443,7 +455,7 @@ void BenchRunner::splitIpv6Lookup()
         m_ipv6.insert(QStringLiteral("aaaa_ok"), hasV6);
         if (!hasV6) { // резолва нет — v6-HTTP заведомо не пойдёт, не тратим таймаут
             m_ipv6.insert(QStringLiteral("https_ok"), false);
-            stageIdleRtt();
+            stageMtu(); // БАГ v5.0: уходили в stageIdleRtt — MTU-проба молча пропускалась без v6
             return;
         }
         splitIpv6Http();
@@ -623,7 +635,8 @@ void BenchRunner::assemble()
     QVector<double> dnsMs, ttfbMs, totalMs;
     int httpFail = 0;
     for (const QJsonValue &v : m_dnsProbes)
-        if (v.toObject().value(QStringLiteral("query_ms")).isDouble())
+        if (v.toObject().value(QStringLiteral("query_ms")).isDouble()
+            && !v.toObject().value(QStringLiteral("cached")).toBool()) // OS-кэш ≠ замер DNS
             dnsMs.append(v.toObject().value(QStringLiteral("query_ms")).toDouble());
     for (const QJsonValue &v : m_httpProbes) {
         const QJsonObject o = v.toObject();
