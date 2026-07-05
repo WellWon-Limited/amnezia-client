@@ -24,10 +24,7 @@
 #include "core/utils/routeModes.h" // AVPN RU-direct: amnezia::RouteMode::VpnAllExceptSites
 #include <QMap>                    // AVPN RU-direct: bulk addVpnSites
 
-#include "GeoAutoBypass.h" // AVPN (гео-авто тумблера): decideAutoBypass + localSignalsRu
-
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
-#include <QGuiApplication>  // AVPN (гео-авто тумблера): applicationStateChanged → переоценка страны на foreground
 #include <QDateTime>
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
 #include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
@@ -323,18 +320,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (QQuickItem::setFocus). 1200мс гарантируют, что окно показано и loop простаивает (как при
     // пользовательском start()). Идемпотентно (m_bootstrapped). // AVPN
     QTimer::singleShot(1200, this, &AvpnEngineQml::bootstrap);
-
-    // AVPN (гео-авто тумблера «АвтоVPN», 2026-07-04): триггеры оценки страны — отложенный старт
-    // (после bootstrap, окно уже живое; проба async → главный поток не блокируем) + каждый выход
-    // приложения в foreground (перелёт/роуминг ловится без перезапуска). Троттл/гейты — внутри.
-    QTimer::singleShot(2000, this, &AvpnEngineQml::maybeAutoBypassGeo);
-    if (auto *gui = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
-        connect(gui, &QGuiApplication::applicationStateChanged, this,
-                [this](Qt::ApplicationState st) {
-                    if (st == Qt::ApplicationActive)
-                        maybeAutoBypassGeo();
-                });
-    }
 }
 
 QString AvpnEngineQml::state() const
@@ -1915,78 +1900,6 @@ void AvpnEngineQml::setBypassMasterOn(bool on)
     s.setValue(QStringLiteral("AvpnBypass/masterOn"), on);
     s.sync();
     reapplyBypass();
-}
-
-// AVPN (гео-авто, 2026-07-04): ручной тап по тумблеру из UI. Ставит ВЕЧНЫЙ userLock — гео-авто-режим
-// (maybeAutoBypassGeo) после этого никогда не трогает тумблер («я выключил — значит выключено»).
-// Программные пути (A/B-бенч, авто-гео) зовут setBypassMasterOn напрямую, lock не ставят.
-void AvpnEngineQml::setBypassMasterOnByUser(bool on)
-{
-    QSettings s;
-    s.setValue(QStringLiteral("AvpnBypass/userLock"), true);
-    s.sync();
-    setBypassMasterOn(on);
-}
-
-// AVPN (гео-авто тумблера «АвтоVPN», 2026-07-04): оценить страну и привести тумблер к гео-дефолту.
-// Вся решающая логика — чистая avpn::decideAutoBypass (GeoAutoBypass.h, юнит-тест
-// tests/geo_auto_bypass_check.cpp); здесь — гейты, троттл и async-проба.
-// НЕ трогает туннель и путь коннекта: только QSettings-значение сплита; применится при следующем
-// подъёме в VpnConnectionTunnelControl::up() (§14.3). §13 (никакого авто-подъёма) не задет.
-void AvpnEngineQml::maybeAutoBypassGeo()
-{
-    // Ручной режим — вечный: дешёвый выход ДО пробы (не жжём сеть зря).
-    if (QSettings().value(QStringLiteral("AvpnBypass/userLock"), false).toBool())
-        return;
-    if (m_geoProbeInFlight)
-        return;
-    // Троттл 15 мин: смена страны — редкое событие; foreground-дребезг не должен плодить пробы.
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastGeoProbeMs && now - m_lastGeoProbeMs < 15 * 60 * 1000)
-        return;
-    // Гео честно ТОЛЬКО при опущенном туннеле (при поднятом egress = страна ноды, не пользователя).
-    // Терминальный actionable — как в reconcile; плюс никаких операций/намерения быть онлайн.
-    const Vpn::ConnectionState st = m_lastTunnelState;
-    const bool tunnelDown = (st == Vpn::Disconnected || st == Vpn::Unknown || st == Vpn::Error);
-    if (!tunnelDown || m_opInFlight || m_wantConnected)
-        return;
-
-    m_lastGeoProbeMs = now;
-    m_geoProbeInFlight = true;
-    // Тот же эндпоинт, что stageTrace бенча: ~200 байт, отдаёт loc=<ISO-3166>. IP НЕ сохраняем.
-    QNetworkRequest req{QUrl(QStringLiteral("https://www.cloudflare.com/cdn-cgi/trace"))};
-    req.setTransferTimeout(5000);
-    QNetworkReply *r = m_nam->get(req);
-    connect(r, &QNetworkReply::finished, this, [this, r] {
-        r->deleteLater();
-        m_geoProbeInFlight = false;
-        QString loc;
-        if (r->error() == QNetworkReply::NoError) {
-            const QString body = QString::fromUtf8(r->readAll());
-            for (const QString &line : body.split(QLatin1Char('\n')))
-                if (line.startsWith(QLatin1String("loc=")))
-                    loc = line.mid(4).trimmed();
-        }
-        // ГОНКА: за время полёта пробы (до 5с) юзер мог начать коннект/тапнуть тумблер —
-        // ВСЕ гейты перепроверяются в момент ответа; не прошли → результат выбрасываем.
-        if (QSettings().value(QStringLiteral("AvpnBypass/userLock"), false).toBool())
-            return;
-        const Vpn::ConnectionState st2 = m_lastTunnelState;
-        const bool down2 = (st2 == Vpn::Disconnected || st2 == Vpn::Unknown || st2 == Vpn::Error);
-        if (!down2 || m_opInFlight || m_wantConnected)
-            return;
-        const bool currentOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
-        const bool localRu = localSignalsRu();
-        const int act = decideAutoBypass(false, currentOn, loc, localRu);
-        // Диагностика для разбора полётов (страна — не PII, IP не логируем).
-        qInfo("[AVPN geo-auto] loc=%s localRu=%d masterOn=%d -> act=%d",
-              loc.isEmpty() ? "?" : qUtf8Printable(loc), localRu ? 1 : 0, currentOn ? 1 : 0, act);
-        if (act < 0)
-            return; // неизвестность/чужой VPN/значение уже верное — не дёргаем
-        const bool on = (act == 1);
-        setBypassMasterOn(on);            // reapplyBypass внутри no-op: туннель опущен, намерения нет
-        emit bypassMasterAutoChanged(on); // QML обязан обновить bypassStore.masterOn (Settings не видит QSettings)
-    });
 }
 
 // AVPN (звонки): «RU-DNS маскировка» — гейт Яндекс-DNS-подмены (читается в

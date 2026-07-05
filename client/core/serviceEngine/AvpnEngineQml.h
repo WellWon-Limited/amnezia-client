@@ -326,11 +326,6 @@ public:
     // QML-стор флашится с батч-задержкой ~500 мс, туннель гасится быстрее → guardedStart читал СТАРОЕ
     // значение и поднимал туннель без сплита («переподключился, а сплит не активен»).
     Q_INVOKABLE void setBypassMasterOn(bool on);
-    // AVPN (гео-авто, 2026-07-04): вход тумблера ИЗ UI (ручной тап) — ставит вечный AvpnBypass/userLock
-    // (гео-авто-режим больше НИКОГДА не трогает тумблер) и дальше как setBypassMasterOn. Программные
-    // вызовы (A/B-бенч, авто-гео) зовут setBypassMasterOn напрямую и lock НЕ ставят.
-    // Спека: tribe-front docs/superpowers/specs/2026-07-04-geo-auto-bypass-toggle-design.md.
-    Q_INVOKABLE void setBypassMasterOnByUser(bool on);
 
     // AVPN (звонки, 2026-07-03): саб-опция «RU-DNS маскировка» (AvpnBypass/dnsMaskOn, default ВКЛ).
     // OFF ⇒ DNS = бэкендовский 1.1.1.1 через туннель (честный гео для звонков/CDN), маршрутный
@@ -367,10 +362,6 @@ signals:
     // fallback) — QML-кнопка не залипнет в loading. Открывать ТОЛЬКО во внешнем браузере
     // (Qt.openUrlExternally), НЕ в webview (Apple §3.1.1).
     void cabinetLinkReady(const QString &url);
-    // AVPN (гео-авто тумблера «АвтоVPN»): авто-режим сменил AvpnBypass/masterOn по географии
-    // (RU→ВКЛ / уверенно не-RU→ВЫКЛ). QML обязан обновить свой Settings-стор (bypassStore.masterOn):
-    // QML Settings НЕ видит запись в QSettings со стороны C++ — без этого тумблер на экране рассинхронится.
-    void bypassMasterAutoChanged(bool on);
     // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
     void liveQualityChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
@@ -417,15 +408,6 @@ private:
     // ServiceEngine::ensureSubscription; этот хелпер добивает именно сетевые сбои.
     void tryBootstrapSubscription();
 
-    // AVPN (гео-авто тумблера «АвтоVPN», 2026-07-04): пока пользователь НЕ трогал тумблер руками
-    // (AvpnBypass/userLock=false), его значение определяет география: egress=RU→ВКЛ, уверенно не-RU→ВЫКЛ
-    // (двухфакторно: egress И локальные сигналы, GeoAutoBypass.h), неизвестно→не трогать. Проба
-    // cdn-cgi/trace loc= — async на общем m_nam, ТОЛЬКО при опущенном туннеле (при поднятом egress =
-    // страна ноды), троттл 15 мин. Гейты перепроверяются В МОМЕНТ ОТВЕТА (юзер мог начать коннект).
-    // Триггеры: отложенный старт (конструктор) + applicationStateChanged→Active. Туннель НЕ трогает
-    // (§13 не задет: только настройка сплита, применится при следующем подъёме в up()).
-    void maybeAutoBypassGeo();
-
     // AVPN RU-direct (единый «Доступ к сайтам РФ», флаг AvpnBypass/masterOn, default ON): перед коннектом
     // сеет split-tunnel репозиторий — routeMode=VpnAllExceptSites + весь рунет CIDR (ru_prefixes.h) →
     // рунет идёт МИМО туннеля через реальный residential РФ-IP (бьёт датацентр-детект Госуслуг/Кинопоиска;
@@ -439,9 +421,6 @@ private:
     QNetworkAccessManager       *m_nam = nullptr;
     VpnConnection               *m_conn = nullptr;
     QTimer                       m_healthTimer;
-    // AVPN (гео-авто тумблера): троттл (15 мин) + дедуп полёта egress-пробы страны.
-    qint64                       m_lastGeoProbeMs = 0;
-    bool                         m_geoProbeInFlight = false;
     // AVPN (реальные палочки): app-layer RTT-проба через туннель + сглаживание в 0..5 баров.
     QualityProbe                *m_probe = nullptr;   // создаётся в конструкторе (владелец — this)
     SignalQuality                m_signal;            // EWMA+гистерезис (чистая логика, протестирована)
