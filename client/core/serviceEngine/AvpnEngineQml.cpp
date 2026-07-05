@@ -21,6 +21,8 @@
 #include "core/utils/qrCodeUtils.h" // AVPN: QR для ссылки переноса (makeQrCode)
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
+#include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
+#include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include "core/utils/routeModes.h" // AVPN RU-direct: amnezia::RouteMode::VpnAllExceptSites
 #include <QMap>                    // AVPN RU-direct: bulk addVpnSites
 
@@ -64,6 +66,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
         m_baseUrl = QString::fromUtf8(envUrl);
+
+    // AVPN RU-direct carve-out (2026-07-05): узнать актуальные IP хоста API, чтобы сев байпаса
+    // их исключил (см. applyRuBypassSplit). Async (QHostInfo не блокирует GUI); провал резолва
+    // не страшен — в севе всегда есть вкомпиленный фолбэк-IP. Ре-сев на живом туннеле произойдёт
+    // при следующем reconcile/up() и подхватит m_apiHostIps.
+    const QString apiHost = QUrl(m_baseUrl).host();
+    if (!apiHost.isEmpty() && QHostAddress(apiHost).isNull()) { // literal-IP резолвить не надо
+        QHostInfo::lookupHost(apiHost, this, [this](const QHostInfo &info) {
+            if (info.error() == QHostInfo::NoError && !info.addresses().isEmpty())
+                m_apiHostIps = info.addresses();
+        });
+    }
 
     m_engine.setTunnel(&m_tunnel);
     m_tunnel.setStore(store); // AVPN RU-direct: гейт сплита по фактической ноде — в up() (T2)
@@ -1880,6 +1894,15 @@ void AvpnEngineQml::applyRuBypassSplit()
         for (const char *cidr : kLiAutoCidrs)
             sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
     }
+
+    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
+    // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
+    // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
+    // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
+    // Вкомпиленный фолбэк + актуальные IP из async-резолва конструктора (смена IP у Beget).
+    carveOutIpFromSites(sites, QHostAddress(QStringLiteral("159.194.214.36")));
+    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
+        carveOutIpFromSites(sites, ip);
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
