@@ -50,6 +50,7 @@ PageType {
         case "tls":   return qsTr("TCP/TLS-фазы…")
         case "http":  return qsTr("HTTP-тайминги (8 сайтов)…")
         case "ping":  return qsTr("ICMP-пинг…")
+        case "split": return qsTr("проверка сплита и IPv6…")
         case "rtt":   return qsTr("базовый RTT…")
         case "down":  return qsTr("загрузка 25 МБ…")
         case "up":    return qsTr("отдача 5 МБ…")

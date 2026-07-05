@@ -139,6 +139,25 @@ inline QJsonArray verdicts(const QJsonObject &r)
         out.append(mkVerdict("packet-loss-single", "info",
                              QStringLiteral("Единичная потеря ICMP-пакета — скорее шум замера, чем проблема пути")));
 
+    // bench v5: сплит по ФАКТУ. Гейт по extra.tunnel_config.split_on (сеялся ли сплит ЭТИМ подъёмом):
+    // на РФ-ноде или при выключенных тумблерах совпадение egress — норма, не leak.
+    const QJsonObject extra = r.value(QStringLiteral("extra")).toObject();
+    const QJsonObject split = r.value(QStringLiteral("split_check")).toObject();
+    const bool splitOn = extra.value(QStringLiteral("tunnel_config")).toObject()
+                              .value(QStringLiteral("split_on")).toBool();
+    if (splitOn && split.value(QStringLiteral("ru_reachable")).toBool()
+        && split.value(QStringLiteral("ru_equals_tunnel_egress")).toBool())
+        out.append(mkVerdict("split-leak", "bad",
+                             QStringLiteral("Split-leak: RU-чекер видит IP туннеля — рунет ушёл ЧЕРЕЗ VPN, хотя сплит включён (сев не применился/маршруты не встали)")));
+
+    // bench v5: IPv6 — резолв есть, а v6-путь мёртв (класс IPv6-дыры RU-direct). info: у многих
+    // сетей v6 нет вовсе (aaaa_ok=false) — это не проблема, молчим.
+    const QJsonObject v6 = r.value(QStringLiteral("ipv6")).toObject();
+    if (v6.value(QStringLiteral("aaaa_ok")).toBool()
+        && !v6.value(QStringLiteral("https_ok")).toBool())
+        out.append(mkVerdict("ipv6-dead", "info",
+                             QStringLiteral("IPv6 резолвится, но соединение не проходит — v6-путь битый (проверь маршруты/утечку v6)")));
+
     // связность вовсе мертва? (все стадии пустые)
     if (dnsMs < 0 && num(http, "median_ttfb_ms") < 0 && down <= 0)
         out.append(mkVerdict("no-connectivity", "bad", QStringLiteral("Сеть не отвечает ни по одной пробе")));

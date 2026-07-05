@@ -71,6 +71,11 @@ private:
     void stageTls();
     void stageHttp();
     void stagePing();
+    // bench v5: сплит по ФАКТУ (RU-чекер vs egress туннеля, только «совпал/нет» — IP не пишем)
+    // + IPv6 (AAAA-резолв и v6-цель). Только full-режим (lite пропускает).
+    void stageSplit();
+    void splitIpv6Lookup();
+    void splitIpv6Http();
     void stageIdleRtt();
     void stageDown();
     void stageUp();
@@ -106,6 +111,9 @@ private:
 
     // результаты стадий
     QString m_loc, m_colo;
+    QString m_traceIp;        // ip= из cf-trace: ТОЛЬКО в памяти для сравнения в stageSplit; в JSON НЕ пишется
+    QJsonObject m_splitCheck; // bench v5: {ru_reachable, ru_equals_tunnel_egress}
+    QJsonObject m_ipv6;       // bench v5: {aaaa_ok, https_ok}
     int m_dnsIdx = 0;
     QJsonArray m_dnsProbes;
     int m_tlsIdx = 0;
