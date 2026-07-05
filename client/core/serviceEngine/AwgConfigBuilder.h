@@ -27,6 +27,12 @@ public:
     // Native wg-quick текст (ключ "config") в формате AmneziaWG. TODO(in-fork): сверить с шаблоном форка.
     static QString wgQuick(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys);
 
+    // AVPN bench v5: санитизированный дамп конфига для отчёта бенча (tunnel.config). Только
+    // parity-поля (mtu/dns/port/keepalive/awg-параметры/факты allowed_ips|psk) — НИ ключей,
+    // НИ endpoint-хоста, НИ client_ip: отчёт пересылается наружу. mtu/dns — ЭФФЕКТИВНЫЕ
+    // (с подставленными дефолтами) — ровно то, что реально уйдёт в туннель.
+    static QJsonObject reportSummary(const Subscription &sub, const SubscriptionNode &node);
+
     // host из "host:port".
     static QString host(const QString &endpoint);
     // port из "host:port" (0 если нет).

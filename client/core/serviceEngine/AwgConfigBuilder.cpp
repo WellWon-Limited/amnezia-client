@@ -84,6 +84,47 @@ QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNod
     return l.join(QLatin1Char('\n')) + QLatin1Char('\n');
 }
 
+QJsonObject AwgConfigBuilder::reportSummary(const Subscription &sub, const SubscriptionNode &node)
+{
+    Q_UNUSED(sub) // sub.address = client_ip — в отчёт НЕ пишем (PII); параметр оставлен под будущие факты
+    QJsonObject o;
+    o.insert(QStringLiteral("proto"), node.proto);
+    o.insert(QStringLiteral("mtu"), mtuOrDefault(node.mtu).toInt());
+    QJsonArray dns;
+    for (const QString &d : dnsOrDefault(node.dns))
+        dns.append(d);
+    o.insert(QStringLiteral("dns"), dns);
+    o.insert(QStringLiteral("port"), port(node.endpoint));
+    o.insert(QStringLiteral("keepalive"), node.persistentKeepalive);
+    o.insert(QStringLiteral("has_psk"), !node.presharedKey.isEmpty());
+    o.insert(QStringLiteral("allowed_ips"),
+             node.allowedIps.isEmpty() ? 2 : int(node.allowedIps.size()));
+    const AwgParams &a = node.awg;
+    QJsonObject awg;
+    awg.insert(QStringLiteral("jc"), a.Jc);
+    awg.insert(QStringLiteral("jmin"), a.Jmin);
+    awg.insert(QStringLiteral("jmax"), a.Jmax);
+    awg.insert(QStringLiteral("s1"), a.S1);
+    awg.insert(QStringLiteral("s2"), a.S2);
+    if (a.S3) awg.insert(QStringLiteral("s3"), *a.S3);
+    if (a.S4) awg.insert(QStringLiteral("s4"), *a.S4); // S4≠0 = класс blackhole-бага awg-go 0.2.16
+    awg.insert(QStringLiteral("h1"), a.H1);
+    awg.insert(QStringLiteral("h2"), a.H2);
+    awg.insert(QStringLiteral("h3"), a.H3);
+    awg.insert(QStringLiteral("h4"), a.H4);
+    // I-пакеты: только факт+размер (контент — серверная обфускация, в отчёте не нужен)
+    const int iLens[] = { int(a.I1.size()), int(a.I2.size()), int(a.I3.size()),
+                          int(a.I4.size()), int(a.I5.size()) };
+    QJsonArray iPkts;
+    for (int len : iLens)
+        if (len > 0)
+            iPkts.append(len);
+    if (!iPkts.isEmpty())
+        awg.insert(QStringLiteral("i_pkt_lens"), iPkts);
+    o.insert(QStringLiteral("awg"), awg);
+    return o;
+}
+
 QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys)
 {
     QJsonObject o;
