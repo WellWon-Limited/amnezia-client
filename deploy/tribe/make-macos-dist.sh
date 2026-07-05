@@ -23,6 +23,9 @@ DEVID="Developer ID Application: WellWon Limited (Q7DVH5MCWF)"
 ENTS="$REPO/deploy/tribe/tribe-app.entitlements"
 DIST="$HOME/avpn-build/dist"; DMG="$DIST/Tribe VPN.dmg"
 SIGN=(codesign --force --options runtime --timestamp --sign "$DEVID")
+# Нотаризация ПРЯМЫМИ ключами (НЕ keychain-профиль AC_NOTARY: он спонтанно пропадал из
+# кичейна — см. memory tribe-notary-keychain-flake; прямые аргументы не зависят от кичейна)
+NOTARY_KEY=(--key "$HOME/.appstoreconnect/private_keys/AuthKey_BSDJAT949V.p8" --key-id BSDJAT949V --issuer 1fb2a58a-ce3b-470a-bfed-afa87c463e8a)
 
 [ -d "$APP" ] || { echo "нет $APP — сначала cmake build"; exit 1; }
 
@@ -78,7 +81,7 @@ if [ "$STAGE" = notarize ]; then
   echo "=== 7. Нотаризация app ==="
   ZIP=/tmp/TribeVPN-notarize.zip; rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"
-  xcrun notarytool submit "$ZIP" --keychain-profile AC_NOTARY --wait
+  xcrun notarytool submit "$ZIP" "${NOTARY_KEY[@]}" --wait
   xcrun stapler staple "$APP"
 fi
 
@@ -99,7 +102,7 @@ if [ "$STAGE" = notarize ]; then
   for dev in $(hdiutil info | grep -A30 "Tribe VPN.dmg" | grep -oE "/dev/disk[0-9]+" | sort -u); do
     hdiutil detach "$dev" -force 2>/dev/null || true
   done
-  xcrun notarytool submit "$DMG" --keychain-profile AC_NOTARY --wait
+  xcrun notarytool submit "$DMG" "${NOTARY_KEY[@]}" --wait
   xcrun stapler staple "$DMG"
   codesign -v -R=notarized --verbose=1 "$DMG" && echo "  ✅ dmg notarized (codesign -R=notarized exit0)"
   spctl -a -t open --context context:primary-signature -vv "$DMG" || true
