@@ -169,6 +169,9 @@ public:
     // (type:"full-report": замеры + парные сравнения). "" пока собрано <2 меток.
     Q_INVOKABLE QString buildFullReport() const;
     Q_INVOKABLE QVariantMap benchHistoryInfo() const; // метка → ts последнего замера (карточка «N/4»)
+    // Сохранить JSON-отчёт бенча файлом: desktop — путь из SystemController.getFileName (QML-диалог),
+    // iOS — временный файл + нативный share sheet ФАЙЛОМ, Android — SAF (создание документа).
+    Q_INVOKABLE bool saveReportFile(const QString &fileName, const QString &json) const;
     Q_INVOKABLE void bootstrap();                    // AVPN: тихая прогрузка подписки при старте (Task 11; без connect)
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();

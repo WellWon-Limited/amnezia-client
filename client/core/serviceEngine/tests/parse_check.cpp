@@ -169,12 +169,33 @@ int main(int argc, char **argv)
         bool lossTextOk = true;
         for (const QJsonValue &v : loss3)
             if (v.toObject().value("text").toString().contains(QLatin1String("%%"))) lossTextOk = false;
+        // RU-direct: провалы ya.ru/vk при bypass_on → ru-direct-down (общий http-failures молчит:
+        // заграничных провалов нет); тот же корпус при bypass_off → обычный http-failures (RU шёл
+        // через туннель); замер без probes[] (старая схема) → прежнее поведение по failures
+        auto mkRu = [&](bool bypassOn) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, 3);
+            QJsonObject http = r.value("http").toObject();
+            http.insert("probes", QJsonArray{
+                QJsonObject{{"url", "https://www.google.com/"}, {"code", 200}},
+                QJsonObject{{"url", "https://ya.ru/"}, {"error", true}, {"error_kind", "TimeoutError"}},
+                QJsonObject{{"url", "https://ya.ru/"}, {"error", true}, {"error_kind", "HostNotFoundError"}},
+                QJsonObject{{"url", "https://vk.com/"}, {"error", true}, {"error_kind", "TimeoutError"}}});
+            r.insert("http", http);
+            r.insert("extra", QJsonObject{{"bypass_on", bypassOn}});
+            return r;
+        };
+        const QJsonArray ruOn = bench::verdicts(mkRu(true));
+        const QJsonArray ruOff = bench::verdicts(mkRu(false));
+        const QJsonArray legacy = bench::verdicts(mk(25, 250, 80, 90, 110, 3)); // failures без probes[]
+        const bool ruOk = hasCode(ruOn, "ru-direct-down") && !hasCode(ruOn, "http-failures")
+                       && !hasCode(ruOff, "ru-direct-down") && hasCode(ruOff, "http-failures")
+                       && hasCode(legacy, "http-failures") && !hasCode(legacy, "ru-direct-down");
         const bool vOk = good.isEmpty()
                       && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
                       && hasCode(slowDns, "dns-slow")
                       && hasCode(lowGp, "low-goodput")
                       && !hasCode(loss1, "packet-loss") && hasCode(loss1, "packet-loss-single")
-                      && hasCode(loss3, "packet-loss") && lossTextOk;
+                      && hasCode(loss3, "packet-loss") && lossTextOk && ruOk;
         // A/B: b хуже a по TTFB на 30% (существенно) и лучше по загрузке (не в significant)
         const QJsonObject cmp = bench::compare(mk(25, 200, 50, 90, 110, 0), mk(25, 260, 70, 90, 110, 0));
         const QJsonArray sig = cmp.value("significant").toArray();

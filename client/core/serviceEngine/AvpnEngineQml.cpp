@@ -32,6 +32,8 @@
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
 #include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
 #include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
+#include <QTimeZone>     // AVPN (панель администратора): tz в extra{} — физлокация vs egress
+#include "ui/controllers/systemController.h" // AVPN (панель администратора): saveReportFile → файл/шэр отчёта
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
 #include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
@@ -544,6 +546,9 @@ QJsonObject AvpnEngineQml::benchExtra() const
     extra.insert(QStringLiteral("bypass_on"), s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool());
     extra.insert(QStringLiteral("liauto_on"), s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool());
     extra.insert(QStringLiteral("dns_mask_on"), s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool());
+    // системная таймзона = где ФИЗИЧЕСКИ устройство (egress loc в network{} — где выход туннеля).
+    // Без неё отчёты из разных стран несравнимы: провал RU-direct за границей — норма, в РФ — баг.
+    extra.insert(QStringLiteral("tz"), QString::fromUtf8(QTimeZone::systemTimeZoneId()));
     // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить
     static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
     if (niLoaded) {
@@ -1066,6 +1071,15 @@ QString AvpnEngineQml::buildFullReport() const
     add("tribe_off_vs_amnezia", "amnezia", "tribe-bypass-off");
     report.insert(QStringLiteral("compares"), compares);
     return QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact));
+}
+
+// Сохранение отчёта файлом — весь платформенный веер уже в SystemController::saveFile (upstream:
+// desktop = запись по пути, iOS = temp + share sheet файла, Android = SAF). Здесь только мост в QML.
+bool AvpnEngineQml::saveReportFile(const QString &fileName, const QString &json) const
+{
+    if (fileName.isEmpty() || json.isEmpty())
+        return false;
+    return SystemController::saveFile(fileName, json);
 }
 
 // метка → ts последнего замера (для карточки «собрано N/4»; свежесть видна по датам)
