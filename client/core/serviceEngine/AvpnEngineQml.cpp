@@ -569,6 +569,14 @@ QJsonObject AvpnEngineQml::benchExtra() const
     // системная таймзона = где ФИЗИЧЕСКИ устройство (egress loc в network{} — где выход туннеля).
     // Без неё отчёты из разных стран несравнимы: провал RU-direct за границей — норма, в РФ — баг.
     extra.insert(QStringLiteral("tz"), QString::fromUtf8(QTimeZone::systemTimeZoneId()));
+    // bench v5 (tunnel.config): фактический конфиг НАШЕГО туннеля — только когда поднят именно он
+    // (baseline/amnezia меряют чужой путь — наш последний конфиг там был бы враньём). Санитизирован
+    // by construction (AwgConfigBuilder::reportSummary). Даёт A/B с ванилью diff mtu/dns/awg в отчёте.
+    if (state() == QLatin1String("connected")) {
+        const QJsonObject tc = m_tunnel.lastConfigReport();
+        if (!tc.isEmpty())
+            extra.insert(QStringLiteral("tunnel_config"), tc);
+    }
     // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить
     static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
     if (niLoaded) {

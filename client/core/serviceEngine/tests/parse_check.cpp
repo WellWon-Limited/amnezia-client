@@ -124,6 +124,32 @@ int main(int argc, char **argv)
         printf("config builder defaults: OK (dns 1.1.1.1/1.0.0.1, mtu %s)\n", wantMtu.toUtf8().constData());
     }
 
+    // --- AVPN bench v5: reportSummary — санитизированный дамп конфига для отчёта бенча ---
+    // Даёт A/B с ванильной Amnezia интерпретируемость («mtu 1280 vs 1376», а не «TTFB хуже»).
+    // ЖЁСТКО: ни ключей, ни endpoint-хоста, ни client_ip в выводе (отчёт уходит наружу).
+    if (!sub.nodes.isEmpty()) {
+        const SubscriptionNode &n = sub.nodes.first();
+        const QJsonObject rep = AwgConfigBuilder::reportSummary(sub, n);
+        const QJsonObject awg = rep.value(QStringLiteral("awg")).toObject();
+        const QString flat = QString::fromUtf8(QJsonDocument(rep).toJson(QJsonDocument::Compact));
+        printf("report summary: mtu=%d port=%d dns=%d jc=%d keys-leak=%d\n",
+               rep.value(QStringLiteral("mtu")).toInt(), rep.value(QStringLiteral("port")).toInt(),
+               int(rep.value(QStringLiteral("dns")).toArray().size()), awg.value(QStringLiteral("jc")).toInt(),
+               flat.contains(QLatin1String("203.0.113.10")) ? 1 : 0);
+        const bool repOk = rep.value(QStringLiteral("proto")).toString() == QLatin1String("awg")
+                        && rep.value(QStringLiteral("mtu")).toInt() > 0            // эффективный (дефолт при 0)
+                        && rep.value(QStringLiteral("port")).toInt() == 51820
+                        && rep.value(QStringLiteral("keepalive")).toInt() == 25
+                        && rep.value(QStringLiteral("dns")).toArray().size() == 2
+                        && awg.value(QStringLiteral("jc")).toInt() == 4
+                        && awg.contains(QStringLiteral("h1"))
+                        && !flat.contains(QLatin1String("203.0.113.10"))           // endpoint-хост не течёт
+                        && !flat.contains(QLatin1String("10.7.0.5"))               // client_ip не течёт
+                        && !flat.contains(n.serverPubkey);                         // ключи не текут
+        if (!repOk) { fprintf(stderr, "FAIL: reportSummary (sanitize/fields)\n"); return 5; }
+        printf("report summary: OK (parity-поля есть, ключи/хост/ip не текут)\n");
+    }
+
     // --- BenchRunner: чистая математика (median/mbit) ---
     {
         const bool medOk = BenchRunner::median({}) == -1.0                       // нет данных

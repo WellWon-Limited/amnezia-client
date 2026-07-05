@@ -43,6 +43,12 @@ public:
 
     void down() override;
 
+    // AVPN bench v5 (tunnel.config): санитизированный снапшот ПОСЛЕДНЕГО реально ушедшего в
+    // connectToVpn конфига (reportSummary + факты сева: split/split-DNS/dns-override). up() —
+    // единственная точка каждого подъёма, поэтому снапшот всегда соответствует живому туннелю.
+    // Пустой объект = туннель ещё не поднимали. Ключей/IP внутри нет by construction.
+    QJsonObject lastConfigReport() const { return m_lastConfigReport; }
+
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
 
@@ -52,6 +58,7 @@ private:
     VpnConnection *m_conn = nullptr;
     ClientKeys     m_keys;
     TunnelStats    m_stats;
+    QJsonObject    m_lastConfigReport; // AVPN bench v5: снапшот конфига последнего up()
     ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде
 };
 

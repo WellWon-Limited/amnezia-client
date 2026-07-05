@@ -82,6 +82,8 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // резолвер и так российский (сплит на РФ-ноде выключается здесь же, ниже).
     SubscriptionNode primary = node;   // мутабельная копия (DNS-override под РФ-доступ)
     bool splitDns = false;             // AVPN split-DNS: поля в корень cfg (macOS-демон)
+    bool splitOnFact = false;          // AVPN bench v5: факт сева сплита — в tunnel.config отчёта
+    bool ruNodeFact = false;
     {
         QSettings s;
         const bool ruNode = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
@@ -123,7 +125,9 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
             if (splitOn)
                 m_appStore->setRouteMode(amnezia::RouteMode::VpnAllExceptSites);
             m_appStore->setSitesSplitTunnelingEnabled(splitOn);
+            splitOnFact = splitOn;
         }
+        ruNodeFact = ruNode;
     }
 
     QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
@@ -137,6 +141,13 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
                                QStringLiteral("yandex.net"), QStringLiteral("yastatic.net") });
         cfg.insert(QStringLiteral("splitDnsServer"), QStringLiteral("77.88.8.8"));
     }
+    // AVPN bench v5 (tunnel.config): снапшот того, что РЕАЛЬНО уходит в туннель (primary — уже с
+    // dns-override, эффективные mtu/dns из reportSummary) + факты сева этого подъёма.
+    m_lastConfigReport = AwgConfigBuilder::reportSummary(sub, primary);
+    m_lastConfigReport.insert(QStringLiteral("split_on"), splitOnFact);
+    m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
+    m_lastConfigReport.insert(QStringLiteral("split_dns"), splitDns);
+
     if (!invokeConnect(cfg, primary.nodeId))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();
