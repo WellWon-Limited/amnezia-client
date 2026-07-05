@@ -23,6 +23,11 @@
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
+#ifdef Q_OS_IOS
+#include <chrono>   // AVPN: предохранитель watchdog при выходе (см. конструктор)
+#include <thread>
+#include <unistd.h> // ::_exit
+#endif
 #include "core/utils/routeModes.h" // AVPN RU-direct: amnezia::RouteMode::VpnAllExceptSites
 #include <QMap>                    // AVPN RU-direct: bulk addVpnSites
 
@@ -71,6 +76,22 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // их исключил (см. applyRuBypassSplit). Async (QHostInfo не блокирует GUI); провал резолва
     // не страшен — в севе всегда есть вкомпиленный фолбэк-IP. Ре-сев на живом туннеле произойдёт
     // при следующем reconcile/up() и подхватит m_apiHostIps.
+    // AVPN (watchdog 0x8BADF00D, креш build 53, 2026-07-05): при выходе ~QGuiApplication ждёт
+    // QThreadPool::waitForDone (Qt-внутренний пул QHostInfo), а застрявший в блокированной сети
+    // DNS-lookup не завершается → iOS убивает процесс за 5с как «Failed to terminate gracefully».
+    // Предохранитель: на aboutToQuit синхронно флашим настройки и взводим detached-поток, который
+    // через 2с (внутри 5с watchdog) завершает процесс штатно, если teardown не успел сам.
+    // Overlay: наш файл, апстрим main.cpp/amneziaApplication.cpp не трогаем.
+#ifdef Q_OS_IOS
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [] {
+        { QSettings s; s.sync(); }
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            ::_exit(0);
+        }).detach();
+    });
+#endif
+
     const QString apiHost = QUrl(m_baseUrl).host();
     if (!apiHost.isEmpty() && QHostAddress(apiHost).isNull()) { // literal-IP резолвить не надо
         QHostInfo::lookupHost(apiHost, this, [this](const QHostInfo &info) {
