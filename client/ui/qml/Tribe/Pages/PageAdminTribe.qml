@@ -41,7 +41,11 @@ PageType {
     readonly property string sweepProgress: hasEngine ? TribeEngine.sweepProgress : ""
     readonly property bool abRunning: hasEngine ? TribeEngine.abRunning : false
     readonly property string abProgress: hasEngine ? TribeEngine.abProgress : ""
-    readonly property bool anyBusy: benchRunning || sweepRunning || abRunning
+    readonly property bool ccRunning: hasEngine ? TribeEngine.ccRunning : false
+    readonly property string ccProgress: hasEngine ? TribeEngine.ccProgress : ""
+    property var ccSummary: null     // сводка теста коннекта из ccFinished
+    property string ccJson: ""
+    readonly property bool anyBusy: benchRunning || sweepRunning || abRunning || ccRunning
 
     function stageTitle(st) {
         switch (st) {
@@ -104,6 +108,10 @@ PageType {
             root.abSummary = summary
             root.abJson = json
             root.refreshHistory()
+        }
+        function onCcFinished(summary, json) {
+            root.ccSummary = summary
+            root.ccJson = json
         }
     }
 
@@ -193,6 +201,33 @@ PageType {
                         else
                             TribeEngine.startBench("") // авто-метка по факту тумблера байпаса
                     }
+                }
+
+                // ── bench v5: «Тест коннекта» — N циклов stop→start→verify (меряет сам коннект) ──
+                TribeButton {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    visible: root.tunnelConnected || root.ccRunning
+                    text: root.ccRunning ? qsTr("Отменить тест коннекта (%1)").arg(root.ccProgress)
+                                         : qsTr("Тест коннекта (3 цикла)")
+                    variant: root.ccRunning ? "ghost" : "glass"
+                    enabled: root.hasEngine && (root.ccRunning || !root.anyBusy)
+                    onClicked: {
+                        if (!root.hasEngine)
+                            return
+                        if (root.ccRunning)
+                            TribeEngine.cancelConnectCycle()
+                        else
+                            TribeEngine.startConnectCycle()
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.ccRunning
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Идёт тест коннекта: VPN несколько раз отключится и подключится сам. Не трогай кнопку Connect.")
+                    color: Theme.color.warning
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                 }
 
                 // ── Tribe отключён: два ручных сценария (различить их изнутри нельзя) ──
@@ -327,6 +362,75 @@ PageType {
                             Layout.preferredWidth: 1; Layout.preferredHeight: 1
                             visible: false; readOnly: true
                             text: root.sweepJson
+                        }
+                    }
+                }
+
+                // ── bench v5: результат теста коннекта ──
+                TribeCard {
+                    Layout.fillWidth: true
+                    visible: root.ccSummary !== null
+                    implicitHeight: ccCol.implicitHeight + 2 * Theme.space.lg
+                    ColumnLayout {
+                        id: ccCol
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        anchors.topMargin: Theme.space.lg
+                        spacing: Theme.space.xs
+
+                        Text {
+                            text: root.ccSummary
+                                  ? qsTr("Тест коннекта — успешно %1 из %2")
+                                        .arg(root.ccSummary.ok_cycles).arg(root.ccSummary.cycles)
+                                  : ""
+                            color: root.ccSummary && root.ccSummary.ok_cycles === root.ccSummary.cycles
+                                   ? Theme.color.connected : Theme.color.warning
+                            font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
+                        }
+                        Repeater {
+                            model: root.ccSummary === null ? [] : [
+                                { k: qsTr("Подключение (медиана)"), v: root.fmt(root.ccSummary.median_connect_ms, qsTr(" мс")) },
+                                { k: qsTr("Отключение (медиана)"),  v: root.fmt(root.ccSummary.median_teardown_ms, qsTr(" мс")) },
+                                { k: qsTr("Первый байт данных"),    v: root.fmt(root.ccSummary.median_first_byte_ms, qsTr(" мс")) }
+                            ]
+                            delegate: RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: Theme.space.sm
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.k
+                                    color: Theme.color.text3
+                                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                                }
+                                Text {
+                                    text: modelData.v
+                                    color: Theme.color.text1
+                                    font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                                }
+                            }
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            Layout.topMargin: Theme.space.sm
+                            variant: "glass"
+                            text: qsTr("Скопировать отчёт коннекта")
+                            onClicked: {
+                                ccJsonEdit.selectAll(); ccJsonEdit.copy(); ccJsonEdit.deselect()
+                                PageController.showNotificationMessage(qsTr("Отчёт скопирован"))
+                            }
+                        }
+                        TribeButton {
+                            Layout.fillWidth: true
+                            variant: "glass"
+                            text: qsTr("Сохранить отчёт коннекта в файл")
+                            onClicked: root.saveReport(root.ccJson, "tribe-connect-cycle")
+                        }
+                        TextEdit {
+                            id: ccJsonEdit
+                            Layout.preferredWidth: 1; Layout.preferredHeight: 1
+                            visible: false; readOnly: true
+                            text: root.ccJson
                         }
                     }
                 }

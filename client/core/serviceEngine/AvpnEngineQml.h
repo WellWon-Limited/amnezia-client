@@ -100,6 +100,12 @@ class AvpnEngineQml : public QObject {
     // состояния настроек — ошибиться меткой невозможно. Итог — abFinished (type:"ab-bypass").
     Q_PROPERTY(bool abRunning READ abRunning NOTIFY abChanged)
     Q_PROPERTY(QString abProgress READ abProgress NOTIFY abChanged)
+    // AVPN (bench v5, connect{}): «Тест коннекта» — N циклов disconnect→connect→verify ТОЛЬКО
+    // публичными переходами (stop()/start(), фактические состояния по changed()). Меряет сам
+    // КОННЕКТ (v1-v4 меряли путь после): teardown_ms/connect_ms/handshake_ms/first_byte_ms +
+    // verify (данные реально ходят). Итог — ccFinished (type:"connect-cycle").
+    Q_PROPERTY(bool ccRunning READ ccRunning NOTIFY ccChanged)
+    Q_PROPERTY(QString ccProgress READ ccProgress NOTIFY ccChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -161,6 +167,12 @@ public:
     Q_INVOKABLE void cancelBypassAb();
     bool abRunning() const { return m_abPhase != AbPhase::Idle; }
     QString abProgress() const { return m_abProgress; }
+
+    // AVPN (bench v5, connect{}): «Тест коннекта» — N циклов stop→start→verify (см. Q_PROPERTY выше).
+    Q_INVOKABLE void startConnectCycle();
+    Q_INVOKABLE void cancelConnectCycle();
+    bool ccRunning() const { return m_ccPhase != CcPhase::Idle; }
+    QString ccProgress() const { return m_ccProgress; }
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -382,6 +394,11 @@ signals:
     // AVPN (авто-A/B байпаса): пара замеров готова. summary — {on:{...}, off:{...}, cost:[тексты],
     // reconnect_ms}; json — полный отчёт (type:"ab-bypass": оба замера + compare).
     void abFinished(const QVariantMap &summary, const QString &json);
+    // AVPN (bench v5, connect{}): смена состояния теста коннекта (ccRunning/ccProgress).
+    void ccChanged();
+    // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
+    // median_teardown_ms, median_first_byte_ms}; json — полный отчёт (type:"connect-cycle").
+    void ccFinished(const QVariantMap &summary, const QString &json);
 
 private slots:
     void onTick();
@@ -478,6 +495,31 @@ private:
     void abStartBench(bool second);
     void abFail(const QString &reason); // прервать, вернуть исходный тумблер, error() наружу
     void abFinish();
+
+    // AVPN (bench v5, connect{}): «Тест коннекта» — N циклов stop→wait down→start→wait connected→
+    // →handshake (poll readStats, где платформа отдаёт)→first byte (HEAD 204)→next. Тот же каркас,
+    // что свип/A/B: продвижение по changed() (queued) + сторож фазы + эпоха против стейла.
+    // Настройки/тумблеры НЕ трогаем; тест заканчивается подключённым (последняя фаза — Verify).
+    enum class CcPhase { Idle, Down, Up, Handshake, Verify };
+    CcPhase       m_ccPhase = CcPhase::Idle;
+    int           m_ccEpoch = 0;
+    int           m_ccCycle = 0;                    // текущий цикл (0-based)
+    static constexpr int kCcCycles = 3;
+    QJsonArray    m_ccCycles;                       // [{teardown_ms,connect_ms,handshake_ms,first_byte_ms,verify_ok,error?}]
+    QJsonObject   m_ccCur;                          // собираемый цикл
+    QElapsedTimer m_ccT;                            // таймер текущей фазы
+    qint64        m_ccConnEpochSec = 0;             // момент подключения (гейт свежести handshake)
+    int           m_ccHsPolls = 0;                  // счётчик поллов handshake (сторож по числу)
+    QTimer        m_ccGuard;
+    QString       m_ccProgress;
+    void ccEnterPhase(CcPhase ph, int guardMs);
+    void ccAdvance();
+    void ccGuardFired();
+    void ccPollHandshake();
+    void ccVerify();          // HEAD generate_204 через туннель + rx-рост (data-plane правда)
+    void ccNextCycle();       // зафиксировать m_ccCur и перейти к следующему циклу/финишу
+    void ccFail(const QString &reason);
+    void ccFinish();
     QJsonObject benchExtra() const;     // контекст замера: факты конфигурации + тип сети
     static QString bypassLabel(bool on)
     { return on ? QStringLiteral("tribe-bypass-on") : QStringLiteral("tribe-bypass-off"); }

@@ -124,6 +124,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_abGuard, &QTimer::timeout, this, [this] { abGuardFired(); });
     connect(this, &AvpnEngineQml::changed, this, [this] { abAdvance(); }, Qt::QueuedConnection);
 
+    m_ccGuard.setSingleShot(true); // AVPN bench v5 (connect{}): тот же каркас, что свип/A/B
+    connect(&m_ccGuard, &QTimer::timeout, this, [this] { ccGuardFired(); });
+    connect(this, &AvpnEngineQml::changed, this, [this] { ccAdvance(); }, Qt::QueuedConnection);
+
     connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
         m_benchRunning = false;
         emit benchChanged();
@@ -1061,6 +1065,234 @@ void AvpnEngineQml::abFinish()
 
     emit abChanged();
     emit abFinished(summary, json);
+}
+
+// ── AVPN bench v5 (connect{}): «Тест коннекта» ────────────────────────────────────────────────
+// Меряет САМ коннект (v1–v4 мерили путь после): kCcCycles циклов stop→wait down→start→wait
+// connected→handshake→first byte. Только публичные переходы (CONNECT-INVARIANTS не трогаем);
+// исторические баги этого класса: «2-й коннект = Network Error» (ios reconnect), залипание
+// Connect, медленные сторожа — здесь видны как фейл/тайминг конкретной фазы конкретного цикла.
+static const int kCcGuardVerifyMs = 15000;  // HEAD 204 через свежеподнятый туннель
+static const int kCcHsPollMs = 500;         // шаг полла handshake
+static const int kCcHsPollMax = 20;         // 10с: handshake не свежий → пишем null (desktop не отдаёт)
+
+void AvpnEngineQml::startConnectCycle()
+{
+    if (ccRunning() || m_benchRunning || sweepRunning() || abRunning())
+        return;
+    if (state() != QLatin1String("connected")) {
+        emit error(tr("Тест коннекта: сначала подключи Tribe VPN"));
+        return;
+    }
+    ++m_ccEpoch;
+    m_ccCycle = 0;
+    m_ccCycles = QJsonArray();
+    m_ccCur = QJsonObject();
+    m_ccProgress = tr("цикл 1/%1 · отключение…").arg(kCcCycles);
+    m_ccT.start();
+    stop(); // публичный переход; факт «вниз» ждём по changed()
+    ccEnterPhase(CcPhase::Down, 25000);
+}
+
+void AvpnEngineQml::cancelConnectCycle()
+{
+    if (!ccRunning())
+        return;
+    ++m_ccEpoch;
+    m_ccGuard.stop();
+    const bool wasDown = (m_ccPhase == CcPhase::Down);
+    m_ccPhase = CcPhase::Idle;
+    m_ccProgress.clear();
+    emit ccChanged();
+    if (wasDown || state() != QLatin1String("connected"))
+        start(); // не бросаем юзера отключённым посреди цикла
+}
+
+void AvpnEngineQml::ccEnterPhase(CcPhase ph, int guardMs)
+{
+    m_ccPhase = ph;
+    m_ccGuard.start(guardMs);
+    emit ccChanged();
+}
+
+void AvpnEngineQml::ccAdvance()
+{
+    const QString st = state();
+    switch (m_ccPhase) {
+    case CcPhase::Idle:
+    case CcPhase::Handshake: // продвигается поллом ccPollHandshake
+    case CcPhase::Verify:    // продвигается колбэком HEAD в ccVerify
+        return;
+    case CcPhase::Down:
+        if (st == QLatin1String("error")) {
+            m_ccCur.insert(QStringLiteral("error"), QStringLiteral("teardown-error"));
+            ccNextCycle();
+        } else if (st != QLatin1String("connected")) {
+            m_ccCur.insert(QStringLiteral("teardown_ms"), double(m_ccT.elapsed()));
+            m_ccProgress = tr("цикл %1/%2 · подключение…").arg(m_ccCycle + 1).arg(kCcCycles);
+            m_ccT.start();
+            start();
+            ccEnterPhase(CcPhase::Up, kSweepGuardUpMs);
+        }
+        return;
+    case CcPhase::Up:
+        if (st == QLatin1String("connected")) {
+            m_ccGuard.stop();
+            m_ccCur.insert(QStringLiteral("connect_ms"), double(m_ccT.elapsed()));
+            m_ccConnEpochSec = QDateTime::currentSecsSinceEpoch();
+            m_ccHsPolls = 0;
+            m_ccProgress = tr("цикл %1/%2 · рукопожатие…").arg(m_ccCycle + 1).arg(kCcCycles);
+            m_ccT.start();
+            ccEnterPhase(CcPhase::Handshake, (kCcHsPollMax + 4) * kCcHsPollMs);
+            ccPollHandshake();
+        } else if (st == QLatin1String("error")) {
+            m_ccCur.insert(QStringLiteral("error"), QStringLiteral("connect-error"));
+            ccNextCycle();
+        }
+        return;
+    }
+}
+
+// handshake: iOS/Android отдают latestHandshakeEpoch (UAPI/GoBackend), desktop-демон — нет (см.
+// VpnConnectionTunnelControl::readStats). Свежий (после момента коннекта) эпох → handshake_ms;
+// за kCcHsPollMax поллов не дождались → null (не факт проблемы: desktop просто не отдаёт).
+void AvpnEngineQml::ccPollHandshake()
+{
+    if (m_ccPhase != CcPhase::Handshake)
+        return;
+    const int epoch = m_ccEpoch;
+    const TunnelStats s = m_tunnel.readStats();
+    if (s.valid && s.latestHandshakeEpoch >= m_ccConnEpochSec - 3) {
+        m_ccCur.insert(QStringLiteral("handshake_ms"), double(m_ccT.elapsed()));
+        ccVerify();
+        return;
+    }
+    if (++m_ccHsPolls >= kCcHsPollMax) {
+        ccVerify(); // handshake_ms не пишем (null в анализе) — идём проверять данные напрямую
+        return;
+    }
+    QTimer::singleShot(kCcHsPollMs, this, [this, epoch] {
+        if (epoch == m_ccEpoch)
+            ccPollHandshake();
+    });
+}
+
+// Правда data-plane: HEAD generate_204 через свежий туннель (first_byte_ms) + вырос ли rx.
+// «connected + first byte не прошёл» = класс S4-blackhole («подключено, данных нет»).
+void AvpnEngineQml::ccVerify()
+{
+    m_ccProgress = tr("цикл %1/%2 · проверка данных…").arg(m_ccCycle + 1).arg(kCcCycles);
+    ccEnterPhase(CcPhase::Verify, kCcGuardVerifyMs);
+    const int epoch = m_ccEpoch;
+    const qint64 rxBefore = m_tunnel.readStats().rxBytes;
+    QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
+    req.setTransferTimeout(kCcGuardVerifyMs - 2000);
+    m_ccT.start();
+    QNetworkReply *r = m_nam->head(req);
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch, rxBefore] {
+        r->deleteLater();
+        if (epoch != m_ccEpoch)
+            return;
+        m_ccGuard.stop();
+        const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = (r->error() == QNetworkReply::NoError && (code == 204 || code == 200));
+        if (ok)
+            m_ccCur.insert(QStringLiteral("first_byte_ms"), double(m_ccT.elapsed()));
+        m_ccCur.insert(QStringLiteral("verify_ok"), ok);
+        const qint64 rxAfter = m_tunnel.readStats().rxBytes;
+        if (rxAfter > 0 || rxBefore > 0) // счётчики живы только там, где платформа их отдаёт
+            m_ccCur.insert(QStringLiteral("rx_grew"), rxAfter > rxBefore);
+        ccNextCycle();
+    });
+}
+
+void AvpnEngineQml::ccNextCycle()
+{
+    m_ccGuard.stop();
+    m_ccCycles.append(m_ccCur);
+    m_ccCur = QJsonObject();
+    ++m_ccCycle;
+    if (m_ccCycle >= kCcCycles || state() == QLatin1String("error")) {
+        ccFinish();
+        return;
+    }
+    m_ccProgress = tr("цикл %1/%2 · отключение…").arg(m_ccCycle + 1).arg(kCcCycles);
+    m_ccT.start();
+    stop();
+    ccEnterPhase(CcPhase::Down, 25000);
+}
+
+void AvpnEngineQml::ccGuardFired()
+{
+    switch (m_ccPhase) {
+    case CcPhase::Idle:
+        return;
+    case CcPhase::Down:
+        m_ccCur.insert(QStringLiteral("error"), QStringLiteral("teardown-timeout"));
+        break;
+    case CcPhase::Up:
+        m_ccCur.insert(QStringLiteral("error"), QStringLiteral("connect-timeout"));
+        break;
+    case CcPhase::Handshake:
+        break; // поллы сами уходят в verify; сторож здесь — чистая подстраховка
+    case CcPhase::Verify:
+        m_ccCur.insert(QStringLiteral("verify_ok"), false);
+        m_ccCur.insert(QStringLiteral("error"), QStringLiteral("verify-timeout"));
+        break;
+    }
+    ccNextCycle(); // тайм-аут фазы = данные цикла (это и есть находка), НЕ смерть теста
+}
+
+void AvpnEngineQml::ccFail(const QString &reason)
+{
+    ++m_ccEpoch;
+    m_ccGuard.stop();
+    m_ccPhase = CcPhase::Idle;
+    m_ccProgress.clear();
+    emit ccChanged();
+    emit error(tr("Тест коннекта прерван: %1").arg(reason));
+}
+
+void AvpnEngineQml::ccFinish()
+{
+    m_ccGuard.stop();
+    m_ccPhase = CcPhase::Idle;
+    m_ccProgress.clear();
+
+    QVector<double> conn, teardown, firstByte;
+    int okCycles = 0;
+    for (const QJsonValue &v : m_ccCycles) {
+        const QJsonObject c = v.toObject();
+        if (c.value(QStringLiteral("connect_ms")).isDouble())
+            conn.append(c.value(QStringLiteral("connect_ms")).toDouble());
+        if (c.value(QStringLiteral("teardown_ms")).isDouble())
+            teardown.append(c.value(QStringLiteral("teardown_ms")).toDouble());
+        if (c.value(QStringLiteral("first_byte_ms")).isDouble())
+            firstByte.append(c.value(QStringLiteral("first_byte_ms")).toDouble());
+        if (c.value(QStringLiteral("verify_ok")).toBool())
+            ++okCycles;
+    }
+    auto num = [](double v) { return v < 0 ? QJsonValue(QJsonValue::Null) : QJsonValue(v); };
+    QJsonObject report;
+    report.insert(QStringLiteral("schema"), 2);
+    report.insert(QStringLiteral("type"), QStringLiteral("connect-cycle"));
+    report.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    report.insert(QStringLiteral("cycles"), m_ccCycles);
+    report.insert(QStringLiteral("ok_cycles"), okCycles);
+    report.insert(QStringLiteral("median_connect_ms"), num(avpn::BenchRunner::median(conn)));
+    report.insert(QStringLiteral("median_teardown_ms"), num(avpn::BenchRunner::median(teardown)));
+    report.insert(QStringLiteral("median_first_byte_ms"), num(avpn::BenchRunner::median(firstByte)));
+    report.insert(QStringLiteral("extra"), benchExtra());
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("cycles"), int(m_ccCycles.size()));
+    summary.insert(QStringLiteral("ok_cycles"), okCycles);
+    summary.insert(QStringLiteral("median_connect_ms"), report.value(QStringLiteral("median_connect_ms")).toVariant());
+    summary.insert(QStringLiteral("median_teardown_ms"), report.value(QStringLiteral("median_teardown_ms")).toVariant());
+    summary.insert(QStringLiteral("median_first_byte_ms"), report.value(QStringLiteral("median_first_byte_ms")).toVariant());
+
+    emit ccChanged();
+    emit ccFinished(summary, QString::fromUtf8(QJsonDocument(report).toJson(QJsonDocument::Compact)));
 }
 
 // история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
