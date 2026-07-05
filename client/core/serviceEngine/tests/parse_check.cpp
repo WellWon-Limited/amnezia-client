@@ -212,10 +212,25 @@ int main(int argc, char **argv)
         };
         const QJsonArray ruOn = bench::verdicts(mkRu(true));
         const QJsonArray ruOff = bench::verdicts(mkRu(false));
+        // bench v5: split-leak ТОЛЬКО при split_on&&reachable&&equals; ipv6-dead только при aaaa&&!https
+        auto mkSplit = [&](bool splitOn, bool equals, bool aaaa, bool v6http) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, 0);
+            r.insert("extra", QJsonObject{{"tunnel_config", QJsonObject{{"split_on", splitOn}}}});
+            r.insert("split_check", QJsonObject{{"ru_reachable", true}, {"ru_equals_tunnel_egress", equals}});
+            r.insert("ipv6", QJsonObject{{"aaaa_ok", aaaa}, {"https_ok", v6http}});
+            return r;
+        };
+        const bool splitOk =
+               hasCode(bench::verdicts(mkSplit(true, true, true, true)), "split-leak")     // сплит вкл, egress совпал → leak
+            && !hasCode(bench::verdicts(mkSplit(true, false, true, true)), "split-leak")   // не совпал → ок
+            && !hasCode(bench::verdicts(mkSplit(false, true, true, true)), "split-leak")   // сплит не сеялся (РФ-нода) → норма
+            && hasCode(bench::verdicts(mkSplit(true, false, true, false)), "ipv6-dead")    // AAAA есть, v6 не ходит
+            && !hasCode(bench::verdicts(mkSplit(true, false, false, false)), "ipv6-dead"); // v6 нет вовсе → молчим
         const QJsonArray legacy = bench::verdicts(mk(25, 250, 80, 90, 110, 3)); // failures без probes[]
         const bool ruOk = hasCode(ruOn, "ru-direct-down") && !hasCode(ruOn, "http-failures")
                        && !hasCode(ruOff, "ru-direct-down") && hasCode(ruOff, "http-failures")
-                       && hasCode(legacy, "http-failures") && !hasCode(legacy, "ru-direct-down");
+                       && hasCode(legacy, "http-failures") && !hasCode(legacy, "ru-direct-down")
+                       && splitOk;
         const bool vOk = good.isEmpty()
                       && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
                       && hasCode(slowDns, "dns-slow")

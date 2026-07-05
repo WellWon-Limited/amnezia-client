@@ -11,6 +11,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression> // bench v5: извлечение IPv4 из RU-чекера (stageSplit)
 #include <QSslSocket>
 #include <QTimer>
 #include <QUrl>
@@ -71,7 +72,8 @@ void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lit
     ++m_epoch;
     m_label = label.isEmpty() ? QStringLiteral("unlabeled") : label;
     m_extra = extra;
-    m_loc.clear(); m_colo.clear();
+    m_loc.clear(); m_colo.clear(); m_traceIp.clear();
+    m_splitCheck = QJsonObject(); m_ipv6 = QJsonObject();
     m_dnsIdx = 0; m_dnsProbes = QJsonArray();
     m_tlsIdx = 0; m_tlsProbes = QJsonArray(); m_tlsTcpMs = -1;
     m_httpIdx = 0; m_httpProbes = QJsonArray();
@@ -137,6 +139,8 @@ void BenchRunner::stageTrace()
         for (const QString &line : body.split(QLatin1Char('\n'))) {
             if (line.startsWith(QLatin1String("loc=")))  m_loc = line.mid(4).trimmed();
             if (line.startsWith(QLatin1String("colo="))) m_colo = line.mid(5).trimmed();
+            // bench v5: ip= держим ТОЛЬКО в памяти для сравнения в stageSplit — в JSON не пишется (PII)
+            if (line.startsWith(QLatin1String("ip=")))   m_traceIp = line.mid(3).trimmed();
         }
         stageDns();
     });
@@ -364,7 +368,7 @@ void BenchRunner::pingRound()
             }
             m_pingProbes.append(o);
         }
-        stageIdleRtt();
+        stageSplit();
         return;
     }
     const int epoch = m_epoch;
@@ -388,6 +392,78 @@ void BenchRunner::pingRound()
             ++m_pingRound;
             pingRound();
         });
+}
+
+// --- стадия 3b (bench v5): сплит по ФАКТУ + IPv6 ----------------------------------------------
+// Сплит: RU-хостинговый чекер (2ip.ru ∈ рунет-CIDR ⇒ при bypass_on обязан идти direct) против
+// egress туннеля (ip= из cf-trace). Пишем ТОЛЬКО булевы «дошёл/совпал» — сами IP не сохраняем (PII).
+// ru_equals_tunnel_egress==true при включённом сплите = split-leak (рунет ушёл через туннель).
+// IPv6: AAAA-резолв + v6-only цель — ловит «AAAA есть, а v6-путь мёртв» (класс IPv6-дыры RU-direct).
+// lite-режим пропускает стадию (свип нод должен быть коротким).
+void BenchRunner::stageSplit()
+{
+    if (m_lite) {
+        stageIdleRtt();
+        return;
+    }
+    emit stageChanged(QStringLiteral("split"));
+    const int epoch = m_epoch;
+    QNetworkRequest req{QUrl(QStringLiteral("https://2ip.ru/"))};
+    req.setTransferTimeout(6000);
+    QNetworkReply *r = m_nam->get(req);
+    m_reply = r;
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch] {
+        r->deleteLater();
+        if (epoch != m_epoch) return;
+        const bool ok = (r->error() == QNetworkReply::NoError);
+        m_splitCheck.insert(QStringLiteral("ru_reachable"), ok);
+        if (ok && !m_traceIp.isEmpty()) {
+            static const QRegularExpression ipRe(QStringLiteral("\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b"));
+            const QRegularExpressionMatch m = ipRe.match(QString::fromUtf8(r->readAll()));
+            if (m.hasMatch())
+                m_splitCheck.insert(QStringLiteral("ru_equals_tunnel_egress"),
+                                    m.captured(0) == m_traceIp);
+        }
+        splitIpv6Lookup();
+    });
+}
+
+void BenchRunner::splitIpv6Lookup()
+{
+    const int epoch = m_epoch;
+    // QHostInfo (не QDnsLookup): работает и на iOS; AAAA-факт = есть ли v6-адреса в ответе системы
+    m_hostLookup = QHostInfo::lookupHost(QStringLiteral("ipv6.google.com"), this,
+                                         [this, epoch](const QHostInfo &info) {
+        if (epoch != m_epoch) return;
+        m_hostLookup = -1;
+        bool hasV6 = false;
+        for (const QHostAddress &a : info.addresses())
+            if (a.protocol() == QAbstractSocket::IPv6Protocol) { hasV6 = true; break; }
+        m_ipv6.insert(QStringLiteral("aaaa_ok"), hasV6);
+        if (!hasV6) { // резолва нет — v6-HTTP заведомо не пойдёт, не тратим таймаут
+            m_ipv6.insert(QStringLiteral("https_ok"), false);
+            stageIdleRtt();
+            return;
+        }
+        splitIpv6Http();
+    });
+}
+
+void BenchRunner::splitIpv6Http()
+{
+    const int epoch = m_epoch;
+    QNetworkRequest req{QUrl(QStringLiteral("https://ipv6.google.com/generate_204"))}; // v6-only хост
+    req.setTransferTimeout(6000);
+    QNetworkReply *r = m_nam->get(req);
+    m_reply = r;
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch] {
+        r->deleteLater();
+        if (epoch != m_epoch) return;
+        const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        m_ipv6.insert(QStringLiteral("https_ok"), r->error() == QNetworkReply::NoError
+                                                  && (code == 204 || code == 200));
+        stageIdleRtt();
+    });
 }
 
 QNetworkReply *BenchRunner::head204()
@@ -562,7 +638,7 @@ void BenchRunner::assemble()
     tls.insert(QStringLiteral("median_handshake_ms"), num(median(hsMs)));
 
     QJsonObject out;
-    out.insert(QStringLiteral("schema"), 1);
+    out.insert(QStringLiteral("schema"), 2); // bench v5: +split_check/ipv6/extra.tunnel_config (обратносовместимо)
     out.insert(QStringLiteral("label"), m_label);
     out.insert(QStringLiteral("mode"), m_lite ? QStringLiteral("lite") : QStringLiteral("full"));
     out.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
@@ -573,6 +649,10 @@ void BenchRunner::assemble()
     out.insert(QStringLiteral("ping"), m_pingProbes);
     out.insert(QStringLiteral("throughput"), thr);
     out.insert(QStringLiteral("network_quality"), nq);
+    if (!m_splitCheck.isEmpty())
+        out.insert(QStringLiteral("split_check"), m_splitCheck);
+    if (!m_ipv6.isEmpty())
+        out.insert(QStringLiteral("ipv6"), m_ipv6);
     out.insert(QStringLiteral("extra"), m_extra);
     out.insert(QStringLiteral("verdicts"), bench::verdicts(out)); // авто-диагнозы (BenchAnalysis.h)
 
