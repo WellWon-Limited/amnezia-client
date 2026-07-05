@@ -128,6 +128,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_ccGuard, &QTimer::timeout, this, [this] { ccGuardFired(); });
     connect(this, &AvpnEngineQml::changed, this, [this] { ccAdvance(); }, Qt::QueuedConnection);
 
+    // AVPN bench v5.2 (мастер «Полный тест»): дирижёр слушает завершения готовых машин.
+    m_ftGuard.setSingleShot(true);
+    connect(&m_ftGuard, &QTimer::timeout, this, [this] { ftStepDone(m_ftPhase, false); });
+    connect(this, &AvpnEngineQml::ccFinished, this, [this] { ftStepDone(FtPhase::Cc, true); });
+    connect(this, &AvpnEngineQml::abFinished, this, [this] { ftStepDone(FtPhase::Ab, true); });
+    connect(this, &AvpnEngineQml::sweepFinished, this, [this] { ftStepDone(FtPhase::Sweep, true); });
+    connect(this, &AvpnEngineQml::benchFinished, this, [this] {
+        if (m_ftPhase == FtPhase::BenchAmnezia || m_ftPhase == FtPhase::BenchBaseline)
+            ftStepDone(m_ftPhase, true);
+    });
+    // фаза Connect0 (мастер сам подключает) продвигается по changed()
+    connect(this, &AvpnEngineQml::changed, this, [this] {
+        if (m_ftPhase != FtPhase::Connect0)
+            return;
+        if (state() == QLatin1String("connected"))
+            ftStepDone(FtPhase::Connect0, true);
+        else if (state() == QLatin1String("error"))
+            ftStepDone(FtPhase::Connect0, false);
+    }, Qt::QueuedConnection);
+
     connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
         m_benchRunning = false;
         emit benchChanged();
@@ -580,6 +600,25 @@ QJsonObject AvpnEngineQml::benchExtra() const
         const QJsonObject tc = m_tunnel.lastConfigReport();
         if (!tc.isEmpty())
             extra.insert(QStringLiteral("tunnel_config"), tc);
+        // v5.2 (обогащение): готовые живые сигналы клиента — чипы сервисов (goodput/троттл),
+        // сглаженный RTT-бар и off-tunnel RTT-кэш нод (изоляция «нода vs провайдер»: сравнить
+        // node_rtt_cache текущей ноды с base_rtt_ms через туннель = чистый оверхед туннеля).
+        if (m_liveRtt > 0) {
+            QJsonObject lq;
+            lq.insert(QStringLiteral("rtt_ms"), m_liveRtt);
+            lq.insert(QStringLiteral("bars"), m_liveBars);
+            extra.insert(QStringLiteral("live_quality"), lq);
+        }
+        if (!m_serviceStatus.isEmpty())
+            extra.insert(QStringLiteral("services"), QJsonArray::fromVariantList(m_serviceStatus));
+        if (!m_nodeRtt.isEmpty()) {
+            QJsonObject rtts;
+            for (auto it = m_nodeRtt.constBegin(); it != m_nodeRtt.constEnd(); ++it)
+                if (it.value() > 0)
+                    rtts.insert(it.key(), it.value());
+            if (!rtts.isEmpty())
+                extra.insert(QStringLiteral("node_rtt_cache"), rtts);
+        }
     }
     // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить
     static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
@@ -1311,6 +1350,245 @@ void AvpnEngineQml::ccFinish()
     QSettings().setValue(QStringLiteral("AvpnBench/last_connect-cycle"), json);
     emit ccChanged();
     emit ccFinished(summary, json);
+}
+
+// ── AVPN bench v5.2: мастер «Полный тест» ─────────────────────────────────────────────────────
+// Дирижёр: этап 1 сам (connect0 → тест коннекта → авто-A/B → свип), два ручных гейта
+// (Amnezia / baseline-скип), финал = мега-отчёт одним JSON. Измерительной логики НЕТ —
+// только последовательность, ожидание *Finished и сторожа. Ошибка шага НЕ роняет мастер:
+// шаг пишется error в methodology, идём дальше (частичный отчёт ценнее прерванного).
+static const int kFtGuardConnectMs = 90000;   // connect0: enroll+подключение
+static const int kFtGuardCcMs      = 5 * 60000;
+static const int kFtGuardAbMs      = 12 * 60000;
+static const int kFtGuardSweepMs   = 15 * 60000;
+static const int kFtGuardBenchMs   = 5 * 60000;
+
+QString AvpnEngineQml::ftStage() const
+{
+    switch (m_ftPhase) {
+    case FtPhase::Idle:          return QString();
+    case FtPhase::Connect0:      return QStringLiteral("connect0");
+    case FtPhase::Cc:            return QStringLiteral("cc");
+    case FtPhase::Ab:            return QStringLiteral("ab");
+    case FtPhase::Sweep:         return QStringLiteral("sweep");
+    case FtPhase::WaitAmnezia:   return QStringLiteral("wait-amnezia");
+    case FtPhase::BenchAmnezia:  return QStringLiteral("bench-amnezia");
+    case FtPhase::WaitBaseline:  return QStringLiteral("wait-baseline");
+    case FtPhase::BenchBaseline: return QStringLiteral("bench-baseline");
+    }
+    return QString();
+}
+
+void AvpnEngineQml::ftEnter(FtPhase ph, int guardMs)
+{
+    m_ftPhase = ph;
+    m_ftGuard.stop();
+    if (guardMs > 0)
+        m_ftGuard.start(guardMs);
+    emit ftChanged();
+}
+
+void AvpnEngineQml::ftRecord(const char *step, const char *status)
+{
+    QJsonObject s;
+    s.insert(QStringLiteral("step"), QLatin1String(step));
+    s.insert(QStringLiteral("status"), QLatin1String(status));
+    s.insert(QStringLiteral("ts"), QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    m_ftSteps.append(s);
+}
+
+void AvpnEngineQml::startFullTest()
+{
+    if (ftRunning() || m_benchRunning || sweepRunning() || abRunning() || ccRunning())
+        return;
+    ++m_ftEpoch;
+    m_ftSteps = QJsonArray();
+    ftRecord("full-test", "started");
+    if (state() == QLatin1String("connected")) {
+        m_ftProgress = tr("этап 1/3 · тест коннекта…");
+        ftEnter(FtPhase::Cc, kFtGuardCcMs);
+        startConnectCycle();
+    } else {
+        m_ftProgress = tr("этап 1/3 · подключаю Tribe…");
+        ftEnter(FtPhase::Connect0, kFtGuardConnectMs);
+        start();
+    }
+}
+
+void AvpnEngineQml::cancelFullTest()
+{
+    if (!ftRunning())
+        return;
+    ++m_ftEpoch;
+    m_ftGuard.stop();
+    // отменить активную под-машину (каждая сама возвращает тумблеры/состояние)
+    if (ccRunning()) cancelConnectCycle();
+    if (abRunning()) cancelBypassAb();
+    if (sweepRunning()) cancelNodeSweep();
+    if (m_benchRunning) cancelBench();
+    ftRecord("full-test", "cancelled");
+    m_ftPhase = FtPhase::Idle;
+    m_ftProgress.clear();
+    emit ftChanged();
+}
+
+// Продвижение: завершился шаг donePhase (ok/сторож). Ошибка шага не прерывает мастер.
+void AvpnEngineQml::ftStepDone(FtPhase donePhase, bool ok)
+{
+    if (m_ftPhase != donePhase || m_ftPhase == FtPhase::Idle)
+        return;
+    m_ftGuard.stop();
+    const int epoch = m_ftEpoch;
+    switch (donePhase) {
+    case FtPhase::Idle:
+        return;
+    case FtPhase::Connect0:
+        ftRecord("connect0", ok ? "ok" : "error");
+        if (!ok) { // подключиться не смогли — этап 1 невозможен, уходим сразу на ручные шаги
+            m_ftProgress = tr("этап 2/3 · включи Amnezia и нажми «Продолжить»");
+            ftEnter(FtPhase::WaitAmnezia);
+            return;
+        }
+        m_ftProgress = tr("этап 1/3 · тест коннекта…");
+        ftEnter(FtPhase::Cc, kFtGuardCcMs);
+        startConnectCycle();
+        return;
+    case FtPhase::Cc:
+        ftRecord("connect-cycle", ok ? "ok" : "error");
+        m_ftProgress = tr("этап 1/3 · авто-A/B байпаса…");
+        ftEnter(FtPhase::Ab, kFtGuardAbMs);
+        // A/B требует connected; после cc мы connected (последняя фаза — verify)
+        QTimer::singleShot(500, this, [this, epoch] {
+            if (epoch == m_ftEpoch && m_ftPhase == FtPhase::Ab)
+                startBypassAb();
+        });
+        return;
+    case FtPhase::Ab:
+        ftRecord("ab-bypass", ok ? "ok" : "error");
+        m_ftProgress = tr("этап 1/3 · свип всех нод…");
+        ftEnter(FtPhase::Sweep, kFtGuardSweepMs);
+        QTimer::singleShot(500, this, [this, epoch] {
+            if (epoch == m_ftEpoch && m_ftPhase == FtPhase::Sweep)
+                startNodeSweep();
+        });
+        return;
+    case FtPhase::Sweep:
+        ftRecord("node-sweep", ok ? "ok" : "error");
+        // ручной шаг: сами опускаем наш туннель, юзеру остаётся включить Amnezia
+        m_ftProgress = tr("этап 2/3 · включи Amnezia (наш ключ) и нажми «Продолжить»");
+        stop();
+        ftEnter(FtPhase::WaitAmnezia);
+        return;
+    case FtPhase::WaitAmnezia:
+    case FtPhase::WaitBaseline:
+        return; // продвигаются только fullTestContinue/fullTestSkip
+    case FtPhase::BenchAmnezia:
+        ftRecord("bench-amnezia", ok ? "ok" : "error");
+        m_ftProgress = tr("этап 3/3 · выключи ВСЕ VPN и нажми «Продолжить» (или пропусти)");
+        ftEnter(FtPhase::WaitBaseline);
+        return;
+    case FtPhase::BenchBaseline:
+        ftRecord("bench-baseline", ok ? "ok" : "error");
+        ftFinish();
+        return;
+    }
+}
+
+void AvpnEngineQml::fullTestContinue()
+{
+    if (m_ftPhase == FtPhase::WaitAmnezia) {
+        if (state() == QLatin1String("connected")) // наш ещё поднят — гейт (QML тоже дизейблит)
+            return;
+        m_ftProgress = tr("этап 2/3 · замер через Amnezia…");
+        ftEnter(FtPhase::BenchAmnezia, kFtGuardBenchMs);
+        startBench(QStringLiteral("amnezia"));
+    } else if (m_ftPhase == FtPhase::WaitBaseline) {
+        if (state() == QLatin1String("connected"))
+            return;
+        m_ftProgress = tr("этап 3/3 · замер без VPN (baseline)…");
+        ftEnter(FtPhase::BenchBaseline, kFtGuardBenchMs);
+        startBench(QStringLiteral("baseline"));
+    }
+}
+
+void AvpnEngineQml::fullTestSkip()
+{
+    if (m_ftPhase != FtPhase::WaitBaseline)
+        return;
+    ftRecord("bench-baseline", "skipped");
+    ftFinish();
+}
+
+// Мега-отчёт мастера: buildFullReport (метки+сравнения+свип+cc+A/B) + methodology (шаги/время/
+// пропуски — видно, что серия снята одной сессией) + summary (выжимка ВСЕХ вердиктов всех секций —
+// анализ начинается с одного блока) + гард методики baseline-suspect (egress baseline == стране
+// ноды amnezia-замера ⇒ «похоже, VPN не был выключен» — человеческая ошибка ручного шага).
+QString AvpnEngineQml::assembleMegaReport() const
+{
+    QJsonObject rep = QJsonDocument::fromJson(buildFullReport().toUtf8()).object();
+    if (rep.isEmpty()) {
+        rep.insert(QStringLiteral("schema"), 2);
+        rep.insert(QStringLiteral("type"), QStringLiteral("full-report"));
+    }
+    QJsonObject meth;
+    meth.insert(QStringLiteral("wizard"), true);
+    meth.insert(QStringLiteral("steps"), m_ftSteps);
+    rep.insert(QStringLiteral("methodology"), meth);
+
+    QJsonArray sum;
+    auto addVerdicts = [&sum](const QString &section, const QJsonObject &run) {
+        for (const QJsonValue &v : run.value(QStringLiteral("verdicts")).toArray()) {
+            QJsonObject o = v.toObject();
+            o.insert(QStringLiteral("section"), section);
+            sum.append(o);
+        }
+    };
+    const QJsonObject runs = rep.value(QStringLiteral("runs")).toObject();
+    for (auto it = runs.constBegin(); it != runs.constEnd(); ++it)
+        addVerdicts(it.key(), it.value().toObject());
+    const QJsonArray sweepNodes = rep.value(QStringLiteral("node_sweep")).toObject()
+                                     .value(QStringLiteral("nodes")).toArray();
+    for (const QJsonValue &n : sweepNodes)
+        addVerdicts(QStringLiteral("sweep:%1").arg(n.toObject().value(QStringLiteral("label")).toString()),
+                    n.toObject());
+    const QJsonObject cc = rep.value(QStringLiteral("connect_cycle")).toObject();
+    if (!cc.isEmpty()) {
+        const int okC = cc.value(QStringLiteral("ok_cycles")).toInt();
+        const int allC = cc.value(QStringLiteral("cycles")).toArray().size();
+        if (allC > 0 && okC < allC) {
+            QJsonObject o = bench::mkVerdict("connect-cycle-failures", "bad",
+                tr("Тест коннекта: успешно %1 из %2 циклов").arg(okC).arg(allC));
+            o.insert(QStringLiteral("section"), QStringLiteral("connect_cycle"));
+            sum.append(o);
+        }
+    }
+    // baseline-suspect: страна egress baseline == стране egress amnezia-замера → VPN не выключали
+    const QString baseLoc = runs.value(QStringLiteral("baseline")).toObject()
+                                .value(QStringLiteral("network")).toObject()
+                                .value(QStringLiteral("egress")).toObject()
+                                .value(QStringLiteral("loc")).toString();
+    const QString amnLoc = runs.value(QStringLiteral("amnezia")).toObject()
+                               .value(QStringLiteral("network")).toObject()
+                               .value(QStringLiteral("egress")).toObject()
+                               .value(QStringLiteral("loc")).toString();
+    if (!baseLoc.isEmpty() && !amnLoc.isEmpty() && baseLoc == amnLoc) {
+        QJsonObject o = bench::mkVerdict("baseline-suspect", "warn",
+            tr("baseline и amnezia видят один egress (%1) — похоже, VPN не был выключен при baseline-замере").arg(baseLoc));
+        o.insert(QStringLiteral("section"), QStringLiteral("methodology"));
+        sum.append(o);
+    }
+    rep.insert(QStringLiteral("summary"), sum);
+    return QString::fromUtf8(QJsonDocument(rep).toJson(QJsonDocument::Compact));
+}
+
+void AvpnEngineQml::ftFinish()
+{
+    m_ftGuard.stop();
+    ftRecord("full-test", "finished");
+    m_ftPhase = FtPhase::Idle;
+    m_ftProgress.clear();
+    emit ftChanged();
+    emit ftFinished(assembleMegaReport());
 }
 
 // история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
