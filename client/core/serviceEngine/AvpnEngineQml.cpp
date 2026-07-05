@@ -1352,6 +1352,44 @@ void AvpnEngineQml::ccFinish()
     emit ccFinished(summary, json);
 }
 
+// ── AVPN bench v5.3: отправка отчёта на control plane ─────────────────────────────────────────
+// POST /v1/bench/report (Bearer-токен устройства, тело = отчёт как есть; PII в отчётах нет by
+// construction — IP не пишутся ещё на сборке). Сервер копит по device_id — анализ с прода без
+// пересылки файлов руками. Бэк-эндпоинт — greenfield (handoff BENCH-REPORT-BACKEND-HANDOFF.md):
+// до его выката честно говорим «сервер ещё не принимает отчёты».
+void AvpnEngineQml::uploadReport(const QString &json)
+{
+    if (json.isEmpty())
+        return;
+    if (json.size() > 3 * 1024 * 1024) { // защита от абсурда; реальный мега-отчёт ~200–600 КБ
+        emit reportUploadDone(false, tr("Отчёт слишком большой для отправки"));
+        return;
+    }
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty()) {
+        emit reportUploadDone(false, tr("Нет токена устройства — отправка недоступна"));
+        return;
+    }
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/bench/report"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
+    QNetworkReply *reply = m_nam->post(req, json.toUtf8());
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code >= 200 && code < 300)
+            emit reportUploadDone(true, tr("Отчёт отправлен разработчику ✓"));
+        else if (code == 404 || code == 405)
+            emit reportUploadDone(false, tr("Сервер ещё не принимает отчёты — сохрани файлом"));
+        else if (code == 401 || code == 403)
+            emit reportUploadDone(false, tr("Нет авторизации для отправки (%1)").arg(code));
+        else
+            emit reportUploadDone(false, code > 0 ? tr("Сервер отклонил отчёт (%1)").arg(code)
+                                                  : tr("Сеть недоступна — отчёт не отправлен"));
+    });
+}
+
 // ── AVPN bench v5.2: мастер «Полный тест» ─────────────────────────────────────────────────────
 // Дирижёр: этап 1 сам (connect0 → тест коннекта → авто-A/B → свип), два ручных гейта
 // (Amnezia / baseline-скип), финал = мега-отчёт одним JSON. Измерительной логики НЕТ —

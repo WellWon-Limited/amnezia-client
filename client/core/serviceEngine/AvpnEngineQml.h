@@ -181,6 +181,12 @@ public:
     bool ccRunning() const { return m_ccPhase != CcPhase::Idle; }
     QString ccProgress() const { return m_ccProgress; }
 
+    // AVPN (bench v5.3): отправка отчёта на control plane — POST /v1/bench/report (Bearer, JSON
+    // как есть; отчёты без PII by construction). Копятся в БД по устройствам — анализ с прода.
+    // Итог — сигнал reportUploadDone(ok, message); 404/405 = «бэк ещё не принимает» (endpoint в
+    // handoff BENCH-REPORT-BACKEND-HANDOFF.md, живёт независимо от клиента).
+    Q_INVOKABLE void uploadReport(const QString &json);
+
     // AVPN (bench v5.2): мастер «Полный тест». fullTestContinue — подтверждение ручного шага
     // (гейт: наш туннель disconnected), fullTestSkip — пропустить baseline-шаг.
     Q_INVOKABLE void startFullTest();
@@ -418,6 +424,8 @@ signals:
     // AVPN (bench v5.2, мастер): полный тест завершён — единый мега-отчёт (все секции + methodology
     // + summary). UI сразу предлагает сохранить файлом.
     void ftFinished(const QString &json);
+    // AVPN (bench v5.3): итог отправки отчёта на сервер (message — готовый текст для тоста).
+    void reportUploadDone(bool ok, const QString &message);
     // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
     // median_teardown_ms, median_first_byte_ms}; json — полный отчёт (type:"connect-cycle").
     void ccFinished(const QVariantMap &summary, const QString &json);
