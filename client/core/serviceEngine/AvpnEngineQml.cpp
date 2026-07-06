@@ -138,6 +138,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (m_ftPhase == FtPhase::BenchAmnezia || m_ftPhase == FtPhase::BenchBaseline)
             ftStepDone(m_ftPhase, true);
     });
+    // прогресс-бар мастера: пересчитывать на каждом тике под-машин (v5.4)
+    auto ftTick = [this] { if (ftRunning()) ftUpdatePercent(); };
+    connect(this, &AvpnEngineQml::benchChanged, this, ftTick);
+    connect(this, &AvpnEngineQml::abChanged, this, ftTick);
+    connect(this, &AvpnEngineQml::sweepChanged, this, ftTick);
+    connect(this, &AvpnEngineQml::ccChanged, this, ftTick);
     // фаза Connect0 (мастер сам подключает) продвигается по changed()
     connect(this, &AvpnEngineQml::changed, this, [this] {
         if (m_ftPhase != FtPhase::Connect0)
@@ -1357,7 +1363,7 @@ void AvpnEngineQml::ccFinish()
 // construction — IP не пишутся ещё на сборке). Сервер копит по device_id — анализ с прода без
 // пересылки файлов руками. Бэк-эндпоинт — greenfield (handoff BENCH-REPORT-BACKEND-HANDOFF.md):
 // до его выката честно говорим «сервер ещё не принимает отчёты».
-void AvpnEngineQml::uploadReport(const QString &json)
+void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
 {
     if (json.isEmpty())
         return;
@@ -1367,7 +1373,8 @@ void AvpnEngineQml::uploadReport(const QString &json)
     }
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
-        emit reportUploadDone(false, tr("Нет токена устройства — отправка недоступна"));
+        if (!quiet)
+            emit reportUploadDone(false, tr("Нет токена устройства — отправка недоступна"));
         return;
     }
     QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/bench/report"))};
@@ -1375,14 +1382,16 @@ void AvpnEngineQml::uploadReport(const QString &json)
     req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
     QNetworkReply *reply = m_nam->post(req, json.toUtf8());
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, quiet]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code >= 200 && code < 300)
             emit reportUploadDone(true, tr("Отчёт отправлен разработчику ✓"));
-        else if (code == 404 || code == 405)
-            emit reportUploadDone(false, tr("Сервер ещё не принимает отчёты — сохрани файлом"));
-        else if (code == 401 || code == 403)
+        else if (code == 404 || code == 405) {
+            // бэк ещё без эндпоинта: авто-отправка молчит (иначе ныла бы каждый прогон)
+            if (!quiet)
+                emit reportUploadDone(false, tr("Сервер ещё не принимает отчёты — сохрани файлом"));
+        } else if (code == 401 || code == 403)
             emit reportUploadDone(false, tr("Нет авторизации для отправки (%1)").arg(code));
         else
             emit reportUploadDone(false, code > 0 ? tr("Сервер отклонил отчёт (%1)").arg(code)
@@ -1400,6 +1409,61 @@ static const int kFtGuardCcMs      = 5 * 60000;
 static const int kFtGuardAbMs      = 12 * 60000;
 static const int kFtGuardSweepMs   = 15 * 60000;
 static const int kFtGuardBenchMs   = 5 * 60000;
+
+QString AvpnEngineQml::lastFullTestJson() const
+{
+    return QSettings().value(QStringLiteral("AvpnBench/last_full_test")).toString();
+}
+
+// Доля прогресса текущего бенча по его стадии (порядок = конвейер BenchRunner; веса ~длительности:
+// down/up — самые долгие). Грубая, но живая — юзеру важно видеть движение, не точность.
+double AvpnEngineQml::benchStageFrac() const
+{
+    static const struct { const char *st; double frac; } kMap[] = {
+        {"start", 0.02}, {"dns", 0.08}, {"tls", 0.16}, {"http", 0.30}, {"ping", 0.45},
+        {"split", 0.55}, {"mtu", 0.60}, {"rtt", 0.68}, {"down", 0.80}, {"up", 0.95}, {"done", 1.0},
+    };
+    for (const auto &m : kMap)
+        if (m_benchStage == QLatin1String(m.st))
+            return m.frac;
+    return 0.0;
+}
+
+// Взвешенная шкала мастера: этап 1 (сам) ≈ 0–86, ручные шаги и финальные бенчи — хвост.
+void AvpnEngineQml::ftUpdatePercent()
+{
+    double p = 0;
+    switch (m_ftPhase) {
+    case FtPhase::Idle:          p = m_ftPercent; break; // не дёргаем после финиша
+    case FtPhase::Connect0:      p = 2; break;
+    case FtPhase::Cc:            p = 4 + std::min(m_ccCycle, kCcCycles) * (12.0 / kCcCycles); break;
+    case FtPhase::Ab:
+        switch (m_abPhase) {
+        case AbPhase::Idle:
+        case AbPhase::BenchA:    p = 18 + benchStageFrac() * 20; break;
+        case AbPhase::WaitDown:
+        case AbPhase::WaitUp:    p = 40; break;
+        case AbPhase::BenchB:    p = 43 + benchStageFrac() * 17; break;
+        case AbPhase::RestoreDown:
+        case AbPhase::RestoreUp: p = 61; break;
+        }
+        break;
+    case FtPhase::Sweep:
+        p = 62 + (m_sweepQueue.isEmpty() ? 0.0
+                  : (std::max(m_sweepIdx, 0) + benchStageFrac()) * (24.0 / m_sweepQueue.size()));
+        p = std::min(p, 86.0);
+        break;
+    case FtPhase::WaitAmnezia:   p = 86; break;
+    case FtPhase::BenchAmnezia:  p = 87 + benchStageFrac() * 8; break;
+    case FtPhase::WaitBaseline:  p = 95; break;
+    case FtPhase::BenchBaseline: p = 95 + benchStageFrac() * 5; break;
+    }
+    const int np = std::clamp(int(p), 0, 100);
+    if (np != m_ftPercent) {
+        m_ftPercent = np;
+        emit ftChanged();
+    }
+}
 
 QString AvpnEngineQml::ftStage() const
 {
@@ -1423,6 +1487,7 @@ void AvpnEngineQml::ftEnter(FtPhase ph, int guardMs)
     m_ftGuard.stop();
     if (guardMs > 0)
         m_ftGuard.start(guardMs);
+    ftUpdatePercent();
     emit ftChanged();
 }
 
@@ -1441,6 +1506,7 @@ void AvpnEngineQml::startFullTest()
         return;
     ++m_ftEpoch;
     m_ftSteps = QJsonArray();
+    m_ftPercent = 0;
     ftRecord("full-test", "started");
     if (state() == QLatin1String("connected")) {
         m_ftProgress = tr("этап 1/3 · тест коннекта…");
@@ -1467,6 +1533,7 @@ void AvpnEngineQml::cancelFullTest()
     ftRecord("full-test", "cancelled");
     m_ftPhase = FtPhase::Idle;
     m_ftProgress.clear();
+    m_ftPercent = 0;
     emit ftChanged();
 }
 
@@ -1625,8 +1692,14 @@ void AvpnEngineQml::ftFinish()
     ftRecord("full-test", "finished");
     m_ftPhase = FtPhase::Idle;
     m_ftProgress.clear();
+    m_ftPercent = 100;
+    const QString json = assembleMegaReport();
+    // v5.4: мега-отчёт живёт в QSettings — переживает навигацию/перезапуск («не сбрасывается»),
+    // и уходит на сервер САМ (quiet: пока бэк не принимает — без нытья тостом, только успех/сеть)
+    QSettings().setValue(QStringLiteral("AvpnBench/last_full_test"), json);
     emit ftChanged();
-    emit ftFinished(assembleMegaReport());
+    emit ftFinished(json);
+    uploadReport(json, /*quiet=*/true);
 }
 
 // история замеров (QSettings AvpnBench/last_<label>) — для A/B между запусками
