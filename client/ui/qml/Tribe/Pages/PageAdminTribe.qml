@@ -627,7 +627,7 @@ PageType {
                             Layout.fillWidth: true
                             spacing: 1
                             Text {
-                                text: qsTr("Split-DNS (эксперимент)")
+                                text: qsTr("Split-DNS")
                                 color: Theme.color.text1
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                             }
@@ -640,7 +640,7 @@ PageType {
                             }
                         }
                         TribeToggle {
-                            checked: root.hasEngine ? TribeEngine.bypassDnsFwdOn() : false
+                            checked: root.hasEngine ? TribeEngine.bypassDnsFwdOn() : true
                             onToggled: if (root.hasEngine) TribeEngine.setBypassDnsFwdOn(checked)
                         }
                     }
