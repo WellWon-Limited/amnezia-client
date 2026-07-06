@@ -27,6 +27,11 @@
 // на устройстве, ниже — ТРАССЕР: свизлим все промптящие геттеры UIPasteboard и логируем стек вызова
 // ([TRIBE-PB] в unified log → idevicesyslog/Console). Промпт триггерят ТОЛЬКО эти чтения, они редки —
 // лог не шумит; на решение «показывать ли попап» трассер не влияет (оригинал вызывается всегда).
+//
+// build 62: трассер ЗАГЕЙЧЕН под TRIBE_PASTE_TRACE (диагностика не завершена — виновник не пойман,
+// но релизным сборкам свизл 14 геттеров UIPasteboard не нужен). Для следующей охоты за попапом:
+// добавить -DTRIBE_PASTE_TRACE=1 к флагам этого файла в client/cmake/ios.cmake и смотреть [TRIBE-PB].
+// Боевой фикс (свизл QUIView ниже) от флага НЕ зависит и работает всегда.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -51,7 +56,8 @@ static BOOL tribe_canPerformAction(id self, SEL _cmd, SEL action, id sender)
     return NO;
 }
 
-// ── Трассер промптящих чтений UIPasteboard ──────────────────────────────────────────────────
+// ── Трассер промптящих чтений UIPasteboard (только под TRIBE_PASTE_TRACE) ───────────────────
+#if defined(TRIBE_PASTE_TRACE)
 // Логирует селектор + стек (кто прочитал буфер). Кадры 0-1 (сам трассер) пропускаем.
 static void tribeLogPasteboardRead(SEL sel)
 {
@@ -108,6 +114,7 @@ static void tribeSwizzlePb2Arg(SEL sel)
     });
     method_setImplementation(m, repl);
 }
+#endif // TRIBE_PASTE_TRACE
 
 @interface TribePasteMenuFix : NSObject
 @end
@@ -116,6 +123,7 @@ static void tribeSwizzlePb2Arg(SEL sel)
 
 + (void)load
 {
+#if defined(TRIBE_PASTE_TRACE)
     // Трассер чтений буфера (диагностика «попап жив»). Ставим ДО свизла QUIView — не зависят друг от друга.
     tribeSwizzlePbGetter(@selector(string));
     tribeSwizzlePbGetter(@selector(strings));
@@ -131,6 +139,7 @@ static void tribeSwizzlePb2Arg(SEL sel)
     tribeSwizzlePb1Arg(@selector(valueForPasteboardType:));
     tribeSwizzlePb2Arg(@selector(dataForPasteboardType:inItemSet:));
     tribeSwizzlePb2Arg(@selector(valuesForPasteboardType:inItemSet:));
+#endif // TRIBE_PASTE_TRACE
 
     Class cls = objc_getClass("QUIView");
     if (!cls) {
