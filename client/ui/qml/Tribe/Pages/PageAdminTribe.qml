@@ -48,8 +48,11 @@ PageType {
     readonly property bool ftRunning: hasEngine ? TribeEngine.ftRunning : false
     readonly property string ftStage: hasEngine ? TribeEngine.ftStage : ""
     readonly property string ftProgress: hasEngine ? TribeEngine.ftProgress : ""
+    readonly property int ftPercent: hasEngine ? TribeEngine.ftPercent : 0
     readonly property bool ftManualStep: ftStage === "wait-amnezia" || ftStage === "wait-baseline"
-    property string ftJson: ""       // мега-отчёт мастера из ftFinished
+    // мега-отчёт живёт в движке (QSettings) — переживает уход со страницы и перезапуск
+    readonly property string ftJson: hasEngine ? TribeEngine.lastFullTestJson : ""
+    property bool showAdvanced: false // точечные тесты/карточки — под развороткой (v5.4: меню простое)
     readonly property bool anyBusy: benchRunning || sweepRunning || abRunning || ccRunning || ftRunning
 
     function stageTitle(st) {
@@ -120,7 +123,6 @@ PageType {
             root.ccJson = json
         }
         function onFtFinished(json) {
-            root.ftJson = json
             root.refreshHistory()
         }
         function onReportUploadDone(ok, message) {
@@ -194,6 +196,29 @@ PageType {
                         anchors.topMargin: Theme.space.lg
                         spacing: Theme.space.sm
 
+                        // прогресс-бар мастера (v5.4): полоса 0..100 + процент — видно, что движется
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.space.sm
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 6
+                                radius: 3
+                                color: Theme.color.bg700
+                                Rectangle {
+                                    anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                    width: parent.width * root.ftPercent / 100
+                                    radius: 3
+                                    color: Theme.color.accent
+                                    Behavior on width { NumberAnimation { duration: 300 } }
+                                }
+                            }
+                            Text {
+                                text: root.ftPercent + "%"
+                                color: Theme.color.text1
+                                font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                            }
+                        }
                         Text {
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
@@ -257,16 +282,17 @@ PageType {
                             color: Theme.color.connected
                             font.family: Theme.font.mono; font.pixelSize: Theme.font.bodyS
                         }
+                        Text {
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: qsTr("Отчёт отправляется разработчику автоматически. На всякий случай можно сохранить файлом.")
+                            color: Theme.color.text3
+                            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                        }
                         TribeButton {
                             Layout.fillWidth: true
                             Layout.topMargin: Theme.space.xs
                             variant: "primary"
-                            text: qsTr("Отправить разработчику")
-                            onClicked: if (root.hasEngine) TribeEngine.uploadReport(root.ftJson)
-                        }
-                        TribeButton {
-                            Layout.fillWidth: true
-                            variant: "glass"
                             text: qsTr("Сохранить отчёт в файл")
                             onClicked: root.saveReport(root.ftJson, "tribe-full-test")
                         }
@@ -288,19 +314,26 @@ PageType {
                     }
                 }
 
+                // v5.4: точечные тесты — под развороткой (меню простое: «Полный тест» — главный путь)
                 Text {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.md
-                    text: qsTr("Отдельные тесты")
+                    visible: !root.ftRunning
+                    text: (root.showAdvanced ? "▾ " : "▸ ") + qsTr("Отдельные тесты (для отладки)")
                     color: Theme.color.text3
                     font.family: Theme.font.mono; font.pixelSize: Theme.font.caption
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -Theme.space.xs // зона тапа больше текста
+                        onClicked: root.showAdvanced = !root.showAdvanced
+                    }
                 }
 
                 // ── Tribe подключён: авто-A/B пары байпаса + одиночный замер текущего пути ──
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: (root.tunnelConnected || root.abRunning) && !root.ftRunning
+                    visible: (root.tunnelConnected || root.abRunning) && !root.ftRunning && root.showAdvanced
                     text: root.abRunning ? qsTr("Отменить A/B (%1)").arg(root.abProgress)
                                          : qsTr("Авто A/B байпаса (~5 мин)")
                     variant: root.abRunning ? "ghost" : "primary"
@@ -325,7 +358,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: root.tunnelConnected && !root.abRunning && !root.ftRunning
+                    visible: root.tunnelConnected && !root.abRunning && !root.ftRunning && root.showAdvanced
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
                                             : qsTr("Замер текущего пути")
                     variant: root.benchRunning ? "ghost" : "glass"
@@ -344,7 +377,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: (root.tunnelConnected || root.ccRunning) && !root.ftRunning
+                    visible: (root.tunnelConnected || root.ccRunning) && !root.ftRunning && root.showAdvanced
                     text: root.ccRunning ? qsTr("Отменить тест коннекта (%1)").arg(root.ccProgress)
                                          : qsTr("Тест коннекта (3 цикла)")
                     variant: root.ccRunning ? "ghost" : "glass"
@@ -371,7 +404,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: !root.tunnelConnected && !root.abRunning && !root.ftRunning
+                    visible: !root.tunnelConnected && !root.abRunning && !root.ftRunning && root.showAdvanced
                     text: root.benchRunning ? qsTr("Отменить (%1)").arg(root.stageTitle(root.benchStage))
                                             : qsTr("Замер без VPN — baseline")
                     variant: root.benchRunning ? "ghost" : "primary"
@@ -388,7 +421,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
-                    visible: !root.tunnelConnected && !root.abRunning && !root.benchRunning && !root.ftRunning
+                    visible: !root.tunnelConnected && !root.abRunning && !root.benchRunning && !root.ftRunning && root.showAdvanced
                     text: qsTr("Замер через другой VPN — amnezia")
                     variant: "glass"
                     enabled: root.hasEngine && !root.sweepRunning
@@ -431,7 +464,7 @@ PageType {
                 // результаты свипа: таблица нод (лучшие сверху)
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: root.sweepRows !== null && !root.sweepRunning
+                    visible: root.sweepRows !== null && !root.sweepRunning && root.showAdvanced
                     implicitHeight: sweepCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: sweepCol
@@ -506,7 +539,7 @@ PageType {
                 // ── bench v5: результат теста коннекта ──
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: root.ccSummary !== null
+                    visible: root.ccSummary !== null && root.showAdvanced
                     implicitHeight: ccCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: ccCol
@@ -647,7 +680,7 @@ PageType {
                 // ── результат авто-A/B: пара bypass-on/off + «цена байпаса» ──
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: root.abSummary !== null && !root.abRunning
+                    visible: root.abSummary !== null && !root.abRunning && root.showAdvanced
                     implicitHeight: abCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: abCol
@@ -723,7 +756,7 @@ PageType {
                 // ── полный отчёт: последние замеры всех меток + сравнения одним JSON ──
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: Object.keys(root.historyInfo).length >= 1 || root.sweepRows !== null || root.ccSummary !== null
+                    visible: root.showAdvanced && (Object.keys(root.historyInfo).length >= 1 || root.sweepRows !== null || root.ccSummary !== null)
                     implicitHeight: fullCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: fullCol
@@ -777,12 +810,6 @@ PageType {
                             text: qsTr("Сохранить полный отчёт в файл")
                             onClicked: root.saveReport(TribeEngine.buildFullReport(), "tribe-bench-full-report")
                         }
-                        TribeButton {
-                            Layout.fillWidth: true
-                            variant: "glass"
-                            text: qsTr("Отправить полный отчёт разработчику")
-                            onClicked: if (root.hasEngine) TribeEngine.uploadReport(TribeEngine.buildFullReport())
-                        }
                         TextEdit {
                             id: fullJsonEdit
                             Layout.preferredWidth: 1; Layout.preferredHeight: 1
@@ -794,7 +821,7 @@ PageType {
                 // результат последнего замера
                 TribeCard {
                     Layout.fillWidth: true
-                    visible: root.lastSummary !== null
+                    visible: root.lastSummary !== null && root.showAdvanced
                     implicitHeight: resultCol.implicitHeight + 2 * Theme.space.lg
                     ColumnLayout {
                         id: resultCol

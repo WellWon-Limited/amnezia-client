@@ -202,7 +202,9 @@ inline QJsonObject compare(const QJsonObject &a, const QJsonObject &b)
         const double pct = (vb - va) / va * 100.0;         // + = b больше a
         const bool worse = m.lowerBetter ? pct > 0 : pct < 0;
         QJsonObject d;
-        d.insert(QStringLiteral("metric"), QLatin1String(m.title));
+        // fromUtf8, НЕ QLatin1String: title содержит кириллицу («Загрузка»), Latin1-интерпретация
+        // UTF-8 байтов давала кракозябры в отчётах (реальные данные: «Ð—Ð°Ð³Ñ€ÑƒÐ·ÐºÐ°»)
+        d.insert(QStringLiteral("metric"), QString::fromUtf8(m.title));
         d.insert(QStringLiteral("a"), va);
         d.insert(QStringLiteral("b"), vb);
         d.insert(QStringLiteral("pct"), std::round(pct * 10) / 10);
@@ -210,7 +212,7 @@ inline QJsonObject compare(const QJsonObject &a, const QJsonObject &b)
         deltas.append(d);
         if (worse && std::abs(pct) >= m.sigPct)
             significant.append(QStringLiteral("%1: %2 (%3%)")
-                                   .arg(QLatin1String(m.title),
+                                   .arg(QString::fromUtf8(m.title),
                                         m.lowerBetter ? QStringLiteral("хуже") : QStringLiteral("ниже"),
                                         QString::number(std::abs(std::round(pct)))));
     }

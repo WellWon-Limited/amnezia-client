@@ -113,6 +113,11 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool ftRunning READ ftRunning NOTIFY ftChanged)
     Q_PROPERTY(QString ftStage READ ftStage NOTIFY ftChanged)
     Q_PROPERTY(QString ftProgress READ ftProgress NOTIFY ftChanged)
+    // v5.4: прогресс мастера 0..100 (взвешенные этапы + доля стадии текущего бенча) — для
+    // прогресс-бара; и последний мега-отчёт (живёт в движке+QSettings — переживает навигацию
+    // и перезапуск, «тест не сбрасывается»).
+    Q_PROPERTY(int ftPercent READ ftPercent NOTIFY ftChanged)
+    Q_PROPERTY(QString lastFullTestJson READ lastFullTestJson NOTIFY ftChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -184,8 +189,9 @@ public:
     // AVPN (bench v5.3): отправка отчёта на control plane — POST /v1/bench/report (Bearer, JSON
     // как есть; отчёты без PII by construction). Копятся в БД по устройствам — анализ с прода.
     // Итог — сигнал reportUploadDone(ok, message); 404/405 = «бэк ещё не принимает» (endpoint в
-    // handoff BENCH-REPORT-BACKEND-HANDOFF.md, живёт независимо от клиента).
-    Q_INVOKABLE void uploadReport(const QString &json);
+    // handoff BENCH-REPORT-BACKEND-HANDOFF.md). v5.4: зовётся АВТОМАТОМ по завершении мастера
+    // (quiet=true: «сервер не принимает» не ноет тостом каждый прогон — только успех/сеть).
+    Q_INVOKABLE void uploadReport(const QString &json, bool quiet = false);
 
     // AVPN (bench v5.2): мастер «Полный тест». fullTestContinue — подтверждение ручного шага
     // (гейт: наш туннель disconnected), fullTestSkip — пропустить baseline-шаг.
@@ -196,6 +202,8 @@ public:
     bool ftRunning() const { return m_ftPhase != FtPhase::Idle; }
     QString ftStage() const;
     QString ftProgress() const { return m_ftProgress; }
+    int ftPercent() const { return m_ftPercent; }
+    QString lastFullTestJson() const;
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -561,7 +569,10 @@ private:
     int         m_ftEpoch = 0;
     QJsonArray  m_ftSteps;      // methodology: [{step, ts, status}]
     QString     m_ftProgress;
+    int         m_ftPercent = 0;
     QTimer      m_ftGuard;
+    void ftUpdatePercent();     // из ftEnter + changed-сигналов под-машин (пока ftRunning)
+    double benchStageFrac() const; // доля прогресса текущего бенча по m_benchStage (0..1)
     void ftEnter(FtPhase ph, int guardMs = 0); // 0 = без сторожа (ручные фазы)
     void ftRecord(const char *step, const char *status);
     void ftStepDone(FtPhase donePhase, bool ok); // продвижение по *Finished/сторожу
