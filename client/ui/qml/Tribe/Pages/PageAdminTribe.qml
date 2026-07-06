@@ -79,6 +79,8 @@ PageType {
     // (iOS отдаст файл в share sheet, Android — в SAF-диалог создания), desktop — диалог пути.
     function saveReport(json, baseName) {
         if (!root.hasEngine || json === "") return
+        // дата-время в имени: файлы разных прогонов не затираются и сортируются по времени
+        baseName = baseName + "-" + Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
         var mobile = Qt.platform.os === "ios" || Qt.platform.os === "android"
         var fileName = ""
         if (mobile) {
