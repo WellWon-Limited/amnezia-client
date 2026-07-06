@@ -32,7 +32,7 @@ class AmneziaVPN(ConanFile):
             self.requires("v2ray-rules-dat/202603162227")
 
         if has_ne:
-            self.requires("awg-apple/2.0.2")
+            self.requires("awg-apple/2.0.2-tribe.1")  # AVPN split-DNS: наш форк с dnsfwd (deploy/tribe/conan/awg-apple-tribe)
             self.requires("hev-socks5-tunnel/2.15.0", options={"as_framework": True})
             self.requires("openvpnadapter/1.0.0")
 

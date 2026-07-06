@@ -2693,6 +2693,21 @@ void AvpnEngineQml::setBypassLiAutoOn(bool on)
     reapplyBypass();
 }
 
+// AVPN split-DNS форвардер: синхронная запись (грабля QML Settings ~500мс) + штатная реконсиляция
+// (смена DNS-механики требует передёрга туннеля — reapplyBypass сам решит needsRestart).
+bool AvpnEngineQml::bypassDnsFwdOn() const
+{
+    return QSettings().value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+}
+
+void AvpnEngineQml::setBypassDnsFwdOn(bool on)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnBypass/dnsFwd"), on);
+    s.sync();
+    reapplyBypass();
+}
+
 void AvpnEngineQml::reapplyBypass()
 {
     if (!m_wantConnected)

@@ -782,6 +782,14 @@ bool IosController::setupAwg()
 
     wgConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
 
+    // AVPN split-DNS форвардер: корневые ключи cfg (VpnConnectionTunnelControl::up) → JSON для NE
+    // (WGConfig.swift; значения — СТРОКИ). Отсутствуют = форвардер выключен.
+    if (m_rawConfig.contains(QLatin1String("dnsFwdOn"))) {
+        wgConfig.insert(QLatin1String("dnsFwdOn"), m_rawConfig[QLatin1String("dnsFwdOn")]);
+        wgConfig.insert(QLatin1String("dnsFwdSuffixes"), m_rawConfig[QLatin1String("dnsFwdSuffixes")]);
+        wgConfig.insert(QLatin1String("dnsFwdServer"), m_rawConfig[QLatin1String("dnsFwdServer")]);
+    }
+
     if (config.contains(configKey::allowedIps) && config[configKey::allowedIps].isArray()) {
         wgConfig.insert(configKey::allowedIps, config[configKey::allowedIps]);
     } else {

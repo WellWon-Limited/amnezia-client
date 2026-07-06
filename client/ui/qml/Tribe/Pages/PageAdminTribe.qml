@@ -611,6 +611,41 @@ PageType {
                     }
                 }
 
+                // ── split-DNS форвардер (iOS, эксперимент v1; дизайн SPLIT-DNS-FORWARDER-DESIGN.md) ──
+                TribeCard {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                    visible: Qt.platform.os === "ios"
+                    implicitHeight: dnsFwdRow.implicitHeight + 2 * Theme.space.lg
+                    RowLayout {
+                        id: dnsFwdRow
+                        anchors.left: parent.left; anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
+                        spacing: Theme.space.md
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+                            Text {
+                                text: qsTr("Split-DNS (эксперимент)")
+                                color: Theme.color.text1
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: qsTr("Как на macOS: RU-домены — российский резолвер (стелс), остальные — через туннель (честный гео и скорость на любом сервере). При включении «RU-DNS маскировка» не используется.")
+                                color: Theme.color.text3
+                                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                            }
+                        }
+                        TribeToggle {
+                            checked: root.hasEngine ? TribeEngine.bypassDnsFwdOn() : false
+                            onToggled: if (root.hasEngine) TribeEngine.setBypassDnsFwdOn(checked)
+                        }
+                    }
+                }
+
                 // ── эксперимент «RU-DNS маскировка» (звонки vs стелс, реш. 2026-07-03) ──
                 // Измерено: Яндекс-DNS с загран-egress подсовывает RU-гео edge → WhatsApp-инфра
                 // +75% RTT. OFF = DNS 1.1.1.1 через туннель (честный гео), RU-маршруты сохраняются.

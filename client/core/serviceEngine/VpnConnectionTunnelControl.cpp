@@ -98,7 +98,11 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         //     полный split там = DNS-форвардер в туннель-движке (в плане, см. память tribe-ru-split).
         // dnsMaskOn OFF ⇒ чистый 1.1.1.1 везде (маршрутный RU-байпас не трогается).
         const bool dnsMaskOn = s.value(QStringLiteral("AvpnBypass/dnsMaskOn"), true).toBool();
-        if (!ruNode && masterOn && dnsMaskOn) {
+        // AVPN split-DNS форвардер (v1 iOS, дизайн SPLIT-DNS-FORWARDER-DESIGN.md): DNS-прокси в
+        // туннель-движке даёт macOS-качество (стелс И честный гео сразу) — при нём маска не нужна
+        // и НЕ применяется (тумблер маскировки остаётся в UI, просто игнорируется при dnsFwd=ON).
+        const bool dnsFwdOn = s.value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+        if (!ruNode && masterOn && dnsMaskOn && !dnsFwdOn) {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
             splitDns = true; // DNS ноды (1.1.1.1) не подменяем — RU-суффиксы уйдут на Яндекс через демона
 #else
@@ -131,6 +135,20 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     }
 
     QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
+    // AVPN split-DNS форвардер (iOS): ключи в КОРЕНЬ cfg → ios_controller::setupAwg → WGConfig.swift
+    // → wgSetSplitDns (Go dnsfwd.go). Значения СТРОКАМИ (JSONDecoder-грабля). Не на РФ-ноде
+    // (там full-tunnel через РФ — резолвер и так российский).
+    {
+        QSettings st;
+        const bool fwd = st.value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+        const bool ruN = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
+        if (fwd && !ruN) {
+            cfg.insert(QStringLiteral("dnsFwdOn"), QStringLiteral("1"));
+            cfg.insert(QStringLiteral("dnsFwdSuffixes"),
+                       QStringLiteral("ru,su,xn--p1ai,vk.com,userapi.com,yandex.net,yastatic.net"));
+            cfg.insert(QStringLiteral("dnsFwdServer"), QStringLiteral("77.88.8.8"));
+        }
+    }
     if (splitDns) {
         // AVPN split-DNS: RU-суффиксы (TLD рунета + RU-сервисы вне .ru) → Яндекс мимо туннеля.
         // Прокид: localsocketcontroller → демон → /etc/resolver/*. Яндекс отвечает ТОЛЬКО
@@ -147,6 +165,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     m_lastConfigReport.insert(QStringLiteral("split_on"), splitOnFact);
     m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
     m_lastConfigReport.insert(QStringLiteral("split_dns"), splitDns);
+    m_lastConfigReport.insert(QStringLiteral("dns_fwd"), cfg.contains(QStringLiteral("dnsFwdOn")));
 
     if (!invokeConnect(cfg, primary.nodeId))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
