@@ -19,6 +19,10 @@ struct WGConfig: Decodable {
   var persistentKeepAlive: String
   let splitTunnelType: Int
   let splitTunnelSites: [String]
+  // AVPN split-DNS форвардер (dnsfwd.go): опциональные СТРОКИ (числа ломают JSONDecoder — грабля AWG-полей)
+  let dnsFwdOn: String?
+  let dnsFwdSuffixes: String?
+  let dnsFwdServer: String?
 
   enum CodingKeys: String, CodingKey {
     case initPacketMagicHeader = "H1", responsePacketMagicHeader = "H2"
@@ -39,7 +43,15 @@ struct WGConfig: Decodable {
     case persistentKeepAlive = "persistent_keep_alive"
     case splitTunnelType
     case splitTunnelSites
+    case dnsFwdOn
+    case dnsFwdSuffixes
+    case dnsFwdServer
   }
+
+  // AVPN split-DNS: форвардер включён → система получает виртуальный резолвер (100.100.100.53),
+  // реальная маршрутизация DNS — в Go-слое (wgSetSplitDns до wgTurnOn).
+  var dnsFwdEnabled: Bool { dnsFwdOn == "1" }
+  var effectiveDns: String { dnsFwdEnabled ? "100.100.100.53" : "\(dns1), \(dns2)" }
 
   var settings: String {
     func trimmed(_ value: String?) -> String? {
@@ -107,7 +119,7 @@ struct WGConfig: Decodable {
     """
     [Interface]
     Address = \(clientIP)
-    DNS = \(dns1), \(dns2)
+    DNS = \(effectiveDns)
     MTU = \(mtu)
     PrivateKey = \(clientPrivateKey)
     \(settings)
@@ -124,7 +136,7 @@ struct WGConfig: Decodable {
     """
     [Interface]
     Address = \(clientIP)
-    DNS = \(dns1), \(dns2)
+    DNS = \(effectiveDns)
     MTU = \(mtu)
     PrivateKey = ***
     \(settings)

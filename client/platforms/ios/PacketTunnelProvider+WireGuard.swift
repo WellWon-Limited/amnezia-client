@@ -18,6 +18,19 @@ extension PacketTunnelProvider {
             let wgConfigStr = wgConfig.str
             wg_log(.info, title: "config: ", message: wgConfig.redux)
 
+            // AVPN split-DNS форвардер: настроить Go-слой ДО старта адаптера (wgTurnOn читает
+            // конфиг форвардера при создании устройства). Выключен → явный сброс (переподключения).
+            if wgConfig.dnsFwdEnabled {
+                let rc = wgSetSplitDns(wgConfig.dnsFwdSuffixes ?? "",
+                                       wgConfig.dnsFwdServer ?? "77.88.8.8",
+                                       wgConfig.dns1,
+                                       wgConfig.clientIP,
+                                       1)
+                wg_log(.info, message: "AVPN dnsfwd: enable rc=\(rc)")
+            } else {
+                _ = wgSetSplitDns("", "", "", "", 0)
+            }
+
             let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgConfigStr)
 
             if tunnelConfiguration.peers.first!.allowedIPs

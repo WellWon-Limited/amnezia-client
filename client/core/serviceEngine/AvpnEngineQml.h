@@ -389,6 +389,11 @@ public:
     Q_INVOKABLE bool bypassLiAutoOn() const;
     Q_INVOKABLE void setBypassLiAutoOn(bool on);
 
+    // AVPN split-DNS форвардер (iOS, эксперимент; дизайн SPLIT-DNS-FORWARDER-DESIGN.md):
+    // AvpnBypass/dnsFwd, default OFF. При ON тумблер «RU-DNS маскировка» игнорируется (но живёт в UI).
+    Q_INVOKABLE bool bypassDnsFwdOn() const;
+    Q_INVOKABLE void setBypassDnsFwdOn(bool on);
+
 signals:
     void changed();
     void error(const QString &message);
