@@ -40,7 +40,10 @@ public:
 
     // extra — вклеивается в результат как extra{} (tunnel_state, node_id, platform, app_ver,
     // connect_ms при свипе). lite — короткий замер для пер-нодного свипа.
-    void start(const QString &label, const QJsonObject &extra, bool lite = false);
+    // nodePingIp (v5.5) — IP эндпоинта текущей ноды: у WG к нему host-route мимо туннеля ⇒ ICMP-серия
+    // до него меряет потери «до ноды» отдельно от «через туннель» (цель "node-endpoint"; IP не пишется).
+    void start(const QString &label, const QJsonObject &extra, bool lite = false,
+               const QString &nodePingIp = QString());
     void cancel(); // идемпотентно; никаких сигналов после cancel
 
     // --- чистая математика (inline в хедере: тестируется в tests/parse_check.cpp без moc) ---
@@ -118,7 +121,10 @@ private:
     QJsonObject m_splitCheck; // bench v5: {ru_reachable, ru_equals_tunnel_egress}
     QJsonObject m_ipv6;       // bench v5: {aaaa_ok, https_ok}
     int m_mtuIdx = 0;         // bench v5: индекс текущего размера в свипе MTU
+    int m_mtuAttempt = 0;     // v5.5: попытка текущего размера (2 на размер — потери гасят DF-пинг)
     QJsonObject m_mtu;        // bench v5: {path_mtu | probed:false}
+    QString m_nodePingIp;     // v5.5: IP эндпоинта текущей ноды (host-route ⇒ off-tunnel) — цель
+                              // "node-endpoint" в ICMP-серии; в JSON пишется ТОЛЬКО метка, не IP
     int m_dnsIdx = 0;
     QJsonArray m_dnsProbes;
     int m_tlsIdx = 0;

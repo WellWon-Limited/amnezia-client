@@ -63,12 +63,14 @@ BenchRunner::~BenchRunner()
     cancel();
 }
 
-void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lite)
+void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lite,
+                        const QString &nodePingIp)
 {
     if (m_running)
         return;
     m_running = true;
     m_lite = lite;
+    m_nodePingIp = nodePingIp;
     ++m_epoch;
     m_label = label.isEmpty() ? QStringLiteral("unlabeled") : label;
     m_extra = extra;
@@ -378,10 +380,14 @@ void BenchRunner::pingRound()
         return;
     }
     const int epoch = m_epoch;
-    const QList<RttTarget> targets = {
+    QList<RttTarget> targets = {
         { QStringLiteral("1.1.1.1"), QStringLiteral("1.1.1.1"), 0 },
         { QStringLiteral("8.8.8.8"), QStringLiteral("8.8.8.8"), 0 },
     };
+    // v5.5: эндпоинт ноды (host-route ⇒ off-tunnel) — изоляция потерь «до ноды» vs «через туннель».
+    // Метка вместо IP: nodeId "node-endpoint" уходит в JSON, сам адрес — нет.
+    if (!m_nodePingIp.isEmpty())
+        targets.append({ QStringLiteral("node-endpoint"), m_nodePingIp, 0 });
     // цели фиксируем в сэмплах заранее: полная тишина раунда тоже учитывается (loss)
     for (const RttTarget &t : targets)
         if (!m_icmpSamples.contains(t.nodeId))
@@ -517,6 +523,13 @@ void BenchRunner::mtuNext()
             stageIdleRtt();
             return;
         }
+        // ретрай размера: одиночный DF-пинг гибнет от потерь (реальный прогон: loss 40% →
+        // probed:false при живом пути) — даём каждому размеру 2 попытки
+        if (++m_mtuAttempt < 2) {
+            mtuNext();
+            return;
+        }
+        m_mtuAttempt = 0;
         ++m_mtuIdx;
         mtuNext();
     });
