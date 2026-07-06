@@ -118,6 +118,9 @@ class AvpnEngineQml : public QObject {
     // и перезапуск, «тест не сбрасывается»).
     Q_PROPERTY(int ftPercent READ ftPercent NOTIFY ftChanged)
     Q_PROPERTY(QString lastFullTestJson READ lastFullTestJson NOTIFY ftChanged)
+    // v5.5: судьба последней отправки отчёта на сервер («Отправлен ✓ (HH:mm)» / причина) — видно
+    // в финальной карточке мастера, а не только мимолётным тостом.
+    Q_PROPERTY(QString uploadStatus READ uploadStatus NOTIFY ftChanged)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -204,6 +207,7 @@ public:
     QString ftProgress() const { return m_ftProgress; }
     int ftPercent() const { return m_ftPercent; }
     QString lastFullTestJson() const;
+    QString uploadStatus() const { return m_lastUploadStatus; }
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -520,6 +524,9 @@ private:
     AbPhase                      m_abPhase = AbPhase::Idle;
     int                          m_abEpoch = 0;
     bool                         m_abOrigOn = true;    // исходный AvpnBypass/masterOn (вернём в конце)
+    bool                         m_abOrigLiAuto = true; // v5.5: исходный liAutoOn — off-фаза A/B гасит
+                                                        // и его (иначе «bypass-off» ≠ ваниль: split_on
+                                                        // остаётся из-за Li Auto default-ON)
     QJsonObject                  m_abFirst, m_abSecond; // замер 1 (исходный тумблер) и 2 (инверсный)
     double                       m_abSwitchMs = -1, m_abRestoreMs = -1; // длительность реконнектов
     QElapsedTimer                m_abConnT;
@@ -570,6 +577,7 @@ private:
     QJsonArray  m_ftSteps;      // methodology: [{step, ts, status}]
     QString     m_ftProgress;
     int         m_ftPercent = 0;
+    QString     m_lastUploadStatus; // v5.5: итог последней отправки на сервер
     QTimer      m_ftGuard;
     void ftUpdatePercent();     // из ftEnter + changed-сигналов под-машин (пока ftRunning)
     double benchStageFrac() const; // доля прогресса текущего бенча по m_benchStage (0..1)

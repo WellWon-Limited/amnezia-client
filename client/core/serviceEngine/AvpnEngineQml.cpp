@@ -646,6 +646,14 @@ QJsonObject AvpnEngineQml::benchExtra() const
 // Гард методики: baseline/amnezia — замеры ЧУЖОГО пути, при поднятом Tribe-туннеле они бессмысленны
 // (реальный случай: «baseline» с tunnel_state=connected обесценил всю серию). Пустая метка →
 // авто-метка по факту: подключены — tribe-bypass-on/off из настроек, отключены — manual.
+// v5.5: IP эндпоинта ТЕКУЩЕЙ ноды для ICMP-цели "node-endpoint" (host-route ⇒ off-tunnel);
+// пусто, если не подключены — тогда цель не добавляется.
+static QString currentNodeEndpointIp(const QVariantMap &node)
+{
+    return node.value(QStringLiteral("connected")).toBool()
+        ? node.value(QStringLiteral("ip")).toString() : QString();
+}
+
 void AvpnEngineQml::startBench(const QString &label)
 {
     if (m_benchRunning || sweepRunning() || abRunning() || !m_bench)
@@ -663,7 +671,7 @@ void AvpnEngineQml::startBench(const QString &label)
     m_benchRunning = true;
     m_benchStage = QStringLiteral("start");
     emit benchChanged();
-    m_bench->start(effLabel, benchExtra());
+    m_bench->start(effLabel, benchExtra(), /*lite=*/false, currentNodeEndpointIp(currentNode()));
 }
 
 void AvpnEngineQml::cancelBench()
@@ -815,7 +823,8 @@ void AvpnEngineQml::sweepStartBench()
     m_benchStage = QStringLiteral("start");
     emit benchChanged();
     sweepEnterPhase(SweepPhase::Bench, kSweepGuardBenchMs);
-    m_bench->start(QStringLiteral("node-%1").arg(id), extra, /*lite=*/true);
+    m_bench->start(QStringLiteral("node-%1").arg(id), extra, /*lite=*/true,
+                   currentNodeEndpointIp(currentNode()));
 }
 
 void AvpnEngineQml::sweepNodeFailed(const QString &reason)
@@ -930,6 +939,7 @@ void AvpnEngineQml::startBypassAb()
     }
     ++m_abEpoch;
     m_abOrigOn = QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    m_abOrigLiAuto = QSettings().value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
     m_abFirst = QJsonObject();
     m_abSecond = QJsonObject();
     m_abSwitchMs = m_abRestoreMs = -1;
@@ -945,6 +955,13 @@ void AvpnEngineQml::cancelBypassAb()
     if (m_benchRunning)
         cancelBench();
     // вернуть исходный тумблер, если успели переключить (реконнект доделает reconcile)
+    {
+        QSettings st; // v5.5: вернуть liAuto тихо ДО реконсиляции master
+        if (st.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool() != m_abOrigLiAuto) {
+            st.setValue(QStringLiteral("AvpnBypass/liAutoOn"), m_abOrigLiAuto);
+            st.sync();
+        }
+    }
     if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
         setBypassMasterOn(m_abOrigOn);
     m_abPhase = AbPhase::Idle;
@@ -967,7 +984,7 @@ void AvpnEngineQml::abStartBench(bool second)
     m_benchStage = QStringLiteral("start");
     emit benchChanged();
     abEnterPhase(second ? AbPhase::BenchB : AbPhase::BenchA, kAbGuardBenchMs);
-    m_bench->start(bypassLabel(on), benchExtra());
+    m_bench->start(bypassLabel(on), benchExtra(), /*lite=*/false, currentNodeEndpointIp(currentNode()));
 }
 
 // benchFinished при фазе BenchA/BenchB (история last_<label> уже записана вызывающей лямбдой)
@@ -980,7 +997,16 @@ void AvpnEngineQml::abOnBenchDone(const QJsonObject &result)
                             : tr("возврат настроек и реконнект…");
     m_abConnT.start();
     // синхронная запись тумблера + штатный передёрг туннеля (reapplyBypass → reconcile)
-    setBypassMasterOn(wasFirst ? !m_abOrigOn : m_abOrigOn);
+    // v5.5 (Li Auto гейт): off-фаза = ЧИСТЫЙ full-tunnel — гасим и liAutoOn, иначе split_on
+    // остаётся из-за Li Auto default-ON и «bypass-off» несравним с ванилью (реальный отчёт).
+    // Пишем тихо (setValue+sync): реконсиляцию/реконнект делает следующий setBypassMasterOn.
+    {
+        const bool targetMaster = wasFirst ? !m_abOrigOn : m_abOrigOn;
+        QSettings st;
+        st.setValue(QStringLiteral("AvpnBypass/liAutoOn"), targetMaster ? m_abOrigLiAuto : false);
+        st.sync();
+        setBypassMasterOn(targetMaster);
+    }
     abEnterPhase(wasFirst ? AbPhase::WaitDown : AbPhase::RestoreDown, kSweepGuardDownMs);
     QTimer::singleShot(0, this, [this, e = m_abEpoch] { if (e == m_abEpoch) abAdvance(); });
 }
@@ -1050,6 +1076,13 @@ void AvpnEngineQml::abFail(const QString &reason)
     ++m_abEpoch;
     if (m_benchRunning)
         cancelBench();
+    {
+        QSettings st; // v5.5: вернуть liAuto тихо ДО реконсиляции master
+        if (st.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool() != m_abOrigLiAuto) {
+            st.setValue(QStringLiteral("AvpnBypass/liAutoOn"), m_abOrigLiAuto);
+            st.sync();
+        }
+    }
     if (QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool() != m_abOrigOn)
         setBypassMasterOn(m_abOrigOn);
     m_abPhase = AbPhase::Idle;
@@ -1385,17 +1418,26 @@ void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
     connect(reply, &QNetworkReply::finished, this, [this, reply, quiet]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (code >= 200 && code < 300)
+        if (code >= 200 && code < 300) {
+            m_lastUploadStatus = tr("Отправлен на сервер ✓ (%1)")
+                                     .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm")));
+            emit ftChanged();
             emit reportUploadDone(true, tr("Отчёт отправлен разработчику ✓"));
+        }
         else if (code == 404 || code == 405) {
             // бэк ещё без эндпоинта: авто-отправка молчит (иначе ныла бы каждый прогон)
+            m_lastUploadStatus = tr("Не отправлен: сервер не принимает — сохрани файлом");
+            emit ftChanged();
             if (!quiet)
                 emit reportUploadDone(false, tr("Сервер ещё не принимает отчёты — сохрани файлом"));
         } else if (code == 401 || code == 403)
             emit reportUploadDone(false, tr("Нет авторизации для отправки (%1)").arg(code));
-        else
+        else {
+            m_lastUploadStatus = tr("Не отправлен (%1) — сохрани файлом").arg(code > 0 ? QString::number(code) : tr("сеть"));
+            emit ftChanged();
             emit reportUploadDone(false, code > 0 ? tr("Сервер отклонил отчёт (%1)").arg(code)
                                                   : tr("Сеть недоступна — отчёт не отправлен"));
+        }
     });
 }
 
@@ -1509,6 +1551,7 @@ void AvpnEngineQml::startFullTest()
     m_ftPercent = 0;
     ftRecord("full-test", "started");
     if (state() == QLatin1String("connected")) {
+        probeServices(); // v5.5: чипы (goodput/троттл) греются заранее — к A/B попадут в extra живыми
         m_ftProgress = tr("этап 1/3 · тест коннекта…");
         ftEnter(FtPhase::Cc, kFtGuardCcMs);
         startConnectCycle();
@@ -1567,6 +1610,7 @@ void AvpnEngineQml::ftStepDone(FtPhase donePhase, bool ok)
             ftEnter(FtPhase::WaitAmnezia);
             return;
         }
+        probeServices(); // v5.5: греем чипы сразу после подключения
         m_ftProgress = tr("этап 1/3 · тест коннекта…");
         ftEnter(FtPhase::Cc, kFtGuardCcMs);
         startConnectCycle();

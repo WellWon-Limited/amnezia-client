@@ -287,8 +287,12 @@ PageType {
                         Text {
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
-                            text: qsTr("Отчёт отправляется разработчику автоматически. На всякий случай можно сохранить файлом.")
-                            color: Theme.color.text3
+                            // живой итог автоотправки (v5.5): «Отправлен ✓ (HH:mm)» / причина отказа
+                            text: (root.hasEngine && TribeEngine.uploadStatus !== "")
+                                  ? TribeEngine.uploadStatus
+                                  : qsTr("Отчёт отправляется разработчику автоматически. На всякий случай можно сохранить файлом.")
+                            color: (root.hasEngine && TribeEngine.uploadStatus.indexOf("✓") >= 0)
+                                   ? Theme.color.connected : Theme.color.text3
                             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                         }
                         TribeButton {
