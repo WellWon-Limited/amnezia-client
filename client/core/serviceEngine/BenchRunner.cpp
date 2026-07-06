@@ -76,6 +76,7 @@ void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lit
     m_extra = extra;
     m_loc.clear(); m_colo.clear(); m_traceIp.clear();
     m_splitCheck = QJsonObject(); m_ipv6 = QJsonObject();
+    m_dnsDuel = QJsonObject(); m_duelIdx = 0;
     m_mtuIdx = 0; m_mtu = QJsonObject();
     m_dnsIdx = 0; m_dnsProbes = QJsonArray();
     m_tlsIdx = 0; m_tlsProbes = QJsonArray(); m_tlsTcpMs = -1;
@@ -461,7 +462,7 @@ void BenchRunner::splitIpv6Lookup()
         m_ipv6.insert(QStringLiteral("aaaa_ok"), hasV6);
         if (!hasV6) { // резолва нет — v6-HTTP заведомо не пойдёт, не тратим таймаут
             m_ipv6.insert(QStringLiteral("https_ok"), false);
-            stageMtu(); // БАГ v5.0: уходили в stageIdleRtt — MTU-проба молча пропускалась без v6
+            stageDnsDuel(); // БАГ v5.0: уходили в stageIdleRtt — MTU-проба молча пропускалась без v6
             return;
         }
         splitIpv6Http();
@@ -481,7 +482,59 @@ void BenchRunner::splitIpv6Http()
         const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         m_ipv6.insert(QStringLiteral("https_ok"), r->error() == QNetworkReply::NoError
                                                   && (code == 204 || code == 200));
+        stageDnsDuel();
+    });
+}
+
+// --- стадия 3b' (build 62): DNS-дуэль — сторож split-DNS форвардера ----------------------------
+// При dns_fwd on системный резолвер устройства = форвардер (100.100.100.53). Резолвим по хосту с
+// каждой стороны занавеса через QHostInfo (работает на iOS; выбрать резолвер нельзя — и не нужно:
+// проверяем именно системный путь, которым ходит всё приложение). Провал плеча = DNS через
+// форвардер мёртв и fail-open не спас → вердикт dns-fwd-dead (BenchAnalysis.h). Хосты — из уже
+// используемых бенчем (новых эндпоинтов НЕТ — §14.5 не задет; резолв-only, HTTP-трафика нет).
+// Пишем только булевы + тайминги, адреса НЕ сохраняем (PII-правило). Кэш ОС не мешает: адрес из
+// кэша тоже был получен через форвардер в этой же сессии туннеля.
+void BenchRunner::stageDnsDuel()
+{
+    const bool fwdOn = m_extra.value(QStringLiteral("tunnel_config")).toObject()
+                           .value(QStringLiteral("dns_fwd")).toBool();
+    if (m_lite || !fwdOn
+        || m_extra.value(QStringLiteral("tunnel_state")).toString() != QLatin1String("connected")) {
         stageMtu();
+        return;
+    }
+    emit stageChanged(QStringLiteral("dns_duel"));
+    m_duelIdx = 0;
+    m_dnsDuel = QJsonObject();
+    dnsDuelNext();
+}
+
+void BenchRunner::dnsDuelNext()
+{
+    struct Leg { const char *host; const char *okKey; const char *msKey; };
+    static const Leg kLegs[] = {
+        // RU-плечо: форвардер обязан отдать direct-резолвером (суффикс "ru" в dnsFwdSuffixes)
+        { "ya.ru", "ru_ok", "ru_ms" },
+        // загран-плечо: форвардер шлёт через туннель на dns1 (хост уже используется rtt-зондом)
+        { "connectivitycheck.gstatic.com", "foreign_ok", "foreign_ms" },
+    };
+    if (m_duelIdx >= int(sizeof(kLegs) / sizeof(kLegs[0]))) {
+        stageMtu();
+        return;
+    }
+    const Leg leg = kLegs[m_duelIdx];
+    const int epoch = m_epoch;
+    m_t.start();
+    m_hostLookup = QHostInfo::lookupHost(QLatin1String(leg.host), this,
+                                         [this, epoch, leg](const QHostInfo &info) {
+        if (epoch != m_epoch) return;
+        m_hostLookup = -1;
+        const bool ok = (info.error() == QHostInfo::NoError) && !info.addresses().isEmpty();
+        m_dnsDuel.insert(QLatin1String(leg.okKey), ok);
+        if (ok)
+            m_dnsDuel.insert(QLatin1String(leg.msKey), double(m_t.elapsed()));
+        ++m_duelIdx;
+        dnsDuelNext();
     });
 }
 
@@ -723,6 +776,8 @@ void BenchRunner::assemble()
         out.insert(QStringLiteral("split_check"), m_splitCheck);
     if (!m_ipv6.isEmpty())
         out.insert(QStringLiteral("ipv6"), m_ipv6);
+    if (!m_dnsDuel.isEmpty())
+        out.insert(QStringLiteral("dns_duel"), m_dnsDuel);
     if (!m_mtu.isEmpty())
         out.insert(QStringLiteral("mtu_probe"), m_mtu);
     out.insert(QStringLiteral("extra"), m_extra);

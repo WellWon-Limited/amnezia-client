@@ -1463,7 +1463,8 @@ double AvpnEngineQml::benchStageFrac() const
 {
     static const struct { const char *st; double frac; } kMap[] = {
         {"start", 0.02}, {"dns", 0.08}, {"tls", 0.16}, {"http", 0.30}, {"ping", 0.45},
-        {"split", 0.55}, {"mtu", 0.60}, {"rtt", 0.68}, {"down", 0.80}, {"up", 0.95}, {"done", 1.0},
+        {"split", 0.55}, {"dns_duel", 0.58}, {"mtu", 0.60}, {"rtt", 0.68}, {"down", 0.80},
+        {"up", 0.95}, {"done", 1.0},
     };
     for (const auto &m : kMap)
         if (m_benchStage == QLatin1String(m.st))
@@ -1733,11 +1734,27 @@ QString AvpnEngineQml::assembleMegaReport() const
                                .value(QStringLiteral("network")).toObject()
                                .value(QStringLiteral("egress")).toObject()
                                .value(QStringLiteral("loc")).toString();
-    if (!baseLoc.isEmpty() && !amnLoc.isEmpty() && baseLoc == amnLoc) {
+    const bool baselineSuspect = !baseLoc.isEmpty() && !amnLoc.isEmpty() && baseLoc == amnLoc;
+    if (baselineSuspect) {
         QJsonObject o = bench::mkVerdict("baseline-suspect", "warn",
             tr("baseline и amnezia видят один egress (%1) — похоже, VPN не был выключен при baseline-замере").arg(baseLoc));
         o.insert(QStringLiteral("section"), QStringLiteral("methodology"));
         sum.append(o);
+    }
+    // build 62 (цензура-детект): хост молчит в baseline (без VPN) и открывается через туннель →
+    // явный диагноз «оператор блокирует X». Нога «через VPN» = bypass-off (полный туннель);
+    // фолбэк bypass-on — внутри bench::censorship() RU-корпус тогда пропускается (шёл мимо туннеля).
+    // Гейт: baseline не под подозрением (иначе baseline врёт и сравнение бессмысленно).
+    if (!baselineSuspect) {
+        QJsonObject vpnRun = runs.value(QStringLiteral("tribe-bypass-off")).toObject();
+        if (vpnRun.isEmpty())
+            vpnRun = runs.value(QStringLiteral("tribe-bypass-on")).toObject();
+        const QJsonArray cens = bench::censorship(runs.value(QStringLiteral("baseline")).toObject(), vpnRun);
+        for (const QJsonValue &v : cens) {
+            QJsonObject o = v.toObject();
+            o.insert(QStringLiteral("section"), QStringLiteral("baseline"));
+            sum.append(o);
+        }
     }
     rep.insert(QStringLiteral("summary"), sum);
     return QString::fromUtf8(QJsonDocument(rep).toJson(QJsonDocument::Compact));
