@@ -24,7 +24,7 @@ class AmneziaVPN(ConanFile):
                 self.requires("win-split-tunnel/1.2.5.0")
                 self.requires("wintun/0.14.1")
             else:
-                self.requires("awg-go/0.2.18")
+                self.requires("awg-go/0.2.19")
 
             self.requires("amnezia-xray-bindings/1.1.0")
             self.requires("tun2socks/2.6.0")
