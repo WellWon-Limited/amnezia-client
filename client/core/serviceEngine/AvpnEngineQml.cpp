@@ -1543,6 +1543,19 @@ void AvpnEngineQml::ftStepDone(FtPhase donePhase, bool ok)
     if (m_ftPhase != donePhase || m_ftPhase == FtPhase::Idle)
         return;
     m_ftGuard.stop();
+    // Сторож добил шаг → ОТМЕНИТЬ зависшую под-машину, иначе она живёт параллельно со следующим
+    // шагом (реальный прогон 2026-07-06: свип завис на мёртвой Польше, сторож увёл мастер на
+    // ручной шаг Amnezia, а свип продолжал реконнектить наш туннель под ногами у юзера).
+    if (!ok) {
+        switch (donePhase) {
+        case FtPhase::Cc:            if (ccRunning()) cancelConnectCycle(); break;
+        case FtPhase::Ab:            if (abRunning()) cancelBypassAb(); break;
+        case FtPhase::Sweep:         if (sweepRunning()) cancelNodeSweep(); break;
+        case FtPhase::BenchAmnezia:
+        case FtPhase::BenchBaseline: if (m_benchRunning) cancelBench(); break;
+        default: break;
+        }
+    }
     const int epoch = m_ftEpoch;
     switch (donePhase) {
     case FtPhase::Idle:
