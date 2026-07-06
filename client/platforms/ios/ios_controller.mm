@@ -179,6 +179,19 @@ IosController* IosController::Instance() {
     return s_instance;
 }
 
+// AVPN (краш-фикс UAF, 2026-07-06): единственная точка владения m_currentTunnel. Без retain
+// менеджер из autoreleased-массива loadAllFromPreferences жил только в кеше NE-фреймворка;
+// после ночного фона кеш освобождался → m_checkTimer (QThread) → checkStatus →
+// objc_msgSend(m_currentTunnel, 'connection') по трупу = SIGSEGV (AmneziaVPN-2026-07-06-091741.ips).
+void IosController::setCurrentTunnel(NETunnelProviderManager *tunnel)
+{
+    if (tunnel == m_currentTunnel)
+        return;
+    [tunnel retain];
+    [m_currentTunnel release];
+    m_currentTunnel = tunnel;
+}
+
 bool IosController::initialize()
 {
     __block bool ok = true;
@@ -200,7 +213,7 @@ bool IosController::initialize()
                 qDebug() << "IosController::initialize : VPNC: " << manager.localizedDescription;
 
                 if (manager.connection.status == NEVPNStatusConnected) {
-                    m_currentTunnel = manager;
+                    setCurrentTunnel(manager); // AVPN: владеющее присвоение (retain)
                     qDebug() << "IosController::initialize : VPN already connected with" << manager.localizedDescription;
                     emit connectionStateChanged(Vpn::ConnectionState::Connected);
                     break;
@@ -241,7 +254,8 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     // но трафика нет» = Network Error); m_lastEmittedState глушил нужный переход (dedup); m_statusRequestInFlight
     // блокировал checkStatus. (void)tunnelName — имя больше не используем для матчинга (см. ниже).
     (void)tunnelName;
-    m_currentTunnel = nullptr;
+    setCurrentTunnel(nil); // AVPN: release старого менеджера
+
     m_handshakeConfirmed = false;
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
@@ -273,7 +287,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
             NSMutableArray<NETunnelProviderManager *> *extras = [NSMutableArray array];
             for (NETunnelProviderManager *manager in managers) {
                 if (!m_currentTunnel && isOurManager(manager)) {
-                    m_currentTunnel = manager;
+                    setCurrentTunnel(manager); // AVPN: владеющее присвоение (retain)
                 } else {
                     [extras addObject:manager];
                 }
@@ -285,7 +299,8 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
             }
 
             if (!m_currentTunnel) {
-                m_currentTunnel = [[NETunnelProviderManager alloc] init];
+                // AVPN: setCurrentTunnel ретейнит, поэтому alloc-объект отдаём в autorelease (иначе утечка +1)
+                setCurrentTunnel([[[NETunnelProviderManager alloc] init] autorelease]);
                 qDebug() << "IosController::connectVpn : creating new tunnel manager";
             }
             // AVPN: стабильное имя — чтобы конфиг в Настройках iOS назывался понятно и не плодился по серверам.
@@ -294,7 +309,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
         @catch (NSException *exception) {
             qDebug() << "IosController::connectVpn : exception" << QString::fromNSString(exception.reason);
             ok = false;
-            m_currentTunnel = nullptr;
+            setCurrentTunnel(nil); // AVPN: release старого менеджера
         }
         @finally {
             dispatch_semaphore_signal(semaphore);
@@ -590,7 +605,7 @@ void IosController::vpnConfigurationDidChange(void *pNotification)
         }
         if (!stillExists && m_currentTunnel) {
             qDebug() << "IosController::vpnConfigurationDidChange : our manager was removed externally — clearing";
-            m_currentTunnel = nullptr;
+            setCurrentTunnel(nil); // AVPN: release (менеджер удалён извне)
             m_handshakeConfirmed = false;
             m_handshakeAwaiting = false;
             m_handshakeTimer.invalidate();

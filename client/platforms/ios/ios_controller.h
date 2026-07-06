@@ -113,7 +113,11 @@ private:
 private:
     void *m_iosControllerWrapper {};
 #ifdef __OBJC__
+    // AVPN (краш-фикс UAF): файл MRC (без ARC) — менеджером ВЛАДЕЕМ через setCurrentTunnel
+    // (retain/release), напрямую m_currentTunnel не присваивать. Менеджеры из loadAllFromPreferences
+    // autoreleased; без retain указатель повисал после долгого фона → SIGSEGV в checkStatus.
     NETunnelProviderManager *m_currentTunnel {};
+    void setCurrentTunnel(NETunnelProviderManager *tunnel);
     NSString *m_serverAddress {};
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NSDictionary *message, std::function<void(NSDictionary *)> callback = nullptr);
