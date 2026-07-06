@@ -10,7 +10,9 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QMap>
 #include <QString>
+#include <QUrl>
 
 #include <cmath>
 
@@ -39,6 +41,22 @@ inline QJsonObject mkVerdict(const char *code, const char *severity, const QStri
     v.insert(QStringLiteral("severity"), QLatin1String(severity)); // info | warn | bad
     v.insert(QStringLiteral("text"), text);
     return v;
+}
+
+// RU-корпус бенча (kHosts в BenchRunner.cpp): при bypass_on эти хосты идут RU-direct МИМО туннеля.
+// Общая для verdicts() и censorship() — списки не должны разъезжаться.
+inline bool isRuCorpusUrl(const QString &u)
+{
+    return u.contains(QLatin1String("ya.ru")) || u.contains(QLatin1String("vk.com"))
+        || u.contains(QLatin1String("ozon.ru"));
+}
+
+// «Сайт ответил, но отказал»: у пробы-провала есть HTTP-код ⇒ DNS+TCP+TLS+HTTP прошли, маршрут ЖИВ,
+// отказал сам сайт (403 антибот Ozon, 429, гео-бан, 5xx). Это НЕ «маршрут молчит» — не считать
+// в ru-direct-down / http-failures (реальный кейс: Ozon 403 давал ложный ru-direct-down).
+inline bool isRefusedProbe(const QJsonObject &p)
+{
+    return p.value(QStringLiteral("code")).toInt() > 0;
 }
 
 // Авто-диагнозы по одному результату schema:1 (BenchRunner::assemble).
@@ -74,17 +92,19 @@ inline QJsonArray verdicts(const QJsonObject &r)
     // (HostNotFound = DNS-маска не резолвит, Timeout = прямой маршрут молчит), заграничные — как раньше.
     const bool bypassOn = r.value(QStringLiteral("extra")).toObject()
                               .value(QStringLiteral("bypass_on")).toBool();
-    auto isRuUrl = [](const QString &u) {
-        return u.contains(QLatin1String("ya.ru")) || u.contains(QLatin1String("vk.com"))
-            || u.contains(QLatin1String("ozon.ru"));
-    };
-    int ruFail = 0, ruDns = 0, ruTimeout = 0, foreignFail = 0;
+    // «Честные вердикты» (build 62): провалы с HTTP-кодом (isRefusedProbe) — отдельный счётчик,
+    // в «маршрут молчит»/«не открылась» их не считаем (Ozon 403 = антибот, а не блокировка пути).
+    int ruFail = 0, ruDns = 0, ruTimeout = 0, foreignFail = 0, refusedCnt = 0;
     const QJsonArray httpProbes = http.value(QStringLiteral("probes")).toArray();
     for (const QJsonValue &v : httpProbes) {
         const QJsonObject p = v.toObject();
         if (!p.value(QStringLiteral("error")).toBool())
             continue;
-        if (isRuUrl(p.value(QStringLiteral("url")).toString())) {
+        if (isRefusedProbe(p)) {
+            ++refusedCnt;
+            continue;
+        }
+        if (isRuCorpusUrl(p.value(QStringLiteral("url")).toString())) {
             ++ruFail;
             const QString kind = p.value(QStringLiteral("error_kind")).toString();
             if (kind.contains(QLatin1String("HostNotFound"))) ++ruDns;
@@ -111,6 +131,9 @@ inline QJsonArray verdicts(const QJsonObject &r)
     if (foreignFail > 0)
         out.append(mkVerdict("http-failures", foreignFail > 2 ? "bad" : "warn",
                              QStringLiteral("HTTP-ошибок: %1 из корпуса — часть сайтов не открылась").arg(foreignFail)));
+    if (refusedCnt > 0)
+        out.append(mkVerdict("site-refused", "info",
+                             QStringLiteral("%1 проб(ы) получили отказ самого сайта (HTTP-код: антибот/гео-бан) — маршрут жив, это не блокировка пути").arg(refusedCnt)));
 
     // ICMP: unreachable по всем целям = info (часто фильтруется). Потери = bad ТОЛЬКО при ≥2
     // потерянных пакетах: серия короткая (sent=5–10), один недошедший пакет — 10–20% «потерь»,
@@ -150,6 +173,22 @@ inline QJsonArray verdicts(const QJsonObject &r)
         out.append(mkVerdict("split-leak", "bad",
                              QStringLiteral("Split-leak: RU-чекер видит IP туннеля — рунет ушёл ЧЕРЕЗ VPN, хотя сплит включён (сев не применился/маршруты не встали)")));
 
+    // build 62: DNS-дуэль — сторож split-DNS форвардера. Стадия шла ТОЛЬКО при dns_fwd on (гейт в
+    // BenchRunner::stageDnsDuel), системный резолвер там = форвардер (100.100.100.53): провал любого
+    // плеча = DNS через форвардер мёртв и fail-open не спас → браузинг фактически сломан. Идентичность
+    // резолвера по адресам не доказать (ya.ru отовсюду RU) — прямое доказательство = счётчики Go-слоя
+    // (очередь Android-этапа форвардера).
+    const QJsonObject duel = r.value(QStringLiteral("dns_duel")).toObject();
+    if (!duel.isEmpty()) {
+        const bool ruOk = duel.value(QStringLiteral("ru_ok")).toBool();
+        const bool fOk = duel.value(QStringLiteral("foreign_ok")).toBool();
+        if (!ruOk || !fOk)
+            out.append(mkVerdict("dns-fwd-dead", "bad",
+                                 QStringLiteral("Split-DNS: резолв через форвардер не работает (RU-плечо %1, загран-плечо %2) — выключи тумблер Split-DNS в админке и повтори замер")
+                                     .arg(ruOk ? QStringLiteral("ок") : QStringLiteral("мёртво"),
+                                          fOk ? QStringLiteral("ок") : QStringLiteral("мёртво"))));
+    }
+
     // bench v5: IPv6 — резолв есть, а v6-путь мёртв (класс IPv6-дыры RU-direct). info: у многих
     // сетей v6 нет вовсе (aaaa_ok=false) — это не проблема, молчим.
     const QJsonObject v6 = r.value(QStringLiteral("ipv6")).toObject();
@@ -172,6 +211,56 @@ inline QJsonArray verdicts(const QJsonObject &r)
     // связность вовсе мертва? (все стадии пустые)
     if (dnsMs < 0 && num(http, "median_ttfb_ms") < 0 && down <= 0)
         out.append(mkVerdict("no-connectivity", "bad", QStringLiteral("Сеть не отвечает ни по одной пробе")));
+    return out;
+}
+
+// Цензура-детект (build 62, для мега-отчёта): хост «молчит» в baseline (замер БЕЗ VPN: все прогоны
+// провалились без HTTP-кода) и открывается через туннель → оператор блокирует его. Правила честности:
+//   • отказ с HTTP-кодом (isRefusedProbe) цензурой НЕ считаем — путь жив, отказал сам сайт;
+//   • flaky (в baseline есть хоть один успешный прогон) — не цензура, шум;
+//   • baseline с tunnel_state=connected — методика нарушена, молчим (дополняет baseline-suspect);
+//   • у VPN-ноги с bypass_on RU-корпус шёл МИМО туннеля — «через VPN» для него неправда, пропускаем.
+inline QJsonArray censorship(const QJsonObject &baseline, const QJsonObject &viaVpn)
+{
+    QJsonArray out;
+    if (baseline.value(QStringLiteral("extra")).toObject()
+            .value(QStringLiteral("tunnel_state")).toString() == QLatin1String("connected"))
+        return out;
+    const QJsonArray basePr = baseline.value(QStringLiteral("http")).toObject()
+                                  .value(QStringLiteral("probes")).toArray();
+    const QJsonArray vpnPr = viaVpn.value(QStringLiteral("http")).toObject()
+                                 .value(QStringLiteral("probes")).toArray();
+    if (basePr.isEmpty() || vpnPr.isEmpty())
+        return out;
+    const bool vpnBypass = viaVpn.value(QStringLiteral("extra")).toObject()
+                               .value(QStringLiteral("bypass_on")).toBool();
+    struct St { int ok = 0; int refused = 0; int silent = 0; };
+    QMap<QString, St> base; // QMap: детерминированный порядок вердиктов (стабильные отчёты/тесты)
+    for (const QJsonValue &v : basePr) {
+        const QJsonObject p = v.toObject();
+        St &s = base[p.value(QStringLiteral("url")).toString()];
+        if (!p.value(QStringLiteral("error")).toBool()) ++s.ok;
+        else if (isRefusedProbe(p)) ++s.refused;
+        else ++s.silent;
+    }
+    QMap<QString, bool> vpnOk;
+    for (const QJsonValue &v : vpnPr) {
+        const QJsonObject p = v.toObject();
+        if (!p.value(QStringLiteral("error")).toBool())
+            vpnOk.insert(p.value(QStringLiteral("url")).toString(), true);
+    }
+    for (auto it = base.constBegin(); it != base.constEnd(); ++it) {
+        const St &s = it.value();
+        if (s.ok > 0 || s.refused > 0 || s.silent == 0)
+            continue; // открывался / сам отказал / не проваливался — не цензура
+        if (!vpnOk.value(it.key()))
+            continue; // и через VPN мёртв — это не «оператор блокирует», а сайт/сеть
+        if (vpnBypass && isRuCorpusUrl(it.key()))
+            continue; // при bypass_on RU-хост шёл мимо туннеля — сравнение не про VPN
+        out.append(mkVerdict("censorship", "warn",
+                             QStringLiteral("Оператор блокирует %1 без VPN (проба молчит), через VPN открывается")
+                                 .arg(QUrl(it.key()).host())));
+    }
     return out;
 }
 

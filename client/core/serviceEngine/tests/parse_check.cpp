@@ -239,11 +239,77 @@ int main(int argc, char **argv)
                hasCode(bench::verdicts(mkMtu(true, 1380, 1420)), "mtu-mismatch")   // путь уже конфига → bad
             && !hasCode(bench::verdicts(mkMtu(true, 1420, 1376)), "mtu-mismatch")  // путь шире → ок
             && !hasCode(bench::verdicts(mkMtu(false, 0, 1420)), "mtu-mismatch");   // не мерили → молчим
+        // build 62 «честные вердикты»: провал с HTTP-кодом (403 антибот Ozon) = сайт ОТВЕТИЛ →
+        // site-refused (info), НЕ ru-direct-down/http-failures; смесь 403+timeout → оба вердикта
+        auto mkRefused = [&](bool bypassOn, bool withTimeout) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, withTimeout ? 2 : 1);
+            QJsonObject http = r.value("http").toObject();
+            QJsonArray probes{
+                QJsonObject{{"url", "https://www.google.com/"}, {"code", 200}},
+                QJsonObject{{"url", "https://www.ozon.ru/"}, {"error", true},
+                            {"error_kind", "ContentAccessDeniedError"}, {"code", 403}}};
+            if (withTimeout)
+                probes.append(QJsonObject{{"url", "https://ya.ru/"}, {"error", true},
+                                          {"error_kind", "TimeoutError"}});
+            http.insert("probes", probes);
+            r.insert("http", http);
+            r.insert("extra", QJsonObject{{"bypass_on", bypassOn}});
+            return r;
+        };
+        const QJsonArray ref403 = bench::verdicts(mkRefused(true, false));
+        const QJsonArray refMix = bench::verdicts(mkRefused(true, true));
+        const QJsonArray refOff = bench::verdicts(mkRefused(false, false));
+        const bool honestOk =
+               hasCode(ref403, "site-refused") && !hasCode(ref403, "ru-direct-down")
+            && !hasCode(ref403, "http-failures")                                     // 403 ≠ «не открылась»
+            && hasCode(refMix, "site-refused") && hasCode(refMix, "ru-direct-down")  // timeout остался честным
+            && hasCode(refOff, "site-refused") && !hasCode(refOff, "http-failures"); // bypass off: 403 тоже не «провал»
+        // build 62 DNS-дуэль: dns-fwd-dead при провале любого плеча; молчит при обоих ok
+        auto mkDuel = [&](bool ruLeg, bool fLeg) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, 0);
+            r.insert("dns_duel", QJsonObject{{"ru_ok", ruLeg}, {"foreign_ok", fLeg}});
+            return r;
+        };
+        const bool duelOk =
+               hasCode(bench::verdicts(mkDuel(false, true)), "dns-fwd-dead")
+            && hasCode(bench::verdicts(mkDuel(true, false)), "dns-fwd-dead")
+            && !hasCode(bench::verdicts(mkDuel(true, true)), "dns-fwd-dead");
+        // build 62 цензура-детект: молчит в baseline И открывается через VPN → censorship;
+        // 403/flaky/RU-хост-при-bypass-on/baseline-под-туннелем → НЕ цензура
+        auto mkRun = [&](const QJsonArray &probes, bool bypassOn, const char *tunnelState) {
+            QJsonObject r = mk(25, 250, 80, 90, 110, 0);
+            QJsonObject http = r.value("http").toObject();
+            http.insert("probes", probes);
+            r.insert("http", http);
+            QJsonObject extra{{"bypass_on", bypassOn}};
+            if (tunnelState) extra.insert("tunnel_state", tunnelState);
+            r.insert("extra", extra);
+            return r;
+        };
+        const QJsonArray deadBoth{QJsonObject{{"url", "https://www.google.com/"}, {"error", true}, {"error_kind", "TimeoutError"}},
+                                  QJsonObject{{"url", "https://ya.ru/"}, {"error", true}, {"error_kind", "TimeoutError"}}};
+        const QJsonArray okBoth{QJsonObject{{"url", "https://www.google.com/"}, {"code", 200}},
+                                QJsonObject{{"url", "https://ya.ru/"}, {"code", 200}}};
+        const QJsonObject baseDead = mkRun(deadBoth, false, nullptr);
+        const QJsonObject vpnOffRun = mkRun(okBoth, false, "connected");
+        const QJsonObject vpnOnRun = mkRun(okBoth, true, "connected");
+        const QJsonArray base403{QJsonObject{{"url", "https://www.google.com/"}, {"error", true},
+                                             {"error_kind", "ContentAccessDeniedError"}, {"code", 403}}};
+        const QJsonArray baseFlaky{QJsonObject{{"url", "https://www.google.com/"}, {"code", 200}},
+                                   QJsonObject{{"url", "https://www.google.com/"}, {"error", true}, {"error_kind", "TimeoutError"}}};
+        const QJsonArray censOff = bench::censorship(baseDead, vpnOffRun); // google+ya.ru = 2
+        const QJsonArray censOn = bench::censorship(baseDead, vpnOnRun);   // ya.ru мимо туннеля → только google
+        const bool censOk =
+               censOff.size() == 2 && hasCode(censOff, "censorship")
+            && censOn.size() == 1
+            && bench::censorship(mkRun(base403, false, nullptr), vpnOffRun).isEmpty()
+            && bench::censorship(mkRun(baseFlaky, false, nullptr), vpnOffRun).isEmpty()
+            && bench::censorship(mkRun(deadBoth, false, "connected"), vpnOffRun).isEmpty();
         const QJsonArray legacy = bench::verdicts(mk(25, 250, 80, 90, 110, 3)); // failures без probes[]
         const bool ruOk = hasCode(ruOn, "ru-direct-down") && !hasCode(ruOn, "http-failures")
                        && !hasCode(ruOff, "ru-direct-down") && hasCode(ruOff, "http-failures")
                        && hasCode(legacy, "http-failures") && !hasCode(legacy, "ru-direct-down")
-                       && splitOk && mtuOk;
+                       && splitOk && mtuOk && honestOk && duelOk && censOk;
         const bool vOk = good.isEmpty()
                       && hasCode(bloat, "bufferbloat") && !hasCode(bloat, "dns-slow")
                       && hasCode(slowDns, "dns-slow")
@@ -260,7 +326,8 @@ int main(int argc, char **argv)
                       && cmp.value("deltas").toArray().size() == 9; // 7 базовых + TCP/TLS-фазы
         printf("bench analysis: verdicts=%d compare=%d (sig=%d)\n", vOk ? 1 : 0, cOk ? 1 : 0, int(sig.size()));
         if (!vOk || !cOk) { fprintf(stderr, "FAIL: BenchAnalysis verdicts/compare\n"); return 8; }
-        printf("benchanalysis: OK (bufferbloat/dns-slow/low-goodput, loss 1/10=info 3/10=bad, A/B deltas+tls)\n");
+        printf("benchanalysis: OK (bufferbloat/dns-slow/low-goodput, loss 1/10=info 3/10=bad, "
+               "site-refused/censorship/dns-fwd-dead, A/B deltas+tls)\n");
     }
 
     // --- Enrollment: чистые builders/parsers ---

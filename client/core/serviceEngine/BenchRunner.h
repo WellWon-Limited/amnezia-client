@@ -79,6 +79,10 @@ private:
     void stageSplit();
     void splitIpv6Lookup();
     void splitIpv6Http();
+    // build 62: DNS-дуэль — сторож split-DNS форвардера (резолв по хосту с каждой стороны занавеса
+    // через системный резолвер = форвардер при dns_fwd on). Гейт: full-режим + connected + dns_fwd.
+    void stageDnsDuel();
+    void dnsDuelNext();
     // bench v5: path-MTU (DF-ping нисходящим свипом размеров; probeMtuOne). Только full-режим.
     void stageMtu();
     void mtuNext();
@@ -120,6 +124,8 @@ private:
     QString m_traceIp;        // ip= из cf-trace: ТОЛЬКО в памяти для сравнения в stageSplit; в JSON НЕ пишется
     QJsonObject m_splitCheck; // bench v5: {ru_reachable, ru_equals_tunnel_egress}
     QJsonObject m_ipv6;       // bench v5: {aaaa_ok, https_ok}
+    QJsonObject m_dnsDuel;    // build 62: {ru_ok, ru_ms, foreign_ok, foreign_ms} — адреса НЕ пишем
+    int m_duelIdx = 0;        // build 62: индекс плеча дуэли (0 = RU, 1 = загран)
     int m_mtuIdx = 0;         // bench v5: индекс текущего размера в свипе MTU
     int m_mtuAttempt = 0;     // v5.5: попытка текущего размера (2 на размер — потери гасят DF-пинг)
     QJsonObject m_mtu;        // bench v5: {path_mtu | probed:false}
