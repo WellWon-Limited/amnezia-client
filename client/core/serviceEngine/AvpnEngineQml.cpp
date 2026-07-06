@@ -2697,7 +2697,7 @@ void AvpnEngineQml::setBypassLiAutoOn(bool on)
 // (смена DNS-механики требует передёрга туннеля — reapplyBypass сам решит needsRestart).
 bool AvpnEngineQml::bypassDnsFwdOn() const
 {
-    return QSettings().value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+    return QSettings().value(QStringLiteral("AvpnBypass/dnsFwd"), true).toBool();
 }
 
 void AvpnEngineQml::setBypassDnsFwdOn(bool on)

@@ -101,7 +101,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         // AVPN split-DNS форвардер (v1 iOS, дизайн SPLIT-DNS-FORWARDER-DESIGN.md): DNS-прокси в
         // туннель-движке даёт macOS-качество (стелс И честный гео сразу) — при нём маска не нужна
         // и НЕ применяется (тумблер маскировки остаётся в UI, просто игнорируется при dnsFwd=ON).
-        const bool dnsFwdOn = s.value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+        const bool dnsFwdOn = s.value(QStringLiteral("AvpnBypass/dnsFwd"), true).toBool();
         if (!ruNode && masterOn && dnsMaskOn && !dnsFwdOn) {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
             splitDns = true; // DNS ноды (1.1.1.1) не подменяем — RU-суффиксы уйдут на Яндекс через демона
@@ -140,7 +140,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     // (там full-tunnel через РФ — резолвер и так российский).
     {
         QSettings st;
-        const bool fwd = st.value(QStringLiteral("AvpnBypass/dnsFwd"), false).toBool();
+        const bool fwd = st.value(QStringLiteral("AvpnBypass/dnsFwd"), true).toBool();
         const bool ruN = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
         if (fwd && !ruN) {
             cfg.insert(QStringLiteral("dnsFwdOn"), QStringLiteral("1"));
