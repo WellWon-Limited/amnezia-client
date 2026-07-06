@@ -555,6 +555,14 @@ PageType {
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
+                // Единственный способ самостоятельной миграции: аккаунты анонимны (без email/Telegram),
+                // без переноса восстановление доступа — только вручную через поддержку. // AVPN
+                Text {
+                    text: qsTr("Перенос — единственный способ забрать подписку с собой. Потеряете устройство без переноса — восстановление только через поддержку.")
+                    color: Theme.color.text2
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                }
                 TribeButton {
                     variant: "glass"
                     text: qsTr("Перенести подписку")
@@ -771,6 +779,19 @@ PageType {
                             }
                         }
                     }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true; height: 1; color: Theme.color.border
+                }
+
+                // Восстановление при потере устройства: identity-каналов нет (аноним),
+                // единственный путь — ручной перенос оператором по данным платежа. // AVPN
+                Text {
+                    text: qsTr("Потеряли устройство? Напишите в поддержку с нового устройства и укажите платёж — сумму, дату и способ оплаты. Мы вручную перенесём подписку.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
             }
         }

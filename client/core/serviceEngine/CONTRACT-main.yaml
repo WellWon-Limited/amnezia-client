@@ -1,7 +1,7 @@
-openapi: 3.1.0
+openapi: 3.0.3
 info:
   title: Tribe — control plane API
-  version: 0.4.1
+  version: 0.5.0
   description: >
     Client↔backend contract (source of truth for client codegen). Backend exposes the
     healthy pool + AmneziaWG params + per-target health; the CLIENT picks the server by its
@@ -33,7 +33,8 @@ info:
     0.4.0 (P-B7.5, CONTRACT-DELTA-2026-06-09): email+code login (no passwords) — POST
     /v1/auth/email/request-code (ALWAYS 200, anti-enumeration; rate-limited) and POST
     /v1/auth/email/verify (device-scoped token; migrates a trial device onto the email account;
-    409 device_limit_reached carries the device list for the kick flow); + GET /v1/devices,
+    409 device_limit_reached carries the device list for the kick flow) — REMOVED in 0.5.0;
+    + GET /v1/devices,
     DELETE /v1/devices/{id} (kick = peer removed on EVERY node + token killed),
     DELETE /v1/account (Apple 5.1.1(v): tokens + peers + PII). Push notifications remain v1.1.
     0.4.1 (P-B9 admin ops): + /admin/users (search/patch incl. traffic_reset+revoke_tokens/delete),
@@ -41,6 +42,12 @@ info:
     ORIGIN HARDENING IMPLEMENTED (Task 13): when CF_ACCESS_TEAM_DOMAIN/CF_ACCESS_ADMIN_AUD are set,
     every /admin/* request must carry a valid Cf-Access-Jwt-Assertion (JWKS-verified, aud-checked);
     the admin bearer remains the second factor. Every mutating admin action writes an audit row.
+    0.4.2 (additive): + POST /v1/bench/report — client bench-report ingest ("Отправить разработчику",
+    build >= 57). The body is stored AS-IS (opaque JSONB, <= 3 MiB, 413 above the cap); validation is
+    intentionally minimal (JSON object carrying a `schema` field); per-device rate limit ~10/hour (429).
+    Reports are diagnostic-only, retained 90 days, read server-side via psql — no read/admin API on purpose.
+    0.5.0: удалены /v1/auth/email/request-code и /v1/auth/email/verify (Tribe анонимен; вход в
+    кабинет только web-link).
 servers:
   - url: https://api.tribevpn.com
     description: production
@@ -82,6 +89,12 @@ components:
       properties:
         code: { type: string, example: unauthorized }
         message: { type: string, example: "subscription token revoked" }
+    BenchReportAccepted:
+      type: object
+      description: Receipt for a stored bench report (POST /v1/bench/report).
+      required: [id]
+      properties:
+        id: { type: string, format: uuid, example: "6f1e2d3c-4b5a-4c6d-8e9f-0a1b2c3d4e5f" }
     Health:
       type: object
       required: [status, version]
@@ -240,6 +253,43 @@ components:
         expires_at: { type: string, format: date-time, nullable: true }
         traffic_limit: { type: integer, description: bytes; 0 = unlimited }
         traffic_used: { type: integer, description: bytes }
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Server-observed last handshake of THIS device, from the nodes'
+            `awg show dump` (5.7). A liveness cross-check for the client's
+            dead-tunnel detector: tunnel up locally but a stale last_seen_at
+            ⇒ path likely dead (e.g. router roaming) → reconnect. Null until a
+            node has reported a handshake. Reconnect remains the client's job.
+        last_seen_node_id:
+          type: integer
+          nullable: true
+          description: Node id that last observed this device's handshake (null until seen).
+    ReferralOut:
+      type: object
+      required: [code, link, invited, days_earned]
+      properties:
+        code: { type: string, description: the account's peer invite code }
+        link: { type: string, description: full /r/<code> invite URL }
+        invited: { type: integer, description: accounts attributed to me via my peer code }
+        days_earned: { type: integer, description: total referral bonus-days credited to me }
+    AffiliateOut:
+      type: object
+      required:
+        [code, link, first_pct, rest_pct, referred, paid_conversions, earned_minor, paid_minor, balance_minor]
+      properties:
+        code: { type: string, description: the account's affiliate code }
+        link: { type: string, description: full /a/<code> affiliate URL }
+        first_pct: { type: integer, description: commission % on a referred account's first payment }
+        rest_pct: { type: integer, description: commission % on subsequent payments }
+        referred: { type: integer, description: accounts attributed to me }
+        paid_conversions: { type: integer, description: how many referred accounts ever paid }
+        earned_minor: { type: integer, description: total commission accrued (minor units) }
+        paid_minor: { type: integer, description: total commission marked paid (minor units) }
+        balance_minor: { type: integer, description: owed = earned - paid (minor units) }
+        currency: { type: string, nullable: true, description: ISO 4217; null until any commission accrues }
     ServerPublic:
       type: object
       required: [node_id, region, load]
@@ -247,35 +297,12 @@ components:
         node_id: { type: string }
         region: { type: string }
         load: { type: number, minimum: 0, maximum: 1 }
-    EmailRequestIn:
-      type: object
-      required: [email]
-      properties:
-        email: { type: string, format: email, maxLength: 255 }
-    EmailVerifyIn:
-      type: object
-      required: [email, code, public_key, device_id]
-      properties:
-        email: { type: string, format: email, maxLength: 255 }
-        code: { type: string, pattern: "^[0-9]{6}$" }
-        public_key: { type: string, pattern: "^[A-Za-z0-9+/]{43}=$" }
-        device_id: { type: string, minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9._-]{16,128}$" }
-        platform: { type: string, maxLength: 32 }
-    EmailVerifyOut:
-      type: object
-      required: [subscription_token, account_id, status]
-      properties:
-        subscription_token:
-          type: string
-          description: PER-DEVICE token (rotate-on-issue); client overwrites its stored token.
-        account_id: { type: string }
-        status: { type: string, enum: [trial, active, expired] }
-        expires_at: { type: string, format: date-time, nullable: true }
     DeviceInfo:
       type: object
       required: [device_id]
       properties:
-        device_id: { type: string, description: Backend device id (NOT the client install id). }
+        device_id: { type: string, deprecated: true, description: "DEPRECATED backend PK string. Migrate to device_uuid." }
+        device_uuid: { type: string, nullable: true, description: "Canonical PUBLIC device id = client install id (localDeviceId). Show THIS; use it in /v1/devices/{id} ops. See documents/IDENTITY-AND-REFERRALS.md." }
         platform: { type: string, nullable: true }
         label: { type: string, nullable: true }
         last_seen: { type: string, format: date-time, nullable: true }
@@ -304,6 +331,23 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ProbeTargetConfig" }
         subscription_refresh_interval_s: { type: integer, example: 43200 }
+        edges:
+          type: array
+          description: Prioritised API base URLs to fall back through if the primary is blocked.
+          items: { type: string }
+          example: ["https://api.tribevpn.com", "https://api2.tribevpn.com"]
+    Edges:
+      type: object
+      description: >
+        RU-edge fallback list. Try `edges` in order if the primary API base URL is unreachable;
+        cache them and re-fetch after `ttl_s`. The client must also ship a baked-in default.
+      required: [edges, ttl_s]
+      properties:
+        edges:
+          type: array
+          items: { type: string }
+          example: ["https://api.tribevpn.com", "https://api2.tribevpn.com"]
+        ttl_s: { type: integer, example: 3600 }
     ProbeTarget:
       type: string
       description: Category reachability target. Reused in Probe.target and SubscriptionNode.health keys.
@@ -387,6 +431,14 @@ components:
         platform:
           type: string
           description: Client platform (ios/android/macos/windows/linux).
+        referral_code:
+          type: string
+          nullable: true
+          maxLength: 32
+          description: >
+            Referral attribution (optional). The code from the /r/<code> (peer) or /a/<code>
+            (affiliate) deep-link this install arrived from. First-touch, stamped once on the new
+            account. See documents/IDENTITY-AND-REFERRALS.md.
     TrialOut:
       type: object
       required: [subscription_token, account_id, expires_at, traffic_limit]
@@ -424,6 +476,14 @@ components:
       required: [plan_id]
       properties:
         plan_id: { type: string, description: Identifier of the plan being purchased/extended. }
+        device_uuid:
+          type: string
+          nullable: true
+          maxLength: 128
+          description: >
+            Purchase-to-device: which device (device_uuid == install id) the purchased days land on.
+            Omitted → the calling device. The plan's days extend THAT device's expires_at directly.
+            See documents/IDENTITY-AND-REFERRALS.md.
     CheckoutOut:
       type: object
       required: [payment_id, pay_url, amount, currency, expires_at]
@@ -491,6 +551,22 @@ components:
           description: Human display name (Unicode/Cyrillic ok); becomes Node.label.
           example: "Финляндия"
         region: { type: string, pattern: "^[a-z0-9-]{1,32}$", example: eu-central }
+        country_code:
+          type: string
+          maxLength: 2
+          pattern: "^[A-Za-z]{2}$"
+          nullable: true
+          description: >
+            Operator-chosen ISO-3166 alpha-2. Authoritative when present — overrides best-effort
+            GeoIP (which mis-detects behind some DNS/anycast). Drives the client country flag.
+          example: FI
+        server_number:
+          type: integer
+          minimum: 0
+          maximum: 999999
+          nullable: true
+          description: Operator-assigned server number (stored; used in display names).
+          example: 1
         endpoint:
           type: string
           maxLength: 64
@@ -534,6 +610,22 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Config" }
+  /v1/edges:
+    get:
+      tags: [config]
+      summary: RU-edge fallback list (anti-block resilience)
+      description: >
+        No auth, cacheable. Prioritised API base URLs the client should try, in order, if the
+        primary is unreachable (РКН may block a domain/IP). The client caches these and re-fetches
+        after ttl_s; it MUST also ship a baked-in default copy, since a fully blocked primary
+        cannot be refreshed from. Every edge proxies to the same backend.
+      security: []
+      responses:
+        "200":
+          description: edge list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Edges" }
   /v1/activate:
     post:
       tags: [activation]
@@ -614,49 +706,37 @@ paths:
       responses:
         "202":
           description: accepted
-  /v1/auth/email/request-code:
+  /v1/bench/report:
     post:
-      tags: [auth]
-      summary: Send a 6-digit login code (no passwords)
+      tags: [bench]
+      summary: Ingest a client bench report ("Отправить разработчику")
       description: >
-        ALWAYS returns the same 200 body whether the account exists or not (anti-enumeration).
-        Rate-limited per email and per IP (429). Code TTL ~10 min, 5 wrong attempts kill it. (SEC)
-      security: []
+        Accepts the client's bench JSON AS-IS (opaque; the backend only lifts `type`/`label`
+        and `extra.app_ver` for querying). Minimal validation: a JSON object carrying a
+        `schema` field, body <= 3 MiB (413 above). Per-device rate limit ~10/hour (429) —
+        the button is manual, not telemetry. Reports are retained 90 days.
+      security: [{ subscriptionToken: [] }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/EmailRequestIn" }
+            schema:
+              type: object
+              description: Client bench report, stored verbatim. Must carry a `schema` field.
       responses:
-        "200":
-          description: sent (or silently ignored — existence is never revealed)
-        "429":
-          description: rate-limited
-  /v1/auth/email/verify:
-    post:
-      tags: [auth]
-      summary: Exchange a valid code for a device-scoped subscription token
-      description: >
-        Migrates an existing trial device (matched by device_id OR public_key) onto the email
-        account — peers and the stable /32 are untouched, the orphaned anonymous trial account is
-        deleted. A new device is created and provisioned fleet-wide. Each device holds its OWN
-        token. 409 device_limit_reached carries the account's devices for the kick flow.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/EmailVerifyIn" }
-      responses:
-        "200":
-          description: verified
+        "201":
+          description: report stored
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/EmailVerifyOut" }
-        "400":
-          description: invalid_code (wrong/expired code; 5 misses invalidate it)
-        "409":
-          description: "device_limit_reached: detail carries devices[] (DeviceInfo) for kick"
+              schema: { $ref: "#/components/schemas/BenchReportAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413":
+          description: Body over the 3 MiB cap.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "429":
+          description: Per-device rate limit exceeded (~10/hour).
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
   /v1/devices:
     get:
       tags: [devices]
@@ -675,7 +755,7 @@ paths:
     delete:
       tags: [devices]
       summary: Kick a device (token killed + peer removed on EVERY node)
-      description: Scoped to the caller's account; foreign/missing ids return 404 (BOLA).
+      description: "Scoped to the caller's account; foreign/missing ids return 404 (BOLA). The id accepts the canonical device_uuid (install id); the legacy backend PK string is still resolved during migration."
       security: [{ subscriptionToken: [] }]
       parameters:
         - name: id
@@ -686,47 +766,49 @@ paths:
         "204": { description: kicked }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: not found (or not yours) }
-  /v1/devices/{id}/extend:
+  # REMOVED: POST /v1/devices/{id}/extend (apply wallet days) — the day-wallet is
+  # gone. Time is added per-device via purchase (POST /v1/billing/checkout with
+  # device_uuid) or bonuses. See documents/IDENTITY-AND-REFERRALS.md.
+  /v1/devices/push-token:
     post:
       tags: [devices]
-      summary: Apply wallet days to a device (P-W2)
+      summary: Register a mobile push token for the calling device (P-W3)
       description: >
-        Spend `days` from the account's day wallet to extend this device's `expires_at`
-        (base = max(now, current expiry)). The device is put on the paid traffic allowance
-        (operator-configurable, default 100 GiB) and its usage counter resets. Account-scoped:
-        a foreign/missing id is 404; 403 when the wallet has fewer days than requested.
+        Stores the device's APNs/FCM token so the backend can deliver expiry reminders and
+        broadcasts. Idempotent — call again to refresh a rotated token. Cleared automatically
+        when the device is kicked.
       security: [{ subscriptionToken: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [days]
+              required: [token, platform]
               properties:
-                days: { type: integer, minimum: 1, maximum: 3650 }
+                token: { type: string, maxLength: 512, description: "APNs/FCM device token" }
+                platform: { type: string, enum: [ios, android] }
+                environment:
+                  type: string
+                  enum: [sandbox, production]
+                  nullable: true
+                  description: "APNs routing (ios). sandbox=TestFlight/Debug, production=App Store; null=server default."
+                app_version: { type: string, nullable: true, maxLength: 32 }
       responses:
-        "200":
-          description: extended
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [device_id, traffic_limit, traffic_used, wallet_days]
-                properties:
-                  device_id: { type: string }
-                  expires_at: { type: string, format: date-time, nullable: true }
-                  traffic_limit: { type: integer, description: "bytes; 0 = unlimited" }
-                  traffic_used: { type: integer }
-                  wallet_days: { type: integer, description: "pool balance after the apply" }
+        "204": { description: registered }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: insufficient wallet days }
-        "404": { description: not found (or not yours) }
+  /v1/notifications/read:
+    post:
+      tags: [devices]
+      summary: Reset the unread push badge to 0 (P-W3)
+      description: >
+        Server is the source of truth for the iOS app-icon badge. Call when the user opens the app /
+        reads notifications; the next push then carries the new absolute aps.badge. The client also
+        clears its local badge on open.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "204": { description: reset }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/transfer:
     post:
       tags: [transfer]
@@ -787,6 +869,29 @@ paths:
         "401": { description: invalid or expired token }
         "409": { description: device limit reached }
         "429": { description: too many attempts }
+  /v1/cabinet/web-link:
+    post:
+      tags: [cabinet]
+      summary: Mint a one-time app→cabinet web-link ("one button" seamless sign-in)
+      description: >
+        Authenticated (device JWT). Returns a cabinet URL carrying a short-lived single-use token
+        (sha256 in Redis, TTL ~90 s) as `?wl=<token>`. Opening it lets the cabinet exchange the token
+        for a browser cookie session — the device JWT never enters the browser. The consume endpoint
+        (POST /account/api/auth/web-link) is internal to the cabinet SPA.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: web-link minted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url, expires_in]
+                properties:
+                  url: { type: string, example: "https://tribevpn.com/account?wl=…" }
+                  expires_in: { type: integer, example: 90 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { description: rate limit exceeded }
   /v1/billing/webhook/{provider}:
     post:
       tags: [billing]
@@ -934,6 +1039,59 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Plan" }
+  /v1/referral:
+    get:
+      tags: [account]
+      summary: The caller's peer invite link + stats
+      description: >
+        Peer-referral dashboard for the signed-in device: the account's /r/ invite code and link
+        plus how many accounts it attributed and how many bonus days it has earned.
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: referral
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReferralOut" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/affiliate:
+    get:
+      tags: [account]
+      summary: The caller's affiliate (blogger) dashboard
+      description: >
+        Money-commission dashboard, available only to accounts flagged is_affiliate. Returns the
+        /a/ code + link, the applied commission percentages and accrued/paid/owed minor-unit totals.
+        A non-affiliate account gets 404 (the app hides the section).
+      security: [{ subscriptionToken: [] }]
+      responses:
+        "200":
+          description: affiliate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AffiliateOut" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: not an affiliate }
+  /v1/diag/crash:
+    post:
+      tags: [telemetry]
+      summary: Ingest one MetricKit crash/hang diagnostic payload (iOS)
+      description: >
+        PUBLIC + UNAUTHENTICATED on purpose — a crashed app may have no valid session. The iOS client
+        posts each MXDiagnosticPayload.JSONRepresentation here on the launch after a crash/hang. Logged
+        server-side for offline symbolication (no DB row). Protected by a hard body-size cap and a
+        coarse per-IP rate limit. See documents/CRASHLOGS.md.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: MXDiagnosticPayload.JSONRepresentation (opaque MetricKit blob)
+      responses:
+        "202": { description: accepted (logged) }
+        "413": { description: payload too large }
+        "429": { description: rate limit exceeded }
   /admin/nodes:
     post:
       tags: [admin]
