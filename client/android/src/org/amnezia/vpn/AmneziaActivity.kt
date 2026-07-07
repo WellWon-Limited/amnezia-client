@@ -282,10 +282,11 @@ class AmneziaActivity : QtActivity() {
         openFileDeliveryScheduled = false
         Log.d(TAG, "Stop Amnezia activity")
         doUnbindService()
-        mainScope.launch {
-            qtInitialized.await()
-            QtAndroidController.onServiceDisconnected()
-        }
+        // AVPN: НЕ шлём Qt фейковый onServiceDisconnected при штатном уходе в фон — туннель жив,
+        // и «забывание» состояния давало белую вспышку/перепробы при каждом возврате (выглядело как
+        // реконнект). Правда о состоянии приедет снапшотом STATUS при ре-байнде в onStart (движок
+        // сверит и адоптит только РАСХОЖДЕНИЕ). Реальные обрывы (onBindingDied/DeadObject/колбэк
+        // onServiceDisconnected) фейк по-прежнему шлют — там связь действительно потеряна.
         super.onStop()
     }
 
