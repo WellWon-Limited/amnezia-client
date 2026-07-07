@@ -22,7 +22,7 @@ PageType {
     ListModel {
         id: thread
         Component.onCompleted: {
-            append({ body: qsTr("Здравствуйте! Это поддержка Tribe VPN. Чем можем помочь?"), mine: false, t: "10:02" })
+            append({ body: qsTr("Здравствуйте! Это поддержка Tribe. Чем можем помочь?"), mine: false, t: "10:02" })
             append({ body: qsTr("Привет! Один сайт не открывается через VPN."), mine: true, t: "10:03" })
             append({ body: qsTr("Подскажите адрес сайта и ваш регион — проверим узел и маршрут."), mine: false, t: "10:03" })
         }
