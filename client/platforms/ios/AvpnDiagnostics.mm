@@ -9,7 +9,9 @@
 static NSString *const kAvpnDiagUrl = @"https://api.tribevpn.com/v1/diag/crash";
 
 // Best-effort POST одного payload'а. Тело — сырой JSON MetricKit (со стеком/сигналом/UUID/build).
-// Заголовки X-Device/X-App-Build — для атрибуции (какой тестер/сборка) без парсинга на клиенте.
+// Приватность: НЕ отправляем идентификатор устройства (IDFV) — крэш-диагностика анонимна,
+// привязки к устройству/аккаунту нет (App Privacy: Crash Data = Not Linked). Атрибуция — только
+// по версии/сборке приложения (какая сборка падает), без Apple Device-ID.
 static void avpnDiagPost(NSData *json)
 {
     if (json.length == 0)
@@ -18,8 +20,6 @@ static void avpnDiagPost(NSData *json)
     req.HTTPMethod = @"POST";
     req.timeoutInterval = 20;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    NSString *idfv = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-    if (idfv) [req setValue:idfv forHTTPHeaderField:@"X-Device"];
     NSString *build = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
     if (build) [req setValue:build forHTTPHeaderField:@"X-App-Build"];
     NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
