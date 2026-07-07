@@ -257,6 +257,17 @@ bool ServiceEngine::onTunnelConnected() // AVPN
     return false;
 }
 
+bool ServiceEngine::adoptTunnelConnected() // AVPN
+{
+    // Android-адопт (см. ServiceEngine.h): восстановление факта «туннель жив» после фейкового
+    // Disconnected. Из любой фазы, кроме уже-Connected.
+    if (m_state == EngineState::Connected)
+        return false;
+    m_state = EngineState::Connected;
+    m_health.reset();
+    return true;
+}
+
 bool ServiceEngine::onTunnelError() // AVPN
 {
     // AVPN: ошибка в фазе down() свитча (iOS иногда рапортует Error вместо чистого Disconnected при
