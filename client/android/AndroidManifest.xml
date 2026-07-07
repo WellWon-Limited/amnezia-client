@@ -41,8 +41,10 @@
         android:hasFragileUserData="false"
         tools:targetApi="s">
 
+        <!-- AVPN: screenOrientation=portrait — мобильный UI Tribe только вертикальный -->
         <activity
             android:name=".AmneziaActivity"
+            android:screenOrientation="portrait"
             android:configChanges="uiMode|screenSize|smallestScreenSize|screenLayout|orientation|density
                 |fontScale|layoutDirection|locale|keyboard|keyboardHidden|navigation|mcc|mnc"
             android:launchMode="singleInstance"
@@ -71,8 +73,10 @@
 
         </activity>
 
+        <!-- AVPN: screenOrientation=portrait — сканер QR не вращаем (как главный экран) -->
         <activity
             android:name=".CameraActivity"
+            android:screenOrientation="portrait"
             android:excludeFromRecents="true"
             android:launchMode="singleTask"
             android:taskAffinity=""
