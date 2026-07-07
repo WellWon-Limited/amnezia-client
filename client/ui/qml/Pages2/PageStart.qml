@@ -44,6 +44,16 @@ PageType {
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageConnectTribe.qml")
     }
 
+    // AVPN (Support): тап по APNs-пушу «ответ поддержки» → сразу в чат (вкладка 1).
+    Connections {
+        target: (typeof AvpnPush !== "undefined") ? AvpnPush : null
+        ignoreUnknownSignals: true
+        function onPushTapped(type) {
+            if (type === "support" && root.avpnNav && !root.onboardingActive)
+                root.goAvpnTab(1)
+        }
+    }
+
     // AVPN: Connect-экран просит переключить вкладку / открыть настройки.
     Connections {
         target: tabBarStackView ? tabBarStackView.currentItem : null

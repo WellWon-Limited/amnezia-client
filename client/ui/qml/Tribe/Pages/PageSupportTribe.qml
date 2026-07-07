@@ -1,5 +1,6 @@
 import QtQuick
-import QtQuick.Controls   // TextField (поле ввода композера)
+import QtQuick.Controls   // TextArea/ScrollView (композер)
+import QtQuick.Dialogs    // FileDialog (десктоп; iOS/Android — системные пикеры)
 import QtQuick.Layouts
 import QtQuick.Shapes
 
@@ -7,44 +8,62 @@ import ".."              // Theme
 import "../components"
 import "../../Controls2" // PageType
 
-// AVPN: Поддержка — чат с оператором. P-U: данные локальные (mock); реальный бэкенд чата —
-// задача #10 (Tribe-Backend). Дизайн строго по Theme-токенам.
+// AVPN: Поддержка — живой чат с оператором через TribeSupport (serviceEngine/TribeSupportChat:
+// поллинг /v1/support/*, оптимистичные эхо, вложения фото/видео). Дизайн строго по Theme-токенам.
 PageType {
     id: root
 
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
+    // dev-превью без движка (qml с диска) — страница живёт на пустой модели, не падает.
+    readonly property bool hasChat: typeof TribeSupport !== "undefined"
+
+    // Открытая страница → частый поллинг треда + mark-read на бэке; ушли — только счётчик.
+    Component.onCompleted: if (root.hasChat) TribeSupport.active = true
+    Component.onDestruction: if (root.hasChat) TribeSupport.active = false
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
-    // mock-тред поддержки (визуализация; бэкенд подключим позже). qsTr в ListElement не
-    // работает — заполняем модель в Component.onCompleted через append(). // AVPN (i18n)
-    ListModel {
-        id: thread
-        Component.onCompleted: {
-            append({ body: qsTr("Здравствуйте! Это поддержка Tribe VPN. Чем можем помочь?"), mine: false, t: "10:02" })
-            append({ body: qsTr("Привет! Один сайт не открывается через VPN."), mine: true, t: "10:03" })
-            append({ body: qsTr("Подскажите адрес сайта и ваш регион — проверим узел и маршрут."), mine: false, t: "10:03" })
-        }
-    }
-
     function send() {
         var txt = input.text.trim()
-        if (txt.length === 0)
+        if (txt.length === 0 || !root.hasChat)
             return
-        thread.append({ body: txt, mine: true, t: Qt.formatTime(new Date(), "HH:mm") })
+        TribeSupport.sendText(txt)
         input.clear()
+        list.stick = true
         list.positionViewAtEnd()
-        autoReply.restart()   // mock-ответ оператора
     }
 
-    Timer {
-        id: autoReply; interval: 1200
-        onTriggered: {
-            thread.append({ body: qsTr("Спасибо! Передал инженеру — ответим в течение нескольких минут."),
-                            mine: false, t: Qt.formatTime(new Date(), "HH:mm") })
-            list.positionViewAtEnd()
+    Connections {
+        target: root.hasChat ? TribeSupport : null
+        function onSendFailed(reason) { PageController.showErrorMessage(reason) }
+        function onAttachmentReady(attachmentId, kind, fileUrl) {
+            if (kind === "image")
+                lightbox.show(fileUrl)
+            else
+                Qt.openUrlExternally(fileUrl) // видео — системный плеер/просмотрщик
         }
+        function onAttachmentFailed(attachmentId) {
+            PageController.showErrorMessage(qsTr("Не удалось загрузить вложение"))
+        }
+        // Полная замена QVariantList сбрасывает позицию ListView — возвращаем:
+        // читатель у низа → прижать к концу (новое сообщение видно сразу),
+        // листает историю → вернуть сохранённый contentY (near-bottom-гард Занавеса).
+        function onMessagesChanged() {
+            Qt.callLater(function() {
+                if (list.stick)
+                    list.positionViewAtEnd()
+                else
+                    list.contentY = list.savedY
+            })
+        }
+    }
+
+    FileDialog {
+        id: mediaDialog
+        title: qsTr("Фото или видео")
+        nameFilters: [ qsTr("Фото и видео") + " (*.jpg *.jpeg *.png *.webp *.gif *.heic *.heif *.mp4 *.mov *.webm)" ]
+        onAccepted: if (root.hasChat) TribeSupport.sendAttachmentFile(selectedFile)
     }
 
     ColumnLayout {
@@ -62,21 +81,79 @@ PageType {
             Layout.topMargin: Theme.space.sm
             clip: true
             spacing: Theme.space.md
-            model: thread
+            model: root.hasChat ? TribeSupport.messages : []
             cacheBuffer: 4000
+
+            // прижатие к низу: пока пользователь не ушёл в историю — держим конец
+            property bool stick: true
+            property real savedY: 0
+            onMovementEnded: {
+                stick = atYEnd
+                savedY = contentY
+            }
+
             delegate: ChatBubble {
                 width: ListView.view ? ListView.view.width : 0
-                text: body
-                mine: model.mine
-                time: t
+                text: modelData.body
+                mine: modelData.sender === "client"
+                time: Qt.formatTime(new Date(modelData.atMs), "HH:mm")
+                operatorName: modelData.operatorName
+                isAuto: modelData.isAuto
+                pending: modelData.pending
+                failed: modelData.failed
+                attachments: modelData.attachments
+                onAttachmentClicked: function(attachmentId, kind) {
+                    if (root.hasChat) TribeSupport.openAttachment(attachmentId)
+                }
+                onRetryClicked: if (root.hasChat) TribeSupport.retryMessage(modelData.id)
+                onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(modelData.id)
             }
-            onCountChanged: positionViewAtEnd()
+            onCountChanged: if (stick) positionViewAtEnd()
             Component.onCompleted: positionViewAtEnd()
+
+            // пустой диалог — приглашение вместо тишины
+            Column {
+                visible: list.count === 0 && (!root.hasChat || !TribeSupport.loading)
+                anchors.centerIn: parent
+                spacing: Theme.space.md
+                width: parent.width * 0.8
+                Shape {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 40; height: 40
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.text3; fillColor: "transparent"; strokeWidth: 1.7
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        // Tabler message-circle в сетке 24, масштаб через Shape 40 (scale ниже)
+                        PathSvg { path: "M5 6 a13 9 0 0 1 14 0 a8 8 0 0 1 1 12 l1 4 l-4 -1 a13 9 0 0 1 -13 -1 a8 8 0 0 1 1 -14z" }
+                    }
+                    scale: 40 / 24; transformOrigin: Item.Center
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: qsTr("Напишите нам — ответим прямо здесь.\nМожно приложить фото или видео.")
+                    wrapMode: Text.Wrap
+                    color: Theme.color.text2
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyM
+                }
+            }
+
+            Text {
+                visible: root.hasChat && TribeSupport.loading && list.count === 0
+                anchors.centerIn: parent
+                text: qsTr("Загружаем диалог…")
+                color: Theme.color.text3
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.bodyM
+            }
         }
 
         // composer (редизайн 2026-06-18, Telegram-стиль): капсула с авто-растущим вверх TextArea +
-        // ОТДЕЛЬНАЯ круглая кнопка отправки СБОКУ справа (не налезает на текст). Кнопка прижата к низу
-        // строки (Layout.alignment AlignBottom) — при росте капсулы остаётся на месте. Без тёмной
+        // кнопка «+» (вложение) слева и круглая кнопка отправки справа. Кнопки прижаты к низу
+        // строки (Layout.alignment AlignBottom) — при росте капсулы остаются на месте. Без тёмной
         // подложки (цвет страницы bg800). Тёмное контекст-меню как в TribeField. // AVPN
         Rectangle {
             id: composer
@@ -102,6 +179,40 @@ PageType {
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Theme.space.md
                 spacing: Theme.space.sm
+
+                // «+» — прикрепить фото/видео (десктоп: FileDialog; iOS/Android: системный пикер)
+                Rectangle {
+                    id: attachBtn
+                    Layout.preferredWidth: 44; Layout.preferredHeight: 44
+                    Layout.alignment: Qt.AlignBottom
+                    radius: height / 2
+                    color: attachMa.pressed ? Theme.color.surface2 : Theme.color.surface1
+                    border.width: 1
+                    border.color: Theme.color.border
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                    Shape {
+                        anchors.centerIn: parent; width: 24; height: 24
+                        scale: 20 / 24; transformOrigin: Item.Center
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: Theme.color.text2
+                            fillColor: "transparent"; strokeWidth: 2
+                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                            PathSvg { path: "M12 5 L12 19 M5 12 L19 12" }
+                        }
+                    }
+                    MouseArea {
+                        id: attachMa
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        // iOS — нативный PHPicker (фотоплёнка); прочие платформы — FileDialog
+                        onClicked: {
+                            if (root.hasChat && TribeSupport.pickMediaNative())
+                                return
+                            mediaDialog.open()
+                        }
+                    }
+                }
 
                 // авто-растущая капсула с полем ввода (растёт вверх, кнопка остаётся на месте)
                 Rectangle {
@@ -188,6 +299,32 @@ PageType {
                     }
                 }
             }
+        }
+    }
+
+    // лайтбокс: фото на весь экран поверх страницы, закрытие тапом
+    Rectangle {
+        id: lightbox
+        anchors.fill: parent
+        visible: false
+        color: Qt.rgba(0, 0, 0, 0.92)
+        z: 100
+
+        function show(fileUrl) {
+            lightboxImage.source = fileUrl
+            visible = true
+        }
+
+        Image {
+            id: lightboxImage
+            anchors.fill: parent
+            anchors.margins: Theme.space.md
+            fillMode: Image.PreserveAspectFit
+            asynchronous: true
+        }
+        MouseArea {
+            anchors.fill: parent
+            onClicked: { lightbox.visible = false; lightboxImage.source = "" }
         }
     }
 }

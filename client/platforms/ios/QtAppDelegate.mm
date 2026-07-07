@@ -63,7 +63,12 @@ extern "C" void Avpn_consumeIntentFlags(void);
     NSData *json = [NSJSONSerialization dataWithJSONObject:userInfo options:0 error:nil];
     if (json) {
         NSString *str = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-        AvpnPush_onRemoteNotification(str.UTF8String);
+        // AVPN (Support): Inactive = пользователь ТАПНУЛ по уведомлению (alert-пуш без
+        // content-available будит app только тапом) → диплинк-навигация (pushTapped).
+        if (application.applicationState == UIApplicationStateInactive)
+            AvpnPush_onRemoteNotificationTapped(str.UTF8String);
+        else
+            AvpnPush_onRemoteNotification(str.UTF8String);
     }
     completionHandler(UIBackgroundFetchResultNewData);
 }

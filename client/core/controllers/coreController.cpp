@@ -15,6 +15,7 @@
     #include "amneziaApplication.h"   // amnApp->networkManager()
     #include "core/serviceEngine/AvpnEngineQml.h"
     #include "core/serviceEngine/AvpnPushBridge.h" // AVPN (Task 9): мост пушей → QML
+    #include "core/serviceEngine/TribeSupportChat.h" // AVPN (Support): чат поддержки → QML
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
     #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
 #endif
@@ -211,6 +212,14 @@ void CoreController::initControllers()
     // AVPN (Task 9): мост пуш-уведомлений (APNs/FCM) → QML. На desktop/Android без пушей это просто
     // пустой счётчик. Натив-слой (iOS QtAppDelegate.mm) дёргает singleton instance() из своего потока.
     setQmlContextProperty("AvpnPush", avpn::AvpnPushBridge::instance());
+
+    // AVPN (Support): движковая половина чата поддержки (PageSupportTribe) — поллинг
+    // /v1/support/* + отправка текста/медиа. Пуш type=support → внеочередной фетч
+    // (открыт чат → тред, закрыт → только счётчик; см. onSupportPush).
+    auto *tribeSupport = new avpn::TribeSupportChat(amnApp->networkManager(), this);
+    setQmlContextProperty("TribeSupport", tribeSupport);
+    QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::supportPushReceived,
+                     tribeSupport, &avpn::TribeSupportChat::onSupportPush);
 
     // AVPN (Task 13): мост обратного диплинка ПЕРЕНОСА (tribe://transfer / Universal Link) → QML.
     auto *avpnDeepLink = avpn::AvpnDeepLinkBridge::instance();

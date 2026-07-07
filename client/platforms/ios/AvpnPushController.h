@@ -33,6 +33,12 @@ void AvpnPush_onRegisterFailed(const char *reason);
 // сериализованный в JSON-строку (UTF-8). Разбираем aps.alert.{title,body} → мост.
 void AvpnPush_onRemoteNotification(const char *userInfoJson);
 
+// AVPN (Support): пуш доставлен ТАПОМ по уведомлению (applicationState == Inactive в
+// didReceiveRemoteNotification — alert-пуш без content-available будит app только тапом).
+// Делает то же, что onRemoteNotification, + прокидывает «тап» в мост (pushTapped) для
+// диплинк-навигации в QML (type=support → вкладка «Поддержка»).
+void AvpnPush_onRemoteNotificationTapped(const char *userInfoJson);
+
 #ifdef __cplusplus
 }
 #endif

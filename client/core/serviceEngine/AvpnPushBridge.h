@@ -62,6 +62,9 @@ public:
     void onRemoteNotification(const QString &title, const QString &body);
     void onRemoteNotification(const QString &title, const QString &body,
                               const QString &type, int days);
+    // AVPN (Support): пуш открыт ТАПОМ (натив различает по applicationState) —
+    // после обычной обработки эмитит pushTapped(type) для диплинк-навигации в QML.
+    void onPushTapped(const QString &type);
     // Регистрация запрошена из QML — натив-слой подменит это (см. setAuthorizationRequester).
     void setAuthorizationRequester(void (*fn)());
     // AVPN: сброс системного бейджа иконки — натив ставит C-функцию (iOS: setBadgeCount:0).
@@ -75,6 +78,12 @@ signals:
     void deviceTokenReady(const QString &token, const QString &platform, const QString &environment);
     // AVPN: пользователь отметил всё прочитанным → движок шлёт POST /v1/notifications/read (сброс счётчика).
     void readRequested();
+    // AVPN (Support): пришёл пуш type=support (ответ оператора чата поддержки). В колокол
+    // НЕ попадает (гейт в applyRemoteNotification) — слушает TribeSupportChat::onSupportPush.
+    void supportPushReceived();
+    // AVPN (Support): пользователь ТАПНУЛ по пушу → QML-навигация (PageStart:
+    // type=support → вкладка «Поддержка»).
+    void pushTapped(const QString &type);
 
 private:
     explicit AvpnPushBridge(QObject *parent = nullptr);
