@@ -321,6 +321,9 @@ PageType {
             anchors.margins: Theme.space.md
             fillMode: Image.PreserveAspectFit
             asynchronous: true
+            // без sourceSize 10-МБ фото декодируется в полный размер (GPU-память);
+            // 2× экрана хватает и для пинч-зума в будущем
+            sourceSize.width: root.width * 2
         }
         MouseArea {
             anchors.fill: parent

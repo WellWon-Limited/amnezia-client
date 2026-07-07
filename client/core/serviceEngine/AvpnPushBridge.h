@@ -47,6 +47,9 @@ public:
     Q_INVOKABLE void markAllRead();
     // Принудительная (пере)регистрация на пуши (например, после логина). На desktop — no-op.
     Q_INVOKABLE void requestAuthorization();
+    // AVPN (Support): забрать отложенный «тап по пушу» (cold start: сигнал pushTapped ушёл
+    // ДО создания QML — PageStart добирает его в onGoToPageHome). Возвращает type и чистит.
+    Q_INVOKABLE QString takePendingPushTap();
 
     // --- Натив-слой (iOS/Android), потокобезопасно (маршалят в Qt-поток) ---
     // Пришёл APNs/FCM device token. platform: "ios" | "android".
@@ -104,6 +107,7 @@ private:
     QString      m_platform;
     QString      m_environment;   // AVPN: "sandbox" | "production" | "" (десктоп/неизвестно)
     QString      m_authStatus = QStringLiteral("unknown");
+    QString      m_pendingTapType;   // AVPN (Support): cold-start тап до готовности QML
     QVariantList m_items;
     bool         m_loaded = false;   // AVPN: история уже подгружена из QSettings (ленивая инициализация)
     void (*m_authRequester)() = nullptr;

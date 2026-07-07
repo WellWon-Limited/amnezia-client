@@ -154,8 +154,22 @@ void AvpnPushBridge::onRemoteNotification(const QString &title, const QString &b
 void AvpnPushBridge::onPushTapped(const QString &type)
 {
     // Натив зовёт с main queue iOS — эмитим сигнал из Qt-потока (как остальные мосты).
+    // Тип дополнительно запоминаем: на cold start сигнал уходит ДО создания QML —
+    // PageStart доберёт его через takePendingPushTap() в onGoToPageHome.
     QMetaObject::invokeMethod(
-        this, [this, type]() { emit pushTapped(type); }, Qt::QueuedConnection);
+        this,
+        [this, type]() {
+            m_pendingTapType = type;
+            emit pushTapped(type);
+        },
+        Qt::QueuedConnection);
+}
+
+QString AvpnPushBridge::takePendingPushTap()
+{
+    const QString t = m_pendingTapType;
+    m_pendingTapType.clear();
+    return t;
 }
 
 // --- apply* — выполняются уже в Qt-потоке ---
