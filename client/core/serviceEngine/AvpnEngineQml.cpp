@@ -1,5 +1,9 @@
 #include "AvpnEngineQml.h"
 
+#ifdef Q_OS_ANDROID
+#include "platforms/android/android_controller.h" // AVPN: адопт initConnectionState (рассинхрон после фона)
+#endif
+
 #include "core/repositories/secureAppSettingsRepository.h"
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
@@ -375,6 +379,24 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         connect(m_conn, &VpnConnection::vpnProtocolError,
                 this, &AvpnEngineQml::onVpnProtocolError, Qt::QueuedConnection);
     }
+
+#ifdef Q_OS_ANDROID
+    // AVPN (рассинхрон после фона, 2026-07-07): у апстрима обрыв байндинга мессенджера (уход в фон/
+    // Chrome, binder-хиккап) шлёт ФЕЙКОВЫЙ connectionStateChanged(Disconnected) — движок честно гасит
+    // фазу и намерение (анти-авто-коннект). А ВОССТАНОВЛЕНИЕ после ре-байнда/холодного старта апстрим
+    // ведёт ДРУГИМ сигналом — AndroidController::initConnectionState — который идёт в ванильный
+    // connectionUiController МИМО VpnConnection. Итог был: орб «выключен», туннель жив, stop = ноль-оп
+    // (юзер не мог погасить VPN). Адоптим реальность: Connected → вернуть намерение и фазу.
+    connect(AndroidController::instance(), &AndroidController::initConnectionState, this,
+            [this](Vpn::ConnectionState s) {
+                if (s == Vpn::Connected) {
+                    m_wantConnected = true; // фейковый Disconnected успел снять намерение — восстанавливаем
+                    m_engine.adoptTunnelConnected(); // onTunnelConnected терминалы не воскрешает — адопт явно
+                }
+                onConnectionStateChanged(s);
+            },
+            Qt::QueuedConnection);
+#endif
 
     // AVPN (Task 11): тихий bootstrap при создании движка — наполнить подписку ДО первого Connect,
     // чтобы бейдж ГБ/дней/subActive был живой сразу. Дефер через singleShot(0): bootstrap() делает
@@ -2925,6 +2947,9 @@ void AvpnEngineQml::refreshAccount()
                               static_cast<qlonglong>(o.value(QStringLiteral("traffic_limit")).toDouble()));
                 result.insert(QStringLiteral("traffic_used"),
                               static_cast<qlonglong>(o.value(QStringLiteral("traffic_used")).toDouble()));
+                // AVPN (admin-гейт): devices.is_admin с бэка. Отсутствие ключа/оффлайн/401 →
+                // пустая мапа → isAdminDevice()==false — панель администратора скрыта.
+                result.insert(QStringLiteral("is_admin"), o.value(QStringLiteral("is_admin")).toBool());
             }
         }
         m_account = result;
@@ -2936,6 +2961,23 @@ void AvpnEngineQml::refreshAccount()
         // теперь кормит refreshSubscription() (device-часы); сюда merge НЕ возвращать.
         // property account (account_id для саппорта, списки в Настройках) остаётся как есть.
     });
+}
+
+// AVPN (i18n): язык приложения для переключателя в Tribe-настройках. Свои enum/модели не заводим —
+// пишем локаль напрямую в SecureAppSettingsRepository (тот же инстанс, что у coreController);
+// его сигнал appLanguageChanged запускает штатную цепочку ретрансляции апстрима.
+QString AvpnEngineQml::appLang() const
+{
+    return m_store ? m_store->getAppLanguage().name().split(QLatin1Char('_')).first()
+                   : QStringLiteral("ru");
+}
+
+void AvpnEngineQml::setAppLang(const QString &lang)
+{
+    if (!m_store || appLang() == lang)
+        return;
+    m_store->setAppLanguage(QLocale(lang));
+    emit appLangChanged();
 }
 
 // AVPN (оплата, ДВОЕ ЧАСОВ): лёгкий рефетч GET /v1/subscription — ЧАСЫ УСТРОЙСТВА (их продлевает

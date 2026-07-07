@@ -105,6 +105,12 @@ public:
     bool onTunnelError();
     bool onTunnelDisconnected();
 
+    // AVPN (Android-адопт): туннель ФАКТИЧЕСКИ жив (AndroidController::initConnectionState после
+    // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected
+    // (обрыв байндинга при уходе в фон). Единственный легальный «воскреситель» Connected извне фаз
+    // подъёма; обычный onTunnelConnected терминалы намеренно НЕ воскрешает.
+    bool adoptTunnelConnected();
+
     // AVPN: пользователь нажал «стоп». Помечаем НАМЕРЕННОЕ отключение (state→Disconnected,
     // сбрасываем текущую ноду) ДО m_tunnel.down(), иначе прилетевший Disconnected уйдёт в
     // notifyConnectionLost()→onDead()→switchTo() и туннель переподнимется сразу после стопа.
