@@ -59,6 +59,8 @@ PageType {
         function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
+        // AVPN in-app Legal: Privacy/Terms внутри приложения (кэш+fallback, без выброса в браузер)
+        function onRequestLegalDoc(doc) { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLegalTribe.qml", { docKey: doc }) }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
         function onRequestStart() {
             avpnOnboard.done = true
@@ -358,10 +360,14 @@ PageType {
         }
 
         // AVPN: загрузка нашей страницы по относительному URL (резолвится и в qrc, и с диска).
-        function goToTabBarPageUrl(relUrl) {
+        // extraProps (опционально) — начальные свойства страницы (напр. docKey у PageLegalTribe).
+        function goToTabBarPageUrl(relUrl, extraProps) {
             var pagePath = Qt.resolvedUrl(relUrl)
+            var props = { "objectName": pagePath }
+            for (var k in (extraProps || {}))
+                props[k] = extraProps[k]
             tabBarStackView.clear(StackView.Immediate)
-            tabBarStackView.replace(pagePath, { "objectName" : pagePath }, StackView.Immediate)
+            tabBarStackView.replace(pagePath, props, StackView.Immediate)
         }
 
         Component.onCompleted: {
@@ -574,6 +580,8 @@ PageType {
         // уходит под home-индикатор до самого низа (implicitHeight = 72 + inset)
         bottomInset: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)
         enabled: !root.isControlsDisabled && !root.isTabBarDisabled
+        // AVPN (Support): бейдж непрочитанных ответов оператора на вкладке «Поддержка».
+        supportBadge: (typeof TribeSupport !== "undefined") ? TribeSupport.unread : 0
 
         onActivated: function(index) { root.goAvpnTab(index) }
     }

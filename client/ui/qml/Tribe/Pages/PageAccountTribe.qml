@@ -19,6 +19,8 @@ PageType {
     signal requestAmnezia()
     // AVPN: «Панель администратора» (низ настроек) → PageAdminTribe (бенч соединения, тесты)
     signal requestAdminPanel()
+    // AVPN in-app Legal: Privacy/Terms открываются внутри приложения (PageLegalTribe), не в браузере
+    signal requestLegalDoc(string doc)
 
     // AVPN: модель — анонимный триал-по-device (кодов на бэке пока нет). Реальные данные из движка.
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
@@ -841,9 +843,10 @@ PageType {
             Layout.topMargin: Theme.space.sm
         }
         Repeater {
+            // AVPN in-app Legal: внутренняя страница (кэш+fallback, не зависит от доступности сайта)
             model: [
-                { label: qsTr("Политика конфиденциальности"), url: "https://tribevpn.com/legal/privacy" },
-                { label: qsTr("Условия использования"),       url: "https://tribevpn.com/legal/terms" }
+                { label: qsTr("Политика конфиденциальности"), doc: "privacy" },
+                { label: qsTr("Условия использования"),       doc: "terms" }
             ]
             delegate: TribeListRow {
                 required property var modelData
@@ -859,7 +862,7 @@ PageType {
                         PathSvg { path: "M6 3 l6 5 -6 5" }
                     }
                 }
-                onClicked: Qt.openUrlExternally(modelData.url)
+                onClicked: root.requestLegalDoc(modelData.doc)
             }
         }
 
