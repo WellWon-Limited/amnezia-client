@@ -595,4 +595,21 @@ PageType {
 
         onActivated: function(index) { root.goAvpnTab(index) }
     }
+
+    // AVPN (перенос «как SIM», приёмник): полноэкранный успех «Подписка перенесена на это
+    // устройство». Живёт ЗДЕСЬ (хост всегда жив), а не в PageAccountTribe: диплинк с системной
+    // камеры может прилететь на ЛЮБОЙ вкладке — тост легко пропустить, полноэкранный экран нет.
+    TribeResultSheet {
+        id: transferInResult
+        anchors.fill: parent
+        z: 200
+    }
+    Connections {
+        target: (typeof TribeEngine !== "undefined") ? TribeEngine : null
+        ignoreUnknownSignals: true
+        function onTransferRedeemed() {
+            transferInResult.show(qsTr("Подписка перенесена на это устройство"),
+                                  qsTr("Дни и трафик уже здесь. Прежнее устройство отключено — можно подключаться."))
+        }
+    }
 }

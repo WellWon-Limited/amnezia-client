@@ -30,6 +30,7 @@
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
 #include <QDir>                   // AVPN in-app Legal: каталог кэша
+#include <QImage>                 // AVPN: QR → PNG для share-листа переноса (shareTextWithQr)
 #include <QFile>                  // AVPN in-app Legal: чтение кэша
 #include <QSaveFile>              // AVPN in-app Legal: атомарная запись кэша
 #include <QStandardPaths>         // AVPN in-app Legal: AppDataLocation
@@ -2112,23 +2113,132 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
 // (BootstrapRetry.h), тихо (без error()). Раньше после 5 попыток сдавались навсегда — на сотовой с
 // холодным радио первое 60с-окно проваливалось целиком и «∞»/пустой пул жили до перезапуска приложения.
 // Ускорение извне — kickBootstrap() (появление сети/foreground) поджимает m_bootstrapRetryTimer.
+// АСИНХРОННО (2026-07-07): раньше здесь был m_engine.bootstrap → awaitReply (вложенный QEventLoop,
+// до 4с блокировки главного потока НА КАЖДУЮ попытку). С вечным ретраем это недопустимо — перешли
+// на armTimeout-цепочку (kNetTimeoutMs 15с: не блокирует UI, и сотовой с холодным радио хватает).
 // Успех → m_bootstrapped=true (дедуп), пул наполнен, RTT-проба.
 void AvpnEngineQml::tryBootstrapSubscription()
 {
-    QString err;
-    if (m_engine.bootstrap(m_nam, m_baseUrl, m_store, err)) {
-        m_bootstrapped = true;
-        m_bootstrapInFlight = false;
-        m_bootstrapRetries = 0;
-        m_bootstrapRetryTimer.stop();
-        emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
-        probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
-                        // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
+    if (m_bootstrapped)
+        return;
+    const QString token = Enrollment::loadToken();
+    if (token.isEmpty()) {
+        bootstrapEnrollAsync(/*reEnrolled=*/false); // первый вход: POST /v1/trial → GET /v1/subscription
         return;
     }
-    // Провал — тихо. Переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
+    bootstrapFetchAsync(token, /*tokenFromStore=*/true, /*reEnrolled=*/false);
+}
+
+// AVPN: async-энролл для bootstrap-цепочки. Повторяет side-эффекты Enrollment::enroll (saveToken,
+// clearPendingReferral, Keychain-якорь через saveToken) через те же чистые хелперы, но БЕЗ awaitReply.
+void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
+{
+    if (!m_nam) { onBootstrapAttemptFailed(); return; }
+    QString err;
+    if (!m_engine.identityEnsureKeys(m_store, err)) { onBootstrapAttemptFailed(); return; }
+    m_tunnel.setClientKeys(m_engine.clientKeys());
+
+    const QByteArray body = Enrollment::buildTrialBody(
+        m_engine.identity().publicKey(), Identity::deviceId(m_store), Enrollment::detectPlatform(),
+        deviceMarketingName(), Enrollment::loadPendingReferral());
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/trial"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+
+    QNetworkReply *reply = m_nam->post(req, body);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reEnrolled]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool netErr = (reply->error() != QNetworkReply::NoError);
+        const auto outcome = Enrollment::classifyFetch(code, netErr);
+        if (outcome == FetchOutcome::Transferred) { stopBootstrapTerminal(); return; } // 410: триал не выдаётся
+        if (outcome != FetchOutcome::Ok) { onBootstrapAttemptFailed(); return; }
+        TrialResponse tr;
+        QString perr;
+        if (!Enrollment::parseTrialResponse(reply->readAll(), tr, perr)) { onBootstrapAttemptFailed(); return; }
+        Enrollment::saveToken(tr.subscriptionToken);
+        Enrollment::clearPendingReferral(); // реферал атрибутирован на бэке (first-touch)
+        emit changed();                     // authToken появился → зависимые биндинги оживут
+        // AVPN (Task 9): device token из APNs мог прийти ДО enroll — теперь authToken есть, флашим.
+        flushPendingPushToken();
+        bootstrapFetchAsync(tr.subscriptionToken, /*tokenFromStore=*/false, reEnrolled);
+    });
+}
+
+// AVPN: async GET /v1/subscription для bootstrap-цепочки. Исходы — через те же чистые решатели
+// (classifyFetch/decideAuthRecovery, покрыты auth_heal_check), что и синхронный ensureSubscription.
+void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStore, bool reEnrolled)
+{
+    if (!m_nam) { onBootstrapAttemptFailed(); return; }
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, tokenFromStore, reEnrolled]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool netErr = (reply->error() != QNetworkReply::NoError);
+        const auto outcome = Enrollment::classifyFetch(code, netErr);
+        if (outcome == FetchOutcome::Ok) {
+            finishBootstrapSuccess(reply->readAll());
+            return;
+        }
+        if (outcome == FetchOutcome::Transferred) { // 410: подписка уехала — терминально, НЕ ре-энроллим
+            if (!m_transferredAway) { m_transferredAway = true; emit changed(); }
+            stopBootstrapTerminal();
+            return;
+        }
+        if (Enrollment::decideAuthRecovery(outcome, tokenFromStore, reEnrolled)
+            == AuthRecoveryAction::ReEnrollThenRetry) {
+            Enrollment::clearToken();               // стейл-токен (ротация secret на бэке) — выкинуть
+            bootstrapEnrollAsync(/*reEnrolled=*/true); // один ре-энролл + повторный fetch, без петли
+            return;
+        }
+        if (outcome == FetchOutcome::Unauthorized) { // свежий токен 401 / уже лечили — ретрай не поможет
+            stopBootstrapTerminal();
+            return;
+        }
+        onBootstrapAttemptFailed(); // сеть/5xx/429 — транзиентно, вечный ретрай добьёт
+    });
+}
+
+// AVPN: успех bootstrap-цепочки — единая точка (парс + LKG-персист + пробы + оживление UI).
+void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
+{
+    QString err;
+    if (!m_engine.loadSubscription(body, err)) {
+        onBootstrapAttemptFailed(); // битое тело не затирает LKG-пул и не останавливает ретрай
+        return;
+    }
+    Enrollment::saveLkgSubscription(body); // AVPN (LKG): персистим ТОЛЬКО валидное тело
+    if (m_transferredAway) { m_transferredAway = false; } // подписка снова валидна (новый ключ/энролл)
+    m_bootstrapped = true;
+    m_bootstrapInFlight = false;
+    m_bootstrapRetries = 0;
+    m_bootstrapRetryTimer.stop();
+    emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
+    probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
+                    // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
+    flushPendingPushToken(); // токен точно есть — дедуп внутри защитит от повтора
+}
+
+// AVPN: провал попытки — тихо переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
+void AvpnEngineQml::onBootstrapAttemptFailed()
+{
     m_bootstrapRetryTimer.start(nextBootstrapDelayMs(m_bootstrapRetries));
     ++m_bootstrapRetries;
+}
+
+// AVPN: терминальный исход (410 transferred / невосстановимый 401) — вечный ретрай тут ВРЕДЕН
+// (долбил бы бэк каждые 60с заведомо мёртвым запросом). Отпускаем цепочку: следующий заход
+// (навигация/kick/Connect/redeem нового ключа) сможет попробовать заново с чистого листа.
+void AvpnEngineQml::stopBootstrapTerminal()
+{
+    m_bootstrapInFlight = false;
+    m_bootstrapRetries = 0;
+    m_bootstrapRetryTimer.stop();
 }
 
 // AVPN (фикс «на сотовой ∞ навсегда»): поджать ретрай bootstrap — сеть появилась/сменилась или
@@ -2518,13 +2628,24 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
 // (AvpnDeepLinkBridge) по tribe://transfer?t=… . Синхронно (как redeemCode).
 void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 {
-    if (m_busy)
-        return;
     const QString trimmed = transferToken.trimmed();
     if (trimmed.isEmpty()) {
         emit error(QStringLiteral("Пустая ссылка переноса"));
         return;
     }
+    if (m_busy) {
+        // Холодный старт по диплинку: движок ещё занят bootstrap'ом. Раньше токен МОЛЧА терялся
+        // («приложение открылось, а подписка не поменялась») — откладываем и ретраим до ~15 с.
+        if (m_pendingRedeemAttempts < 20) {
+            ++m_pendingRedeemAttempts;
+            QTimer::singleShot(750, this, [this, trimmed]() { redeemTransfer(trimmed); });
+        } else {
+            m_pendingRedeemAttempts = 0;
+            emit error(QStringLiteral("Не удалось принять перенос — откройте ссылку ещё раз"));
+        }
+        return;
+    }
+    m_pendingRedeemAttempts = 0;
 
     m_busy = true;
     emit changed();
@@ -2565,6 +2686,9 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 }
 
 // AVPN (Task 13): выпустить перенос с ЭТОГО устройства (POST /v1/transfer, Bearer authToken).
+// 401 лечим как fetchSubscription (decideAuthRecovery): clearToken + один ре-энролл + ретрай —
+// раньше стейл-JWT давал сырую ошибку «transfer unauthorized (token)» до перезапуска приложения.
+// 410 (после переноса) — законное терминальное состояние: взводим transferredAway, не ошибку.
 QVariantMap AvpnEngineQml::createTransfer()
 {
     QVariantMap result;
@@ -2576,9 +2700,32 @@ QVariantMap AvpnEngineQml::createTransfer()
 
     avpn::TransferMintResponse resp;
     QString err;
-    const bool ok = Enrollment::createTransfer(m_nam, m_baseUrl, authToken(), resp, err);
+    avpn::FetchOutcome outcome = avpn::FetchOutcome::NetworkError;
+    bool ok = Enrollment::createTransfer(m_nam, m_baseUrl, authToken(), resp, err, &outcome);
+
+    if (!ok
+        && Enrollment::decideAuthRecovery(outcome, /*tokenFromStore*/ true, /*alreadyReEnrolled*/ false)
+                   == avpn::AuthRecoveryAction::ReEnrollThenRetry) {
+        Enrollment::clearToken();
+        avpn::TrialResponse trial;
+        QString enrollErr;
+        avpn::FetchOutcome enrollOutcome = avpn::FetchOutcome::NetworkError;
+        if (Enrollment::enroll(m_nam, m_baseUrl, m_engine.identity(), m_store, trial, enrollErr,
+                               &enrollOutcome)) {
+            // device_id идемпотентен на бэке: ре-энролл вернул токен ТОГО ЖЕ аккаунта — ретраим минт.
+            ok = Enrollment::createTransfer(m_nam, m_baseUrl, authToken(), resp, err, &outcome);
+        } else if (enrollOutcome == avpn::FetchOutcome::Transferred) {
+            outcome = avpn::FetchOutcome::Transferred; // перенесённому устройству триал не положен
+        }
+    }
 
     m_busy = false;
+
+    if (!ok && outcome == avpn::FetchOutcome::Transferred) {
+        if (!m_transferredAway) m_transferredAway = true;
+        emit changed(); // UI покажет состояние «Подписка перенесена» вместо тоста ошибки
+        return result;
+    }
     emit changed();
 
     if (!ok) {
@@ -2637,6 +2784,40 @@ bool AvpnEngineQml::shareText(const QString &text) const
     return AvpnShare::shareText(text);
 }
 
+// AVPN: share ссылки ВМЕСТЕ с QR-картинкой (перенос подписки: получатель может тапнуть ссылку
+// ИЛИ отсканировать картинку с другого экрана). Рендерим qrcodegen-матрицу в PNG (12 px/модуль,
+// quiet zone 4 модуля — читается камерой с запасом) в files-dir — на Android его покрывает
+// FileProvider qtprovider (см. AvpnShareBridge). false → QML-fallback (shareText → копирование).
+bool AvpnEngineQml::shareTextWithQr(const QString &text, const QString &qrPayload) const
+{
+    if (qrPayload.isEmpty())
+        return AvpnShare::shareText(text);
+    try {
+        const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(qrPayload.toUtf8().constData(),
+                                                                   qrcodegen::QrCode::Ecc::MEDIUM);
+        constexpr int kScale = 12, kBorder = 4;
+        const int size = (qr.getSize() + 2 * kBorder) * kScale;
+        QImage img(size, size, QImage::Format_RGB32);
+        img.fill(Qt::white);
+        for (int y = 0; y < qr.getSize(); ++y)
+            for (int x = 0; x < qr.getSize(); ++x)
+                if (qr.getModule(x, y))
+                    for (int dy = 0; dy < kScale; ++dy)
+                        for (int dx = 0; dx < kScale; ++dx)
+                            img.setPixel((x + kBorder) * kScale + dx, (y + kBorder) * kScale + dy,
+                                         qRgb(0, 0, 0));
+
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDir().mkpath(dir);
+        const QString path = dir + QStringLiteral("/tribe-transfer-qr.png");
+        if (!img.save(path, "PNG"))
+            return AvpnShare::shareText(text);
+        return AvpnShare::shareTextWithImage(text, path);
+    } catch (...) {
+        return AvpnShare::shareText(text); // payload не влез в QR — хотя бы ссылка
+    }
+}
+
 // AVPN: QR для ссылки переноса — СЫРАЯ строка в QR (НЕ generateQrCodeImageSeries: тот заворачивает
 // в амнезиевский чанк-конверт magic+base64 для импорта конфигов — системная камера его не поймёт).
 // border=2 модуля — quiet zone для считывания. Data-URI SVG (чёрный на белом) для Image.source.
@@ -2678,6 +2859,9 @@ void AvpnEngineQml::applyRuBypassSplit()
 {
     if (!m_store)
         return;
+    // AVPN win-note (2026-07-07): Windows-путь сева (router_win.cpp routeAddList) доведён до
+    // инварианта «apply = реконсиляция»: идемпотентный посев + persist на диск + уборка сирот на
+    // старте сервиса + дебаунс RouteMonitor (инцидент: 8646 маршрутов-сирот после краша сервиса).
     using amnezia::RouteMode;
     QSettings s;
     const bool masterOn = s.value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
@@ -3341,11 +3525,20 @@ QString AvpnEngineQml::legalDocCached(const QString &doc, const QString &lang) c
 {
     if (!LegalDocs::isValidDoc(doc) || !LegalDocs::isValidLang(lang))
         return {};
-    QFile f(legalCacheDir() + QLatin1Char('/') + LegalDocs::cacheFileName(doc, lang));
-    if (!f.open(QIODevice::ReadOnly))
-        return {};
-    const QByteArray body = f.readAll();
-    return LegalDocs::looksLikeMarkdown(body) ? QString::fromUtf8(body) : QString();
+    // 1) дисковый кэш прошлого fetch; 2) qrc-снапшот из сборки. Читаем здесь, а не XHR
+    // из QML: XMLHttpRequest к file:/qrc: по умолчанию ЗАПРЕЩЁН (QML_XHR_ALLOW_FILE_READ),
+    // в проде qrc-фоллбек обязан работать без env-хаков.
+    const QString name = LegalDocs::cacheFileName(doc, lang);
+    for (const QString &path : { legalCacheDir() + QLatin1Char('/') + name,
+                                 QStringLiteral(":/ui/qml/Tribe/legal/") + name }) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            continue;
+        const QByteArray body = f.readAll();
+        if (LegalDocs::looksLikeMarkdown(body))
+            return QString::fromUtf8(body);
+    }
+    return {};
 }
 
 void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)

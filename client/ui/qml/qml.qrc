@@ -87,6 +87,7 @@
         <file>Tribe/components/TribePill.qml</file>
         <file>Tribe/components/TribeListRow.qml</file>
         <file>Tribe/components/TribeHeader.qml</file>
+        <file>Tribe/components/TribeResultSheet.qml</file>
         <file>Tribe/components/TribeBottomNav.qml</file>
         <file>Tribe/components/SignalRing.qml</file>
         <file>Tribe/components/LoadBars.qml</file>

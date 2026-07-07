@@ -28,6 +28,19 @@ public:
 
     QString pendingTransferToken() const { return m_transferToken; }
 
+    // AVPN: забрать-и-очистить отложенный токен (холодный старт: applyUrl мог отработать ДО того,
+    // как coreController связал transferRequested с движком — сигнал ушёл в пустоту, токен остался
+    // здесь). coreController зовёт это ОДИН раз сразу после connect и сам запускает redeem.
+    Q_INVOKABLE QString takePendingTransferToken()
+    {
+        const QString t = m_transferToken;
+        if (!t.isEmpty()) {
+            m_transferToken.clear();
+            emit changed();
+        }
+        return t;
+    }
+
     // Натив-слой (iOS/Android), потокобезопасно (маршалит в Qt-поток). Q_INVOKABLE — тот же вход
     // используют QML-сканеры QR (PageAccountTribe): отсканированная строка = тот же URL переноса.
     Q_INVOKABLE void handleUrl(const QString &url);

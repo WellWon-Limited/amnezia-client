@@ -228,6 +228,14 @@ void CoreController::initControllers()
     // У моста нет base URL / Identity / NAM, поэтому redeem делает движок.
     QObject::connect(avpnDeepLink, &avpn::AvpnDeepLinkBridge::transferRequested,
                      avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
+    // AVPN: холодный старт по диплинку — ссылка могла прийти ДО этого connect (натив-слой iOS/
+    // Android дёргает мост в своём темпе): сигнал ушёл в пустоту, токен остался в мосте. Забираем
+    // его один раз и редимим сами (при busy движок сам отложит-ретраит — см. redeemTransfer).
+    {
+        const QString pendingTransfer = avpnDeepLink->takePendingTransferToken();
+        if (!pendingTransfer.isEmpty())
+            avpnEngine->redeemTransfer(pendingTransfer);
+    }
 
     // AVPN (Task E): мост-консьюмер «намерений» фонового App Intent авто-паузы (Task 8). Сам движок
     // (AvpnEngineQml) уже connect-ится к pauseRequested/resumeRequested в конструкторе. Здесь лишь

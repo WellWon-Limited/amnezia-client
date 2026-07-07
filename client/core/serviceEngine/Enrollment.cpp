@@ -70,8 +70,10 @@ void Enrollment::clearPendingReferral()
 }
 
 bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Identity &identity,
-                        SecureAppSettingsRepository *store, TrialResponse &out, QString &error)
+                        SecureAppSettingsRepository *store, TrialResponse &out, QString &error,
+                        FetchOutcome *outcome)
 {
+    if (outcome) *outcome = FetchOutcome::NetworkError;
     if (!nam) {
         error = QStringLiteral("no network manager");
         return false;
@@ -97,8 +99,14 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
     const QString netErrStr = reply->errorString();
     reply->deleteLater();
 
+    if (outcome) *outcome = classifyFetch(code, netErr != QNetworkReply::NoError);
     if (netErr != QNetworkReply::NoError && code == 0) {
         error = QStringLiteral("network error: %1").arg(netErrStr);
+        return false;
+    }
+    if (code == 410) {
+        // Перенос «как SIM»: бэк (handoff §7) не выдаёт новый триал перенёсшему устройству.
+        error = QStringLiteral("Подписка перенесена на другое устройство");
         return false;
     }
     if (code == 429) {
@@ -286,8 +294,10 @@ TransferRedeemResult Enrollment::redeemTransfer(QNetworkAccessManager *nam, cons
 
 // AVPN (Task 13): выпустить одноразовый токен переноса (+ deep_link) для QR/копирования. Bearer.
 bool Enrollment::createTransfer(QNetworkAccessManager *nam, const QString &baseUrl,
-                                const QString &authToken, TransferMintResponse &out, QString &error)
+                                const QString &authToken, TransferMintResponse &out, QString &error,
+                                FetchOutcome *outcome)
 {
+    if (outcome) *outcome = FetchOutcome::NetworkError;
     if (!nam) { error = QStringLiteral("no network manager"); return false; }
     if (authToken.isEmpty()) { error = QStringLiteral("not authorized (no token)"); return false; }
 
@@ -305,11 +315,13 @@ bool Enrollment::createTransfer(QNetworkAccessManager *nam, const QString &baseU
     const QString netErrStr = reply->errorString();
     reply->deleteLater();
 
+    if (outcome) *outcome = classifyFetch(code, netErr != QNetworkReply::NoError);
     if (netErr != QNetworkReply::NoError && code == 0) {
         error = QStringLiteral("network error: %1").arg(netErrStr);
         return false;
     }
     if (code == 401) { error = QStringLiteral("transfer unauthorized (token)"); return false; }
+    if (code == 410) { error = QStringLiteral("Подписка перенесена на другое устройство"); return false; }
     if (code < 200 || code >= 300) { error = QStringLiteral("transfer HTTP %1").arg(code); return false; }
     return parseTransferMintResponse(respBody, out, error);
 }

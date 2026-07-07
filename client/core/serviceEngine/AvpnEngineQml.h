@@ -280,6 +280,9 @@ public:
     // AVPN: системный share sheet для текста/ссылки (рефералка, перенос). iOS = UIActivityViewController
     // (non-blocking), Android = ACTION_SEND chooser, desktop = false → QML-fallback (copy + тост).
     Q_INVOKABLE bool shareText(const QString &text) const;
+    // AVPN: share ссылки + QR-картинки одним шитом (перенос). qrPayload = та же ссылка в QR (PNG).
+    // false → у платформы нет натив-шита / рендер не удался → QML-fallback (копирование + тост).
+    Q_INVOKABLE bool shareTextWithQr(const QString &text, const QString &qrPayload) const;
 
     // AVPN: QR-картинка для СЫРОЙ строки (ссылка переноса) — data:image/svg;base64,… для Image.source.
     // Кодирует текст как есть (qrcodegen), БЕЗ амнезиевского чанк-конверта — читается системной камерой.
@@ -491,11 +494,20 @@ private:
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
 
-    // AVPN: холодный bootstrap подписки С РЕТРАЕМ. На транзиентном сетевом сбое (первый запуск после
-    // обновления: сеть/DNS/TLS/NE ещё не прогреты) одиночный фетч пуст → пул нод пустой до ручного
-    // перезапуска. Здесь переармируем фетч с бэкоффом (тихо, без error()). 401-самохил — в
-    // ServiceEngine::ensureSubscription; этот хелпер добивает именно сетевые сбои.
+    // AVPN: холодный bootstrap подписки С РЕТРАЕМ, полностью АСИНХРОННЫЙ (armTimeout, БЕЗ вложенного
+    // QEventLoop на GUI-потоке — тот же паттерн, что refreshDevices/refreshAccount). Цепочка:
+    // tryBootstrapSubscription → (нет токена? bootstrapEnrollAsync) → bootstrapFetchAsync →
+    // finishBootstrapSuccess | onBootstrapAttemptFailed (переарм m_bootstrapRetryTimer, вечный цикл).
+    // 401-самохил (стейл-токен из стора): clearToken → bootstrapEnrollAsync → повторный fetch РОВНО
+    // один раз (та же логика Enrollment::decideAuthRecovery, что в синхронном ensureSubscription).
+    // Терминальные исходы (410 transferred; 401 на свежем токене) ОСТАНАВЛИВАЮТ цепочку — вечный
+    // ретрай только для транзиентного (сеть/HTTP 5xx/429).
     void tryBootstrapSubscription();
+    void bootstrapEnrollAsync(bool reEnrolled);                    // POST /v1/trial (async)
+    void bootstrapFetchAsync(const QString &token, bool tokenFromStore, bool reEnrolled); // GET /v1/subscription (async)
+    void finishBootstrapSuccess(const QByteArray &body);           // парс + LKG + probeNodeRtt + changed()
+    void onBootstrapAttemptFailed();                               // переарм таймера (BootstrapRetry.h)
+    void stopBootstrapTerminal();                                  // 410/невосстановимый 401 — цепочку не переармируем
 
     // AVPN RU-direct (единый «Доступ к сайтам РФ», флаг AvpnBypass/masterOn, default ON): перед коннектом
     // сеет split-tunnel репозиторий — routeMode=VpnAllExceptSites + весь рунет CIDR (ru_prefixes.h) →
@@ -635,6 +647,7 @@ private:
     QList<QHostAddress>          m_apiHostIps;
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
+    int                          m_pendingRedeemAttempts = 0; // AVPN: ретраи redeemTransfer, пока движок занят bootstrap'ом (холодный старт по диплинку)
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
     Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // ФАКТ: реальное состояние туннеля
     int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)

@@ -21,6 +21,8 @@ PageType {
     signal requestAdminPanel()
     // AVPN in-app Legal: Privacy/Terms открываются внутри приложения (PageLegalTribe), не в браузере
     signal requestLegalDoc(string doc)
+    // AVPN (перенос): после «подписка перенесена» уводим на главную (роутер goAvpnTab в PageStart)
+    signal requestTab(int index)
 
     // AVPN: модель — анонимный триал-по-device (кодов на бэке пока нет). Реальные данные из движка.
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
@@ -174,12 +176,12 @@ PageType {
             seatSheet.open()
         }
         // перенос принят НА ЭТО устройство (скан QR / ссылка / ввод в поле): токен ротирован,
-        // подписка перечитана движком — даём явный фидбек и обновляем экран.
+        // подписка перечитана движком. Полноэкранный успех показывает PageStart (хост всегда жив,
+        // диплинк может прилететь на любой вкладке) — здесь только прибираем локальный UI.
         function onTransferRedeemed() {
             root.redeemHint = ""
             root.redeemError = false
             scanSheet.close()
-            PageController.showNotificationMessage(qsTr("Подписка перенесена на это устройство"))
             settingsLoadTimer.restart()
         }
         // движок перечитал данные (kick / redeem / transfer) → освежаем устройства и аккаунт.
@@ -316,6 +318,19 @@ PageType {
     // Выпуск одноразового токена «как SIM» (POST /v1/transfer). Возвращает {transfer_token, deep_link,
     // web_link?, expires_in_s?} (опциональные — бэк по TRANSFER-KEYS-BACKEND-HANDOFF). QR кодирует
     // web_link (откроется и системной камерой), пока бэк не отдаёт — deep_link (in-app сканер понимает).
+
+    // Отправитель: пока QR-модалка открыта, движок поллит /v1/subscription (таймер в transferSheet);
+    // бэк ответил 410 → transferredAway взводится → закрываем модалку и показываем полноэкранный
+    // результат (не оставляем юзера на «мёртвом» QR). «Понятно» → на главную (там golden CTA).
+    readonly property bool transferredAwayNow: root.hasEngine && TribeEngine.transferredAway === true
+    onTransferredAwayNowChanged: {
+        if (transferredAwayNow && transferSheet.opened) {
+            transferSheet.close()
+            transferOutResult.show(qsTr("Подписка перенесена"),
+                                   qsTr("Новое устройство активировано. Это устройство отключено от подписки — чтобы вернуть доступ, оформите новый ключ или перенесите подписку обратно."))
+        }
+    }
+
     function createTransfer() {
         if (!(root.hasEngine && typeof TribeEngine.createTransfer === "function")) {
             PageController.showErrorMessage(qsTr("Движок недоступен — обновите приложение"))
@@ -933,8 +948,23 @@ PageType {
         property bool opened: false
         property var devices: []
         property bool busy: false
-        function open()  { opened = true }
-        function close() { opened = false; busy = false }
+        // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает модалку, не страницу
+        property int depthIndex: 0
+        function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        function close() {
+            if (!opened) return
+            opened = false; busy = false; depthIndex = 0
+            PageController.decrementDrawerDepth()
+        }
+
+        Connections {
+            target: PageController
+            enabled: seatSheet.opened
+            function onCloseTopDrawer() {
+                if (seatSheet.depthIndex === PageController.getDrawerDepth() && !seatSheet.busy)
+                    seatSheet.close()
+            }
+        }
 
         // затемнение фона + перехват кликов
         Rectangle {
@@ -1133,16 +1163,36 @@ PageType {
         property int    secsLeft: 0    // TTL-обратный отсчёт (0 = бэк не отдал expires_in_s)
         // что копируем/шарим/кодируем в QR: web_link предпочтительнее (откроется без приложения)
         readonly property string shareUrl: webLink !== "" ? webLink : deepLink
-        function open()  { opened = true }
-        function close() { opened = false }
+        // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает ЭТОТ оверлей, не страницу
+        property int depthIndex: 0
+        function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        function close() {
+            if (!opened) return
+            opened = false; depthIndex = 0
+            PageController.decrementDrawerDepth()
+        }
+
+        Connections {
+            target: PageController
+            enabled: transferSheet.opened
+            function onCloseTopDrawer() {
+                if (transferSheet.depthIndex === PageController.getDrawerDepth())
+                    transferSheet.close()
+            }
+        }
 
         function copyShareUrl() {
             linkText.selectAll(); linkText.copy(); linkText.deselect()
             PageController.showNotificationMessage(qsTr("Ссылка скопирована"))
         }
+        // «Поделиться» = ссылка + QR-картинка (получатель может тапнуть или отсканировать).
+        // Каскад фолбэков: shareTextWithQr → shareText (стейл-бинарник) → копирование (desktop).
         function shareUrlNative() {
-            var shared = root.hasEngine && typeof TribeEngine.shareText === "function"
-                         && TribeEngine.shareText(transferSheet.shareUrl)
+            var shared = false
+            if (root.hasEngine && typeof TribeEngine.shareTextWithQr === "function")
+                shared = TribeEngine.shareTextWithQr(transferSheet.shareUrl, transferSheet.shareUrl)
+            else if (root.hasEngine && typeof TribeEngine.shareText === "function")
+                shared = TribeEngine.shareText(transferSheet.shareUrl)
             if (!shared)
                 copyShareUrl() // desktop/стейл-бинарник: fallback = копирование + тост
         }
@@ -1160,10 +1210,37 @@ PageType {
             }
         }
 
+        // поллинг «перенос принят?»: лёгкий async GET /v1/subscription (движок сам взводит
+        // transferredAway на 410 → onTransferredAwayNowChanged закроет модалку и покажет результат).
+        // Только пока модалка открыта — вне её хватает foreground-рефреша.
+        Timer {
+            interval: 4000; repeat: true
+            running: transferSheet.opened && root.hasEngine
+            onTriggered: {
+                if (typeof TribeEngine.refreshSubscription === "function")
+                    TribeEngine.refreshSubscription()
+            }
+        }
+
         Rectangle {
             anchors.fill: parent
             color: "#CC000000"
             MouseArea { anchors.fill: parent; onClicked: transferSheet.close() }
+        }
+
+        // свайп слева направо = закрыть (симметрично сканеру)
+        Item {
+            anchors.left: parent.left
+            width: 28; height: parent.height
+            z: 50
+            DragHandler {
+                target: null
+                xAxis.enabled: true; yAxis.enabled: false
+                onActiveChanged: {
+                    if (!active && activeTranslation.x > 60)
+                        transferSheet.close()
+                }
+            }
         }
 
         TribeCard {
@@ -1295,10 +1372,41 @@ PageType {
         visible: opened
         z: 110
         property bool opened: false
-        function open()  { opened = true }
-        function close() { opened = false }
+        // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает сканер, не страницу
+        property int depthIndex: 0
+        function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        function close() {
+            if (!opened) return
+            opened = false; depthIndex = 0
+            PageController.decrementDrawerDepth()
+        }
+
+        Connections {
+            target: PageController
+            enabled: scanSheet.opened
+            function onCloseTopDrawer() {
+                if (scanSheet.depthIndex === PageController.getDrawerDepth())
+                    scanSheet.close()
+            }
+        }
 
         Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
+
+        // свайп слева направо = закрыть (iOS-жест «назад»). Кромка в QML-слое: превью камеры —
+        // нативное вью строго над scanArea (x ≥ отступа xl), левая полоса остаётся кликабельной.
+        Item {
+            anchors.left: parent.left
+            width: 28; height: parent.height
+            z: 50
+            DragHandler {
+                target: null
+                xAxis.enabled: true; yAxis.enabled: false
+                onActiveChanged: {
+                    if (!active && activeTranslation.x > 60)
+                        scanSheet.close()
+                }
+            }
+        }
 
         Loader {
             anchors.fill: parent
@@ -1360,5 +1468,15 @@ PageType {
                 Component.onDestruction: qrReader.stopReading()
             }
         }
+    }
+
+    // ── РЕЗУЛЬТАТ ПЕРЕНОСА (отправитель) ─────────────────────────────────
+    // Полноэкранный «Подписка перенесена» после подтверждённого 410 (см. onTransferredAwayNowChanged).
+    // «Понятно»/Back → на главную: там состояние «подписка закончилась» + золотая CTA.
+    TribeResultSheet {
+        id: transferOutResult
+        anchors.fill: parent
+        z: 200
+        onDone: root.requestTab(0)
     }
 }
