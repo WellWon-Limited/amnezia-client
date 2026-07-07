@@ -191,3 +191,28 @@ void AvpnPush_onRemoteNotification(const char *userInfoJson)
                                      QString::fromNSString(type), days);
     }
 }
+
+// AVPN (Support): пуш открыт тапом — обычная обработка + «тап» в мост (диплинк-навигация:
+// QML PageStart слушает pushTapped, type=support → вкладка «Поддержка»).
+void AvpnPush_onRemoteNotificationTapped(const char *userInfoJson)
+{
+    AvpnPush_onRemoteNotification(userInfoJson);
+    if (!userInfoJson) {
+        return;
+    }
+    NSData *jsonData = [[NSString stringWithUTF8String:userInfoJson]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *userInfo = nil;
+    if (jsonData) {
+        userInfo = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil];
+    }
+    NSString *type = @"";
+    if ([userInfo isKindOfClass:[NSDictionary class]]) {
+        id t = userInfo[@"type"];
+        if ([t isKindOfClass:[NSString class]]) type = t;
+    }
+    if (type.length > 0) {
+        if (auto *bridge = avpn::AvpnPushBridge::instance())
+            bridge->onPushTapped(QString::fromNSString(type));
+    }
+}

@@ -151,6 +151,13 @@ void AvpnPushBridge::onRemoteNotification(const QString &title, const QString &b
         Qt::QueuedConnection);
 }
 
+void AvpnPushBridge::onPushTapped(const QString &type)
+{
+    // Натив зовёт с main queue iOS — эмитим сигнал из Qt-потока (как остальные мосты).
+    QMetaObject::invokeMethod(
+        this, [this, type]() { emit pushTapped(type); }, Qt::QueuedConnection);
+}
+
 // --- apply* — выполняются уже в Qt-потоке ---
 
 void AvpnPushBridge::applyDeviceToken(const QString &token, const QString &platform)
@@ -182,6 +189,13 @@ void AvpnPushBridge::applyPushEnvironment(const QString &environment)
 void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString &body,
                                              const QString &type, int days)
 {
+    // AVPN (Support): ответ оператора живёт в чате поддержки (своя история и свой
+    // бейдж через TribeSupportChat) — в колокол/центр уведомлений его НЕ дублируем,
+    // только сигналим движку чата (внеочередной фетч треда/счётчика).
+    if (type == QLatin1String("support")) {
+        emit supportPushReceived();
+        return;
+    }
     ensureLoaded();   // подгрузить прошлую историю, чтобы новый пуш не затёр её при persist()
     QVariantMap item;
     item[QStringLiteral("title")] = title;

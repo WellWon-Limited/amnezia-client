@@ -46,6 +46,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/ServiceEngine.h
     ${AVPN_SE}/AvpnEngineQml.h
+    ${AVPN_SE}/TribeSupportChat.h
     ${AVPN_SE}/AvpnPushBridge.h
     ${AVPN_SE}/AvpnDeepLinkBridge.h
     ${AVPN_SE}/AvpnIntentBridge.h
@@ -66,6 +67,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/VpnConnectionTunnelControl.cpp
     ${AVPN_SE}/ServiceEngine.cpp
     ${AVPN_SE}/AvpnEngineQml.cpp
+    ${AVPN_SE}/TribeSupportChat.cpp
     ${AVPN_SE}/AvpnPushBridge.cpp
     ${AVPN_SE}/AvpnDeepLinkBridge.cpp
     ${AVPN_SE}/AvpnIntentBridge.cpp
@@ -87,6 +89,10 @@ if(IOS)
     # AVPN: нативный share sheet (UIActivityViewController) для ссылок — рефералка/перенос.
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnShare.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnShare.mm)
+    # AVPN (Support): нативный PHPicker фото/видео для чата поддержки (без пермишена).
+    # PhotosUI/UniformTypeIdentifiers авто-линкуются clang-модулями, как MetricKit ниже.
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaPicker.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaPicker.mm)
     # AVPN (Task 9): APNs контроллер (auth + device token + входящие пуши).
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.mm)

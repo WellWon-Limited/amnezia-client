@@ -8,6 +8,9 @@ import ".."   // Theme
 Item {
     id: nav
     property int currentIndex: 0
+    // AVPN (Support): непрочитанные ответы оператора — красный счётчик на вкладке
+    // «Поддержка» (index 1), по образцу колокола PageConnectTribe.
+    property int supportBadge: 0
     signal activated(int index)
 
     // tab spec: { label, icon path (24-grid) } — Tabler Home/Globe/Shield/User
@@ -60,6 +63,22 @@ Item {
                             strokeColor: tint; fillColor: "transparent"; strokeWidth: 2
                             capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
                             PathSvg { path: modelData.icon }
+                        }
+                        // бейдж непрочитанных (только вкладка «Поддержка»)
+                        Rectangle {
+                            visible: index === 1 && nav.supportBadge > 0
+                            width: 16; height: 16; radius: 8
+                            color: Theme.color.danger
+                            anchors.right: parent.right; anchors.top: parent.top
+                            anchors.rightMargin: -10; anchors.topMargin: -6
+                            Text {
+                                anchors.centerIn: parent
+                                text: nav.supportBadge > 9 ? "9+" : String(nav.supportBadge)
+                                color: Theme.color.text1
+                                font.family: Theme.font.body
+                                font.pixelSize: 9
+                                font.weight: Theme.font.wBold
+                            }
                         }
                     }
                     Text {
