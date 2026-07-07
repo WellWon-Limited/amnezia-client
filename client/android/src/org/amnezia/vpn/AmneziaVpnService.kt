@@ -631,9 +631,17 @@ open class AmneziaVpnService : VpnService() {
         }
 
     companion object {
-        fun isRunning(context: Context, processName: String): Boolean =
-            context.getSystemService<ActivityManager>()!!.runningAppProcesses.any {
-                it.processName == processName && it.importance <= IMPORTANCE_FOREGROUND_SERVICE
+        // AVPN: имена процессов в VpnProto захардкожены под апстрим-пакет ("org.amnezia.vpn:…"),
+        // а реальный процесс = "<applicationId>:суффикс" (manifest android:process=":amneziaAwgService").
+        // После ребренда пакета (org.antivpn.client) хардкод НИКОГДА не совпадал → isRunning()==false →
+        // activity/tile не ре-байндились к живому сервису при возврате → REQUEST_STATUS не уходил →
+        // рассинхрон «UI выключен, туннель жив» (stop при этом ноль-оп). Строим ожидаемое имя из
+        // фактического пакета + суффикса хардкода — переживает смену applicationId и апстрим-мержи.
+        fun isRunning(context: Context, processName: String): Boolean {
+            val expected = "${context.packageName}:${processName.substringAfter(':')}"
+            return context.getSystemService<ActivityManager>()!!.runningAppProcesses.any {
+                it.processName == expected && it.importance <= IMPORTANCE_FOREGROUND_SERVICE
             }
+        }
     }
 }
