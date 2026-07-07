@@ -344,8 +344,8 @@
     </message>
     <message>
         <location line="+6"/>
-        <source>На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.</source>
-        <translation>En el nuevo dispositivo: instala Tribe VPN → Ajustes → «Escanear QR» y apunta la cámara. O abre este enlace ahí. La suscripción se transfiere por completo y este dispositivo se desconecta de inmediato.</translation>
+        <source>На новом устройстве: установите Tribe → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.</source>
+        <translation>En el nuevo dispositivo: instala Tribe → Ajustes → «Escanear QR» y apunta la cámara. O abre este enlace ahí. La suscripción se transfiere por completo y este dispositivo se desconecta de inmediato.</translation>
     </message>
     <message>
         <location line="+43"/>
@@ -893,8 +893,8 @@
     </message>
     <message>
         <location line="+21"/>
-        <source>Обнаружен другой активный VPN (%1). Отключите его — Tribe VPN может не подключиться из-за конфликта.</source>
-        <translation>Se detectó otra VPN activa (%1). Desactívala: Tribe VPN podría no conectarse por un conflicto.</translation>
+        <source>Обнаружен другой активный VPN (%1). Отключите его — Tribe может не подключиться из-за конфликта.</source>
+        <translation>Se detectó otra VPN activa (%1). Desactívala: Tribe podría no conectarse por un conflicto.</translation>
     </message>
     <message>
         <location line="+11"/>
@@ -1173,8 +1173,8 @@ artificial</translation>
     <name>PageSupportTribe</name>
     <message>
         <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+25"/>
-        <source>Здравствуйте! Это поддержка Tribe VPN. Чем можем помочь?</source>
-        <translation>¡Hola! Soporte de Tribe VPN. ¿En qué podemos ayudarte?</translation>
+        <source>Здравствуйте! Это поддержка Tribe. Чем можем помочь?</source>
+        <translation>¡Hola! Soporte de Tribe. ¿En qué podemos ayudarte?</translation>
     </message>
     <message>
         <location line="+1"/>

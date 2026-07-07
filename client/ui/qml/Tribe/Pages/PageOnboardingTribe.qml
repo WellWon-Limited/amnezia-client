@@ -81,7 +81,7 @@ PageType {
                 id: bigText
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: bigMark.width
-                text: "Tribe VPN"; color: "#EEF3F9"
+                text: "Tribe"; color: "#EEF3F9"
                 fontSizeMode: Text.HorizontalFit
                 font.family: Theme.font.display; font.pixelSize: 64; minimumPixelSize: 12
                 font.weight: Theme.font.wExtra
