@@ -148,6 +148,7 @@ private:
     SecureQSettings* m_settings;
     QSharedPointer<VpnConnection> m_vpnConnection;
     QTranslator* m_translator;
+    QTranslator* m_tribeTranslator = nullptr; // AVPN (i18n): второй транслятор Tribe-слоя (tribe_*.qm)
 
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;

@@ -17,12 +17,15 @@ PageType {
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
-    // mock-тред поддержки (визуализация; бэкенд подключим позже)
+    // mock-тред поддержки (визуализация; бэкенд подключим позже). qsTr в ListElement не
+    // работает — заполняем модель в Component.onCompleted через append(). // AVPN (i18n)
     ListModel {
         id: thread
-        ListElement { body: "Здравствуйте! Это поддержка Tribe VPN. Чем можем помочь?"; mine: false; t: "10:02" }
-        ListElement { body: "Привет! Один сайт не открывается через VPN."; mine: true; t: "10:03" }
-        ListElement { body: "Подскажите адрес сайта и ваш регион — проверим узел и маршрут."; mine: false; t: "10:03" }
+        Component.onCompleted: {
+            append({ body: qsTr("Здравствуйте! Это поддержка Tribe VPN. Чем можем помочь?"), mine: false, t: "10:02" })
+            append({ body: qsTr("Привет! Один сайт не открывается через VPN."), mine: true, t: "10:03" })
+            append({ body: qsTr("Подскажите адрес сайта и ваш регион — проверим узел и маршрут."), mine: false, t: "10:03" })
+        }
     }
 
     function send() {

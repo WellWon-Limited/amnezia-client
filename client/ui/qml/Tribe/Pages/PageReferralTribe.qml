@@ -255,9 +255,8 @@ PageType {
                                 anchors.centerIn: parent
                                 textFormat: Text.StyledText
                                 text: root.invited > 0
-                                      ? "<font color='" + Theme.color.cta + "'>Приглашено " + root.invited
-                                        + "</font> · +" + root.daysEarned + " дней"
-                                      : "<font color='" + Theme.color.cta + "'>7 дней + 3 ГБ</font> бесплатно"
+                                      ? qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned)
+                                      : qsTr("<font color='%1'>7 дней + 3 ГБ</font> бесплатно").arg(Theme.color.cta)
                                 color: "white"
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                                 font.weight: Theme.font.wMedium

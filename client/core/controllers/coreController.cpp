@@ -348,6 +348,22 @@ void CoreController::updateTranslator(const QLocale &locale)
         }
     }
 
+    // AVPN (i18n): второй транслятор — Tribe-слой (исходники строк русские, апстрим не трогаем).
+    // ru = исходник (транслятор не нужен); en/es = tribe_<lang>.qm; прочие языки → tribe_en.qm.
+    // .qm коммитятся (client/translations/tribe/, скрипт update-translations.sh), qrc — avpn.cmake.
+    if (!m_tribeTranslator) {
+        m_tribeTranslator = new QTranslator(this);
+    }
+    if (!m_tribeTranslator->isEmpty()) {
+        QCoreApplication::removeTranslator(m_tribeTranslator);
+    }
+    if (lang != QLatin1String("ru")) {
+        if (m_tribeTranslator->load(QStringLiteral(":/translations/tribe_%1.qm").arg(lang))
+            || m_tribeTranslator->load(QStringLiteral(":/translations/tribe_en.qm"))) {
+            QCoreApplication::installTranslator(m_tribeTranslator);
+        }
+    }
+
     if (m_engine) {
         m_engine->retranslate();
     }

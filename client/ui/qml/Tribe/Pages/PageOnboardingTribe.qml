@@ -117,6 +117,21 @@ PageType {
 
         Item { Layout.fillHeight: true }
 
+        // Декларация о данных ДО первого использования сервиса + правовые ссылки
+        // (App Review 5.4: VPN обязан заявить сбор данных до старта; тексты — /legal/*)
+        Text {
+            Layout.fillWidth: true
+            Layout.bottomMargin: Theme.space.md
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.StyledText
+            wrapMode: Text.WordWrap
+            color: Theme.color.text3
+            linkColor: Theme.color.accent
+            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+            text: qsTr("Мы не логируем трафик и не продаём ваши данные. Нажимая «Приступим», вы принимаете <a href='https://tribevpn.com/legal/terms'>Условия</a> и <a href='https://tribevpn.com/legal/privacy'>Политику конфиденциальности</a>.")
+            onLinkActivated: (link) => Qt.openUrlExternally(link)
+        }
+
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 52

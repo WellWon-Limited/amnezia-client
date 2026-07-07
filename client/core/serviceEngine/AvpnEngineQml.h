@@ -68,6 +68,13 @@ class AvpnEngineQml : public QObject {
     // запускают фоновый GET, результат прилетает через devicesChanged()/accountChanged().
     Q_PROPERTY(QVariantList devices READ devices NOTIFY devicesChanged)
     Q_PROPERTY(QVariantMap account READ account NOTIFY accountChanged)
+    // AVPN (admin-гейт): серверный флаг devices.is_admin из /v1/account — «Панель администратора»
+    // видна ТОЛЬКО помеченным устройствам. Оффлайн/401/нет ключа → m_account пуста → false.
+    Q_PROPERTY(bool isAdminDevice READ isAdminDevice NOTIFY accountChanged)
+    // AVPN (i18n): язык приложения "ru"/"en"/"es" для переключателя в Tribe-настройках.
+    // Хранение/цепочка ретрансляции — апстримные (SecureAppSettingsRepository::setAppLanguage →
+    // appLanguageChanged → LanguageUiController → CoreController::updateTranslator → retranslate).
+    Q_PROPERTY(QString appLang READ appLang NOTIFY appLangChanged)
     // AVPN (рефералы #37): GET /v1/referral → {code, link, invited, days_earned} для баннера «Поделиться».
     Q_PROPERTY(QVariantMap referral READ referral NOTIFY referralChanged)
     // AVPN (Task 7): туннель на «авто-паузе для покупок» (реально down, ждём авто-возврат). // AVPN
@@ -152,6 +159,12 @@ public:
     // AVPN: кэш последнего async-ответа /v1/devices и /v1/account (для биндинга в QML).
     QVariantList devices() const { return m_devices; }
     QVariantMap account() const { return m_account; }
+    // AVPN (admin-гейт): пустая мапа / отсутствие ключа → QVariant().toBool() == false.
+    bool isAdminDevice() const { return m_account.value(QStringLiteral("is_admin")).toBool(); }
+
+    // AVPN (i18n): текущий язык ("ru"/"en"/"es" — префикс локали) и смена из QML.
+    QString appLang() const;
+    Q_INVOKABLE void setAppLang(const QString &lang);
     QVariantMap referral() const { return m_referral; }   // AVPN (#37): кэш GET /v1/referral
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
@@ -411,6 +424,7 @@ signals:
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
+    void appLangChanged();   // AVPN (i18n): сменили язык через setAppLang
     void referralChanged();   // AVPN (#37): async-ответ /v1/referral готов (property referral обновлена)
     // AVPN (оплата): готова ссылка web-кабинета (см. requestCabinetLink). Эмитится ВСЕГДА (успех или
     // fallback) — QML-кнопка не залипнет в loading. Открывать ТОЛЬКО во внешнем браузере

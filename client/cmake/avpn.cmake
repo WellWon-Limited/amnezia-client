@@ -108,3 +108,12 @@ endif()
 if(NOT MSVC)
     set_source_files_properties(${AVPN_ENGINE_SRC} PROPERTIES COMPILE_OPTIONS "-Werror=return-type")
 endif()
+
+# AVPN (i18n): переводы Tribe-слоя (tribe_en.qm/tribe_es.qm; русский — исходник строк).
+# .qm заранее скомпилированы и закоммичены (client/translations/tribe/update-translations.sh) —
+# lupdate/lrelease-таргеты НЕ заводим (имена заняты апстримным qt6_add_translations, и его
+# update_translations гонять по нашим файлам нельзя). Свой .qrc — через отдельную переменную
+# (в QRC уже лежат сгенерированные .cpp) → в SOURCES, который уходит в target_sources
+# ПОСЛЕ include(avpn.cmake) (client/CMakeLists.txt:204).
+qt6_add_resources(AVPN_I18N_QRC ${CMAKE_CURRENT_LIST_DIR}/../translations/tribe/tribe_translations.qrc)
+list(APPEND SOURCES ${AVPN_I18N_QRC})
