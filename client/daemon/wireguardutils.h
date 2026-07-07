@@ -49,6 +49,13 @@ class WireguardUtils : public QObject {
   virtual bool addExclusionRoute(const IPAddress& prefix) = 0;
   virtual bool deleteExclusionRoute(const IPAddress& prefix) = 0;
 
+  // AVPN win-fix (2026-07-07): пакетное окно вокруг массового добавления exclusion-маршрутов
+  // (RU-direct = ~8.6k префиксов). Базовая реализация — no-op: на не-Windows платформах поведение
+  // НЕ меняется (маршруты добавляются как раньше). Только WireguardUtilsWindows переопределяет,
+  // чтобы схлопнуть O(N²) пересчёт таблицы в один проход. НЕ трогать другие платформы.
+  virtual void beginBulkExclusion() {}
+  virtual void endBulkExclusion() {}
+
   virtual bool excludeLocalNetworks(const QList<IPAddress>& addresses) = 0;
 };
 

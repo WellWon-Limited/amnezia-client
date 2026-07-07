@@ -314,6 +314,17 @@ bool WireguardUtilsWindows::deleteExclusionRoute(const IPAddress& prefix) {
   return m_routeMonitor->deleteExclusionRoute(prefix);
 }
 
+// AVPN win-fix: проброс bulk-окна в route monitor (см. WindowsRouteMonitor::beginBulkExclusion)
+void WireguardUtilsWindows::beginBulkExclusion() {
+  if (m_routeMonitor)
+    m_routeMonitor->beginBulkExclusion();
+}
+
+void WireguardUtilsWindows::endBulkExclusion() {
+  if (m_routeMonitor)
+    m_routeMonitor->endBulkExclusion();
+}
+
 bool WireguardUtilsWindows::excludeLocalNetworks(
     const QList<IPAddress>& addresses) {
   // If the interface isn't up then something went horribly wrong.
