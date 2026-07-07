@@ -45,6 +45,14 @@ Item {
         }
     }
 
+    // страница может быть уничтожена (replace при смене вкладки — нижняя навигация кликабельна
+    // поверх оверлея) с открытым шитом: без компенсации drawerDepth навсегда >0 → Back/Escape
+    // ломаются во всём приложении (closeTopDrawer уходит в никуда).
+    Component.onDestruction: {
+        if (opened)
+            PageController.decrementDrawerDepth()
+    }
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     MouseArea { anchors.fill: parent }   // глушим клики в страницу под оверлеем
 
