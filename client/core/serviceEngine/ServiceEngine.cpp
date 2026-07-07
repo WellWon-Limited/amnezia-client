@@ -97,6 +97,16 @@ bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
     if (!SubscriptionParser::parse(json, sub, error))
         return false;
     m_pool.setSubscription(sub);
+    m_lkgActive = false; // AVPN (LKG): свежие данные с сервера — кэш больше не «маска»
+    return true;
+}
+
+// AVPN (LKG, C-7): тот же парс-путь, но данные из дискового кэша → снапшот честно помечен stale.
+bool ServiceEngine::loadSubscriptionFromLkg(const QByteArray &json, QString &error)
+{
+    if (!loadSubscription(json, error))
+        return false;
+    m_lkgActive = true;
     return true;
 }
 
@@ -195,8 +205,12 @@ bool ServiceEngine::ensureSubscription(QNetworkAccessManager *nam, const QString
     for (;;) {
         QByteArray body;
         FetchOutcome outcome = FetchOutcome::HttpError;
-        if (Enrollment::fetchSubscription(nam, baseUrl, token, body, error, &outcome))
-            return loadSubscription(body, error); // 3) распарсить (NodePool + лимиты/expiresAt)
+        if (Enrollment::fetchSubscription(nam, baseUrl, token, body, error, &outcome)) {
+            if (!loadSubscription(body, error)) // 3) распарсить (NodePool + лимиты/expiresAt)
+                return false;
+            Enrollment::saveLkgSubscription(body); // AVPN (LKG): персистим ТОЛЬКО валидное тело
+            return true;
+        }
 
         if (Enrollment::decideAuthRecovery(outcome, tokenFromStore, reEnrolled)
             != AuthRecoveryAction::ReEnrollThenRetry)
@@ -396,7 +410,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     s.trafficUsed = sub.trafficUsed;
     s.trafficLimit = sub.trafficLimit;
     s.expiresAt = sub.expiresAt; // AVPN: для AvpnEngineQml::daysLeft()
-    s.lkgStale = false; // TODO(C-7): отражать stale-LKG при offline-подъёме
+    s.lkgStale = m_lkgActive; // AVPN (LKG, C-7): пул из дискового кэша, свежий фетч ещё не доехал
 
     // реальные рантайм-статы туннеля
     if (m_tunnel) {

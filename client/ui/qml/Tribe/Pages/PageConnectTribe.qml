@@ -175,12 +175,17 @@ PageType {
     // освежить ЧАСЫ УСТРОЙСТВА (GET /v1/subscription, их продлевает платёж): новый expires_at/трафик
     // приедет в бейдж, CTA «Обновить ключ» погаснет сам. refreshAccount — справочно (account_id,
     // списки в Настройках), в бейдж НЕ пишет. Троттл 30с, чтобы не дёргать бэк на каждый свап
-    // приложений. bootstrap() тут НЕ зовём — он трогает подписку/туннель-флоу (CONNECT-INVARIANTS).
+    // приложений. Синхронный bootstrap() тут по-прежнему НЕ зовём (блокирующий QEventLoop в момент
+    // резюма — риск watchdog, CONNECT-INVARIANTS); вместо него kickBootstrap — он лишь поджимает
+    // таймер ретрая, если подписка ТАК И НЕ загрузилась (фикс «на сотовой ∞ навсегда»), и no-op
+    // после успеха. ВНЕ троттла: дёшев, а ждать 30с с пустым пулом нельзя.
     Connections {
         target: Qt.application
         function onStateChanged() {
             if (Qt.application.state !== Qt.ApplicationActive) return
             if (!root.hasEngine) return
+            if (typeof TribeEngine.kickBootstrap === "function")
+                TribeEngine.kickBootstrap()
             var now = Date.now()
             if (now - root.lastFgRefreshMs < 30000) return
             root.lastFgRefreshMs = now
@@ -912,7 +917,9 @@ PageType {
                         // (из «Управлять подпиской» в Настройках — чистый ЛК, без intent). // AVPN
                         TribeEngine.requestCabinetLink("renew")  // ответ всегда придёт в onCabinetLinkReady
                     } else {
-                        Qt.openUrlExternally("https://tribevpn.com/account?intent=renew")
+                        // без движка язык приложения недоступен — берём язык системы (сайт провалидирует)
+                        Qt.openUrlExternally("https://tribevpn.com/account?intent=renew&lang="
+                                             + Qt.locale().name.split("_")[0])
                     }
                 }
             }
