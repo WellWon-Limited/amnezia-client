@@ -156,7 +156,7 @@ PageType {
         // AVPN (macOS): обнаружен другой активный VPN → конфликт маршрутов/демонов. Предупреждаем.
         function onVpnConflict(name) {
             PageController.showNotificationMessage(
-                qsTr("Обнаружен другой активный VPN (%1). Отключите его — Tribe может не подключиться из-за конфликта.").arg(name))
+                qsTr("Обнаружен другой активный VPN (%1). Отключите его — Tribe VPN может не подключиться из-за конфликта.").arg(name))
         }
     }
 
@@ -338,7 +338,7 @@ PageType {
             Text {
                 id: brandText
                 anchors.left: brandMark.right; anchors.leftMargin: 10
-                text: "Tribe"; color: "#EEF3F9"
+                text: "Tribe VPN"; color: "#EEF3F9"
                 font.family: Theme.font.display; font.pixelSize: Theme.font.h2; font.weight: Theme.font.wExtra
                 font.letterSpacing: Theme.font.trackTight * Theme.font.h2
             }
