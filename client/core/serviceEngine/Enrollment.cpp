@@ -5,6 +5,7 @@
 #include "secureQSettings.h"
 #include "version.h"
 
+#include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
 #include <QNetworkAccessManager>
@@ -66,7 +67,7 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
     const QString deviceId = Identity::deviceId(store);
     // AVPN (рефералы): передаём pending referral_code (из deep-link /r//a/, если был) — first-touch.
     const QByteArray body = buildTrialBody(identity.publicKey(), deviceId, detectPlatform(),
-                                           deviceModel(), loadPendingReferral());
+                                           deviceMarketingName(), loadPendingReferral());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/trial"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -164,7 +165,7 @@ CodeRedeemResult Enrollment::redeemCode(QNetworkAccessManager *nam, const QStrin
 
     const QString deviceId = Identity::deviceId(store);
     const QByteArray body = buildRedeemBody(code, identity.publicKey(), deviceId,
-                                            detectPlatform(), deviceModel(), evictDeviceId);
+                                            detectPlatform(), deviceMarketingName(), evictDeviceId);
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/code/redeem"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -227,7 +228,7 @@ TransferRedeemResult Enrollment::redeemTransfer(QNetworkAccessManager *nam, cons
 
     const QString deviceId = Identity::deviceId(store);
     const QByteArray body = buildTransferRedeemBody(transferToken, identity.publicKey(), deviceId,
-                                                    detectPlatform(), deviceModel());
+                                                    detectPlatform(), deviceMarketingName());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/transfer/redeem"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));

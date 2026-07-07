@@ -63,7 +63,7 @@ PageType {
 
             Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Tribe VPN"
+                text: "Tribe"
                 color: "#F2F2F5"
                 font.pixelSize: 17
                 font.weight: Font.Bold

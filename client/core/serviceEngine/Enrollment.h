@@ -144,11 +144,12 @@ public:
         return AuthRecoveryAction::Fail;
     }
 
-    // AVPN: имя устройства (показывается в кабинете). Hostname (user-set), фолбэк — продукт.
+    // AVPN (приватность): legacy-хелпер. НЕ использовать hostname (может содержать имя владельца,
+    // напр. «MacBook Влада»). Реальную маркетинговую модель («iPhone 15 Pro», без PII) шлём из
+    // Enrollment.cpp через avpn::deviceMarketingName() (DeviceModel.h). Этот фолбэк оставлен безопасным.
     static QString deviceModel()
     {
-        const QString host = QSysInfo::machineHostName();
-        return host.isEmpty() ? QSysInfo::prettyProductName() : host;
+        return QSysInfo::prettyProductName();
     }
 
     // Разбор ответа TrialOut. false + error при провале.
