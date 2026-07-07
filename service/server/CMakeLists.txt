@@ -447,7 +447,10 @@ install(RUNTIME_DEPENDENCY_SET service_deps
         [[.*\.framework]]
         [[^[Qq]t.*]]
     POST_EXCLUDE_REGEXES
-        [[^.*[\\/]system32[\\/].*\.dll$]]
+        # AVPN win-fix: только DLL непосредственно из system32\ (см. client/CMakeLists.txt) —
+        # иначе conan-кеш SYSTEM-пользователя (C:\Windows\System32\config\systemprofile\.conan2)
+        # молча выпадает из бандла (amnezia_xray/libssl терялись у сервиса).
+        [[^.*[\\/][Ss]ystem32[\\/][^\\/]*\.dll$]]
         [[^/lib.*]]
         [[^/usr/lib.*]]
     DIRECTORIES ${CONAN_RUNTIME_LIB_DIRS}

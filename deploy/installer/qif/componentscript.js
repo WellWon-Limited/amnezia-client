@@ -4,15 +4,19 @@ function appName()
     return installer.value("Name")
 }
 
+// AVPN: имена НЕ выводим из installer.value("Name") (=TribeVPN, cmake/CPack.cmake) — реальные
+// бинари называются иначе: сервис = Tribe-service.exe (service/server/CMakeLists PROJECT,
+// = SERVICE_NAME в version.h.in — клиент ищет сервис ИМЕННО с этим именем), GUI = AmneziaVPN.exe
+// (upstream-имя цели клиента). Иначе sc create регистрирует несуществующий exe, а ярлыки бьют мимо.
 function serviceName()
 {
-    return (appName() + "-service")
+    return "Tribe-service"
 }
 
 function appExecutableFileName()
 {
     if (runningOnWindows()) {
-        return appName() + ".exe";
+        return "AmneziaVPN.exe";
     } else {
         return appName();
     }

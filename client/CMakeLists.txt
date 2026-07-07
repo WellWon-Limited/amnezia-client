@@ -142,7 +142,9 @@ if(WIN32)
         gdi32
     )
 
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+    # AVPN win-fix: цель создана выше (qt_add_executable, строка ~55) — правка CMAKE_EXE_LINKER_FLAGS
+    # здесь уже НЕ попадает в свойства цели (под Ninja линкуется консольное окно). Ставим флаги на цель.
+    target_link_options(${PROJECT} PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:mainCRTStartup")
 endif()
 
 if(APPLE)
@@ -236,7 +238,11 @@ install(RUNTIME_DEPENDENCY_SET client_deps
         [[.*\.framework]]
         [[^[Qq]t.*]]
     POST_EXCLUDE_REGEXES
-        [[^.*[\\/]system32[\\/].*\.dll$]]
+        # AVPN win-fix: исключаем ТОЛЬКО DLL непосредственно из system32\ (системные), а не любой
+        # путь с /system32/ внутри — conan-кеш SYSTEM-пользователя живёт в
+        # C:\Windows\System32\config\systemprofile\.conan2\ и старый глоб молча выкидывал
+        # libcrypto/libssl/amnezia_xray из инсталлера при сборке от SYSTEM (prlctl exec).
+        [[^.*[\\/][Ss]ystem32[\\/][^\\/]*\.dll$]]
         [[^/lib.*]]
         [[^/usr/lib.*]]
     DIRECTORIES ${CONAN_RUNTIME_LIB_DIRS}
