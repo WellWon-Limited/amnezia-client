@@ -409,6 +409,12 @@ public:
     Q_INVOKABLE bool bypassDnsFwdOn() const;
     Q_INVOKABLE void setBypassDnsFwdOn(bool on);
 
+    // AVPN in-app Legal (Privacy/Terms, PageLegalTribe): кэш с диска + тихий fetch
+    // tribevpn.com/legal/<doc>.<lang>.md (LegalDocs.h). Ошибки сети молчаливые:
+    // страница живёт на кэше/qrc-снапшоте. doc ∈ privacy|terms, lang ∈ ru|en.
+    Q_INVOKABLE QString legalDocCached(const QString &doc, const QString &lang) const;
+    Q_INVOKABLE void legalDocFetch(const QString &doc, const QString &lang);
+
 signals:
     void changed();
     void error(const QString &message);
@@ -431,6 +437,8 @@ signals:
     // fallback) — QML-кнопка не залипнет в loading. Открывать ТОЛЬКО во внешнем браузере
     // (Qt.openUrlExternally), НЕ в webview (Apple §3.1.1).
     void cabinetLinkReady(const QString &url);
+    // AVPN in-app Legal: свежий markdown скачан и закэширован (после legalDocFetch)
+    void legalDocReady(const QString &doc, const QString &lang, const QString &text);
     // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
     void liveQualityChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
