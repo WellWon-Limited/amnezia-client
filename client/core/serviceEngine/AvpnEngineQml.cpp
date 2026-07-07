@@ -1,7 +1,7 @@
 #include "AvpnEngineQml.h"
 
 #ifdef Q_OS_ANDROID
-#include "platforms/android/android_controller.h" // AVPN: адопт initConnectionState (рассинхрон после фона)
+#include "platforms/android/android_controller.h" // AVPN: адопт снапшота статуса (рассинхрон после фона)
 #endif
 
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -381,19 +381,28 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     }
 
 #ifdef Q_OS_ANDROID
-    // AVPN (рассинхрон после фона, 2026-07-07): у апстрима обрыв байндинга мессенджера (уход в фон/
-    // Chrome, binder-хиккап) шлёт ФЕЙКОВЫЙ connectionStateChanged(Disconnected) — движок честно гасит
-    // фазу и намерение (анти-авто-коннект). А ВОССТАНОВЛЕНИЕ после ре-байнда/холодного старта апстрим
-    // ведёт ДРУГИМ сигналом — AndroidController::initConnectionState — который идёт в ванильный
-    // connectionUiController МИМО VpnConnection. Итог был: орб «выключен», туннель жив, stop = ноль-оп
-    // (юзер не мог погасить VPN). Адоптим реальность: Connected → вернуть намерение и фазу.
-    connect(AndroidController::instance(), &AndroidController::initConnectionState, this,
-            [this](Vpn::ConnectionState s) {
-                if (s == Vpn::Connected) {
-                    m_wantConnected = true; // фейковый Disconnected успел снять намерение — восстанавливаем
-                    m_engine.adoptTunnelConnected(); // onTunnelConnected терминалы не воскрешает — адопт явно
+    // AVPN (рассинхрон после фона, 2026-07-07): Android-активити при возврате из фона ре-байндится к
+    // сервису и получает СНАПШОТ статуса (REQUEST_STATUS -> STATUS -> JNI onStatus -> сырой сигнал
+    // status). До фикса цепочка была дырявой дважды: (1) апстрим слал фейковый Disconnected на каждый
+    // onStop (убрано в AmneziaActivity -- состояние больше не «забывается» в фоне), (2) restore-сигнал
+    // initConnectionState шёл в ванильный UI-контроллер МИМО VpnConnection/движка. Теперь движок
+    // слушает СЫРОЙ AndroidController::status и адоптит ТОЛЬКО РАСХОЖДЕНИЕ факта с нашим состоянием:
+    //  - факт Connected, мы «не connected» -> вернуть намерение + adoptTunnelConnected (воскреситель;
+    //    покрывает холодный старт при живом туннеле и восстановление после РЕАЛЬНОГО обрыва байндинга
+    //    -- те пути всё ещё шлют фейковый Disconnected);
+    //  - факт Disconnected, мы «connected» -> честный Disconnected (туннель погас, пока были в фоне);
+    //  - состояния согласованы -> НИЧЕГО (никаких пере-проб/вспышек при обычном возврате из фона).
+    // Промежуточные снапшоты (Connecting/...) не трогаем -- терминал прилетит обычным путём.
+    connect(AndroidController::instance(), &AndroidController::status, this,
+            [this](AndroidController::ConnectionState st) {
+                const bool thinkConnected = (state() == QLatin1String("connected"));
+                if (st == AndroidController::ConnectionState::CONNECTED && !thinkConnected) {
+                    m_wantConnected = true;
+                    m_engine.adoptTunnelConnected();
+                    onConnectionStateChanged(Vpn::Connected);
+                } else if (st == AndroidController::ConnectionState::DISCONNECTED && thinkConnected) {
+                    onConnectionStateChanged(Vpn::Disconnected);
                 }
-                onConnectionStateChanged(s);
             },
             Qt::QueuedConnection);
 #endif
