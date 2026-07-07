@@ -68,9 +68,14 @@ PageType {
     // Исчерпан, если: подписка неактивна, ИЛИ дней не осталось (0), ИЛИ лимит трафика выбран.
     // Гейт daysLeft >= 0: ПОКА данные не загружены (пустой снапшот, daysLeft = -1) CTA не показываем —
     // «не знаем» ≠ «истёк»; после foreground-рефетча /v1/subscription состояние догонит правду.
-    readonly property bool subExpired: root.hasEngine && TribeEngine.daysLeft >= 0 && (!root.subActive
+    // AVPN (перенос «как SIM»): подписка уехала на другое устройство (бэк отвечает 410) — главная
+    // ведёт себя как при закончившейся подписке: золотая CTA вместо ротации (числа бейджа могут
+    // быть стейл из LKG — им не верим, 410 терминален).
+    readonly property bool transferredAwayNow: root.hasEngine && TribeEngine.transferredAway === true
+    readonly property bool subExpired: root.hasEngine && (root.transferredAwayNow
+                              || (TribeEngine.daysLeft >= 0 && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
-                              || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))
+                              || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))))
     // Причина CTA для текста кнопки: подписка/срок живы, кончился ТОЛЬКО трафик → «Продлить трафик»
     // (иначе юзер видит «Обновить ключ» при непросроченном сроке и не понимает, что случилось —
     // реальный кейс did=40: expires_at в будущем, а 4 GiB триала выбраны). Гард как у subExpired:

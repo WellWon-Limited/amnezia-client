@@ -69,6 +69,15 @@ int main(int argc, char **argv)
     CHECK(Enrollment::decideAuthRecovery(FetchOutcome::HttpError, true, false)
           == AuthRecoveryAction::Fail);
 
+    // --- Перенос «как SIM» (410 transferred) — тот же контракт используют createTransfer/enroll ---
+    // 410 → Transferred: терминально, НЕ лечится ре-энроллом (иначе молча выбили бы новый триал).
+    CHECK(Enrollment::classifyFetch(410, false) == FetchOutcome::Transferred);
+    CHECK(Enrollment::classifyFetch(410, true) == FetchOutcome::Transferred);
+    CHECK(Enrollment::decideAuthRecovery(FetchOutcome::Transferred, true, false)
+          == AuthRecoveryAction::Fail);
+    CHECK(Enrollment::decideAuthRecovery(FetchOutcome::Transferred, true, true)
+          == AuthRecoveryAction::Fail);
+
     if (g_failed == 0) {
         printf(">>> auth_heal_check: OK (%d checks)\n", g_total);
         return 0;

@@ -25,6 +25,47 @@ static UIViewController *avpnTopViewController()
     return vc;
 }
 
+// текст/ссылка + QR-картинка одним шитом (перенос подписки: получатель может и сканировать
+// картинку, и тапнуть ссылку). Non-blocking, тот же паттерн, что AvpnShare_presentText.
+extern "C" bool AvpnShare_presentTextAndImage(const char *utf8Text, const char *utf8ImagePath)
+{
+    NSString *text = utf8Text ? [NSString stringWithUTF8String:utf8Text] : nil;
+    NSString *path = utf8ImagePath ? [NSString stringWithUTF8String:utf8ImagePath] : nil;
+    UIImage *image = path.length ? [UIImage imageWithContentsOfFile:path] : nil;
+    if (text.length == 0 && !image)
+        return false;
+
+    UIViewController *host = avpnTopViewController();
+    if (!host)
+        return false;
+
+    NSMutableArray *items = [NSMutableArray array];
+    if (text.length) {
+        id item = text;
+        NSURL *url = [NSURL URLWithString:text];
+        if (url && ([url.scheme isEqualToString:@"https"] || [url.scheme isEqualToString:@"http"]))
+            item = url;
+        [items addObject:item];
+    }
+    if (image)
+        [items addObject:image];
+
+    UIActivityViewController *activity =
+            [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
+
+    UIPopoverPresentationController *pop = activity.popoverPresentationController;
+    if (pop) {
+        pop.sourceView = host.view;
+        pop.sourceRect = CGRectMake(CGRectGetMidX(host.view.bounds), CGRectGetMidY(host.view.bounds), 1, 1);
+        pop.permittedArrowDirections = 0;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [host presentViewController:activity animated:YES completion:nil];
+    });
+    return true;
+}
+
 extern "C" bool AvpnShare_presentText(const char *utf8Text)
 {
     NSString *text = utf8Text ? [NSString stringWithUTF8String:utf8Text] : nil;

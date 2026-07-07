@@ -316,9 +316,12 @@ public:
 
     // Полный flow: ensure keys → POST {base}/v1/trial → сохранить token в защ. хранилище.
     // baseUrl напр. https://api.tribevpn.com . Возвращает true + out при успехе.
+    // outcome (необяз.) — машиночитаемый исход (classifyFetch); 410 = Transferred: устройство
+    // перенесло подписку «как SIM», новый триал ему НЕ положен (бэк, handoff §7) — UI показывает
+    // «Подписка перенесена», а не сырую ошибку.
     static bool enroll(QNetworkAccessManager *nam, const QString &baseUrl,
                        Identity &identity, SecureAppSettingsRepository *store,
-                       TrialResponse &out, QString &error);
+                       TrialResponse &out, QString &error, FetchOutcome *outcome = nullptr);
 
     // GET {base}/v1/subscription с Bearer-токеном. true + body (сырое тело) при 2xx. [IN-FORK]
     // outcome (необяз.) — машиночитаемый исход (classifyFetch) для авто-хила 401 в startFlow/bootstrap.
@@ -345,8 +348,12 @@ public:
 
     // AVPN (Task 13): POST {base}/v1/transfer (Bearer authToken) — выпустить одноразовый токен переноса
     // + готовый deep_link (tribe://transfer?t=…) для QR/копирования в UI. true + out при 2xx. [IN-FORK]
+    // outcome (необяз.) — для авто-хила 401 в AvpnEngineQml::createTransfer (стейл-JWT после ротации
+    // или после переноса «как SIM»): раньше 401 отдавался сырой ошибкой «transfer unauthorized (token)»
+    // и лечился только перезапуском приложения.
     static bool createTransfer(QNetworkAccessManager *nam, const QString &baseUrl,
-                               const QString &authToken, TransferMintResponse &out, QString &error);
+                               const QString &authToken, TransferMintResponse &out, QString &error,
+                               FetchOutcome *outcome = nullptr);
 
     // AVPN (grant-ключи): POST {base}/v1/key/redeem (Bearer authToken) — активировать промо/подарочный/
     // компенсационный ключ TRIBE-XXXX-XXXX-XXXX на ТЕКУЩИЙ аккаунт. Токен НЕ ротируется. Бэк — по
