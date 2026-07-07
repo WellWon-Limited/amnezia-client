@@ -796,13 +796,81 @@ PageType {
             }
         }
 
+        // ── ЯЗЫК ────────────────────────────────────────────────────────────
+        // Ручной выбор поверх авто-детекта по языку системы (дефолт SecureAppSettingsRepository =
+        // QLocale::system()). Названия языков — эндонимы, НЕ переводятся (без qsTr).
+        Text {
+            text: qsTr("ЯЗЫК")
+            color: Theme.color.text3
+            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+            Layout.topMargin: Theme.space.sm
+        }
+        Repeater {
+            model: [
+                { code: "ru", label: "Русский" },
+                { code: "en", label: "English" },
+                { code: "es", label: "Español" }
+            ]
+            delegate: TribeListRow {
+                required property var modelData
+                Layout.fillWidth: true
+                title: modelData.label
+                rightItem: Shape { // галочка активного языка
+                    visible: root.hasEngine && TribeEngine.appLang === modelData.code
+                    width: 16; height: 16
+                    anchors.verticalCenter: parent.verticalCenter
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 1.8
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M3 8.5 l3.5 3.5 L13 4" }
+                    }
+                }
+                onClicked: if (root.hasEngine) TribeEngine.setAppLang(modelData.code)
+            }
+        }
+
+        // ── ПРАВОВАЯ ИНФОРМАЦИЯ ─────────────────────────────────────────────
+        // Видимые ссылки на политику/условия обязательны для VPN (App Review 5.4).
+        Text {
+            text: qsTr("ПРАВОВАЯ ИНФОРМАЦИЯ")
+            color: Theme.color.text3
+            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+            Layout.topMargin: Theme.space.sm
+        }
+        Repeater {
+            model: [
+                { label: qsTr("Политика конфиденциальности"), url: "https://tribevpn.com/legal/privacy" },
+                { label: qsTr("Условия использования"),       url: "https://tribevpn.com/legal/terms" }
+            ]
+            delegate: TribeListRow {
+                required property var modelData
+                Layout.fillWidth: true
+                title: modelData.label
+                rightItem: Shape { // шеврон ›
+                    width: 16; height: 16
+                    anchors.verticalCenter: parent.verticalCenter
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: Theme.color.text3; fillColor: "transparent"; strokeWidth: 1.8
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M6 3 l6 5 -6 5" }
+                    }
+                }
+                onClicked: Qt.openUrlExternally(modelData.url)
+            }
+        }
+
         // ── ПАНЕЛЬ АДМИНИСТРАТОРА (низ настроек) ────────────────────────────
-        // Бенч соединения и тест-инструменты (PageAdminTribe). Пока видна всем;
-        // скрыть из релиза — Dev.adminPanelVisible=false (Tribe/Dev.qml, одна строка). // AVPN
+        // Бенч соединения и тест-инструменты (PageAdminTribe). Видна только устройствам
+        // с серверным is_admin (devices.is_admin → GET /v1/account → TribeEngine.isAdminDevice);
+        // Dev.adminPanelVisible — локальный override для превью с диска без движка. // AVPN
         TribeCard {
             Layout.fillWidth: true
             Layout.topMargin: Theme.space.sm
-            visible: Dev.adminPanelVisible
+            visible: (root.hasEngine && TribeEngine.isAdminDevice === true) || Dev.adminPanelVisible
             implicitHeight: adminRow.implicitHeight + 2 * Theme.space.lg
             RowLayout {
                 id: adminRow

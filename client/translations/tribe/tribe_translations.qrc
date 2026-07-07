@@ -1,0 +1,8 @@
+<!-- AVPN (i18n): скомпилированные переводы Tribe-слоя (см. update-translations.sh).
+     Загружаются вторым QTranslator в coreController::updateTranslator (метка // AVPN). -->
+<RCC>
+    <qresource prefix="/translations">
+        <file>tribe_en.qm</file>
+        <file>tribe_es.qm</file>
+    </qresource>
+</RCC>

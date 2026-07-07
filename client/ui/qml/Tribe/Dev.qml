@@ -11,6 +11,8 @@ QtObject {
     // вход — иконка «А» на Connect (видна в adminMode), выход — кнопка «‹ Tribe»
     property bool amneziaMode: false
     // «Панель администратора» внизу настроек (бенч соединения и будущие тест-инструменты).
-    // Пока открыта всем; чтобы скрыть из релиза — false (одна строка, PageAccountTribe гейтится ей).
-    property bool adminPanelVisible: true
+    // Релиз: карточка видна ТОЛЬКО устройствам с серверным is_admin (TribeEngine.isAdminDevice,
+    // devices.is_admin в бэкенде). Этот флаг — локальный dev-override для превью с диска
+    // (AVPN_QML_SRC), где движка нет: включить true руками, НЕ коммитить.
+    property bool adminPanelVisible: false
 }
