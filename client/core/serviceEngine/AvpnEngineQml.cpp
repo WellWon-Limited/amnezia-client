@@ -28,6 +28,11 @@
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
+#include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
+#include <QDir>                   // AVPN in-app Legal: каталог кэша
+#include <QFile>                  // AVPN in-app Legal: чтение кэша
+#include <QSaveFile>              // AVPN in-app Legal: атомарная запись кэша
+#include <QStandardPaths>         // AVPN in-app Legal: AppDataLocation
 #ifdef Q_OS_IOS
 #include <chrono>   // AVPN: предохранитель watchdog при выходе (см. конструктор)
 #include <thread>
@@ -3320,6 +3325,53 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         log.append(l);
     m["switchLog"] = log;
     return m;
+}
+
+// ── AVPN in-app Legal (Privacy/Terms) ────────────────────────────────────────
+// PageLegalTribe: qrc-снапшот → legalDocCached() поверх → legalDocFetch() тихо
+// обновляет. Кэш: AppDataLocation/legal/<doc>.<lang>.md. Ошибки сети молчаливые.
+
+static QString legalCacheDir()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+           + QStringLiteral("/legal");
+}
+
+QString AvpnEngineQml::legalDocCached(const QString &doc, const QString &lang) const
+{
+    if (!LegalDocs::isValidDoc(doc) || !LegalDocs::isValidLang(lang))
+        return {};
+    QFile f(legalCacheDir() + QLatin1Char('/') + LegalDocs::cacheFileName(doc, lang));
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    const QByteArray body = f.readAll();
+    return LegalDocs::looksLikeMarkdown(body) ? QString::fromUtf8(body) : QString();
+}
+
+void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)
+{
+    if (!m_nam || !LegalDocs::isValidDoc(doc) || !LegalDocs::isValidLang(lang))
+        return;
+    // без дедупа запросов: страница дёргает fetch один раз на открытие, ответы идемпотентны
+    QNetworkRequest req{QUrl(LegalDocs::url(doc, lang))};
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply); // жёсткий таймаут без nested loop (abort → finished с code==0)
+    connect(reply, &QNetworkReply::finished, this, [this, reply, doc, lang]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code != 200)
+            return; // тихо: остаёмся на кэше/снапшоте
+        const QByteArray body = reply->readAll();
+        if (!LegalDocs::looksLikeMarkdown(body))
+            return; // captive portal / страница ошибки — кэш не портим
+        QDir().mkpath(legalCacheDir());
+        QSaveFile f(legalCacheDir() + QLatin1Char('/') + LegalDocs::cacheFileName(doc, lang));
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(body);
+            f.commit();
+        }
+        emit legalDocReady(doc, lang, QString::fromUtf8(body));
+    });
 }
 
 } // namespace avpn
