@@ -965,6 +965,8 @@ PageType {
                     seatSheet.close()
             }
         }
+        // смена вкладки (replace) с открытой модалкой → деструкция без close(): компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
         // затемнение фона + перехват кликов
         Rectangle {
@@ -1071,8 +1073,26 @@ PageType {
         property string deviceId: ""
         property string deviceLabel: ""
         property bool   isSelf: false
-        function open()  { opened = true }
-        function close() { opened = false }
+        // участие в back-логике (паттерн DrawerType2, фикс ревью 2026-07-07): раньше Back при
+        // открытом диалоге уходил в escapePressed → closePage → hideWindow (сворачивал приложение)
+        property int depthIndex: 0
+        function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        function close() {
+            if (!opened) return
+            opened = false; depthIndex = 0
+            PageController.decrementDrawerDepth()
+        }
+
+        Connections {
+            target: PageController
+            enabled: kickConfirm.opened
+            function onCloseTopDrawer() {
+                if (kickConfirm.depthIndex === PageController.getDrawerDepth() && !root.kicking)
+                    kickConfirm.close()
+            }
+        }
+        // смена вкладки (replace) с открытым диалогом → деструкция без close(): компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
         Rectangle {
             anchors.fill: parent
@@ -1180,6 +1200,9 @@ PageType {
                     transferSheet.close()
             }
         }
+        // смена вкладки (replace) с открытым шитом → деструкция без close(): компенсируем depth,
+        // иначе Back/Escape ломаются во всём приложении
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
         function copyShareUrl() {
             linkText.selectAll(); linkText.copy(); linkText.deselect()
@@ -1389,6 +1412,8 @@ PageType {
                     scanSheet.close()
             }
         }
+        // смена вкладки (replace) с открытым сканером → деструкция без close(): компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
         Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
