@@ -3258,11 +3258,16 @@ void AvpnEngineQml::refreshSubscription()
         if (code < 200 || code >= 300)
             return; // 401/сеть/таймаут → тихо; данные обновятся при следующем connect/bootstrap
         if (m_transferredAway) { m_transferredAway = false; emit changed(); } // подписка снова валидна (новый ключ/энролл)
+        const QByteArray body = reply->readAll();
         Subscription sub;
         QString err;
-        if (!SubscriptionParser::parse(reply->readAll(), sub, err))
+        if (!SubscriptionParser::parse(body, sub, err))
             return; // битый ответ не затирает валидные числа
         m_engine.updateSubscriptionTraffic(sub.trafficUsed, sub.trafficLimit, sub.expiresAt);
+        // AVPN (LKG, HARDENING-BACKLOG H-3): каждый удачный фетч освежает дисковый кэш — после
+        // долгой фоновой жизни холодный старт покажет свежие цифры, а не данные последнего bootstrap.
+        // Тело уже валидно (parse выше); НЕ трогаем m_pool (этот путь обновляет только счётчики).
+        Enrollment::saveLkgSubscription(body);
         emit changed(); // daysLeft/traffic*/subExpired в QML пересчитаются
     });
 }
