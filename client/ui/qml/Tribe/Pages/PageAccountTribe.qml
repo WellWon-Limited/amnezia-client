@@ -51,11 +51,17 @@ PageType {
     readonly property bool manageSubEnabled: true
     property bool cabinetLinking: false   // loading кнопки; сбрасывается в onCabinetLinkReady (приходит всегда)
 
+    // Язык приложения → веб-страницы (ЛК/legal) открываются на нём же (i18n сайта, 2026-07-07).
+    // Биндинг живой: смена языка в настройках перечитывает ссылки (NOTIFY appLangChanged). // AVPN
+    readonly property string webLang: (root.hasEngine && TribeEngine.appLang)
+                                      ? TribeEngine.appLang
+                                      : Qt.locale().name.split("_")[0]
+
     function manageSubscription() {
         if (root.cabinetLinking) return
         if (!(root.hasEngine && typeof TribeEngine.requestCabinetLink === "function")) {
             // dev-превью / стейл-бинарник без движка: кабинет без авто-логина (юзер войдёт сам)
-            Qt.openUrlExternally("https://tribevpn.com/account")
+            Qt.openUrlExternally("https://tribevpn.com/account?lang=" + root.webLang)
             return
         }
         root.cabinetLinking = true
