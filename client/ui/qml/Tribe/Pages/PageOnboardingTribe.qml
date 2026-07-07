@@ -129,7 +129,12 @@ PageType {
             linkColor: Theme.color.accent
             font.family: Theme.font.body; font.pixelSize: Theme.font.caption
             text: qsTr("Мы не логируем трафик и не продаём ваши данные. Нажимая «Приступим», вы принимаете <a href='https://tribevpn.com/legal/terms'>Условия</a> и <a href='https://tribevpn.com/legal/privacy'>Политику конфиденциальности</a>.")
-            onLinkActivated: (link) => Qt.openUrlExternally(link)
+            // язык приложения → legal-страница открывается на нём же (i18n сайта, 2026-07-07) // AVPN
+            onLinkActivated: (link) => {
+                var lang = (typeof TribeEngine !== "undefined" && TribeEngine.appLang)
+                           ? TribeEngine.appLang : Qt.locale().name.split("_")[0]
+                Qt.openUrlExternally(link + "?lang=" + lang)
+            }
         }
 
         Rectangle {
