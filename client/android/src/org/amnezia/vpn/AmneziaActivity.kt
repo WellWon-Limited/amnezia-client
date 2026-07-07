@@ -658,7 +658,11 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Connect to VPN")
         vpnServiceMessenger.send {
             Action.CONNECT.packToMessage {
-                putString(MSG_VPN_CONFIG, vpnConfig)
+                // AVPN: большой конфиг (RU-direct CIDR-сев) — файлом, иначе TransactionTooLargeException
+                if (vpnConfig.length > TribeConfigFile.INLINE_LIMIT)
+                    putString(TribeConfigFile.MSG_VPN_CONFIG_FILE, TribeConfigFile.write(this@AmneziaActivity, vpnConfig))
+                else
+                    putString(MSG_VPN_CONFIG, vpnConfig)
             }
         }
     }
@@ -666,7 +670,11 @@ class AmneziaActivity : QtActivity() {
     private fun startVpnService(vpnConfig: String, proto: VpnProto) {
         Log.d(TAG, "Start VPN service: $proto")
         Intent(this, proto.serviceClass).apply {
-            putExtra(MSG_VPN_CONFIG, vpnConfig)
+            // AVPN: большой конфиг (RU-direct CIDR-сев) — файлом, иначе TransactionTooLargeException
+            if (vpnConfig.length > TribeConfigFile.INLINE_LIMIT)
+                putExtra(TribeConfigFile.MSG_VPN_CONFIG_FILE, TribeConfigFile.write(this@AmneziaActivity, vpnConfig))
+            else
+                putExtra(MSG_VPN_CONFIG, vpnConfig)
         }.also {
             try {
                 ContextCompat.startForegroundService(this, it)

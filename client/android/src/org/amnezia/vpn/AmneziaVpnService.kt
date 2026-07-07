@@ -156,7 +156,11 @@ open class AmneziaVpnService : VpnService() {
                     }
 
                     Action.CONNECT -> {
-                        connect(msg.data.getString(MSG_VPN_CONFIG))
+                        // AVPN: конфиг мог приехать файлом (binder-лимит) — см. TribeConfigFile
+                        connect(
+                            msg.data.getString(MSG_VPN_CONFIG)
+                                ?: TribeConfigFile.read(msg.data.getString(TribeConfigFile.MSG_VPN_CONFIG_FILE))
+                        )
                     }
 
                     Action.DISCONNECT -> {
@@ -227,7 +231,11 @@ open class AmneziaVpnService : VpnService() {
             connect()
         } else {
             Log.d(TAG, "Start service")
-            connect(intent?.getStringExtra(MSG_VPN_CONFIG))
+            // AVPN: конфиг мог приехать файлом (binder-лимит) — см. TribeConfigFile
+            connect(
+                intent?.getStringExtra(MSG_VPN_CONFIG)
+                    ?: TribeConfigFile.read(intent?.getStringExtra(TribeConfigFile.MSG_VPN_CONFIG_FILE))
+            )
         }
         ServiceCompat.startForeground(
             this, NOTIFICATION_ID,
