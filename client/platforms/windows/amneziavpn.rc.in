@@ -3,14 +3,16 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 IDI_ICON1               ICON                    "../../images/app.ico"
 
-#define VER_COMPANYNAME_STR         "AmneziaVPN"
-#define VER_FILEDESCRIPTION_STR     VER_COMPANYNAME_STR
-#define VER_INTERNALNAME_STR        VER_COMPANYNAME_STR
-#define VER_LEGALCOPYRIGHT_STR      "AmneziaVPN."
+// AVPN: продуктовый брендинг Windows-ресурсов (видно в таскбаре/свойствах файла); иконка
+// client/images/app.ico тоже заменена на Tribe (сгенерена из app.icns)
+#define VER_COMPANYNAME_STR         "WellWon Limited"
+#define VER_FILEDESCRIPTION_STR     "Tribe VPN"
+#define VER_INTERNALNAME_STR        "Tribe VPN"
+#define VER_LEGALCOPYRIGHT_STR      "WellWon Limited."
 #define VER_LEGALTRADEMARKS1_STR    "All Rights Reserved"
 #define VER_LEGALTRADEMARKS2_STR    VER_LEGALTRADEMARKS1_STR
-#define VER_ORIGINALFILENAME_STR    "amneziavpn.exe"
-#define VER_PRODUCTNAME_STR         VER_COMPANYNAME_STR
+#define VER_ORIGINALFILENAME_STR    "AmneziaVPN.exe"
+#define VER_PRODUCTNAME_STR         "Tribe VPN"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     @CMAKE_PROJECT_VERSION_MAJOR@,@CMAKE_PROJECT_VERSION_MINOR@,@CMAKE_PROJECT_VERSION_PATCH@,@CMAKE_PROJECT_VERSION_TWEAK@
