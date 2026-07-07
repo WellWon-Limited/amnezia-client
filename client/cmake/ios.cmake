@@ -16,6 +16,8 @@ find_library(FW_STOREKIT StoreKit)
 find_library(FW_USERNOTIFICATIONS UserNotifications)
 find_library(FW_NETWORKEXTENSION NetworkExtension)
 find_library(FW_METRICKIT MetricKit)   # AVPN: авто-диагностика вылетов (AvpnDiagnostics.mm); @import заменён на #import → нужен явный линк
+find_library(FW_PHOTOSUI PhotosUI)     # AVPN (Support): PHPicker фото/видео (TribeMediaPicker.mm); #import не авто-линкует → явный линк
+find_library(FW_UTTYPES UniformTypeIdentifiers) # AVPN (Support): UTType для фильтров пикера (TribeMediaPicker.mm)
 
 set(LIBS ${LIBS}
     ${FW_AUTHENTICATIONSERVICES}
@@ -26,6 +28,8 @@ set(LIBS ${LIBS}
     ${FW_USERNOTIFICATIONS}
     ${FW_NETWORKEXTENSION}
     ${FW_METRICKIT}
+    ${FW_PHOTOSUI}
+    ${FW_UTTYPES}
 )
 
 
