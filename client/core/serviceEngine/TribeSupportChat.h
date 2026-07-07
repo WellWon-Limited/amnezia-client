@@ -111,6 +111,8 @@ private:
 
     QString authToken() const;
     QNetworkReply *authedGet(const QString &path, int timeoutMs);
+    // JSON сообщения бэкенда → QVariantMap модели (заодно ставит превью в очередь).
+    QVariantMap parseMessage(const QJsonObject &m);
     void schedulePoll();
     void rebuildMessages();                  // m_serverMessages + эхо → m_messages (+ emit при изменении)
     void applyThread(const QByteArray &json);
@@ -135,6 +137,13 @@ private:
     bool m_threadLoadedOnce = false;
     bool m_refreshInFlight = false;
     bool m_unreadInFlight = false;
+    // Пока наш POST в полёте, тред НЕ перечитываем: поллинг мог привезти уже
+    // закоммиченную серверную копию при ещё живом эхе → дубль на экране.
+    // Отложенные запросы (поллинг/пуш во время долгого аплоада) копятся во флаг
+    // и выстреливают ОДНИМ refresh() сразу после завершения POST — иначе ответ
+    // оператора был бы невидим до конца 3-минутного видео-аплоада.
+    int m_postsInFlight = 0;
+    bool m_refreshPending = false;
 
     QList<Echo> m_echoes;
     int m_localSeq = 0;

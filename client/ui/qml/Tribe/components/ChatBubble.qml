@@ -49,8 +49,11 @@ Item {
             delegate: Rectangle {
                 id: mediaCard
                 required property var modelData
-                readonly property string previewUrl: modelData.localUrl !== ""
-                                                     ? modelData.localUrl : modelData.thumbUrl
+                // видео-файл в Image.source не годится (декодера нет) — локальное превью
+                // только у фото-эха; у видео до постера сервера остаётся плейсхолдер
+                readonly property string previewUrl: modelData.kind === "image"
+                        ? (modelData.localUrl !== "" ? modelData.localUrl : modelData.thumbUrl)
+                        : modelData.thumbUrl
                 // серверные width/height превью → честный aspect-ratio без прыжков;
                 // нет данных (эхо/постер ещё не готов) → 4:3.
                 readonly property real ratio: (modelData.width > 0 && modelData.height > 0)

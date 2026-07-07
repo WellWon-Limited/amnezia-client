@@ -58,6 +58,7 @@ PageType {
         target: (typeof AvpnPush !== "undefined") ? AvpnPush : null
         ignoreUnknownSignals: true
         function onPushTapped(type) {
+            AvpnPush.takePendingPushTap()   // сигнал обработан — pending-копию гасим
             if (type === "support" && root.avpnNav && !root.onboardingActive)
                 root.goAvpnTab(1)
         }
@@ -116,6 +117,11 @@ PageType {
                     if (!PageController.isStartPageVisible())
                         ServersUiController.setProcessedServerId(ServersUiController.defaultServerId)
                     root.goAvpnTab(0)
+                    // AVPN (Support): cold start ТАПОМ по пушу — сигнал pushTapped ушёл до
+                    // создания QML, тип ждёт в мосте. Забираем после штатного роутинга.
+                    if (typeof AvpnPush !== "undefined"
+                            && AvpnPush.takePendingPushTap() === "support")
+                        root.goAvpnTab(1)
                 }
                 return
             }

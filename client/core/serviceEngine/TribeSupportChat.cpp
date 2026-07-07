@@ -197,6 +197,10 @@ void TribeSupportChat::onSupportPush()
 
 void TribeSupportChat::refresh()
 {
+    if (m_postsInFlight > 0) {
+        m_refreshPending = true; // выстрелит по завершении POST (см. postEcho)
+        return;
+    }
     if (m_refreshInFlight)
         return;
     QNetworkReply *reply = authedGet(QStringLiteral("/v1/support/thread"), kNetTimeoutMs);
@@ -250,6 +254,43 @@ void TribeSupportChat::refreshUnread()
     });
 }
 
+QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
+{
+    QVariantList atts;
+    const QJsonArray aArr = m.value(QStringLiteral("attachments")).toArray();
+    for (const QJsonValue &av : aArr) {
+        const QJsonObject a = av.toObject();
+        const int attId = a.value(QStringLiteral("id")).toInt();
+        const bool hasThumb = a.value(QStringLiteral("has_thumb")).toBool();
+        QVariantMap am;
+        am.insert(QStringLiteral("id"), attId);
+        am.insert(QStringLiteral("kind"), a.value(QStringLiteral("kind")).toString());
+        am.insert(QStringLiteral("mime"), a.value(QStringLiteral("mime")).toString());
+        am.insert(QStringLiteral("name"), a.value(QStringLiteral("name")).toString());
+        am.insert(QStringLiteral("bytes"), qint64(a.value(QStringLiteral("bytes")).toDouble()));
+        am.insert(QStringLiteral("width"), a.value(QStringLiteral("width")).toInt());
+        am.insert(QStringLiteral("height"), a.value(QStringLiteral("height")).toInt());
+        am.insert(QStringLiteral("hasThumb"), hasThumb);
+        am.insert(QStringLiteral("thumbUrl"), QString()); // впрыснет rebuildMessages
+        am.insert(QStringLiteral("localUrl"), QString());
+        atts.append(am);
+        if (hasThumb && !m_thumbCache.contains(attId))
+            queueThumb(attId);
+    }
+
+    QVariantMap mm;
+    mm.insert(QStringLiteral("id"), m.value(QStringLiteral("id")).toInt());
+    mm.insert(QStringLiteral("sender"), m.value(QStringLiteral("sender")).toString());
+    mm.insert(QStringLiteral("body"), m.value(QStringLiteral("body")).toString());
+    mm.insert(QStringLiteral("operatorName"), m.value(QStringLiteral("operator_name")).toString());
+    mm.insert(QStringLiteral("isAuto"), m.value(QStringLiteral("is_auto")).toBool());
+    mm.insert(QStringLiteral("atMs"), parseIsoMs(m.value(QStringLiteral("created_at")).toString()));
+    mm.insert(QStringLiteral("pending"), false);
+    mm.insert(QStringLiteral("failed"), false);
+    mm.insert(QStringLiteral("attachments"), atts);
+    return mm;
+}
+
 void TribeSupportChat::applyThread(const QByteArray &json)
 {
     const QJsonObject root = QJsonDocument::fromJson(json).object();
@@ -257,49 +298,8 @@ void TribeSupportChat::applyThread(const QByteArray &json)
 
     QVariantList msgs;
     const QJsonArray arr = root.value(QStringLiteral("messages")).toArray();
-    QSet<int> serverIds;
-    for (const QJsonValue &v : arr) {
-        const QJsonObject m = v.toObject();
-        const int id = m.value(QStringLiteral("id")).toInt();
-        serverIds.insert(id);
-
-        QVariantList atts;
-        const QJsonArray aArr = m.value(QStringLiteral("attachments")).toArray();
-        for (const QJsonValue &av : aArr) {
-            const QJsonObject a = av.toObject();
-            const int attId = a.value(QStringLiteral("id")).toInt();
-            const bool hasThumb = a.value(QStringLiteral("has_thumb")).toBool();
-            QVariantMap am;
-            am.insert(QStringLiteral("id"), attId);
-            am.insert(QStringLiteral("kind"), a.value(QStringLiteral("kind")).toString());
-            am.insert(QStringLiteral("mime"), a.value(QStringLiteral("mime")).toString());
-            am.insert(QStringLiteral("name"), a.value(QStringLiteral("name")).toString());
-            am.insert(QStringLiteral("bytes"),
-                      qint64(a.value(QStringLiteral("bytes")).toDouble()));
-            am.insert(QStringLiteral("width"), a.value(QStringLiteral("width")).toInt());
-            am.insert(QStringLiteral("height"), a.value(QStringLiteral("height")).toInt());
-            am.insert(QStringLiteral("hasThumb"), hasThumb);
-            am.insert(QStringLiteral("thumbUrl"), QString()); // впрыснет rebuildMessages
-            am.insert(QStringLiteral("localUrl"), QString());
-            atts.append(am);
-            if (hasThumb && !m_thumbCache.contains(attId))
-                queueThumb(attId);
-        }
-
-        QVariantMap mm;
-        mm.insert(QStringLiteral("id"), id);
-        mm.insert(QStringLiteral("sender"), m.value(QStringLiteral("sender")).toString());
-        mm.insert(QStringLiteral("body"), m.value(QStringLiteral("body")).toString());
-        mm.insert(QStringLiteral("operatorName"),
-                  m.value(QStringLiteral("operator_name")).toString());
-        mm.insert(QStringLiteral("isAuto"), m.value(QStringLiteral("is_auto")).toBool());
-        mm.insert(QStringLiteral("atMs"),
-                  parseIsoMs(m.value(QStringLiteral("created_at")).toString()));
-        mm.insert(QStringLiteral("pending"), false);
-        mm.insert(QStringLiteral("failed"), false);
-        mm.insert(QStringLiteral("attachments"), atts);
-        msgs.append(mm);
-    }
+    for (const QJsonValue &v : arr)
+        msgs.append(parseMessage(v.toObject()));
     m_serverMessages = msgs;
 
     // Эхо, чей POST успел завершиться и чьё сообщение уже приехало с сервера,
@@ -424,9 +424,13 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
         QImageReader reader(fi.absoluteFilePath());
         reader.setAutoTransform(true);
         QImage img = reader.read();
+        // HEIC/HEIF перекодируем ВСЕГДА (Chrome оператора их не показывает; на Apple
+        // Qt декодирует нативно через ImageIO, на прочих платформах img.isNull() →
+        // ветка «как есть» ниже).
         const bool needShrink = fi.size() > kImageShrinkThresholdBytes
             || img.width() > kImageMaxDimension || img.height() > kImageMaxDimension
-            || !isAllowedImageMime(mime);
+            || !isAllowedImageMime(mime) || mime == QLatin1String("image/heic")
+            || mime == QLatin1String("image/heif");
         if (!img.isNull() && needShrink) {
             if (img.width() > kImageMaxDimension || img.height() > kImageMaxDimension)
                 img = img.scaled(kImageMaxDimension, kImageMaxDimension, Qt::KeepAspectRatio,
@@ -517,8 +521,10 @@ void TribeSupportChat::postEcho(Echo &echo)
         armTimeout(reply, kMediaTimeoutMs);
     }
 
+    ++m_postsInFlight;
     connect(reply, &QNetworkReply::finished, this, [this, reply, localId]() {
         reply->deleteLater();
+        m_postsInFlight = qMax(0, m_postsInFlight - 1);
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         if (code >= 200 && code < 300) {
@@ -529,10 +535,22 @@ void TribeSupportChat::postEcho(Echo &echo)
                     break;
                 }
             }
-            // Дешёвле и надёжнее перечитать тред целиком (заодно подтянет автоответ
-            // и постер видео, когда догонит постпроцесс).
-            refresh();
+            // Кладём серверную копию в историю СРАЗУ (иначе сообщение мигает:
+            // эхо уже снято, а поллинг ещё не привёз строку) и перечитываем тред
+            // (подтянет автоответ и постер видео после постпроцесса).
+            const QJsonObject saved = QJsonDocument::fromJson(reply->readAll()).object();
+            const int savedId = saved.value(QStringLiteral("id")).toInt();
+            bool known = false;
+            for (const auto &mv : m_serverMessages) {
+                if (mv.toMap().value(QStringLiteral("id")).toInt() == savedId) {
+                    known = true;
+                    break;
+                }
+            }
+            if (savedId > 0 && !known)
+                m_serverMessages.append(parseMessage(saved));
             rebuildMessages();
+            m_refreshPending = true; // подтянуть автоответ/постер (уйдёт в хвосте ниже)
         } else {
             if (Echo *e = echoByLocalId(localId)) {
                 e->pending = false;
@@ -540,6 +558,12 @@ void TribeSupportChat::postEcho(Echo &echo)
             }
             rebuildMessages();
             emit sendFailed(humanSendError(code, netErr));
+        }
+        // Отложенные во время POST'ов запросы (поллинг/пуш) — одним refresh(),
+        // когда последний POST завершился (любой исход).
+        if (m_postsInFlight == 0 && m_refreshPending) {
+            m_refreshPending = false;
+            refresh();
         }
     });
 }

@@ -76,7 +76,7 @@ Item {
                                 text: nav.supportBadge > 9 ? "9+" : String(nav.supportBadge)
                                 color: Theme.color.text1
                                 font.family: Theme.font.body
-                                font.pixelSize: 9
+                                font.pixelSize: 10   // как бейдж колокола (PageConnectTribe)
                                 font.weight: Theme.font.wBold
                             }
                         }

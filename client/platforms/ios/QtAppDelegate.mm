@@ -38,6 +38,19 @@ extern "C" void Avpn_consumeIntentFlags(void);
     if (launchUrl && !launchUrl.fileURL)
         AvpnDeepLink_handleUrl(launchUrl.absoluteString.UTF8String);
 
+    // AVPN (Support): холодный старт ТАПОМ по пушу — didReceiveRemoteNotification в этом
+    // случае не приходит, payload лежит в launchOptions. Прокидываем как «тап»: мост
+    // запомнит pending-тип (queued-invoke доедет после старта Qt-петли), QML заберёт
+    // через AvpnPush.takePendingPushTap() в onGoToPageHome.
+    NSDictionary *remote = launchOptions[UIApplicationLaunchOptionsRemoteNotificationKey];
+    if ([remote isKindOfClass:NSDictionary.class]) {
+        NSData *rjson = [NSJSONSerialization dataWithJSONObject:remote options:0 error:nil];
+        if (rjson) {
+            NSString *rstr = [[NSString alloc] initWithData:rjson encoding:NSUTF8StringEncoding];
+            AvpnPush_onRemoteNotificationTapped(rstr.UTF8String);
+        }
+    }
+
     return YES;
 }
 
