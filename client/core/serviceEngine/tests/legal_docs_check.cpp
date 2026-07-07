@@ -21,13 +21,16 @@ int main()
     CHECK(!LegalDocs::isValidDoc(QStringLiteral("../etc/passwd")));
     CHECK(LegalDocs::isValidLang(QStringLiteral("ru")));
     CHECK(LegalDocs::isValidLang(QStringLiteral("en")));
-    CHECK(!LegalDocs::isValidLang(QStringLiteral("es"))); // на сайте пока нет es.md — мапится в en до появления
+    CHECK(LegalDocs::isValidLang(QStringLiteral("es"))); // es live с волны i18n сайта 2026-07-07
     CHECK(!LegalDocs::isValidLang(QStringLiteral("")));
+    CHECK(!LegalDocs::isValidLang(QStringLiteral("de")));
 
     // нормализация локали приложения → язык документа
     CHECK(LegalDocs::normalizeLang(QStringLiteral("ru")) == QStringLiteral("ru"));
     CHECK(LegalDocs::normalizeLang(QStringLiteral("ru_RU")) == QStringLiteral("ru"));
-    CHECK(LegalDocs::normalizeLang(QStringLiteral("es")) == QStringLiteral("en"));
+    CHECK(LegalDocs::normalizeLang(QStringLiteral("es")) == QStringLiteral("es"));
+    CHECK(LegalDocs::normalizeLang(QStringLiteral("es_MX")) == QStringLiteral("es"));
+    CHECK(LegalDocs::normalizeLang(QStringLiteral("de")) == QStringLiteral("en"));
     CHECK(LegalDocs::normalizeLang(QStringLiteral("")) == QStringLiteral("en"));
 
     // URL документа
