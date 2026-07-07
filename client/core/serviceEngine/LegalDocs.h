@@ -21,8 +21,9 @@ inline bool isValidDoc(const QString &doc)
 
 inline bool isValidLang(const QString &lang)
 {
-    // es появится, когда es-блоки доедут до сайта; до тех пор normalizeLang мапит его в en
-    return lang == QLatin1String("ru") || lang == QLatin1String("en");
+    // ru/en/es — языки правового центра сайта (es live с волны i18n 2026-07-07, PR #218 бэка)
+    return lang == QLatin1String("ru") || lang == QLatin1String("en")
+           || lang == QLatin1String("es");
 }
 
 // Локаль приложения ("ru", "ru_RU", "es", …) → язык документа.

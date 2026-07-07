@@ -31,6 +31,15 @@ PageType {
     Settings { id: avpnOnboard; category: "AvpnOnboarding"; property bool done: false }
     property bool onboardingActive: false
 
+    // AVPN: страница ОДНОЙ из наших вкладок (или онбординг) — в отличие от overlay-страниц
+    // (Legal/Admin/Notifications/Locations), системный «назад» на них ведёт себя по-старому.
+    function isAvpnTabPage(pageName) {
+        var s = pageName.toString()
+        return s.indexOf("PageConnectTribe.qml") !== -1 || s.indexOf("PageSupportTribe.qml") !== -1
+            || s.indexOf("PageReferralTribe.qml") !== -1 || s.indexOf("PageAccountTribe.qml") !== -1
+            || s.indexOf("PageOnboardingTribe.qml") !== -1
+    }
+
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
         avpnBottomNav.currentIndex = index
@@ -183,6 +192,18 @@ PageType {
             }
 
             var pageName = tabBarStackView.currentItem.objectName
+            // AVPN: системный «назад» (Android Back / Escape) на наших OVERLAY-страницах
+            // (Legal/Admin/Notifications/Locations — открыты через replace, depth=1) раньше
+            // проваливался в closePage() → hideWindow(): Android сворачивал ВСЁ приложение.
+            // Возвращаем страницу текущей вкладки (индекс bottom-nav при открытии overlay
+            // не меняется): Legal/Admin → Настройки, Уведомления → Connect. Вкладочные
+            // страницы и онбординг — прежнее поведение (свернуть приложение — норма Android).
+            if (root.avpnNav && !root.onboardingActive
+                    && pageName.toString().indexOf("/Tribe/Pages/") !== -1
+                    && !root.isAvpnTabPage(pageName)) {
+                root.goAvpnTab(avpnBottomNav.currentIndex)
+                return
+            }
             if ((pageName === PageController.getPagePath(PageEnum.PageShare)) ||
                     (pageName === PageController.getPagePath(PageEnum.PageSettings)) ||
                     (pageName === PageController.getPagePath(PageEnum.PageSetupWizardConfigSource))) {

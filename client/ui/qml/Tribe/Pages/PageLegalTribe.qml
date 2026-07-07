@@ -28,13 +28,13 @@ PageType {
 
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
-    // язык документа: язык приложения (или локаль), нормализованный в ru/en
-    // (es.md на сайте пока нет — испанская локаль читает en, как LegalDocs::normalizeLang)
+    // язык документа: язык приложения (или локаль), нормализованный в ru/en/es
+    // (зеркалит LegalDocs::normalizeLang; прочие локали → en)
     readonly property string lang: {
         var l = (root.hasEngine && TribeEngine.appLang) ? TribeEngine.appLang
                                                         : Qt.locale().name
         l = l.substring(0, 2).toLowerCase()
-        return (l === "ru") ? "ru" : "en"
+        return (l === "ru" || l === "es") ? l : "en"
     }
     readonly property string title: docKey === "terms" ? qsTr("Условия использования")
                                                        : qsTr("Политика конфиденциальности")

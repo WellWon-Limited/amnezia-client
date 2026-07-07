@@ -108,8 +108,10 @@
              scripts/build_legal_md.py; свежий текст приложение качает с tribevpn.com/legal/*.md) -->
         <file>Tribe/legal/privacy.ru.md</file>
         <file>Tribe/legal/privacy.en.md</file>
+        <file>Tribe/legal/privacy.es.md</file>
         <file>Tribe/legal/terms.ru.md</file>
         <file>Tribe/legal/terms.en.md</file>
+        <file>Tribe/legal/terms.es.md</file>
         <file>Pages2/PageProtocolAwgSettings.qml</file>
         <file>Pages2/PageProtocolOpenVpnSettings.qml</file>
         <file>Pages2/PageProtocolRaw.qml</file>
