@@ -19,6 +19,13 @@ namespace avpn {
 void Enrollment::saveToken(const QString &token)
 {
     SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    // AVPN (LKG, фикс ревью 2026-07-07): кэш подписки привязан к токену. Ротация на ДРУГОЙ токен
+    // (redeemCode/redeemTransfer — смена аккаунта) инвалидирует LKG здесь, централизованно: если
+    // ре-фетч сразу после активации сорвётся (сеть/kill), холодный старт НЕ покажет пул/лимиты
+    // ЧУЖОГО (старого) аккаунта. Первый enroll (стор пуст) и ре-энролл (clearToken уже вычистил)
+    // проходят без лишней записи.
+    if (s.value(kTokenKey).toString() != token)
+        s.setValue(kLkgSubscriptionKey, QByteArray());
     s.setValue(kTokenKey, token);
     // AVPN (анти-фрод): каждая ротация токена (enroll/redeem/transfer) освежает Keychain-якорь —
     // иначе после переустановки восстановился бы отозванный токен (self-heal спас бы, но лишний раунд).

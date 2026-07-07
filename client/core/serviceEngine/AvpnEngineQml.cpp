@@ -2633,12 +2633,23 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
         emit error(QStringLiteral("Пустая ссылка переноса"));
         return;
     }
+    // Дедуп: iOS-сканер может отдать один QR несколько раз подряд (эмит на каждый кадр), плюс
+    // возможен дубль скана/ссылки руками. Повторный redeem УЖЕ принятого токена дал бы 401 →
+    // тост «Ссылка недействительна» ПОВЕРХ экрана успеха. Токен одноразовый — второй заход глушим.
+    if (!m_lastRedeemedToken.isEmpty() && trimmed == m_lastRedeemedToken)
+        return;
     if (m_busy) {
         // Холодный старт по диплинку: движок ещё занят bootstrap'ом. Раньше токен МОЛЧА терялся
         // («приложение открылось, а подписка не поменялась») — откладываем и ретраим до ~15 с.
+        if (m_pendingRedeemToken == trimmed)
+            return; // ретрай этого токена уже запланирован — второй таймер не плодим
         if (m_pendingRedeemAttempts < 20) {
             ++m_pendingRedeemAttempts;
-            QTimer::singleShot(750, this, [this, trimmed]() { redeemTransfer(trimmed); });
+            m_pendingRedeemToken = trimmed;
+            QTimer::singleShot(750, this, [this, trimmed]() {
+                m_pendingRedeemToken.clear();
+                redeemTransfer(trimmed);
+            });
         } else {
             m_pendingRedeemAttempts = 0;
             emit error(QStringLiteral("Не удалось принять перенос — откройте ссылку ещё раз"));
@@ -2660,6 +2671,7 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 
     switch (res) {
     case avpn::TransferRedeemResult::Ok:
+        m_lastRedeemedToken = trimmed; // дедуп повторных сканов того же QR (см. вход)
         // РОТАЦИЯ токена уже сделана внутри Enrollment::redeemTransfer (saveToken). Перечитываем
         // подписку под НОВЫМ токеном напрямую через движок (QML-фасадный bootstrap() идемпотентен).
         m_engine.bootstrap(m_nam, m_baseUrl, m_store, err);
@@ -2686,8 +2698,8 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 }
 
 // AVPN (Task 13): выпустить перенос с ЭТОГО устройства (POST /v1/transfer, Bearer authToken).
-// 401 лечим как fetchSubscription (decideAuthRecovery): clearToken + один ре-энролл + ретрай —
-// раньше стейл-JWT давал сырую ошибку «transfer unauthorized (token)» до перезапуска приложения.
+// 401 лечим как fetchSubscription (decideAuthRecovery): один ре-энролл + ретрай — раньше
+// стейл-JWT давал сырую ошибку «transfer unauthorized (token)» до перезапуска приложения.
 // 410 (после переноса) — законное терминальное состояние: взводим transferredAway, не ошибку.
 QVariantMap AvpnEngineQml::createTransfer()
 {
@@ -2706,7 +2718,9 @@ QVariantMap AvpnEngineQml::createTransfer()
     if (!ok
         && Enrollment::decideAuthRecovery(outcome, /*tokenFromStore*/ true, /*alreadyReEnrolled*/ false)
                    == avpn::AuthRecoveryAction::ReEnrollThenRetry) {
-        Enrollment::clearToken();
+        // БЕЗ clearToken: enroll при успехе сам перезапишет токен (saveToken), а при провале
+        // (сеть/429) старый токен обязан ОСТАТЬСЯ — иначе после рестарта устройство в лимбе
+        // (пустой токен → refreshSubscription молчит → даже 410 «перенесено» не доедет до UI).
         avpn::TrialResponse trial;
         QString enrollErr;
         avpn::FetchOutcome enrollOutcome = avpn::FetchOutcome::NetworkError;
@@ -3432,7 +3446,13 @@ void AvpnEngineQml::resetTrialDev()
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code >= 200 && code < 300) {
             refreshAccount(); // обновить property account (дни/трафик)
-            bootstrap();      // перечитать подписку
+            // AVPN (фикс ревью 2026-07-07): фасадный bootstrap() идемпотентен (m_bootstrapped
+            // после первого успеха) — прямой вызов был вечным no-op, бейдж после сброса не
+            // обновлялся. Принудительно перезапускаем async-цепочку под новым состоянием бэка.
+            m_bootstrapped = false;
+            m_bootstrapInFlight = false;
+            m_bootstrapRetryTimer.stop();
+            bootstrap();      // перечитать подписку (async-цепочка)
             emit changed();
         } else if (code == 404) {
             emit error(QStringLiteral("Сброс триала выключен на сервере"));
