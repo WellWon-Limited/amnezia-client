@@ -63,6 +63,15 @@ WindowsRouteMonitor::WindowsRouteMonitor(quint64 luid, QObject* parent)
   MZ_COUNT_CTOR(WindowsRouteMonitor);
   logger.debug() << "WindowsRouteMonitor created.";
 
+  // AVPN win-fix: коалесцирование шторма нотификаций (см. комментарий в .h)
+  m_routeChangeDebounce.setSingleShot(true);
+  m_routeChangeDebounce.setInterval(300);
+  connect(&m_routeChangeDebounce, &QTimer::timeout, this,
+          &WindowsRouteMonitor::routeChangedNow);
+
+  // AVPN win-fix: убрать маршруты-сироты прошлой сессии ДО начала работы (см. метод)
+  purgeOrphanExclusionRoutes();
+
   NotifyRouteChange2(AF_INET, routeChangeCallback, this, FALSE, &m_routeHandle);
 }
 
@@ -409,7 +418,6 @@ bool WindowsRouteMonitor::addExclusionRoute(const IPAddress& prefix) {
   data->Immortal = false;
   data->Age = 0;
 
-  PMIB_IPFORWARD_TABLE2 table;
   int family;
   if (prefix.address().protocol() == QAbstractSocket::IPv6Protocol) {
     family = AF_INET6;
@@ -417,6 +425,15 @@ bool WindowsRouteMonitor::addExclusionRoute(const IPAddress& prefix) {
     family = AF_INET;
   }
 
+  // AVPN win-fix: в bulk-окне переиспользуем кэш таблицы/метрик (см. beginBulkExclusion) и НЕ
+  // пересчитываем captured-routes на каждый маршрут — иначе O(N²)/O(N³) на 8.6k префиксов.
+  if (m_bulkExclusion && m_bulkTable) {
+    updateExclusionRoute(data, m_bulkTable);
+    m_exclusionRoutes[prefix] = data;
+    return true;
+  }
+
+  PMIB_IPFORWARD_TABLE2 table;
   DWORD result = GetIpForwardTable2(family, &table);
   if (result != NO_ERROR) {
     logger.error() << "Failed to fetch routing table:" << result;
@@ -430,6 +447,68 @@ bool WindowsRouteMonitor::addExclusionRoute(const IPAddress& prefix) {
 
   m_exclusionRoutes[prefix] = data;
   return true;
+}
+
+// AVPN win-fix (2026-07-07): открыть bulk-окно — таблица маршрутов и метрики берутся ОДИН раз.
+// Физические маршруты (по которым ищется nexthop для исключения) во время посева не меняются, а
+// свои exclusion-маршруты updateExclusionRoute и так игнорит по сигнатуре Protocol+Metric — поэтому
+// кэш валиден на весь посев. captured-routes пересчитываем один раз в endBulkExclusion.
+void WindowsRouteMonitor::beginBulkExclusion() {
+  if (m_bulkExclusion)
+    return;
+  PMIB_IPFORWARD_TABLE2 table = nullptr;
+  DWORD result = GetIpForwardTable2(AF_UNSPEC, &table);
+  if (result != NO_ERROR) {
+    logger.error() << "beginBulkExclusion: failed to fetch routing table:" << result;
+    return;
+  }
+  updateInterfaceMetrics(AF_UNSPEC);
+  m_bulkTable = table;
+  m_bulkExclusion = true;
+  logger.debug() << "beginBulkExclusion: cached routing table for bulk seeding";
+}
+
+// AVPN win-fix: закрыть bulk-окно — освободить кэш и сделать ОДИН пересчёт captured-routes.
+void WindowsRouteMonitor::endBulkExclusion() {
+  if (!m_bulkExclusion)
+    return;
+  if (m_bulkTable) {
+    FreeMibTable(reinterpret_cast<PMIB_IPFORWARD_TABLE2>(m_bulkTable));
+    m_bulkTable = nullptr;
+  }
+  m_bulkExclusion = false;
+
+  PMIB_IPFORWARD_TABLE2 table = nullptr;
+  if (GetIpForwardTable2(AF_UNSPEC, &table) == NO_ERROR) {
+    updateCapturedRoutes(AF_UNSPEC, table);
+    FreeMibTable(table);
+  }
+  logger.debug() << "endBulkExclusion: seeded" << m_exclusionRoutes.size()
+                 << "exclusion routes";
+}
+
+// AVPN win-fix (2026-07-07): удалить exclusion-маршруты-сироты, оставшиеся в системной таблице от
+// прошлой (крашнутой/убитой) сессии демона. Опознаём по нашей сигнатуре Protocol==NETMGMT &&
+// Metric==EXCLUSION_ROUTE_METRIC (0x5e72) — обычные системные маршруты её не имеют. Без этого
+// ~8.6k RU-direct маршрутов переживали демон и убивали все последующие коннекты (инцидент).
+void WindowsRouteMonitor::purgeOrphanExclusionRoutes() {
+  PMIB_IPFORWARD_TABLE2 table = nullptr;
+  if (GetIpForwardTable2(AF_UNSPEC, &table) != NO_ERROR || !table) {
+    return;
+  }
+  int removed = 0;
+  for (ULONG i = 0; i < table->NumEntries; i++) {
+    MIB_IPFORWARD_ROW2* row = &table->Table[i];
+    if (row->Protocol == MIB_IPPROTO_NETMGMT &&
+        row->Metric == EXCLUSION_ROUTE_METRIC) {
+      if (DeleteIpForwardEntry2(row) == NO_ERROR)
+        ++removed;
+    }
+  }
+  FreeMibTable(table);
+  if (removed > 0)
+    logger.warning() << "purgeOrphanExclusionRoutes: removed" << removed
+                     << "orphaned exclusion routes from a previous session";
 }
 
 bool WindowsRouteMonitor::deleteExclusionRoute(const IPAddress& prefix) {
@@ -481,6 +560,11 @@ void WindowsRouteMonitor::setDetaultRouteCapture(bool enable) {
 }
 
 void WindowsRouteMonitor::routeChanged() {
+  // AVPN win-fix: не пересчитываем на каждую нотификацию — только один раз после затишья 300мс
+  m_routeChangeDebounce.start();
+}
+
+void WindowsRouteMonitor::routeChangedNow() {
   logger.debug() << "Routes changed";
 
   PMIB_IPFORWARD_TABLE2 table;

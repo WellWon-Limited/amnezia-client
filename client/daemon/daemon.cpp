@@ -135,9 +135,13 @@ bool Daemon::activate(const InterfaceConfig& config) {
   }
 
   // Configure routing for excluded addresses.
+  // AVPN win-fix: bulk-окно — на Windows схлопывает O(N²) пересчёт таблицы (RU-direct ~8.6k
+  // префиксов = «бесконечный коннект»); на прочих платформах begin/end — no-op, поведение как было.
+  wgutils()->beginBulkExclusion();
   for (const QString& i : config.m_excludedAddresses) {
     addExclusionRoute(IPAddress(i));
   }
+  wgutils()->endBulkExclusion();
 
   // Add the peer to this interface.
   if (!wgutils()->updatePeer(config)) {
@@ -536,9 +540,12 @@ bool Daemon::switchServer(const InterfaceConfig& config) {
       m_connections.value(config.m_hopType).m_config;
 
   // Configure routing for new excluded addresses.
+  // AVPN win-fix: bulk-окно (см. activate) — Windows-only оптимизация, на прочих no-op.
+  wgutils()->beginBulkExclusion();
   for (const QString& i : config.m_excludedAddresses) {
     addExclusionRoute(IPAddress(i));
   }
+  wgutils()->endBulkExclusion();
 
   // Activate the new peer and its routes.
   if (!wgutils()->updatePeer(config)) {

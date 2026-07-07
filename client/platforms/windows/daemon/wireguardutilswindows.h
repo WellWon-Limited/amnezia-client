@@ -44,6 +44,10 @@ class WireguardUtilsWindows final : public WireguardUtils {
   bool addExclusionRoute(const IPAddress& prefix) override;
   bool deleteExclusionRoute(const IPAddress& prefix) override;
 
+  // AVPN win-fix (2026-07-07): bulk-окно вокруг массового посева exclusion-маршрутов (RU-direct)
+  void beginBulkExclusion() override;
+  void endBulkExclusion() override;
+
   bool WireguardUtilsWindows::excludeLocalNetworks(const QList<IPAddress>& addresses) override;
 
  signals:
