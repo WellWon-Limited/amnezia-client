@@ -1179,7 +1179,7 @@ PageType {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 Text {
-                    text: qsTr("На новом устройстве: установите Tribe → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.")
+                    text: qsTr("На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
