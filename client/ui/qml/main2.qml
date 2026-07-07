@@ -69,9 +69,10 @@ Window  {
     // AVPN (macOS): окно со скруглением 24 — frameless + прозрачный фон, углы режет OpacityMask
     // на appContent. Перемещение окна — DragHandler (startSystemMove) за любую пустую область.
     readonly property bool roundedMac: Qt.platform.os === "osx" && GC.isDesktop()
-    // AVPN: верхняя полоса с версией — ТОЛЬКО десктоп (macOS + Windows); на мобилках её нет.
-    // На Windows окно остаётся с системной рамкой/кнопками — показываем только версию.
-    readonly property bool desktopBar: roundedMac || (Qt.platform.os === "windows" && GC.isDesktop())
+    // AVPN: верхняя полоса — ТОЛЬКО macOS (frameless: светофоры + версия). На Windows полосы НЕТ
+    // (решение 2026-07-07): системная рамка уже даёт заголовок/кнопки, версия видна в свойствах exe
+    // и в «Приложениях» Windows — 40px пустой полосы ради пилюли версии не окупались.
+    readonly property bool desktopBar: roundedMac
     // AVPN: с Qt 6.9 окно на iOS НЕ заходит под статус-бар/home-индикатор без этого флага —
     // без него фон обрезан сверху и снизу. Отступы контента — SafeArea.margins в страницах.
     flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint)
