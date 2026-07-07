@@ -18,6 +18,7 @@
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
+#include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -416,6 +417,39 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (QQuickItem::setFocus). 1200мс гарантируют, что окно показано и loop простаивает (как при
     // пользовательском start()). Идемпотентно (m_bootstrapped). // AVPN
     QTimer::singleShot(1200, this, &AvpnEngineQml::bootstrap);
+
+    // AVPN (LKG, C-7): мгновенный бейдж/пул из последнего удачного ответа /v1/subscription —
+    // холодный старт не мигает «∞» и список серверов не пустой, пока сетевой bootstrap в пути.
+    // Чистый парс без сети/QEventLoop — из конструктора безопасно. Источник правды — сервер:
+    // успешный фетч перезапишет данные (loadSubscription снимет lkgStale). emit не нужен —
+    // QML-биндинги читают Q_PROPERTY при первом создании, т.е. уже ПОСЛЕ этой строки.
+    {
+        const QByteArray lkg = Enrollment::loadLkgSubscription();
+        QString lkgErr;
+        if (!lkg.isEmpty() && !m_engine.loadSubscriptionFromLkg(lkg, lkgErr))
+            qWarning() << "avpn: lkg subscription cache unusable:" << lkgErr; // не фатально: bootstrap догрузит
+    }
+
+    // AVPN (фикс «на сотовой ∞ навсегда»): единый member-таймер ретрая bootstrap (вместо
+    // одноразовых singleShot) — kickBootstrap() может его поджать при появлении сети/foreground.
+    m_bootstrapRetryTimer.setSingleShot(true);
+    connect(&m_bootstrapRetryTimer, &QTimer::timeout, this, &AvpnEngineQml::tryBootstrapSubscription);
+
+    // AVPN (фикс «на сотовой ∞ навсегда»): появление сети / смена Wi-Fi↔сотовая → поджать ретрай.
+    // ТОЛЬКО ускоряет фетч подписки, когда она ещё не загружена (kickBootstrap — no-op после
+    // успеха); туннель/коннект/выбор ноды НЕ трогает — хождение между роутерами с поднятым VPN
+    // сюда не попадает. loadDefaultBackend идемпотентен (второй вызов в benchExtra — ок).
+    if (QNetworkInformation::loadDefaultBackend()) {
+        if (auto *ni = QNetworkInformation::instance()) {
+            connect(ni, &QNetworkInformation::reachabilityChanged, this,
+                    [this](QNetworkInformation::Reachability r) {
+                        if (r == QNetworkInformation::Reachability::Online)
+                            kickBootstrap();
+                    });
+            connect(ni, &QNetworkInformation::transportMediumChanged, this,
+                    [this](QNetworkInformation::TransportMedium) { kickBootstrap(); });
+        }
+    }
 }
 
 QString AvpnEngineQml::state() const
@@ -2069,9 +2103,11 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
 // AVPN: тихий фетч подписки на холодном старте С САМОВОССТАНОВЛЕНИЕМ. Корень бага «после обновления нет
 // нод»: одиночный фетч на первом запуске падал транзиентно (сеть/DNS/TLS/NE ещё не прогреты сразу после
 // апдейта) → пул пустой до ручного перезапуска ( retry отсутствовал; 401-самохил в ensureSubscription
-// сетевые сбои не покрывает). Решение: переарм с бэкоффом 2/4/8/16/30с (кап 5 попыток ≈ 60с покрытия),
-// тихо (без error()). Успех → m_bootstrapped=true (дедуп), пул наполнен, RTT-проба. Исчерпали → отпускаем
-// m_bootstrapInFlight, чтобы следующий заход/Connect мог попробовать заново.
+// сетевые сбои не покрывает). Решение: переарм с бэкоффом 2/4/8/16/30с, затем ВЕЧНЫЙ медленный цикл 60с
+// (BootstrapRetry.h), тихо (без error()). Раньше после 5 попыток сдавались навсегда — на сотовой с
+// холодным радио первое 60с-окно проваливалось целиком и «∞»/пустой пул жили до перезапуска приложения.
+// Ускорение извне — kickBootstrap() (появление сети/foreground) поджимает m_bootstrapRetryTimer.
+// Успех → m_bootstrapped=true (дедуп), пул наполнен, RTT-проба.
 void AvpnEngineQml::tryBootstrapSubscription()
 {
     QString err;
@@ -2079,21 +2115,36 @@ void AvpnEngineQml::tryBootstrapSubscription()
         m_bootstrapped = true;
         m_bootstrapInFlight = false;
         m_bootstrapRetries = 0;
+        m_bootstrapRetryTimer.stop();
         emit changed(); // подписка наполнена → Q_PROPERTY (daysLeft/traffic*/subActive/nodePool) обновятся
         probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
                         // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
         return;
     }
-    // Провал — тихо. Переарм с бэкоффом, пока не исчерпаем кап.
-    static constexpr int kBootstrapBackoffMs[] = {2000, 4000, 8000, 16000, 30000};
-    static constexpr int kBootstrapMaxRetries = 5;
-    if (m_bootstrapRetries >= kBootstrapMaxRetries) {
-        m_bootstrapInFlight = false; // сдались тихо; следующий заход/ручной Connect попробует снова
+    // Провал — тихо. Переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
+    m_bootstrapRetryTimer.start(nextBootstrapDelayMs(m_bootstrapRetries));
+    ++m_bootstrapRetries;
+}
+
+// AVPN (фикс «на сотовой ∞ навсегда»): поджать ретрай bootstrap — сеть появилась/сменилась или
+// приложение вышло из фона. СТРОГО про фетч подписки: после успешного bootstrap это no-op, туннель/
+// коннект/выбор ноды не трогает (безопасно звать сколь угодно часто). Фетч НЕ запускаем синхронно
+// из сигнала: сетевые транзишены/резюм — худший момент для вложенного QEventLoop на главном потоке
+// (iOS watchdog, см. NetAwait.h) + сети нужно время устаканиться. Вместо этого взводим таймер.
+void AvpnEngineQml::kickBootstrap()
+{
+    static constexpr int kKickDelayMs = 1200; // как стартовый дефер bootstrap: окно показано, сеть осела
+    if (m_bootstrapped)
+        return;
+    if (!m_bootstrapInFlight) {
+        // Цепочка ещё не стартовала (ранний сигнал до дефер-вызова из конструктора) — bootstrap()
+        // сам идемпотентен, лишний вызов схлопнется.
+        QTimer::singleShot(kKickDelayMs, this, &AvpnEngineQml::bootstrap);
         return;
     }
-    const int delayMs = kBootstrapBackoffMs[m_bootstrapRetries];
-    ++m_bootstrapRetries;
-    QTimer::singleShot(delayMs, this, &AvpnEngineQml::tryBootstrapSubscription);
+    // Ретрай спит (до 60с в медленном цикле) — поджать. Если сработает раньше kKickDelayMs сам, не трогаем.
+    if (m_bootstrapRetryTimer.isActive() && m_bootstrapRetryTimer.remainingTime() > kKickDelayMs)
+        m_bootstrapRetryTimer.start(kKickDelayMs);
 }
 
 void AvpnEngineQml::start()
@@ -3073,13 +3124,21 @@ void AvpnEngineQml::refreshReferral()
 void AvpnEngineQml::requestCabinetLink(const QString &intent)
 {
     // intent → query-параметр (реш. 2026-07-03): "renew" (золотая CTA) — кабинет сразу выдвигает шит
-    // тарифов; пусто («Управлять подпиской») — чистый ЛК. Дописываем к ЛЮБОМУ исходу (и к fallback).
-    const auto withIntent = [&intent](const QString &url) {
-        if (intent.isEmpty())
-            return url;
-        const QString sep = url.contains(QLatin1Char('?')) ? QStringLiteral("&") : QStringLiteral("?");
-        return url + sep + QStringLiteral("intent=")
-               + QString::fromLatin1(QUrl::toPercentEncoding(intent));
+    // тарифов; пусто («Управлять подпиской») — чистый ЛК. lang = язык приложения → кабинет открывается
+    // на нём же (i18n ЛК, 2026-07-07). Дописываем к ЛЮБОМУ исходу (и к fallback). Захват по значению:
+    // лямбда живёт дольше вызова (async-коллбэк ниже).
+    const QString lang = appLang();
+    const auto withIntent = [intent, lang](const QString &url) {
+        QString out = url;
+        const auto add = [&out](const QString &kv) {
+            out += (out.contains(QLatin1Char('?')) ? QLatin1Char('&') : QLatin1Char('?'));
+            out += kv;
+        };
+        if (!intent.isEmpty())
+            add(QStringLiteral("intent=") + QString::fromLatin1(QUrl::toPercentEncoding(intent)));
+        if (!lang.isEmpty())
+            add(QStringLiteral("lang=") + lang);
+        return out;
     };
     const QString fallback = withIntent(Enrollment::appendDeviceUuid(
         QStringLiteral("https://tribevpn.com/account"), localDeviceId()));

@@ -372,6 +372,10 @@ public:
 
     // Ключи в защ. хранилище (наш namespace, чтобы не пересекаться с настройками форка).
     static constexpr QLatin1String kTokenKey{"avpn/subscriptionToken"};
+    // AVPN (LKG, C-7): последний УСПЕШНЫЙ сырой ответ GET /v1/subscription. Грузится при старте
+    // движка ДО сетевого bootstrap → бейдж/пул мгновенно, без мигания «∞»; сервер остаётся
+    // источником правды (успешный фетч перезаписывает). Чистится вместе с токеном (clearToken).
+    static constexpr QLatin1String kLkgSubscriptionKey{"avpn/lkgSubscription"};
     // AVPN (рефералы): код приглашения из deep-link /r/<code>(друзья)|/a/<code>(блогеры), сохранён
     // до ПЕРВОГО /v1/trial (first-touch). Бэк сам различит peer/affiliate по коду.
     static constexpr QLatin1String kReferralKey{"avpn/pendingReferral"};
@@ -381,6 +385,9 @@ public:
     static void    saveToken(const QString &token);
     static QString loadToken();
     static void    clearToken();
+    // AVPN (LKG, C-7): кэш последнего удачного тела /v1/subscription (см. kLkgSubscriptionKey).
+    static void       saveLkgSubscription(const QByteArray &body);
+    static QByteArray loadLkgSubscription();
     // AVPN (рефералы): pending-код приглашения. Пишет мост (AvpnDeepLinkBridge) при открытии /r//a/;
     // читает+чистит enroll() (передаёт в referral_code тела /v1/trial). Не секрет, тот же стор.
     static void    savePendingReferral(const QString &code);

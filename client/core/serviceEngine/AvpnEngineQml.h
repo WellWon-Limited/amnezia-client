@@ -234,6 +234,7 @@ public:
     // iOS — временный файл + нативный share sheet ФАЙЛОМ, Android — SAF (создание документа).
     Q_INVOKABLE bool saveReportFile(const QString &fileName, const QString &json) const;
     Q_INVOKABLE void bootstrap();                    // AVPN: тихая прогрузка подписки при старте (Task 11; без connect)
+    Q_INVOKABLE void kickBootstrap();                // AVPN: поджать ретрай bootstrap (сеть появилась/foreground). No-op когда подписка загружена; туннель НЕ трогает
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
@@ -643,7 +644,8 @@ private:
     QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
     bool                         m_bootstrapped = false; // AVPN: bootstrap() УСПЕШНО выполнен (Task 11)
     bool                         m_bootstrapInFlight = false; // AVPN: цепочка ретраев идёт (дедуп QML-вызовов)
-    int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф)
+    int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф → вечный медленный цикл, BootstrapRetry.h)
+    QTimer                       m_bootstrapRetryTimer;       // AVPN: единый таймер ретрая (member, НЕ singleShot-фабрика) — kickBootstrap() может его поджать
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume
     bool                         m_paused = false;       // туннель реально down, ждём авто-возврат

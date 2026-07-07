@@ -35,6 +35,21 @@ void Enrollment::clearToken()
 {
     SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
     s.setValue(kTokenKey, QString());
+    // AVPN (LKG): подписка привязана к токену — с мёртвым токеном кэш невалиден/чужой.
+    s.setValue(kLkgSubscriptionKey, QByteArray());
+}
+
+// AVPN (LKG, C-7): кэш последнего удачного тела /v1/subscription — тот же зашифрованный стор.
+void Enrollment::saveLkgSubscription(const QByteArray &body)
+{
+    SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    s.setValue(kLkgSubscriptionKey, body);
+}
+
+QByteArray Enrollment::loadLkgSubscription()
+{
+    SecureQSettings s(QStringLiteral(ORGANIZATION_NAME), QStringLiteral(APPLICATION_NAME));
+    return s.value(kLkgSubscriptionKey).toByteArray();
 }
 
 // AVPN (рефералы): pending-код приглашения (first-touch) в том же сторе.

@@ -41,6 +41,11 @@ public:
     // Загрузить подписку (тело GET /v1/subscription). Заполняет NodePool. false + error при провале.
     bool loadSubscription(const QByteArray &json, QString &error);
 
+    // AVPN (LKG, C-7): загрузить подписку из ДИСКОВОГО кэша (последний удачный ответ) — мгновенный
+    // бейдж/пул при старте до сетевого bootstrap. Помечает снапшот lkgStale=true; свежий сетевой
+    // loadSubscription (ensureSubscription) перезаписывает данные и снимает флаг.
+    bool loadSubscriptionFromLkg(const QByteArray &json, QString &error);
+
     // Список не-фатальных проблем текущей подписки (см. SubscriptionParser::validate).
     QStringList subscriptionIssues() const;
 
@@ -173,6 +178,7 @@ private:
     Identity      m_identity;
     NodePool      m_pool;
     Selector      m_selector;
+    bool          m_lkgActive = false; // AVPN (LKG): пул наполнен из дискового кэша, свежего фетча ещё не было
     Switcher      m_switcher;
     HealthLoop    m_health;
     ITunnelControl *m_tunnel = nullptr;
