@@ -28,9 +28,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- AVPN: android:label — видимое имя приложения = Tribe VPN (ребренд; плейсхолдер androiddeployqt заменён) -->
     <application
         android:name=".AmneziaApplication"
-        android:label="-- %%INSERT_APP_NAME%% --"
+        android:label="Tribe VPN"
         android:icon="@mipmap/icon"
         android:roundIcon="@mipmap/icon_round"
         android:banner="@mipmap/ic_banner"
@@ -212,10 +213,11 @@
             </intent-filter>
         </service>
 
+        <!-- AVPN: иконка QS-тайла → фирменные бары Tribe (ic_tribe_status) -->
         <service
             android:name=".AmneziaTileService"
             android:process=":amneziaTileService"
-            android:icon="@drawable/ic_amnezia_round"
+            android:icon="@drawable/ic_tribe_status"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
 
