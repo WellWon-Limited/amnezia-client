@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 import ".."              // Theme
 import "../components"
@@ -117,10 +118,49 @@ PageType {
 
         Item { Layout.fillHeight: true }
 
+        // Манифест приватности (текст утверждён владельцем; privacy v1.1 «без регистрации»
+        // на бэке — манифест НЕ противоречит политике, на которую ссылается строка ниже)
+        Shape {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 30
+            Layout.preferredHeight: 30
+            preferredRendererType: Shape.CurveRenderer
+            transform: Scale { xScale: 30 / 24; yScale: 30 / 24 }
+            ShapePath {
+                strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                // shield-check, 24-grid
+                PathSvg { path: "M12 2 L20 6 v6 c0 5 -3.4 8.6 -8 10 c-4.6 -1.4 -8 -5 -8 -10 V6 z M9 12 l2 2 l4 -4" }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.sm
+            text: qsTr("100% приватность. Никакой регистрации.")
+            color: Theme.color.text1
+            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
+            font.weight: Theme.font.wSemibold
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+        }
+
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.xs
+            text: qsTr("Мы не собираем email и не зовём вас в Telegram-каналы.\nНам не нужны ваши данные — главное, чтобы всё работало.")
+            color: Theme.color.text2
+            font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+            lineHeight: 1.35
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+        }
+
         // Декларация о данных ДО первого использования сервиса + правовые ссылки
         // (App Review 5.4: VPN обязан заявить сбор данных до старта; тексты — /legal/*)
         Text {
             Layout.fillWidth: true
+            Layout.topMargin: Theme.space.md
             Layout.bottomMargin: Theme.space.md
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.StyledText
