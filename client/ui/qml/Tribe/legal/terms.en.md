@@ -1,14 +1,14 @@
 # Terms of Service
 
-Operator: Wellwon Limited (Hong Kong). Version 1.1 · effective 1 July 2026.
+Operator: Wellwon Limited (Hong Kong). Version 1.2 · effective 8 July 2026.
 
-These Terms of Service ("Terms") constitute a legally binding agreement between Wellwon Limited, a company incorporated in Hong Kong (Companies Ordinance Cap. 622), BR No. 76756073-000-07-25-8, registered at Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong Kong ("Company"), and any person who accesses or uses Tribe VPN ("Service"). By registering, paying, or using the Service you agree to these Terms.
+These Terms of Service ("Terms") constitute a legally binding agreement between Wellwon Limited, a company incorporated in Hong Kong (Companies Ordinance Cap. 622), BR No. 76756073-000-07-25-8, registered at Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong Kong ("Company"), and any person who accesses or uses Tribe VPN ("Service"). By paying for or using the Service you agree to these Terms.
 
 ## 1. Definitions
 
 - "Service" — the Tribe VPN software, applications, servers and infrastructure operated by the Company.
 - "Subscription" — a paid plan granting access to the Service for a defined period.
-- "Account" — the registered user profile created to access the Service.
+- "Account" — the anonymous user profile used to access the Service; created without registration or personal data.
 - "Permitted Protocols" — VPN tunnelling protocols currently including Amnezia v2, AmneziaWG, Vless, Hysteria.
 - "No-Log Policy" — commitment not to record or store User browsing activity, DNS queries, original IP addresses, or traffic content.
 
@@ -16,9 +16,9 @@ These Terms of Service ("Terms") constitute a legally binding agreement between 
 
 You must be at least 18 years of age and have full legal capacity to enter this Agreement.
 
-## 3. Account Registration
+## 3. Account and Access
 
-Create an Account with a valid email address. You are responsible for all activity under your Account. Report unauthorised access immediately to <support@tribevpn.com>.
+The Service requires no registration: an Account is created automatically, without an email address or any other personal data. Access to the Account is provided via a personal access link. You must keep your personal access link confidential and are responsible for all activity under your Account. If the personal access link is lost, access recovery is only possible through support at <support@tribevpn.com>; the Company cannot guarantee recovery, as it holds no information identifying the Account owner. Report unauthorised access immediately to <support@tribevpn.com>.
 
 ## 4. Subscriptions and Payment
 

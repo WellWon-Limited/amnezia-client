@@ -1,6 +1,6 @@
 # Política de Privacidad
 
-Operador: Wellwon Limited (Hong Kong). Versión 1.0 · en vigor desde el 1 de julio de 2026.
+Operador: Wellwon Limited (Hong Kong). Versión 1.1 · en vigor desde el 8 de julio de 2026.
 
 Esta Política de Privacidad describe cómo Wellwon Limited (la «Empresa») recopila, utiliza, almacena y divulga información en relación con Tribe VPN. Se rige por la Personal Data (Privacy) Ordinance (PDPO, Cap. 486) de Hong Kong. Forma parte integrante de los Términos del Servicio.
 
@@ -12,16 +12,18 @@ Wellwon Limited, Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong
 
 ### 2.1 Información que usted proporciona
 
-- Dirección de correo electrónico (registro de la cuenta y comunicaciones de soporte).
+El Servicio funciona sin registro: la Empresa no solicita ni recopila su dirección de correo electrónico, número de teléfono, nombre ni ninguna otra información que permita identificarle. Las cuentas se crean de forma anónima y se accede a ellas mediante un enlace de acceso personal.
+
 - Información de pago (procesada por Enot.io (www.enot.io) y el Sistema de Pagos Rápidos (FPS / СБП); la Empresa no almacena datos de tarjetas ni de cuentas).
-- Solicitudes de soporte y correspondencia.
+- Solicitudes de soporte y correspondencia (únicamente la información que usted decida compartir).
 
 ### 2.2 Información recopilada automáticamente
 
 - Dirección IP utilizada únicamente para facturación y prevención del fraude; no se conserva tras finalizar la sesión.
-- Identificadores del dispositivo y versión del sistema operativo.
+- Identificador anónimo de la cuenta, identificadores del dispositivo y versión del sistema operativo.
 - Marcas de tiempo de conexión y duración de las sesiones.
-- Estado de la suscripción y versión de la aplicación.
+- Estado de la suscripción, versión de la aplicación y volumen de tráfico consumido (para el control de los límites del plan).
+- Informes técnicos de fallos y rendimiento de la aplicación (no contienen información sobre su identidad ni el contenido del tráfico).
 
 ### 2.3 Política de No Registros (No-Log)
 
@@ -48,7 +50,7 @@ Nuestro sitio web https://tribevpn.com utiliza cookies y tecnologías de seguimi
 
 ## 5. Conservación de los datos
 
-Datos de la cuenta (email, estado de la suscripción): se conservan durante la vigencia de la cuenta y 90 días tras su cierre, y después se eliminan de forma permanente. Metadatos de conexión: no se conservan — todos los datos de la sesión se eliminan al finalizar la sesión conforme a nuestra Política de No Registros. Registros de pago: los conservan los procesadores de pago según lo exija la legislación aplicable; la Empresa conserva únicamente el estado de la suscripción.
+Datos de la cuenta (identificador anónimo, estado de la suscripción): se conservan durante la vigencia de la cuenta y 90 días tras su cierre, y después se eliminan de forma permanente. Metadatos de conexión: no se conservan — todos los datos de la sesión se eliminan al finalizar la sesión conforme a nuestra Política de No Registros. Registros de pago: los conservan los procesadores de pago según lo exija la legislación aplicable; la Empresa conserva únicamente el estado de la suscripción.
 
 ## 6. Almacenamiento de datos, ubicación e infraestructura
 
@@ -72,7 +74,7 @@ Al utilizar el Servicio, usted consiente la transferencia de sus datos personale
 
 ## 9. Sus derechos (PDPO)
 
-En virtud de la PDPO, usted tiene derecho a: (a) acceder a sus datos personales; (b) corregir datos inexactos; (c) solicitar la eliminación, con sujeción a las obligaciones legales de conservación; (d) retirar su consentimiento; (e) presentar una reclamación ante el Privacy Commissioner for Personal Data (PCPD) de Hong Kong. Contacto: <info@tribevpn.com>.
+En virtud de la PDPO, usted tiene derecho a: (a) acceder a sus datos personales; (b) corregir datos inexactos; (c) solicitar la eliminación, con sujeción a las obligaciones legales de conservación; (d) retirar su consentimiento; (e) presentar una reclamación ante el Privacy Commissioner for Personal Data (PCPD) de Hong Kong. Contacto: <info@tribevpn.com>. Dado que las cuentas son anónimas, usted ejerce estos derechos acreditando el control de su cuenta mediante su enlace de acceso personal.
 
 ## 10. Auditorías independientes y transparencia
 

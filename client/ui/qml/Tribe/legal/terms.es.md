@@ -1,14 +1,14 @@
 # Términos del Servicio
 
-Operador: Wellwon Limited (Hong Kong). Versión 1.1 · en vigor desde el 1 de julio de 2026.
+Operador: Wellwon Limited (Hong Kong). Versión 1.2 · en vigor desde el 8 de julio de 2026.
 
-Estos Términos del Servicio (los «Términos») constituyen un acuerdo jurídicamente vinculante entre Wellwon Limited, sociedad constituida en Hong Kong (Companies Ordinance Cap. 622), BR No. 76756073-000-07-25-8, con domicilio en Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong Kong (la «Empresa»), y cualquier persona que acceda a Tribe VPN o lo utilice (el «Servicio»). Al registrarse, pagar o utilizar el Servicio, usted acepta estos Términos.
+Estos Términos del Servicio (los «Términos») constituyen un acuerdo jurídicamente vinculante entre Wellwon Limited, sociedad constituida en Hong Kong (Companies Ordinance Cap. 622), BR No. 76756073-000-07-25-8, con domicilio en Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong Kong (la «Empresa»), y cualquier persona que acceda a Tribe VPN o lo utilice (el «Servicio»). Al pagar o utilizar el Servicio, usted acepta estos Términos.
 
 ## 1. Definiciones
 
 - «Servicio» — el software, las aplicaciones, los servidores y la infraestructura de Tribe VPN operados por la Empresa.
 - «Suscripción» — un plan de pago que otorga acceso al Servicio durante un período determinado.
-- «Cuenta» — el perfil de usuario registrado creado para acceder al Servicio.
+- «Cuenta» — el perfil anónimo del Usuario para acceder al Servicio; se crea sin registro y sin datos personales.
 - «Protocolos Permitidos» — protocolos de tunelización VPN, que actualmente incluyen Amnezia v2, AmneziaWG, Vless, Hysteria.
 - «Política de No Registros» — el compromiso de no registrar ni almacenar la actividad de navegación del Usuario, las consultas DNS, las direcciones IP de origen ni el contenido del tráfico.
 
@@ -16,9 +16,9 @@ Estos Términos del Servicio (los «Términos») constituyen un acuerdo jurídic
 
 Usted debe tener al menos 18 años de edad y plena capacidad jurídica para celebrar este Acuerdo.
 
-## 3. Registro de la cuenta
+## 3. Cuenta y acceso
 
-Cree una Cuenta con una dirección de correo electrónico válida. Usted es responsable de toda la actividad realizada bajo su Cuenta. Informe inmediatamente de cualquier acceso no autorizado a <support@tribevpn.com>.
+El Servicio no requiere registro: la Cuenta se crea automáticamente, sin dirección de correo electrónico ni otros datos personales. El acceso a la Cuenta se realiza mediante un enlace de acceso personal. Usted debe mantener su enlace de acceso personal en secreto y es responsable de toda la actividad realizada bajo su Cuenta. En caso de pérdida del enlace de acceso personal, la recuperación solo es posible a través del soporte en <support@tribevpn.com>; la Empresa no puede garantizar la recuperación, ya que no conserva información que permita identificar al titular de la Cuenta. Informe inmediatamente de cualquier acceso no autorizado a <support@tribevpn.com>.
 
 ## 4. Suscripciones y pago
 
