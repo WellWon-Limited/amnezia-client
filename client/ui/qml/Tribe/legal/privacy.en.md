@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Operator: Wellwon Limited (Hong Kong). Version 1.0 · effective 1 July 2026.
+Operator: Wellwon Limited (Hong Kong). Version 1.1 · effective 8 July 2026.
 
 This Privacy Policy describes how Wellwon Limited ("Company") collects, uses, stores and discloses information in connection with Tribe VPN. Governed by the Personal Data (Privacy) Ordinance (PDPO, Cap. 486) of Hong Kong. Forms an integral part of the Terms of Service.
 
@@ -12,16 +12,18 @@ Wellwon Limited, Rm 1921, 19/F Star House, 3 Salisbury Road, Tsim Sha Tsui, Hong
 
 ### 2.1 Information You Provide
 
-- Email address (account registration and support communications).
+The Service works without registration: the Company does not request or collect your email address, phone number, name, or any other information that could identify you. Accounts are created anonymously and accessed via a personal access link.
+
 - Payment information (processed by Enot.io (www.enot.io) and the Fast Payment System (FPS / СБП); card/account details not stored by the Company).
-- Support and correspondence.
+- Support and correspondence (only the information you choose to share).
 
 ### 2.2 Information Collected Automatically
 
 - IP address used solely for billing and fraud prevention; not retained after session end.
-- Device identifiers and operating system version.
+- Anonymous account identifier, device identifiers and operating system version.
 - Connection timestamps and session duration.
-- Subscription status and app version.
+- Subscription status, app version and traffic volume consumed (for plan limit accounting).
+- Technical crash and performance reports from the app (contain no identity information and no traffic content).
 
 ### 2.3 No-Log Policy
 
@@ -48,7 +50,7 @@ Our website at https://tribevpn.com uses cookies and similar tracking technologi
 
 ## 5. Data Retention
 
-Account data (email, subscription status): retained for the duration of the account and 90 days after closure, then permanently deleted. Connection metadata: none retained — all session data is deleted at session end in accordance with our No-Log Policy. Payment records: held by payment processors as required by applicable law; the Company retains only subscription status.
+Account data (anonymous identifier, subscription status): retained for the duration of the account and 90 days after closure, then permanently deleted. Connection metadata: none retained — all session data is deleted at session end in accordance with our No-Log Policy. Payment records: held by payment processors as required by applicable law; the Company retains only subscription status.
 
 ## 6. Data Storage, Location and Infrastructure
 
@@ -72,7 +74,7 @@ By using the Service, you consent to transfer of your personal data to Hong Kong
 
 ## 9. Your Rights (PDPO)
 
-Under the PDPO you have the right to: (a) access your personal data; (b) correct inaccurate data; (c) request deletion subject to legal retention obligations; (d) withdraw consent; (e) lodge a complaint with the Privacy Commissioner for Personal Data (PCPD) of Hong Kong. Contact: <info@tribevpn.com>.
+Under the PDPO you have the right to: (a) access your personal data; (b) correct inaccurate data; (c) request deletion subject to legal retention obligations; (d) withdraw consent; (e) lodge a complaint with the Privacy Commissioner for Personal Data (PCPD) of Hong Kong. Contact: <info@tribevpn.com>. As accounts are anonymous, you exercise these rights by proving control of your account via your personal access link.
 
 ## 10. Independent Audits and Transparency
 
