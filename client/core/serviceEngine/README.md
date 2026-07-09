@@ -34,6 +34,11 @@ AwgConfigBuilder.{h,cpp}      — DTO → QJsonObject для VpnConnection::conn
 ITunnelControl.h              — граница с туннелем (up/applyPeer/readStats/down)
 VpnConnectionTunnelControl.{h,cpp} — УНИВЕРСАЛЬНАЯ реализация поверх VpnConnection (in-fork build)
 Identity.{h,cpp}              — ключи: REUSE WireguardConfigurator::genClientKeys + SecureAppSettingsRepository [in-fork]
+IdentityAnchor.{h,cpp}        — iOS keychain-якорь identity (uuid+ключи+токен+fpSeed, переживает переустановку);
+                                прямой SecItem (ThisDeviceOnly, без iCloud; НЕ QtKeychain — тот не умеет
+                                kSecAttrAccessible); канон: tribe-front docs/amnezia-fork/DEVICE-FINGERPRINT.md ✅ протестирован
+DeviceFingerprint.{h,cpp}     — device_fingerprint: sha256 якоря железа (iOS fpSeed / ANDROID_ID / IOPlatformUUID /
+                                MachineGuid) в trial/code-redeem/transfer-redeem; пусто → поле не слать ✅ протестирован
 Enrollment.{h,cpp}            — /v1/trial: REUSE networkManager форка; чистые builders/parsers ✅ протестированы
 NodePool.h                    — реестр нод текущей подписки                                        [stub]
 Prober.{h,cpp}                — TCP-ping пула (QtNetwork), параллельно + таймаут                   ✅ протестирован (вкл. live)
