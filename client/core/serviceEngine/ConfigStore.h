@@ -7,7 +7,8 @@ namespace avpn {
 
 enum class UpdateVerdict { Ok, Recommend, Block };
 
-// Чистая логика (тестируется без Settings). Пустой/нулевой порог => не срабатывает.
+// Чистая логика (тестируется без Settings).
+// Пустой порог отсекается isNull(); 0.0.0 не блокирует, т.к. ни одна реальная версия не ниже нуля.
 inline UpdateVerdict compareVersions(const QString &appVer, const QString &minVer,
                                      const QString &recVer)
 {
