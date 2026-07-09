@@ -50,6 +50,32 @@ int main(int argc, char **argv)
     CHECK(!avpn::parseConfig("{not json", c3, err3), "broken json => false");
     CHECK(!c3.valid && !err3.isEmpty(), "broken json sets err");
 
+    // Поля с неверным типом => скипаются, дефолты остаются (type-guards).
+    const QByteArray wrongTyped = R"({
+        "features": {"support_chat": "yes"},
+        "numbers": {"x": "nan"},
+        "edges": [123, "https://ok"],
+        "probe_targets": [{"target":"t","host":123}]
+    })";
+    avpn::RemoteConfig c4; QString err4;
+    CHECK(avpn::parseConfig(wrongTyped, c4, err4), "wrong-typed fields still parse");
+    CHECK(avpn::featureFlag(c4, "support_chat", false) == false, "string feature ignored => default");
+    CHECK(avpn::numberOr(c4, "x", 7) == 7, "string number ignored => default");
+    CHECK(c4.edges.size() == 1 && c4.edges[0] == "https://ok", "non-string edge skipped");
+    CHECK(c4.probeTargets.isEmpty(), "probe target with non-string host skipped");
+
+    // Идемпотентность: повторный parseConfig в ТОТ ЖЕ struct не оставляет стейл.
+    avpn::RemoteConfig c5; QString err5;
+    CHECK(avpn::parseConfig(full, c5, err5), "reuse: first parse ok");
+    CHECK(avpn::parseConfig(R"({"edges":["https://only.one"]})", c5, err5), "reuse: second parse ok");
+    CHECK(c5.edges.size() == 1 && c5.edges[0] == "https://only.one", "reuse: edges not accumulated");
+    CHECK(c5.probeTargets.isEmpty(), "reuse: stale probe targets gone");
+    CHECK(c5.features.isEmpty(), "reuse: stale features gone");
+    CHECK(avpn::featureFlag(c5, "support_chat", false) == false, "reuse: stale flag => default");
+    // Битый JSON поверх валидного => struct очищен, не полу-валиден.
+    CHECK(!avpn::parseConfig("{not json", c5, err5), "reuse: broken json => false");
+    CHECK(!c5.valid && c5.edges.isEmpty(), "reuse: broken json clears struct");
+
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
 }
