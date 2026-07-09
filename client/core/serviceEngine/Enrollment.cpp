@@ -9,6 +9,7 @@
 #include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
+#include <QCoreApplication> // AVPN (i18n): translate() — пользовательские ошибки (класс не-QObject)
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -116,7 +117,7 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
     }
     if (code == 410) {
         // Перенос «как SIM»: бэк (handoff §7) не выдаёт новый триал перенёсшему устройству.
-        error = QStringLiteral("Подписка перенесена на другое устройство");
+        error = QCoreApplication::translate("Enrollment", "Подписка перенесена на другое устройство");
         return false;
     }
     if (code == 429) {
@@ -171,7 +172,7 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &ba
         error = QStringLiteral("subscription unauthorized (token)");
         return false;
     case FetchOutcome::Transferred:
-        error = QStringLiteral("Подписка перенесена на другое устройство");
+        error = QCoreApplication::translate("Enrollment", "Подписка перенесена на другое устройство");
         return false;
     case FetchOutcome::RateLimited:
         error = QStringLiteral("subscription rate-limited (429)");
@@ -344,7 +345,7 @@ bool Enrollment::createTransfer(QNetworkAccessManager *nam, const QString &baseU
         return false;
     }
     if (code == 401) { error = QStringLiteral("transfer unauthorized (token)"); return false; }
-    if (code == 410) { error = QStringLiteral("Подписка перенесена на другое устройство"); return false; }
+    if (code == 410) { error = QCoreApplication::translate("Enrollment", "Подписка перенесена на другое устройство"); return false; }
     if (code < 200 || code >= 300) { error = QStringLiteral("transfer HTTP %1").arg(code); return false; }
     return parseTransferMintResponse(respBody, out, error);
 }

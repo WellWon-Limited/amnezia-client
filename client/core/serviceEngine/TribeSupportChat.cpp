@@ -107,13 +107,13 @@ qint64 parseIsoMs(const QString &iso)
 QString humanSendError(int httpCode, bool netError)
 {
     if (netError && httpCode == 0)
-        return QStringLiteral("Нет сети — сообщение не отправлено");
+        return TribeSupportChat::tr("Нет сети — сообщение не отправлено");
     switch (httpCode) {
-    case 429: return QStringLiteral("Слишком часто — подождите минуту");
-    case 413: return QStringLiteral("Файл слишком большой");
-    case 415: return QStringLiteral("Формат файла не поддерживается");
-    case 401: return QStringLiteral("Нет авторизации");
-    default:  return QStringLiteral("Не отправлено (ошибка %1)").arg(httpCode);
+    case 429: return TribeSupportChat::tr("Слишком часто — подождите минуту");
+    case 413: return TribeSupportChat::tr("Файл слишком большой");
+    case 415: return TribeSupportChat::tr("Формат файла не поддерживается");
+    case 401: return TribeSupportChat::tr("Нет авторизации");
+    default:  return TribeSupportChat::tr("Не отправлено (ошибка %1)").arg(httpCode);
     }
 }
 
@@ -457,7 +457,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
     const QString path = fileUrl.isLocalFile() ? fileUrl.toLocalFile() : fileUrl.toString();
     QFileInfo fi(path);
     if (!fi.exists() || fi.size() <= 0) {
-        emit sendFailed(QStringLiteral("Файл недоступен"));
+        emit sendFailed(tr("Файл недоступен"));
         return;
     }
 
@@ -472,11 +472,11 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
 
     if (mime.startsWith(QLatin1String("video/"))) {
         if (!isAllowedVideoMime(mime)) {
-            emit sendFailed(QStringLiteral("Формат видео не поддерживается (mp4/mov/webm)"));
+            emit sendFailed(tr("Формат видео не поддерживается (mp4/mov/webm)"));
             return;
         }
         if (fi.size() > kVideoMaxBytes) {
-            emit sendFailed(QStringLiteral("Видео больше 25 МБ"));
+            emit sendFailed(tr("Видео больше 25 МБ"));
             return;
         }
         e.kind = QStringLiteral("video");
@@ -488,19 +488,17 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
         const QString poster = fi.absoluteFilePath() + QStringLiteral(".poster.jpg");
         e.localUrl = QFile::exists(poster) ? QUrl::fromLocalFile(poster).toString() : QString();
     } else if (mime.startsWith(QLatin1String("image/"))) {
-        // Паритет с Занавесом: крупные/непереваримые бэкендом форматы пережимаем
-        // в JPEG ≤1600px q85 (заодно чинит EXIF-поворот через setAutoTransform).
+        // ПРИВАТНОСТЬ (аудит 2026-07-09): любое декодируемое фото ВСЕГДА перекодируем в
+        // JPEG ≤1600px q85 — QImage::save не пишет EXIF/XMP, т.е. срезает GPS-координаты
+        // камеры (iPhone кладёт их в каждый снимок). setAutoTransform чинит EXIF-поворот
+        // ДО пережатия. Путь «как есть» оставлен ТОЛЬКО для GIF (формат без EXIF/GPS;
+        // перекодирование убило бы анимацию). Недекодируемое (HEIC без кодека на не-Apple)
+        // не отправляем вовсе — «как есть» утекали бы метаданные.
         QImageReader reader(fi.absoluteFilePath());
         reader.setAutoTransform(true);
         QImage img = reader.read();
-        // HEIC/HEIF перекодируем ВСЕГДА (Chrome оператора их не показывает; на Apple
-        // Qt декодирует нативно через ImageIO, на прочих платформах img.isNull() →
-        // ветка «как есть» ниже).
-        const bool needShrink = fi.size() > kImageShrinkThresholdBytes
-            || img.width() > kImageMaxDimension || img.height() > kImageMaxDimension
-            || !isAllowedImageMime(mime) || mime == QLatin1String("image/heic")
-            || mime == QLatin1String("image/heif");
-        if (!img.isNull() && needShrink) {
+        const bool isGif = (mime == QLatin1String("image/gif"));
+        if (!img.isNull() && !isGif) {
             if (img.width() > kImageMaxDimension || img.height() > kImageMaxDimension)
                 img = img.scaled(kImageMaxDimension, kImageMaxDimension, Qt::KeepAspectRatio,
                                  Qt::SmoothTransformation);
@@ -510,26 +508,25 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             e.mime = QStringLiteral("image/jpeg");
             const int dot = e.fileName.lastIndexOf(QLatin1Char('.'));
             e.fileName = (dot > 0 ? e.fileName.left(dot) : e.fileName) + QStringLiteral(".jpg");
-        } else if (isAllowedImageMime(mime)) {
-            // Мелкий файл или недекодируемый (HEIC без кодека) — как есть.
+        } else if (isGif && isAllowedImageMime(mime)) {
             QFile f(fi.absoluteFilePath());
             if (!f.open(QIODevice::ReadOnly)) {
-                emit sendFailed(QStringLiteral("Файл недоступен"));
+                emit sendFailed(tr("Файл недоступен"));
                 return;
             }
             e.imageBytes = f.readAll();
             e.mime = mime;
         } else {
-            emit sendFailed(QStringLiteral("Формат изображения не поддерживается"));
+            emit sendFailed(tr("Формат изображения не поддерживается"));
             return;
         }
         if (e.imageBytes.size() > kImageMaxBytes) {
-            emit sendFailed(QStringLiteral("Фото больше 10 МБ"));
+            emit sendFailed(tr("Фото больше 10 МБ"));
             return;
         }
         e.kind = QStringLiteral("image");
     } else {
-        emit sendFailed(QStringLiteral("Можно отправить только фото или видео"));
+        emit sendFailed(tr("Можно отправить только фото или видео"));
         return;
     }
 
@@ -546,7 +543,7 @@ void TribeSupportChat::postEcho(Echo &echo)
         echo.pending = false;
         echo.failed = true;
         rebuildMessages();
-        emit sendFailed(QStringLiteral("Нет авторизации"));
+        emit sendFailed(tr("Нет авторизации"));
         return;
     }
 
@@ -567,9 +564,20 @@ void TribeSupportChat::postEcho(Echo &echo)
         auto *multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
         QHttpPart part;
         part.setHeader(QNetworkRequest::ContentTypeHeader, echo.mime);
+        // ПРИВАТНОСТЬ (аудит 2026-07-09): на бэк уходит generic-имя, НЕ оригинальное
+        // (IMG_1234.HEIC / переименованные юзером файлы могут нести PII). Локальное
+        // echo.fileName остаётся только для отображения в UI.
+        QString wireName;
+        if (echo.kind == QLatin1String("video")) {
+            wireName = echo.mime.contains(QLatin1String("quicktime")) ? QStringLiteral("video.mov")
+                     : echo.mime.contains(QLatin1String("webm"))      ? QStringLiteral("video.webm")
+                                                                      : QStringLiteral("video.mp4");
+        } else {
+            wireName = (echo.mime == QLatin1String("image/gif")) ? QStringLiteral("photo.gif")
+                                                                 : QStringLiteral("photo.jpg");
+        }
         part.setHeader(QNetworkRequest::ContentDispositionHeader,
-                       QStringLiteral("form-data; name=\"file\"; filename=\"%1\"")
-                           .arg(echo.fileName.isEmpty() ? QStringLiteral("file") : echo.fileName));
+                       QStringLiteral("form-data; name=\"file\"; filename=\"%1\"").arg(wireName));
         if (!echo.filePath.isEmpty()) {
             auto *file = new QFile(echo.filePath, multi); // умирает вместе с multipart
             if (!file->open(QIODevice::ReadOnly)) {
@@ -577,7 +585,7 @@ void TribeSupportChat::postEcho(Echo &echo)
                 echo.pending = false;
                 echo.failed = true;
                 rebuildMessages();
-                emit sendFailed(QStringLiteral("Файл недоступен"));
+                emit sendFailed(tr("Файл недоступен"));
                 return;
             }
             part.setBodyDevice(file);

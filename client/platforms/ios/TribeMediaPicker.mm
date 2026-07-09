@@ -58,6 +58,41 @@ static void tribeGenerateVideoPoster(NSString *videoPath)
         [jpg writeToFile:[videoPath stringByAppendingString:@".poster.jpg"] atomically:YES];
 }
 
+// ПРИВАТНОСТЬ (аудит 2026-07-09): видео с камеры несёт точный GPS в QuickTime-атоме
+// (com.apple.quicktime.location.ISO6709) — PHPicker его НЕ вырезает. Чистим штатным
+// AVMetadataItemFilter forSharing (Apple делает его именно для этого) через passthrough-
+// экспорт: без перекодирования, быстро, качество не трогаем. Мы на background-очереди
+// completion-хендлера — семафор допустим (как и синхронный постер рядом).
+// Не смогли очистить (битый файл/таймаут) — отдаём оригинал: деградация к старому
+// поведению, чат важнее (webm AVFoundation не читает, но у него и нет GPS-стандарта).
+static NSString *tribeStripVideoLocation(NSString *path)
+{
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+    AVAssetExportSession *ex =
+        [[AVAssetExportSession alloc] initWithAsset:asset
+                                         presetName:AVAssetExportPresetPassthrough];
+    if (ex == nil)
+        return path;
+    const BOOL isMp4 = [path.pathExtension.lowercaseString isEqualToString:@"mp4"];
+    NSString *out = [path stringByAppendingString:isMp4 ? @".clean.mp4" : @".clean.mov"];
+    [NSFileManager.defaultManager removeItemAtPath:out error:nil];
+    ex.outputURL = [NSURL fileURLWithPath:out];
+    ex.outputFileType = isMp4 ? AVFileTypeMPEG4 : AVFileTypeQuickTimeMovie;
+    ex.metadataItemFilter = [AVMetadataItemFilter metadataItemFilterForSharing];
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [ex exportAsynchronouslyWithCompletionHandler:^{ dispatch_semaphore_signal(sem); }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)));
+    if (ex.status == AVAssetExportSessionStatusCompleted) {
+        // Имя сохраняем (конвенция постера <видео>.poster.jpg и C++ пути) — подменяем файл.
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        if ([NSFileManager.defaultManager moveItemAtPath:out toPath:path error:nil])
+            return path;
+        return out; // переезд не удался — отдаём очищенный файл под clean-именем
+    }
+    [NSFileManager.defaultManager removeItemAtPath:out error:nil];
+    return path;
+}
+
 // Делегат держим статически: PHPicker хранит delegate weak — локальный объект умер бы
 // до колбэка и пикер молча ничего не возвращал.
 @interface TribeMediaPickerDelegate : NSObject <PHPickerViewControllerDelegate>
@@ -100,13 +135,17 @@ static TribeMediaPickerDelegate *s_delegate = nil;
                                                    toURL:[NSURL fileURLWithPath:dst]
                                                    error:&copyErr])
             return;
-        // Видео: сразу выдрать локальный постер-кадр (мы на background-очереди — можно синхронно).
-        if ([typeId isEqualToString:UTTypeMovie.identifier])
-            tribeGenerateVideoPoster(dst);
-        // dst ретейнится блоком — UTF8String берём ВНУТРИ (сырой указатель снаружи
+        // Видео: сначала срезать GPS/идентифицирующие метаданные, потом постер-кадр
+        // (мы на background-очереди — можно синхронно).
+        NSString *finalPath = dst;
+        if ([typeId isEqualToString:UTTypeMovie.identifier]) {
+            finalPath = tribeStripVideoLocation(dst);
+            tribeGenerateVideoPoster(finalPath);
+        }
+        // finalPath ретейнится блоком — UTF8String берём ВНУТРИ (сырой указатель снаружи
         // пережил бы autorelease-пул completion-хендлера).
         dispatch_async(dispatch_get_main_queue(), ^{
-            Tribe_supportPickedMedia(dst.UTF8String);
+            Tribe_supportPickedMedia(finalPath.UTF8String);
         });
     }];
 }

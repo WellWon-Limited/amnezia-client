@@ -30,6 +30,16 @@
     </message>
 </context>
 <context>
+    <name>Enrollment</name>
+    <message>
+        <location filename="../../core/serviceEngine/Enrollment.cpp" line="+120"/>
+        <location line="+55"/>
+        <location line="+173"/>
+        <source>Подписка перенесена на другое устройство</source>
+        <translation>La suscripción fue transferida a otro dispositivo</translation>
+    </message>
+</context>
+<context>
     <name>PageAccountTribe</name>
     <message>
         <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+108"/>
@@ -41,12 +51,12 @@
         <location line="-217"/>
         <location line="+7"/>
         <location line="+238"/>
-        <location line="+846"/>
+        <location line="+883"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1077"/>
+        <location line="-1114"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -75,29 +85,29 @@
     </message>
     <message>
         <location line="+77"/>
-        <location line="+215"/>
+        <location line="+265"/>
         <source>Активна</source>
         <translation>Activa</translation>
     </message>
     <message>
-        <location line="-214"/>
+        <location line="-264"/>
         <source>Пробный доступ</source>
         <translation>Acceso de prueba</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+214"/>
+        <location line="+264"/>
         <source>Истекла</source>
         <translation>Expirada</translation>
     </message>
     <message>
-        <location line="-196"/>
-        <location line="+807"/>
+        <location line="-246"/>
+        <location line="+842"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-721"/>
+        <location line="-756"/>
         <source>Подписка перенесена</source>
         <translation>Suscripción transferida</translation>
     </message>
@@ -107,12 +117,12 @@
         <translation>Se activó un nuevo dispositivo. Este dispositivo quedó desconectado de la suscripción: para recuperar el acceso, obtén una clave nueva o transfiere la suscripción de vuelta.</translation>
     </message>
     <message>
-        <location line="+54"/>
+        <location line="+62"/>
         <source>ПОДПИСКА</source>
         <translation>SUSCRIPCIÓN</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+61"/>
         <source>Подписка перенесена на другое устройство</source>
         <translation>Suscripción transferida a otro dispositivo</translation>
     </message>
@@ -177,38 +187,33 @@
         <translation>Activar clave</translation>
     </message>
     <message>
-        <location line="-424"/>
-        <location line="+442"/>
+        <location line="-474"/>
+        <location line="+493"/>
         <source>Введите код активации</source>
         <translation>Introduce el código de activación</translation>
     </message>
     <message>
-        <location line="-346"/>
+        <location line="-397"/>
         <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
         <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
     </message>
     <message>
-        <location line="+335"/>
+        <location line="+385"/>
         <source>Если у вас есть код активации — введите его ниже, доступ продлится сразу.</source>
         <translation>Si tienes un código de activación, introdúcelo abajo: tu acceso se extenderá al instante.</translation>
     </message>
     <message>
-        <location line="+20"/>
+        <location line="+48"/>
         <source>Активировать</source>
         <translation>Activar</translation>
     </message>
     <message>
-        <location line="+11"/>
-        <source>Сканировать QR</source>
-        <translation>Escanear QR</translation>
-    </message>
-    <message>
-        <location line="+10"/>
+        <location line="+12"/>
         <source>Нет кода? Напишите нам — поможем.</source>
         <translation>¿No tienes código? Escríbenos y te ayudamos.</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+8"/>
         <location line="+20"/>
         <source>Написать в поддержку</source>
         <translation>Escribir a soporte</translation>
@@ -265,12 +270,12 @@
     </message>
     <message>
         <location line="+26"/>
-        <location line="+471"/>
+        <location line="+440"/>
         <source>Отключить</source>
         <translation>Desconectar</translation>
     </message>
     <message>
-        <location line="-467"/>
+        <location line="-436"/>
         <source>устройство</source>
         <translation>dispositivo</translation>
     </message>
@@ -300,12 +305,7 @@
         <translation>¿Perdiste tu dispositivo? Escribe a soporte desde un nuevo dispositivo e indica tu pago: monto, fecha y método de pago. Transferiremos la suscripción manualmente.</translation>
     </message>
     <message>
-        <location line="+12"/>
-        <source>ЯЗЫК</source>
-        <translation>IDIOMA</translation>
-    </message>
-    <message>
-        <location line="+34"/>
+        <location line="+11"/>
         <source>ПРАВОВАЯ ИНФОРМАЦИЯ</source>
         <translation>LEGAL</translation>
     </message>
@@ -330,7 +330,7 @@
         <translation>Benchmark de conexión y pruebas</translation>
     </message>
     <message>
-        <location line="+82"/>
+        <location line="+84"/>
         <source>Достигнут лимит устройств</source>
         <translation>Límite de dispositivos alcanzado</translation>
     </message>
@@ -351,13 +351,13 @@
     </message>
     <message>
         <location line="+18"/>
-        <location line="+83"/>
-        <location line="+333"/>
+        <location line="+85"/>
+        <location line="+337"/>
         <source>Отмена</source>
         <translation>Cancelar</translation>
     </message>
     <message>
-        <location line="-353"/>
+        <location line="-357"/>
         <source>Выйти на этом устройстве?</source>
         <translation>¿Cerrar sesión en este dispositivo?</translation>
     </message>
@@ -387,7 +387,7 @@
         <translation>Dispositivo desconectado</translation>
     </message>
     <message>
-        <location line="+48"/>
+        <location line="+50"/>
         <source>Ссылка скопирована</source>
         <translation>Enlace copiado</translation>
     </message>
@@ -427,7 +427,7 @@
         <translation>Listo</translation>
     </message>
     <message>
-        <location line="+70"/>
+        <location line="+72"/>
         <source>Сканирование QR</source>
         <translation>Escaneo de QR</translation>
     </message>
@@ -967,8 +967,8 @@
     </message>
     <message>
         <location line="+321"/>
-        <source>AntiVPN активирован!</source>
-        <translation>¡AntiVPN activado!</translation>
+        <source>Доступ к сайтам РФ включён</source>
+        <translation>Acceso a sitios rusos activado</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1166,17 +1166,7 @@
         <translation>Rusos — siempre conectan directamente</translation>
     </message>
     <message>
-        <location line="-112"/>
-        <source>Умная Ai маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
-        <translation>El enrutamiento inteligente Ai decide qué tráfico debe ir por el VPN.</translation>
-    </message>
-    <message>
-        <location line="+72"/>
-        <source>AntiVPN активирован!</source>
-        <translation>¡AntiVPN activado!</translation>
-    </message>
-    <message>
-        <location line="+64"/>
+        <location line="+24"/>
         <source>Зарубежные сайты — работают через VPN,
 Банки, кинотеатры, Госуслуги, маркетплейсы продолжают работать без переключений!</source>
         <translation>Los sitios extranjeros funcionan por VPN,
@@ -1208,12 +1198,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>El servidor se elige solo</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Ai подберет самый быстрый сервер</source>
-        <translation>Ai elegirá el servidor más rápido</translation>
-    </message>
-    <message>
-        <location line="+7"/>
+        <location line="+8"/>
         <source>Если скорость интернета низкая вы можете нажать &quot;Сменить сервер&quot;</source>
         <translation>Si la velocidad de internet es baja puedes pulsar &quot;Cambiar servidor&quot;</translation>
     </message>
@@ -1248,7 +1233,22 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Puedes cambiar de servidor</translation>
     </message>
     <message>
-        <location line="+29"/>
+        <location line="-201"/>
+        <source>Умная маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
+        <translation>El enrutamiento inteligente decide por sí solo qué tráfico pasa por la VPN.</translation>
+    </message>
+    <message>
+        <location line="+72"/>
+        <source>Доступ к сайтам РФ включён</source>
+        <translation>Acceso a sitios rusos activado</translation>
+    </message>
+    <message>
+        <location line="+123"/>
+        <source>Приложение подберёт самый быстрый сервер</source>
+        <translation>La app elegirá el servidor más rápido</translation>
+    </message>
+    <message>
+        <location line="+35"/>
         <source>100% приватность</source>
         <translation>100% privacidad</translation>
     </message>
@@ -1402,7 +1402,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeAnnouncementSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+171"/>
+        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+195"/>
         <source>Прочитал</source>
         <translation>Entendido</translation>
     </message>
@@ -1433,7 +1433,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeNodeSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeNodeSheet.qml" line="+90"/>
+        <location filename="../../ui/qml/Tribe/components/TribeNodeSheet.qml" line="+116"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1452,7 +1452,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeResultSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+104"/>
+        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+108"/>
         <source>Понятно</source>
         <translation>Entendido</translation>
     </message>
@@ -1483,7 +1483,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+762"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+773"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -1682,6 +1682,187 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+562"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
+    </message>
+    <message>
+        <location line="+176"/>
+        <source>Недостаточно живых серверов для переключения</source>
+        <translation>No hay suficientes servidores activos para cambiar</translation>
+    </message>
+    <message>
+        <location line="+34"/>
+        <source>Введите код доступа</source>
+        <translation>Introduce tu código de acceso</translation>
+    </message>
+    <message>
+        <location line="+29"/>
+        <source>Неверный код доступа</source>
+        <translation>Código de acceso incorrecto</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Не удалось активировать код</source>
+        <translation>No se pudo activar el código</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Пустая ссылка переноса</source>
+        <translation>Enlace de transferencia vacío</translation>
+    </message>
+    <message>
+        <location line="+22"/>
+        <source>Не удалось принять перенос — откройте ссылку ещё раз</source>
+        <translation>No se pudo aceptar la transferencia — abre el enlace de nuevo</translation>
+    </message>
+    <message>
+        <location line="+30"/>
+        <source>Ссылка переноса недействительна или истекла</source>
+        <translation>El enlace de transferencia no es válido o ha caducado</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Достигнут лимит устройств</source>
+        <translation>Límite de dispositivos alcanzado</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Не удалось принять перенос</source>
+        <translation>No se pudo aceptar la transferencia</translation>
+    </message>
+    <message>
+        <location line="+52"/>
+        <source>Не удалось создать перенос</source>
+        <translation>No se pudo crear la transferencia</translation>
+    </message>
+    <message>
+        <location line="+32"/>
+        <source>Ключ не найден — проверьте ввод</source>
+        <translation>Clave no encontrada — revisa lo introducido</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Этот ключ уже использован</source>
+        <translation>Esta clave ya fue utilizada</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ключ истёк или отозван</source>
+        <translation>La clave ha caducado o fue revocada</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Не удалось активировать ключ</source>
+        <translation>No se pudo activar la clave</translation>
+    </message>
+    <message>
+        <location line="+355"/>
+        <source>Не указано устройство</source>
+        <translation>No se especificó el dispositivo</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Нет авторизации</source>
+        <translation>No autorizado</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>Сеть недоступна: %1</source>
+        <translation>Red no disponible: %1</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Сессия истекла</source>
+        <translation>La sesión ha caducado</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Устройство не найдено</source>
+        <translation>Dispositivo no encontrado</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Не удалось отключить устройство (HTTP %1)</source>
+        <translation>No se pudo desconectar el dispositivo (HTTP %1)</translation>
+    </message>
+    <message>
+        <location line="+418"/>
+        <source>Сначала войдите или подключитесь</source>
+        <translation>Primero inicia sesión o conéctate</translation>
+    </message>
+    <message>
+        <location line="+24"/>
+        <source>Сброс триала выключен на сервере</source>
+        <translation>El reinicio de la prueba está desactivado en el servidor</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Не удалось сбросить триал (код %1)</source>
+        <translation>No se pudo reiniciar la prueba (código %1)</translation>
+    </message>
+</context>
+<context>
+    <name>avpn::TribeSupportChat</name>
+    <message>
+        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+110"/>
+        <source>Нет сети — сообщение не отправлено</source>
+        <translation>Sin red — el mensaje no se envió</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Слишком часто — подождите минуту</source>
+        <translation>Demasiadas solicitudes — espera un minuto</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Файл слишком большой</source>
+        <translation>El archivo es demasiado grande</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Формат файла не поддерживается</source>
+        <translation>Formato de archivo no compatible</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <location line="+431"/>
+        <source>Нет авторизации</source>
+        <translation>No autorizado</translation>
+    </message>
+    <message>
+        <location line="-430"/>
+        <source>Не отправлено (ошибка %1)</source>
+        <translation>No enviado (error %1)</translation>
+    </message>
+    <message>
+        <location line="+344"/>
+        <location line="+54"/>
+        <location line="+74"/>
+        <source>Файл недоступен</source>
+        <translation>Archivo no disponible</translation>
+    </message>
+    <message>
+        <location line="-113"/>
+        <source>Формат видео не поддерживается (mp4/mov/webm)</source>
+        <translation>Formato de vídeo no compatible (mp4/mov/webm)</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Видео больше 25 МБ</source>
+        <translation>El vídeo supera los 25 MB</translation>
+    </message>
+    <message>
+        <location line="+41"/>
+        <source>Формат изображения не поддерживается</source>
+        <translation>Formato de imagen no compatible</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Фото больше 10 МБ</source>
+        <translation>La foto supera los 10 MB</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Можно отправить только фото или видео</source>
+        <translation>Solo se pueden enviar fotos o vídeos</translation>
     </message>
 </context>
 </TS>

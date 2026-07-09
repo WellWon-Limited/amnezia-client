@@ -2584,7 +2584,7 @@ void AvpnEngineQml::rotateNext()
 {
     const QString next = m_engine.nextLiveNodeId();
     if (next.isEmpty()) {
-        emit error(QStringLiteral("Недостаточно живых серверов для переключения"));
+        emit error(tr("Недостаточно живых серверов для переключения"));
         return;
     }
     QString err;
@@ -2618,7 +2618,7 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
         return;
     const QString trimmed = code.trimmed();
     if (trimmed.isEmpty()) {
-        emit error(QStringLiteral("Введите код доступа"));
+        emit error(tr("Введите код доступа"));
         return;
     }
 
@@ -2647,7 +2647,7 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
         emit changed(); // daysLeft/traffic*/subActive/nodePool/authToken обновятся
         break;
     case avpn::CodeRedeemResult::BadCode:
-        emit error(QStringLiteral("Неверный код доступа"));
+        emit error(tr("Неверный код доступа"));
         emit changed();
         break;
     case avpn::CodeRedeemResult::SeatLimit:
@@ -2663,7 +2663,7 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
         break;
     case avpn::CodeRedeemResult::Failed:
     default:
-        emit error(err.isEmpty() ? QStringLiteral("Не удалось активировать код") : err);
+        emit error(err.isEmpty() ? tr("Не удалось активировать код") : err);
         emit changed();
         break;
     }
@@ -2675,7 +2675,7 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 {
     const QString trimmed = transferToken.trimmed();
     if (trimmed.isEmpty()) {
-        emit error(QStringLiteral("Пустая ссылка переноса"));
+        emit error(tr("Пустая ссылка переноса"));
         return;
     }
     // Дедуп: iOS-сканер может отдать один QR несколько раз подряд (эмит на каждый кадр), плюс
@@ -2697,7 +2697,7 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
             });
         } else {
             m_pendingRedeemAttempts = 0;
-            emit error(QStringLiteral("Не удалось принять перенос — откройте ссылку ещё раз"));
+            emit error(tr("Не удалось принять перенос — откройте ссылку ещё раз"));
         }
         return;
     }
@@ -2727,7 +2727,7 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
         emit changed(); // daysLeft/traffic*/subActive/nodePool/authToken обновятся
         break;
     case avpn::TransferRedeemResult::BadToken:
-        emit error(QStringLiteral("Ссылка переноса недействительна или истекла"));
+        emit error(tr("Ссылка переноса недействительна или истекла"));
         emit changed();
         break;
     case avpn::TransferRedeemResult::FingerprintMismatch:
@@ -2736,12 +2736,12 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
         emit changed();
         break;
     case avpn::TransferRedeemResult::SeatLimit:
-        emit error(QStringLiteral("Достигнут лимит устройств"));
+        emit error(tr("Достигнут лимит устройств"));
         emit changed();
         break;
     case avpn::TransferRedeemResult::Failed:
     default:
-        emit error(err.isEmpty() ? QStringLiteral("Не удалось принять перенос") : err);
+        emit error(err.isEmpty() ? tr("Не удалось принять перенос") : err);
         emit changed();
         break;
     }
@@ -2793,7 +2793,7 @@ QVariantMap AvpnEngineQml::createTransfer()
     emit changed();
 
     if (!ok) {
-        emit error(err.isEmpty() ? QStringLiteral("Не удалось создать перенос") : err);
+        emit error(err.isEmpty() ? tr("Не удалось создать перенос") : err);
         return result;
     }
     result.insert(QStringLiteral("transfer_token"), resp.transferToken);
@@ -2825,10 +2825,10 @@ QVariantMap AvpnEngineQml::redeemGrantKey(const QString &key)
     if (res != GrantKeyResult::Ok) {
         QString msg;
         switch (res) {
-        case GrantKeyResult::NotFound:    msg = QStringLiteral("Ключ не найден — проверьте ввод"); break;
-        case GrantKeyResult::AlreadyUsed: msg = QStringLiteral("Этот ключ уже использован"); break;
-        case GrantKeyResult::Expired:     msg = QStringLiteral("Ключ истёк или отозван"); break;
-        default: msg = err.isEmpty() ? QStringLiteral("Не удалось активировать ключ") : err; break;
+        case GrantKeyResult::NotFound:    msg = tr("Ключ не найден — проверьте ввод"); break;
+        case GrantKeyResult::AlreadyUsed: msg = tr("Этот ключ уже использован"); break;
+        case GrantKeyResult::Expired:     msg = tr("Ключ истёк или отозван"); break;
+        default: msg = err.isEmpty() ? tr("Не удалось активировать ключ") : err; break;
         }
         emit error(msg);
         return result;
@@ -3183,12 +3183,12 @@ bool AvpnEngineQml::kickDevice(const QString &deviceId)
 {
     const QString id = deviceId.trimmed();
     if (id.isEmpty()) {
-        emit error(QStringLiteral("Не указано устройство"));
+        emit error(tr("Не указано устройство"));
         return false;
     }
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
-        emit error(QStringLiteral("Нет авторизации"));
+        emit error(tr("Нет авторизации"));
         return false;
     }
 
@@ -3206,19 +3206,19 @@ bool AvpnEngineQml::kickDevice(const QString &deviceId)
     reply->deleteLater();
 
     if (netErr != QNetworkReply::NoError && code == 0) {
-        emit error(QStringLiteral("Сеть недоступна: %1").arg(netErrStr));
+        emit error(tr("Сеть недоступна: %1").arg(netErrStr));
         return false;
     }
     if (code == 401) {
-        emit error(QStringLiteral("Сессия истекла"));
+        emit error(tr("Сессия истекла"));
         return false;
     }
     if (code == 404) {
-        emit error(QStringLiteral("Устройство не найдено"));
+        emit error(tr("Устройство не найдено"));
         return false;
     }
     if (code < 200 || code >= 300) {
-        emit error(QStringLiteral("Не удалось отключить устройство (HTTP %1)").arg(code));
+        emit error(tr("Не удалось отключить устройство (HTTP %1)").arg(code));
         return false;
     }
     emit changed(); // UI перечитает список устройств
@@ -3545,8 +3545,13 @@ void AvpnEngineQml::requestCabinetLink(const QString &intent)
             add(QStringLiteral("lang=") + lang);
         return out;
     };
-    const QString fallback = withIntent(Enrollment::appendDeviceUuid(
-        QStringLiteral("https://tribevpn.com/account"), localDeviceId()));
+    // ПРИВАТНОСТЬ (аудит 2026-07-09): fallback-URL (без wl) идёт БЕЗ device_uuid — без wl
+    // кабинет не аутентифицирует и checkout невозможен, а стабильный install-id в query
+    // засветился бы в access-логах зря. На wl-URL device_uuid пока остаётся (функционален:
+    // purchase-to-device; кабинет тут же вычищает его из адресной строки replaceState'ом).
+    // План: бэк вошьёт привязку устройства в сам wl → параметр уйдёт совсем
+    // (docs/amnezia-fork/WEBLINK-DEVICE-BINDING-HANDOFF.md).
+    const QString fallback = withIntent(QStringLiteral("https://tribevpn.com/account"));
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
         emit cabinetLinkReady(fallback);
@@ -3631,7 +3636,7 @@ void AvpnEngineQml::resetTrialDev()
 {
     const QString auth = authToken();
     if (!m_nam || auth.isEmpty()) {
-        emit error(QStringLiteral("Сначала войдите или подключитесь"));
+        emit error(tr("Сначала войдите или подключитесь"));
         return;
     }
     QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/dev/reset-trial"))};
@@ -3655,9 +3660,9 @@ void AvpnEngineQml::resetTrialDev()
             bootstrap();      // перечитать подписку (async-цепочка)
             emit changed();
         } else if (code == 404) {
-            emit error(QStringLiteral("Сброс триала выключен на сервере"));
+            emit error(tr("Сброс триала выключен на сервере"));
         } else {
-            emit error(QStringLiteral("Не удалось сбросить триал (код %1)").arg(code));
+            emit error(tr("Не удалось сбросить триал (код %1)").arg(code));
         }
     });
 }
