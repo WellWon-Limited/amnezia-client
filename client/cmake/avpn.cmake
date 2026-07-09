@@ -23,6 +23,13 @@ add_compile_definitions(AVPN_ENGINE_ENABLED=1)
 # ключ» (redeem) + чат поддержки. Sideload-APK / macOS-dmg / Windows / TestFlight-dev собираются
 # БЕЗ флага — там прямая кнопка web-кабинета остаётся. Это COMPILE-TIME разница (не рантайм-флаг
 # с сервера: удалённое переключение поведения после ревью = cloaking → бан аккаунта).
+# env-переопределение для сборочной обвязки: апстримный deploy/build.sh не пробрасывает
+# произвольные -D, поэтому store-сборка включается окружением ДО первого конфига:
+#   TRIBE_STORE_BUILD=ON scripts/build-android.sh   (значение ложится в CMake-кеш build-папки
+# и живёт там до явного -DTRIBE_STORE_BUILD=OFF / удаления папки — у store-сборок СВОЙ build-dir).
+if(DEFINED ENV{TRIBE_STORE_BUILD})
+    set(TRIBE_STORE_BUILD "$ENV{TRIBE_STORE_BUILD}" CACHE BOOL "Store build (env override)")
+endif()
 option(TRIBE_STORE_BUILD "Store build (Google Play / App Store): no direct payment surfaces in-app" OFF)
 if(TRIBE_STORE_BUILD)
     add_compile_definitions(TRIBE_STORE_BUILD=1)
