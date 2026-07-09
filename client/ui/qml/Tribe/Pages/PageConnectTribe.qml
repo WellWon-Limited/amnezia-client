@@ -64,6 +64,9 @@ PageType {
     readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
+    // AVPN (store-flow, 2026-07-09): store-сборка (-DTRIBE_STORE_BUILD=ON) — золотая CTA ведёт
+    // НЕ в web-кабинет, а в Настройки на карточку «Активировать ключ» (+ чат поддержки там же).
+    readonly property bool storeBuild:    root.hasEngine && TribeEngine.storeBuild === true
     // AVPN: триал/подписка исчерпаны → монетизационный CTA «Получить ключ» вместо ротации.
     // Исчерпан, если: подписка неактивна, ИЛИ дней не осталось (0), ИЛИ лимит трафика выбран.
     // Гейт daysLeft >= 0: ПОКА данные не загружены (пустой снапшот, daysLeft = -1) CTA не показываем —
@@ -911,6 +914,12 @@ PageType {
             MouseArea {
                 id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: {
+                    // AVPN (store-flow): в store-сборке НИКАКИХ платёжных переходов из приложения —
+                    // CTA уводит в Настройки (карточка «Активировать ключ» + «Написать в поддержку»).
+                    if (root.storeBuild) {
+                        root.requestSettings()
+                        return
+                    }
                     // Оплата — ВНЕШНИЙ сайт (Apple §10: в апке нет цен/IAP). Одноразовый web-link
                     // (POST /v1/cabinet/web-link, авто-логин, TTL ~90с) вместо JWT в query —
                     // долгоживущий токен не светится в истории браузера/логах. device_uuid дописывает

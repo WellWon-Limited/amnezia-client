@@ -43,6 +43,7 @@
 #include <QMap>                    // AVPN RU-direct: bulk addVpnSites
 
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
+#include <QGuiApplication>  // AVPN (store-flow E): applicationStateChanged → foreground-рефреш подписки
 #include <QDateTime>
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
 #include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
@@ -445,6 +446,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // ТОЛЬКО ускоряет фетч подписки, когда она ещё не загружена (kickBootstrap — no-op после
     // успеха); туннель/коннект/выбор ноды НЕ трогает — хождение между роутерами с поднятым VPN
     // сюда не попадает. loadDefaultBackend идемпотентен (второй вызов в benchExtra — ок).
+    // AVPN (store-flow E, 2026-07-09): foreground-рефреш подписки НА УРОВНЕ ДВИЖКА. Раньше жил
+    // только в PageConnectTribe (Connections на Qt.application), а вкладки существуют ПО ОДНОЙ
+    // (goToTabBarPageUrl = clear+replace) → вернулся из браузера после оплаты на вкладке
+    // Поддержка/Настройки — рефреша НЕ было, бейдж/золотая CTA стейл до захода на главную.
+    // Движок живёт всегда → покрывает все страницы и платформы. Троттл 30с (как у QML-пути;
+    // QML-путь в PageConnectTribe оставлен — он же дёргает kickBootstrap/refreshAccount; лишний
+    // параллельный GET /v1/subscription в момент резюма дёшев и безвреден). Async, no-op без токена.
+    if (auto *guiApp = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        connect(guiApp, &QGuiApplication::applicationStateChanged, this,
+                [this](Qt::ApplicationState st) {
+                    if (st != Qt::ApplicationActive)
+                        return;
+                    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                    if (now - m_lastFgRefreshMs < 30000)
+                        return;
+                    m_lastFgRefreshMs = now;
+                    refreshSubscription();
+                });
+    }
+
     if (QNetworkInformation::loadDefaultBackend()) {
         if (auto *ni = QNetworkInformation::instance()) {
             connect(ni, &QNetworkInformation::reachabilityChanged, this,

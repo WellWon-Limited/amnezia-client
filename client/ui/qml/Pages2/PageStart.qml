@@ -70,6 +70,12 @@ PageType {
         ignoreUnknownSignals: true
         function onRequestTab(index) { root.goAvpnTab(index) }
         function onRequestSettings() { root.goAvpnTab(3) }
+        // AVPN (store-flow): чат поддержки с черновиком в composer (кнопка «Написать в поддержку»
+        // у карточки активации). Черновик передаём свойством страницы — отправляет юзер сам.
+        function onRequestSupportChat(draft) {
+            avpnBottomNav.currentIndex = 1
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSupportTribe.qml", { prefillDraft: draft })
+        }
         // AVPN: колокол → центр уведомлений (#3)
         function onRequestNotifications() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml") }
         // AVPN: «назад» с уведомлений/админ-пула. Эти страницы открыты через replace (depth=1), поэтому

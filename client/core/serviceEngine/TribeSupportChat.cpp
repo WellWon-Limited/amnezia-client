@@ -288,6 +288,31 @@ QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
     mm.insert(QStringLiteral("pending"), false);
     mm.insert(QStringLiteral("failed"), false);
     mm.insert(QStringLiteral("attachments"), atts);
+    // AVPN (store-flow D, 2026-07-09): server-driven карточка с кнопками (опц. поле "card"):
+    // {title, body, buttons: [{label, action: "open_url"|"compose_send", url, send}]}.
+    // Весь контент (тексты, подписи кнопок, URL) — СЕРВЕРНЫЙ; в бинарнике только генерик-рендерер
+    // (ChatBubble). При наличии card клиент рендерит её ВМЕСТО текстового пузыря (body сообщения =
+    // plain-text фолбэк для старых клиентов без card-поддержки). Нет card / битые поля → обычный
+    // текст, ничего не ломается (обратная совместимость в обе стороны).
+    const QJsonObject card = m.value(QStringLiteral("card")).toObject();
+    if (!card.isEmpty()) {
+        QVariantMap cm;
+        cm.insert(QStringLiteral("title"), card.value(QStringLiteral("title")).toString());
+        cm.insert(QStringLiteral("body"), card.value(QStringLiteral("body")).toString());
+        QVariantList btns;
+        const QJsonArray bArr = card.value(QStringLiteral("buttons")).toArray();
+        for (const QJsonValue &bv : bArr) {
+            const QJsonObject b = bv.toObject();
+            QVariantMap bm;
+            bm.insert(QStringLiteral("label"), b.value(QStringLiteral("label")).toString());
+            bm.insert(QStringLiteral("action"), b.value(QStringLiteral("action")).toString());
+            bm.insert(QStringLiteral("url"), b.value(QStringLiteral("url")).toString());
+            bm.insert(QStringLiteral("send"), b.value(QStringLiteral("send")).toString());
+            btns.append(bm);
+        }
+        cm.insert(QStringLiteral("buttons"), btns);
+        mm.insert(QStringLiteral("card"), cm);
+    }
     return mm;
 }
 

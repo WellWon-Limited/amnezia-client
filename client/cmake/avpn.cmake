@@ -17,6 +17,18 @@ message(STATUS "AVPN overlay: ENABLED")
 # Компайл-деф, по которому апстрим-точки (coreController) включают регистрацию AvpnEngine.
 add_compile_definitions(AVPN_ENGINE_ENABLED=1)
 
+# AVPN (store-flow, 2026-07-09): сборка для СТОРОВ (Google Play AAB / App Store). В store-билде
+# в приложении НЕТ прямых платёжных переходов (полиси Google Play Payments / Apple §3.1.1):
+# «Управлять подпиской» скрыта (бейдж-инфо остаётся), золотая CTA ведёт на карточку «Активировать
+# ключ» (redeem) + чат поддержки. Sideload-APK / macOS-dmg / Windows / TestFlight-dev собираются
+# БЕЗ флага — там прямая кнопка web-кабинета остаётся. Это COMPILE-TIME разница (не рантайм-флаг
+# с сервера: удалённое переключение поведения после ревью = cloaking → бан аккаунта).
+option(TRIBE_STORE_BUILD "Store build (Google Play / App Store): no direct payment surfaces in-app" OFF)
+if(TRIBE_STORE_BUILD)
+    add_compile_definitions(TRIBE_STORE_BUILD=1)
+    message(STATUS "AVPN overlay: TRIBE_STORE_BUILD=ON (store flow, payment surfaces gated)")
+endif()
+
 set(AVPN_SE ${CMAKE_CURRENT_LIST_DIR}/../core/serviceEngine)
 
 list(APPEND HEADERS

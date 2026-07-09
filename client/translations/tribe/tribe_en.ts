@@ -4,41 +4,35 @@
 <context>
     <name>ChatBubble</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/ChatBubble.qml" line="+40"/>
+        <location filename="../../ui/qml/Tribe/components/ChatBubble.qml" line="+47"/>
         <source>%1 · авто</source>
-        <translation type="unfinished"></translation>
+        <translation>%1 · auto</translation>
     </message>
     <message>
-        <location line="+119"/>
+        <location line="+173"/>
         <source>Не отправлено</source>
-        <translation type="unfinished"></translation>
+        <translation>Not sent</translation>
     </message>
     <message>
         <location line="+7"/>
         <source>Повторить</source>
-        <translation type="unfinished"></translation>
+        <translation>Retry</translation>
     </message>
     <message>
         <location line="+14"/>
         <source>Убрать</source>
-        <translation type="unfinished"></translation>
+        <translation>Discard</translation>
     </message>
     <message>
         <location line="+13"/>
         <source>отправка…</source>
-        <translation type="unfinished"></translation>
+        <translation>sending…</translation>
     </message>
 </context>
 <context>
     <name>PageAccountTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+91"/>
-        <location line="+431"/>
-        <source>Введите ключ активации</source>
-        <translation>Enter activation key</translation>
-    </message>
-    <message>
-        <location line="-424"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+106"/>
         <location line="+210"/>
         <source>Переносим подписку на это устройство…</source>
         <translation>Transferring subscription to this device…</translation>
@@ -47,12 +41,12 @@
         <location line="-206"/>
         <location line="+7"/>
         <location line="+227"/>
-        <location line="+816"/>
+        <location line="+835"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Engine unavailable — update the app</translation>
     </message>
     <message>
-        <location line="-1037"/>
+        <location line="-1056"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -98,19 +92,19 @@
     </message>
     <message>
         <location line="-196"/>
-        <location line="+777"/>
+        <location line="+796"/>
         <source>Устройство</source>
         <translation>Device</translation>
     </message>
     <message>
-        <location line="-691"/>
+        <location line="-710"/>
         <source>Подписка перенесена</source>
-        <translation type="unfinished"></translation>
+        <translation>Subscription transferred</translation>
     </message>
     <message>
         <location line="+1"/>
         <source>Новое устройство активировано. Это устройство отключено от подписки — чтобы вернуть доступ, оформите новый ключ или перенесите подписку обратно.</source>
-        <translation type="unfinished"></translation>
+        <translation>A new device has been activated. This device is disconnected from the subscription — to regain access, get a new key or transfer the subscription back.</translation>
     </message>
     <message>
         <location line="+54"/>
@@ -183,9 +177,15 @@
         <translation>Activate key</translation>
     </message>
     <message>
-        <location line="+7"/>
-        <source>Введите ключ активации, чтобы продлить доступ.</source>
-        <translation>Enter an activation key to extend access.</translation>
+        <location line="-413"/>
+        <location line="+431"/>
+        <source>Введите код активации</source>
+        <translation>Enter activation code</translation>
+    </message>
+    <message>
+        <location line="-11"/>
+        <source>Если у вас есть код активации — введите его ниже, доступ продлится сразу.</source>
+        <translation>If you have an activation code, enter it below — your access will be extended right away.</translation>
     </message>
     <message>
         <location line="+20"/>
@@ -198,7 +198,22 @@
         <translation>Scan QR</translation>
     </message>
     <message>
-        <location line="+27"/>
+        <location line="+10"/>
+        <source>Нет кода? Напишите нам — поможем.</source>
+        <translation>No code? Write to us — we’ll help.</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Написать в поддержку</source>
+        <translation>Contact support</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Здравствуйте! Как мне активировать код?</source>
+        <translation>Hello! How do I activate a code?</translation>
+    </message>
+    <message>
+        <location line="+25"/>
         <source>Перенести подписку на другое устройство</source>
         <translation>Transfer subscription to another device</translation>
     </message>
@@ -905,7 +920,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+99"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+102"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -995,7 +1010,7 @@
         <translation>Renew key</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+72"/>
         <source>Сменить сервер</source>
         <translation>Change server</translation>
     </message>
@@ -1048,12 +1063,12 @@
     <message>
         <location filename="../../ui/qml/Tribe/Pages/PageLegalTribe.qml" line="+39"/>
         <source>Условия использования</source>
-        <translation type="unfinished">Terms of Use</translation>
+        <translation>Terms of Use</translation>
     </message>
     <message>
         <location line="+1"/>
         <source>Политика конфиденциальности</source>
-        <translation type="unfinished">Privacy Policy</translation>
+        <translation>Privacy Policy</translation>
     </message>
 </context>
 <context>
@@ -1230,30 +1245,31 @@ A gift for every friend!</translation>
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+47"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+58"/>
         <source>Не удалось загрузить вложение</source>
-        <translation type="unfinished"></translation>
+        <translation>Failed to load the attachment</translation>
     </message>
     <message>
         <location line="+17"/>
         <source>Фото или видео</source>
-        <translation type="unfinished"></translation>
+        <translation>Photo or video</translation>
     </message>
     <message>
         <location line="+1"/>
         <source>Фото и видео</source>
-        <translation type="unfinished"></translation>
+        <translation>Photos and videos</translation>
     </message>
     <message>
-        <location line="+71"/>
+        <location line="+86"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
-        <translation type="unfinished"></translation>
+        <translation>Write to us — we’ll reply right here.
+You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+11"/>
         <source>Загружаем диалог…</source>
-        <translation type="unfinished"></translation>
+        <translation>Loading conversation…</translation>
     </message>
     <message>
         <location line="+104"/>
@@ -1308,7 +1324,7 @@ A gift for every friend!</translation>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+104"/>
         <source>Понятно</source>
-        <translation type="unfinished"></translation>
+        <translation>Got it</translation>
     </message>
 </context>
 <context>
@@ -1337,7 +1353,7 @@ A gift for every friend!</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+735"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+756"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>

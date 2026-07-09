@@ -84,6 +84,11 @@ signals:
     // AVPN (Support): пришёл пуш type=support (ответ оператора чата поддержки). В колокол
     // НЕ попадает (гейт в applyRemoteNotification) — слушает TribeSupportChat::onSupportPush.
     void supportPushReceived();
+    // AVPN (store-flow E): пришёл пуш type=payment (оплата прошла, бэк продлил подписку) —
+    // движок мгновенно перечитывает /v1/subscription (coreController коннектит к
+    // AvpnEngineQml::refreshSubscription): бейдж/золотая CTA оживают сразу, даже если
+    // приложение открыто на чате. В колокол пуш ТОЖЕ попадает (в отличие от support).
+    void paymentPushReceived();
     // AVPN (Support): пользователь ТАПНУЛ по пушу → QML-навигация (PageStart:
     // type=support → вкладка «Поддержка»).
     void pushTapped(const QString &type);

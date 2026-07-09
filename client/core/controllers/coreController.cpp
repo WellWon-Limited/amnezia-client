@@ -221,6 +221,11 @@ void CoreController::initControllers()
     QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::supportPushReceived,
                      tribeSupport, &avpn::TribeSupportChat::onSupportPush);
 
+    // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный
+    // рефреш /v1/subscription — бейдж и золотая CTA оживают сразу, на любой открытой вкладке.
+    QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::paymentPushReceived,
+                     avpnEngine, &avpn::AvpnEngineQml::refreshSubscription);
+
     // AVPN (Task 13): мост обратного диплинка ПЕРЕНОСА (tribe://transfer / Universal Link) → QML.
     auto *avpnDeepLink = avpn::AvpnDeepLinkBridge::instance();
     setQmlContextProperty("AvpnDeepLink", avpnDeepLink);

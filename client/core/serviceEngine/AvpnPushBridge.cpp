@@ -226,6 +226,10 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     m_unreadCount += 1;
     persist();   // AVPN: сохранить новый пуш в локальную историю (переживёт перезапуск)
     emit changed();
+    // AVPN (store-flow E): оплата прошла → сигнал движку на мгновенный рефреш подписки
+    // (после обычной обработки: пуш «Доступ продлён (+N дней)» остаётся в колоколе).
+    if (type == QLatin1String("payment"))
+        emit paymentPushReceived();
 }
 
 } // namespace avpn
