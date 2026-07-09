@@ -501,7 +501,7 @@ PageType {
                 // текстовки зависят от тумблера (реш. 2026-07-02): off = оффер, on = подтверждение
                 Text {
                     width: parent.width
-                    text: bypassStore.masterOn ? qsTr("AntiVPN активирован!")
+                    text: bypassStore.masterOn ? qsTr("Доступ к сайтам РФ включён")
                                                : qsTr("Надоело выключать VPN?")
                     color: "white"; elide: Text.ElideRight
                     fontSizeMode: Text.HorizontalFit; minimumPixelSize: 10
