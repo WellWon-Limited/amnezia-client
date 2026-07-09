@@ -4,6 +4,7 @@
 // для PageDiagnostics.qml. Overlay: апстрим не трогаем, только публичные API форка. [IN-FORK build]
 #pragma once
 
+#include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "VpnConnectionTunnelControl.h"
@@ -15,6 +16,7 @@
 #include <QHash>
 #include <QHostAddress> // AVPN RU-direct carve-out: IP API вне байпаса
 #include <QJsonArray>    // AVPN (панель администратора): результаты свипа
+#include <QMap>          // AVPN remote-config (T6): sites-карта в rebuildApiCarveOut(sites)
 #include <QObject>
 #include <QSet>
 #include <QString>
@@ -137,6 +139,10 @@ class AvpnEngineQml : public QObject {
     // v5.5: судьба последней отправки отчёта на сервер («Отправлен ✓ (HH:mm)» / причина) — видно
     // в финальной карточке мастера, а не только мимолётным тостом.
     Q_PROPERTY(QString uploadStatus READ uploadStatus NOTIFY ftChanged)
+    // AVPN remote-config (T6): вердикт force-update (0 Ok/1 Recommend/2 Block, из ConfigService::configApplied)
+    // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
+    Q_PROPERTY(int updateState READ updateState NOTIFY changed)
+    Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -188,6 +194,13 @@ public:
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
     void setBaseUrl(const QString &url) { m_baseUrl = url; }
+
+    // AVPN remote-config (T6, server-driven — без ребилда): фичефлаги/URL из /v1/config (ConfigService).
+    // featureEnabled/configUrl читают ПОСЛЕДНИЙ применённый конфиг (LKG на старте, свежий после fetch).
+    Q_INVOKABLE bool    featureEnabled(const QString &key, bool def = false) const;
+    Q_INVOKABLE QString configUrl(const QString &key, const QString &def) const;
+    int     updateState() const { return m_updateState; }
+    QString storeUrl() const;
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
@@ -555,6 +568,23 @@ private:
     // OFF → не трогаем (юзер сам рулит с экрана «Защита»). DNS=Яндекс ставится в VpnConnectionTunnelControl.
     void applyRuBypassSplit();
 
+    // AVPN remote-config (T6): carve-out API/edge-хоста из RU-bypass CIDR — тот же инвариант, что
+    // carveOutIpFromSites в applyRuBypassSplit (control plane ВСЕГДА в туннеле), но переиспользуемый:
+    //  · rebuildApiCarveOut(sites) — применяет вырез к конкретному сев-набору; вызывается ВНУТРИ
+    //    applyRuBypassSplit РОВНО там же, где раньше был инлайн-блок (behaviour-preserving extraction).
+    //  · rebuildApiCarveOut() — вызывается из ConfigService::activeEdgeChanged: резолвит НОВЫЙ активный
+    //    edge-хост в m_apiHostIps (async QHostInfo, тот же паттерн, что в конструкторе для исходного
+    //    m_baseUrl) и передёргивает сплит через reapplyBypass(), чтобы следующий пересев (внутри
+    //    applyRuBypassSplit → rebuildApiCarveOut(sites)) унёс с собой и свежий carve-out. Офлайн/ещё
+    //    не резолвлено → применится на следующем Connect, как везде в RU-direct (см. reapplyBypass()).
+    void rebuildApiCarveOut(QMap<QString, QString> &sites) const;
+    void rebuildApiCarveOut();
+
+    // AVPN remote-config (T6): если сервер прислал probeTargets — переопределить m_svcProbe маппингом
+    // ProbeTarget→ServiceProbeConfig (telegram→Mtproto, youtube/instagram→Goodput); иначе НЕ трогаем
+    // вшитые дефолты из конструктора (см. AvpnEngineQml.cpp:278-292).
+    void applyRemoteProbeTargets(const avpn::RemoteConfig &cfg);
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
@@ -680,9 +710,16 @@ private:
     void sweepBeginRestore();
     void sweepFinish();        // сборка отчёта + emit sweepFinished + сброс в Idle
     QString                      m_baseUrl = QStringLiteral("https://api.tribevpn.com");
+    // AVPN remote-config (T6): оркестратор /v1/config+/v1/edges (fetch/ed25519-verify/LKG/edge-walk,
+    // см. ConfigService.h) + снапшот последнего применённого конфига (featureEnabled/configUrl/
+    // storeUrl читают отсюда) + вердикт force-update (см. updateState()).
+    avpn::ConfigService          *m_configSvc = nullptr;
+    avpn::RemoteConfig            m_remoteCfg;
+    int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block
     // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
-    // конструктора). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из байпаса —
-    // control plane всегда через туннель, см. CidrCarve.h.
+    // конструктора; T6 — дополняется резолвом НОВОГО edge-хоста при activeEdgeChanged, см.
+    // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из
+    // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
