@@ -56,6 +56,11 @@
 #include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
 // AVPN (Devices+Account): синхронные REST-вызовы к control plane, как fetchSubscription.
 #include "NetAwait.h" // AVPN: awaitReply() — ожидание с таймаутом (анти-фриз GUI)
+
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+// AVPN (P-ANN, macOS): регистрация бейджа дока (platforms/macos/AvpnDockBadge.mm).
+extern "C" void AvpnDockBadge_install();
+#endif
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -376,6 +381,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (P-ANN): пуш «объявление» → немедленный рефреш списка (попап всплывает сразу).
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::announcementPushReceived,
             this, &AvpnEngineQml::refreshAnnouncements);
+
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (P-ANN, macOS): бейдж непрочитанных на иконке дока — питается unreadCount моста
+    // (aps.badge на десктоп не приходит). Реализация — platforms/macos/AvpnDockBadge.mm.
+    AvpnDockBadge_install();
+#endif
 
     // AVPN (Task 9): разрешение на пуши спрашиваем ОДИН раз — после первого успешного коннекта (UX:
     // контекстный запрос). Persist, чтобы не пытаться при каждом коннекте (iOS и так дедупит промпт).

@@ -72,6 +72,9 @@ public:
     void setAuthorizationRequester(void (*fn)());
     // AVPN: сброс системного бейджа иконки — натив ставит C-функцию (iOS: setBadgeCount:0).
     void setBadgeClearer(void (*fn)());
+    // AVPN (P-ANN, macOS): натив-установка ЧИСЛА на иконке (NSApp.dockTile.badgeLabel) — macOS
+    // не получает aps.badge (пуша нет), бейдж питается локальным unreadCount при поллинге.
+    void setBadgeSetter(void (*fn)(int));
 
 signals:
     void changed();
@@ -121,6 +124,8 @@ private:
     bool         m_loaded = false;   // AVPN: история уже подгружена из QSettings (ленивая инициализация)
     void (*m_authRequester)() = nullptr;
     void (*m_badgeClearer)() = nullptr;   // AVPN: натив-сброс бейджа иконки
+    void (*m_badgeSetter)(int) = nullptr; // AVPN (P-ANN): натив-установка числа (macOS dockTile)
+    void updateNativeBadge();             // AVPN (P-ANN): m_badgeSetter(m_unreadCount), если задан
 };
 
 } // namespace avpn
