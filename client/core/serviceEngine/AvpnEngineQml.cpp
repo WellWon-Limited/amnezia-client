@@ -20,6 +20,7 @@
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
+#include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -343,6 +344,50 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 });
     }
 
+    // AVPN remote-config (T6): вшитый публичный ключ (prod, key id k1) + дефолтные edges (baked —
+    // обязателен по контракту ConfigService — фолбэк, если LKG-кеш ещё пуст на первом запуске).
+    // ПОСЛЕ блока m_svcProbe (выше) НАРОЧНО: ConfigService::start() может синхронно эмитить
+    // configApplied прямо из этого вызова (LKG-кеш готов мгновенно, без сети) → applyRemoteProbeTargets
+    // должен застать УЖЕ созданный m_svcProbe, иначе серверный оверрайд probe-целей на холодном
+    // офлайн-старте молча потерялся бы до следующего живого /v1/config (m_apiHostIps/carve-out эту
+    // гонку не разделяют — они читаются из applyRuBypassSplit() в guardedStart(), намного позже ctor).
+    static const QString kConfigPubKeyHex = QStringLiteral(
+        "67bddcb248215a35ee2d8c2145ce415071ba02c5bcf888e35cc4491957aac78f");
+    static const QStringList kBakedEdges{QStringLiteral("https://api.tribevpn.com"),
+                                         QStringLiteral("https://vpn.wellwon.hk")};
+    m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
+    connect(m_configSvc, &avpn::ConfigService::configApplied, this,
+            [this](const avpn::RemoteConfig &c) {
+                m_remoteCfg = c;
+                // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
+                // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
+                const QString appVer = QStringLiteral(APP_VERSION);
+#if defined(Q_OS_IOS)
+                const QString plat = QStringLiteral("ios");
+#elif defined(Q_OS_ANDROID)
+                const QString plat = QStringLiteral("android");
+#elif defined(Q_OS_MACOS)
+                const QString plat = QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+                const QString plat = QStringLiteral("windows");
+#else
+                const QString plat = QStringLiteral("linux");
+#endif
+                const avpn::UpdateVerdict v = avpn::compareVersions(
+                    appVer, c.minAppVersion.value(plat), c.recommendedVersion.value(plat));
+                m_updateState = (v == avpn::UpdateVerdict::Block) ? 2
+                              : (v == avpn::UpdateVerdict::Recommend) ? 1 : 0;
+                applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
+                emit changed();
+            });
+    connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged, this,
+            [this](const QString &base) {
+                m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
+                rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
+                emit changed();
+            });
+    m_configSvc->start();
+
     // AVPN (Task 7): таймер авто-паузы «для покупок». Одноразовый: истёк → бездействие → resume.
     m_pauseTimer.setSingleShot(true);
     connect(&m_pauseTimer, &QTimer::timeout, this, &AvpnEngineQml::onPauseTimeout);
@@ -494,6 +539,98 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     [this](QNetworkInformation::TransportMedium) { kickBootstrap(); });
         }
     }
+}
+
+// AVPN remote-config (T6): фичефлаг/URL из последнего применённого /v1/config (LKG на старте,
+// свежий — после первого успешного fetch). Ключ отсутствует на сервере → def.
+bool AvpnEngineQml::featureEnabled(const QString &key, bool def) const
+{
+    return avpn::featureFlag(m_remoteCfg, key, def);
+}
+
+QString AvpnEngineQml::configUrl(const QString &key, const QString &def) const
+{
+    return m_remoteCfg.urls.value(key, def);
+}
+
+// AVPN remote-config (T6): магазинная ссылка для баннера апдейта/CTA — urls.store_ios/store_android
+// с сервера (можно поменять без ребилда, напр. сменить регион стора), фолбэк вшитый.
+QString AvpnEngineQml::storeUrl() const
+{
+#if defined(Q_OS_ANDROID)
+    return m_remoteCfg.urls.value(QStringLiteral("store_android"),
+        QStringLiteral("https://play.google.com/store/apps/details?id=com.tribevpn.client"));
+#else
+    return m_remoteCfg.urls.value(QStringLiteral("store_ios"),
+        QStringLiteral("https://apps.apple.com/app/id0000000000"));
+#endif
+}
+
+// AVPN remote-config (T6): вынесенный API/edge-хост carve-out (см. .h) — применяет вырез к
+// КОНКРЕТНОМУ сев-набору sites. Вызывается ВНУТРИ applyRuBypassSplit РОВНО там же, где раньше
+// был инлайн-блок — behaviour-preserving extraction, поведение на исходном месте не меняется.
+void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QString> &sites) const
+{
+    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
+    // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
+    // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
+    // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
+    // Вкомпиленный фолбэк + актуальные IP из async-резолва (конструктор + T6 edge-walk).
+    carveOutIpFromSites(sites, QHostAddress(QStringLiteral("159.194.214.36")));
+    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
+        carveOutIpFromSites(sites, ip);
+}
+
+// AVPN remote-config (T6): «новый активный edge — в carve-out». Резолвит host(m_baseUrl) (уже
+// переключён вызывающим activeEdgeChanged-обработчиком) в m_apiHostIps (async QHostInfo, тот же
+// паттерн, что в конструкторе для исходного m_baseUrl; накопительно — не теряем IP предыдущих
+// edge, лишний carve-out безвреден) и передёргивает сплит через reapplyBypass(). reapplyBypass()
+// — единственный штатный способ докатить сев до ЖИВОГО туннеля (см. setBypassMasterOn и др.):
+// на живом коннекте reconcile сделает stop→start, а guardedStart() пересеет applyRuBypassSplit()
+// (который зовёт rebuildApiCarveOut(sites) выше) уже со свежим m_apiHostIps. Офлайн → no-op
+// (reapplyBypass сам гейтит по m_wantConnected) — свежий сев подхватится на следующем Connect.
+void AvpnEngineQml::rebuildApiCarveOut()
+{
+    const QString host = QUrl(m_baseUrl).host();
+    if (host.isEmpty() || !QHostAddress(host).isNull()) { // пусто или уже literal-IP — резолвить не надо
+        reapplyBypass();
+        return;
+    }
+    QHostInfo::lookupHost(host, this, [this](const QHostInfo &info) {
+        if (info.error() == QHostInfo::NoError) {
+            for (const QHostAddress &ip : info.addresses())
+                if (!m_apiHostIps.contains(ip))
+                    m_apiHostIps.append(ip);
+        }
+        reapplyBypass();
+    });
+}
+
+// AVPN remote-config (T6): сервер может переопределить пробируемые сервисы (probeTargets из
+// /v1/config) — напр. добавить/убрать сервис или сменить seed-хост без ребилда. Маппинг по
+// target: telegram→Mtproto (host = первый seed-DC-IP, остальные — fallbackHosts), youtube/
+// instagram→Goodput (host = fallback-SNI на душимом CDN). Неизвестный target — Https-деградация
+// (best-effort reachability), как штатная деградация ServiceProbeConfig. Пусто в конфиге →
+// НЕ трогаем вшитые дефолты конструктора (см. AvpnEngineQml.cpp выше, cfgs telegram/youtube/instagram).
+void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
+{
+    if (!m_svcProbe || cfg.probeTargets.isEmpty())
+        return;
+    QList<ServiceProbeConfig> cfgs;
+    for (const avpn::ProbeTarget &t : cfg.probeTargets) {
+        ServiceProbeConfig c;
+        c.key = t.target;
+        c.host = t.host;
+        c.port = t.port;
+        if (t.target == QLatin1String("telegram"))
+            c.kind = ServiceProbeConfig::Mtproto;
+        else if (t.target == QLatin1String("youtube") || t.target == QLatin1String("instagram"))
+            c.kind = ServiceProbeConfig::Goodput;
+        else
+            c.kind = ServiceProbeConfig::Https;
+        cfgs.append(c);
+    }
+    m_svcProbe->setServices(cfgs);
 }
 
 QString AvpnEngineQml::state() const
@@ -2985,14 +3122,12 @@ void AvpnEngineQml::applyRuBypassSplit()
             sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
     }
 
-    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
-    // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
-    // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
-    // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
-    // Вкомпиленный фолбэк + актуальные IP из async-резолва конструктора (смена IP у Beget).
-    carveOutIpFromSites(sites, QHostAddress(QStringLiteral("159.194.214.36")));
-    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
-        carveOutIpFromSites(sites, ip);
+    // AVPN carve-out (инцидент 2026-07-05, вынесено в T6 — rebuildApiCarveOut(sites) выше в файле):
+    // api.tribevpn.com хостится на Beget (RU) и накрывается ru_prefixes (159.194.208.0/20) →
+    // control plane уходил мимо туннеля, где его режет оператор. Исключаем IP API/активного edge
+    // из сева ЗДЕСЬ ЖЕ, где раньше был инлайн-блок (behaviour-preserving — тот же порядок операций
+    // над тем же `sites`, тот же вызов carveOutIpFromSites, просто вынесен в метод).
+    rebuildApiCarveOut(sites);
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
@@ -3246,6 +3381,15 @@ void AvpnEngineQml::refreshAccount()
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // AVPN remote-config (T6, edge-walk): та же классификация транспорт-vs-приложение, что
+        // ConfigService::fetchConfig — 0/5xx = проблема ИМЕННО этого edge → повод шагнуть на другой;
+        // любой иной ответ (даже 401/403/410) ДОКАЗЫВАЕТ, что edge жив — НЕ считаем сетевой ошибкой.
+        if (m_configSvc) {
+            if (code == 0 || code >= 500)
+                m_configSvc->reportNetworkFailure();
+            else
+                m_configSvc->reportNetworkSuccess();
+        }
         // AVPN (перенос «как SIM»): 410 transferred — см. refreshSubscription (тот же флаг).
         if (code == 410 && !m_transferredAway) { m_transferredAway = true; emit changed(); }
         QVariantMap result;
@@ -3313,6 +3457,13 @@ void AvpnEngineQml::refreshSubscription()
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // AVPN remote-config (T6, edge-walk): см. идентичный блок в refreshAccount() выше по файлу.
+        if (m_configSvc) {
+            if (code == 0 || code >= 500)
+                m_configSvc->reportNetworkFailure();
+            else
+                m_configSvc->reportNetworkSuccess();
+        }
         // AVPN (перенос «как SIM»): 410 transferred — подписка уехала на другое устройство.
         // Взводим терминальный флаг для UI («Подписка перенесена»); НЕ ре-энроллим.
         if (code == 410) {
