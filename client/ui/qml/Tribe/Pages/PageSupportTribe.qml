@@ -185,11 +185,11 @@ PageType {
             id: composer
             Layout.fillWidth: true
             color: Theme.color.bg800
-            // строка composer + по md-отступу сверху/снизу. БЕЗ safe-area/IME-инсетов: зона вкладки
-            // заканчивается на верхе навбара (PageStart: tabBarStackView.bottom = avpnBottomNav.top),
-            // а навбар САМ несёт home-indicator (bottomInset в implicitHeight) и САМ поднимается над
-            // клавиатурой (anchors.bottomMargin = imeHeight). Дублирование здесь давало лишний зазор
-            // ~34px на iOS (на маке инсеты≈0 — не воспроизводилось). // AVPN
+            // строка composer + по md-отступу сверху/снизу. БЕЗ safe-area/IME-инсетов: без
+            // клавиатуры зона вкладки кончается на верхе навбара (он несёт home-indicator в
+            // bottomInset), а ПРИ клавиатуре навбар СКРЫТ и низ зоны = верх клавиатуры
+            // (PageStart: bottomMargin = imeHeight, handoff Занавеса 2026-07-08) — композер
+            // прижат к ней без зазора. Дублирование инсетов здесь давало лишние ~34px. // AVPN
             implicitHeight: composerRow.implicitHeight + 2 * Theme.space.md
 
             // хайрлайн-разделитель сверху

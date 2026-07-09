@@ -141,6 +141,33 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     // Бейдж вкладки актуален вскоре после старта, не через минуту (но и не в
     // конструкторе: enroll/токен могли ещё не подняться).
     QTimer::singleShot(3000, this, &TribeSupportChat::refreshUnread);
+
+    // Бэкофф-поллер серверного постера видео (см. watchPoster).
+    m_posterTimer.setSingleShot(true);
+    connect(&m_posterTimer, &QTimer::timeout, this, [this]() {
+        if (m_posterWatch.isEmpty())
+            return;
+        if (!m_active) { // ушли со страницы — не дёргать /thread (он mark-read'ит)
+            m_posterWatch.clear();
+            return;
+        }
+        static constexpr int kDelays[] = {2000, 5000, 10000, 10000, 10000};
+        refresh();
+        ++m_posterAttempt;
+        if (m_posterAttempt < int(sizeof(kDelays) / sizeof(kDelays[0])))
+            m_posterTimer.start(kDelays[m_posterAttempt]);
+        else
+            m_posterWatch.clear(); // сдаёмся — при открытом чате доберёт общий поллинг
+    });
+}
+
+void TribeSupportChat::watchPoster(int attachmentId)
+{
+    m_posterWatch.insert(attachmentId);
+    if (!m_posterTimer.isActive()) {
+        m_posterAttempt = 0;
+        m_posterTimer.start(2000);
+    }
 }
 
 QString TribeSupportChat::authToken() const
@@ -276,6 +303,9 @@ QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
         atts.append(am);
         if (hasThumb && !m_thumbCache.contains(attId))
             queueThumb(attId);
+        // Серверный постер видео готов → бэкофф-поллер больше не нужен.
+        if (hasThumb && m_posterWatch.remove(attId) && m_posterWatch.isEmpty())
+            m_posterTimer.stop();
     }
 
     QVariantMap mm;
@@ -335,7 +365,10 @@ void TribeSupportChat::applyThread(const QByteArray &json)
 void TribeSupportChat::rebuildMessages()
 {
     QVariantList list = m_serverMessages;
-    // Впрыснуть подъехавшие превью в копию серверной истории.
+    // Впрыснуть в копию серверной истории: подъехавшие превью (m_thumbCache) и
+    // локальные превью бывших эх (m_localUrlByAttId) — серверная копия сообщения
+    // рисует ТО ЖЕ локальное фото/постер непрерывно, пока WebP тихо едет фоном
+    // (анти-паттерн PWA-GUIDE §4: «эхо-бабл не заменять серверным» — иначе мигание).
     for (auto &mv : list) {
         QVariantMap mm = mv.toMap();
         QVariantList atts = mm.value(QStringLiteral("attachments")).toList();
@@ -346,6 +379,12 @@ void TribeSupportChat::rebuildMessages()
             const QString cached = m_thumbCache.value(attId);
             if (!cached.isEmpty() && am.value(QStringLiteral("thumbUrl")).toString() != cached) {
                 am.insert(QStringLiteral("thumbUrl"), cached);
+                av = am;
+                touched = true;
+            }
+            const QString local = m_localUrlByAttId.value(attId);
+            if (!local.isEmpty() && am.value(QStringLiteral("localUrl")).toString() != local) {
+                am.insert(QStringLiteral("localUrl"), local);
                 av = am;
                 touched = true;
             }
@@ -443,6 +482,11 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
         e.kind = QStringLiteral("video");
         e.mime = mime;
         e.filePath = fi.absoluteFilePath(); // стримим с диска, в память не тащим
+        // localUrl эха — ТОЛЬКО картинка. Для видео это локальный постер-кадр,
+        // который iOS-пикер кладёт рядом по конвенции <видео>.poster.jpg
+        // (TribeMediaPicker.mm, handoff §C.2); нет постера → плейсхолдер с play.
+        const QString poster = fi.absoluteFilePath() + QStringLiteral(".poster.jpg");
+        e.localUrl = QFile::exists(poster) ? QUrl::fromLocalFile(poster).toString() : QString();
     } else if (mime.startsWith(QLatin1String("image/"))) {
         // Паритет с Занавесом: крупные/непереваримые бэкендом форматы пережимаем
         // в JPEG ≤1600px q85 (заодно чинит EXIF-поворот через setAutoTransform).
@@ -553,9 +597,13 @@ void TribeSupportChat::postEcho(Echo &echo)
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         if (code >= 200 && code < 300) {
-            // Сервер вернул сохранённое сообщение — эхо больше не нужно.
+            // Сервер вернул сохранённое сообщение — эхо больше не нужно, но его
+            // локальное превью (фото/постер) ПЕРЕНОСИТСЯ на серверную копию
+            // (handoff Занавеса §B: замена эха без превью = мигание пустой карточкой).
+            QString echoLocalUrl;
             for (int i = 0; i < m_echoes.size(); ++i) {
                 if (m_echoes[i].localId == localId) {
+                    echoLocalUrl = m_echoes[i].localUrl;
                     m_echoes.removeAt(i);
                     break;
                 }
@@ -572,8 +620,24 @@ void TribeSupportChat::postEcho(Echo &echo)
                     break;
                 }
             }
-            if (savedId > 0 && !known)
-                m_serverMessages.append(parseMessage(saved));
+            if (savedId > 0 && !known) {
+                const QVariantMap savedMsg = parseMessage(saved);
+                const QVariantList savedAtts =
+                    savedMsg.value(QStringLiteral("attachments")).toList();
+                if (!savedAtts.isEmpty()) {
+                    const QVariantMap att = savedAtts.first().toMap();
+                    const int attId = att.value(QStringLiteral("id")).toInt();
+                    // attId серверного вложения → локальное превью эха (впрыск в rebuild).
+                    if (attId > 0 && !echoLocalUrl.isEmpty())
+                        m_localUrlByAttId.insert(attId, echoLocalUrl);
+                    // Постер видео сервер жуёт асинхронно — подтянуть бэкофф-поллингом
+                    // (handoff §C: один refresh сразу после POST почти всегда рано).
+                    if (attId > 0 && att.value(QStringLiteral("kind")) == QLatin1String("video")
+                        && !att.value(QStringLiteral("hasThumb")).toBool())
+                        watchPoster(attId);
+                }
+                m_serverMessages.append(savedMsg);
+            }
             rebuildMessages();
             m_refreshPending = true; // подтянуть автоответ/постер (уйдёт в хвосте ниже)
         } else {

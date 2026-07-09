@@ -125,6 +125,10 @@ private:
     void finishOriginal(int attachmentId, const QString &kind, const QString &mime,
                         const QByteArray &data);
     Echo *echoByLocalId(int localId);
+    // Бэкофф-поллинг серверного постера видео (handoff Занавеса §C: постер генерится
+    // асинхронно, один refresh после POST почти всегда рано): 2с→5с→10с×3, стоп по
+    // появлению постера / исчерпанию попыток / уходу со страницы (mark-read-гигиена).
+    void watchPoster(int attachmentId);
     static QString sanitizeFileName(const QString &name);
 
     QNetworkAccessManager *m_nam = nullptr;
@@ -155,6 +159,14 @@ private:
 
     // Кэш превью: attachment id → data:-URL (живёт с процессом; WebP ≤480px — дёшево).
     QHash<int, QString> m_thumbCache;
+    // Локальные превью бывших эх: server attId → file:// (фото или постер-кадр видео).
+    // Впрыскивается в серверную историю при rebuild — превью видно непрерывно с момента
+    // отправки, серверный WebP тихо подъезжает фоном (PWA-GUIDE §4).
+    QHash<int, QString> m_localUrlByAttId;
+    // Видео без серверного постера — бэкофф-поллер.
+    QSet<int> m_posterWatch;
+    QTimer m_posterTimer;
+    int m_posterAttempt = 0;
     QList<int> m_thumbQueue;
     QSet<int> m_thumbQueued;
     bool m_thumbInFlight = false;

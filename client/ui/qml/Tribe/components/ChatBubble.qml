@@ -56,11 +56,12 @@ Item {
             delegate: Rectangle {
                 id: mediaCard
                 required property var modelData
-                // видео-файл в Image.source не годится (декодера нет) — локальное превью
-                // только у фото-эха; у видео до постера сервера остаётся плейсхолдер
-                readonly property string previewUrl: modelData.kind === "image"
-                        ? (modelData.localUrl !== "" ? modelData.localUrl : modelData.thumbUrl)
-                        : modelData.thumbUrl
+                // localUrl — ВСЕГДА картинка (фото или локальный постер-кадр видео из
+                // TribeMediaPicker; сам видеофайл сюда не попадает — движок кладёт в
+                // localUrl только <видео>.poster.jpg). Локальное превью непрерывно с
+                // момента отправки; серверный WebP-thumb — тихий апгрейд следом.
+                readonly property string previewUrl: modelData.localUrl !== ""
+                                                     ? modelData.localUrl : modelData.thumbUrl
                 // серверные width/height превью → честный aspect-ratio без прыжков;
                 // нет данных (эхо/постер ещё не готов) → 4:3.
                 readonly property real ratio: (modelData.width > 0 && modelData.height > 0)

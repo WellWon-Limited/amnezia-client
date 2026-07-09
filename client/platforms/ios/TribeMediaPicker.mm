@@ -8,6 +8,7 @@
 // nested event loop — правило движка), выбранный файл копируется во временную папку и
 // отдаётся обратно в C++ через Tribe_supportPickedMedia(path) (реализация — в
 // TribeSupportChat.cpp, маршалит в Qt-поток).
+#import <AVFoundation/AVFoundation.h>
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -32,6 +33,29 @@ static UIViewController *tribeTopViewController()
     while (vc.presentedViewController)
         vc = vc.presentedViewController;
     return vc;
+}
+
+// AVPN (handoff Занавеса §C.2): мгновенный локальный постер видео — кадр ~0.5с через
+// AVAssetImageGenerator, JPEG рядом с файлом (<видео>.poster.jpg). C++ (sendAttachmentFile)
+// подхватывает его по конвенции имени в localUrl эха; серверный постер (точнее по кадру)
+// потом тихо заменит. Синхронно, но мы уже на background-очереди completion-хендлера.
+static void tribeGenerateVideoPoster(NSString *videoPath)
+{
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:videoPath] options:nil];
+    AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+    gen.appliesPreferredTrackTransform = YES; // учесть rotation-метаданные
+    gen.maximumSize = CGSizeMake(960, 960);
+    NSError *err = nil;
+    CGImageRef cg = [gen copyCGImageAtTime:CMTimeMakeWithSeconds(0.5, 600)
+                                actualTime:nil
+                                     error:&err];
+    if (cg == NULL)
+        return; // нет постера — карточка с play и плейсхолдером, не смертельно
+    UIImage *ui = [UIImage imageWithCGImage:cg];
+    CGImageRelease(cg);
+    NSData *jpg = UIImageJPEGRepresentation(ui, 0.8);
+    if (jpg != nil)
+        [jpg writeToFile:[videoPath stringByAppendingString:@".poster.jpg"] atomically:YES];
 }
 
 // Делегат держим статически: PHPicker хранит delegate weak — локальный объект умер бы
@@ -76,6 +100,9 @@ static TribeMediaPickerDelegate *s_delegate = nil;
                                                    toURL:[NSURL fileURLWithPath:dst]
                                                    error:&copyErr])
             return;
+        // Видео: сразу выдрать локальный постер-кадр (мы на background-очереди — можно синхронно).
+        if ([typeId isEqualToString:UTTypeMovie.identifier])
+            tribeGenerateVideoPoster(dst);
         // dst ретейнится блоком — UTF8String берём ВНУТРИ (сырой указатель снаружи
         // пережил бы autorelease-пул completion-хендлера).
         dispatch_async(dispatch_get_main_queue(), ^{
