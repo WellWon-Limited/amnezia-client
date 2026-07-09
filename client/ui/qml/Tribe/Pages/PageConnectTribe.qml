@@ -458,11 +458,26 @@ PageType {
         }
     }
 
+    // AVPN (Task 7): мягкий баннер «доступно обновление» (remote-config, updateState===1).
+    // Anchors НЕЗАВИСИМЫ от header (topMargin реагирует на updateBanner.visible): скрытый баннер
+    // схлопывается в implicitHeight 0 и не двигает autoVpnCard/orb ни на пиксель относительно
+    // текущей пиксель-точной раскладки; видимый — вставляет себя в цепочку якорей без правки
+    // констант sceneShift (orb якорится на autoVpnCard.bottom, а не на фиксированных числах).
+    TribeUpdateBanner {
+        id: updateBanner
+        anchors.top: header.bottom
+        anchors.topMargin: visible ? Theme.space.md : 0
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        z: 10
+    }
+
     // ── карточка «АвтоVPN» — НАД кнопкой Connect (перенос из bottomBlock, реш. 2026-07-02):
     //    РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
     Rectangle {
         id: autoVpnCard
-        anchors.top: header.bottom; anchors.topMargin: Theme.space.lg
+        anchors.top: updateBanner.bottom; anchors.topMargin: Theme.space.lg
         anchors.left: parent.left; anchors.right: parent.right
         anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
         anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
@@ -1009,6 +1024,13 @@ PageType {
     TribeNodeSheet {
         id: nodeSheet
         z: 200
+    }
+
+    // AVPN (Task 7): force-update блокер (remote-config, updateState===2) — поверх ВСЕГО (z:9999
+    // внутри компонента), включая шторку и попап объявления: несовместимая версия важнее любого
+    // другого UI. Неснимаем — см. комментарии в TribeUpdateGate.qml (drawerDepth back-guard).
+    TribeUpdateGate {
+        id: updateGate
     }
 
     // AVPN (объявления P-ANN): попап важного объявления поверх главного. Показ — самое новое
