@@ -328,18 +328,43 @@ PageType {
         }
     }
 
-    // лайтбокс: фото на весь экран поверх страницы, закрытие тапом
+    // лайтбокс: фото на весь экран поверх страницы, закрытие тапом/Back/свайпом вниз.
+    // Участвует в back-логике (паттерн DrawerType2, аудит 2026-07-09): раньше Back при открытом
+    // фото уходил в escapePressed → closePage → hideWindow (сворачивал приложение).
     Rectangle {
         id: lightbox
         anchors.fill: parent
-        visible: false
+        visible: opened
         color: Qt.rgba(0, 0, 0, 0.92)
         z: 100
+        property bool opened: false
+        property int  depthIndex: 0
 
         function show(fileUrl) {
             lightboxImage.source = fileUrl
-            visible = true
+            opened = true
+            depthIndex = PageController.incrementDrawerDepth()
         }
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
+            if (!opened) return
+            opened = false
+            depthIndex = 0
+            lightboxImage.source = ""
+            if (!viaController)
+                PageController.decrementDrawerDepth()
+        }
+
+        Connections {
+            target: PageController
+            enabled: lightbox.opened
+            function onCloseTopDrawer() {
+                if (lightbox.depthIndex === PageController.getDrawerDepth())
+                    lightbox.close(true)
+            }
+        }
+        // смена вкладки (replace) с открытым фото → деструкция без close(): компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
         Image {
             id: lightboxImage
@@ -353,7 +378,16 @@ PageType {
         }
         MouseArea {
             anchors.fill: parent
-            onClicked: { lightbox.visible = false; lightboxImage.source = "" }
+            onClicked: lightbox.close()
+        }
+        // свайп вниз = закрыть (жест галерей)
+        DragHandler {
+            target: null
+            yAxis.enabled: true; xAxis.enabled: false
+            onActiveChanged: {
+                if (!active && activeTranslation.y > 80)
+                    lightbox.close()
+            }
         }
     }
 }

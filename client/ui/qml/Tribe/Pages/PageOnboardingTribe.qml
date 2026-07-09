@@ -662,12 +662,14 @@ PageType {
             opened = true
             depthIndex = PageController.incrementDrawerDepth()
         }
-        function close() {
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
             if (!opened)
                 return
             opened = false
             depthIndex = 0
-            PageController.decrementDrawerDepth()
+            if (!viaController)
+                PageController.decrementDrawerDepth()
         }
         // страница может быть уничтожена с открытым оверлеем — компенсируем depth,
         // иначе Back/Escape ломаются во всём приложении (см. TribeResultSheet)
@@ -681,7 +683,7 @@ PageType {
             enabled: legalSheet.opened
             function onCloseTopDrawer() {
                 if (legalSheet.depthIndex === PageController.getDrawerDepth())
-                    legalSheet.close()
+                    legalSheet.close(true)
             }
         }
 

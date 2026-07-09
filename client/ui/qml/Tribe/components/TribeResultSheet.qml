@@ -27,12 +27,16 @@ Item {
         opened = true
         depthIndex = PageController.incrementDrawerDepth()
     }
-    function close() {
+    // viaController=true — закрытие по Back/Escape: pageController декрементит depth САМ после
+    // emit closeTopDrawer — второй декремент здесь оставил бы нижний оверлей (при наложении двух)
+    // с depth=0 и мёртвым Back.
+    function close(viaController) {
         if (!opened)
             return
         opened = false
         depthIndex = 0
-        PageController.decrementDrawerDepth()
+        if (!viaController)
+            PageController.decrementDrawerDepth()
         done()
     }
 
@@ -41,7 +45,7 @@ Item {
         enabled: sheet.opened
         function onCloseTopDrawer() {
             if (sheet.depthIndex === PageController.getDrawerDepth())
-                sheet.close()
+                sheet.close(true)
         }
     }
 

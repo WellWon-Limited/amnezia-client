@@ -401,12 +401,62 @@ PageType {
         // ── ПОДПИСКА ─────────────────────────────────────────────────────────
         // Единый блок: статус/срок/трафик/устройства. Отдельного «Профиля» нет — устройство
         // и так видно в списке УСТРОЙСТВА ниже; всё остальное сведено сюда (без дублирования).
-        Text {
-            text: qsTr("ПОДПИСКА")
-            color: Theme.color.text3
-            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+        // Справа в строке заголовка — переключатель языка (сегмент-пилюля RU/EN/ES): ручной
+        // выбор поверх авто-детекта по языку системы (дефолт SecureAppSettingsRepository =
+        // QLocale::system()). Коды-эндонимы, НЕ переводятся (без qsTr). Заменил список «ЯЗЫК» внизу.
+        RowLayout {
+            Layout.fillWidth: true
             Layout.topMargin: Theme.space.sm
+            spacing: Theme.space.md
+
+            Text {
+                text: qsTr("ПОДПИСКА")
+                color: Theme.color.text3
+                font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+            }
+            Item { Layout.fillWidth: true }
+
+            Rectangle {
+                Layout.preferredWidth: langRow.implicitWidth + 2 * Theme.space.xs
+                Layout.preferredHeight: 32
+                radius: Theme.radius.pill
+                color: Theme.color.glass
+                border.width: 1
+                border.color: Theme.color.border
+
+                Row {
+                    id: langRow
+                    anchors.centerIn: parent
+                    spacing: 2
+                    Repeater {
+                        model: ["ru", "en", "es"]
+                        delegate: Rectangle {
+                            id: langSeg
+                            required property var modelData
+                            readonly property bool active: root.hasEngine && TribeEngine.appLang === modelData
+                            width: 34; height: 24
+                            radius: Theme.radius.pill
+                            color: active ? Theme.color.surface2 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: langSeg.modelData.toUpperCase()
+                                color: langSeg.active ? Theme.color.accent : Theme.color.text3
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.caption
+                                font.weight: Theme.font.wSemibold
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: if (root.hasEngine) TribeEngine.setAppLang(langSeg.modelData)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // перенос «как SIM» завершён С ЭТОГО устройства (бэк ответил 410 transferred):
@@ -540,36 +590,55 @@ PageType {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xs
                     enabled: !root.redeeming
+                    horizontalAlignment: TextInput.AlignHCenter // код по центру, как OTP-поле (и подсказка тоже)
                     placeholderText: qsTr("Введите код активации")
                     error: root.redeemError
                     onTextChanged: { root.redeemError = false; root.redeemHint = ""; root.fingerprintBlocked = false }
                     onAccepted: root.redeemKey(text)
                 }
 
-                // accent-кнопка во всю ширину; активна только при непустом поле
-                TribeButton {
-                    variant: "primary"
-                    text: qsTr("Активировать")
-                    loading: root.redeeming
-                    enabled: !root.redeeming && redeemField.text.trim().length > 0
+                // одна строка: слева квадратная иконка-кнопка скана QR (только моб. платформы —
+                // root.scanAvailable, на desktop камеры-бэкенда нет), справа accent-кнопка
+                // «Активировать» на всю оставшуюся ширину (активна только при непустом поле).
+                RowLayout {
                     Layout.fillWidth: true
-                    onClicked: root.redeemKey(redeemField.text)
+                    spacing: Theme.space.sm
+
+                    TribeButton {
+                        visible: root.scanAvailable
+                        variant: "icon"
+                        Layout.preferredWidth: 46
+                        Layout.preferredHeight: 46
+                        onClicked: root.openScanner()
+
+                        // иконка «скан QR» (lucide scan-line, 24-грид), вектор через Shape
+                        Shape {
+                            anchors.centerIn: parent
+                            width: 24; height: 24
+                            scale: 20 / 24
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.8
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                PathSvg { path: "M3 7 V5 A2 2 0 0 1 5 3 H7 M17 3 H19 A2 2 0 0 1 21 5 V7 M21 17 V19 A2 2 0 0 1 19 21 H17 M7 21 H5 A2 2 0 0 1 3 19 V17 M7 12 H17" }
+                            }
+                        }
+                    }
+
+                    TribeButton {
+                        variant: "primary"
+                        text: qsTr("Активировать")
+                        loading: root.redeeming
+                        enabled: !root.redeeming && redeemField.text.trim().length > 0
+                        Layout.fillWidth: true
+                        onClicked: root.redeemKey(redeemField.text)
+                    }
                 }
 
-                // скан QR переноса/ключа камерой (моб. платформы; на desktop камеры-бэкенда нет)
-                TribeButton {
-                    visible: root.scanAvailable
-                    variant: "glass"
-                    text: qsTr("Сканировать QR")
-                    Layout.fillWidth: true
-                    onClicked: root.openScanner()
-                }
-
-                // AVPN (store-flow): нет кода → чат поддержки с заготовленным вопросом в composer
-                // (отправляет пользователь САМ — приложение диалог не инициирует). Только в
-                // store-сборке: в остальных путь продления — «Управлять подпиской» выше.
+                // нет кода → чат поддержки с заготовленным вопросом в composer (отправляет
+                // пользователь САМ — приложение диалог не инициирует). Во ВСЕХ сборках
+                // (2026-07-09; раньше только store — это просто мостик в чат, платёжных ссылок нет).
                 Text {
-                    visible: root.storeBuild
                     text: qsTr("Нет кода? Напишите нам — поможем.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
@@ -577,7 +646,6 @@ PageType {
                     Layout.topMargin: Theme.space.xs
                 }
                 TribeButton {
-                    visible: root.storeBuild
                     variant: "glass"
                     text: qsTr("Написать в поддержку")
                     Layout.fillWidth: true
@@ -870,41 +938,6 @@ PageType {
             }
         }
 
-        // ── ЯЗЫК ────────────────────────────────────────────────────────────
-        // Ручной выбор поверх авто-детекта по языку системы (дефолт SecureAppSettingsRepository =
-        // QLocale::system()). Названия языков — эндонимы, НЕ переводятся (без qsTr).
-        Text {
-            text: qsTr("ЯЗЫК")
-            color: Theme.color.text3
-            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
-            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
-            Layout.topMargin: Theme.space.sm
-        }
-        Repeater {
-            model: [
-                { code: "ru", label: "Русский" },
-                { code: "en", label: "English" },
-                { code: "es", label: "Español" }
-            ]
-            delegate: TribeListRow {
-                required property var modelData
-                Layout.fillWidth: true
-                title: modelData.label
-                rightItem: Shape { // галочка активного языка
-                    visible: root.hasEngine && TribeEngine.appLang === modelData.code
-                    width: 16; height: 16
-                    anchors.verticalCenter: parent.verticalCenter
-                    preferredRendererType: Shape.CurveRenderer
-                    ShapePath {
-                        strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 1.8
-                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                        PathSvg { path: "M3 8.5 l3.5 3.5 L13 4" }
-                    }
-                }
-                onClicked: if (root.hasEngine) TribeEngine.setAppLang(modelData.code)
-            }
-        }
-
         // ── ПРАВОВАЯ ИНФОРМАЦИЯ ─────────────────────────────────────────────
         // Видимые ссылки на политику/условия обязательны для VPN (App Review 5.4).
         Text {
@@ -1002,10 +1035,12 @@ PageType {
         // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает модалку, не страницу
         property int depthIndex: 0
         function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
-        function close() {
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
             if (!opened) return
             opened = false; busy = false; depthIndex = 0
-            PageController.decrementDrawerDepth()
+            if (!viaController)
+                PageController.decrementDrawerDepth()
         }
 
         Connections {
@@ -1013,7 +1048,7 @@ PageType {
             enabled: seatSheet.opened
             function onCloseTopDrawer() {
                 if (seatSheet.depthIndex === PageController.getDrawerDepth() && !seatSheet.busy)
-                    seatSheet.close()
+                    seatSheet.close(true)
             }
         }
         // смена вкладки (replace) с открытой модалкой → деструкция без close(): компенсируем depth
@@ -1128,10 +1163,12 @@ PageType {
         // открытом диалоге уходил в escapePressed → closePage → hideWindow (сворачивал приложение)
         property int depthIndex: 0
         function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
-        function close() {
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
             if (!opened) return
             opened = false; depthIndex = 0
-            PageController.decrementDrawerDepth()
+            if (!viaController)
+                PageController.decrementDrawerDepth()
         }
 
         Connections {
@@ -1139,7 +1176,7 @@ PageType {
             enabled: kickConfirm.opened
             function onCloseTopDrawer() {
                 if (kickConfirm.depthIndex === PageController.getDrawerDepth() && !root.kicking)
-                    kickConfirm.close()
+                    kickConfirm.close(true)
             }
         }
         // смена вкладки (replace) с открытым диалогом → деструкция без close(): компенсируем depth
@@ -1237,10 +1274,12 @@ PageType {
         // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает ЭТОТ оверлей, не страницу
         property int depthIndex: 0
         function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
-        function close() {
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
             if (!opened) return
             opened = false; depthIndex = 0
-            PageController.decrementDrawerDepth()
+            if (!viaController)
+                PageController.decrementDrawerDepth()
         }
 
         Connections {
@@ -1248,7 +1287,7 @@ PageType {
             enabled: transferSheet.opened
             function onCloseTopDrawer() {
                 if (transferSheet.depthIndex === PageController.getDrawerDepth())
-                    transferSheet.close()
+                    transferSheet.close(true)
             }
         }
         // смена вкладки (replace) с открытым шитом → деструкция без close(): компенсируем depth,
@@ -1449,10 +1488,12 @@ PageType {
         // участие в back-логике (паттерн DrawerType2): Back/Escape закрывает сканер, не страницу
         property int depthIndex: 0
         function open()  { opened = true; depthIndex = PageController.incrementDrawerDepth() }
-        function close() {
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
             if (!opened) return
             opened = false; depthIndex = 0
-            PageController.decrementDrawerDepth()
+            if (!viaController)
+                PageController.decrementDrawerDepth()
         }
 
         Connections {
@@ -1460,7 +1501,7 @@ PageType {
             enabled: scanSheet.opened
             function onCloseTopDrawer() {
                 if (scanSheet.depthIndex === PageController.getDrawerDepth())
-                    scanSheet.close()
+                    scanSheet.close(true)
             }
         }
         // смена вкладки (replace) с открытым сканером → деструкция без close(): компенсируем depth

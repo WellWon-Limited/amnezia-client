@@ -35,12 +35,15 @@ Item {
         if (hasEngine)
             TribeEngine.ackAnnouncement(a.id, "shown", "")   // дедуп за сессию — в движке
     }
-    function close() {
+    // viaController=true — закрытие по Back/Escape: pageController декрементит depth САМ после
+    // emit closeTopDrawer — второй декремент оставил бы нижний оверлей (при наложении) с depth=0.
+    function close(viaController) {
         if (!opened)
             return
         opened = false
         depthIndex = 0
-        PageController.decrementDrawerDepth()
+        if (!viaController)
+            PageController.decrementDrawerDepth()
     }
     function markRead() {
         if (hasEngine && ann)
@@ -72,7 +75,7 @@ Item {
         enabled: sheet.opened
         function onCloseTopDrawer() {
             if (sheet.depthIndex === PageController.getDrawerDepth())
-                sheet.close()   // системный «назад» = «Позже»: без read, вернётся при перезапуске
+                sheet.close(true)   // системный «назад» = «Позже»: без read, вернётся при перезапуске
         }
     }
 
