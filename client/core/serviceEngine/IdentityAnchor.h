@@ -37,10 +37,14 @@ public:
         return Action::None;
     }
 
-    // Блоб якоря — компактный JSON {v, uuid, priv, pub, token}. Токен/ключи могут быть пустыми
-    // (до первого enroll) — восстановим хотя бы uuid.
+    // Блоб якоря — компактный JSON {v, uuid, priv, pub, token[, fpSeed]}. Токен/ключи могут быть
+    // пустыми (до первого enroll) — восстановим хотя бы uuid. fpSeed — секрет device_fingerprint
+    // (DEVICE-FIRST-SPEC §4.1): наружу уходит ТОЛЬКО sha256(fpSeed); в QSettings/plist сид не
+    // попадает никогда (plist бэкапится, сид намеренно нет). Пустой сид ключ не пишет (аддитивно,
+    // v не бампаем — старый билд такой блоб читает как раньше).
     static QByteArray packIdentity(const QString &uuid, const QString &privKey,
-                                   const QString &pubKey, const QString &token)
+                                   const QString &pubKey, const QString &token,
+                                   const QString &fpSeed = QString())
     {
         QJsonObject o;
         o.insert(QStringLiteral("v"), 1);
@@ -48,12 +52,16 @@ public:
         o.insert(QStringLiteral("priv"), privKey);
         o.insert(QStringLiteral("pub"), pubKey);
         o.insert(QStringLiteral("token"), token);
+        if (!fpSeed.isEmpty())
+            o.insert(QStringLiteral("fpSeed"), fpSeed);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
     }
 
     // false + error при мусоре/отсутствии uuid (не затираем стор битым якорем).
+    // fpSeed — опциональный выход: блоб старого билда сид не несёт → пустая строка.
     static bool unpackIdentity(const QByteArray &blob, QString &uuid, QString &privKey,
-                               QString &pubKey, QString &token, QString &error)
+                               QString &pubKey, QString &token, QString &error,
+                               QString *fpSeed = nullptr)
     {
         QJsonParseError pe;
         const QJsonDocument doc = QJsonDocument::fromJson(blob, &pe);
@@ -64,6 +72,8 @@ public:
         privKey = o.value(QStringLiteral("priv")).toString();
         pubKey = o.value(QStringLiteral("pub")).toString();
         token = o.value(QStringLiteral("token")).toString();
+        if (fpSeed)
+            *fpSeed = o.value(QStringLiteral("fpSeed")).toString();
         if (uuid.isEmpty()) { error = QStringLiteral("anchor without uuid"); return false; }
         return true;
     }
@@ -77,8 +87,15 @@ public:
     static void syncAtStartup();
 
     // Освежить якорь из стора (после ротации токена — Enrollment::saveToken). Пишет в Keychain
-    // ТОЛЬКО если блоб изменился (не дёргаем Keychain на каждый запуск зря).
+    // ТОЛЬКО если блоб изменился (не дёргаем Keychain на каждый запуск зря). Существующий fpSeed
+    // из текущего якоря СОХРАНЯЕТСЯ (стор его не знает — сид живёт только в Keychain).
     static void updateFromStore();
+
+    // device_fingerprint (iOS): вернуть fpSeed из якоря; если его нет — сгенерировать, записать
+    // атомарно вместе с identity (тот же блоб, одна запись) и вернуть ТОЛЬКО перечитанное из
+    // Keychain значение (read-back). Пусто = не достали/не записали → поле НЕ слать (случайный
+    // fallback на каждый запуск дал бы ложные 403 владельцу). Не-iOS → всегда пусто.
+    static QString ensureFingerprintSeed();
 #endif
 };
 

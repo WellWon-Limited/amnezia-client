@@ -445,6 +445,11 @@ signals:
     // AVPN (Task 13): перенос «как SIM» успешно принят на это устройство (токен уже ротирован,
     // подписка перечитана). UI может показать тост/перейти на Connect.
     void transferRedeemed();
+    // AVPN (device_fingerprint): redeem/transfer вернул 403 «device fingerprint mismatch» —
+    // rehome-гейт бэка: устройство заштамповано другим якорем железа (защита от угона по утёкшему
+    // device_id). UI: «привязано к другому аккаунту — обратитесь в поддержку», БЕЗ ретраев и БЕЗ
+    // чистки локального стейта (текущая подписка устройства цела).
+    void fingerprintMismatch();
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
