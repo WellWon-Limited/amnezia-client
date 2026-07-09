@@ -52,8 +52,14 @@ DebugSnapshot.h               — данные для диагностическ
 ServiceEngine.{h,cpp}         — оркестратор (+ startFlow: enroll→subscription→connect; switchLog; snapshot)
 AvpnEngineQml.{h,cpp}         — QObject-фасад для QML (context property "AvpnEngine"): start/stop/reprobe/
                                 manualSwitch/resetLkg + debugSnapshot()→QVariantMap; health-QTimer; реактивный failover
+TribeSupportChat.{h,cpp}      — чат поддержки (context property "TribeSupport"): поллинг /v1/support/*
+                                (device-Bearer), оптимистичные эхо, QHttpMultiPart-аплоад фото/видео
+                                (JPEG-рекомпресс, HEIC→JPEG), превью data:-URL, ручной 302→R2 без Bearer,
+                                бэкофф-поллер постера видео; спека — tribe-backend
+                                documents/SUPPORT-CHAT.md (+SUPPORT-CHAT-NATIVE-HANDOFF.md) ✅ E2E
 tests/                        — фикстура + автономная проверка (парсер + билдер + enrollment + selector + health
-                                + node_ranking_check + rtt_icmp_check[live ICMP])
+                                + node_ranking_check + rtt_icmp_check[live ICMP]
+                                + build_e2e_support.sh — ЖИВОЙ E2E чата против локального бэкенда)
 
 ## Интеграция в приложение (C-7, выполнена)
 - **Сборка:** `client/cmake/avpn.cmake` подключён 1 строкой в `CMakeLists.txt` (`// AVPN`). Опция
