@@ -62,18 +62,25 @@ namespace AvpnShare
 
     bool shareTextWithImage(const QString &text, const QString &imagePath)
     {
-        // content:// через штатный FileProvider Qt-манифеста (authorities=org.amnezia.vpn.qtprovider,
+        // content:// через штатный FileProvider Qt-манифеста (authorities=${applicationId}.qtprovider,
         // покрывает files-dir). Прямой file:// URI с API 24+ кидает FileUriExposedException.
         QJniObject context = QNativeInterface::QAndroidApplication::context();
         if (!context.isValid())
             return false;
+
+        // authority ДИНАМИЧЕСКИ из packageName: жёсткая строка сломалась при ренейме пакета
+        // org.antivpn.client → com.tribevpn.client (28122224) — share тихо деградировал в текст.
+        const QJniObject pkg = context.callObjectMethod("getPackageName", "()Ljava/lang/String;");
+        if (!pkg.isValid())
+            return shareText(text);
+        const QString authority = pkg.toString() + QStringLiteral(".qtprovider");
 
         const QJniObject file = QJniObject("java/io/File", "(Ljava/lang/String;)V",
                                            QJniObject::fromString(imagePath).object<jstring>());
         const QJniObject uri = QJniObject::callStaticObjectMethod(
                 "androidx/core/content/FileProvider", "getUriForFile",
                 "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;",
-                context.object(), QJniObject::fromString(QStringLiteral("org.amnezia.vpn.qtprovider")).object<jstring>(),
+                context.object(), QJniObject::fromString(authority).object<jstring>(),
                 file.object());
         if (!uri.isValid())
             return shareText(text); // не вышло с картинкой — хотя бы ссылка
