@@ -55,8 +55,17 @@ void ConfigService::fetchConfig()
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (code < 200 || code >= 300) {
+        // Только транспортный сбой = проблема ЭТОГО входа → повод шагнуть на другой edge:
+        // code==0 (abort/timeout из armTimeout, либо сокет не подключился) или 5xx (серверная авария).
+        if (code == 0 || code >= 500) {
             reportNetworkFailure();
+            return;
+        }
+        // Любой иной non-2xx (401/403/410/404/4xx) ДОКАЗЫВАЕТ, что edge достижим — ответ пришёл с
+        // прикладного слоя. Проблема НЕ в маршруте (это авторизация/подписка/путь), уходить с
+        // рабочего входа нельзя → сбрасываем стрик, тело не применяем.
+        if (code < 200 || code >= 300) {
+            reportNetworkSuccess();
             return;
         }
         reportNetworkSuccess();
