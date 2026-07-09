@@ -89,6 +89,10 @@ signals:
     // AvpnEngineQml::refreshSubscription): бейдж/золотая CTA оживают сразу, даже если
     // приложение открыто на чате. В колокол пуш ТОЖЕ попадает (в отличие от support).
     void paymentPushReceived();
+    // AVPN (объявления P-ANN): пришёл пуш type=announcement — движок перечитывает
+    // /v1/announcements (попап всплывает сразу, без ожидания foreground-рефреша).
+    // В колокол пуш ТОЖЕ попадает (обычная обработка перед сигналом).
+    void announcementPushReceived();
     // AVPN (Support): пользователь ТАПНУЛ по пушу → QML-навигация (PageStart:
     // type=support → вкладка «Поддержка»).
     void pushTapped(const QString &type);

@@ -62,6 +62,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
+#include <QUrlQuery> // AVPN (P-ANN): query-параметры GET /v1/announcements
 
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
 #include "MacServiceInstaller.h" // AVPN (macOS desktop): авто-установка root-демона из вшитого pkg (ноль терминала)
@@ -371,6 +372,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             });
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readRequested,
             this, &AvpnEngineQml::markNotificationsRead);
+    // AVPN (P-ANN): пуш «объявление» → немедленный рефреш списка (попап всплывает сразу).
+    connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::announcementPushReceived,
+            this, &AvpnEngineQml::refreshAnnouncements);
 
     // AVPN (Task 9): разрешение на пуши спрашиваем ОДИН раз — после первого успешного коннекта (UX:
     // контекстный запрос). Persist, чтобы не пытаться при каждом коннекте (iOS и так дедупит промпт).
@@ -378,6 +382,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         QSettings s;
         m_pushPermissionAsked = s.value(QStringLiteral("AvpnPush/permissionAsked"), false).toBool();
     }
+    loadAnnouncementsLkg(); // AVPN (P-ANN): объявления из LKG до сети (fetch заменит после bootstrap)
 
     // реактивный failover + правдивый статус: реальное состояние туннеля. // AVPN
     if (m_conn) {
@@ -2243,6 +2248,7 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
     probeNodeRtt(); // AVPN (выбор по скорости): тёплый off-tunnel ICMP при старте (туннель опущен) —
                     // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
     flushPendingPushToken(); // токен точно есть — дедуп внутри защитит от повтора
+    refreshAnnouncements();  // AVPN (P-ANN): токен есть → подтянуть актуальные объявления
 }
 
 // AVPN: провал попытки — тихо переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
@@ -3356,6 +3362,153 @@ void AvpnEngineQml::refreshReferral()
     });
 }
 
+// ---------------------------------------------------------------------------
+// AVPN (объявления P-ANN): server-driven важные сообщения — попап поверх главного
+// экрана + карточки колокольчика. Контент настраивается в админке; новые
+// объявления НЕ требуют обновления приложения. Спека: tribe-front
+// docs/superpowers/specs/2026-07-09-announcements-design.md.
+// ---------------------------------------------------------------------------
+
+namespace {
+QString announcePlatform()
+{
+#if defined(Q_OS_IOS)
+    return QStringLiteral("ios");
+#elif defined(Q_OS_ANDROID)
+    return QStringLiteral("android");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("windows");
+#else
+    return QStringLiteral("linux");
+#endif
+}
+} // namespace
+
+// LKG-персист текущего списка (мгновенный показ до сети при следующем старте — паттерн
+// saveLkgSubscription). Синхронный QSettings::sync — движок владеет записью, не QML.
+void AvpnEngineQml::persistAnnouncementsLkg()
+{
+    QSettings s;
+    s.setValue(QStringLiteral("AvpnAnnounce/lkg"),
+               QString::fromUtf8(QJsonDocument(QJsonArray::fromVariantList(m_announcements))
+                                     .toJson(QJsonDocument::Compact)));
+    s.sync();
+}
+
+void AvpnEngineQml::loadAnnouncementsLkg()
+{
+    QSettings s;
+    const QByteArray raw = s.value(QStringLiteral("AvpnAnnounce/lkg")).toString().toUtf8();
+    if (raw.isEmpty())
+        return;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw);
+    if (!doc.isArray())
+        return;
+    QVariantList items;
+    for (const QJsonValue &v : doc.array()) {
+        const QVariantMap item = v.toObject().toVariantMap();
+        // Прочитанное после сохранения LKG отфильтровываем на загрузке.
+        if (!announcementRead(item.value(QStringLiteral("id")).toInt()))
+            items.append(item);
+    }
+    if (!items.isEmpty()) {
+        m_announcements = items;
+        emit announcementsChanged();
+    }
+}
+
+void AvpnEngineQml::refreshAnnouncements()
+{
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty())
+        return; // без токена не ходим; LKG уже показан, bootstrap дотянет позже
+
+    QUrl url(m_baseUrl + QStringLiteral("/v1/announcements"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("platform"), announcePlatform());
+    q.addQueryItem(QStringLiteral("lang"), appLang());
+    q.addQueryItem(QStringLiteral("app_version"), QCoreApplication::applicationVersion());
+    url.setQuery(q);
+    QNetworkRequest req{url};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code < 200 || code >= 300)
+            return; // сеть/401 → тихо, текущий список (LKG) не трогаем
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject())
+            return;
+        QVariantList items;
+        const QJsonArray arr = doc.object().value(QStringLiteral("items")).toArray();
+        for (const QJsonValue &v : arr) {
+            const QVariantMap item = v.toObject().toVariantMap();
+            // Серверный фильтр уже исключает прочитанные ЭТИМ устройством; локальный дубль —
+            // страховка от гонки «read-ack ещё не долетел, а fetch уже вернул старый список».
+            if (!announcementRead(item.value(QStringLiteral("id")).toInt()))
+                items.append(item);
+        }
+        m_announcements = items;
+        persistAnnouncementsLkg();
+        emit announcementsChanged();
+    });
+}
+
+bool AvpnEngineQml::announcementRead(int id) const
+{
+    QSettings s;
+    return s.value(QStringLiteral("AvpnAnnounce/read_%1").arg(id), false).toBool();
+}
+
+void AvpnEngineQml::ackAnnouncement(int id, const QString &event, const QString &buttonId)
+{
+    if (id <= 0)
+        return;
+    if (event == QLatin1String("shown")) {
+        if (m_announceShownAcked.contains(id))
+            return; // один shown-ack на объявление за сессию
+        m_announceShownAcked.insert(id);
+    }
+    if (event == QLatin1String("read")) {
+        // Локальный дубль серверного read_at — СИНХРОННО (движок, не QML Settings):
+        // попап не должен всплыть повторно даже офлайн/до следующего fetch.
+        {
+            QSettings s;
+            s.setValue(QStringLiteral("AvpnAnnounce/read_%1").arg(id), true);
+            s.sync();
+        }
+        QVariantList rest;
+        for (const QVariant &v : std::as_const(m_announcements))
+            if (v.toMap().value(QStringLiteral("id")).toInt() != id)
+                rest.append(v);
+        if (rest.size() != m_announcements.size()) {
+            m_announcements = rest;
+            persistAnnouncementsLkg();
+            emit announcementsChanged();
+        }
+    }
+
+    const QString token = authToken();
+    if (!m_nam || token.isEmpty())
+        return; // локальный read уже сохранён; серверная квитанция догонит при следующем показе
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/announcements/%1/ack").arg(id))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + token.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    QJsonObject body{{QStringLiteral("event"), event}};
+    if (!buttonId.isEmpty())
+        body.insert(QStringLiteral("button_id"), buttonId);
+    QNetworkReply *reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater); // fire-and-forget
+}
+
 // AVPN (оплата): POST /v1/cabinet/web-link (Bearer, тело пустое) → { url: "…?wl=<token>", expires_in }.
 // Тот же async-паттерн, что refreshReferral (armTimeout, без вложенного QEventLoop). Сигнал
 // cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка + device_uuid (кабинет откроет шит
@@ -3436,6 +3589,9 @@ void AvpnEngineQml::registerPushToken(const QString &token, const QString &envir
     const QString ver = QCoreApplication::applicationVersion();
     if (!ver.isEmpty())
         body.insert(QStringLiteral("app_version"), ver);
+    // AVPN (P-ANN): язык UI — кормит таргетинг объявлений/пушей на бэке.
+    if (!appLang().isEmpty())
+        body.insert(QStringLiteral("lang"), appLang());
 
     QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/devices/push-token"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));

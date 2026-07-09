@@ -230,6 +230,10 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     // (после обычной обработки: пуш «Доступ продлён (+N дней)» остаётся в колоколе).
     if (type == QLatin1String("payment"))
         emit paymentPushReceived();
+    // AVPN (P-ANN): объявление опубликовано → движок перечитывает /v1/announcements
+    // (попап поверх главного всплывает сразу; карточка в колоколе уже добавлена выше).
+    if (type == QLatin1String("announcement"))
+        emit announcementPushReceived();
 }
 
 } // namespace avpn
