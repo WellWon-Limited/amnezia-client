@@ -9,7 +9,7 @@
         <translation>%1 · auto</translation>
     </message>
     <message>
-        <location line="+173"/>
+        <location line="+174"/>
         <source>Не отправлено</source>
         <translation>Not sent</translation>
     </message>
@@ -966,7 +966,7 @@
         <translation>Access activated on this device</translation>
     </message>
     <message>
-        <location line="+319"/>
+        <location line="+321"/>
         <source>AntiVPN активирован!</source>
         <translation>AntiVPN activated!</translation>
     </message>
@@ -1128,7 +1128,7 @@
         <translation>Notifications</translation>
     </message>
     <message>
-        <location line="+128"/>
+        <location line="+136"/>
         <source>+%1 дней</source>
         <translation>+%1 days</translation>
     </message>
@@ -1146,40 +1146,146 @@
 <context>
     <name>PageOnboardingTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageOnboardingTribe.qml" line="+99"/>
-        <source>Умный VPN
-с искусственным
-интеллектом</source>
-        <translation>Smart VPN
-with artificial
-intelligence</translation>
+        <location filename="../../ui/qml/Tribe/Pages/PageOnboardingTribe.qml" line="+271"/>
+        <source>Надоело выключать VPN?</source>
+        <translation>Tired of turning your VPN off?</translation>
+    </message>
+    <message>
+        <location line="+94"/>
+        <source>Теперь VPN выключать не нужно.</source>
+        <translation>No need to turn off your VPN anymore.</translation>
     </message>
     <message>
         <location line="+12"/>
-        <source>Зарубежные сайты открываются через VPN, а российские — банки, Госуслуги, маркетплейсы — напрямую. Без блокировок и переключений: всё работает сразу.</source>
-        <translation>Foreign sites open through the VPN, while Russian ones — banks, Gosuslugi (gov services), marketplaces — go direct. No blocks, no switching: everything just works.</translation>
+        <source>Зарубежные — направляются через VPN</source>
+        <translation>Foreign — routed through VPN</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>Российские — всегда работают напрямую</source>
+        <translation>Russian — always connect directly</translation>
+    </message>
+    <message>
+        <location line="-112"/>
+        <source>Умная Ai маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
+        <translation>Smart Ai routing decides which traffic should go through the VPN.</translation>
+    </message>
+    <message>
+        <location line="+72"/>
+        <source>AntiVPN активирован!</source>
+        <translation>AntiVPN activated!</translation>
+    </message>
+    <message>
+        <location line="+64"/>
+        <source>Зарубежные сайты — работают через VPN,
+Банки, кинотеатры, Госуслуги, маркетплейсы продолжают работать без переключений!</source>
+        <translation>Foreign sites — work through the VPN,
+banks, cinemas, government services and marketplaces keep working without switching!</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Режим одной кнопки</source>
+        <translation>One-button mode</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Никаких настроек, конфигов и инструкций. Одна кнопка — и вы под защитой.</source>
+        <translation>No settings, configs or instructions. One button — and you are protected.</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Нажмите кнопку Connect</source>
+        <translation>Press the Connect button</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Подключение за пару секунд</source>
+        <translation>Connected in a couple of seconds</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Сервер выберется сам</source>
+        <translation>The server picks itself</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ai подберет самый быстрый сервер</source>
+        <translation>Ai will pick the fastest server</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Если скорость интернета низкая вы можете нажать &quot;Сменить сервер&quot;</source>
+        <translation>If your internet is slow you can tap &quot;Change server&quot;</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Выбирайте любую страну</source>
+        <translation>Choose any country</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Выберите любую страну из доступного списка серверов, есть даже Россия</source>
+        <translation>Pick any country from the available server list, even Russia</translation>
+    </message>
+    <message>
+        <location line="+47"/>
+        <source>Мы не собираем email или Telegram аккаунты. Соблюдаем анонимность!</source>
+        <translation>We don&apos;t collect emails or Telegram accounts. We respect anonymity!</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Мы не анализируем ваш трафик и не знаем какие сайты и приложения используете</source>
+        <translation>We don&apos;t analyze your traffic and don&apos;t know which sites and apps you use</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Авторизация происходит только из приложения без ввода личных данных</source>
+        <translation>Authorization happens only from the app, without entering personal data</translation>
+    </message>
+    <message>
+        <location line="-69"/>
+        <source>Вы можете сменить сервер</source>
+        <translation>You can change the server</translation>
     </message>
     <message>
         <location line="+29"/>
-        <source>100% приватность. Никакой регистрации.</source>
-        <translation>100% privacy. No sign-up.</translation>
+        <source>100% приватность</source>
+        <translation>100% privacy</translation>
     </message>
     <message>
-        <location line="+11"/>
-        <source>Мы не собираем email и не зовём вас в Telegram-каналы.
-Нам не нужны ваши данные — главное, чтобы всё работало.</source>
-        <translation>We don&apos;t collect your email and won&apos;t drag you into Telegram channels.
-We don&apos;t need your data — we just want everything to work.</translation>
+        <location line="+12"/>
+        <source>Нам не нужны ваши данные — главное, чтобы всё работало.</source>
+        <translation>We don&apos;t need your data — what matters is that everything works.</translation>
     </message>
     <message>
-        <location line="+20"/>
+        <location line="+13"/>
+        <source>Никакой регистрации</source>
+        <translation>No registration</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Никаких логов</source>
+        <translation>No logs</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Полная анонимность</source>
+        <translation>Full anonymity</translation>
+    </message>
+    <message>
+        <location line="+17"/>
         <source>Мы не логируем трафик и не продаём ваши данные. Нажимая «Приступим», вы принимаете &lt;a href=&apos;https://tribevpn.com/legal/terms&apos;&gt;Условия&lt;/a&gt; и &lt;a href=&apos;https://tribevpn.com/legal/privacy&apos;&gt;Политику конфиденциальности&lt;/a&gt;.</source>
         <translation>We don&apos;t log traffic and don&apos;t sell your data. By tapping «Get Started», you accept the &lt;a href=&apos;https://tribevpn.com/legal/terms&apos;&gt;Terms&lt;/a&gt; and &lt;a href=&apos;https://tribevpn.com/legal/privacy&apos;&gt;Privacy Policy&lt;/a&gt;.</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+71"/>
         <source>Приступим</source>
         <translation>Get Started</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Далее</source>
+        <translation>Next</translation>
     </message>
 </context>
 <context>
@@ -1294,6 +1400,14 @@ You can attach a photo or video.</translation>
     </message>
 </context>
 <context>
+    <name>TribeAnnouncementSheet</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+171"/>
+        <source>Прочитал</source>
+        <translation>Got it</translation>
+    </message>
+</context>
+<context>
     <name>TribeBottomNav</name>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeBottomNav.qml" line="+18"/>
@@ -1369,7 +1483,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+756"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+762"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -1565,7 +1679,7 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+560"/>
+        <location line="+562"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
