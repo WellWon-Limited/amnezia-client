@@ -11,6 +11,7 @@
 #include "SubscriptionParser.h" // AVPN (оплата): refreshSubscription() — device-часы для шапки/CTA
 #include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
 #include "IdentityAnchor.h" // AVPN (анти-фрод): Keychain-якорь identity — restore на старте (переустановка)
+#include "DeviceFingerprint.h" // AVPN (anti-farm): якорь железа в async-enroll (паритет с Enrollment::enroll)
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
@@ -2166,7 +2167,8 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
 
     const QByteArray body = Enrollment::buildTrialBody(
         m_engine.identity().publicKey(), Identity::deviceId(m_store), Enrollment::detectPlatform(),
-        deviceMarketingName(), Enrollment::loadPendingReferral());
+        deviceMarketingName(), Enrollment::loadPendingReferral(),
+        DeviceFingerprint::get()); // AVPN (anti-farm, 7eb3467a): паритет с sync-enroll — якорь железа и тут
     QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/trial"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
 
