@@ -34,7 +34,10 @@ android {
     }
 
     defaultConfig {
-        applicationId = "org.antivpn.client" // AVPN: наш applicationId (upstream org.amnezia.vpn); load-bearing, НЕ менять
+        // AVPN: наш applicationId (upstream org.amnezia.vpn). История: org.antivpn.client (эра ANTI VPN,
+        // sideload-сборки до 2026-07) → com.tribevpn.client (решение владельца 2026-07-09; регистрируется
+        // в Google Play — там НЕОБРАТИМ). load-bearing: обязан байт-в-байт совпадать с package в Play Console.
+        applicationId = "com.tribevpn.client"
         targetSdk = qtTargetSdkVersion.toInt()
 
         // keeps language resources for only the locales specified below
