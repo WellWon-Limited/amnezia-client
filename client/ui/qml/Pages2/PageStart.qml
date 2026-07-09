@@ -390,9 +390,14 @@ PageType {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.left: parent.left
-        // AVPN: над нашей навигацией; на онбординге навигации нет — страница до низа окна
+        // AVPN: над нашей навигацией; на онбординге навигации нет — страница до низа окна.
+        // AVPN (Support, handoff Занавеса 2026-07-08): при клавиатуре навбар СКРЫТ (не едет
+        // вверх), низ зоны = верх клавиатуры — над ней остаётся только композер чата.
         anchors.bottom: root.onboardingActive ? parent.bottom
-                                              : (root.avpnNav ? avpnBottomNav.top : tabBar.top)
+                                              : (root.avpnNav ? (PageController.imeHeight > 0 ? parent.bottom
+                                                                                              : avpnBottomNav.top)
+                                                              : tabBar.top)
+        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive) ? PageController.imeHeight : 0
 
         enabled: !root.isControlsDisabled
 
@@ -616,9 +621,10 @@ PageType {
         anchors.right: parent.right
         anchors.left: parent.left
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: PageController.imeHeight
 
-        visible: root.avpnNav && !root.onboardingActive   // AVPN: на онбординге навигации нет
+        // AVPN (Support, handoff Занавеса): при клавиатуре навбар ПРЯЧЕТСЯ, а не поднимается
+        // (PWA-паттерн kb-open .tabbar{display:none}) — над клавиатурой живёт только композер.
+        visible: root.avpnNav && !root.onboardingActive && PageController.imeHeight === 0
         // iOS: PageController.safeArea* только для Android → SafeArea (Qt 6.9+); фон нава
         // уходит под home-индикатор до самого низа (implicitHeight = 72 + inset)
         bottomInset: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)
