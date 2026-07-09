@@ -27,8 +27,13 @@ Item {
     // живые узлы из пула (фильтруем «только живые»). Гард на undefined-движок (dev-превью).
     readonly property var pool: hasEngine ? TribeEngine.nodePool : []
 
+    // участие в back-логике (паттерн DrawerType2, аудит 2026-07-09): раньше Back при открытой
+    // шторке уходил в escapePressed → closePage → hideWindow (сворачивал приложение).
+    property int depthIndex: 0
+
     function open() {
         opened = true
+        depthIndex = PageController.incrementDrawerDepth()
         // AVPN: refreshPool() на стороне движка СИНХРОННЫЙ (bootstrap → awaitReply, nested QEventLoop).
         // Звать его ПРЯМО здесь = nested loop во время показа/анимации шторки → re-entrancy SIGSEGV
         // (тот же класс краша, из-за которого bootstrap/refreshDevices деферят таймером). Список и так
@@ -39,7 +44,28 @@ Item {
         // Ответы прилетают по одному → changed() → список пересортируется (быстрые вниз) + палочки живые.
         if (hasEngine) TribeEngine.probeNodeRtt()
     }
-    function close() { opened = false; poolRefreshTimer.stop() }
+    // viaController=true — закрытие по Back/Escape: pageController декрементит depth САМ после
+    // emit closeTopDrawer (keyPressEvent) — второй декремент здесь оставил бы нижний оверлей
+    // (если их два наложено) с depth=0 и мёртвым Back.
+    function close(viaController) {
+        if (!opened) return
+        opened = false
+        depthIndex = 0
+        poolRefreshTimer.stop()
+        if (!viaController)
+            PageController.decrementDrawerDepth()
+    }
+
+    Connections {
+        target: PageController
+        enabled: sheet.opened
+        function onCloseTopDrawer() {
+            if (sheet.depthIndex === PageController.getDrawerDepth())
+                sheet.close(true)
+        }
+    }
+    // смена вкладки (replace) с открытой шторкой → деструкция без close(): компенсируем depth
+    Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
 
     // AVPN: деферим синхронный refreshPool за пределы кадра показа шторки (см. open()).
     Timer {
