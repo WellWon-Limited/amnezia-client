@@ -112,6 +112,14 @@
         <file>Tribe/legal/terms.ru.md</file>
         <file>Tribe/legal/terms.en.md</file>
         <file>Tribe/legal/terms.es.md</file>
+        <!-- AVPN onboarding: бренд-иконки сервисов (экран 1 «АнтиVPN») -->
+        <file>Tribe/images/brand-whatsapp.svg</file>
+        <file>Tribe/images/brand-telegram.svg</file>
+        <file>Tribe/images/brand-youtube.svg</file>
+        <file>Tribe/images/brand-gemini.svg</file>
+        <file>Tribe/images/brand-claude.svg</file>
+        <file>Tribe/images/brand-kinopoisk.svg</file>
+        <file>Tribe/images/brand-gosuslugi.png</file>
         <file>Pages2/PageProtocolAwgSettings.qml</file>
         <file>Pages2/PageProtocolOpenVpnSettings.qml</file>
         <file>Pages2/PageProtocolRaw.qml</file>
