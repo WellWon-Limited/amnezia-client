@@ -92,6 +92,7 @@ void AvpnPushBridge::markAllRead()
     // системный бейдж мог быть выставлен прилетевшим aps.badge, пока приложение было закрыто.
     if (m_badgeClearer)
         m_badgeClearer();
+    updateNativeBadge();   // AVPN (P-ANN, macOS): dockTile → 0
     // AVPN: сказать серверу «прочитано» (обнулит серверный счётчик) — движок слушает readRequested.
     emit readRequested();
     if (changedAny)
@@ -115,6 +116,18 @@ void AvpnPushBridge::setAuthorizationRequester(void (*fn)())
 void AvpnPushBridge::setBadgeClearer(void (*fn)())
 {
     m_badgeClearer = fn;
+}
+
+void AvpnPushBridge::setBadgeSetter(void (*fn)(int))
+{
+    m_badgeSetter = fn;
+    updateNativeBadge();   // сразу отразить текущее состояние (LKG-история уже могла загрузиться)
+}
+
+void AvpnPushBridge::updateNativeBadge()
+{
+    if (m_badgeSetter)
+        m_badgeSetter(m_unreadCount);
 }
 
 // --- Натив-слой: маршалинг в Qt-поток ---
@@ -225,6 +238,7 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
         m_items.removeLast();
     m_unreadCount += 1;
     persist();   // AVPN: сохранить новый пуш в локальную историю (переживёт перезапуск)
+    updateNativeBadge();   // AVPN (P-ANN, macOS): dockTile ← unreadCount
     emit changed();
     // AVPN (store-flow E): оплата прошла → сигнал движку на мгновенный рефреш подписки
     // (после обычной обработки: пуш «Доступ продлён (+N дней)» остаётся в колоколе).

@@ -101,6 +101,9 @@ if(APPLE AND NOT IOS AND NOT MACOS_NE)
     list(APPEND HEADERS ${AVPN_SE}/MacServiceInstaller.h)
     list(APPEND SOURCES ${AVPN_SE}/MacServiceInstaller.mm)
     list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/MacServiceInstaller.mm)
+    # AVPN (P-ANN): бейдж непрочитанных на иконке дока (NSApp.dockTile).
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
 endif()
 
 # AVPN: нативные iOS-исходники — только для iOS-таргета.
