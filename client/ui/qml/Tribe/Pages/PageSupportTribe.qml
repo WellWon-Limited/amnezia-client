@@ -18,8 +18,19 @@ PageType {
     // dev-превью без движка (qml с диска) — страница живёт на пустой модели, не падает.
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
 
+    // AVPN (store-flow): черновик, подставляемый в composer при открытии (кнопка «Написать в
+    // поддержку» из Настроек передаёт его через goToTabBarPageUrl). ТОЛЬКО подстановка в поле —
+    // отправляет пользователь сам (диалог инициирует клиент, не приложение).
+    property string prefillDraft: ""
+
     // Открытая страница → частый поллинг треда + mark-read на бэке; ушли — только счётчик.
-    Component.onCompleted: if (root.hasChat) TribeSupport.active = true
+    Component.onCompleted: {
+        if (root.hasChat) TribeSupport.active = true
+        if (root.prefillDraft !== "") {
+            input.text = root.prefillDraft
+            input.cursorPosition = input.text.length
+        }
+    }
     Component.onDestruction: if (root.hasChat) TribeSupport.active = false
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -102,8 +113,23 @@ PageType {
                 pending: modelData.pending
                 failed: modelData.failed
                 attachments: modelData.attachments
+                card: modelData.card
                 onAttachmentClicked: function(attachmentId, kind) {
                     if (root.hasChat) TribeSupport.openAttachment(attachmentId)
+                }
+                // AVPN (store-flow D): действия server-driven карточки. open_url — внешний браузер
+                // (персональная ссылка из ответа поддержки); compose_send — отправить заготовленный
+                // сервером текст ОТ ИМЕНИ пользователя (тап = действие юзера; кнопка Т-3 карточки
+                // «Помочь с продлением»). Неизвестный action — no-op (forward-совместимость).
+                onCardButtonClicked: function(btn) {
+                    if (!btn || !root.hasChat) return
+                    if (btn.action === "open_url" && (btn.url || "") !== "")
+                        Qt.openUrlExternally(btn.url)
+                    else if (btn.action === "compose_send" && (btn.send || "") !== "") {
+                        TribeSupport.sendText(btn.send)
+                        list.stick = true
+                        list.positionViewAtEnd()
+                    }
                 }
                 onRetryClicked: if (root.hasChat) TribeSupport.retryMessage(modelData.id)
                 onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(modelData.id)

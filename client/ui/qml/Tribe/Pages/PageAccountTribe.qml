@@ -23,6 +23,9 @@ PageType {
     signal requestLegalDoc(string doc)
     // AVPN (перенос): после «подписка перенесена» уводим на главную (роутер goAvpnTab в PageStart)
     signal requestTab(int index)
+    // AVPN (store-flow): открыть вкладку «Поддержка» с черновиком в composer (кнопка «Написать
+    // в поддержку» у карточки активации). Отправляет пользователь сам — только подстановка.
+    signal requestSupportChat(string draft)
 
     // AVPN: модель — анонимный триал-по-device (кодов на бэке пока нет). Реальные данные из движка.
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
@@ -47,10 +50,15 @@ PageType {
     property bool   redeemFailed: false  // взводится onError/onSeatLimitReached в рамках синхронного вызова
     property string redeemLastCode: ""   // для повторного redeem с evict_device_id после кика
 
+    // AVPN (store-flow, 2026-07-09): store-сборка (-DTRIBE_STORE_BUILD=ON) — в UI нет прямых
+    // платёжных переходов (Google Play Payments / Apple §3.1.1). dev-превью без движка → false.
+    readonly property bool storeBuild: root.hasEngine && TribeEngine.storeBuild === true
+
     // AVPN (оплата): «Управлять подпиской» — минт одноразовой ссылки (TribeEngine.requestCabinetLink,
     // POST /v1/cabinet/web-link) и открытие web-кабинета во ВНЕШНЕМ браузере (НЕ webview — §3.1.1).
-    // Фиче-флаг на случай придирок ревью Apple: false + пересборка = кнопки нет, бэк не затронут.
-    readonly property bool manageSubEnabled: true
+    // В store-сборке кнопки НЕТ (compile-time, см. storeBuild) — бейдж-инфо подписки остаётся,
+    // путь продления = карточка «Активировать ключ» + чат поддержки (store-flow).
+    readonly property bool manageSubEnabled: !root.storeBuild
     property bool cabinetLinking: false   // loading кнопки; сбрасывается в onCabinetLinkReady (приходит всегда)
 
     // Язык приложения → веб-страницы (ЛК/legal) открываются на нём же (i18n сайта, 2026-07-07).
@@ -88,7 +96,7 @@ PageType {
         var c = (code || "").trim()
         if (c.length === 0) {
             root.redeemError = true
-            root.redeemHint = qsTr("Введите ключ активации")
+            root.redeemHint = qsTr("Введите код активации")
             return
         }
         if (isTransferInput(c)) {
@@ -508,7 +516,7 @@ PageType {
                     Layout.fillWidth: true
                 }
                 Text {
-                    text: qsTr("Введите ключ активации, чтобы продлить доступ.")
+                    text: qsTr("Если у вас есть код активации — введите его ниже, доступ продлится сразу.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -519,7 +527,7 @@ PageType {
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xs
                     enabled: !root.redeeming
-                    placeholderText: qsTr("Введите ключ активации")
+                    placeholderText: qsTr("Введите код активации")
                     error: root.redeemError
                     onTextChanged: { root.redeemError = false; root.redeemHint = "" }
                     onAccepted: root.redeemKey(text)
@@ -542,6 +550,25 @@ PageType {
                     text: qsTr("Сканировать QR")
                     Layout.fillWidth: true
                     onClicked: root.openScanner()
+                }
+
+                // AVPN (store-flow): нет кода → чат поддержки с заготовленным вопросом в composer
+                // (отправляет пользователь САМ — приложение диалог не инициирует). Только в
+                // store-сборке: в остальных путь продления — «Управлять подпиской» выше.
+                Text {
+                    visible: root.storeBuild
+                    text: qsTr("Нет кода? Напишите нам — поможем.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    Layout.topMargin: Theme.space.xs
+                }
+                TribeButton {
+                    visible: root.storeBuild
+                    variant: "glass"
+                    text: qsTr("Написать в поддержку")
+                    Layout.fillWidth: true
+                    onClicked: root.requestSupportChat(qsTr("Здравствуйте! Как мне активировать код?"))
                 }
 
                 // пояснительный текст (text3): «Проверяем…» / ошибка валидации непустоты

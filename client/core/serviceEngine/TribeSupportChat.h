@@ -45,7 +45,10 @@ class TribeSupportChat : public QObject {
     //           atMs (epoch мс, локальное время считает QML), pending, failed,
     //           attachments: [{id, kind: "image"|"video", mime, name, bytes,
     //                          width, height, hasThumb, thumbUrl (data:-URL или ""),
-    //                          localUrl (file:// для эха, иначе "")}]}
+    //                          localUrl (file:// для эха, иначе "")}],
+    //           card (опц., store-flow D): {title, body, buttons: [{label,
+    //                          action: "open_url"|"compose_send", url, send}]} —
+    //                          server-driven карточка, рендерится ВМЕСТО body}
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
     Q_PROPERTY(QString status READ status NOTIFY messagesChanged)      // "open" | "resolved"
     Q_PROPERTY(int unread READ unread NOTIFY unreadChanged)            // бейдж вкладки

@@ -59,6 +59,11 @@ class AvpnEngineQml : public QObject {
     // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
     // позже выбор сервера гейтится этим одним флагом. CONSTANT — значение не меняется в рантайме.
     Q_PROPERTY(bool proSelectionEnabled READ proSelectionEnabled CONSTANT)
+    // AVPN (store-flow, 2026-07-09): сборка для сторов (-DTRIBE_STORE_BUILD=ON, cmake/avpn.cmake).
+    // true → в UI НЕТ прямых платёжных переходов: «Управлять подпиской» скрыта, золотая CTA ведёт
+    // на карточку «Активировать ключ» + чат поддержки (полиси Google Play Payments / Apple §3.1.1).
+    // CONSTANT by design: compile-time, НЕ рантайм-флаг (переключение после ревью = cloaking).
+    Q_PROPERTY(bool storeBuild READ storeBuild CONSTANT)
     // AVPN: имя/ОС ТЕКУЩЕГО устройства, добытые НАТИВНО (DeviceModel.h: IOKit на macOS, sysctl+таблица
     // на iOS). Перекрывают невнятный backend-label (часто = платформа «macos»). CONSTANT — не меняется.
     Q_PROPERTY(QString thisDeviceName READ thisDeviceName CONSTANT)
@@ -150,6 +155,15 @@ public:
     QVariantList nodePool() const;
     // AVPN (live-node picker): Pro-гейт-заглушка — выбор сервера доступен (сейчас всегда true).
     bool proSelectionEnabled() const { return true; }
+    // AVPN (store-flow): compile-time флаг store-сборки (см. Q_PROPERTY storeBuild выше).
+    bool storeBuild() const
+    {
+#ifdef TRIBE_STORE_BUILD
+        return true;
+#else
+        return false;
+#endif
+    }
 
     // AVPN: текущее устройство (нативно). Реализация в .cpp — DeviceModel.h тянет Apple-фреймворки,
     // держим их вне этого заголовка (его инклудят многие TU).
@@ -666,6 +680,7 @@ private:
     Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)
     QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
     bool                         m_bootstrapped = false; // AVPN: bootstrap() УСПЕШНО выполнен (Task 11)
+    qint64                       m_lastFgRefreshMs = 0;  // AVPN (store-flow E): троттл engine-level foreground-рефреша подписки (30с)
     bool                         m_bootstrapInFlight = false; // AVPN: цепочка ретраев идёт (дедуп QML-вызовов)
     int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф → вечный медленный цикл, BootstrapRetry.h)
     QTimer                       m_bootstrapRetryTimer;       // AVPN: единый таймер ретрая (member, НЕ singleShot-фабрика) — kickBootstrap() может его поджать

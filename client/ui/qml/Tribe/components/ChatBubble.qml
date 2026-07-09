@@ -19,7 +19,14 @@ Item {
     property bool failed: false
     // [{id, kind: "image"|"video", mime, name, width, height, thumbUrl, localUrl}]
     property var attachments: []
+    // AVPN (store-flow D): server-driven карточка {title, body, buttons:[{label, action, url, send}]}.
+    // Есть card → рендерим её ВМЕСТО текстового пузыря (text = фолбэк старых клиентов).
+    // Генерик-рендерер: весь контент (тексты/кнопки/URL) приходит с сервера, обработка
+    // действий — у страницы (cardButtonClicked).
+    property var card: undefined
+    readonly property bool hasCard: !!card && ((card.title || "") !== "" || (card.body || "") !== "")
     signal attachmentClicked(int attachmentId, string kind)
+    signal cardButtonClicked(var button)
     signal retryClicked()
     signal discardClicked()
 
@@ -120,9 +127,63 @@ Item {
             }
         }
 
+        // AVPN (store-flow D): server-driven карточка — рамка surface1 с заголовком/текстом и
+        // кнопками во всю ширину. Первая кнопка primary (главное действие), остальные glass.
+        Rectangle {
+            id: cardBox
+            visible: bubble.hasCard
+            anchors.left: bubble.mine ? undefined : parent.left
+            anchors.right: bubble.mine ? parent.right : undefined
+            width: Math.min(bubble.width * 0.78, 320)
+            implicitHeight: cardCol.implicitHeight + 2 * bubble.pad
+            radius: Theme.radius.lg
+            color: Theme.color.surface1
+            border.width: 1
+            border.color: Theme.color.border
+
+            Column {
+                id: cardCol
+                x: bubble.pad
+                y: bubble.pad
+                width: cardBox.width - 2 * bubble.pad
+                spacing: Theme.space.sm
+
+                Text {
+                    visible: bubble.hasCard && (bubble.card.title || "") !== ""
+                    width: parent.width
+                    text: bubble.hasCard ? (bubble.card.title || "") : ""
+                    wrapMode: Text.Wrap
+                    color: Theme.color.text1
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyM
+                    font.weight: Theme.font.wMedium
+                }
+                Text {
+                    visible: bubble.hasCard && (bubble.card.body || "") !== ""
+                    width: parent.width
+                    text: bubble.hasCard ? (bubble.card.body || "") : ""
+                    wrapMode: Text.Wrap
+                    color: Theme.color.text2
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                }
+                Repeater {
+                    model: bubble.hasCard ? (bubble.card.buttons || []) : []
+                    delegate: TribeButton {
+                        required property var modelData
+                        required property int index
+                        width: cardCol.width
+                        variant: index === 0 ? "primary" : "glass"
+                        text: modelData.label || ""
+                        onClicked: bubble.cardButtonClicked(modelData)
+                    }
+                }
+            }
+        }
+
         Rectangle {
             id: box
-            visible: bubble.text !== ""
+            visible: bubble.text !== "" && !bubble.hasCard
             anchors.left: bubble.mine ? undefined : parent.left
             anchors.right: bubble.mine ? parent.right : undefined
             // implicitWidth текста — натуральная (без переноса) ширина → нет binding-loop с msg.width
