@@ -351,8 +351,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // должен застать УЖЕ созданный m_svcProbe, иначе серверный оверрайд probe-целей на холодном
     // офлайн-старте молча потерялся бы до следующего живого /v1/config (m_apiHostIps/carve-out эту
     // гонку не разделяют — они читаются из applyRuBypassSplit() в guardedStart(), намного позже ctor).
-    static const QString kConfigPubKeyHex = QStringLiteral(
-        "67bddcb248215a35ee2d8c2145ce415071ba02c5bcf888e35cc4491957aac78f");
+    // Remote-config signing key: prod by default; dev key only when a dev/E2E backend is pinned
+    // via AVPN_API_URL (same env var read above for m_baseUrl override — keeps endpoint and key
+    // selection consistent: dev endpoint ⇒ dev key, prod endpoint ⇒ prod key).
+    const bool devApi = !qgetenv("AVPN_API_URL").isEmpty();
+    const QString kConfigPubKeyHex = devApi
+        ? QStringLiteral("95da1bd9062653d9c185c3ca5cae995516a8e353abccd3cf98cd12cd2f3a075a")
+        : QStringLiteral("67bddcb248215a35ee2d8c2145ce415071ba02c5bcf888e35cc4491957aac78f");
     static const QStringList kBakedEdges{QStringLiteral("https://api.tribevpn.com"),
                                          QStringLiteral("https://vpn.wellwon.hk")};
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
