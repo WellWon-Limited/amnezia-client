@@ -608,19 +608,29 @@ void AvpnEngineQml::rebuildApiCarveOut()
 
 // AVPN remote-config (T6): сервер может переопределить пробируемые сервисы (probeTargets из
 // /v1/config) — напр. добавить/убрать сервис или сменить seed-хост без ребилда. Маппинг по
-// target: telegram→Mtproto (host = первый seed-DC-IP, остальные — fallbackHosts), youtube/
-// instagram→Goodput (host = fallback-SNI на душимом CDN). Неизвестный target — Https-деградация
-// (best-effort reachability), как штатная деградация ServiceProbeConfig. Пусто в конфиге →
+// target: telegram→Mtproto, youtube/instagram→Goodput, прочее→Https-деградация (best-effort
+// reachability, штатная деградация ServiceProbeConfig). ProbeTarget несёт ОДИН host, поэтому
+// несколько IP (напр. seed-DC Telegram) сервер выражает НЕСКОЛЬКИМИ записями с ОДИНАКОВЫМ target:
+// ГРУППИРУЕМ по target → ровно один ServiceProbeConfig на сервис (1:1 с m_serviceStatus, который
+// апдейтит только первое совпадение по key), host = первый host этой группы, остальные хосты
+// группы → fallbackHosts (тот же 4-й механизм, что у вшитого telegram-дефолта). Пусто в конфиге →
 // НЕ трогаем вшитые дефолты конструктора (см. AvpnEngineQml.cpp выше, cfgs telegram/youtube/instagram).
 void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
 {
     if (!m_svcProbe || cfg.probeTargets.isEmpty())
         return;
     QList<ServiceProbeConfig> cfgs;
+    QHash<QString, int> idxByTarget; // target → индекс в cfgs (сохраняем порядок первого появления)
     for (const avpn::ProbeTarget &t : cfg.probeTargets) {
+        auto it = idxByTarget.constFind(t.target);
+        if (it != idxByTarget.constEnd()) {
+            // повтор того же сервиса — доп. хост в fallbackHosts уже созданного конфига (multi-IP)
+            cfgs[it.value()].fallbackHosts.append(t.host);
+            continue;
+        }
         ServiceProbeConfig c;
         c.key = t.target;
-        c.host = t.host;
+        c.host = t.host; // первый host группы = основной seed
         c.port = t.port;
         if (t.target == QLatin1String("telegram"))
             c.kind = ServiceProbeConfig::Mtproto;
@@ -628,6 +638,7 @@ void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
             c.kind = ServiceProbeConfig::Goodput;
         else
             c.kind = ServiceProbeConfig::Https;
+        idxByTarget.insert(t.target, cfgs.size());
         cfgs.append(c);
     }
     m_svcProbe->setServices(cfgs);
