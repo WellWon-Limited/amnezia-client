@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Qt5Compat.GraphicalEffects as Fx   // OpacityMask: скругление баннера (clip режет прямоугольником)
 
 import ".."   // Theme
 
@@ -89,13 +90,15 @@ Item {
     Rectangle { anchors.fill: parent; color: Qt.alpha(Theme.color.bg800, 0.88) }
     MouseArea { anchors.fill: parent }   // важное сообщение: тап мимо карточки НЕ закрывает
 
+    // Карточка почти во весь экран (от верха до низа страницы, нижняя навигация остаётся
+    // видимой под страницей) — контент «дышит», кнопки прижаты к низу карточки.
     Rectangle {
         id: card
-        anchors.centerIn: parent
-        width: parent.width - 2 * Theme.space.xl
-        height: Math.min(content.implicitHeight + 2 * Theme.space.xl,
-                         parent.height - 2 * Theme.space.xxl
-                         - PageController.safeAreaTopMargin - PageController.safeAreaBottomMargin)
+        anchors.fill: parent
+        anchors.leftMargin: Theme.space.lg
+        anchors.rightMargin: Theme.space.lg
+        anchors.topMargin: PageController.safeAreaTopMargin + Theme.space.lg
+        anchors.bottomMargin: PageController.safeAreaBottomMargin + Theme.space.lg
         radius: Theme.radius.xl
         color: Theme.color.surface1
         border.width: 1
@@ -104,7 +107,7 @@ Item {
         ColumnLayout {
             id: content
             anchors.fill: parent
-            anchors.margins: Theme.space.xl
+            anchors.margins: Theme.space.lg
             spacing: Theme.space.md
 
             Text {
@@ -112,14 +115,13 @@ Item {
                 text: sheet.ann ? (sheet.ann.title || "") : ""
                 color: Theme.color.text1
                 wrapMode: Text.WordWrap
-                font.family: Theme.font.display; font.pixelSize: Theme.font.h2; font.weight: Theme.font.wBold
+                font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
             }
 
             Flickable {
                 id: bodyFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: Math.min(bodyCol.implicitHeight, 120)
                 contentWidth: width
                 contentHeight: bodyCol.implicitHeight
                 clip: true
@@ -130,15 +132,34 @@ Item {
                     width: bodyFlick.width
                     spacing: Theme.space.md
 
-                    Image {
+                    // Картинка-баннер: кроп под ширину карточки, скругление — OpacityMask
+                    // (QML clip режет прямоугольником, radius на клип не действует).
+                    Item {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: status === Image.Ready
-                                                ? width * (implicitHeight / Math.max(1, implicitWidth)) : 0
-                        visible: status === Image.Ready   // ошибка/нет URL → секции нет
-                        source: (sheet.ann && sheet.ann.image_url) ? sheet.ann.image_url : ""
-                        asynchronous: true
-                        fillMode: Image.PreserveAspectFit
-                        sourceSize.width: 1024
+                        Layout.preferredHeight: banner.status === Image.Ready
+                                                ? Math.round(width * 0.46) : 0
+                        visible: banner.status === Image.Ready   // ошибка/нет URL → секции нет
+
+                        Image {
+                            id: banner
+                            anchors.fill: parent
+                            source: (sheet.ann && sheet.ann.image_url) ? sheet.ann.image_url : ""
+                            asynchronous: true
+                            fillMode: Image.PreserveAspectCrop
+                            sourceSize.width: 1024
+                            visible: false   // рисует OpacityMask
+                        }
+                        Rectangle {
+                            id: bannerMask
+                            anchors.fill: parent
+                            radius: Theme.radius.md
+                            visible: false
+                        }
+                        Fx.OpacityMask {
+                            anchors.fill: parent
+                            source: banner
+                            maskSource: bannerMask
+                        }
                     }
 
                     Text {
@@ -147,8 +168,8 @@ Item {
                         color: Theme.color.text2
                         wrapMode: Text.WordWrap
                         textFormat: Text.MarkdownText
-                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
-                        lineHeight: 1.25
+                        font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+                        lineHeight: 1.35
                         onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                     }
                 }
