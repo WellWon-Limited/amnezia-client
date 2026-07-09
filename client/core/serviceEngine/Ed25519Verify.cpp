@@ -7,10 +7,20 @@ namespace avpn {
 
 bool verifyDetached(const QString &pubHex, const QByteArray &body, const QByteArray &sigB64)
 {
-    const QByteArray raw = QByteArray::fromHex(pubHex.toLatin1());
-    if (raw.size() != 32)
+    // Строгая проверка hex: fromHex молча выбрасывает невалидные символы, поэтому
+    // требуем ровно 64 hex-символа И round-trip (стрей/выпавшие символы завалят сверку).
+    const QByteArray pubLatin = pubHex.toLatin1();
+    const QByteArray raw = QByteArray::fromHex(pubLatin);
+    if (raw.size() != 32 || pubLatin.size() != 64 || raw.toHex() != pubLatin.toLower())
         return false;
-    const QByteArray sig = QByteArray::fromBase64(sigB64);
+
+    // Строгий base64: AbortOnBase64DecodingErrors ловит мусорные символы,
+    // которые обычный fromBase64 молча проглатывает.
+    const auto dec = QByteArray::fromBase64Encoding(
+        sigB64, QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
+    if (dec.decodingStatus != QByteArray::Base64DecodingStatus::Ok)
+        return false;
+    const QByteArray sig = dec.decoded;
     if (sig.size() != 64)
         return false;
 

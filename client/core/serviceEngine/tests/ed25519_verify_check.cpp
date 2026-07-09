@@ -22,6 +22,9 @@ int main(int argc, char **argv)
     CHECK(!avpn::verifyDetached(QString(), body, sig), "empty key fails");
     QString wrong = pub; wrong[0] = (wrong[0] == QLatin1Char('a')) ? QLatin1Char('b') : QLatin1Char('a');
     CHECK(!avpn::verifyDetached(wrong, body, sig), "wrong key fails");
+    // Строгая валидация входа: валидный ключ/подпись + мусорный хвост → false (не молча пропустить).
+    CHECK(!avpn::verifyDetached(pub + QStringLiteral("Z"), body, sig), "malformed pub hex (trailing Z) fails");
+    CHECK(!avpn::verifyDetached(pub, body, sig + QByteArrayLiteral("!!!")), "malformed sig base64 (trailing !!!) fails");
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
