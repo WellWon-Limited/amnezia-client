@@ -234,9 +234,12 @@
                 android:value="true" />
         </service>
 
+        <!-- AVPN: authority от ${applicationId} (канонический шаблон Qt), не апстрим-хардкод:
+             иначе дублирует authority ванильной AmneziaVPN -> INSTALL_FAILED_CONFLICTING_PROVIDER,
+             наш апп не ставится рядом с установленной Amnezia (частый кейс у RU-аудитории). -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="org.amnezia.vpn.qtprovider"
+            android:authorities="${applicationId}.qtprovider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/qtprovider_paths" />
