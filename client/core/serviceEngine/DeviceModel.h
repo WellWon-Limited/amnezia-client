@@ -99,13 +99,16 @@ inline QString iosMarketingName(const QString &id)
     return QString();
 }
 
-// Имя текущего устройства: Apple → маркетинговая модель, иначе hostname → prettyProductName.
+// Имя текущего устройства: Apple → маркетинговая модель, иначе prettyProductName.
+// ПРИВАТНОСТЬ (аудит 2026-07-09): hostname НЕ используем НИГДЕ — на десктопах он часто
+// личный («MacBook Влада», «DESKTOP-VLAD») и уходил полем model в /v1/trial.
 inline QString deviceMarketingName()
 {
 #if defined(Q_OS_MACOS)
     const QString mac = macProductMarketingName();
     if (!mac.isEmpty())
         return mac;
+    return QStringLiteral("Mac"); // старые Intel без product-name: родовое имя, НЕ hostname
 #elif defined(Q_OS_IOS)
     const QString machine = sysctlStr("hw.machine");
     const QString ios = iosMarketingName(machine);
@@ -118,8 +121,8 @@ inline QString deviceMarketingName()
     if (machine.startsWith(QLatin1String("iPod")))   return QStringLiteral("iPod touch");
     return QSysInfo::prettyProductName(); // напр. "iOS 18.x", но НИКОГДА "localhost"
 #endif
-    const QString host = QSysInfo::machineHostName();
-    return host.isEmpty() ? QSysInfo::prettyProductName() : host;
+    // Windows/Linux/Android: родовое имя ОС («Windows 11 …»), НЕ hostname (PII).
+    return QSysInfo::prettyProductName();
 }
 
 // Версия ОС для подзаголовка: «macOS Sequoia (15.5)» / «iOS 17.5» и т.п.
