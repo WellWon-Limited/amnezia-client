@@ -31,11 +31,22 @@ Item {
         target: PageController
         enabled: gate.visible
         function onCloseTopDrawer() {
-            // блокер неснимаем: сразу восстанавливаем глубину, которую C++ decrementDrawerDepth()
-            // снимет ПОСЛЕ этого сигнала (см. PageController::keyPressEvent) — иначе следующий
-            // Back "проваливается" ниже нуля и уходит в escapePressed()/сворачивание приложения.
+            // Back/Escape while the block is up: PageController::keyPressEvent does
+            //     if (m_drawerDepth) { emit closeTopDrawer(); decrementDrawerDepth(); }
+            // — this slot runs SYNCHRONOUSLY inside `emit`, BEFORE the pending decrement. So at
+            // this instant m_drawerDepth is still the mount value and getDrawerDepth() === depthIndex.
+            // We re-increment EXACTLY ONCE to cancel the decrement that keyPressEvent runs right after
+            // → net zero per Back press: m_drawerDepth stays pinned at the mount value, the gate
+            // remains the top drawer forever, and depth never falls to 0 (so the else-branch
+            // escapePressed()/minimize is never reached). The block is truly un-escapable.
+            //
+            // CRITICAL: do NOT assign the return value back to depthIndex. depthIndex must stay pinned
+            // at the mount value so the guard below holds on EVERY press. (The previous code did
+            // `depthIndex = incrementDrawerDepth()`, which grew depthIndex while m_drawerDepth was
+            // pinned → after 2 presses the guard went false, depth drifted to 0, and press #3
+            // escaped the gate. That was the bug.)
             if (gate.depthIndex === PageController.getDrawerDepth())
-                gate.depthIndex = PageController.incrementDrawerDepth()
+                PageController.incrementDrawerDepth()   // discard return — depthIndex stays pinned
         }
     }
 
