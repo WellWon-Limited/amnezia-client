@@ -53,18 +53,24 @@ PageType {
         xhr.send()
     }
 
-    Component.onCompleted: {
+    function reload() {
         // стейл-бинарник движка (dev-превью) может не знать legal-методов — гварды по функции
-        if (root.hasEngine && typeof TribeEngine.legalDocCached === "function") {
-            var cached = TribeEngine.legalDocCached(docKey, lang)
-            if (cached !== "")
-                root.bodyMd = cached
-        }
+        var fresh = ""
+        if (root.hasEngine && typeof TribeEngine.legalDocCached === "function")
+            fresh = TribeEngine.legalDocCached(docKey, lang)
+        root.bodyMd = fresh
         if (root.bodyMd === "")
             loadSnapshot()
         if (root.hasEngine && typeof TribeEngine.legalDocFetch === "function")
             TribeEngine.legalDocFetch(docKey, lang)
     }
+
+    property bool _ready: false
+    Component.onCompleted: { _ready = true; reload() }
+    // язык сменили, пока страница живёт (оверлей поверх онбординга, где есть переключатель
+    // языка) — перечитываем документ; для обычного открытия из настроек это no-op
+    onLangChanged: if (_ready) reload()
+    onDocKeyChanged: if (_ready) reload()
 
     Connections {
         target: root.hasEngine ? TribeEngine : null
