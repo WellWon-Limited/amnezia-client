@@ -84,6 +84,14 @@ PageType {
                     anchors.leftMargin: Theme.space.md; anchors.topMargin: Theme.space.lg + 4
                 }
 
+                // AVPN (объявления P-ANN): тап по карточке объявления → на главную, где попап
+                // с полным текстом/кнопками всплывёт сам, пока объявление не прочитано.
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: card.kind === "announcement"
+                    onClicked: root.back()
+                }
+
                 RowLayout {
                     id: row
                     anchors.left: parent.left; anchors.right: parent.right
