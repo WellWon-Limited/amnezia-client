@@ -45,6 +45,10 @@ inline QMap<QString, QString> parseStrMap(const QJsonObject &o)
 
 inline bool parseConfig(const QByteArray &body, RemoteConfig &out, QString &err)
 {
+    // Идемпотентность: сбрасываем out ПЕРЕД парсингом, чтобы переиспользуемый
+    // struct не аккумулировал edges/probe_targets и не хранил стейл-флаги.
+    // Битый JSON тоже оставляет out чистым (не полу-валидным).
+    out = RemoteConfig();
     QJsonParseError pe;
     const QJsonDocument doc = QJsonDocument::fromJson(body, &pe);
     if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
