@@ -154,6 +154,11 @@ PageType {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) { PageController.showErrorMessage(message) }
+        // AVPN (device_fingerprint): rehome-гейт 403 при переносе по диплинку/QR — диплинк может
+        // прилететь, когда живёт только эта вкладка. Терминально: тост без ретраев.
+        function onFingerprintMismatch() {
+            PageController.showErrorMessage(qsTr("Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем."))
+        }
         // AVPN (оплата): ссылка web-кабинета готова (успех или fallback). Гард по ctaLinking —
         // сигнал общий на движок, не реагируем на запросы других страниц (кнопка в Настройках).
         function onCabinetLinkReady(url) {

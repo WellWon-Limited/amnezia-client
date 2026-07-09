@@ -2637,6 +2637,11 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
         emit seatLimitReached(devices);
         emit changed();
         break;
+    case avpn::CodeRedeemResult::FingerprintMismatch:
+        // Rehome-гейт (403): не error() — QML показывает специальное сообщение + кнопку в поддержку.
+        emit fingerprintMismatch();
+        emit changed();
+        break;
     case avpn::CodeRedeemResult::Failed:
     default:
         emit error(err.isEmpty() ? QStringLiteral("Не удалось активировать код") : err);
@@ -2704,6 +2709,11 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
         break;
     case avpn::TransferRedeemResult::BadToken:
         emit error(QStringLiteral("Ссылка переноса недействительна или истекла"));
+        emit changed();
+        break;
+    case avpn::TransferRedeemResult::FingerprintMismatch:
+        // Rehome-гейт (403): специальный UX (не error) — см. onFingerprintMismatch в QML.
+        emit fingerprintMismatch();
         emit changed();
         break;
     case avpn::TransferRedeemResult::SeatLimit:

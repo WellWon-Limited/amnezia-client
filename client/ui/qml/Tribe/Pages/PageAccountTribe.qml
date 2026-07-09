@@ -48,6 +48,8 @@ PageType {
     property string redeemHint: ""     // локальный пояснительный текст (text3) под полем
     property bool   redeemError: false
     property bool   redeemFailed: false  // взводится onError/onSeatLimitReached в рамках синхронного вызова
+    // AVPN (device_fingerprint): 403 rehome-гейта — показываем кнопку «Написать в поддержку»
+    property bool   fingerprintBlocked: false
     property string redeemLastCode: ""   // для повторного redeem с evict_device_id после кика
 
     // AVPN (store-flow, 2026-07-09): store-сборка (-DTRIBE_STORE_BUILD=ON) — в UI нет прямых
@@ -119,6 +121,7 @@ PageType {
         }
         root.redeemError = false
         root.redeemFailed = false
+        root.fingerprintBlocked = false
         root.redeeming = true
         root.redeemHint = qsTr("Проверяем…")
         root.redeemLastCode = c
@@ -182,6 +185,16 @@ PageType {
             root.redeemHint = ""
             seatSheet.devices = devices
             seatSheet.open()
+        }
+        // AVPN (device_fingerprint): rehome-гейт 403 — устройство заштамповано другим якорем
+        // железа (защита от угона по утёкшему device_id). Терминально: без ретраев, локальный
+        // стейт не трогаем (текущая подписка устройства цела); даём мостик в чат поддержки.
+        function onFingerprintMismatch() {
+            root.redeemFailed = true
+            root.redeeming = false
+            root.redeemError = true
+            root.fingerprintBlocked = true
+            root.redeemHint = qsTr("Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.")
         }
         // перенос принят НА ЭТО устройство (скан QR / ссылка / ввод в поле): токен ротирован,
         // подписка перечитана движком. Полноэкранный успех показывает PageStart (хост всегда жив,
@@ -529,7 +542,7 @@ PageType {
                     enabled: !root.redeeming
                     placeholderText: qsTr("Введите код активации")
                     error: root.redeemError
-                    onTextChanged: { root.redeemError = false; root.redeemHint = "" }
+                    onTextChanged: { root.redeemError = false; root.redeemHint = ""; root.fingerprintBlocked = false }
                     onAccepted: root.redeemKey(text)
                 }
 
@@ -578,6 +591,17 @@ PageType {
                     color: root.redeemError ? Theme.color.danger : Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
+                }
+
+                // AVPN (device_fingerprint): rehome-гейт 403 — прямой мостик в чат поддержки
+                // (черновик подставляем, отправляет пользователь САМ). Не гейтим storeBuild:
+                // мисматч — ситуация «сам не решишь», поддержка нужна в любой сборке.
+                TribeButton {
+                    visible: root.fingerprintBlocked
+                    variant: "glass"
+                    text: qsTr("Написать в поддержку")
+                    Layout.fillWidth: true
+                    onClicked: root.requestSupportChat(qsTr("Здравствуйте! При активации пишет «устройство привязано к другому аккаунту». Помогите, пожалуйста, разобраться."))
                 }
             }
         }

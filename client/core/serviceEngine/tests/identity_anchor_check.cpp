@@ -76,6 +76,33 @@ int main(int argc, char **argv)
         CHECK(!IdentityAnchor::unpackIdentity(QByteArray(), uuid, priv, pub, token, err));
     }
 
+    // --- fpSeed (device_fingerprint, DEVICE-FIRST-SPEC §4.1): секрет живёт ТОЛЬКО в якоре ---
+    // Round-trip: сид упаковывается и распаковывается.
+    {
+        const QByteArray blob = IdentityAnchor::packIdentity(
+            QStringLiteral("u-1"), QStringLiteral("p1"), QStringLiteral("p2"),
+            QStringLiteral("t"), QStringLiteral("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233"));
+        QString uuid, priv, pub, token, seed, err;
+        CHECK(IdentityAnchor::unpackIdentity(blob, uuid, priv, pub, token, err, &seed));
+        CHECK(seed == QStringLiteral("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233"));
+    }
+    // Блоб СТАРОГО билда (без fpSeed) читается, сид пуст — даунгрейд/апгрейд не ломаются.
+    {
+        const QByteArray blob = IdentityAnchor::packIdentity(
+            QStringLiteral("u-1"), QStringLiteral("p1"), QStringLiteral("p2"), QStringLiteral("t"));
+        QString uuid, priv, pub, token, seed = QStringLiteral("stale"), err;
+        CHECK(IdentityAnchor::unpackIdentity(blob, uuid, priv, pub, token, err, &seed));
+        CHECK(seed.isEmpty());
+        // и распаковка БЕЗ указателя на сид (старая сигнатура) тоже жива
+        CHECK(IdentityAnchor::unpackIdentity(blob, uuid, priv, pub, token, err));
+    }
+    // Пустой сид НЕ пишет ключ в блоб (аддитивность: блоб без сида байт-в-байт как раньше).
+    {
+        const QByteArray blob = IdentityAnchor::packIdentity(
+            QStringLiteral("u-1"), QStringLiteral("p1"), QStringLiteral("p2"), QStringLiteral("t"));
+        CHECK(!blob.contains("fpSeed"));
+    }
+
     if (g_failed == 0) {
         printf(">>> identity_anchor_check: OK (%d checks)\n", g_total);
         return 0;

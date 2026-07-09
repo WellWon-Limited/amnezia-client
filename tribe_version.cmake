@@ -20,5 +20,5 @@
 #   • Android versionCode > последнего залитого в Google Play (отдельная монотонная нумерация).
 #
 # БАМПИТЬ — ТОЛЬКО ЗДЕСЬ (две строки ниже). Больше нигде, ни для одной платформы, трогать не нужно.
-set(TRIBE_VERSION 5.1.42.68)
-set(TRIBE_ANDROID_VERSION_CODE 2142)
+set(TRIBE_VERSION 5.1.43.69)
+set(TRIBE_ANDROID_VERSION_CODE 2143)

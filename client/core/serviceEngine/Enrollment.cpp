@@ -5,6 +5,7 @@
 #include "secureQSettings.h"
 #include "version.h"
 
+#include "DeviceFingerprint.h" // AVPN (anti-hijack/anti-farm): sha256 якоря железа в trial/redeem/transfer
 #include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
@@ -90,8 +91,10 @@ bool Enrollment::enroll(QNetworkAccessManager *nam, const QString &baseUrl, Iden
 
     const QString deviceId = Identity::deviceId(store);
     // AVPN (рефералы): передаём pending referral_code (из deep-link /r//a/, если был) — first-touch.
+    // AVPN (device_fingerprint): якорь железа — deviceId к этому моменту уже создан (нужно iOS-сиду).
     const QByteArray body = buildTrialBody(identity.publicKey(), deviceId, detectPlatform(),
-                                           deviceMarketingName(), loadPendingReferral());
+                                           deviceMarketingName(), loadPendingReferral(),
+                                           DeviceFingerprint::get());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/trial"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -195,7 +198,8 @@ CodeRedeemResult Enrollment::redeemCode(QNetworkAccessManager *nam, const QStrin
 
     const QString deviceId = Identity::deviceId(store);
     const QByteArray body = buildRedeemBody(code, identity.publicKey(), deviceId,
-                                            detectPlatform(), deviceMarketingName(), evictDeviceId);
+                                            detectPlatform(), deviceMarketingName(), evictDeviceId,
+                                            DeviceFingerprint::get());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/code/redeem"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -216,6 +220,12 @@ CodeRedeemResult Enrollment::redeemCode(QNetworkAccessManager *nam, const QStrin
     if (httpCode == 401) {
         error = QStringLiteral("invalid code (401)");
         return CodeRedeemResult::BadCode;
+    }
+    if (isFingerprintMismatch(httpCode, respBody)) {
+        // Rehome-гейт бэка: устройство заштамповано другим якорем железа. Терминально для этого
+        // кода: без ретраев, локальный стейт НЕ трогаем (текущая подписка устройства цела).
+        error = QStringLiteral("device fingerprint mismatch (403)");
+        return CodeRedeemResult::FingerprintMismatch;
     }
     if (httpCode == 409) {
         // Мест нет — отдаём devices[] для UI-выбора кого отключить (DELETE /v1/devices/{id} или evict).
@@ -258,7 +268,8 @@ TransferRedeemResult Enrollment::redeemTransfer(QNetworkAccessManager *nam, cons
 
     const QString deviceId = Identity::deviceId(store);
     const QByteArray body = buildTransferRedeemBody(transferToken, identity.publicKey(), deviceId,
-                                                    detectPlatform(), deviceMarketingName());
+                                                    detectPlatform(), deviceMarketingName(),
+                                                    DeviceFingerprint::get());
 
     QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/transfer/redeem"))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
@@ -279,6 +290,11 @@ TransferRedeemResult Enrollment::redeemTransfer(QNetworkAccessManager *nam, cons
     if (httpCode == 401) {
         error = QStringLiteral("invalid or expired transfer token (401)");
         return TransferRedeemResult::BadToken;
+    }
+    if (isFingerprintMismatch(httpCode, respBody)) {
+        // Rehome-гейт (СТРОГО по detail: другой 403 здесь — Zanaves-гейт → generic-путь ниже).
+        error = QStringLiteral("device fingerprint mismatch (403)");
+        return TransferRedeemResult::FingerprintMismatch;
     }
     if (httpCode == 409) {
         error = QStringLiteral("device limit reached (409)");

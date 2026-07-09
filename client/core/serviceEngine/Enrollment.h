@@ -39,8 +39,9 @@ struct CodeRedeemResponse {
     int     seatsUsed = 0;
 };
 
-// AVPN: исход redeem — различаем 200 / 401 (неверный код) / 409 (мест нет, есть devices[]).
-enum class CodeRedeemResult { Ok, BadCode, SeatLimit, Failed };
+// AVPN: исход redeem — различаем 200 / 401 (неверный код) / 403 (rehome-гейт: устройство
+// заштамповано другим device_fingerprint — анти-hijack по утёкшему device_id) / 409 (мест нет).
+enum class CodeRedeemResult { Ok, BadCode, FingerprintMismatch, SeatLimit, Failed };
 
 // AVPN (Task 13): ответ POST /v1/transfer/redeem (перенос «как SIM» на это устройство).
 // Контракт: { subscription_token, account_id, expires_at?, traffic_limit, traffic_used }.
@@ -52,8 +53,9 @@ struct TransferRedeemResponse {
     qint64  trafficUsed = 0;
 };
 
-// AVPN (Task 13): исход transfer/redeem — 200 / 401 (токен мёртв/истёк) / 409 (мест нет) / прочее.
-enum class TransferRedeemResult { Ok, BadToken, SeatLimit, Failed };
+// AVPN (Task 13): исход transfer/redeem — 200 / 401 (токен мёртв/истёк) / 403 (rehome-гейт:
+// device_fingerprint не совпал со штампом устройства) / 409 (мест нет) / прочее.
+enum class TransferRedeemResult { Ok, BadToken, FingerprintMismatch, SeatLimit, Failed };
 
 // AVPN (Task 13): ответ POST /v1/transfer (генерация переноса). { transfer_token, deep_link }.
 struct TransferMintResponse {
@@ -100,11 +102,15 @@ class Enrollment {
 public:
     // --- чистые (тестируемые) ---
 
-    // Тело POST /v1/trial: { public_key, device_id, platform, model, referral_code? }. referral_code —
-    // опциональная реферал-атрибуция (код из deep-link /r/<code> друзья или /a/<code> блогеры). LIVE.
+    // Тело POST /v1/trial: { public_key, device_id, platform, model, referral_code?,
+    // device_fingerprint? }. referral_code — опциональная реферал-атрибуция (код из deep-link
+    // /r/<code> друзья или /a/<code> блогеры). deviceFingerprint — sha256 якоря железа
+    // (DeviceFingerprint::get; anti-farm: сервер дедупит переустановки даже при потере
+    // локального device_id); пустой → поле НЕ кладём (инвариант бэка).
     static QByteArray buildTrialBody(const QString &publicKey, const QString &deviceId,
                                      const QString &platform, const QString &model = QString(),
-                                     const QString &referralCode = QString())
+                                     const QString &referralCode = QString(),
+                                     const QString &deviceFingerprint = QString())
     {
         QJsonObject o;
         o.insert(QStringLiteral("public_key"), publicKey);
@@ -114,7 +120,23 @@ public:
             o.insert(QStringLiteral("model"), model);
         if (!referralCode.isEmpty())
             o.insert(QStringLiteral("referral_code"), referralCode.trimmed());
+        if (!deviceFingerprint.isEmpty())
+            o.insert(QStringLiteral("device_fingerprint"), deviceFingerprint);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
+    }
+
+    // AVPN (device_fingerprint): 403 rehome-гейта — СТРОГО по detail из тела (FastAPI
+    // {"detail":"device fingerprint mismatch"}). Другие 403 (напр. Zanaves-гейт transfer)
+    // остаются на generic-пути. UI: «привязано к другому аккаунту» — без ретраев и без
+    // чистки локального стейта (устройство у бэка нетронуто).
+    static bool isFingerprintMismatch(int httpCode, const QByteArray &body)
+    {
+        if (httpCode != 403)
+            return false;
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        return doc.isObject()
+               && doc.object().value(QStringLiteral("detail")).toString()
+                      == QLatin1String("device fingerprint mismatch");
     }
 
     // AVPN (auth self-heal): классификация исхода запроса к /v1/subscription по HTTP-коду.
@@ -169,10 +191,12 @@ public:
     }
 
     // AVPN: тело POST /v1/code/redeem (CodeRedeemIn): { code, public_key, device_id, platform, model,
-    // evict_device_id? }. evictDeviceId — backend-id из devices[] (1-seat «перенести сюда»).
+    // evict_device_id?, device_fingerprint? }. evictDeviceId — backend-id из devices[] (1-seat
+    // «перенести сюда»); deviceFingerprint — якорь железа (anti-hijack, контракт 0.7.2).
     static QByteArray buildRedeemBody(const QString &code, const QString &publicKey, const QString &deviceId,
                                       const QString &platform, const QString &model = QString(),
-                                      const QString &evictDeviceId = QString())
+                                      const QString &evictDeviceId = QString(),
+                                      const QString &deviceFingerprint = QString())
     {
         QJsonObject o;
         o.insert(QStringLiteral("code"), code);
@@ -183,6 +207,8 @@ public:
             o.insert(QStringLiteral("model"), model);
         if (!evictDeviceId.isEmpty())
             o.insert(QStringLiteral("evict_device_id"), evictDeviceId);
+        if (!deviceFingerprint.isEmpty())
+            o.insert(QStringLiteral("device_fingerprint"), deviceFingerprint);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
     }
 
@@ -205,9 +231,11 @@ public:
     }
 
     // AVPN (Task 13): тело POST /v1/transfer/redeem — токен переноса = креденшл (security: []).
+    // deviceFingerprint штампует ПРИНИМАЮЩЕЕ устройство — reinstall-дедуп /v1/trial узнает его позже.
     static QByteArray buildTransferRedeemBody(const QString &transferToken, const QString &publicKey,
                                               const QString &deviceId, const QString &platform,
-                                              const QString &model = QString())
+                                              const QString &model = QString(),
+                                              const QString &deviceFingerprint = QString())
     {
         QJsonObject o;
         o.insert(QStringLiteral("transfer_token"), transferToken);
@@ -216,6 +244,8 @@ public:
         o.insert(QStringLiteral("platform"), platform);
         if (!model.isEmpty())
             o.insert(QStringLiteral("model"), model);
+        if (!deviceFingerprint.isEmpty())
+            o.insert(QStringLiteral("device_fingerprint"), deviceFingerprint);
         return QJsonDocument(o).toJson(QJsonDocument::Compact);
     }
 

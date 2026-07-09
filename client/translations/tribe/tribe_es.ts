@@ -32,21 +32,21 @@
 <context>
     <name>PageAccountTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+106"/>
-        <location line="+210"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+108"/>
+        <location line="+221"/>
         <source>Переносим подписку на это устройство…</source>
         <translation>Transfiriendo la suscripción a este dispositivo…</translation>
     </message>
     <message>
-        <location line="-206"/>
+        <location line="-217"/>
         <location line="+7"/>
-        <location line="+227"/>
-        <location line="+835"/>
+        <location line="+238"/>
+        <location line="+846"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1056"/>
+        <location line="-1077"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -74,7 +74,7 @@
         <translation>Clave activada: acceso actualizado</translation>
     </message>
     <message>
-        <location line="+67"/>
+        <location line="+77"/>
         <location line="+215"/>
         <source>Активна</source>
         <translation>Activa</translation>
@@ -92,12 +92,12 @@
     </message>
     <message>
         <location line="-196"/>
-        <location line="+796"/>
+        <location line="+807"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-710"/>
+        <location line="-721"/>
         <source>Подписка перенесена</source>
         <translation>Suscripción transferida</translation>
     </message>
@@ -177,13 +177,18 @@
         <translation>Activar clave</translation>
     </message>
     <message>
-        <location line="-413"/>
-        <location line="+431"/>
+        <location line="-424"/>
+        <location line="+442"/>
         <source>Введите код активации</source>
         <translation>Introduce el código de activación</translation>
     </message>
     <message>
-        <location line="-11"/>
+        <location line="-346"/>
+        <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
+        <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
+    </message>
+    <message>
+        <location line="+335"/>
         <source>Если у вас есть код активации — введите его ниже, доступ продлится сразу.</source>
         <translation>Si tienes un código de activación, introdúcelo abajo: tu acceso se extenderá al instante.</translation>
     </message>
@@ -204,16 +209,22 @@
     </message>
     <message>
         <location line="+9"/>
+        <location line="+20"/>
         <source>Написать в поддержку</source>
         <translation>Escribir a soporte</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="-18"/>
         <source>Здравствуйте! Как мне активировать код?</source>
         <translation>¡Hola! ¿Cómo activo un código?</translation>
     </message>
     <message>
-        <location line="+25"/>
+        <location line="+20"/>
+        <source>Здравствуйте! При активации пишет «устройство привязано к другому аккаунту». Помогите, пожалуйста, разобраться.</source>
+        <translation>¡Hola! Al activar, aparece «el dispositivo está vinculado a otra cuenta». Ayúdenme a resolverlo, por favor.</translation>
+    </message>
+    <message>
+        <location line="+16"/>
         <source>Перенести подписку на другое устройство</source>
         <translation>Transferir la suscripción a otro dispositivo</translation>
     </message>
@@ -940,7 +951,12 @@
         <translation>Nuestros servidores están arrancando: el acceso de prueba llegará en una próxima actualización, sin necesidad de cuenta</translation>
     </message>
     <message>
-        <location line="+21"/>
+        <location line="+14"/>
+        <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
+        <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
+    </message>
+    <message>
+        <location line="+12"/>
         <source>Обнаружен другой активный VPN (%1). Отключите его — Tribe VPN может не подключиться из-за конфликта.</source>
         <translation>Se detectó otra VPN activa (%1). Desactívala: Tribe VPN podría no conectarse por un conflicto.</translation>
     </message>

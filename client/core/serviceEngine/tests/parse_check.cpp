@@ -3,6 +3,7 @@
 #include "../AwgConfigBuilder.h"
 #include "../BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #include "../BenchRunner.h" // AVPN (панель администратора): чистая математика бенча (median/mbit)
+#include "../DeviceFingerprint.h" // AVPN (device_fingerprint): чистый hashAnchor
 #include "../Enrollment.h"
 #include "../GoodputProbe.h"
 #include "../HealthLoop.h"
@@ -19,6 +20,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <cstdio>
 
 using namespace avpn;
@@ -350,6 +352,49 @@ int main(int argc, char **argv)
                    && tr.trafficLimit == 104857600;
         if (!eOk) { fprintf(stderr, "FAIL: Enrollment build/parse mismatch (%s)\n", terr.toUtf8().constData()); return 6; }
         printf("enrollment: OK (trial body built, response parsed)\n");
+    }
+
+    // --- device_fingerprint: хеш якоря + поле в трёх телах + детект 403-мисматча ---
+    {
+        // sha256 lower-hex, 64 симв. (匹 паттерну бэка ^[A-Fa-f0-9._-]{16,128}$); детерминирован.
+        const QString fp = DeviceFingerprint::hashAnchor(QStringLiteral("test-anchor"));
+        const QRegularExpression hexRe(QStringLiteral("^[a-f0-9]{64}$"));
+        bool hOk = hexRe.match(fp).hasMatch()
+                   && fp == DeviceFingerprint::hashAnchor(QStringLiteral("test-anchor"))
+                   && fp != DeviceFingerprint::hashAnchor(QStringLiteral("test-anchor2"))
+                   // якорь известной формы → известный дайджест (фиксирует нормализацию НАВСЕГДА:
+                   // смена = другой fingerprint у всего флота = массовые ложные 403)
+                   && DeviceFingerprint::hashAnchor(QStringLiteral("abc"))
+                          == QLatin1String("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+        // Поле кладётся во все ТРИ тела и опускается, когда якоря нет (инвариант «не слать пустое»).
+        const QJsonObject t1 = QJsonDocument::fromJson(Enrollment::buildTrialBody(
+            QStringLiteral("PK=="), QStringLiteral("dev-1234567890123456"),
+            QStringLiteral("ios"), QString(), QString(), fp)).object();
+        const QJsonObject t0 = QJsonDocument::fromJson(Enrollment::buildTrialBody(
+            QStringLiteral("PK=="), QStringLiteral("dev-1234567890123456"),
+            QStringLiteral("ios"))).object();
+        const QJsonObject r1 = QJsonDocument::fromJson(Enrollment::buildRedeemBody(
+            QStringLiteral("TRIBE-CODE"), QStringLiteral("PK=="),
+            QStringLiteral("dev-1234567890123456"), QStringLiteral("ios"),
+            QString(), QString(), fp)).object();
+        const QJsonObject x1 = QJsonDocument::fromJson(Enrollment::buildTransferRedeemBody(
+            QStringLiteral("ttok"), QStringLiteral("PK=="),
+            QStringLiteral("dev-1234567890123456"), QStringLiteral("ios"), QString(), fp)).object();
+        const QString k = QStringLiteral("device_fingerprint");
+        bool bOk = t1.value(k).toString() == fp && !t0.contains(k)
+                   && r1.value(k).toString() == fp && x1.value(k).toString() == fp;
+
+        // 403-мисматч: детект СТРОГО по detail (иной 403 — например Zanaves-гейт transfer — не наш).
+        bool mOk = Enrollment::isFingerprintMismatch(403, R"({"detail":"device fingerprint mismatch"})")
+                   && !Enrollment::isFingerprintMismatch(403, R"({"detail":"transfer is not available for this key"})")
+                   && !Enrollment::isFingerprintMismatch(401, R"({"detail":"device fingerprint mismatch"})")
+                   && !Enrollment::isFingerprintMismatch(403, "not json")
+                   && !Enrollment::isFingerprintMismatch(403, QByteArray());
+
+        printf("fingerprint: hash=%d bodies=%d mismatch=%d\n", hOk ? 1 : 0, bOk ? 1 : 0, mOk ? 1 : 0);
+        if (!hOk || !bOk || !mOk) { fprintf(stderr, "FAIL: device_fingerprint hash/bodies/403\n"); return 6; }
+        printf("fingerprint: OK (sha256-hex, 3 bodies, omit-when-empty, 403 detail)\n");
     }
 
     // --- Selector: чистые score()/choose() (детерминированно) ---
