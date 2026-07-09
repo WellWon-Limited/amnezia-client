@@ -280,7 +280,7 @@ PageType {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.maximumWidth: 344   // две строки: «…через VPN.» целиком во второй
                     Layout.topMargin: Theme.space.sm + 2
-                    text: qsTr("Умная Ai маршрутизация сама решает, какой трафик нужно направить через VPN.")
+                    text: qsTr("Умная маршрутизация сама решает, какой трафик нужно направить через VPN.")
                     color: Theme.color.text2
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS + 1
                     lineHeight: 1.4
@@ -352,7 +352,7 @@ PageType {
                             spacing: 3
                             Text {
                                 Layout.fillWidth: true
-                                text: qsTr("AntiVPN активирован!")
+                                text: qsTr("Доступ к сайтам РФ включён")
                                 color: Theme.color.text1
                                 font.family: Theme.font.display; font.pixelSize: Theme.font.bodyM
                                 font.weight: Theme.font.wExtra
@@ -475,7 +475,7 @@ PageType {
                     shown: root.reveal1 >= 2
                     iconD: "M13 2L4.5 13.5H11L9.5 22 19 10.5h-6.5L13 2z"
                     title: qsTr("Сервер выберется сам")
-                    sub: qsTr("Ai подберет самый быстрый сервер")
+                    sub: qsTr("Приложение подберёт самый быстрый сервер")
                 }
                 StepLink { shown: root.reveal1 >= 2 }
                 StepCard {
