@@ -82,6 +82,10 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(QString appLang READ appLang NOTIFY appLangChanged)
     // AVPN (рефералы #37): GET /v1/referral → {code, link, invited, days_earned} для баннера «Поделиться».
     Q_PROPERTY(QVariantMap referral READ referral NOTIFY referralChanged)
+    // AVPN (объявления P-ANN): активные server-driven объявления для этого устройства.
+    // Элемент: {id:int, kind:"popup"|"inbox_only", title, body, image_url, buttons:[{id,label,action,value}]}.
+    // Контент приходит уже в языке устройства; прочитанные локально/на сервере сюда не попадают.
+    Q_PROPERTY(QVariantList announcements READ announcements NOTIFY announcementsChanged)
     // AVPN (Task 7): туннель на «авто-паузе для покупок» (реально down, ждём авто-возврат). // AVPN
     Q_PROPERTY(bool paused READ paused NOTIFY changed)
     // AVPN (реальные палочки): живое качество ТЕКУЩЕГО соединения, измеренное app-layer RTT-пробой
@@ -180,6 +184,7 @@ public:
     QString appLang() const;
     Q_INVOKABLE void setAppLang(const QString &lang);
     QVariantMap referral() const { return m_referral; }   // AVPN (#37): кэш GET /v1/referral
+    QVariantList announcements() const { return m_announcements; } // AVPN (P-ANN): кэш /v1/announcements
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
     void setBaseUrl(const QString &url) { m_baseUrl = url; }
@@ -345,6 +350,20 @@ public:
     // {code, link, invited, days_earned} + emit referralChanged(). 401/сеть → пустая мапа.
     Q_INVOKABLE void refreshReferral();
 
+    // AVPN (объявления P-ANN): GET /v1/announcements?platform=&lang=&app_version= (АСИНХРОННО,
+    // Bearer, armTimeout — без nested loop). Успех → property announcements + LKG-персист
+    // (AvpnAnnounce/lkg, мгновенный показ до сети при следующем старте); ошибка/401 → тихо,
+    // текущий список НЕ затирается. Вызовы: finishBootstrapSuccess, foreground-хук QML,
+    // пуш type=announcement (мост).
+    Q_INVOKABLE void refreshAnnouncements();
+    // Квитанция объявления: event = "shown" | "read" | "clicked" (+buttonId). Fire-and-forget
+    // POST /v1/announcements/{id}/ack. "read" дополнительно персистится ЛОКАЛЬНО (синхронный
+    // QSettings — грабля 500мс QML-Settings) и убирает объявление из announcements — попап не
+    // мигает повторно офлайн. "shown" дедупится за сессию. Кнопка-действие (не "later"):
+    // QML шлёт clicked, затем read.
+    Q_INVOKABLE void ackAnnouncement(int id, const QString &event, const QString &buttonId = QString());
+    Q_INVOKABLE bool announcementRead(int id) const; // локальный дубль серверного read_at
+
     // AVPN (оплата): «Управлять подпиской» — минт одноразовой ссылки авто-логина в web-кабинет
     // (POST /v1/cabinet/web-link, Bearer = authToken()). АСИНХРОННО (armTimeout, без nested loop).
     // Ответ ВСЕГДА приходит сигналом cabinetLinkReady(url): успех → url бэка (?wl=…, single-use,
@@ -455,6 +474,7 @@ signals:
     void accountChanged();
     void appLangChanged();   // AVPN (i18n): сменили язык через setAppLang
     void referralChanged();   // AVPN (#37): async-ответ /v1/referral готов (property referral обновлена)
+    void announcementsChanged(); // AVPN (P-ANN): property announcements обновлена (fetch/LKG/read)
     // AVPN (оплата): готова ссылка web-кабинета (см. requestCabinetLink). Эмитится ВСЕГДА (успех или
     // fallback) — QML-кнопка не залипнет в loading. Открывать ТОЛЬКО во внешнем браузере
     // (Qt.openUrlExternally), НЕ в webview (Apple §3.1.1).
@@ -697,6 +717,10 @@ private:
     QVariantList                 m_devices;
     QVariantMap                  m_account;
     QVariantMap                  m_referral;   // AVPN (#37): кэш GET /v1/referral {code,link,invited,days_earned}
+    QVariantList                 m_announcements;       // AVPN (P-ANN): активные объявления (fetch/LKG)
+    QSet<int>                    m_announceShownAcked;  // AVPN (P-ANN): дедуп shown-ack за сессию
+    void loadAnnouncementsLkg();                        // AVPN (P-ANN): LKG из QSettings при старте
+    void persistAnnouncementsLkg();                     // AVPN (P-ANN): персист текущего списка
     // AVPN (Task 9 — APNs): последний device token/окружение от AvpnPushBridge — для ПЕРЕ-регистрации
     // после ротации subscription_token (redeemCode/redeemTransfer: старый токен на сервере сброшен).
     QString                      m_pushToken;
