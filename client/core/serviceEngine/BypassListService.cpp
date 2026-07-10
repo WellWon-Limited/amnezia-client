@@ -1,0 +1,180 @@
+// client/core/serviceEngine/BypassListService.cpp
+// AVPN server-driven АнтиВПН (Task 9): см. BypassListService.h. Логика LKG round-trip/
+// анти-downgrade вынесена в чистый header-only слой BypassListLkg.h (юнит test_bypass_lkg.cpp
+// гоняет её без сети/этого файла).
+#include "BypassListService.h"
+
+#include "BypassListLkg.h"
+#include "Ed25519Verify.h"
+#include "NetAwait.h"
+
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QStandardPaths>
+#include <QTimer>
+
+namespace avpn {
+
+namespace {
+
+QMutex      g_bypassStoreMutex;
+BypassLists g_bypassStoreSnapshot; // default: valid=false (пусто до первого успешного LKG/фетча)
+
+// AVPN: повторный фетч раз в 6ч — сервер меняет ru_cidrs редко (реестр РКН обновляется не
+// поминутно), никакой ретрай-шторм не нужен; сетевые/verify-ошибки просто ждут следующего тика.
+constexpr int kRefetchIntervalMs = 6 * 60 * 60 * 1000;
+
+QString lkgFilePath()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/bypass_lists.lkg");
+}
+
+} // namespace
+
+void BypassListStore::set(const BypassLists &l)
+{
+    QMutexLocker lock(&g_bypassStoreMutex);
+    g_bypassStoreSnapshot = l;
+}
+
+BypassLists BypassListStore::get()
+{
+    QMutexLocker lock(&g_bypassStoreMutex);
+    return g_bypassStoreSnapshot;
+}
+
+BypassListService::BypassListService(QNetworkAccessManager *nam, const QString &baseUrl,
+                                     const QString &pubKeyHex, QObject *parent)
+    : QObject(parent), m_nam(nam), m_baseUrl(baseUrl), m_pubKeyHex(pubKeyHex)
+{
+}
+
+void BypassListService::setBaseUrl(const QString &b)
+{
+    m_baseUrl = b; // на будущие фетчи; немедленный рефетч НЕ триггерим (см. .h)
+}
+
+void BypassListService::start()
+{
+    loadLkg();
+    if (!m_timer) {
+        m_timer = new QTimer(this);
+        connect(m_timer, &QTimer::timeout, this, [this]() {
+            if (!m_disabled)
+                fetch();
+        });
+        m_timer->start(kRefetchIntervalMs);
+    }
+    if (!m_disabled)
+        fetch();
+}
+
+void BypassListService::loadLkg()
+{
+    QFile f(lkgFilePath());
+    if (!f.open(QIODevice::ReadOnly))
+        return; // нет LKG (первый запуск после апдейта/установки) — не ошибка
+    const QByteArray json = f.readAll();
+    f.close();
+
+    BypassLists out;
+    QByteArray  etag;
+    QString     err;
+    if (!loadVerifiedBypassListsLkg(json, m_pubKeyHex, out, etag, err)) {
+        qWarning() << "AVPN bypass-lists: LKG rejected:" << err;
+        return; // без сева до первого успешного фетча — не применяем недоверенный кэш
+    }
+    m_lkgVersion = out.version;
+    m_etag = QString::fromUtf8(etag);
+    BypassListStore::set(out);
+    emit listsApplied(out);
+}
+
+void BypassListService::fetch()
+{
+    if (!m_nam || m_baseUrl.isEmpty())
+        return;
+    QNetworkRequest req{ QUrl(m_baseUrl + QStringLiteral("/v1/bypass-lists")) };
+    if (!m_etag.isEmpty())
+        req.setRawHeader(QByteArrayLiteral("If-None-Match"), m_etag.toUtf8());
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code == 304)
+            return; // не изменилось — LKG актуален, no-op
+        if (code == 404) {
+            // Один лог за запуск процесса: эндпоинт ещё не выкачен на бэке — не спамить.
+            if (!m_loggedNotFound) {
+                qWarning() << "AVPN bypass-lists: /v1/bypass-lists 404 (not deployed yet?)";
+                m_loggedNotFound = true;
+            }
+            return;
+        }
+        if (code < 200 || code >= 300)
+            return; // транспортный/серверный сбой — остаёмся на LKG, следующая попытка по таймеру
+
+        const QByteArray body = reply->readAll();
+        const QByteArray sig  = reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
+        const QByteArray etag = reply->rawHeader(QByteArrayLiteral("ETag"));
+        applyBody(body, sig, etag);
+    });
+}
+
+void BypassListService::applyBody(const QByteArray &body, const QByteArray &sigB64, const QByteArray &etag)
+{
+    if (!verifyDetached(m_pubKeyHex, body, sigB64))
+        return; // подпись не прошла → игнор, остаёмся на LKG/фолбэке
+    BypassLists out;
+    QString     err;
+    if (!parseBypassLists(body, out, err))
+        return; // битый/недостаточный payload (см. kMinValidRuCidrs) → остаёмся на LKG
+
+    // Анти-downgrade/анти-replay: строго новее уже сохранённого, иначе тихо discard (это НЕ
+    // ошибка сети/подписи — валидный, но устаревший/повторный ответ, лишний лог не нужен).
+    if (!isBypassListVersionNewer(out.version, m_lkgVersion))
+        return;
+
+    saveLkg(body, sigB64, etag);
+    m_lkgVersion = out.version;
+    m_etag = QString::fromUtf8(etag);
+    BypassListStore::set(out);
+    emit listsApplied(out);
+}
+
+void BypassListService::saveLkg(const QByteArray &body, const QByteArray &sigB64, const QByteArray &etag)
+{
+    const QByteArray json = serializeBypassListsLkg(body, sigB64, etag);
+    QFile f(lkgFilePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(json);
+}
+
+void BypassListService::onRemoteConfigApplied(const RemoteConfig &cfg)
+{
+    const bool enabled = featureFlag(cfg, QStringLiteral("remote_bypass_lists"), true);
+    if (enabled) {
+        if (m_disabled) {
+            // Обратное включение сервером: снова читаем LKG и пробуем свежий фетч.
+            m_disabled = false;
+            loadLkg();
+            fetch();
+        }
+        return;
+    }
+    // Kill-switch: сервер выключил фичу → пустой invalid снапшот (читатели видят "нет сева",
+    // не старый потенциально проблемный список) + фетч на паузу до следующего configApplied.
+    m_disabled = true;
+    BypassListStore::set(BypassLists());
+}
+
+} // namespace avpn
