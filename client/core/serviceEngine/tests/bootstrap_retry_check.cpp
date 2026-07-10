@@ -3,6 +3,7 @@
 // никогда не пробовал. Новая политика: быстрый бэкофф {2,4,8,16,30}с, затем БЕСКОНЕЧНЫЙ
 // медленный цикл 60с — движок не имеет права «сдаться» пока подписка не загружена.
 #include "../BootstrapRetry.h"
+#include "../TuningStore.h"
 
 #include <QtGlobal>
 
@@ -48,6 +49,18 @@ int main()
         if (nextBootstrapDelayMs(i) < 1000)
             allPositive = false;
     CHECK(allPositive, "every delay >= 1s");
+
+    // Backend-first (T10): медленный вечный цикл читает TuningStore (numbers.bootstrap_slow_retry_ms),
+    // фолбэк 60с сохраняется офлайн. Быстрая фаза {2,4,8,16,30}с server-tunable НЕ подлежит.
+    avpn::TuningStore::set({{QStringLiteral("bootstrap_slow_retry_ms"), 120000}}, {});
+    CHECK(nextBootstrapDelayMs(7) == 120000, "server override: attempt 7 -> tuned 120s slow cycle");
+    avpn::TuningStore::reset();
+    CHECK(nextBootstrapDelayMs(7) == 60000, "after reset: attempt 7 -> baked 60s fallback");
+    CHECK(nextBootstrapDelayMs(0) == 2000,  "fast phase unaffected: attempt 0 -> 2s");
+    CHECK(nextBootstrapDelayMs(1) == 4000,  "fast phase unaffected: attempt 1 -> 4s");
+    CHECK(nextBootstrapDelayMs(2) == 8000,  "fast phase unaffected: attempt 2 -> 8s");
+    CHECK(nextBootstrapDelayMs(3) == 16000, "fast phase unaffected: attempt 3 -> 16s");
+    CHECK(nextBootstrapDelayMs(4) == 30000, "fast phase unaffected: attempt 4 -> 30s");
 
     if (failures) {
         std::printf(">>> bootstrap_retry_check: %d FAILURE(S)\n", failures);

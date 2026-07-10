@@ -20,6 +20,7 @@
 
 #include "Enrollment.h"
 #include "NetAwait.h"
+#include "TuningStore.h" // AVPN backend-first (T10): server-tunable chat_poll_active_ms/chat_poll_idle_ms
 
 namespace avpn {
 
@@ -104,6 +105,15 @@ qint64 parseIsoMs(const QString &iso)
     return dt.isValid() ? dt.toMSecsSinceEpoch() : QDateTime::currentMSecsSinceEpoch();
 }
 
+// AVPN backend-first (T10): интервал поллинга — server-tunable (numbers.chat_poll_active_ms /
+// numbers.chat_poll_idle_ms), фолбэк вкомпиленные kActivePollMs/kIdlePollMs.
+int pollMs(bool active)
+{
+    return int(TuningStore::numberOr(
+        active ? QStringLiteral("chat_poll_active_ms") : QStringLiteral("chat_poll_idle_ms"),
+        active ? double(kActivePollMs) : double(kIdlePollMs)));
+}
+
 QString humanSendError(int httpCode, bool netError)
 {
     if (netError && httpCode == 0)
@@ -129,7 +139,7 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
 
     s_instance = this; // колбэк нативного пикера (создаётся один раз в coreController)
 
-    m_pollTimer.setInterval(kIdlePollMs);
+    m_pollTimer.setInterval(pollMs(false));
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
         if (m_active)
             refresh();
@@ -197,7 +207,7 @@ void TribeSupportChat::setActive(bool on)
     if (m_active == on)
         return;
     m_active = on;
-    m_pollTimer.setInterval(on ? kActivePollMs : kIdlePollMs);
+    m_pollTimer.setInterval(pollMs(on));
     emit activeChanged();
     if (on)
         refresh(); // мгновенный фетч при открытии страницы (не ждать первый тик)
