@@ -1455,7 +1455,12 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeAnnouncementSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+195"/>
+        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+280"/>
+        <source>Далее</source>
+        <translation>Next</translation>
+    </message>
+    <message>
+        <location line="+35"/>
         <source>Прочитал</source>
         <translation>Got it</translation>
     </message>

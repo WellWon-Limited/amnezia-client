@@ -207,8 +207,7 @@ PageType {
                 TribeEngine.refreshSubscription()   // device-часы: бейдж/CTA
             if (typeof TribeEngine.refreshAccount === "function")
                 TribeEngine.refreshAccount()        // account-справка: Настройки
-            if (typeof TribeEngine.refreshAnnouncements === "function")
-                TribeEngine.refreshAnnouncements()  // AVPN (P-ANN): свежие объявления при возврате
+            // AVPN (P-ANN): refreshAnnouncements при возврате дёргает глобальный хост (PageStart)
         }
     }
 
@@ -1028,41 +1027,7 @@ PageType {
         id: updateGate
     }
 
-    // AVPN (объявления P-ANN): попап важного объявления поверх главного. Показ — самое новое
-    // непрочитанное kind=popup из TribeEngine.announcements (сервер отдаёт новые первыми);
-    // по одному за раз. Отложенный первый показ Timer'ом — не из кадра создания страницы.
-    TribeAnnouncementSheet {
-        id: announceSheet
-        z: 220
-        onWeblinkRequested: {
-            if (!root.hasEngine) return
-            root.ctaLinking = true                    // ответ придёт в onCabinetLinkReady выше
-            TribeEngine.requestCabinetLink("")
-        }
-        onScreenRequested: function(name) {
-            if (name === "support") root.requestTab(1)
-            else if (name === "referral") root.requestTab(2)
-            else if (name === "settings") root.requestSettings()
-            else if (name === "notifications") root.requestNotifications()
-            // неизвестный экран (объявление новее клиента) — молча игнорируем
-        }
-    }
-    function maybeShowAnnouncement() {
-        if (!root.hasEngine || announceSheet.opened) return
-        var list = TribeEngine.announcements
-        for (var i = 0; i < list.length; ++i) {
-            if (list[i].kind === "popup") { announceSheet.show(list[i]); return }
-        }
-    }
-    Connections {
-        target: root.hasEngine ? TribeEngine : null
-        ignoreUnknownSignals: true
-        function onAnnouncementsChanged() { announceShowTimer.restart() }
-    }
-    Timer {
-        id: announceShowTimer
-        interval: 900; repeat: false; running: root.hasEngine   // первый показ после LKG-загрузки
-        onTriggered: root.maybeShowAnnouncement()
-    }
+    // AVPN (объявления P-ANN): попап рассылки живёт НЕ здесь, а глобальным слоем в
+    // PageStart (реш. 2026-07-10: поверх ЛЮБОГО экрана, вкладки его не прячут).
 
 }
