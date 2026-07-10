@@ -2713,6 +2713,38 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
     emit changed();
 }
 
+// AVPN (server picker, спека 2026-07-10): тап по стране на странице выбора = пин + мгновенный
+// реконнект (решение пользователя; CONNECT-INVARIANTS §4 обновлён этой волной). Реконнект — ТОЛЬКО
+// через reconcile с m_needsRestart (stop→Disconnected→start, тот же iOS-safe путь, что rotateNext);
+// НИКОГДА прямой up() поверх teardown. Офлайн — только цель (cold-connect кнопкой Connect).
+// Kill-switch: features.picker_instant_reconnect=false (/v1/config, operator-editable) откатывает
+// на старую семантику switchToNode без релиза в стор (вкомпиленный фолбэк = true).
+void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
+{
+    if (!featureEnabled(QStringLiteral("picker_instant_reconnect"), true)) {
+        switchToNode(nodeId);
+        return;
+    }
+    QString err;
+    if (!m_engine.setPinnedNode(nodeId, err)) {
+        emit error(err);
+        return;
+    }
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    if (st == QLatin1String("connected") || st == QLatin1String("connecting")
+        || st == QLatin1String("switching") || st == QLatin1String("selecting")) {
+        m_wantConnected = true;
+        m_needsRestart = true;   // reconcile: stop→Disconnected→start на закреплённой ноде
+        m_startAttempts = 0;
+    } else {
+        m_wantConnected = false; // офлайн: только цель, туннель не стартуем
+        m_needsRestart = false;
+        m_startAttempts = 0;
+    }
+    emit changed();
+    reconcile();
+}
+
 // AVPN (live-node picker): «Авто (быстрейший)» в шторке — СИММЕТРИЧНО ручному выбору узла (switchToNode):
 // снимаем закрепление И уводим намерение в OFF. Пользователь жал «Авто» на ПОДКЛЮЧЁННОМ узле (напр.
 // Poland) и ждёт, что главный экран ВЫЙДЕТ из «подключено к Польше» в состояние «авто — можно подключиться»
