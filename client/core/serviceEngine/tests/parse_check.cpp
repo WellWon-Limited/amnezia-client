@@ -680,9 +680,24 @@ int main(int argc, char **argv)
 
         printf("instagram: asset=%d none=%d\n", assetOk, noneOk);
 
-        bool igOk = assetOk && noneOk;
+        // 3) Исход «ассет не добыт» (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»):
+        //    homepage умерла сетевой ошибкой БЕЗ единого байта и без HTTP-статуса — это сам
+        //    сервис недостижим (SNI-RST/дроп на egress) ⇒ Blocked, а не деградация в
+        //    reachability CDN (та давала Unknown-серый при доступном static.cdninstagram.com).
+        using Out = IG::NoAssetOutcome;
+        bool deadOk = IG::decideNoAsset(/*netError=*/true, /*httpStatus=*/0, /*anyBytes=*/false)
+                      == Out::Blocked;
+        // Частичные байты / любой HTTP-статус / чистое «ассет не нашли в живой странице» —
+        // НЕ вердикт цензуры: деградация в reachability (Unknown при живом CDN).
+        bool bytesOk = IG::decideNoAsset(true, 0, true) == Out::FallbackReachability;
+        bool statusOk = IG::decideNoAsset(true, 403, false) == Out::FallbackReachability;
+        bool aliveOk = IG::decideNoAsset(false, 200, true) == Out::FallbackReachability;
+
+        printf("instagram: dead=%d bytes=%d status=%d alive=%d\n", deadOk, bytesOk, statusOk, aliveOk);
+
+        bool igOk = assetOk && noneOk && deadOk && bytesOk && statusOk && aliveOk;
         if (!igOk) { fprintf(stderr, "FAIL: InstagramSource parse mismatch\n"); return 13; }
-        printf("instagramsource: OK (cdn asset extract, no-asset guard)\n");
+        printf("instagramsource: OK (cdn asset extract, no-asset guard, dead-homepage verdict)\n");
     }
 
     printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + instagram\n");

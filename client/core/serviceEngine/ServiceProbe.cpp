@@ -343,12 +343,25 @@ void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
             buf->append(reply->readAll());
             asset = InstagramSource::extractCdnAssetUrl(*buf); // полный body — терминатор не требуем
         }
+        // AVPN (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»): исход «ассет не добыт» решает
+        // чистый decideNoAsset (InstagramSource.h, покрыт parse_check): homepage умерла сетевой
+        // ошибкой без единого байта и без HTTP-статуса ⇒ сам сервис недостижим ⇒ честный Blocked.
+        // Деградация в reachability CDN оставлена для «страница пришла, но ассет не нашли» /
+        // частичных байт / любого HTTP-статуса — там красить красным нельзя.
+        const bool netError = (reply->error() != QNetworkReply::NoError);
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool anyBytes = !buf->isEmpty();
         reply->deleteLater();
         delete done; delete buf; delete found;
-        if (asset.isEmpty())
-            goodputFallback(c); // не нашли CDN-ассет / homepage недостижима → reachability(Unknown)/blocked
-        else
+        if (asset.isEmpty()) {
+            if (InstagramSource::decideNoAsset(netError, httpStatus, anyBytes)
+                == InstagramSource::NoAssetOutcome::Blocked)
+                finish(c.key, ServiceState::Blocked, -1); // homepage мертва ⇒ вердикт, не серый
+            else
+                goodputFallback(c); // не нашли CDN-ассет в живой странице → reachability(Unknown)/blocked
+        } else {
             measureGoodput(c, asset, /*rangeAsQuery=*/false); // CDN уважает Range-заголовок
+        }
     });
 }
 
