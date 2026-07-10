@@ -680,24 +680,31 @@ int main(int argc, char **argv)
 
         printf("instagram: asset=%d none=%d\n", assetOk, noneOk);
 
-        // 3) Исход «ассет не добыт» (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»):
-        //    homepage умерла сетевой ошибкой БЕЗ единого байта и без HTTP-статуса — это сам
-        //    сервис недостижим (SNI-RST/дроп на egress) ⇒ Blocked, а не деградация в
-        //    reachability CDN (та давала Unknown-серый при доступном static.cdninstagram.com).
-        using Out = IG::NoAssetOutcome;
-        bool deadOk = IG::decideNoAsset(/*netError=*/true, /*httpStatus=*/0, /*anyBytes=*/false)
+        // 3) Вердикт «источник мёртв» (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»,
+        //    общий решатель для IG и YT — GoodputProbe::decideDeadSource): homepage умерла
+        //    СОЕДИНИТЕЛЬНОЙ сетевой ошибкой (RST/refused, НЕ наш 6с-таймаут) без единого байта
+        //    и без HTTP-статуса — сервис недостижим ⇒ Blocked, а не деградация в reachability
+        //    CDN (та давала Unknown-серый при доступном static.cdninstagram.com).
+        using Out = GoodputProbe::DeadSourceOutcome;
+        bool deadOk = GoodputProbe::decideDeadSource(/*netError=*/true, /*timedOut=*/false,
+                                                     /*httpStatus=*/0, /*anyBytes=*/false)
                       == Out::Blocked;
-        // Частичные байты / любой HTTP-статус / чистое «ассет не нашли в живой странице» —
+        // Наш собственный таймаут-abort (медленный туннель, ни байта за 6с) неотличим от
+        // дропа — НЕ красим красным, деградация в reachability (ревью-находка A2).
+        bool slowOk = GoodputProbe::decideDeadSource(true, true, 0, false)
+                      == Out::FallbackReachability;
+        // Частичные байты / любой HTTP-статус (403 гео) / живая страница без ассета —
         // НЕ вердикт цензуры: деградация в reachability (Unknown при живом CDN).
-        bool bytesOk = IG::decideNoAsset(true, 0, true) == Out::FallbackReachability;
-        bool statusOk = IG::decideNoAsset(true, 403, false) == Out::FallbackReachability;
-        bool aliveOk = IG::decideNoAsset(false, 200, true) == Out::FallbackReachability;
+        bool bytesOk = GoodputProbe::decideDeadSource(true, false, 0, true) == Out::FallbackReachability;
+        bool statusOk = GoodputProbe::decideDeadSource(true, false, 403, false) == Out::FallbackReachability;
+        bool aliveOk = GoodputProbe::decideDeadSource(false, false, 200, true) == Out::FallbackReachability;
 
-        printf("instagram: dead=%d bytes=%d status=%d alive=%d\n", deadOk, bytesOk, statusOk, aliveOk);
+        printf("instagram: dead=%d slow=%d bytes=%d status=%d alive=%d\n",
+               deadOk, slowOk, bytesOk, statusOk, aliveOk);
 
-        bool igOk = assetOk && noneOk && deadOk && bytesOk && statusOk && aliveOk;
+        bool igOk = assetOk && noneOk && deadOk && slowOk && bytesOk && statusOk && aliveOk;
         if (!igOk) { fprintf(stderr, "FAIL: InstagramSource parse mismatch\n"); return 13; }
-        printf("instagramsource: OK (cdn asset extract, no-asset guard, dead-homepage verdict)\n");
+        printf("instagramsource: OK (cdn asset extract, no-asset guard, dead-source verdict)\n");
     }
 
     printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + instagram\n");

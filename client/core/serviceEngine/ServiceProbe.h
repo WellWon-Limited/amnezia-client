@@ -78,7 +78,10 @@ private:
 
     // Goodput: качаем sampleBytes с реального byte-source на душимом CDN и классифицируем kbit/s.
     void probeGoodput(const ServiceProbeConfig &c);
-    void resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx);
+    // allDead — все предыдущие попытки умерли соединительной ошибкой (GoodputProbe::decideDeadSource):
+    // исчерпали видео и allDead ⇒ www.youtube.com недостижим ⇒ Blocked (паритет с Instagram-вердиктом).
+    void resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx,
+                        bool allDead = true);
     void resolveInstagram(const ServiceProbeConfig &c);
     // Скачать N байт по готовому URL и померить скорость → finish(works/slow/blocked). rttMs слот = kbit/s.
     void measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery);

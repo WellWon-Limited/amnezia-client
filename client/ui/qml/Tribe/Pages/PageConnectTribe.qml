@@ -901,8 +901,10 @@ PageType {
         // Однострочная подсказка объясняет контекст. Видна только на подключённой RU-ноде.
         Text {
             width: parent.width
+            // root.curNode (не сырой TribeEngine.currentNode): гард от undefined + карта уже
+            // построена одним вызовом C++-геттера на changed(), а не вторым (ревью E2/D5).
             visible: root.isOn && root.hasEngine
-                     && (TribeEngine.currentNode.countryCode || "").toUpperCase() === "RU"
+                     && String(root.curNode.countryCode || "").toUpperCase() === "RU"
             text: qsTr("Российский сервер: доступность сервисов — как внутри РФ")
             textFormat: Text.PlainText
             horizontalAlignment: Text.AlignHCenter

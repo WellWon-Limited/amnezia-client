@@ -342,9 +342,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     // AVPN (анти-«вечно серый», 2026-07-03): Unknown (state=-1) = «не смогли измерить»
                     // (транзиент сразу после коннекта: маршруты/DNS не осели, туннель нагружен) — раньше
                     // серая точка висела до ручного тапа, т.к. проба одноразовая. Один авто-ретрай через
-                    // 20с (per-key, per-connect: m_svcRetried сбрасывается в probeServices). Blocked/slow/
-                    // works НЕ ретраим — это честные вердикты.
-                    if (state == -1 && !m_svcRetried.contains(key)) {
+                    // 20с (per-key, per-connect: m_svcRetried сбрасывается в probeServices). Slow/works
+                    // НЕ ретраим — честные замеры. Blocked (state=0) тоже перепроверяем ОДИН раз (ревью
+                    // 2026-07-10): сразу после коннекта соединительная смерть неотличима от блокировки
+                    // (dead-source вердикты IG/YT) — без ретрая ложный красный жил бы до 3-мин self-heal.
+                    if ((state == -1 || state == 0) && !m_svcRetried.contains(key)) {
                         m_svcRetried.insert(key);
                         QTimer::singleShot(20000, this, [this, key]() {
                             if (m_svcProbe && this->state() == QLatin1String("connected"))
@@ -634,16 +636,28 @@ QString AvpnEngineQml::storeUrl() const
 // AVPN remote-config (T6): вынесенный API/edge-хост carve-out (см. .h) — применяет вырез к
 // КОНКРЕТНОМУ сев-набору sites. Вызывается ВНУТРИ applyRuBypassSplit РОВНО там же, где раньше
 // был инлайн-блок — behaviour-preserving extraction, поведение на исходном месте не меняется.
+// AVPN: ЕДИНЫЙ источник carve-IP control plane — и для фактического выреза (rebuildApiCarveOut),
+// и для стампа сева (bypassSeedStamp). Ревью 2026-07-10: раньше стамп собирал этот же список
+// вручную — добавление carve-IP в одном месте без другого дало бы «seed unchanged — skip» при
+// реально изменившемся севе (стале-маршрут для control plane = инцидент 2026-07-05).
+QStringList AvpnEngineQml::apiCarveIps() const
+{
+    QStringList ips{QStringLiteral("159.194.214.36")}; // вкомпиленный фолбэк (Beget, api.tribevpn.com)
+    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
+        ips << ip.toString();
+    return ips;
+}
+
 void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QString> &sites) const
 {
     // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
     // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
     // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
     // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
-    // Вкомпиленный фолбэк + актуальные IP из async-резолва (конструктор + T6 edge-walk).
-    carveOutIpFromSites(sites, QHostAddress(QStringLiteral("159.194.214.36")));
-    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
-        carveOutIpFromSites(sites, ip);
+    // Вкомпиленный фолбэк + актуальные IP из async-резолва — единый список apiCarveIps().
+    const QStringList ips = apiCarveIps();
+    for (const QString &ip : ips)
+        carveOutIpFromSites(sites, QHostAddress(ip));
 }
 
 // AVPN remote-config (T6): «новый активный edge — в carve-out». Резолвит host(m_baseUrl) (уже
@@ -755,6 +769,16 @@ QString AvpnEngineQml::authToken() const
 bool AvpnEngineQml::subActive() const
 {
     return debugSnapshot().value(QStringLiteral("subStatus")).toString() == QLatin1String("active");
+}
+
+// AVPN (баг 2026-07-10 «вечная загрузка без подписки»): достоверное «подписки нет» = снапшот
+// degraded (бэк ставит его ТОЛЬКО по состоянию устройства: expired/over-quota/без tunnel_ip)
+// И пул пуст. active+пустой пул (все ноды в дренаже у подписанного) сюда не попадает; до
+// первого распарсенного тела subStatus пуст → false («ещё грузится», не CTA).
+bool AvpnEngineQml::subMissing() const
+{
+    return debugSnapshot().value(QStringLiteral("subStatus")).toString() == QLatin1String("degraded")
+           && !m_engine.hasSubscription();
 }
 
 QString AvpnEngineQml::localDeviceId() const
@@ -2497,8 +2521,14 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
         onBootstrapAttemptFailed(); // битое тело не затирает LKG-пул и не останавливает ретрай
         return;
     case avpn::BootstrapBodyAction::KeepPollingEmptyPool:
-        Enrollment::saveLkgSubscription(body); // валидное (пусть и пустое) тело — честный LKG-стейт
-        m_subMissingSeen = true;
+        // Валидное 200-тело (пусть и с пустым пулом) — общие с latch-путём эффекты обязаны
+        // случиться и здесь (ревью 2026-07-10): LKG = честный стейт; transferredAway снят
+        // (тело валидно = не 410, иначе UI показывал бы «перенесена» вместо CTA после
+        // ре-энролла с непровиженным пулом); push-токен флашим (дедуп внутри) — иначе
+        // no-sub устройство не получит пуш «подписка активирована».
+        Enrollment::saveLkgSubscription(body);
+        if (m_transferredAway) { m_transferredAway = false; }
+        flushPendingPushToken();
         emit changed(); // daysLeft/traffic/subMissing обновятся; защёлку НЕ ставим, таймер жив
         onBootstrapAttemptFailed();
         return;
@@ -2507,7 +2537,6 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
     }
     Enrollment::saveLkgSubscription(body); // AVPN (LKG): персистим ТОЛЬКО валидное тело
     if (m_transferredAway) { m_transferredAway = false; } // подписка снова валидна (новый ключ/энролл)
-    m_subMissingSeen = false;
     m_bootstrapped = true;
     m_bootstrapInFlight = false;
     m_bootstrapRetries = 0;
@@ -3230,6 +3259,9 @@ void AvpnEngineQml::applyRuBypassSplit()
     // RU-pin — прежний гейт по pinnedNodeIsRu() тут расходился с реальностью, когда нода ≠ pin).
     if (!masterOn && !liAutoOn) {
         m_store->setSitesSplitTunnelingEnabled(false);
+        // Страховка (ревью A5): пока сплит выключен, стор могли мутировать в обход этой функции —
+        // сбрасываем стамп, чтобы ре-ВКЛ гарантированно пересеял (цена — один сев на переключение).
+        m_lastBypassSeedStamp.clear();
         return;
     }
     m_store->setRouteMode(RouteMode::VpnAllExceptSites);
@@ -3241,12 +3273,10 @@ void AvpnEngineQml::applyRuBypassSplit()
     // содержимое sites в сторе уже ровно такое → пропускаем сев целиком. Смена тумблера/версии
     // списка/carve-IP (async-резолв edge) меняет стамп → честный пересев. Стамп живёт только в
     // памяти процесса — первый сев после запуска всегда выполняется (стор мог меняться извне).
-    // Оба-OFF выше стамп НЕ трогают: сев в сторе остаётся прежним, повторное ВКЛ с теми же
-    // входами корректно попадает в скип.
-    QStringList carveIps{QStringLiteral("159.194.214.36")};
-    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
-        carveIps << ip.toString();
-    const QString seedStamp = avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, carveIps);
+    // Оба-OFF выше чистят стамп (страховка от мутаций стора при выключенном сплите) — ре-ВКЛ
+    // всегда пересеет. Carve-IP — из apiCarveIps(), ЕДИНОГО источника с rebuildApiCarveOut.
+    const QString seedStamp =
+            avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, apiCarveIps());
     if (seedStamp == m_lastBypassSeedStamp) {
         qInfo("[AVPN bypass] seed unchanged — skip (v=%d)", useRemote ? bl.version : -1);
         return;

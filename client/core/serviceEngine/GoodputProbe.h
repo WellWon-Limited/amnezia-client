@@ -42,6 +42,23 @@ public:
         return double(bytes) * 8.0 / double(elapsedMs);
     }
 
+    // Вердикт «byte-source мёртв» для стадии резолва (девайс-баг 2026-07-10 «IG вечно серый на
+    // RU-ноде»; общий для resolveInstagram и resolveYoutube — ServiceProbe.cpp): страница/API
+    // умерли СОЕДИНИТЕЛЬНОЙ сетевой ошибкой (RST/refused — НЕ наш таймаут-abort) без единого
+    // байта и без HTTP-статуса ⇒ сам сервис недостижим ⇒ Blocked. Всё остальное — деградация в
+    // reachability CDN (Unknown при живом CDN), красным не красим: наш 6с-таймаут (медленный
+    // туннель до первого байта), частичные байты, любой HTTP-статус (403 гео ≠ сетевой вердикт),
+    // «страница пришла, ассет не нашли» (сменилась вёрстка).
+    enum class DeadSourceOutcome { FallbackReachability, Blocked };
+
+    static DeadSourceOutcome decideDeadSource(bool netError, bool timedOut, int httpStatus,
+                                              bool anyBytes)
+    {
+        return (netError && !timedOut && httpStatus <= 0 && !anyBytes)
+                   ? DeadSourceOutcome::Blocked
+                   : DeadSourceOutcome::FallbackReachability;
+    }
+
     // Классификация в ServiceState-int: 0 blocked, 1 slow, 2 works.
     // Меньше minBytes ⇒ замер недостоверен ⇒ blocked (не выдаём случайный «works» на крохах).
     static int classify(qint64 bytes, qint64 elapsedMs, const Thresholds &t = Thresholds{})
