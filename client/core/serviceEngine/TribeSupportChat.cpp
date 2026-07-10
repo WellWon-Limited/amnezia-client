@@ -141,6 +141,9 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
 
     m_pollTimer.setInterval(pollMs(false));
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
+        // AVPN backend-first (T11): kill-switch — выключенный флаг гасит весь поллинг чата.
+        if (!TuningStore::flag(QStringLiteral("support_chat_poll")))
+            return;
         if (m_active)
             refresh();
         else
