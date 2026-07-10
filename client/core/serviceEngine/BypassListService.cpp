@@ -65,7 +65,14 @@ void BypassListService::setBaseUrl(const QString &b)
 
 void BypassListService::start()
 {
-    loadLkg();
+    // AVPN: loadLkg() тоже под kill-switch — configApplied уже прилетел синхронно ДО start()
+    // (см. реордер connect'ов в AvpnEngineQml) и мог взвести m_disabled=true на тёплом старте
+    // с персистнутым remote_bypass_lists=false. Без гварда loadLkg() тут воскрешала бы
+    // доверенный, но выключенный сервером список в BypassListStore/listsApplied ещё ДО того,
+    // как читатели узнают про kill-switch. Обратное включение уже обрабатывает
+    // onRemoteConfigApplied() сама (loadLkg()+fetch() в ветке re-enable) — дублировать не нужно.
+    if (!m_disabled)
+        loadLkg();
     if (!m_timer) {
         m_timer = new QTimer(this);
         connect(m_timer, &QTimer::timeout, this, [this]() {
