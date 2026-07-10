@@ -53,6 +53,10 @@ private:
     int     m_lkgVersion = 0;
     bool    m_disabled = false;
     bool    m_loggedNotFound = false; // 404 — один лог за запуск, не спамить
+    // AVPN: дедуп параллельных фетчей (повторный start()/таймер/onRemoteConfigApplied не должны
+    // плодить второй in-flight запрос) — снимается в ЛЮБОЙ ветке обработчика finished, включая
+    // armTimeout-abort (armTimeout → finished(OperationCanceledError), лямбда всё равно вызовется).
+    bool    m_fetching = false;
     QTimer *m_timer = nullptr;
 };
 

@@ -16,6 +16,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -102,6 +103,12 @@ void BypassListService::fetch()
 {
     if (!m_nam || m_baseUrl.isEmpty())
         return;
+    // AVPN: дедуп — повторный вызов (таймер тикнул поверх ещё не завершённого start()-фетча,
+    // либо onRemoteConfigApplied(true) догнал уже идущий запрос) не должен породить второй
+    // in-flight запрос. Снимается ниже в finished — для ЛЮБОГО исхода (2xx/3xx/4xx/5xx/abort).
+    if (m_fetching)
+        return;
+    m_fetching = true;
     QNetworkRequest req{ QUrl(m_baseUrl + QStringLiteral("/v1/bypass-lists")) };
     if (!m_etag.isEmpty())
         req.setRawHeader(QByteArrayLiteral("If-None-Match"), m_etag.toUtf8());
@@ -109,6 +116,7 @@ void BypassListService::fetch()
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
+        m_fetching = false; // снимаем ПЕРВЫМ — до любого early return ниже
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code == 304)
             return; // не изменилось — LKG актуален, no-op
@@ -121,7 +129,8 @@ void BypassListService::fetch()
             return;
         }
         if (code < 200 || code >= 300)
-            return; // транспортный/серверный сбой — остаёмся на LKG, следующая попытка по таймеру
+            return; // транспортный/серверный сбой (включая armTimeout-abort, code==0) — остаёмся
+                    // на LKG, следующая попытка по таймеру
 
         const QByteArray body = reply->readAll();
         const QByteArray sig  = reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
@@ -132,6 +141,11 @@ void BypassListService::fetch()
 
 void BypassListService::applyBody(const QByteArray &body, const QByteArray &sigB64, const QByteArray &etag)
 {
+    // AVPN server-driven АнтиВПН: kill-switch перекрывает и in-flight ответ — запрос мог
+    // стартовать ДО onRemoteConfigApplied(false); если сервер уже выключил фичу, тело,
+    // пришедшее позже, применять нельзя (иначе kill-switch на мгновение "воскрешает" список).
+    if (m_disabled)
+        return;
     if (!verifyDetached(m_pubKeyHex, body, sigB64))
         return; // подпись не прошла → игнор, остаёмся на LKG/фолбэке
     BypassLists out;
@@ -154,9 +168,17 @@ void BypassListService::applyBody(const QByteArray &body, const QByteArray &sigB
 void BypassListService::saveLkg(const QByteArray &body, const QByteArray &sigB64, const QByteArray &etag)
 {
     const QByteArray json = serializeBypassListsLkg(body, sigB64, etag);
-    QFile f(lkgFilePath());
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        f.write(json);
+    // AVPN: атомарная запись через QSaveFile (пишет во временный файл рядом + commit-переименование)
+    // — обрыв процесса/питания посреди write() не должен оставить bypass_lists.lkg битым/пустым,
+    // иначе следующий loadLkg() потеряет ПОСЛЕДНИЙ доверенный список.
+    QSaveFile f(lkgFilePath());
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "AVPN bypass-lists: LKG save failed (open):" << f.errorString();
+        return; // применённое в памяти состояние (BypassListStore/m_lkgVersion) оставляем как есть
+    }
+    f.write(json);
+    if (!f.commit())
+        qWarning() << "AVPN bypass-lists: LKG save failed (commit):" << f.errorString();
 }
 
 void BypassListService::onRemoteConfigApplied(const RemoteConfig &cfg)
