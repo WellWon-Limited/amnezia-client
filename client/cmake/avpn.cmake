@@ -76,6 +76,9 @@ list(APPEND HEADERS
     ${AVPN_SE}/ConfigStore.h
     ${AVPN_SE}/EdgeWalk.h
     ${AVPN_SE}/ConfigService.h
+    ${AVPN_SE}/BypassListTypes.h
+    ${AVPN_SE}/BypassListLkg.h
+    ${AVPN_SE}/BypassListService.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -100,6 +103,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/AvpnShareBridge.cpp
     ${AVPN_SE}/Ed25519Verify.cpp
     ${AVPN_SE}/ConfigService.cpp
+    ${AVPN_SE}/BypassListService.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 

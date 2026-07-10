@@ -4,6 +4,7 @@
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 #include "core/repositories/secureAppSettingsRepository.h" // AVPN RU-direct: флаг сплита по факт-ноде
+#include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): split-DNS из BypassListStore
 
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
@@ -72,6 +73,11 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     if (m_keys.privateKey.isEmpty())
         return TunnelResult::fail(QStringLiteral("client keys not set"));
 
+    // AVPN server-driven АнтиВПН (Task 10): снапшот серверного split_dns (подпись+LKG), один раз.
+    // При невалидном снапшоте (офлайн/первый запуск/kill-switch) — прежние вкомпиленные литералы.
+    // Значения в КОРЕНЬ cfg остаются СТРОКАМИ, где были строками (JSONDecoder-грабля iOS).
+    const avpn::BypassLists bl = avpn::BypassListStore::get();
+
     // AVPN RU-direct (единый «Доступ к сайтам РФ», AvpnBypass/masterOn, default ON): DNS = РУССКИЙ резолвер
     // (Яндекс 77.88.8.8/.1 ∈ 77.88.0.0/18 ⊂ рунет → уходит МИМО туннеля вместе с рунетом → residential-
     // резолвер). Иначе DNS шёл бы на дефолтный 1.1.1.1 через загранузел, и инфра-сервисы со своим
@@ -106,7 +112,10 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
             splitDns = true; // DNS ноды (1.1.1.1) не подменяем — RU-суффиксы уйдут на Яндекс через демона
 #else
-            primary.dns = QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
+            // AVPN Task 10: mask-DNS пара — серверная (bl.maskDns) при валидном снапшоте, иначе литерал.
+            primary.dns = (bl.valid && bl.maskDns.size() >= 2)
+                ? QStringList{bl.maskDns[0], bl.maskDns[1]}
+                : QStringList{QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1")};
 #endif
         }
 
@@ -144,20 +153,28 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         const bool ruN = node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
         if (fwd && !ruN) {
             cfg.insert(QStringLiteral("dnsFwdOn"), QStringLiteral("1"));
+            // AVPN Task 10: суффиксы+сервер форвардера — серверные при валидном снапшоте, иначе литералы.
+            // Значения СТРОКАМИ (JSONDecoder-грабля iOS): suffixes = join(','), server = строка.
             cfg.insert(QStringLiteral("dnsFwdSuffixes"),
-                       QStringLiteral("ru,su,xn--p1ai,vk.com,userapi.com,yandex.net,yastatic.net"));
-            cfg.insert(QStringLiteral("dnsFwdServer"), QStringLiteral("77.88.8.8"));
+                       bl.valid ? bl.splitDnsSuffixes.join(QLatin1Char(','))
+                                : QStringLiteral("ru,su,xn--p1ai,vk.com,userapi.com,yandex.net,yastatic.net"));
+            cfg.insert(QStringLiteral("dnsFwdServer"),
+                       bl.valid ? bl.splitDnsServer : QStringLiteral("77.88.8.8"));
         }
     }
     if (splitDns) {
         // AVPN split-DNS: RU-суффиксы (TLD рунета + RU-сервисы вне .ru) → Яндекс мимо туннеля.
         // Прокид: localsocketcontroller → демон → /etc/resolver/*. Яндекс отвечает ТОЛЬКО
         // residential-IP (проверено: с ДЦ-egress UDP53 молчит) — потому строго мимо туннеля.
+        // AVPN Task 10: split-DNS суффиксы+сервер (macOS-демон) — серверные при валидном снапшоте,
+        // иначе прежние литералы.
         cfg.insert(QStringLiteral("splitDnsSuffixes"),
-                   QJsonArray{ QStringLiteral("ru"), QStringLiteral("su"), QStringLiteral("xn--p1ai"),
-                               QStringLiteral("vk.com"), QStringLiteral("userapi.com"),
-                               QStringLiteral("yandex.net"), QStringLiteral("yastatic.net") });
-        cfg.insert(QStringLiteral("splitDnsServer"), QStringLiteral("77.88.8.8"));
+                   bl.valid ? QJsonArray::fromStringList(bl.splitDnsSuffixes)
+                            : QJsonArray{ QStringLiteral("ru"), QStringLiteral("su"), QStringLiteral("xn--p1ai"),
+                                          QStringLiteral("vk.com"), QStringLiteral("userapi.com"),
+                                          QStringLiteral("yandex.net"), QStringLiteral("yastatic.net") });
+        cfg.insert(QStringLiteral("splitDnsServer"),
+                   bl.valid ? bl.splitDnsServer : QStringLiteral("77.88.8.8"));
     }
     // AVPN bench v5 (tunnel.config): снапшот того, что РЕАЛЬНО уходит в туннель (primary — уже с
     // dns-override, эффективные mtu/dns из reportSummary) + факты сева этого подъёма.

@@ -21,6 +21,7 @@
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
+#include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -391,7 +392,33 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
                 emit changed();
             });
+
+    // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
+    // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/kConfigPubKeyHex,
+    // что у ConfigService — dev-эндпоинт ⇒ dev-ключ, prod ⇒ prod-ключ. baseUrl берём из
+    // m_configSvc->activeBaseUrl() (НЕ из m_baseUrl напрямую): ConfigService уже создан и
+    // поднял персистнутый edge на конструкции; activeEdgeChanged эмитится только при СМЕНЕ
+    // edge, а не на холодном старте — если бы тут стоял m_baseUrl (ещё primary), а прод уже
+    // персистнул рабочий edge с прошлой сессии, bypass-фетч бил бы в заблокированный primary
+    // до первой смены edge (которая при живом primary может не наступить вовсе).
+    // Kill-switch remote_bypass_lists реализован ВНУТРИ сервиса (onRemoteConfigApplied: при
+    // флаге=false → пустой invalid снапшот в BypassListStore + фетч на паузу) ⇒ точки чтения
+    // (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
+    // Порядок: создаём m_bypassListSvc и подключаем оба connect'а ДО m_configSvc->start() —
+    // ConfigService::start() может синхронно эмитнуть configApplied на тёплом LKG-старте
+    // (без сети), и если бы connect стоял после start(), это первое персистнутое состояние
+    // флага remote_bypass_lists терялось бы: офлайн-сеанс мог целиком прожить со стейл-LKG
+    // BypassListService вместо актуального флага. Реордер закрывает это окно: оба connect'а
+    // гарантированно ловят даже синхронный первый configApplied. m_bypassListSvc->start()
+    // (loadLkg + fetch) остаётся ПОСЛЕ m_configSvc->start() — сам старт не участвует в гонке.
+    m_bypassListSvc = new avpn::BypassListService(m_nam, m_configSvc->activeBaseUrl(), kConfigPubKeyHex, this);
+    connect(m_configSvc, &avpn::ConfigService::configApplied,
+            m_bypassListSvc, &avpn::BypassListService::onRemoteConfigApplied);
+    connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged,
+            m_bypassListSvc, &avpn::BypassListService::setBaseUrl);
+
     m_configSvc->start();
+    m_bypassListSvc->start();
 
     // AVPN (Task 7): таймер авто-паузы «для покупок». Одноразовый: истёк → бездействие → resume.
     m_pauseTimer.setSingleShot(true);
@@ -3117,6 +3144,11 @@ void AvpnEngineQml::applyRuBypassSplit()
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
+    // AVPN server-driven АнтиВПН (Task 10): списки с /v1/bypass-lists (подпись+LKG); вкомпиленные
+    // массивы ниже — фолбэк (офлайн/первый запуск/kill-switch). Kill-switch remote_bypass_lists
+    // гасится ВНУТРИ BypassListService (пустой invalid снапшот) ⇒ здесь достаточно bl.valid.
+    const avpn::BypassLists bl = avpn::BypassListStore::get();
+    const bool useRemote = bl.valid;
     // AVPN (T2, аудит 2026-07-02): здесь — только СЕВ списка (и активное ВЫКЛ, если ОБА тумблера OFF,
     // иначе прежний seed продолжил бы исключать трафик). Вкл/выкл сплита под РФ-ноду решается ПО
     // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
@@ -3128,8 +3160,18 @@ void AvpnEngineQml::applyRuBypassSplit()
     m_store->setRouteMode(RouteMode::VpnAllExceptSites);
     m_store->setSitesSplitTunnelingEnabled(true);
     QMap<QString, QString> sites;
+    // AVPN Task 10 (per-group fallback): та же политика, что у парсера split_dns — "пусто =
+    // нет override". Сервер может курировать любую из групп (ru_cidrs/bypass_extra/cn_liauto),
+    // но если конкретная группа в валидном снапшоте пуста, это НЕ значит "выключить группу" —
+    // это значит "сервер её не переопределяет", и группа падает на вкомпиленный дефолт. Раньше
+    // useRemote гасил bypassExtra/liAuto целиком одним пустым полем на сервере (даже при живом
+    // вкомпиленном фолбэке) — Госуслуги-carve и LiAuto молча исчезали. usedRemote* ниже — per-group
+    // источник для лога (см. qInfo в конце функции).
+    bool usedRemoteRu = false, usedRemoteExtra = false, usedRemoteLiAuto = false;
     if (masterOn) {
-        const QStringList ru = avpn::ruPrefixes();
+        // AVPN Task 10: рунет CIDR — серверный (bl.ruCidrs) при валидном снапшоте, иначе вкомпиленный.
+        usedRemoteRu = useRemote;
+        const QStringList ru = useRemote ? bl.ruCidrs : avpn::ruPrefixes();
         for (const QString &cidr : ru)
             sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
 
@@ -3144,8 +3186,17 @@ void AvpnEngineQml::applyRuBypassSplit()
             "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
             "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
         };
+        // AVPN Task 10: foreign-эндпоинты — серверные (bl.bypassExtra) при валидном снапшоте И
+        // непустые (сервер может курировать список, но пусто = "нет override", НЕ "выключить
+        // Госуслуги-carve" — иначе пустое поле на сервере молча гасило бы вкомпиленный дефолт).
+        // Массив выше остаётся вкомпиленным фолбэком на офлайн/первый запуск/kill-switch/пустой ответ.
+        QStringList extraFallback;
         for (const char *cidr : kBypassExtra)
-            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+            extraFallback << QString::fromLatin1(cidr);
+        usedRemoteExtra = useRemote && !bl.bypassExtra.isEmpty();
+        const QStringList bypassExtra = usedRemoteExtra ? bl.bypassExtra : extraFallback;
+        for (const QString &cidr : bypassExtra)
+            sites.insert(cidr, cidr);
     }
 
     // AVPN (китайские сервисы, 2026-07-03): узкие /24 серверов Li Auto (理想汽车, app com.chehejia.oc.m01) →
@@ -3166,8 +3217,17 @@ void AvpnEngineQml::applyRuBypassSplit()
             "114.111.24.0/24",  // lianshan.lixiang.com / mindgpt — apisix gw (CT Hebei AS140903)
             "193.118.54.0/24",  // account.lixiang.com — заграничный GSLB-edge логина, запасной (Zenlayer AS21859)
         };
+        // AVPN Task 10: Li Auto CIDR — серверные (bl.cnLiAutoCidrs) при валидном снапшоте И
+        // непустые (та же политика "пусто = нет override" — сервер может курировать список Li Auto,
+        // но пустое поле не должно молча гасить вкомпиленный дефолт при живом фолбэке).
+        // Массив выше — вкомпиленный фолбэк на офлайн/первый запуск/kill-switch/пустой ответ.
+        QStringList liAutoFallback;
         for (const char *cidr : kLiAutoCidrs)
-            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+            liAutoFallback << QString::fromLatin1(cidr);
+        usedRemoteLiAuto = useRemote && !bl.cnLiAutoCidrs.isEmpty();
+        const QStringList liAuto = usedRemoteLiAuto ? bl.cnLiAutoCidrs : liAutoFallback;
+        for (const QString &cidr : liAuto)
+            sites.insert(cidr, cidr);
     }
 
     // AVPN carve-out (инцидент 2026-07-05, вынесено в T6 — rebuildApiCarveOut(sites) выше в файле):
@@ -3176,6 +3236,14 @@ void AvpnEngineQml::applyRuBypassSplit()
     // из сева ЗДЕСЬ ЖЕ, где раньше был инлайн-блок (behaviour-preserving — тот же порядок операций
     // над тем же `sites`, тот же вызов carveOutIpFromSites, просто вынесен в метод).
     rebuildApiCarveOut(sites);
+
+    // AVPN Task 10 (per-group fallback): источник — ПО ГРУППАМ, не одним общим useRemote — с тех пор
+    // как пустая группа на сервере падает на вкомпиленный дефолт, а не на пустой список (см. выше).
+    // ru/extra/liauto=1 → взят серверный снапшот для этой группы, =0 → вкомпиленный фолбэк.
+    qInfo("[AVPN bypass] seed source cidrs=%d (master=%d liauto=%d) remote{ru=%d extra=%d liauto=%d} v=%d",
+          int(sites.size()), masterOn ? 1 : 0, liAutoOn ? 1 : 0,
+          usedRemoteRu ? 1 : 0, usedRemoteExtra ? 1 : 0, usedRemoteLiAuto ? 1 : 0,
+          useRemote ? bl.version : -1);
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
