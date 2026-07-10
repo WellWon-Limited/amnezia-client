@@ -896,6 +896,21 @@ PageType {
             model: root.hasEngine ? TribeEngine.serviceStatus : []
             onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
+        // AVPN (девайс-фидбек 2026-07-10): на RU-ноде чипы меряют РФ-egress честно, но показания
+        // контринтуитивны («YouTube зелёный, Telegram красный») — юзер читает их как поломку.
+        // Однострочная подсказка объясняет контекст. Видна только на подключённой RU-ноде.
+        Text {
+            width: parent.width
+            visible: root.isOn && root.hasEngine
+                     && (TribeEngine.currentNode.countryCode || "").toUpperCase() === "RU"
+            text: qsTr("Российский сервер: доступность сервисов — как внутри РФ")
+            textFormat: Text.PlainText
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            color: Theme.color.text3
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.caption
+        }
         // AVPN: редкий авто-self-heal чипов, пока подключены. Чипы youtube/instagram теперь GOODPUT
         // (качают ~128 КБ каждый), а статус цензуры/троттлинга меняется медленно (не раз в секунды) —
         // поэтому 3 мин, а не 12с (иначе лишний фоновый трафик). Мгновенно — тап по чипу (onRecheck).

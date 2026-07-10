@@ -53,12 +53,12 @@
         <location line="-217"/>
         <location line="+7"/>
         <location line="+238"/>
-        <location line="+889"/>
+        <location line="+892"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1120"/>
+        <location line="-1123"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -87,29 +87,29 @@
     </message>
     <message>
         <location line="+77"/>
-        <location line="+267"/>
+        <location line="+270"/>
         <source>Активна</source>
         <translation>Activa</translation>
     </message>
     <message>
-        <location line="-266"/>
+        <location line="-269"/>
         <source>Пробный доступ</source>
         <translation>Acceso de prueba</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+266"/>
+        <location line="+269"/>
         <source>Истекла</source>
         <translation>Expirada</translation>
     </message>
     <message>
-        <location line="-248"/>
-        <location line="+848"/>
+        <location line="-251"/>
+        <location line="+851"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-762"/>
+        <location line="-765"/>
         <source>Подписка перенесена</source>
         <translation>Suscripción transferida</translation>
     </message>
@@ -119,7 +119,7 @@
         <translation>Se activó un nuevo dispositivo. Este dispositivo quedó desconectado de la suscripción: para recuperar el acceso, obtén una clave nueva o transfiere la suscripción de vuelta.</translation>
     </message>
     <message>
-        <location line="+64"/>
+        <location line="+67"/>
         <source>ПОДПИСКА</source>
         <translation>SUSCRIPCIÓN</translation>
     </message>
@@ -189,18 +189,18 @@
         <translation>Activar clave</translation>
     </message>
     <message>
-        <location line="-476"/>
-        <location line="+495"/>
+        <location line="-479"/>
+        <location line="+498"/>
         <source>Введите код активации</source>
         <translation>Introduce el código de activación</translation>
     </message>
     <message>
-        <location line="-399"/>
+        <location line="-402"/>
         <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
         <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
     </message>
     <message>
-        <location line="+387"/>
+        <location line="+390"/>
         <source>Если у вас есть код активации — введите его ниже, доступ продлится сразу.</source>
         <translation>Si tienes un código de activación, introdúcelo abajo: tu acceso se extenderá al instante.</translation>
     </message>
@@ -1018,7 +1018,12 @@
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+72"/>
+        <location line="+37"/>
+        <source>Российский сервер: доступность сервисов — как внутри РФ</source>
+        <translation>Servidor ruso: la disponibilidad de servicios es la misma que dentro de Rusia</translation>
+    </message>
+    <message>
+        <location line="+50"/>
         <source>Продлить трафик</source>
         <translation>Recargar tráfico</translation>
     </message>
@@ -1440,7 +1445,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Fotos y videos</translation>
     </message>
     <message>
-        <location line="+86"/>
+        <location line="+88"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
         <translation>Escríbenos y te responderemos aquí mismo.
@@ -1564,7 +1569,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1003"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1004"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -1835,7 +1840,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo activar la clave</translation>
     </message>
     <message>
-        <location line="+394"/>
+        <location line="+412"/>
         <source>Не указано устройство</source>
         <translation>No se especificó el dispositivo</translation>
     </message>
