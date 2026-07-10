@@ -221,6 +221,11 @@ void CoreController::initControllers()
     QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::supportPushReceived,
                      tribeSupport, &avpn::TribeSupportChat::onSupportPush);
 
+    // AVPN backend-first: чат поддержки живёт на том же активном edge, что и движок.
+    tribeSupport->setBaseUrl(avpnEngine->apiBase());
+    QObject::connect(avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
+                     tribeSupport, &avpn::TribeSupportChat::setBaseUrl);
+
     // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный
     // рефреш /v1/subscription — бейдж и золотая CTA оживают сразу, на любой открытой вкладке.
     QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::paymentPushReceived,

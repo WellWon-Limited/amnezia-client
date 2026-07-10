@@ -136,6 +136,7 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
         m_baseUrl = QString::fromUtf8(envUrl);
+    m_envPinned = !envUrl.isEmpty();
 
     s_instance = this; // колбэк нативного пикера (создаётся один раз в coreController)
 
@@ -231,6 +232,15 @@ void TribeSupportChat::onSupportPush()
         refresh();
     else
         refreshUnread();
+}
+
+// AVPN backend-first (2026-07-10): чат следует за edge-walk control plane (fix аудита —
+// раньше висел на вкомпиленном хосте и умирал при failover). Env-пин (AVPN_API_URL) сильнее.
+void TribeSupportChat::setBaseUrl(const QString &base)
+{
+    if (m_envPinned || base.isEmpty() || base == m_baseUrl)
+        return;
+    m_baseUrl = base;
 }
 
 // ── тред ─────────────────────────────────────────────────────────────────────
