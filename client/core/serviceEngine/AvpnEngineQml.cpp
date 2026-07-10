@@ -4069,7 +4069,7 @@ void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)
     if (!m_nam || !LegalDocs::isValidDoc(doc) || !LegalDocs::isValidLang(lang))
         return;
     // без дедупа запросов: страница дёргает fetch один раз на открытие, ответы идемпотентны
-    QNetworkRequest req{QUrl(LegalDocs::url(doc, lang))};
+    QNetworkRequest req{QUrl(LegalDocs::url(doc, lang, configUrl(QStringLiteral("legal_base"), QStringLiteral("https://tribevpn.com/legal"))))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply); // жёсткий таймаут без nested loop (abort → finished с code==0)
     connect(reply, &QNetworkReply::finished, this, [this, reply, doc, lang]() {

@@ -33,9 +33,10 @@ inline QString normalizeLang(const QString &appLang)
     return isValidLang(two) ? two : QStringLiteral("en");
 }
 
-inline QString url(const QString &doc, const QString &lang)
+inline QString url(const QString &doc, const QString &lang,
+                   const QString &base = QStringLiteral("https://tribevpn.com/legal"))
 {
-    return QStringLiteral("https://tribevpn.com/legal/%1.%2.md").arg(doc, lang);
+    return QStringLiteral("%1/%2.%3.md").arg(base, doc, lang);
 }
 
 inline QString cacheFileName(const QString &doc, const QString &lang)
