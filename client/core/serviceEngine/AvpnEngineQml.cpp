@@ -34,6 +34,7 @@
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
+#include "BypassSeedStamp.h"      // AVPN: стамп входов сева АнтиВПН — скип пересева 10k CIDR при неизменных входах
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
 #include <QDir>                   // AVPN in-app Legal: каталог кэша
@@ -3233,6 +3234,23 @@ void AvpnEngineQml::applyRuBypassSplit()
     }
     m_store->setRouteMode(RouteMode::VpnAllExceptSites);
     m_store->setSitesSplitTunnelingEnabled(true);
+    // AVPN (тормоза коннекта, 2026-07-10): сев ~10801 CIDR (QMap + carve по всем ключам + полная
+    // запись в QSettings/plist) на GUI-потоке — на КАЖДОМ guardedStart/реконнекте/failover, при
+    // неизменных входах (список обновляется раз в 6ч, тумблеры — руками). Стамп входов
+    // (BypassSeedStamp.h, покрыт bypass_seed_check) совпал с прошлым севом этого процесса →
+    // содержимое sites в сторе уже ровно такое → пропускаем сев целиком. Смена тумблера/версии
+    // списка/carve-IP (async-резолв edge) меняет стамп → честный пересев. Стамп живёт только в
+    // памяти процесса — первый сев после запуска всегда выполняется (стор мог меняться извне).
+    // Оба-OFF выше стамп НЕ трогают: сев в сторе остаётся прежним, повторное ВКЛ с теми же
+    // входами корректно попадает в скип.
+    QStringList carveIps{QStringLiteral("159.194.214.36")};
+    for (const QHostAddress &ip : std::as_const(m_apiHostIps))
+        carveIps << ip.toString();
+    const QString seedStamp = avpn::bypassSeedStamp(masterOn, liAutoOn, useRemote, bl.version, carveIps);
+    if (seedStamp == m_lastBypassSeedStamp) {
+        qInfo("[AVPN bypass] seed unchanged — skip (v=%d)", useRemote ? bl.version : -1);
+        return;
+    }
     QMap<QString, QString> sites;
     // AVPN Task 10 (per-group fallback): та же политика, что у парсера split_dns — "пусто =
     // нет override". Сервер может курировать любую из групп (ru_cidrs/bypass_extra/cn_liauto),
@@ -3320,6 +3338,7 @@ void AvpnEngineQml::applyRuBypassSplit()
           useRemote ? bl.version : -1);
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
+    m_lastBypassSeedStamp = seedStamp; // сев доехал до стора — только теперь входы можно считать применёнными
 }
 
 // AVPN RU-direct: применить смену тумблера «АвтоVPN» на живом туннеле. Если намерение — быть онлайн
