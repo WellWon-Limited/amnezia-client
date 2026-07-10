@@ -852,7 +852,7 @@ void AvpnEngineQml::onTick()
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
     // measure() сам игнорит повторный запуск, пока предыдущий в полёте. На не-connected — не мерим
     // и держим бары на 0 (hard-gate сбросит при следующем reachable=false, см. ниже onConnectionStateChanged).
-    if (m_probe && state() == QLatin1String("connected"))
+    if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt")) && state() == QLatin1String("connected"))
         m_probe->measure();
 
     // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
@@ -873,6 +873,10 @@ void AvpnEngineQml::onTick()
 
 void AvpnEngineQml::probeServices()
 {
+    // AVPN backend-first (T11): kill-switch — гасит и авто-запуск, и ручной тап из UI (осознанно:
+    // выключенный флаг должен глушить ВЕСЬ трафик проб, не только фоновый).
+    if (!avpn::TuningStore::flag(QStringLiteral("service_probes")))
+        return;
     // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
     // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
     m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
@@ -1697,6 +1701,10 @@ void AvpnEngineQml::ccFinish()
 void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
 {
     if (json.isEmpty())
+        return;
+    // AVPN backend-first (T11): kill-switch глушит ТОЛЬКО авто-отправку (quiet); ручную кнопку не
+    // трогаем — юзер сам увидит честный отказ бэка, если тот не готов принимать отчёты.
+    if (quiet && !avpn::TuningStore::flag(QStringLiteral("bench_report_upload")))
         return;
     if (json.size() > 3 * 1024 * 1024) { // защита от абсурда; реальный мега-отчёт ~200–600 КБ
         emit reportUploadDone(false, tr("Отчёт слишком большой для отправки"));
