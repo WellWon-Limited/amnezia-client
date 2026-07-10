@@ -60,6 +60,16 @@ PageType {
 
     Component.onCompleted: root.refreshReferral()
 
+    // «Загрузка ссылки…» не должна висеть вечно: единственный fetch при открытии мог упасть
+    // (стейл-токен на старте / сетевой хикап) — и ссылка не появлялась никогда. Пока ссылки
+    // нет — мягкий ретрай каждые 6с; страница живёт только пока вкладка открыта. // AVPN
+    Timer {
+        running: root.hasEngine && root.referralLink.length === 0
+        interval: 6000
+        repeat: true
+        onTriggered: root.refreshReferral()
+    }
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     // скрытый носитель ссылки для копирования
     TextEdit { id: refLinkEdit; width: 0; height: 0; opacity: 0; readOnly: true }

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import Qt5Compat.GraphicalEffects as Fx   // OpacityMask: скругление превью (clip режет прямоугольно)
 
 import ".."   // Theme
 
@@ -56,6 +57,7 @@ Item {
             delegate: Rectangle {
                 id: mediaCard
                 required property var modelData
+                required property int index
                 // localUrl — ВСЕГДА картинка (фото или локальный постер-кадр видео из
                 // TribeMediaPicker; сам видеофайл сюда не попадает — движок кладёт в
                 // localUrl только <видео>.poster.jpg). Локальное превью непрерывно с
@@ -77,13 +79,29 @@ Item {
                 clip: true
                 opacity: bubble.pending ? 0.55 : 1.0
 
+                // превью через OpacityMask: clip:true у Rectangle режет ПРЯМОУГОЛЬНО (radius
+                // не учитывается) — углы картинки торчали из скруглённой карточки. // AVPN
                 Image {
+                    id: mediaImg
                     anchors.fill: parent
                     source: mediaCard.previewUrl
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     sourceSize.width: 560
+                    visible: false   // источник для маски
+                }
+                Rectangle {
+                    id: mediaMask
+                    anchors.fill: parent
+                    radius: mediaCard.radius
+                    visible: false
+                }
+                Fx.OpacityMask {
+                    anchors.fill: parent
+                    source: mediaImg
+                    maskSource: mediaMask
                     visible: mediaCard.previewUrl !== ""
+                    cached: true
                 }
 
                 // плейсхолдер, пока превью не приехало (или постер видео в постпроцессе)
@@ -116,6 +134,28 @@ Item {
                             fillColor: Theme.color.text1
                             PathSvg { path: "M6 4 L15 9 L6 14 Z" }
                         }
+                    }
+                }
+
+                // время поверх превью (тёмная пилюля, как в Telegram) — только у сообщения-
+                // вложения без текста и на последней карточке. // AVPN
+                Rectangle {
+                    visible: index === (bubble.attachments ? bubble.attachments.length - 1 : 0)
+                             && bubble.text === "" && !bubble.hasCard
+                             && (bubble.time !== "" || bubble.pending)
+                    anchors.right: parent.right; anchors.bottom: parent.bottom
+                    anchors.margins: 6
+                    width: mediaTime.implicitWidth + 12
+                    height: mediaTime.implicitHeight + 6
+                    radius: height / 2
+                    color: Qt.rgba(0, 0, 0, 0.45)
+                    Text {
+                        id: mediaTime
+                        anchors.centerIn: parent
+                        text: bubble.pending ? qsTr("отправка…") : bubble.time
+                        color: "#FFFFFF"
+                        font.family: Theme.font.mono
+                        font.pixelSize: 10
                     }
                 }
 
@@ -179,6 +219,15 @@ Item {
                         onClicked: bubble.cardButtonClicked(modelData)
                     }
                 }
+                // время внутри карточки справа внизу (как у обычных пузырей) // AVPN
+                Text {
+                    anchors.right: parent.right
+                    visible: bubble.time !== "" || bubble.pending
+                    text: bubble.pending ? qsTr("отправка…") : bubble.time
+                    color: Theme.color.text3
+                    font.family: Theme.font.mono
+                    font.pixelSize: 10
+                }
             }
         }
 
@@ -187,34 +236,52 @@ Item {
             visible: bubble.text !== "" && !bubble.hasCard
             anchors.left: bubble.mine ? undefined : parent.left
             anchors.right: bubble.mine ? parent.right : undefined
-            // implicitWidth текста — натуральная (без переноса) ширина → нет binding-loop с msg.width
-            width: Math.min(msg.implicitWidth + 2 * bubble.pad, bubble.width * 0.78)
-            implicitHeight: msg.implicitHeight + 2 * Theme.space.sm
+            // implicitWidth текста — натуральная (без переноса) ширина → нет binding-loop с msg.width;
+            // время внутри пузыря (Telegram) — короткое сообщение не у́же своего времени. // AVPN
+            width: Math.min(Math.max(msg.implicitWidth, boxTime.implicitWidth) + 2 * bubble.pad,
+                            bubble.width * 0.78)
+            implicitHeight: boxCol.implicitHeight + 2 * Theme.space.sm
             radius: Theme.radius.lg
             color: bubble.mine ? Theme.color.accent : Theme.color.surface1
             border.width: bubble.mine ? 0 : 1
             border.color: Theme.color.border
             opacity: bubble.pending ? 0.55 : 1.0
 
-            Text {
-                id: msg
+            // текст + время справа внизу ВНУТРИ пузыря (как в Telegram) — отдельной
+            // строки статуса под сообщением больше нет. // AVPN
+            Column {
+                id: boxCol
                 x: bubble.pad
                 y: Theme.space.sm
                 width: box.width - 2 * bubble.pad
-                text: bubble.text
-                wrapMode: Text.Wrap
-                color: bubble.mine ? Theme.color.bg900 : Theme.color.text1
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.bodyS
+                spacing: 1
+                Text {
+                    id: msg
+                    width: parent.width
+                    text: bubble.text
+                    wrapMode: Text.Wrap
+                    color: bubble.mine ? Theme.color.bg900 : Theme.color.text1
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                }
+                Text {
+                    id: boxTime
+                    anchors.right: parent.right
+                    visible: bubble.time !== "" || bubble.pending
+                    text: bubble.pending ? qsTr("отправка…") : bubble.time
+                    color: bubble.mine ? Qt.alpha(Theme.color.bg900, 0.55) : Theme.color.text3
+                    font.family: Theme.font.mono
+                    font.pixelSize: 10
+                }
             }
         }
 
-        // строка статуса: время / отправка… / не отправлено + действия
+        // строка статуса под пузырём — ТОЛЬКО для неотправленных (время живёт в пузыре)
         Row {
             anchors.left: bubble.mine ? undefined : parent.left
             anchors.right: bubble.mine ? parent.right : undefined
             spacing: Theme.space.sm
-            visible: bubble.time !== "" || bubble.pending || bubble.failed
+            visible: bubble.failed
 
             Text {
                 visible: bubble.failed
@@ -249,13 +316,6 @@ Item {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: bubble.discardClicked()
                 }
-            }
-            Text {
-                visible: !bubble.failed
-                text: bubble.pending ? qsTr("отправка…") : bubble.time
-                color: Theme.color.text3
-                font.family: Theme.font.mono
-                font.pixelSize: 10
             }
         }
     }

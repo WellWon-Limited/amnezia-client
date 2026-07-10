@@ -128,6 +128,10 @@ if(IOS)
     # PhotosUI/UniformTypeIdentifiers авто-линкуются clang-модулями, как MetricKit ниже.
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaPicker.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaPicker.mm)
+    # AVPN (Support): нативный просмотр скачанного вложения — QLPreviewController (видео-плеер/зум
+    # фото). QuickLook линкуется явно в ios.cmake (#import не авто-линкует, как PhotosUI).
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaViewer.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeMediaViewer.mm)
     # AVPN (Task 9): APNs контроллер (auth + device token + входящие пуши).
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnPushController.mm)
