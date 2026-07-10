@@ -386,14 +386,20 @@ void TribeSupportChat::applyThread(const QByteArray &json)
     // геттеры (eff*) падают на вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
     const QJsonObject lim = root.value(QStringLiteral("limits")).toObject();
     if (!lim.isEmpty()) {
-        m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
-        m_videoMaxBytes = qint64(lim.value(QStringLiteral("video_max_bytes")).toDouble(0));
-        m_imageMime.clear();
-        for (const QJsonValue &v : lim.value(QStringLiteral("image_mime")).toArray())
-            if (v.isString()) m_imageMime << v.toString();
-        m_videoMime.clear();
-        for (const QJsonValue &v : lim.value(QStringLiteral("video_mime")).toArray())
-            if (v.isString()) m_videoMime << v.toString();
+        if (lim.contains(QStringLiteral("image_max_bytes")))
+            m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
+        if (lim.contains(QStringLiteral("video_max_bytes")))
+            m_videoMaxBytes = qint64(lim.value(QStringLiteral("video_max_bytes")).toDouble(0));
+        if (lim.contains(QStringLiteral("image_mime"))) {
+            m_imageMime.clear();
+            for (const QJsonValue &v : lim.value(QStringLiteral("image_mime")).toArray())
+                if (v.isString()) m_imageMime << v.toString();
+        }
+        if (lim.contains(QStringLiteral("video_mime"))) {
+            m_videoMime.clear();
+            for (const QJsonValue &v : lim.value(QStringLiteral("video_mime")).toArray())
+                if (v.isString()) m_videoMime << v.toString();
+        }
     }
 
     // Эхо, чей POST успел завершиться и чьё сообщение уже приехало с сервера,
@@ -535,7 +541,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             return;
         }
         if (fi.size() > effVideoMaxBytes()) {
-            emit sendFailed(tr("Видео больше 25 МБ"));
+            emit sendFailed(tr("Видео больше %1 МБ").arg(effVideoMaxBytes() / (1024 * 1024)));
             return;
         }
         e.kind = QStringLiteral("video");
@@ -580,7 +586,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             return;
         }
         if (e.imageBytes.size() > effImageMaxBytes()) {
-            emit sendFailed(tr("Фото больше 10 МБ"));
+            emit sendFailed(tr("Фото больше %1 МБ").arg(effImageMaxBytes() / (1024 * 1024)));
             return;
         }
         e.kind = QStringLiteral("image");
