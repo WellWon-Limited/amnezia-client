@@ -93,7 +93,9 @@ PageType {
             Layout.fillHeight: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
-            Layout.topMargin: Theme.space.sm
+            // верхний воздух — контент-инсет ListView (скроллится с лентой), не рамка:
+            // рамочный Layout.topMargin оставлял мёртвую полосу под плашкой при прокрутке // AVPN
+            topMargin: Theme.space.sm
             clip: true
             spacing: Theme.space.md
             model: root.hasChat ? TribeSupport.messages : []
