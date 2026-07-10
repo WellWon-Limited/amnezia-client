@@ -14,7 +14,25 @@
 // Минимальное удержание уровня (≤ раз в 3с) обеспечивает каденс вызова из QML-таймера, не этот класс.
 #pragma once
 
+#include "TuningStore.h"
+
 namespace avpn {
+
+// Пороги RTT(мс)→бары (щедрая VPN-шкала — см. обоснование ниже). Серверный оверрайд (numbers.*,
+// план backend-first 2026-07-10); пусто → те же вкомпиленные дефолты, что были раньше.
+struct RttBands {
+    double b5 = 150, b4 = 230, b3 = 330, b2 = 500, b1 = 800;
+    static RttBands fromTuning()
+    {
+        RttBands b;
+        b.b5 = TuningStore::numberOr(QStringLiteral("rtt_bar5_ms"), b.b5);
+        b.b4 = TuningStore::numberOr(QStringLiteral("rtt_bar4_ms"), b.b4);
+        b.b3 = TuningStore::numberOr(QStringLiteral("rtt_bar3_ms"), b.b3);
+        b.b2 = TuningStore::numberOr(QStringLiteral("rtt_bar2_ms"), b.b2);
+        b.b1 = TuningStore::numberOr(QStringLiteral("rtt_bar1_ms"), b.b1);
+        return b;
+    }
+};
 
 class SignalQuality {
 public:
@@ -27,11 +45,12 @@ public:
     static int barsForRtt(int rttMs)
     {
         if (rttMs < 0) return 0;
-        if (rttMs < 150) return 5;
-        if (rttMs < 230) return 4;
-        if (rttMs < 330) return 3;
-        if (rttMs < 500) return 2;
-        if (rttMs < 800) return 1;
+        const RttBands b = RttBands::fromTuning();
+        if (rttMs < b.b5) return 5;
+        if (rttMs < b.b4) return 4;
+        if (rttMs < b.b3) return 3;
+        if (rttMs < b.b2) return 2;
+        if (rttMs < b.b1) return 1;
         return 0;
     }
 
@@ -79,20 +98,22 @@ private:
     static constexpr double kAlpha = 1.0 / 4.0; // быстрее реагирует на улучшение (было 1/8) — меньше «залипания»
     static constexpr double kHystFrac = 0.08;   // ±8% dead-band у границ корзины (было 12% — реже тормозит апгрейд бара)
 
-    static double bandLo(int bar)
+    static double bandLo(int bar, const RttBands &b)
     {
-        switch (bar) { case 5: return 0; case 4: return 150; case 3: return 230;
-                       case 2: return 330; case 1: return 500; default: return 800; }
+        switch (bar) { case 5: return 0; case 4: return b.b5; case 3: return b.b4;
+                       case 2: return b.b3; case 1: return b.b2; default: return b.b1; }
     }
-    static double bandHi(int bar)
+    static double bandHi(int bar, const RttBands &b)
     {
-        switch (bar) { case 5: return 150; case 4: return 230; case 3: return 330;
-                       case 2: return 500; case 1: return 800; default: return 1e12; }
+        switch (bar) { case 5: return b.b5; case 4: return b.b4; case 3: return b.b3;
+                       case 2: return b.b2; case 1: return b.b1; default: return 1e12; }
     }
     // «Залипание»: SRTT всё ещё внутри расширенной (±kHystFrac) полосы текущего бара ⇒ не меняем уровень.
+    // Один RttBands::fromTuning() на вызов (не по разу на bandLo/bandHi).
     bool sticky(double srtt, int bar) const
     {
-        return srtt >= bandLo(bar) * (1.0 - kHystFrac) && srtt < bandHi(bar) * (1.0 + kHystFrac);
+        const RttBands b = RttBands::fromTuning();
+        return srtt >= bandLo(bar, b) * (1.0 - kHystFrac) && srtt < bandHi(bar, b) * (1.0 + kHystFrac);
     }
 
     double m_srtt = 0.0;
