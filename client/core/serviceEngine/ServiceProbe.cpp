@@ -396,9 +396,14 @@ void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &ur
         delete clock; delete firstByte; delete bytes; delete done;
         reply->deleteLater();
 
-        if (got >= c.goodput.minBytes) {
+        // Один снапшот тюнинга на оба чтения (внешний гейт и classify()) — иначе серверное
+        // ПОНИЖЕНИЕ goodput_min_bytes тихо не действует: внешний гейт всё ещё сверяется
+        // с вкомпиленным c.goodput.minBytes (32768), и диапазон [new, 32768) никогда не доходит
+        // до classify(), даже честно набрав достаточно байт.
+        const GoodputThresholds th = GoodputThresholds::fromTuning();
+        if (got >= th.minBytes) {
             // Честный замер: набрали достаточно байт ⇒ классифицируем скорость.
-            const int state = GoodputProbe::classify(got, dur, GoodputThresholds::fromTuning());
+            const int state = GoodputProbe::classify(got, dur, th);
             finish(c.key, static_cast<ServiceState>(state), int(GoodputProbe::kbitPerSec(got, dur)));
         } else if (httpStatus == 200 || httpStatus == 206) {
             // Сервер ОТДАВАЛ данные (2xx/partial), но их пришло мало ⇒ реально задушено/рано закрыто ⇒ blocked.
