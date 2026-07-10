@@ -106,7 +106,9 @@ PageType {
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         anchors.bottomMargin: Theme.space.lg
-        spacing: Theme.space.lg
+        // зазор заголовок↔скролл — ВНУТРИ Flickable (content.y), не в рамке: иначе прокрутка
+        // обрезала контент на 24px ниже заголовка (мёртвая полоса — единый паттерн 2026-07-10) // AVPN
+        spacing: 0
 
         // заголовок
         Text {
@@ -118,12 +120,13 @@ PageType {
 
         Flickable {
             Layout.fillWidth: true; Layout.fillHeight: true
-            contentHeight: content.height + Theme.space.xl
+            contentHeight: content.y + content.height + Theme.space.xl
             clip: true
             boundsBehavior: Flickable.StopAtBounds
 
             Column {
                 id: content
+                y: Theme.space.lg   // воздух под заголовком — скроллится с контентом
                 width: parent.width
                 spacing: Theme.space.lg
 

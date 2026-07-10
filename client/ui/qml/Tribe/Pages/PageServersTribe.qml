@@ -253,11 +253,11 @@ PageType {
             }
         }
 
-        // ── заголовок секции ──
+        // ── заголовок секции ── (bottomMargin нет: воздух под лейблом — контент-инсет списка,
+        // скроллится с ним; рамочный зазор давал мёртвую полосу при прокрутке — паттерн 2026-07-10) // AVPN
         Text {
             Layout.leftMargin: Theme.space.xl
             Layout.topMargin: Theme.space.lg
-            Layout.bottomMargin: Theme.space.sm
             text: root.query.trim().length > 0 ? qsTr("РЕЗУЛЬТАТЫ") : qsTr("ВСЕ ЛОКАЦИИ")
             color: Theme.color.text3
             font.family: Theme.font.body
@@ -278,6 +278,7 @@ PageType {
                 id: list
                 anchors.fill: parent
                 clip: true
+                topMargin: Theme.space.sm   // воздух под лейблом — скроллится со списком
                 spacing: Theme.space.sm
                 model: root.countries
                 boundsBehavior: Flickable.StopAtBounds

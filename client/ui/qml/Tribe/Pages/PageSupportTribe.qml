@@ -83,8 +83,10 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        // заголовок «Поддержка» убран (вкладка уже подписана в нижней навигации). Отступ от чёлки. // AVPN
-        anchors.topMargin: root.safeTop + Theme.space.lg
+        // заголовок «Поддержка» убран (вкладка уже подписана в нижней навигации). В рамке ТОЛЬКО
+        // инсет чёлки — воздух 24 скроллится с лентой (topMargin ListView ниже), иначе прокрутка
+        // обрезала сообщения на 16px ниже macOS-плашки (мёртвая полоса, жалоба 2026-07-10). // AVPN
+        anchors.topMargin: root.safeTop
         spacing: 0
 
         ListView {
@@ -95,7 +97,7 @@ PageType {
             Layout.rightMargin: Theme.space.xl
             // верхний воздух — контент-инсет ListView (скроллится с лентой), не рамка:
             // рамочный Layout.topMargin оставлял мёртвую полосу под плашкой при прокрутке // AVPN
-            topMargin: Theme.space.sm
+            topMargin: Theme.space.lg + Theme.space.sm
             clip: true
             spacing: Theme.space.md
             model: root.hasChat ? TribeSupport.messages : []
