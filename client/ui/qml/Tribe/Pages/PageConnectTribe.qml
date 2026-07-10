@@ -47,6 +47,7 @@ PageType {
     signal requestSettings()
     signal requestNotifications()
     signal requestAdminServers()  // AVPN: админ-просмотр пула нод (только Dev.adminMode)
+    signal requestServerPicker()  // AVPN: страница выбора сервера (замена шторки TribeNodeSheet)
 
     // AVPN: центр уведомлений — счётчик непрочитанных. Реальные пуши (#9) идут через мост
     // AvpnPush (APNs/FCM → C++ → QML). В dev-превью моста нет → фолбэк 2 (mock-бейдж).
@@ -735,7 +736,7 @@ PageType {
         spacing: Theme.space.lg
         z: 30
 
-        // карточка сервера — тап открывает шторку выбора сервера (TribeNodeSheet). // AVPN
+        // карточка сервера — тап открывает страницу выбора сервера (PageServersTribe). // AVPN
         // (карточка «АвтоVPN» перенесена НАД орб — см. autoVpnCard выше, реш. 2026-07-02)
         Rectangle {
             id: serverCard
@@ -865,13 +866,13 @@ PageType {
                     }
                 }
             }
-            // тап по всей карточке → шторка выбора сервера (живые узлы пула). Шеврон убран. // AVPN
+            // тап по всей карточке → страница выбора сервера (PageServersTribe). Шеврон убран. // AVPN
             MouseArea {
                 id: serverCardMa
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: nodeSheet.open()
+                onClicked: root.requestServerPicker()
             }
         }
 
@@ -1018,12 +1019,6 @@ PageType {
                 }
             }
         }
-    }
-
-    // AVPN (live-node picker): шторка выбора сервера. z выше bottomBlock (z:30) → перекрывает сцену.
-    TribeNodeSheet {
-        id: nodeSheet
-        z: 200
     }
 
     // AVPN (Task 7): force-update блокер (remote-config, updateState===2) — поверх ВСЕГО (z:9999

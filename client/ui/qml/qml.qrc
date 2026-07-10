@@ -94,7 +94,6 @@
         <file>Tribe/components/TribeServiceChips.qml</file>
         <file>Tribe/components/ChatBubble.qml</file>
         <file>Tribe/components/TribeFlag.qml</file>
-        <file>Tribe/components/TribeNodeSheet.qml</file>
         <file>Tribe/components/TribeAnnouncementSheet.qml</file>
         <file>Tribe/components/TribeUpdateGate.qml</file>
         <file>Tribe/components/TribeUpdateBanner.qml</file>

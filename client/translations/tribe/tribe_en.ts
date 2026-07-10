@@ -931,7 +931,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+102"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+103"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -966,7 +966,7 @@
         <translation>Access activated on this device</translation>
     </message>
     <message>
-        <location line="+321"/>
+        <location line="+336"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Access to Russian sites is on</translation>
     </message>
@@ -1365,6 +1365,59 @@ A gift for every friend!</translation>
     </message>
 </context>
 <context>
+    <name>PageServersTribe</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+95"/>
+        <source>Выбор сервера</source>
+        <translation>Choose server</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Локаций: %1</source>
+        <translation>Locations: %1</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Поиск страны</source>
+        <translation>Search country</translation>
+    </message>
+    <message>
+        <location line="+63"/>
+        <source>Авто (быстрейший)</source>
+        <translation>Auto (fastest)</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Сервис сам подберёт быстрейший узел</source>
+        <translation>The service picks the fastest node for you</translation>
+    </message>
+    <message>
+        <location line="+43"/>
+        <source>РЕЗУЛЬТАТЫ</source>
+        <translation>RESULTS</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>ВСЕ ЛОКАЦИИ</source>
+        <translation>ALL LOCATIONS</translation>
+    </message>
+    <message>
+        <location line="+56"/>
+        <source>~%1 мс</source>
+        <translation>~%1 ms</translation>
+    </message>
+    <message>
+        <location line="+30"/>
+        <source>Локации загружаются…</source>
+        <translation>Loading locations…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ничего не найдено</source>
+        <translation>Nothing found</translation>
+    </message>
+</context>
+<context>
     <name>PageSupportTribe</name>
     <message>
         <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+58"/>
@@ -1431,25 +1484,6 @@ You can attach a photo or video.</translation>
     </message>
 </context>
 <context>
-    <name>TribeNodeSheet</name>
-    <message>
-        <location filename="../../ui/qml/Tribe/components/TribeNodeSheet.qml" line="+116"/>
-        <source>Выбор сервера</source>
-        <translation>Choose server</translation>
-    </message>
-    <message>
-        <location line="+38"/>
-        <source>Авто (быстрейший)</source>
-        <translation>Auto (fastest)</translation>
-    </message>
-    <message>
-        <location line="+88"/>
-        <location line="+1"/>
-        <source>Сервер</source>
-        <translation>Server</translation>
-    </message>
-</context>
-<context>
     <name>TribeResultSheet</name>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+108"/>
@@ -1481,9 +1515,40 @@ You can attach a photo or video.</translation>
     </message>
 </context>
 <context>
+    <name>TribeUpdateBanner</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateBanner.qml" line="+44"/>
+        <source>Доступна новая версия Tribe VPN</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Обновить</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>TribeUpdateGate</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateGate.qml" line="+84"/>
+        <source>Обновите приложение</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Эта версия больше не поддерживается. Установите свежую версию, чтобы продолжить пользоваться Tribe VPN.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Обновить</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+773"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+926"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -1684,7 +1749,7 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+176"/>
+        <location line="+208"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>Not enough live servers to switch</translation>
     </message>
@@ -1754,7 +1819,7 @@ You can attach a photo or video.</translation>
         <translation>Could not activate the key</translation>
     </message>
     <message>
-        <location line="+355"/>
+        <location line="+353"/>
         <source>Не указано устройство</source>
         <translation>No device specified</translation>
     </message>
@@ -1784,7 +1849,7 @@ You can attach a photo or video.</translation>
         <translation>Could not disconnect the device (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+418"/>
+        <location line="+434"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>
