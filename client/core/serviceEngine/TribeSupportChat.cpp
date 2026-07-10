@@ -47,7 +47,8 @@ extern "C" void Tribe_supportPickedMedia(const char *utf8Path)
 }
 
 #ifdef Q_OS_IOS
-extern "C" bool TribeMediaPicker_present(); // TribeMediaPicker.mm
+extern "C" bool TribeMediaPicker_present();                    // TribeMediaPicker.mm
+extern "C" bool TribeMediaViewer_present(const char *utf8Path); // TribeMediaViewer.mm
 #endif
 
 namespace avpn {
@@ -224,6 +225,18 @@ bool TribeSupportChat::pickMediaNative()
     return TribeMediaPicker_present();
 #else
     return false; // десктоп/Android → QML FileDialog (нативный системный пикер)
+#endif
+}
+
+bool TribeSupportChat::presentMediaNative(const QUrl &fileUrl)
+{
+#ifdef Q_OS_IOS
+    if (!fileUrl.isLocalFile())
+        return false;
+    return TribeMediaViewer_present(fileUrl.toLocalFile().toUtf8().constData());
+#else
+    Q_UNUSED(fileUrl)
+    return false; // десктоп/Android → Qt.openUrlExternally (системный плеер)
 #endif
 }
 

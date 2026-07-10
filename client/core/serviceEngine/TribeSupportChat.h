@@ -80,6 +80,9 @@ public:
     // iOS: нативный PHPicker (фотоплёнка без пермишена; TribeMediaPicker.mm) →
     // выбранный файл вернётся в sendAttachmentFile. false → QML открывает FileDialog.
     Q_INVOKABLE bool pickMediaNative();
+    // iOS: нативный просмотр скачанного вложения (QLPreviewController: видео-плеер, зум фото;
+    // TribeMediaViewer.mm). false → QML падает на Qt.openUrlExternally (десктоп/Android).
+    Q_INVOKABLE bool presentMediaNative(const QUrl &fileUrl);
 
 public slots:
     // APNs/FCM type=support (коннект в coreController): открыт чат → перечитать

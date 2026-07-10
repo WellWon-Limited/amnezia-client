@@ -49,10 +49,14 @@ PageType {
         target: root.hasChat ? TribeSupport : null
         function onSendFailed(reason) { PageController.showErrorMessage(reason) }
         function onAttachmentReady(attachmentId, kind, fileUrl) {
-            if (kind === "image")
+            if (kind === "image") {
                 lightbox.show(fileUrl)
-            else
-                Qt.openUrlExternally(fileUrl) // видео — системный плеер/просмотрщик
+                return
+            }
+            // видео: iOS — нативный QuickLook-плеер (Qt.openUrlExternally с file:// на iOS
+            // молча ничего не делает — видео «не игралось»); прочие платформы — системный плеер.
+            if (!TribeSupport.presentMediaNative(fileUrl))
+                Qt.openUrlExternally(fileUrl)
         }
         function onAttachmentFailed(attachmentId) {
             PageController.showErrorMessage(qsTr("Не удалось загрузить вложение"))
@@ -310,7 +314,8 @@ PageType {
                         scale: 20 / 24; transformOrigin: Item.Center
                         preferredRendererType: Shape.CurveRenderer
                         ShapePath {
-                            strokeColor: sendBtn.ready ? Theme.color.bg900 : Theme.color.text3
+                            // в покое стрелка того же цвета, что «+» слева (text2) — единый вид
+                            strokeColor: sendBtn.ready ? Theme.color.bg900 : Theme.color.text2
                             fillColor: "transparent"; strokeWidth: 2
                             capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
                             PathSvg { path: "M5 12 L19 12 M13 6 L19 12 L13 18" }

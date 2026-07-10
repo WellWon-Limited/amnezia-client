@@ -846,14 +846,16 @@ PageType {
                         width: 36; height: 36; radius: Theme.radius.md
                         color: acctCopyMa.pressed ? Theme.color.surface3 : Theme.color.surface2
                         border.width: 1; border.color: Theme.color.border
+                        // Tabler copy в сетке 24 (bbox 4..20, центр 12) → шейп 24×24 + масштаб
+                        // вокруг центра: прежний 18-бокс с 24-путём смещал иконку вправо-вниз. // AVPN
                         Shape {
-                            anchors.centerIn: parent; width: 18; height: 18
+                            anchors.centerIn: parent; width: 24; height: 24
+                            scale: 18 / 24; transformOrigin: Item.Center
                             preferredRendererType: Shape.CurveRenderer
                             ShapePath {
-                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.6
+                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 2
                                 capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                                PathSvg { path: "M9 9 h9 a1 1 0 0 1 1 1 v9 a1 1 0 0 1 -1 1 h-9 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 z" }
-                                PathSvg { path: "M5 15 h-1 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 h9 a1 1 0 0 1 1 1 v1" }
+                                PathSvg { path: "M8 8 m2 0 h8 a2 2 0 0 1 2 2 v8 a2 2 0 0 1 -2 2 h-8 a2 2 0 0 1 -2 -2 v-8 a2 2 0 0 1 2 -2 M16 8 V6 a2 2 0 0 0 -2 -2 H6 a2 2 0 0 0 -2 2 v8 a2 2 0 0 0 2 2 h2" }
                             }
                         }
                         MouseArea {
@@ -901,14 +903,16 @@ PageType {
                         width: 36; height: 36; radius: Theme.radius.md
                         color: devCopyMa.pressed ? Theme.color.surface3 : Theme.color.surface2
                         border.width: 1; border.color: Theme.color.border
+                        // Tabler copy в сетке 24 (bbox 4..20, центр 12) → шейп 24×24 + масштаб
+                        // вокруг центра: прежний 18-бокс с 24-путём смещал иконку вправо-вниз. // AVPN
                         Shape {
-                            anchors.centerIn: parent; width: 18; height: 18
+                            anchors.centerIn: parent; width: 24; height: 24
+                            scale: 18 / 24; transformOrigin: Item.Center
                             preferredRendererType: Shape.CurveRenderer
                             ShapePath {
-                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.6
+                                strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 2
                                 capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                                PathSvg { path: "M9 9 h9 a1 1 0 0 1 1 1 v9 a1 1 0 0 1 -1 1 h-9 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 z" }
-                                PathSvg { path: "M5 15 h-1 a1 1 0 0 1 -1 -1 v-9 a1 1 0 0 1 1 -1 h9 a1 1 0 0 1 1 1 v1" }
+                                PathSvg { path: "M8 8 m2 0 h8 a2 2 0 0 1 2 2 v8 a2 2 0 0 1 -2 2 h-8 a2 2 0 0 1 -2 -2 v-8 a2 2 0 0 1 2 -2 M16 8 V6 a2 2 0 0 0 -2 -2 H6 a2 2 0 0 0 -2 2 v8 a2 2 0 0 0 2 2 h2" }
                             }
                         }
                         MouseArea {

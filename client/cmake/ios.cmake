@@ -19,6 +19,7 @@ find_library(FW_METRICKIT MetricKit)   # AVPN: авто-диагностика �
 find_library(FW_PHOTOSUI PhotosUI)     # AVPN (Support): PHPicker фото/видео (TribeMediaPicker.mm); #import не авто-линкует → явный линк
 find_library(FW_UTTYPES UniformTypeIdentifiers) # AVPN (Support): UTType для фильтров пикера (TribeMediaPicker.mm)
 find_library(FW_COREMEDIA CoreMedia)   # AVPN (Support): CMTimeMakeWithSeconds — кадр-превью видео (TribeMediaPicker.mm)
+find_library(FW_QUICKLOOK QuickLook)   # AVPN (Support): QLPreviewController — просмотр вложений (TribeMediaViewer.mm)
 
 set(LIBS ${LIBS}
     ${FW_AUTHENTICATIONSERVICES}
@@ -32,6 +33,7 @@ set(LIBS ${LIBS}
     ${FW_PHOTOSUI}
     ${FW_UTTYPES}
     ${FW_COREMEDIA}
+    ${FW_QUICKLOOK}
 )
 
 

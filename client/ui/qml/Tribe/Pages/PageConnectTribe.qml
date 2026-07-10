@@ -428,9 +428,12 @@ PageType {
                 color: bellMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
                 border.width: 1; border.color: Theme.color.border
                 Behavior on color { ColorAnimation { duration: 160 } }
+                // путь в сетке 24 → шейп 24×24, масштаб ВОКРУГ ЦЕНТРА (иначе иконка уезжала
+                // вправо-вниз: центр 24-пути = 12, центр 22-бокса = 11). // AVPN
                 Shape {
                     anchors.centerIn: parent
-                    width: 22; height: 22
+                    width: 24; height: 24
+                    scale: 22 / 24; transformOrigin: Item.Center
                     preferredRendererType: Shape.CurveRenderer
                     ShapePath {
                         strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 1.7
