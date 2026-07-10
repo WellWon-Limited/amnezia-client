@@ -603,6 +603,11 @@ private:
     // вшитые дефолты из конструктора (см. AvpnEngineQml.cpp:278-292).
     void applyRemoteProbeTargets(const avpn::RemoteConfig &cfg);
 
+    // AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk (m_baseUrl)
+    // и urls.quality_probe_url; вызывается из activeEdgeChanged и configApplied. Конструкторный
+    // setEndpoints (AvpnEngineQml.cpp:268-269) — только сид до первого вызова.
+    void refreshQualityEndpoints();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
