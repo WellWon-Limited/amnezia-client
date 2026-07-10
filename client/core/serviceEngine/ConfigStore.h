@@ -26,7 +26,7 @@ inline UpdateVerdict compareVersions(const QString &appVer, const QString &minVe
 
 #ifndef AVPN_CONFIGSTORE_TEST
 #include "version.h"
-#include "core/SecureQSettings.h"
+#include "secureQSettings.h" // client/secureQSettings.h (путь core/SecureQSettings.h из PR #1 не существует — ломал сборку)
 
 namespace avpn {
 
