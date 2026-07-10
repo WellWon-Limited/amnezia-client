@@ -49,12 +49,13 @@
     [capturedMetadataOutput setMetadataObjectTypes: [NSArray arrayWithObject:AVMetadataObjectTypeQRCode]];
 
     _videoPreviewPlayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession: _captureSession];
-    
-    CGFloat statusBarHeight = [UIApplication sharedApplication].statusBarFrame.size.height;
 
+    // AVPN: QML передаёт координаты ОКНА (mapToItem(null)), а окно у нас fullscreen
+    // (ExpandedClientAreaHint) — апстримный сдвиг на statusBarHeight двигал превью вниз
+    // на ~50px: оно накрывало кнопку «Отмена», её торчащий торец выглядел «лишней линией».
     QRect cameraRect = _qrCodeReader->cameraSize();
     CGRect cameraCGRect = CGRectMake(cameraRect.x(),
-                                     cameraRect.y() + statusBarHeight,
+                                     cameraRect.y(),
                                      cameraRect.width(),
                                      cameraRect.height());
 
