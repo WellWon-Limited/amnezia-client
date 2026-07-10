@@ -21,6 +21,7 @@
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
+#include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -392,6 +393,23 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 emit changed();
             });
     m_configSvc->start();
+
+    // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
+    // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/m_baseUrl/
+    // kConfigPubKeyHex, что у ConfigService — dev-эндпоинт ⇒ dev-ключ, prod ⇒ prod-ключ.
+    // Kill-switch remote_bypass_lists реализован ВНУТРИ сервиса (onRemoteConfigApplied: при
+    // флаге=false → пустой invalid снапшот в BypassListStore + фетч на паузу) ⇒ точки чтения
+    // (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
+    // Порядок: подключаем ПОСЛЕ m_configSvc->start() (он уже стартован выше). Начальный
+    // configApplied мог синхронно эмитнуться из start() ДО этого connect — это ок: дефолт флага
+    // true, kill-switch применится на СЛЕДУЮЩЕМ configApplied; до тех пор store наполняет
+    // сам BypassListService (loadLkg + fetch) c валидной подписью.
+    m_bypassListSvc = new avpn::BypassListService(m_nam, m_baseUrl, kConfigPubKeyHex, this);
+    connect(m_configSvc, &avpn::ConfigService::configApplied,
+            m_bypassListSvc, &avpn::BypassListService::onRemoteConfigApplied);
+    connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged,
+            m_bypassListSvc, &avpn::BypassListService::setBaseUrl);
+    m_bypassListSvc->start();
 
     // AVPN (Task 7): таймер авто-паузы «для покупок». Одноразовый: истёк → бездействие → resume.
     m_pauseTimer.setSingleShot(true);
@@ -3117,6 +3135,11 @@ void AvpnEngineQml::applyRuBypassSplit()
     // AVPN (китайские сервисы, 2026-07-03): второй независимый тумблер «Li Auto» (default ВКЛ). Оба тумблера
     // сеют в один и тот же split-набор (RouteMode::VpnAllExceptSites) — оси не конфликтуют, список объединяется.
     const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
+    // AVPN server-driven АнтиВПН (Task 10): списки с /v1/bypass-lists (подпись+LKG); вкомпиленные
+    // массивы ниже — фолбэк (офлайн/первый запуск/kill-switch). Kill-switch remote_bypass_lists
+    // гасится ВНУТРИ BypassListService (пустой invalid снапшот) ⇒ здесь достаточно bl.valid.
+    const avpn::BypassLists bl = avpn::BypassListStore::get();
+    const bool useRemote = bl.valid;
     // AVPN (T2, аудит 2026-07-02): здесь — только СЕВ списка (и активное ВЫКЛ, если ОБА тумблера OFF,
     // иначе прежний seed продолжил бы исключать трафик). Вкл/выкл сплита под РФ-ноду решается ПО
     // ФАКТИЧЕСКОЙ ноде в VpnConnectionTunnelControl::up() (покрывает failover/авто-RU-fallback/мёртвый
@@ -3129,7 +3152,8 @@ void AvpnEngineQml::applyRuBypassSplit()
     m_store->setSitesSplitTunnelingEnabled(true);
     QMap<QString, QString> sites;
     if (masterOn) {
-        const QStringList ru = avpn::ruPrefixes();
+        // AVPN Task 10: рунет CIDR — серверный (bl.ruCidrs) при валидном снапшоте, иначе вкомпиленный.
+        const QStringList ru = useRemote ? bl.ruCidrs : avpn::ruPrefixes();
         for (const QString &cidr : ru)
             sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
 
@@ -3144,8 +3168,14 @@ void AvpnEngineQml::applyRuBypassSplit()
             "216.239.38.0/24", // Google (QUIC 443) — Госуслуги attestation/Firebase-класс
             "8.6.112.0/24",    // Level3 (TLS 443)  — Госуслуги телеметрия/анти-фрод (POST ~1.5КБ)
         };
+        // AVPN Task 10: foreign-эндпоинты — серверные (bl.bypassExtra) при валидном снапшоте,
+        // массив выше остаётся вкомпиленным фолбэком.
+        QStringList extraFallback;
         for (const char *cidr : kBypassExtra)
-            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+            extraFallback << QString::fromLatin1(cidr);
+        const QStringList bypassExtra = useRemote ? bl.bypassExtra : extraFallback;
+        for (const QString &cidr : bypassExtra)
+            sites.insert(cidr, cidr);
     }
 
     // AVPN (китайские сервисы, 2026-07-03): узкие /24 серверов Li Auto (理想汽车, app com.chehejia.oc.m01) →
@@ -3166,8 +3196,14 @@ void AvpnEngineQml::applyRuBypassSplit()
             "114.111.24.0/24",  // lianshan.lixiang.com / mindgpt — apisix gw (CT Hebei AS140903)
             "193.118.54.0/24",  // account.lixiang.com — заграничный GSLB-edge логина, запасной (Zenlayer AS21859)
         };
+        // AVPN Task 10: Li Auto CIDR — серверные (bl.cnLiAutoCidrs) при валидном снапшоте,
+        // массив выше — вкомпиленный фолбэк.
+        QStringList liAutoFallback;
         for (const char *cidr : kLiAutoCidrs)
-            sites.insert(QString::fromLatin1(cidr), QString::fromLatin1(cidr));
+            liAutoFallback << QString::fromLatin1(cidr);
+        const QStringList liAuto = useRemote ? bl.cnLiAutoCidrs : liAutoFallback;
+        for (const QString &cidr : liAuto)
+            sites.insert(cidr, cidr);
     }
 
     // AVPN carve-out (инцидент 2026-07-05, вынесено в T6 — rebuildApiCarveOut(sites) выше в файле):
@@ -3176,6 +3212,14 @@ void AvpnEngineQml::applyRuBypassSplit()
     // из сева ЗДЕСЬ ЖЕ, где раньше был инлайн-блок (behaviour-preserving — тот же порядок операций
     // над тем же `sites`, тот же вызов carveOutIpFromSites, просто вынесен в метод).
     rebuildApiCarveOut(sites);
+
+    // AVPN Task 10: источник + размер сева — видно на девайсе «remote v3, N cidrs» vs «compiled fallback».
+    if (useRemote)
+        qInfo("[AVPN bypass] seed source=remote v%d cidrs=%d (master=%d liauto=%d)",
+              bl.version, int(sites.size()), masterOn ? 1 : 0, liAutoOn ? 1 : 0);
+    else
+        qInfo("[AVPN bypass] seed source=compiled-fallback cidrs=%d (master=%d liauto=%d)",
+              int(sites.size()), masterOn ? 1 : 0, liAutoOn ? 1 : 0);
 
     m_store->replaceVpnSites(RouteMode::VpnAllExceptSites, sites); // AVPN: реконсиляция, не merge
 }
