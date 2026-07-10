@@ -7,6 +7,9 @@
 
 // AVPN backend-first (2026-07-10): база «переезжает» вместе с edge-walk движка
 // (AvpnDiagnostics_setBase из activeEdgeChanged). Фолбэк — вкомпиленный дефолт control plane.
+// Персистентность NSUserDefaults НАМЕРЕННА: значение может пережить edge, который его записал
+// (обновится только следующим edge-walk), но на холодном старте в цензурируемой сети последний
+// РАБОТАВШИЙ edge надёжнее вкомпиленного дефолта — дефолт и есть самый блокируемый хост.
 static NSString *const kAvpnDiagDefaultBase = @"https://api.tribevpn.com";
 static NSString *const kAvpnDiagBaseKey = @"AvpnDiagBase";
 
