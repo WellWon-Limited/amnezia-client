@@ -6,6 +6,8 @@
 // с реального byte-source (YoutubeSource/InstagramSource) и зовёт classify(). Здесь — ЧИСТАЯ арифметика.
 #pragma once
 
+#include "TuningStore.h"
+
 #include <QtGlobal>
 
 namespace avpn {
@@ -15,6 +17,17 @@ struct GoodputThresholds {
     double worksKbps = 1000.0; // ≥ ⇒ works
     double slowKbps  = 100.0;  // [slow,works) ⇒ slow (троттлинг); < ⇒ blocked (задушено в ноль)
     qint64 minBytes  = 32768;  // меньше не считаем достоверным замером ⇒ blocked
+
+    // Серверный оверрайд порогов (numbers.*, план backend-first 2026-07-10); пусто → дефолты выше.
+    static GoodputThresholds fromTuning()
+    {
+        GoodputThresholds t;
+        t.worksKbps = TuningStore::numberOr(QStringLiteral("goodput_works_kbps"), t.worksKbps);
+        t.slowKbps  = TuningStore::numberOr(QStringLiteral("goodput_slow_kbps"), t.slowKbps);
+        t.minBytes  = qint64(TuningStore::numberOr(QStringLiteral("goodput_min_bytes"),
+                                                   double(t.minBytes)));
+        return t;
+    }
 };
 
 class GoodputProbe {

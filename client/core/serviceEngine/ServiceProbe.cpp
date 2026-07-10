@@ -2,6 +2,7 @@
 
 #include "InstagramSource.h"
 #include "MtprotoProbe.h"
+#include "TuningStore.h"
 #include "YoutubeSource.h"
 
 #include <QDateTime>
@@ -90,7 +91,8 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
     hosts += c.fallbackHosts;
     // делим бюджет на seed'ы (мин. 1500мс на seed): худший случай (все молчат) ограничен timeoutMs·~.
     const int perHost = qMax(1500, timeoutMs / qMax(1, hosts.size()));
-    attemptMtprotoHost(c.key, hosts, 0, c.port, perHost, c.slowMs);
+    const int slowMs = int(TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), double(c.slowMs)));
+    attemptMtprotoHost(c.key, hosts, 0, c.port, perHost, slowMs);
 }
 
 void ServiceProbe::attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
@@ -202,8 +204,9 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
     auto settle = [this, c, done](bool reachable, int rtt) {
         if (*done) return;
         *done = true;
+        const int slowMs = int(TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), double(c.slowMs)));
         ServiceState st = !reachable ? ServiceState::Blocked
-                                     : (rtt > c.slowMs ? ServiceState::Slow : ServiceState::Works);
+                                     : (rtt > slowMs ? ServiceState::Slow : ServiceState::Works);
         finish(c.key, st, reachable ? rtt : -1);
     };
 
@@ -352,7 +355,8 @@ void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
 // Скачать sampleBytes по готовому URL, померить скорость окна данных (firstByte→конец) → classify().
 void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery)
 {
-    const qint64 N = c.sampleBytes;
+    const qint64 N = qint64(TuningStore::numberOr(QStringLiteral("svc_probe_sample_bytes"),
+                                                  double(c.sampleBytes)));
     QString finalUrl = url;
     QNetworkRequest req;
     if (rangeAsQuery) {
@@ -394,7 +398,7 @@ void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &ur
 
         if (got >= c.goodput.minBytes) {
             // Честный замер: набрали достаточно байт ⇒ классифицируем скорость.
-            const int state = GoodputProbe::classify(got, dur, c.goodput);
+            const int state = GoodputProbe::classify(got, dur, GoodputThresholds::fromTuning());
             finish(c.key, static_cast<ServiceState>(state), int(GoodputProbe::kbitPerSec(got, dur)));
         } else if (httpStatus == 200 || httpStatus == 206) {
             // Сервер ОТДАВАЛ данные (2xx/partial), но их пришло мало ⇒ реально задушено/рано закрыто ⇒ blocked.
