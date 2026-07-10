@@ -2,10 +2,10 @@
 // Сборка/запуск: core/serviceEngine/tests/build_web_link.sh
 //
 // Флоу: POST /v1/cabinet/web-link (Bearer) → { url: "https://tribevpn.com/account?wl=…", expires_in }.
-// К url приложение дописывает device_uuid=<localDeviceId()> и открывает во внешнем браузере.
-// Тестируем ДВЕ чистые функции (без сети):
+// Устройство вшито в сам wl-токен (бэк PR #257) — приложение НИЧЕГО не дописывает к URL
+// (device_uuid в query = утечка стабильного install-id в access-логи; хелпер appendDeviceUuid удалён).
+// Тестируем чистую функцию (без сети):
 //   Enrollment::parseWebLinkResponse(json, out, error) -> bool
-//   Enrollment::appendDeviceUuid(url, uuid) -> QString
 
 #include "../Enrollment.h"
 
@@ -61,26 +61,6 @@ int main(int argc, char **argv)
         CHECK(!Enrollment::parseWebLinkResponse("not json", out, err));
         CHECK(!Enrollment::parseWebLinkResponse("[1,2]", out, err));
     }
-
-    // --- appendDeviceUuid: дописать device_uuid к URL кабинета ---
-    // URL от бэка уже несёт ?wl=… → дописываем через &.
-    CHECK(Enrollment::appendDeviceUuid(QStringLiteral("https://tribevpn.com/account?wl=abc"),
-                                       QStringLiteral("2056f908-f9f4-4edb-95d1-e8ec87660268"))
-          == QStringLiteral(
-              "https://tribevpn.com/account?wl=abc&device_uuid=2056f908-f9f4-4edb-95d1-e8ec87660268"));
-    // Fallback-URL без query → через ?.
-    CHECK(Enrollment::appendDeviceUuid(QStringLiteral("https://tribevpn.com/account"),
-                                       QStringLiteral("2056f908-f9f4-4edb-95d1-e8ec87660268"))
-          == QStringLiteral(
-              "https://tribevpn.com/account?device_uuid=2056f908-f9f4-4edb-95d1-e8ec87660268"));
-    // Пустой uuid → URL не трогаем.
-    CHECK(Enrollment::appendDeviceUuid(QStringLiteral("https://tribevpn.com/account?wl=abc"),
-                                       QString())
-          == QStringLiteral("https://tribevpn.com/account?wl=abc"));
-    // Неожиданные символы в uuid перекодируются (устойчивость к мусору в сторе).
-    CHECK(Enrollment::appendDeviceUuid(QStringLiteral("https://tribevpn.com/account"),
-                                       QStringLiteral("a b&c"))
-          == QStringLiteral("https://tribevpn.com/account?device_uuid=a%20b%26c"));
 
     if (g_failed == 0) {
         printf(">>> web_link_check: OK (%d checks)\n", g_total);

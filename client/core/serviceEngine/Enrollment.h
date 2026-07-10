@@ -298,17 +298,6 @@ public:
         return true;
     }
 
-    // AVPN (оплата): дописать device_uuid=<install id> к URL кабинета (кабинет откроет шит тарифов
-    // на этом устройстве). URL от бэка уже несёт ?wl=… → &; голый fallback → ?. Пустой uuid — no-op.
-    static QString appendDeviceUuid(const QString &url, const QString &deviceUuid)
-    {
-        if (deviceUuid.isEmpty())
-            return url;
-        const QString sep = url.contains(QLatin1Char('?')) ? QStringLiteral("&") : QStringLiteral("?");
-        return url + sep + QStringLiteral("device_uuid=")
-               + QString::fromLatin1(QUrl::toPercentEncoding(deviceUuid));
-    }
-
     // AVPN: разбор devices[] из тела 409 (device_limit_reached). Каждый элемент — DeviceInfo
     // ({device_id, platform?, label?, last_seen?, is_current}) → QVariantMap для QML-выбора.
     static QVariantList parseDeviceList(const QByteArray &json)
