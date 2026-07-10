@@ -106,6 +106,14 @@ bool isWireGuardBasedProto(amnezia::Proto proto) {
     return proto == amnezia::Proto::WireGuard || proto == amnezia::Proto::Awg;
 }
 
+// AVPN backend-first (T20): handshake-пороги из rawConfig (numbers.handshake_timeout_ms /
+// numbers.handshake_max_timeouts, засеяны VpnConnectionTunnelControl::up), фолбэк — константы
+// выше. Пусто/не число → фолбэк (byte-for-byte старое поведение).
+int intFromRawConfig(const QJsonObject &cfg, const char *key, int fallback) {
+    const QJsonValue v = cfg.value(QLatin1String(key));
+    return v.isDouble() ? v.toInt(fallback) : fallback;
+}
+
 uint64_t uint64FromResponse(NSDictionary *response, NSString *key, uint64_t fallback = 0) {
     id value = response[key];
     if (!value || value == [NSNull null]) {
@@ -408,6 +416,12 @@ void IosController::checkStatus()
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
 
         QMetaObject::invokeMethod(this, [this, txBytes, rxBytes, last_handshake_time_sec]() {
+            // AVPN backend-first (T20): пороги — из m_rawConfig (засеяны VpnConnectionTunnelControl::up
+            // ключами awg_handshake_timeout_ms/awg_handshake_max_timeouts), пусто/офлайн → constexpr-фолбэк.
+            const int handshakeTimeoutMs =
+                    intFromRawConfig(m_rawConfig, "awg_handshake_timeout_ms", kHandshakeTimeoutMs);
+            const int handshakeMaxTimeouts =
+                    intFromRawConfig(m_rawConfig, "awg_handshake_max_timeouts", kHandshakeMaxTimeouts);
             if (isWireGuardBasedProto(m_proto) && m_handshakeAwaiting) {
                 const bool hasHandshakeData = (last_handshake_time_sec >= 0);
                 // AVPN: tx НЕ доказывает рукопожатие — init-ретраи можно бесконечно слать в чёрную дыру
@@ -426,11 +440,11 @@ void IosController::checkStatus()
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
                 } else if (m_handshakeTimer.isValid() &&
-                           m_handshakeTimer.elapsed() > kHandshakeTimeoutMs) {
+                           m_handshakeTimer.elapsed() > handshakeTimeoutMs) {
                     m_handshakeTimer.restart();
                     // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов
                     // честно отдаём Error и гасим туннель (типично: IP:порт ноды режется оператором).
-                    if (++m_handshakeTimeouts >= kHandshakeMaxTimeouts) {
+                    if (++m_handshakeTimeouts >= handshakeMaxTimeouts) {
                         qWarning() << "IosController::checkStatus : handshake failed after"
                                    << m_handshakeTimeouts << "timeouts — stopping tunnel";
                         m_handshakeAwaiting = false;
@@ -442,7 +456,7 @@ void IosController::checkStatus()
                         }
                     } else {
                         qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive"
-                                 << m_handshakeTimeouts << "/" << kHandshakeMaxTimeouts;
+                                 << m_handshakeTimeouts << "/" << handshakeMaxTimeouts;
                         emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
                     }
                 }
