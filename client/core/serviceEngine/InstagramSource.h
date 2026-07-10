@@ -24,6 +24,21 @@ public:
         const QRegularExpressionMatch m = re.match(QString::fromUtf8(html));
         return m.hasMatch() ? m.captured(0) : QString();
     }
+
+    // Исход, когда ассет из homepage не добыт (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»):
+    // раньше ЛЮБОЙ провал деградировал в reachability CDN — а блокировка Instagram на RU-egress
+    // рвёт homepage при живом TLS до static.cdninstagram.com ⇒ вечный Unknown-серый вместо
+    // красного. Сетевая смерть БЕЗ единого байта и без HTTP-статуса = сам сервис недостижим
+    // (SNI-RST/дроп) ⇒ Blocked. Частичные байты (медленный туннель, 6с-таймаут) / любой
+    // HTTP-статус (403 гео — не сетевой вердикт) / «страница пришла, ассет не нашли» (сменилась
+    // вёрстка) — по-прежнему деградация в reachability: никогда не ложный красный.
+    enum class NoAssetOutcome { FallbackReachability, Blocked };
+
+    static NoAssetOutcome decideNoAsset(bool netError, int httpStatus, bool anyBytes)
+    {
+        return (netError && httpStatus <= 0 && !anyBytes) ? NoAssetOutcome::Blocked
+                                                          : NoAssetOutcome::FallbackReachability;
+    }
 };
 
 } // namespace avpn
