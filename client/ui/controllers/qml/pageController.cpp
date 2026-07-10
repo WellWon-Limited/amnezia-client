@@ -21,6 +21,7 @@
 
 // AVPN: нативный iOS safe-area inset (AvpnSafeArea.mm) — Qt даёт 0 при ExpandedClientAreaHint.
 #ifdef Q_OS_IOS
+    #include <QInputMethod> // AVPN: высота клавиатуры для imeHeight (см. конструктор)
 extern "C" int avpnSafeAreaTop();
 extern "C" int avpnSafeAreaBottom();
 #endif
@@ -43,6 +44,22 @@ PageController::PageController(ServersController* serversController, SettingsCon
         m_cachedStatusBarHeight = statusBarHeightDp;
         emit safeAreaBottomMarginChanged();
         emit safeAreaTopMarginChanged();
+    });
+#endif
+
+#ifdef Q_OS_IOS
+    // AVPN (Support-чат, 2026-07-10): imeHeight питался ТОЛЬКО с Android (imeInsetsChanged) —
+    // на iOS всегда 0, поэтому при клавиатуре навбар не скрывался и iOS выталкивала весь UI
+    // (вкл. нижнее меню) вверх. Высота клавиатуры — из QInputMethod::keyboardRectangle
+    // (координаты окна = логические px; окно fullscreen). Скрыта → rect пустой → 0.
+    QInputMethod *im = QGuiApplication::inputMethod();
+    connect(im, &QInputMethod::keyboardRectangleChanged, this, [this, im]() {
+        const int h = qMax(0, qRound(im->keyboardRectangle().height()));
+        if (h == m_imeHeight)
+            return;
+        m_imeHeight = h;
+        emit imeHeightChanged(h);
+        emit safeAreaBottomMarginChanged();
     });
 #endif
 
