@@ -282,6 +282,8 @@ Item {
     }
 
     // ═══════════════════ legacy: плавающая карточка по высоте контента ═══════════════
+    // Длинный текст: карточка упирается в maxH, КАРТИНКА УЖИМАЕТСЯ (до 24% ширины),
+    // отдавая место тексту, текст скроллится ВНУТРИ, кнопки прижаты к низу и видимы всегда.
     Rectangle {
         id: legacyCard
         visible: !sheet.rich
@@ -289,155 +291,170 @@ Item {
         width: Math.min(sheet.width - 2 * Theme.space.lg, 420)
         readonly property real maxH: sheet.height - PageController.safeAreaTopMargin
                                      - PageController.safeAreaBottomMargin - 2 * Theme.space.xl
-        height: Math.min(legacyFlick.contentHeight, maxH)
+        // Раскладка высоты: фикс-части (шапка/заголовок/кнопки) + картинка + текст.
+        readonly property int imgFull: banner.status === Image.Ready
+                                       ? Math.round((width - 2 * Theme.space.xl) * 0.46) : 0
+        readonly property int imgMin: Math.round((width - 2 * Theme.space.xl) * 0.24)
+        readonly property real fixedH: Math.round(440 * sheet.kl) + annTitle.implicitHeight
+                                       + btnCol.implicitHeight + legacyCol.spacing * 4 + Theme.space.xl
+        readonly property real availH: maxH - fixedH
+        readonly property int bodyFull: Math.ceil(annBody.implicitHeight)
+        readonly property int imgH: imgFull === 0 ? 0
+                                  : (imgFull + bodyFull <= availH) ? imgFull
+                                  : Math.max(imgMin, Math.min(imgFull, Math.floor(availH - bodyFull)))
+        height: Math.min(maxH, fixedH + imgH + bodyFull)
         radius: Theme.radius.xl
         color: Theme.color.bg700
         border.width: 1
         border.color: Theme.color.border2
+        clip: true
 
-        Flickable {
-            id: legacyFlick
+        ColumnLayout {
+            id: legacyCol
             anchors.fill: parent
-            contentWidth: width
-            contentHeight: legacyCol.implicitHeight
-            clip: true
-            interactive: contentHeight > height
-            boundsBehavior: Flickable.StopAtBounds
+            spacing: Theme.space.md
 
-            ColumnLayout {
-                id: legacyCol
-                width: legacyFlick.width
-                spacing: Theme.space.md
+            // Шапка: свечение + крупные бренд-бары; чип «ОБЪЯВЛЕНИЕ» и крестик поверх.
+            Item {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.round(440 * sheet.kl)
 
-                // Шапка: свечение + крупные бренд-бары; чип «ОБЪЯВЛЕНИЕ» и крестик поверх.
-                Item {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: Math.round(440 * sheet.kl)
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: Theme.radius.xl   // верх совпадает с карточкой; низ прозрачен
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: Qt.alpha(Theme.color.accentBright, 0.34) }
-                            GradientStop { position: 1.0; color: "transparent" }
-                        }
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Theme.radius.xl   // верх совпадает с карточкой; низ прозрачен
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Qt.alpha(Theme.color.accentBright, 0.34) }
+                        GradientStop { position: 1.0; color: "transparent" }
                     }
+                }
 
-                    // Бренд-бары (пропорции макета; центральный — ярче)
+                // Бренд-бары (пропорции макета; центральный — ярче)
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: Math.round(14 * sheet.kl)
+                    spacing: Math.round(17 * sheet.kl)
+                    readonly property real bw: Math.round(17 * sheet.kl)
+                    Rectangle { width: parent.bw; height: Math.round(96 * sheet.kl);  radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.75); anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(150 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.85); anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(230 * sheet.kl); radius: width / 2; color: Theme.color.text1;                 anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(172 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.9);  anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(134 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.8);  anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(160 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.85); anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { width: parent.bw; height: Math.round(110 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.7);  anchors.verticalCenter: parent.verticalCenter }
+                }
+
+                // Чип «ОБЪЯВЛЕНИЕ»
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: Theme.space.lg
+                    width: chipRow.width + 2 * Theme.space.md
+                    height: Math.round(64 * sheet.kl)
+                    radius: Theme.radius.pill
+                    color: Qt.alpha(Theme.color.bg800, 0.55)
+                    border.width: 1
+                    border.color: Theme.color.border2
+
                     Row {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: Math.round(14 * sheet.kl)
-                        spacing: Math.round(17 * sheet.kl)
-                        readonly property real bw: Math.round(17 * sheet.kl)
-                        Rectangle { width: parent.bw; height: Math.round(96 * sheet.kl);  radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.75); anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(150 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.85); anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(230 * sheet.kl); radius: width / 2; color: Theme.color.text1;                 anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(172 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.9);  anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(134 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.8);  anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(160 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.85); anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.bw; height: Math.round(110 * sheet.kl); radius: width / 2; color: Qt.alpha(Theme.color.text1, 0.7);  anchors.verticalCenter: parent.verticalCenter }
-                    }
-
-                    // Чип «ОБЪЯВЛЕНИЕ»
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.margins: Theme.space.lg
-                        width: chipRow.width + 2 * Theme.space.md
-                        height: Math.round(64 * sheet.kl)
-                        radius: Theme.radius.pill
-                        color: Qt.alpha(Theme.color.bg800, 0.55)
-                        border.width: 1
-                        border.color: Theme.color.border2
-
-                        Row {
-                            id: chipRow
-                            anchors.centerIn: parent
-                            spacing: 7
-                            Rectangle {
-                                width: 6; height: 6; radius: 3
-                                color: Theme.color.accent
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                            Text {
-                                text: qsTr("ОБЪЯВЛЕНИЕ")
-                                color: Theme.color.text1
-                                font.family: Theme.font.body
-                                font.pixelSize: Math.max(9, Math.round(20 * sheet.kl))
-                                font.weight: Theme.font.wBold
-                                font.letterSpacing: Theme.font.trackCaption * font.pixelSize
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
+                        id: chipRow
+                        anchors.centerIn: parent
+                        spacing: 7
+                        Rectangle {
+                            width: 6; height: 6; radius: 3
+                            color: Theme.color.accent
+                            anchors.verticalCenter: parent.verticalCenter
                         }
-                    }
-
-                    // Крестик: закрыть-отложить (НЕ read — попап вернётся при перезапуске)
-                    Rectangle {
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: Theme.space.lg
-                        width: Math.max(32, Math.round(64 * sheet.kl)); height: width
-                        radius: Theme.radius.pill
-                        color: Qt.alpha(Theme.color.bg800, 0.55)
-                        border.width: 1
-                        border.color: Theme.color.border2
-
-                        TribeStrokeIcon {
-                            anchors.centerIn: parent
-                            width: Math.round(parent.width * 0.44); height: width
-                            icon: "x"
-                            tint: Theme.color.text1
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: sheet.close()
+                        Text {
+                            text: qsTr("ОБЪЯВЛЕНИЕ")
+                            color: Theme.color.text1
+                            font.family: Theme.font.body
+                            font.pixelSize: Math.max(9, Math.round(20 * sheet.kl))
+                            font.weight: Theme.font.wBold
+                            font.letterSpacing: Theme.font.trackCaption * font.pixelSize
+                            anchors.verticalCenter: parent.verticalCenter
                         }
                     }
                 }
 
-                Text {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: Theme.space.xl
-                    Layout.rightMargin: Theme.space.xl
-                    text: sheet.ann ? (sheet.ann.title || "") : ""
-                    color: Theme.color.text1
-                    wrapMode: Text.WordWrap
-                    lineHeight: 1.15
-                    font.family: Theme.font.display
-                    font.pixelSize: Math.max(19, Math.round(46 * sheet.kl))
-                    font.weight: Theme.font.wExtra
-                    font.letterSpacing: Theme.font.trackTight * font.pixelSize
-                }
+                // Крестик: закрыть-отложить (НЕ read — попап вернётся при перезапуске)
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Theme.space.lg
+                    width: Math.max(32, Math.round(64 * sheet.kl)); height: width
+                    radius: Theme.radius.pill
+                    color: Qt.alpha(Theme.color.bg800, 0.55)
+                    border.width: 1
+                    border.color: Theme.color.border2
 
-                // Картинка-баннер (опционально): кроп, скругление — OpacityMask
-                // (QML clip режет прямоугольником, radius на клип не действует).
-                Item {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: Theme.space.xl
-                    Layout.rightMargin: Theme.space.xl
-                    Layout.preferredHeight: banner.status === Image.Ready
-                                            ? Math.round(width * 0.46) : 0
-                    visible: banner.status === Image.Ready   // ошибка/нет URL → секции нет
-
-                    Image {
-                        id: banner
+                    TribeStrokeIcon {
+                        anchors.centerIn: parent
+                        width: Math.round(parent.width * 0.44); height: width
+                        icon: "x"
+                        tint: Theme.color.text1
+                    }
+                    MouseArea {
                         anchors.fill: parent
-                        source: (!sheet.rich && sheet.ann && sheet.ann.image_url) ? sheet.ann.image_url : ""
-                        asynchronous: true
-                        fillMode: Image.PreserveAspectCrop
-                        sourceSize.width: 1024
-                        visible: false   // рисует OpacityMask
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: sheet.close()
                     }
-                    Rectangle { id: bannerMask; anchors.fill: parent; radius: Theme.radius.md; visible: false }
-                    Fx.OpacityMask { anchors.fill: parent; source: banner; maskSource: bannerMask }
                 }
+            }
+
+            Text {
+                id: annTitle
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.space.xl
+                Layout.rightMargin: Theme.space.xl
+                text: sheet.ann ? (sheet.ann.title || "") : ""
+                color: Theme.color.text1
+                wrapMode: Text.WordWrap
+                lineHeight: 1.15
+                font.family: Theme.font.display
+                font.pixelSize: Math.max(19, Math.round(46 * sheet.kl))
+                font.weight: Theme.font.wExtra
+                font.letterSpacing: Theme.font.trackTight * font.pixelSize
+            }
+
+            // Картинка-баннер (опционально): высота адаптивная (legacyCard.imgH) —
+            // при длинном тексте ужимается, отдавая место тексту. Скругление — OpacityMask.
+            Item {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.space.xl
+                Layout.rightMargin: Theme.space.xl
+                Layout.preferredHeight: legacyCard.imgH
+                visible: banner.status === Image.Ready   // ошибка/нет URL → секции нет
+
+                Image {
+                    id: banner
+                    anchors.fill: parent
+                    source: (!sheet.rich && sheet.ann && sheet.ann.image_url) ? sheet.ann.image_url : ""
+                    asynchronous: true
+                    fillMode: Image.PreserveAspectCrop
+                    sourceSize.width: 1024
+                    visible: false   // рисует OpacityMask
+                }
+                Rectangle { id: bannerMask; anchors.fill: parent; radius: Theme.radius.md; visible: false }
+                Fx.OpacityMask { anchors.fill: parent; source: banner; maskSource: bannerMask }
+            }
+
+            // Текст: скроллится ВНУТРИ, когда не влезает (кнопки при этом всегда видны).
+            Flickable {
+                id: bodyFlick
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.leftMargin: Theme.space.xl
+                Layout.rightMargin: Theme.space.xl
+                contentWidth: width
+                contentHeight: legacyCard.bodyFull
+                clip: true
+                interactive: contentHeight > height
+                boundsBehavior: Flickable.StopAtBounds
 
                 Text {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: Theme.space.xl
-                    Layout.rightMargin: Theme.space.xl
+                    id: annBody
+                    width: bodyFlick.width
                     text: sheet.ann ? (sheet.ann.body || "") : ""
                     color: Theme.color.text2
                     wrapMode: Text.WordWrap
@@ -447,16 +464,23 @@ Item {
                     lineHeight: 1.5
                     onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                 }
+            }
 
-                // Кнопки сразу под контентом — карточка растёт вслед за текстом (макет).
+            // Кнопки — прижаты к низу карточки, видимы всегда (текст скроллится над ними).
+            ColumnLayout {
+                id: btnCol
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.space.xl
+                Layout.rightMargin: Theme.space.xl
+                Layout.bottomMargin: Theme.space.xl
+                spacing: Theme.space.md
+
                 Repeater {
                     model: (!sheet.rich && sheet.ann && sheet.ann.buttons) ? sheet.ann.buttons : []
                     delegate: TribeButton {
                         required property var modelData
                         required property int index
                         Layout.fillWidth: true
-                        Layout.leftMargin: Theme.space.xl
-                        Layout.rightMargin: Theme.space.xl
                         visible: sheet.knownActions.indexOf(modelData.action) !== -1
                         variant: index === 0 ? "primary" : "glass"
                         glow: false
@@ -466,9 +490,6 @@ Item {
                 }
                 TribeButton {
                     Layout.fillWidth: true
-                    Layout.leftMargin: Theme.space.xl
-                    Layout.rightMargin: Theme.space.xl
-                    Layout.bottomMargin: Theme.space.xl
                     variant: "glass"
                     glow: false
                     text: qsTr("Прочитал")
