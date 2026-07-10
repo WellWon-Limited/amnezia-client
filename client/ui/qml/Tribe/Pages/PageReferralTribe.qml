@@ -101,7 +101,8 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.topMargin: Theme.space.xl + root.safeTop
+        // единый верх вкладок: 16+safeTop, как на главной // AVPN
+        anchors.topMargin: Theme.space.lg + root.safeTop
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         anchors.bottomMargin: Theme.space.lg

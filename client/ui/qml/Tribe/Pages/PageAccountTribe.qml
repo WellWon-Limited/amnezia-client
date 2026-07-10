@@ -377,7 +377,9 @@ PageType {
     Flickable {
         id: settingsFlick
         anchors.fill: parent
-        anchors.topMargin: Theme.space.xl + PageController.safeAreaTopMargin // iOS: натив-инсет
+        // единый верх вкладок: 16+safeTop, КАК на главной (xl давал более толстую «плашку»
+        // на macOS — жалоба 2026-07-10). // AVPN
+        anchors.topMargin: Theme.space.lg + PageController.safeAreaTopMargin // iOS: натив-инсет
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         clip: true
