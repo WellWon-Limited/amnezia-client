@@ -114,6 +114,7 @@ PageType {
             avpnOnboard.done = true
             root.onboardingActive = false
             root.goAvpnTab(0)
+            announceShowTimer.restart()   // AVPN (P-ANN): рассылка, ждавшая онбординг
         }
         // AVPN: мост в ПОЛНЫЙ интерфейс Amnezia — ванильный TabBar + их главная;
         // возврат — плавающая кнопка «‹ Tribe» (низ экрана).
@@ -673,4 +674,63 @@ PageType {
                                   qsTr("Дни и трафик уже здесь. Прежнее устройство отключено — можно подключаться."))
         }
     }
+
+    // AVPN (рассылки P-ANN v2): попап важной рассылки — ГЛОБАЛЬНЫЙ слой поверх любого
+    // экрана и нижней навигации (реш. 2026-07-10; хост всегда жив — вкладки/оверлеи его
+    // не прячут). Закрыть можно ТОЛЬКО кнопками уведомления: системный «назад»
+    // проглатывается внутри TribeAnnouncementSheet. Показ — самое новое непрочитанное
+    // kind=popup (сервер отдаёт новые первыми), по одному; на онбординге не показываем.
+    property bool announceLinkWait: false   // гард cabinetLinkReady (сигнал общий на движок)
+    TribeAnnouncementSheet {
+        id: announceSheet
+        z: 190   // под transferInResult (полноэкранный успех переноса важнее)
+        onWeblinkRequested: {
+            if (typeof TribeEngine === "undefined") return
+            root.announceLinkWait = true
+            TribeEngine.requestCabinetLink("")
+        }
+        onScreenRequested: function(name) {
+            if (name === "support") root.goAvpnTab(1)
+            else if (name === "referral") root.goAvpnTab(2)
+            else if (name === "settings" || name === "account") root.goAvpnTab(3)
+            else if (name === "notifications") tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml")
+            // неизвестный экран (рассылка новее клиента) — молча игнорируем
+        }
+    }
+    function maybeShowAnnouncement() {
+        if (typeof TribeEngine === "undefined" || announceSheet.opened) return
+        if (!root.avpnNav || root.onboardingActive) return
+        var list = TribeEngine.announcements
+        for (var i = 0; i < list.length; ++i) {
+            if (list[i].kind === "popup") { announceSheet.show(list[i]); return }
+        }
+    }
+    Connections {
+        target: (typeof TribeEngine !== "undefined") ? TribeEngine : null
+        ignoreUnknownSignals: true
+        function onAnnouncementsChanged() { announceShowTimer.restart() }
+        function onCabinetLinkReady(url) {
+            if (!root.announceLinkWait) return
+            root.announceLinkWait = false
+            Qt.openUrlExternally(url)
+        }
+    }
+    Timer {
+        id: announceShowTimer
+        interval: 900; repeat: false                 // первый показ после LKG-загрузки движка
+        running: typeof TribeEngine !== "undefined"  // не из кадра создания страницы
+        onTriggered: root.maybeShowAnnouncement()
+    }
+    // Возврат в foreground → свежие рассылки (дёшево; свой троттл не нужен — движок
+    // ходит асинхронно, а показ и так дедуплицируется по прочитанности).
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive) return
+            if (typeof TribeEngine !== "undefined"
+                    && typeof TribeEngine.refreshAnnouncements === "function")
+                TribeEngine.refreshAnnouncements()
+        }
+    }
+
 }
