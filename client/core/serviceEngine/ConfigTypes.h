@@ -31,6 +31,7 @@ struct RemoteConfig
     QMap<QString, bool>    features;
     QMap<QString, QString> urls;
     QMap<QString, double>  numbers;
+    QMap<QString, QStringList> lists;
     bool                   valid = false;
 };
 
@@ -76,6 +77,15 @@ inline bool parseConfig(const QByteArray &body, RemoteConfig &out, QString &err)
     for (auto it = nums.begin(); it != nums.end(); ++it)
         if (it.value().isDouble())
             out.numbers.insert(it.key(), it.value().toDouble());
+    const QJsonObject lsts = o.value(QStringLiteral("lists")).toObject();
+    for (auto it = lsts.begin(); it != lsts.end(); ++it) {
+        QStringList vals;
+        for (const QJsonValue &v : it.value().toArray())
+            if (v.isString())
+                vals << v.toString();
+        if (!vals.isEmpty())
+            out.lists.insert(it.key(), vals);
+    }
     const QJsonArray pts = o.value(QStringLiteral("probe_targets")).toArray();
     for (const QJsonValue &v : pts) {
         const QJsonObject p = v.toObject();

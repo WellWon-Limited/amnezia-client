@@ -372,7 +372,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
-                avpn::TuningStore::set(c.numbers, c.features); // lists — Task 19 (парсер Task 18)
+                avpn::TuningStore::set(c.numbers, c.features, c.lists); // AVPN backend-first (T19)
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
                 // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
                 // интервалом, ничего не останавливаем/не стартуем).
@@ -383,6 +383,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
                 m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN backend-first (T19): down/up speed-URL бенча — urls.bench_speed_down_url/
+                // bench_speed_up_url с сервера, фолбэк = вкомпиленные литералы (BenchRunner ctor).
+                if (m_bench)
+                    m_bench->setSpeedUrls(
+                        configUrl(QStringLiteral("bench_speed_down_url"),
+                                  QStringLiteral("https://speed.cloudflare.com/__down?bytes=26214400")),
+                        configUrl(QStringLiteral("bench_speed_up_url"),
+                                  QStringLiteral("https://speed.cloudflare.com/__up")));
                 // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
                 // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
                 const QString appVer = QStringLiteral(APP_VERSION);
