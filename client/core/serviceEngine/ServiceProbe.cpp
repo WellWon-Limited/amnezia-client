@@ -252,9 +252,17 @@ void ServiceProbe::probeGoodput(const ServiceProbeConfig &c)
 
 // YouTube: InnerTube `player` (iOS-клиент ⇒ прямой url без cipher) для evergreen-видео по очереди.
 // Нашли googlevideo url → меряем; ни одно видео не резолвится → fail-safe reachability.
-void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx)
+void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx,
+                                  bool allDead)
 {
-    if (idx >= videoIds.size()) { goodputFallback(c); return; }
+    if (idx >= videoIds.size()) {
+        // AVPN (паритет с Instagram-вердиктом, ревью 2026-07-10): ВСЕ попытки InnerTube умерли
+        // соединительной ошибкой (RST/refused без байта и статуса; наш 6с-таймаут не считается)
+        // ⇒ www.youtube.com недостижим ⇒ честный Blocked, а не вечный серый через fallback.
+        if (allDead && !videoIds.isEmpty()) { finish(c.key, ServiceState::Blocked, -1); return; }
+        goodputFallback(c);
+        return;
+    }
 
     // Хост = www.youtube.com, НЕ youtubei.googleapis.com (корень «серый чип при работающем YouTube»,
     // 2026-07-03): youtubei.googleapis.com резолвится в 216.239.3x.223, а 216.239.38.0/24 состоит в
@@ -285,16 +293,25 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     timer->start(6000); // резолв URL — лёгкий JSON, короткий таймаут
 
-    connect(reply, &QNetworkReply::finished, reply, [this, c, videoIds, idx, reply, done]() {
+    connect(reply, &QNetworkReply::finished, reply, [this, c, videoIds, idx, allDead, reply, done]() {
         if (*done) return;
         *done = true;
+        const QByteArray raw = reply->readAll();
         const QString url = (reply->error() == QNetworkReply::NoError)
-                                ? YoutubeSource::extractVideoplaybackUrl(reply->readAll())
+                                ? YoutubeSource::extractVideoplaybackUrl(raw)
                                 : QString();
+        // AVPN (паритет с Instagram-вердиктом): считаем попытку «мёртвой», только если она
+        // умерла соединительной ошибкой без байта и статуса (наш 6с-таймаут — не вердикт).
+        const bool netError = (reply->error() != QNetworkReply::NoError);
+        const bool timedOut = (reply->error() == QNetworkReply::OperationCanceledError);
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool attemptDead =
+                GoodputProbe::decideDeadSource(netError, timedOut, httpStatus, !raw.isEmpty())
+                == GoodputProbe::DeadSourceOutcome::Blocked;
         reply->deleteLater();
         delete done;
         if (url.isEmpty())
-            resolveYoutube(c, videoIds, idx + 1); // это видео не отдало прямой url → следующее
+            resolveYoutube(c, videoIds, idx + 1, allDead && attemptDead); // следующее видео
         else
             measureGoodput(c, url, /*rangeAsQuery=*/true); // googlevideo уважает &range=
     });
@@ -344,18 +361,19 @@ void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
             asset = InstagramSource::extractCdnAssetUrl(*buf); // полный body — терминатор не требуем
         }
         // AVPN (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»): исход «ассет не добыт» решает
-        // чистый decideNoAsset (InstagramSource.h, покрыт parse_check): homepage умерла сетевой
-        // ошибкой без единого байта и без HTTP-статуса ⇒ сам сервис недостижим ⇒ честный Blocked.
-        // Деградация в reachability CDN оставлена для «страница пришла, но ассет не нашли» /
-        // частичных байт / любого HTTP-статуса — там красить красным нельзя.
+        // чистый GoodputProbe::decideDeadSource (покрыт parse_check): homepage умерла
+        // СОЕДИНИТЕЛЬНОЙ ошибкой (RST/refused — НЕ наш 6с-таймаут) без единого байта и без
+        // HTTP-статуса ⇒ сам сервис недостижим ⇒ честный Blocked. Таймаут-abort/частичные байты/
+        // любой HTTP-статус — деградация в reachability CDN, красным не красим (ревью A2).
         const bool netError = (reply->error() != QNetworkReply::NoError);
+        const bool timedOut = (reply->error() == QNetworkReply::OperationCanceledError);
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool anyBytes = !buf->isEmpty();
         reply->deleteLater();
         delete done; delete buf; delete found;
         if (asset.isEmpty()) {
-            if (InstagramSource::decideNoAsset(netError, httpStatus, anyBytes)
-                == InstagramSource::NoAssetOutcome::Blocked)
+            if (GoodputProbe::decideDeadSource(netError, timedOut, httpStatus, anyBytes)
+                == GoodputProbe::DeadSourceOutcome::Blocked)
                 finish(c.key, ServiceState::Blocked, -1); // homepage мертва ⇒ вердикт, не серый
             else
                 goodputFallback(c); // не нашли CDN-ассет в живой странице → reachability(Unknown)/blocked

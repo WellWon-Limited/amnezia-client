@@ -357,7 +357,7 @@ PageType {
                 // AVPN (баг 2026-07-10): «нет подписки» ≠ «грузится» — при авторитетном пустом
                 // пуле (subMissing: бэк ответил 200 с nodes:[]) честный текст вместо вечной «загрузки».
                 text: root.pool.length === 0
-                          ? ((typeof TribeEngine !== "undefined" && TribeEngine.subMissing === true)
+                          ? ((root.hasEngine && TribeEngine.subMissing === true)
                                  ? qsTr("Нет активной подписки")
                                  : qsTr("Локации загружаются…"))
                           : qsTr("Ничего не найдено")

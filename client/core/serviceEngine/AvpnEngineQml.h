@@ -56,8 +56,9 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool transferredAway READ transferredAway NOTIFY changed)
     // AVPN (баг 2026-07-10 «вечная загрузка без подписки»): бэк авторитетно ответил 200 со
     // status=degraded и nodes:[] — подписки у устройства НЕТ (не «ещё грузится»). UI по этому
-    // флагу показывает золотую CTA вместо бесконечного «Локации загружаются…». Сбрасывается,
-    // как только пул наполнился (любым путём: ретрай bootstrap / startFlow / refreshPool).
+    // флагу показывает золотую CTA вместо бесконечного «Локации загружаются…». Выводится из
+    // снапшота (degraded + пустой пул), без липкого стейта (ревью: sticky-флаг давал ложную CTA
+    // платящему юзеру при транзиентно пустом пуле со status=active — все ноды в дренаже).
     Q_PROPERTY(bool subMissing READ subMissing NOTIFY changed)
     // AVPN: JWT подписки — для авторизованного редиректа в кабинет (кнопка «Обновить ключ»).
     Q_PROPERTY(QString authToken READ authToken NOTIFY changed)
@@ -168,10 +169,11 @@ public:
     qlonglong trafficLimit() const;
     bool subActive() const;
     bool transferredAway() const { return m_transferredAway; }
-    // AVPN: «подписки нет» достоверно (видели 200 с пустым пулом) И пул всё ещё пуст. Вторая
-    // половина условия — самосброс: пул может наполниться не только bootstrap-ретраем (startFlow
-    // по Connect, refreshPool со страницы серверов) — флаг не должен пережить появление нод.
-    bool subMissing() const { return m_subMissingSeen && !m_engine.hasSubscription(); }
+    // AVPN: «подписки нет» достоверно — снапшот говорит degraded (бэк ставит его ТОЛЬКО по
+    // состоянию устройства: expired/over-quota/без tunnel_ip) И пул пуст. active+пустой пул
+    // (все ноды в дренаже у подписанного юзера) сюда НЕ попадает. Без липкого члена — правда
+    // пересчитывается из текущего снапшота на каждом changed().
+    bool subMissing() const;
     QString authToken() const;  // AVPN: JWT из защищённого стора (Enrollment::loadToken)
 
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
@@ -606,6 +608,9 @@ private:
     //    не резолвлено → применится на следующем Connect, как везде в RU-direct (см. reapplyBypass()).
     void rebuildApiCarveOut(QMap<QString, QString> &sites) const;
     void rebuildApiCarveOut();
+    // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
+    // (bypassSeedStamp): один источник исключает дрейф «carve изменился, а стамп не заметил».
+    QStringList apiCarveIps() const;
 
     // AVPN remote-config (T6): если сервер прислал probeTargets — переопределить m_svcProbe маппингом
     // ProbeTarget→ServiceProbeConfig (telegram→Mtproto, youtube/instagram→Goodput); иначе НЕ трогаем
@@ -765,7 +770,6 @@ private:
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
-    bool                         m_subMissingSeen = false;  // AVPN: bootstrap видел авторитетный 200 с nodes:[] (подписки нет; см. subMissing())
     int                          m_pendingRedeemAttempts = 0; // AVPN: ретраи redeemTransfer, пока движок занят bootstrap'ом (холодный старт по диплинку)
     QString                      m_pendingRedeemToken;        // AVPN: токен с уже запланированным busy-ретраем (второй таймер не плодим)
     QString                      m_lastRedeemedToken;         // AVPN: успешно принятый токен — дедуп повторных сканов того же QR (иначе 401-тост поверх успеха)
