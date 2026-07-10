@@ -6,6 +6,7 @@
 #define LOCALSOCKETCONTROLLER_H
 
 #include <QHostAddress>
+#include <QJsonObject>  // AVPN (IPC-stall fix): очередь отложенного activate
 #include <QLocalSocket>
 #include <QTimer>
 #include <functional>
@@ -56,6 +57,12 @@ class LocalSocketController final : public ControllerImpl {
   } m_daemonState = eUnknown;
 
   QLocalSocket* m_socket = nullptr;
+
+  // AVPN (IPC-stall fix, 2026-07-10): activate, пришедший в окне подключения к пайпу демона
+  // (ретраи initializeInternal — например, сервис как раз перезапускается). Раньше запись уходила
+  // в неподключённый сокет и МОЛЧА терялась → вечный «Connecting». Флашится по готовности демона
+  // (parseCommand: первый status → eReady), чистится в deactivate()/disconnectInternal().
+  QJsonObject m_pendingActivate;
 
   QByteArray m_buffer;
 

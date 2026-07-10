@@ -308,8 +308,15 @@ void VpnConnection::connectToVpn(const QString &serverId, DockerContainer contai
 #ifdef AMNEZIA_DESKTOP
     if (m_vpnProtocol) {
         disconnect(m_vpnProtocol.data(), &VpnProtocol::protocolError, this, &VpnConnection::vpnProtocolError);
+        // AVPN (2×deactivate fix, 2026-07-10): stop()/reset() старого протокола синхронно эмитят
+        // транзитный Disconnected — он приходил ПОСЛЕ уже выставленного Connecting, движок принимал
+        // его за терминал и передёргивал старт заново (второй deactivate/activate на один клик,
+        // лишний цикл протокола). Глотаем ТОЛЬКО это синхронное эхо (флаг строго вокруг вызовов);
+        // любой асинхронный Disconnected по-прежнему доходит.
+        m_swallowTransitionalDisconnected = true;
         m_vpnProtocol->stop();
         m_vpnProtocol.reset();
+        m_swallowTransitionalDisconnected = false;
     }
     appendKillSwitchConfig();
 #endif
@@ -545,6 +552,26 @@ void VpnConnection::reconnectToVpn() {
 
     setConnectionState(Vpn::ConnectionState::Reconnecting);
 
+    // AVPN (IPC-stall fix, 2026-07-10, КОРЕНЬ «клик Connect мёртв до перезапуска приложения» на
+    // Windows): маска Reconnecting глотает Disconnected (swallow в setConnectionState — нужен для
+    // транзитного эха stop() и «disconnected»-ответа демона на deactivate). Но если демон умирает
+    // В ОКНЕ реконнекта (рестарт/переустановка сервиса под живым GUI — networkChanged от гаснущего
+    // демона и триггерит этот слот), терминальный сигнал не приходит НИКОГДА: m_connectionState
+    // застревал в Reconnecting навсегда, reconcile-машина вечно ждала терминала (промежуточное
+    // состояние, её сторож не взведён — операция не её). Сторож: не вышли из Reconnecting за 20с
+    // (штатный реконнект — секунды; iOS-хендшейк-окно 12с сюда не ходит, слот десктоп-only) →
+    // честный Disconnected, машина разблокирована, подключение — вручную (§13, авто-коннекта нет).
+    const quint64 generation = ++m_reconnectGeneration;
+    QTimer::singleShot(20000, this, [this, generation]() {
+        if (generation != m_reconnectGeneration)
+            return;  // за 20с начался следующий реконнект — это не наше окно
+        if (m_connectionState != Vpn::ConnectionState::Reconnecting)
+            return;
+        qWarning() << "reconnect watchdog: still Reconnecting after 20s — forcing Disconnected";
+        m_connectionState = Vpn::ConnectionState::Disconnected;  // выйти из свалло-состояния ДО set
+        setConnectionState(Vpn::ConnectionState::Disconnected);
+    });
+
     m_vpnProtocol->stop();
     if (ErrorCode err = m_vpnProtocol->start(); err != ErrorCode::NoError) {
         setConnectionState(Vpn::ConnectionState::Error);
@@ -606,6 +633,11 @@ void VpnConnection::setConnectionState(Vpn::ConnectionState state) {
     // reconcile вечно ждал терминала, кнопка Connect была мертва до перезапуска приложения.
     // Состояние туннеля от ОС всегда авторитетно (CONNECT-INVARIANTS §7/§13).
     if (state == Vpn::Disconnected && m_connectionState == Vpn::Reconnecting)
+        return;
+    // AVPN (2×deactivate fix): синхронное эхо stop() старого протокола в connectToVpn — глотаем
+    // строго на время вызова (см. флаг). Ловушку «застряли в Reconnecting навсегда» закрывает
+    // 20с-сторож в reconnectToVpn().
+    if (state == Vpn::Disconnected && m_swallowTransitionalDisconnected)
         return;
 #endif
 

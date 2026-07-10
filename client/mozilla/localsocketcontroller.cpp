@@ -84,6 +84,7 @@ void LocalSocketController::disconnectInternal() {
   m_daemonState = eReady;
   m_initializingRetry = 0;
   m_initializingTimer.stop();
+  m_pendingActivate = QJsonObject();  // AVPN (IPC-stall fix): недоставленный activate не переживает обрыв
   emit disconnected();
 }
 
@@ -300,11 +301,30 @@ void LocalSocketController::activate(const QJsonObject &rawConfig) {
     json.insert(amnezia::configKey::specialJunk5, wgConfig.value(amnezia::configKey::specialJunk5));
   }
 
-  write(json);
+  // AVPN (IPC-stall fix, 2026-07-10): activate был fire-and-forget — запись в неподключённый сокет
+  // МОЛЧА терялась (демон умер/перезапускается), протокол вечно ждал «connected» → бесконечный
+  // «Connecting» до перезапуска приложения. Здоровый путь (сокет подключён) — байт-в-байт как раньше.
+  if (m_socket->state() == QLocalSocket::ConnectedState) {
+    write(json);
+    return;
+  }
+  if (m_daemonState == eInitializing) {
+    // Пайп ещё подключается / ретраится (initializeInternal, 10×500мс) — например, сервис как раз
+    // рестартует. Откладываем activate; уйдёт сразу после готовности демона (первый status → eReady).
+    logger.warning() << "activate deferred: daemon socket is not connected yet";
+    m_pendingActivate = json;
+    return;
+  }
+  // Сокет мёртв и ретраев нет — честный отказ ВМЕСТО тишины. Отложенно (не из стека вызова),
+  // чтобы протокол/движок обработали Disconnected штатным асинхронным путём.
+  logger.error() << "activate dropped: daemon socket is dead";
+  QTimer::singleShot(0, this, [this]() { disconnectInternal(); });
 }
 
 void LocalSocketController::deactivate() {
   logger.debug() << "Deactivating";
+
+  m_pendingActivate = QJsonObject();  // AVPN (IPC-stall fix): отложенный activate отменён
 
   if (m_daemonState != eReady) {
     logger.debug() << "No disconnect, controller is not ready";
@@ -439,6 +459,15 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
     }
 
     emit initialized(true, connected.toBool(), datetime);
+
+    // AVPN (IPC-stall fix): демон готов — флашим activate, отложенный на окне подключения к пайпу
+    // (клик пришёлся на рестарт сервиса). Без этого клик терялся молча.
+    if (!m_pendingActivate.isEmpty()) {
+      logger.debug() << "flushing deferred activate";
+      const QJsonObject pending = m_pendingActivate;
+      m_pendingActivate = QJsonObject();
+      write(pending);
+    }
     return;
   }
 

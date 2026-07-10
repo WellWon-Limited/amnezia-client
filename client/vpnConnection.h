@@ -92,6 +92,15 @@ private:
 
    Vpn::ConnectionState m_connectionState;
 
+   // AVPN (IPC-stall/2×deactivate fix, 2026-07-10): true ТОЛЬКО на время синхронного stop()
+   // старого протокола внутри connectToVpn() — его транзитный Disconnected (эхо) не должен
+   // приходить ПОСЛЕ уже выставленного Connecting (движок принимал эхо за терминал и передёргивал
+   // старт заново → 2×deactivate/activate на один клик). Десктоп-only путь (см. setConnectionState).
+   bool m_swallowTransitionalDisconnected = false;
+   // AVPN (IPC-stall fix): поколение реконнекта — сторож в reconnectToVpn() действует только на
+   // СВОЁ окно Reconnecting (иначе таймер прошлого реконнекта мог бы уронить следующий).
+   quint64 m_reconnectGeneration = 0;
+
    void createProtocolConnections();
 
    void appendSplitTunnelingConfig();
