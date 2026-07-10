@@ -762,6 +762,7 @@ private:
     // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
+    QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
     bool                         m_subMissingSeen = false;  // AVPN: bootstrap видел авторитетный 200 с nodes:[] (подписки нет; см. subMissing())
