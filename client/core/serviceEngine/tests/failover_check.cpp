@@ -206,7 +206,8 @@ int main(int argc, char **argv)
 namespace avpn {
 
 bool Enrollment::enroll(QNetworkAccessManager *, const QString &, Identity &,
-                        SecureAppSettingsRepository *, TrialResponse &, QString &error)
+                        SecureAppSettingsRepository *, TrialResponse &, QString &error,
+                        FetchOutcome *)
 {
     error = QStringLiteral("stub");
     return false;
@@ -218,6 +219,8 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *, const QString &, con
     error = QStringLiteral("stub");
     return false;
 }
+
+void Enrollment::saveLkgSubscription(const QByteArray &) { } // LKG-персист тестом не проверяется
 
 QString Enrollment::loadToken()
 {
