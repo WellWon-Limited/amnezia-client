@@ -45,6 +45,29 @@ static QByteArray makeBody(int version, int ruCidrCount, const QJsonArray &extra
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
+// Как makeBody, но с ПРОИЗВОЛЬНЫМ (в т.ч. битым) split_dns — для проверки per-field
+// валидации/отката (server/mask_dns инвалидны, suffixes целые, и наоборот).
+static QByteArray makeBodyWithSplitDns(int version, int ruCidrCount, const QJsonObject &splitDns)
+{
+    QJsonArray ru;
+    int made = 0;
+    for (int a = 0; a < 26 && made < ruCidrCount; ++a) {
+        for (int b = 0; b < 250 && made < ruCidrCount; ++b) {
+            ru << QStringLiteral("5.%1.%2.0/24").arg(a).arg(b);
+            ++made;
+        }
+    }
+
+    QJsonObject o;
+    o[QStringLiteral("version")] = version;
+    o[QStringLiteral("generated_at")] = QStringLiteral("2026-07-10T00:00:00Z");
+    o[QStringLiteral("ru_cidrs")] = ru;
+    o[QStringLiteral("bypass_extra")] = QJsonArray{ QStringLiteral("216.239.38.0/24") };
+    o[QStringLiteral("cn_liauto_cidrs")] = QJsonArray{ QStringLiteral("120.92.0.0/16") };
+    o[QStringLiteral("split_dns")] = splitDns;
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -95,6 +118,41 @@ int main(int argc, char **argv)
         CHECK(out.ruCidrs.contains(QStringLiteral("5.0.0.0/24")), "(b) legit entry kept");
     }
 
+    // (е) never-bypass суперсеть (шире never-диапазона, но всё равно перекрывает его) —
+    // фильтр общий для ru_cidrs/bypass_extra/cn_liauto_cidrs, проверяем на всех трёх.
+    {
+        avpn::BypassLists out;
+        QString err;
+        const QJsonArray supersets = {
+            QStringLiteral("100.0.0.0/8"),   // накрывает CGNAT 100.64.0.0/10
+            QStringLiteral("172.0.0.0/8"),   // накрывает RFC1918 172.16.0.0/12
+            QStringLiteral("192.0.0.0/8"),   // накрывает 192.168.0.0/16
+            QStringLiteral("169.0.0.0/8"),   // накрывает link-local 169.254.0.0/16
+            QStringLiteral("fe00::/8"),      // накрывает v6 link-local fe80::/10
+            QStringLiteral("::/8"),          // накрывает v6 loopback ::1/128
+        };
+        QJsonObject o;
+        o[QStringLiteral("version")] = 1;
+        QJsonArray ru;
+        for (int a = 0; a < 26; ++a)
+            for (int b = 0; b < 250; ++b)
+                ru << QStringLiteral("5.%1.%2.0/24").arg(a).arg(b);
+        for (const QJsonValue &v : supersets)
+            ru << v;
+        o[QStringLiteral("ru_cidrs")] = ru;
+        o[QStringLiteral("bypass_extra")] = supersets;
+        o[QStringLiteral("cn_liauto_cidrs")] = supersets;
+        const QByteArray body = QJsonDocument(o).toJson(QJsonDocument::Compact);
+        avpn::parseBypassLists(body, out, err);
+        for (const QJsonValue &v : supersets) {
+            const QString s = v.toString();
+            CHECK(!out.ruCidrs.contains(s), qPrintable(QStringLiteral("(e) ru_cidrs superset dropped: %1").arg(s)));
+            CHECK(!out.bypassExtra.contains(s), qPrintable(QStringLiteral("(e) bypass_extra superset dropped: %1").arg(s)));
+            CHECK(!out.cnLiAutoCidrs.contains(s), qPrintable(QStringLiteral("(e) cn_liauto_cidrs superset dropped: %1").arg(s)));
+        }
+        CHECK(out.ruCidrs.size() == 6500, "(e) legit ru_cidrs count unaffected by superset drop");
+    }
+
     // (в) 100 CIDR (все валидные) → !valid, размер меньше гейта 6000.
     {
         avpn::BypassLists out;
@@ -133,6 +191,42 @@ int main(int argc, char **argv)
               && out.splitDnsSuffixes.contains(QStringLiteral("xn--p1ai")), "(d) default suffixes");
         CHECK(out.maskDns.size() == 2
               && out.maskDns.contains(QStringLiteral("77.88.8.1")), "(d) default mask_dns");
+    }
+
+    // (г2) split_dns.server невалиден (не IP), mask_dns содержит мусорный элемент →
+    // ОБА поля откатываются на дефолт (per-field, не all-or-nothing по всей секции).
+    {
+        avpn::BypassLists out;
+        QString err;
+        QJsonObject splitDns;
+        splitDns[QStringLiteral("suffixes")] = QJsonArray{ QStringLiteral("ru"), QStringLiteral("su") };
+        splitDns[QStringLiteral("server")] = QStringLiteral("evil-string");
+        splitDns[QStringLiteral("mask_dns")] = QJsonArray{ QStringLiteral("77.88.8.8"), QStringLiteral("junk") };
+        const QByteArray body = makeBodyWithSplitDns(9, 6500, splitDns);
+        CHECK(avpn::parseBypassLists(body, out, err), "(g2) body parses");
+        CHECK(out.splitDnsServer == QStringLiteral("77.88.8.8"), "(g2) invalid server => default");
+        CHECK(out.maskDns.size() == 2 && out.maskDns.contains(QStringLiteral("77.88.8.1")),
+              "(g2) mask_dns with junk element => default pair");
+        CHECK(out.splitDnsSuffixes.size() == 2 && out.splitDnsSuffixes.contains(QStringLiteral("su")),
+              "(g2) valid suffixes kept (per-field, not reset by bad server/mask_dns)");
+    }
+
+    // (г3) свежие suffixes + пустой server → suffixes СОХРАНЕНЫ, server дефолтный
+    // (доказывает per-field, а не all-or-nothing откат).
+    {
+        avpn::BypassLists out;
+        QString err;
+        QJsonObject splitDns;
+        splitDns[QStringLiteral("suffixes")] = QJsonArray{ QStringLiteral("example.ru"), QStringLiteral("test.su") };
+        splitDns[QStringLiteral("server")] = QStringLiteral("");
+        splitDns[QStringLiteral("mask_dns")] = QJsonArray{ QStringLiteral("8.8.8.8"), QStringLiteral("8.8.4.4") };
+        const QByteArray body = makeBodyWithSplitDns(10, 6500, splitDns);
+        CHECK(avpn::parseBypassLists(body, out, err), "(g3) body parses");
+        CHECK(out.splitDnsSuffixes.size() == 2 && out.splitDnsSuffixes.contains(QStringLiteral("example.ru")),
+              "(g3) fresh suffixes kept");
+        CHECK(out.splitDnsServer == QStringLiteral("77.88.8.8"), "(g3) empty server => default");
+        CHECK(out.maskDns.size() == 2 && out.maskDns.contains(QStringLiteral("8.8.8.8")),
+              "(g3) fresh mask_dns kept (independent of server fallback)");
     }
 
     // (д) битый JSON → !valid, out чистый (сброшен), err непустой.
