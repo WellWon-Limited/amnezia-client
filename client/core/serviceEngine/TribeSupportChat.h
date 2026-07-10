@@ -86,6 +86,9 @@ public slots:
     // дёргать его на пуше при закрытом чате значит гасить непрочитанное за
     // спиной пользователя.
     void onSupportPush();
+    // AVPN backend-first (2026-07-10): следует за edge-walk control plane (AvpnEngineQml::apiBaseChanged).
+    // Env-пин (AVPN_API_URL) сильнее любых edge-переключений.
+    void setBaseUrl(const QString &base);
 
 signals:
     void messagesChanged();
@@ -133,6 +136,7 @@ private:
 
     QNetworkAccessManager *m_nam = nullptr;
     QString m_baseUrl;
+    bool m_envPinned = false;
 
     QVariantList m_messages;                 // готовая модель для QML
     QVariantList m_serverMessages;           // последняя разобранная серверная история

@@ -405,6 +405,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &base) {
                 m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
                 rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
+                emit apiBaseChanged(base);     // AVPN backend-first: сателлиты (чат поддержки) следуют за edge
                 emit changed();
             });
 

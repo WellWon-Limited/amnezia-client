@@ -199,6 +199,9 @@ public:
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
     void setBaseUrl(const QString &url) { m_baseUrl = url; }
+    // AVPN backend-first (2026-07-10): текущий активный edge-хост control plane — для сателлитов
+    // вроде TribeSupportChat, которым нужен тот же хост, что у движка (см. apiBaseChanged).
+    QString apiBase() const { return m_baseUrl; }
 
     // AVPN remote-config (T6, server-driven — без ребилда): фичефлаги/URL из /v1/config (ConfigService).
     // featureEnabled/configUrl читают ПОСЛЕДНИЙ применённый конфиг (LKG на старте, свежий после fetch).
@@ -537,6 +540,9 @@ signals:
     // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
     // median_teardown_ms, median_first_byte_ms}; json — полный отчёт (type:"connect-cycle").
     void ccFinished(const QVariantMap &summary, const QString &json);
+    // AVPN backend-first (2026-07-10): control plane переключился на живой edge (edge-walk) —
+    // сателлиты (TribeSupportChat) следуют за новым хостом вместо застревания на мёртвом.
+    void apiBaseChanged(const QString &base);
 
 private slots:
     void onTick();
