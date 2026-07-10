@@ -2,6 +2,7 @@
 
 #include "BenchAnalysis.h"
 #include "RttProbeIcmp.h"
+#include "TuningStore.h" // AVPN backend-first (T19): server-tunable корпус (lists.bench_http_*)
 
 #include <QDateTime>
 #include <QDnsLookup>
@@ -22,13 +23,18 @@
 namespace avpn {
 
 // Корпус = tools/connect-bench/bench.sh (зарубежные + RU) — чтобы замеры сводились 1:1.
-static const QStringList kHosts = {
-    QStringLiteral("www.google.com"),   QStringLiteral("www.youtube.com"),
+// AVPN backend-first (T19): вкомпиленные фолбэки, оверрайд с сервера — lists.bench_http_foreign /
+// lists.bench_http_ru (TuningStore::listOr, см. hosts()). Порядок/состав дефолтов — прежний kHosts.
+static const QStringList kHostsForeignDefault = {
+    QStringLiteral("www.google.com"), QStringLiteral("www.youtube.com"),
     QStringLiteral("en.wikipedia.org"), QStringLiteral("github.com"),
-    QStringLiteral("www.apple.com"),    QStringLiteral("ya.ru"),
-    QStringLiteral("vk.com"),           QStringLiteral("www.ozon.ru"),
+    QStringLiteral("www.apple.com"),
 };
-// lite (свип по нодам): минимум, но с обеих сторон занавеса (заруб + RU)
+static const QStringList kHostsRuDefault = {
+    QStringLiteral("ya.ru"), QStringLiteral("vk.com"), QStringLiteral("www.ozon.ru"),
+};
+// lite (свип по нодам): минимум, но с обеих сторон занавеса (заруб + RU) — вне волны T19,
+// вкомпилирован намертво (свип быстрый, короткий список не расширяем remote-списком).
 static const QStringList kHostsLite = {
     QStringLiteral("www.google.com"), QStringLiteral("ya.ru"), QStringLiteral("en.wikipedia.org"),
 };
@@ -42,7 +48,14 @@ static const int kLoadRttPeriodMs = 500;
 static const int kStageTimeoutMs = 30000;
 static const int kTlsTimeoutMs = 8000;
 
-QStringList BenchRunner::hosts() const { return m_lite ? kHostsLite : kHosts; }
+QStringList BenchRunner::hosts() const
+{
+    if (m_lite)
+        return kHostsLite;
+    // Порядок сохранён (заруб перед RU) — byte-for-byte как прежний kHosts, пока сервер не оверрайдит.
+    return TuningStore::listOr(QStringLiteral("bench_http_foreign"), kHostsForeignDefault)
+         + TuningStore::listOr(QStringLiteral("bench_http_ru"), kHostsRuDefault);
+}
 // TCP/TLS-фазы: хосты с обеих сторон занавеса (разложение DNS/TCP/TLS вместо общего TTFB).
 // vk.com — второй RU-хост на другом AS: при bypass-on ya+vk идут direct, google через туннель —
 // пара точек с каждой стороны отделяет «медленный маршрут» от «медленный конкретный хост».
@@ -56,11 +69,25 @@ BenchRunner::BenchRunner(QNetworkAccessManager *nam, QObject *parent)
 {
     m_loadTimer = new QTimer(this);
     m_loadTimer->setInterval(kLoadRttPeriodMs);
+    // AVPN backend-first (T19): вкомпиленные дефолты — используются до первого applied /v1/config
+    // (или навсегда, если сервер урлы не пришлёт) — поведение прежнее byte-for-byte.
+    m_downUrl = QString::fromLatin1(kDownUrl);
+    m_upUrl = QString::fromLatin1(kUpUrl);
 }
 
 BenchRunner::~BenchRunner()
 {
     cancel();
+}
+
+void BenchRunner::setSpeedUrls(const QString &downUrl, const QString &upUrl)
+{
+    // Пустая строка не применяется — защита от случайного затирания валидного урла (напр. если
+    // configUrl() не нашёл ключ И def тоже пуст по ошибке вызова на стороне движка).
+    if (!downUrl.isEmpty())
+        m_downUrl = downUrl;
+    if (!upUrl.isEmpty())
+        m_upUrl = upUrl;
 }
 
 void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lite,
@@ -630,7 +657,7 @@ void BenchRunner::stageDown()
 {
     emit stageChanged(QStringLiteral("down"));
     const int epoch = m_epoch;
-    QNetworkRequest req{QUrl(QString::fromLatin1(m_lite ? kDownUrlLite : kDownUrl))};
+    QNetworkRequest req{QUrl(m_lite ? QString::fromLatin1(kDownUrlLite) : m_downUrl)};
     req.setTransferTimeout(kStageTimeoutMs * 2); // 25МБ на медленной сети
     QElapsedTimer *dl = new QElapsedTimer();
     dl->start();
@@ -680,7 +707,7 @@ void BenchRunner::stageUp()
     }
     emit stageChanged(QStringLiteral("up"));
     const int epoch = m_epoch;
-    QNetworkRequest req{QUrl(QString::fromLatin1(kUpUrl))};
+    QNetworkRequest req{QUrl(m_upUrl)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/octet-stream"));
     req.setTransferTimeout(kStageTimeoutMs * 2);
     m_t.start();

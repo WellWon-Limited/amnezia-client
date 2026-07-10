@@ -20,6 +20,7 @@
 
 #include "Enrollment.h"
 #include "NetAwait.h"
+#include "TuningStore.h" // AVPN backend-first (T10): server-tunable chat_poll_active_ms/chat_poll_idle_ms
 
 namespace avpn {
 
@@ -61,7 +62,8 @@ constexpr int kIdlePollMs = 60000;
 constexpr int kMediaTimeoutMs = 180000;
 constexpr int kThumbTimeoutMs = 30000;
 
-// Лимиты бэкенда (support.py) — дублируем на клиенте, чтобы не гонять байты зря.
+// Лимиты бэкенда (support.py) — вкомпиленный ФОЛБЭК (используются, только пока
+// сервер не прислал limits в ответе /thread — см. applyThread/eff*MaxBytes T18).
 constexpr qint64 kImageMaxBytes = 10 * 1024 * 1024;
 constexpr qint64 kVideoMaxBytes = 25 * 1024 * 1024;
 // Пережатие фото (паритет с canvas-компрессией Занавеса): крупнее порога —
@@ -70,7 +72,7 @@ constexpr qint64 kImageShrinkThresholdBytes = qint64(1.5 * 1024 * 1024);
 constexpr int kImageMaxDimension = 1600;
 constexpr int kJpegQuality = 85;
 
-// Белые списки MIME бэкенда (415 на прочее).
+// Белые списки MIME бэкенда (415 на прочее) — вкомпиленный ФОЛБЭК, см. eff*Mime (T18).
 bool isAllowedImageMime(const QString &mime)
 {
     return mime == QLatin1String("image/jpeg") || mime == QLatin1String("image/png")
@@ -104,6 +106,15 @@ qint64 parseIsoMs(const QString &iso)
     return dt.isValid() ? dt.toMSecsSinceEpoch() : QDateTime::currentMSecsSinceEpoch();
 }
 
+// AVPN backend-first (T10): интервал поллинга — server-tunable (numbers.chat_poll_active_ms /
+// numbers.chat_poll_idle_ms), фолбэк вкомпиленные kActivePollMs/kIdlePollMs.
+int pollMs(bool active)
+{
+    return int(TuningStore::numberOr(
+        active ? QStringLiteral("chat_poll_active_ms") : QStringLiteral("chat_poll_idle_ms"),
+        active ? double(kActivePollMs) : double(kIdlePollMs)));
+}
+
 QString humanSendError(int httpCode, bool netError)
 {
     if (netError && httpCode == 0)
@@ -126,11 +137,15 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
         m_baseUrl = QString::fromUtf8(envUrl);
+    m_envPinned = !envUrl.isEmpty();
 
     s_instance = this; // колбэк нативного пикера (создаётся один раз в coreController)
 
-    m_pollTimer.setInterval(kIdlePollMs);
+    m_pollTimer.setInterval(pollMs(false));
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
+        // AVPN backend-first (T11): kill-switch — выключенный флаг гасит весь поллинг чата.
+        if (!TuningStore::flag(QStringLiteral("support_chat_poll")))
+            return;
         if (m_active)
             refresh();
         else
@@ -197,7 +212,7 @@ void TribeSupportChat::setActive(bool on)
     if (m_active == on)
         return;
     m_active = on;
-    m_pollTimer.setInterval(on ? kActivePollMs : kIdlePollMs);
+    m_pollTimer.setInterval(pollMs(on));
     emit activeChanged();
     if (on)
         refresh(); // мгновенный фетч при открытии страницы (не ждать первый тик)
@@ -218,6 +233,15 @@ void TribeSupportChat::onSupportPush()
         refresh();
     else
         refreshUnread();
+}
+
+// AVPN backend-first (2026-07-10): чат следует за edge-walk control plane (fix аудита —
+// раньше висел на вкомпиленном хосте и умирал при failover). Env-пин (AVPN_API_URL) сильнее.
+void TribeSupportChat::setBaseUrl(const QString &base)
+{
+    if (m_envPinned || base.isEmpty() || base == m_baseUrl)
+        return;
+    m_baseUrl = base;
 }
 
 // ── тред ─────────────────────────────────────────────────────────────────────
@@ -357,9 +381,50 @@ void TribeSupportChat::applyThread(const QByteArray &json)
         msgs.append(parseMessage(v.toObject()));
     m_serverMessages = msgs;
 
+    // AVPN backend-first (T18): лимиты вложений приходят с сервером треда (fix
+    // «дублируем support.py»). Пусто/отсутствует → маркер 0/пустой список, эффективные
+    // геттеры (eff*) падают на вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
+    const QJsonObject lim = root.value(QStringLiteral("limits")).toObject();
+    if (!lim.isEmpty()) {
+        if (lim.contains(QStringLiteral("image_max_bytes")))
+            m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
+        if (lim.contains(QStringLiteral("video_max_bytes")))
+            m_videoMaxBytes = qint64(lim.value(QStringLiteral("video_max_bytes")).toDouble(0));
+        if (lim.contains(QStringLiteral("image_mime"))) {
+            m_imageMime.clear();
+            for (const QJsonValue &v : lim.value(QStringLiteral("image_mime")).toArray())
+                if (v.isString()) m_imageMime << v.toString();
+        }
+        if (lim.contains(QStringLiteral("video_mime"))) {
+            m_videoMime.clear();
+            for (const QJsonValue &v : lim.value(QStringLiteral("video_mime")).toArray())
+                if (v.isString()) m_videoMime << v.toString();
+        }
+    }
+
     // Эхо, чей POST успел завершиться и чьё сообщение уже приехало с сервера,
     // здесь не живёт (снимается в postEcho); подвисшие pending-эхо остаются в хвосте.
     rebuildMessages();
+}
+
+qint64 TribeSupportChat::effImageMaxBytes() const
+{
+    return m_imageMaxBytes > 0 ? m_imageMaxBytes : kImageMaxBytes;
+}
+
+qint64 TribeSupportChat::effVideoMaxBytes() const
+{
+    return m_videoMaxBytes > 0 ? m_videoMaxBytes : kVideoMaxBytes;
+}
+
+bool TribeSupportChat::effAllowedImageMime(const QString &mime) const
+{
+    return m_imageMime.isEmpty() ? isAllowedImageMime(mime) : m_imageMime.contains(mime);
+}
+
+bool TribeSupportChat::effAllowedVideoMime(const QString &mime) const
+{
+    return m_videoMime.isEmpty() ? isAllowedVideoMime(mime) : m_videoMime.contains(mime);
 }
 
 void TribeSupportChat::rebuildMessages()
@@ -471,12 +536,12 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
     e.localUrl = QUrl::fromLocalFile(fi.absoluteFilePath()).toString();
 
     if (mime.startsWith(QLatin1String("video/"))) {
-        if (!isAllowedVideoMime(mime)) {
+        if (!effAllowedVideoMime(mime)) {
             emit sendFailed(tr("Формат видео не поддерживается (mp4/mov/webm)"));
             return;
         }
-        if (fi.size() > kVideoMaxBytes) {
-            emit sendFailed(tr("Видео больше 25 МБ"));
+        if (fi.size() > effVideoMaxBytes()) {
+            emit sendFailed(tr("Видео больше %1 МБ").arg(effVideoMaxBytes() / (1024 * 1024)));
             return;
         }
         e.kind = QStringLiteral("video");
@@ -508,7 +573,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             e.mime = QStringLiteral("image/jpeg");
             const int dot = e.fileName.lastIndexOf(QLatin1Char('.'));
             e.fileName = (dot > 0 ? e.fileName.left(dot) : e.fileName) + QStringLiteral(".jpg");
-        } else if (isGif && isAllowedImageMime(mime)) {
+        } else if (isGif && effAllowedImageMime(mime)) {
             QFile f(fi.absoluteFilePath());
             if (!f.open(QIODevice::ReadOnly)) {
                 emit sendFailed(tr("Файл недоступен"));
@@ -520,8 +585,8 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             emit sendFailed(tr("Формат изображения не поддерживается"));
             return;
         }
-        if (e.imageBytes.size() > kImageMaxBytes) {
-            emit sendFailed(tr("Фото больше 10 МБ"));
+        if (e.imageBytes.size() > effImageMaxBytes()) {
+            emit sendFailed(tr("Фото больше %1 МБ").arg(effImageMaxBytes() / (1024 * 1024)));
             return;
         }
         e.kind = QStringLiteral("image");

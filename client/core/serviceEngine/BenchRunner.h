@@ -46,6 +46,12 @@ public:
                const QString &nodePingIp = QString());
     void cancel(); // идемпотентно; никаких сигналов после cancel
 
+    // AVPN backend-first (T19): down/up throughput-URL из RemoteConfig.urls (bench_speed_down_url/
+    // bench_speed_up_url), фолбэк — вкомпиленные литералы (ctor). Пустая строка не применяется
+    // (защита от случайного затирания урла до валидного значения). lite-скачивание (kDownUrlLite)
+    // и RTT-зонд (generate_204) остаются вкомпилированными — вне волны Task 19.
+    void setSpeedUrls(const QString &downUrl, const QString &upUrl);
+
     // --- чистая математика (inline в хедере: тестируется в tests/parse_check.cpp без moc) ---
     static double median(QVector<double> v)              // пустой → -1 («нет данных»)
     {
@@ -110,6 +116,11 @@ private:
     int  m_epoch = 0;  // анти-UAF/анти-стейл: колбэки старого запуска игнорируются
     QString m_label;
     QJsonObject m_extra;
+
+    // AVPN backend-first (T19): server-tunable down/up speed-URL (см. setSpeedUrls); инициализируются
+    // вкомпиленными дефолтами в ctor, до первого applied /v1/config совпадают со старым поведением.
+    QString m_downUrl;
+    QString m_upUrl;
 
     QPointer<QNetworkReply> m_reply;
     QPointer<QNetworkReply> m_loadPending; // rtt-зонд под нагрузкой (не более одного в полёте)
