@@ -85,6 +85,55 @@ int main(int argc, char **argv)
         CHECK(avpn::SignalQuality::barsForRtt(120) == 5, "rtt: after reset, 120ms => 5 bars again");
     }
 
+    // ─── svc_probe_* — прямые ключи чтения из TuningStore (тот же паттерн, что ServiceProbe.cpp) ──
+    // Сам ServiceProbe.cpp в этот standalone-юнит не линкуется (QNetworkAccessManager и т.п.),
+    // поэтому тестируем паттерн чтения TuningStore::numberOr(key, compiled-default) напрямую —
+    // именно так его читает ServiceProbe.cpp:94/207/358.
+
+    // (з) svc_probe_slow_ms: override 700 → дефолт 1500 не используется; reset() → снова 1500.
+    avpn::TuningStore::set({{"svc_probe_slow_ms", 700.0}}, {});
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), 1500.0)) == 700,
+          "svc_probe_slow_ms: override 700 wins over compiled default 1500");
+    avpn::TuningStore::reset();
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), 1500.0)) == 1500,
+          "svc_probe_slow_ms: after reset() => back to compiled default 1500");
+
+    // (и) svc_probe_sample_bytes: override 65536 → дефолт 131072 не используется; reset() → снова 131072.
+    avpn::TuningStore::set({{"svc_probe_sample_bytes", 65536.0}}, {});
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_sample_bytes"), 131072.0)) == 65536,
+          "svc_probe_sample_bytes: override 65536 wins over compiled default 131072");
+    avpn::TuningStore::reset();
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_sample_bytes"), 131072.0)) == 131072,
+          "svc_probe_sample_bytes: after reset() => back to compiled default 131072");
+
+    // ─── Fix 1: goodput_min_bytes — единый снапшот th покрывает и внешний гейт, и classify() ──────
+    // Регрессия для половинчатого knob: bytes=2000 в диапазоне [tuned min=1000, compiled default
+    // 32768) должен пройти внешний гейт ServiceProbe.cpp (>= th.minBytes) и классифицироваться
+    // classify() по скорости (не blocked по minBytes), т.к. ОБА чтения берут th = fromTuning().
+
+    // (к) tuned goodput_min_bytes=1000, bytes=2000 >= th.minBytes(1000) => внешний гейт пройден,
+    // classify() уже НЕ блокирует по minBytes (только по скорости).
+    avpn::TuningStore::set({{"goodput_min_bytes", 1000.0}}, {});
+    {
+        const avpn::GoodputThresholds th = avpn::GoodputThresholds::fromTuning();
+        CHECK(th.minBytes == 1000, "fix1: tuned goodput_min_bytes => th.minBytes == 1000");
+        CHECK(2000 >= th.minBytes, "fix1: bytes=2000 passes external gate with tuned th (was stuck at 32768)");
+        // 2000 байт / 1000 мс = 16 кбит/с — ниже дефолтного slowKbps(100) => классифицируется по
+        // скорости как blocked(0), НЕ по minBytes (bytes >= th.minBytes уже выполнено).
+        CHECK(avpn::GoodputProbe::classify(2000, 1000, th) == 0,
+              "fix1: classify(2000B,1000ms,tuned th) => blocked by SPEED, not by minBytes gate");
+    }
+
+    // (л) после reset() тот же bytes=2000 снова < вкомпиленного minBytes(32768) => blocked ОБОИМИ путями.
+    avpn::TuningStore::reset();
+    {
+        const avpn::GoodputThresholds th = avpn::GoodputThresholds::fromTuning();
+        CHECK(th.minBytes == 32768, "fix1: after reset() => th.minBytes back to compiled default 32768");
+        CHECK(!(2000 >= th.minBytes), "fix1: bytes=2000 fails external gate again after reset()");
+        CHECK(avpn::GoodputProbe::classify(2000, 1000, th) == 0,
+              "fix1: classify(2000B,1000ms,default th) => blocked by minBytes gate after reset()");
+    }
+
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
 }
