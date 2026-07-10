@@ -402,11 +402,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_updateState = (v == avpn::UpdateVerdict::Block) ? 2
                               : (v == avpn::UpdateVerdict::Recommend) ? 1 : 0;
                 applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
+                refreshQualityEndpoints();  // AVPN (T16): urls.quality_probe_url мог смениться
                 emit changed();
             });
     connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged, this,
             [this](const QString &base) {
                 m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
+                refreshQualityEndpoints();     // AVPN (T16): живые палочки — новый /v1/ping-хост
                 rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
                 emit apiBaseChanged(base);     // AVPN backend-first: сателлиты (чат поддержки) следуют за edge
 #ifdef Q_OS_IOS
@@ -696,6 +698,18 @@ void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
         cfgs.append(c);
     }
     m_svcProbe->setServices(cfgs);
+}
+
+// AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk и
+// urls.quality_probe_url. Свой бэкенд-пинг всегда первый приоритет; публичный generate_204 —
+// фолбэк-литерал байт-в-байт как в конструкторном сиде, если сервер URL не прислал.
+void AvpnEngineQml::refreshQualityEndpoints()
+{
+    if (!m_probe)
+        return;
+    m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
+                           configUrl(QStringLiteral("quality_probe_url"),
+                                     QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
 }
 
 QString AvpnEngineQml::state() const
@@ -2209,7 +2223,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
         QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
         QTimer::singleShot(1800, this, [this]() {
-            if (m_probe && state() == QLatin1String("connected"))
+            if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))
+                && state() == QLatin1String("connected"))
                 m_probe->measure();
         });
         break;
