@@ -377,18 +377,21 @@ PageType {
     Flickable {
         id: settingsFlick
         anchors.fill: parent
-        // единый верх вкладок: 16+safeTop, КАК на главной (xl давал более толстую «плашку»
-        // на macOS — жалоба 2026-07-10). // AVPN
-        anchors.topMargin: Theme.space.lg + PageController.safeAreaTopMargin // iOS: натив-инсет
+        // Верхний воздух (16) — ВНУТРИ скролла (settingsCol.y), НЕ в рамке: рамочный topMargin
+        // при прокрутке обрезал контент на 16px НИЖЕ плашки — «мёртвая» полоса читалась как
+        // утолщение плашки против главной (жалоба 2026-07-10). В рамке остаётся только
+        // iOS-инсет чёлки. // AVPN
+        anchors.topMargin: PageController.safeAreaTopMargin // iOS: натив-инсет
         anchors.leftMargin: Theme.space.xl
         anchors.rightMargin: Theme.space.xl
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         contentWidth: width
-        contentHeight: settingsCol.implicitHeight + Theme.space.lg
+        contentHeight: settingsCol.y + settingsCol.implicitHeight + Theme.space.lg
 
         ColumnLayout {
             id: settingsCol
+            y: Theme.space.lg   // тот самый верхний воздух — скроллится вместе с контентом
             width: settingsFlick.width
             // AVPN: ColumnLayout как прямой content-item Flickable не подгоняет height под implicitHeight
             // сам (в отличие от позиционера Column). Без этого height=0 → нижние секции схлопываются и
