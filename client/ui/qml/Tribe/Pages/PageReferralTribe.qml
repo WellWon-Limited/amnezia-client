@@ -21,7 +21,12 @@ PageType {
     readonly property string referralLink: referralData && referralData.link ? ("" + referralData.link) : ""
     readonly property int invited: referralData && referralData.invited ? Number(referralData.invited) : 0
     readonly property int daysEarned: referralData && referralData.days_earned ? Number(referralData.days_earned) : 0
-    readonly property int daysPerFriend: 7   // бонус за друга (константа оффера)
+    // Оффер server-driven (/v1/referral: days_per_friend/gb_per_friend); литералы = фолбэк
+    // до первого ответа бэка (и для старых бэков без полей).
+    readonly property int daysPerFriend: referralData && referralData.days_per_friend !== undefined
+                                         ? Number(referralData.days_per_friend) : 7
+    readonly property int gbPerFriend: referralData && referralData.gb_per_friend !== undefined
+                                       ? Number(referralData.gb_per_friend) : 3
 
     function refreshReferral() {
         if (hasEngine && typeof TribeEngine.refreshReferral === "function")
@@ -256,7 +261,7 @@ PageType {
                                 textFormat: Text.StyledText
                                 text: root.invited > 0
                                       ? qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned)
-                                      : qsTr("<font color='%1'>7 дней + 3 ГБ</font> бесплатно").arg(Theme.color.cta)
+                                      : qsTr("<font color='%1'>%2 дней + %3 ГБ</font> бесплатно").arg(Theme.color.cta).arg(root.daysPerFriend).arg(root.gbPerFriend)
                                 color: "white"
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                                 font.weight: Theme.font.wMedium
