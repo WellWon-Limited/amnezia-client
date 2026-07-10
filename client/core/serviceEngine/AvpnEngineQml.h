@@ -7,6 +7,7 @@
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
+#include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
@@ -144,6 +145,9 @@ class AvpnEngineQml : public QObject {
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
     Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
+    // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
+    // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
+    Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -202,6 +206,10 @@ public:
     Q_INVOKABLE QString configUrl(const QString &key, const QString &def) const;
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
+
+    // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов — см. Q_PROPERTY выше.
+    int probeServicesIntervalMs() const
+    { return int(avpn::TuningStore::numberOr(QStringLiteral("probe_services_interval_ms"), 180000)); }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics

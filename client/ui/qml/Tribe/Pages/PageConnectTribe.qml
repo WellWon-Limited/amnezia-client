@@ -893,7 +893,9 @@ PageType {
         // поэтому 3 мин, а не 12с (иначе лишний фоновый трафик). Мгновенно — тап по чипу (onRecheck).
         // Движок делает первую пробу при коннекте (~1.5с, DNS-warm). При обрыве таймер стоит (running←isOn).
         Timer {
-            interval: 180000
+            // AVPN backend-first (T10): интервал — server-tunable (numbers.probe_services_interval_ms
+            // через TribeEngine.probeServicesIntervalMs), фолбэк 180000мс (3 мин) без engine/офлайн.
+            interval: root.hasEngine ? TribeEngine.probeServicesIntervalMs : 180000
             repeat: true
             running: root.isOn && root.hasEngine
             onTriggered: TribeEngine.probeServices()

@@ -366,6 +366,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
                 avpn::TuningStore::set(c.numbers, c.features); // lists — Task 19 (парсер Task 18)
+                // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
+                // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
+                // интервалом, ничего не останавливаем/не стартуем).
+                m_healthTimer.setInterval(
+                    int(avpn::TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)));
                 m_remoteCfg = c;
                 // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
                 // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
@@ -850,12 +855,14 @@ void AvpnEngineQml::onTick()
     if (m_probe && state() == QLatin1String("connected"))
         m_probe->measure();
 
-    // AVPN (#35 живой трафик): пока подключены — каждый 5-й тик (~20с) освежаем счётчики.
+    // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
+    // numbers.traffic_sync_ticks) освежаем счётчики.
     // ⚠️ ДВОЕ ЧАСОВ: берём /v1/subscription (ЧАСЫ УСТРОЙСТВА — их продлевает оплата), НЕ /v1/account
     // (часы аккаунта: на оплаченном устройстве затирали 36 дн./100ГБ триальными числами аккаунта).
     // refreshSubscription пишет traffic/expires в снапшот + emit changed() → бейдж живой.
     if (state() == QLatin1String("connected")) {
-        if (++m_trafficSyncTicks >= 5) {
+        if (++m_trafficSyncTicks
+            >= int(avpn::TuningStore::numberOr(QStringLiteral("traffic_sync_ticks"), 5))) {
             m_trafficSyncTicks = 0;
             refreshSubscription();
         }

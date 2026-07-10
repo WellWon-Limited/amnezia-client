@@ -12,6 +12,11 @@
 // (один GET с 4с-капом раз в минуту), а восстановление сети ускоряется извне через
 // kickBootstrap() (reachabilityChanged / выход из фона) — он просто поджимает таймер.
 // Чистые inline-функции (только QtCore) — тестируются автономно: tests/build_bootstrap_retry.sh.
+// Backend-first (T10): длительность медленного цикла — server-tunable (numbers.bootstrap_slow_retry_ms
+// через TuningStore), фолбэк kBootstrapSlowRetryMs=60с офлайн/на первом запуске. Быстрая фаза
+// {2,4,8,16,30}с — вкомпилированная константа, не читает бэкенд (первая минута не должна зависеть от сети).
+
+#include "TuningStore.h"
 
 namespace avpn {
 
@@ -24,7 +29,11 @@ inline int nextBootstrapDelayMs(int attempt)
     static constexpr int kFastCount = int(sizeof(kFast) / sizeof(kFast[0]));
     if (attempt < 0)
         attempt = 0;
-    return attempt < kFastCount ? kFast[attempt] : kBootstrapSlowRetryMs;
+    if (attempt < kFastCount)
+        return kFast[attempt];
+    // Медленный вечный цикл — server-tunable (numbers.bootstrap_slow_retry_ms), фолбэк 60с.
+    return int(TuningStore::numberOr(QStringLiteral("bootstrap_slow_retry_ms"),
+                                     double(kBootstrapSlowRetryMs)));
 }
 
 } // namespace avpn
