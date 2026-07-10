@@ -18,10 +18,14 @@
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
+#ifdef Q_OS_IOS
+#include "platforms/ios/AvpnDiagnostics.h" // AVPN backend-first (2026-07-10): crash-diag следует за edge-walk базой
+#endif
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
+#include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -253,6 +257,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
 
+    // AVPN backend-first: фоновый LKG-рефреш подписки (H-3 бэклога). Коннект здесь, старт —
+    // из configApplied (интервал приходит с сервера; до первого applied — не тикает).
+    connect(&m_subRefreshTimer, &QTimer::timeout, this, &AvpnEngineQml::refreshSubscription);
+
     // AVPN (реальные палочки): app-layer RTT-проба ЧЕРЕЗ туннель. AWG UDP-only ⇒ ICMP/TCP-пинг до
     // эндпоинта пуст; реальный RTT даёт крошечный HTTPS-запрос к generate_204 через поднятый full-tunnel.
     // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
@@ -364,7 +372,25 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
+                avpn::TuningStore::set(c.numbers, c.features, c.lists); // AVPN backend-first (T19)
+                // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
+                // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
+                // интервалом, ничего не останавливаем/не стартуем).
+                m_healthTimer.setInterval(
+                    int(avpn::TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)));
+                // AVPN backend-first: фоновый LKG-рефреш подписки по серверному интервалу
+                // (H-3 бэклога). qBound — защита от абсурда: 10 мин..7 суток.
+                const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
+                m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN backend-first (T19): down/up speed-URL бенча — urls.bench_speed_down_url/
+                // bench_speed_up_url с сервера, фолбэк = вкомпиленные литералы (BenchRunner ctor).
+                if (m_bench)
+                    m_bench->setSpeedUrls(
+                        configUrl(QStringLiteral("bench_speed_down_url"),
+                                  QStringLiteral("https://speed.cloudflare.com/__down?bytes=26214400")),
+                        configUrl(QStringLiteral("bench_speed_up_url"),
+                                  QStringLiteral("https://speed.cloudflare.com/__up")));
                 // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
                 // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
                 const QString appVer = QStringLiteral(APP_VERSION);
@@ -384,12 +410,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_updateState = (v == avpn::UpdateVerdict::Block) ? 2
                               : (v == avpn::UpdateVerdict::Recommend) ? 1 : 0;
                 applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
+                refreshQualityEndpoints();  // AVPN (T16): urls.quality_probe_url мог смениться
                 emit changed();
             });
     connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged, this,
             [this](const QString &base) {
                 m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
+                refreshQualityEndpoints();     // AVPN (T16): живые палочки — новый /v1/ping-хост
                 rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
+                emit apiBaseChanged(base);     // AVPN backend-first: сателлиты (чат поддержки) следуют за edge
+#ifdef Q_OS_IOS
+                AvpnDiagnostics_setBase(m_baseUrl.toUtf8().constData());
+#endif
                 emit changed();
             });
 
@@ -594,7 +626,7 @@ QString AvpnEngineQml::storeUrl() const
         QStringLiteral("https://play.google.com/store/apps/details?id=com.tribevpn.client"));
 #else
     return m_remoteCfg.urls.value(QStringLiteral("store_ios"),
-        QStringLiteral("https://apps.apple.com/app/id0000000000"));
+        QStringLiteral("https://apps.apple.com/app/id6778394015"));
 #endif
 }
 
@@ -674,6 +706,18 @@ void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
         cfgs.append(c);
     }
     m_svcProbe->setServices(cfgs);
+}
+
+// AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk и
+// urls.quality_probe_url. Свой бэкенд-пинг всегда первый приоритет; публичный generate_204 —
+// фолбэк-литерал байт-в-байт как в конструкторном сиде, если сервер URL не прислал.
+void AvpnEngineQml::refreshQualityEndpoints()
+{
+    if (!m_probe)
+        return;
+    m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
+                           configUrl(QStringLiteral("quality_probe_url"),
+                                     QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
 }
 
 QString AvpnEngineQml::state() const
@@ -845,15 +889,17 @@ void AvpnEngineQml::onTick()
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
     // measure() сам игнорит повторный запуск, пока предыдущий в полёте. На не-connected — не мерим
     // и держим бары на 0 (hard-gate сбросит при следующем reachable=false, см. ниже onConnectionStateChanged).
-    if (m_probe && state() == QLatin1String("connected"))
+    if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt")) && state() == QLatin1String("connected"))
         m_probe->measure();
 
-    // AVPN (#35 живой трафик): пока подключены — каждый 5-й тик (~20с) освежаем счётчики.
+    // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
+    // numbers.traffic_sync_ticks) освежаем счётчики.
     // ⚠️ ДВОЕ ЧАСОВ: берём /v1/subscription (ЧАСЫ УСТРОЙСТВА — их продлевает оплата), НЕ /v1/account
     // (часы аккаунта: на оплаченном устройстве затирали 36 дн./100ГБ триальными числами аккаунта).
     // refreshSubscription пишет traffic/expires в снапшот + emit changed() → бейдж живой.
     if (state() == QLatin1String("connected")) {
-        if (++m_trafficSyncTicks >= 5) {
+        if (++m_trafficSyncTicks
+            >= int(avpn::TuningStore::numberOr(QStringLiteral("traffic_sync_ticks"), 5))) {
             m_trafficSyncTicks = 0;
             refreshSubscription();
         }
@@ -864,6 +910,10 @@ void AvpnEngineQml::onTick()
 
 void AvpnEngineQml::probeServices()
 {
+    // AVPN backend-first (T11): kill-switch — гасит и авто-запуск, и ручной тап из UI (осознанно:
+    // выключенный флаг должен глушить ВЕСЬ трафик проб, не только фоновый).
+    if (!avpn::TuningStore::flag(QStringLiteral("service_probes")))
+        return;
     // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
     // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
     m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
@@ -1689,6 +1739,10 @@ void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
 {
     if (json.isEmpty())
         return;
+    // AVPN backend-first (T11): kill-switch глушит ТОЛЬКО авто-отправку (quiet); ручную кнопку не
+    // трогаем — юзер сам увидит честный отказ бэка, если тот не готов принимать отчёты.
+    if (quiet && !avpn::TuningStore::flag(QStringLiteral("bench_report_upload")))
+        return;
     if (json.size() > 3 * 1024 * 1024) { // защита от абсурда; реальный мега-отчёт ~200–600 КБ
         emit reportUploadDone(false, tr("Отчёт слишком большой для отправки"));
         return;
@@ -2177,7 +2231,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
         QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
         QTimer::singleShot(1800, this, [this]() {
-            if (m_probe && state() == QLatin1String("connected"))
+            if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))
+                && state() == QLatin1String("connected"))
                 m_probe->measure();
         });
         break;
@@ -4043,7 +4098,7 @@ void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)
     if (!m_nam || !LegalDocs::isValidDoc(doc) || !LegalDocs::isValidLang(lang))
         return;
     // без дедупа запросов: страница дёргает fetch один раз на открытие, ответы идемпотентны
-    QNetworkRequest req{QUrl(LegalDocs::url(doc, lang))};
+    QNetworkRequest req{QUrl(LegalDocs::url(doc, lang, configUrl(QStringLiteral("legal_base"), QStringLiteral("https://tribevpn.com/legal"))))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply); // жёсткий таймаут без nested loop (abort → finished с code==0)
     connect(reply, &QNetworkReply::finished, this, [this, reply, doc, lang]() {

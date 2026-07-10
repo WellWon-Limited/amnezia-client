@@ -28,6 +28,7 @@
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantList>
@@ -86,6 +87,9 @@ public slots:
     // дёргать его на пуше при закрытом чате значит гасить непрочитанное за
     // спиной пользователя.
     void onSupportPush();
+    // AVPN backend-first (2026-07-10): следует за edge-walk control plane (AvpnEngineQml::apiBaseChanged).
+    // Env-пин (AVPN_API_URL) сильнее любых edge-переключений.
+    void setBaseUrl(const QString &base);
 
 signals:
     void messagesChanged();
@@ -119,6 +123,12 @@ private:
     void schedulePoll();
     void rebuildMessages();                  // m_serverMessages + эхо → m_messages (+ emit при изменении)
     void applyThread(const QByteArray &json);
+    // AVPN backend-first (T18): эффективные лимиты вложений — серверные (лимиты
+    // из /thread), фолбэк — вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
+    qint64 effImageMaxBytes() const;
+    qint64 effVideoMaxBytes() const;
+    bool effAllowedImageMime(const QString &mime) const;
+    bool effAllowedVideoMime(const QString &mime) const;
     void postEcho(Echo &echo);               // POST messages|attachments для эха
     void queueThumb(int attachmentId);
     void fetchNextThumb();
@@ -133,6 +143,15 @@ private:
 
     QNetworkAccessManager *m_nam = nullptr;
     QString m_baseUrl;
+    bool m_envPinned = false;
+
+    // AVPN backend-first (T18): лимиты вложений с /thread. 0/пусто = «сервер не
+    // сообщил» → фолбэк на вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist
+    // (kImageMaxBytes — constexpr анонимного namespace в .cpp, тут недоступен).
+    qint64 m_imageMaxBytes = 0;
+    qint64 m_videoMaxBytes = 0;
+    QStringList m_imageMime;
+    QStringList m_videoMime;
 
     QVariantList m_messages;                 // готовая модель для QML
     QVariantList m_serverMessages;           // последняя разобранная серверная история

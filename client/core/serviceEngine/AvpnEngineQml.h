@@ -7,6 +7,7 @@
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
+#include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
@@ -144,6 +145,9 @@ class AvpnEngineQml : public QObject {
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
     Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
+    // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
+    // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
+    Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -195,6 +199,9 @@ public:
 
     // Control plane base URL (BACKEND §2). Можно переопределить из настроек.
     void setBaseUrl(const QString &url) { m_baseUrl = url; }
+    // AVPN backend-first (2026-07-10): текущий активный edge-хост control plane — для сателлитов
+    // вроде TribeSupportChat, которым нужен тот же хост, что у движка (см. apiBaseChanged).
+    QString apiBase() const { return m_baseUrl; }
 
     // AVPN remote-config (T6, server-driven — без ребилда): фичефлаги/URL из /v1/config (ConfigService).
     // featureEnabled/configUrl читают ПОСЛЕДНИЙ применённый конфиг (LKG на старте, свежий после fetch).
@@ -202,6 +209,10 @@ public:
     Q_INVOKABLE QString configUrl(const QString &key, const QString &def) const;
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
+
+    // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов — см. Q_PROPERTY выше.
+    int probeServicesIntervalMs() const
+    { return int(avpn::TuningStore::numberOr(QStringLiteral("probe_services_interval_ms"), 180000)); }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
@@ -529,6 +540,9 @@ signals:
     // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
     // median_teardown_ms, median_first_byte_ms}; json — полный отчёт (type:"connect-cycle").
     void ccFinished(const QVariantMap &summary, const QString &json);
+    // AVPN backend-first (2026-07-10): control plane переключился на живой edge (edge-walk) —
+    // сателлиты (TribeSupportChat) следуют за новым хостом вместо застревания на мёртвом.
+    void apiBaseChanged(const QString &base);
 
 private slots:
     void onTick();
@@ -589,12 +603,21 @@ private:
     // вшитые дефолты из конструктора (см. AvpnEngineQml.cpp:278-292).
     void applyRemoteProbeTargets(const avpn::RemoteConfig &cfg);
 
+    // AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk (m_baseUrl)
+    // и urls.quality_probe_url; вызывается из activeEdgeChanged и configApplied. Конструкторный
+    // setEndpoints (AvpnEngineQml.cpp:268-269) — только сид до первого вызова.
+    void refreshQualityEndpoints();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
     QNetworkAccessManager       *m_nam = nullptr;
     VpnConnection               *m_conn = nullptr;
     QTimer                       m_healthTimer;
+    // AVPN backend-first (H-3 бэклога): фоновый LKG-рефреш подписки по серверному интервалу
+    // (numbers.subscription_refresh_interval_s из /v1/config). Периодический, не singleShot;
+    // старт — из configApplied (не в конструкторе, интервал ещё неизвестен).
+    QTimer                       m_subRefreshTimer;
     // AVPN (реальные палочки): app-layer RTT-проба через туннель + сглаживание в 0..5 баров.
     QualityProbe                *m_probe = nullptr;   // создаётся в конструкторе (владелец — this)
     SignalQuality                m_signal;            // EWMA+гистерезис (чистая логика, протестирована)

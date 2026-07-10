@@ -38,6 +38,10 @@ int main()
           == QStringLiteral("https://tribevpn.com/legal/privacy.ru.md"));
     CHECK(LegalDocs::url(QStringLiteral("terms"), QStringLiteral("en"))
           == QStringLiteral("https://tribevpn.com/legal/terms.en.md"));
+    // URL документа с кастомной базой (server-driven из config)
+    CHECK(LegalDocs::url(QStringLiteral("privacy"), QStringLiteral("ru"),
+                         QStringLiteral("https://cdn.example/legal"))
+          == QStringLiteral("https://cdn.example/legal/privacy.ru.md"));
 
     // валидация ответа: markdown, а не HTML/JSON/пусто/гигантский блоб
     CHECK(LegalDocs::looksLikeMarkdown(QByteArrayLiteral("# Privacy Policy\n\ntext")));

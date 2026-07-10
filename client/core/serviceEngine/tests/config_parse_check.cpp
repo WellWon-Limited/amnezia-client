@@ -21,6 +21,7 @@ int main(int argc, char **argv)
         "features": {"support_chat": true, "xray": false},
         "urls": {"cabinet":"https://tribevpn.com/account"},
         "numbers": {"edge_fail_threshold": 3},
+        "lists": {"bench_http_ru": ["https://ya.ru"]},
         "future_thing": {"nested": [1,2,3]}
     })";
     avpn::RemoteConfig c;
@@ -38,12 +39,14 @@ int main(int argc, char **argv)
     CHECK(c.urls.value("cabinet") == "https://tribevpn.com/account", "url cabinet");
     CHECK(avpn::numberOr(c, "edge_fail_threshold", 99) == 3, "number");
     CHECK(avpn::numberOr(c, "missing", 7) == 7, "missing number => default");
+    CHECK(c.lists.value("bench_http_ru") == QStringList{"https://ya.ru"}, "lists bench_http_ru");
 
     // Отсутствующие поля => дефолты, не крэш.
     avpn::RemoteConfig c2; QString err2;
     CHECK(avpn::parseConfig(R"({"min_app_version":{"ios":"1.0.0"}})", c2, err2), "minimal parses");
     CHECK(c2.subscriptionRefreshIntervalS == 43200, "refresh default when absent");
     CHECK(c2.edges.isEmpty(), "edges empty when absent");
+    CHECK(c2.lists.isEmpty(), "lists empty when absent");
 
     // Битый JSON => false, valid=false.
     avpn::RemoteConfig c3; QString err3;
@@ -55,7 +58,8 @@ int main(int argc, char **argv)
         "features": {"support_chat": "yes"},
         "numbers": {"x": "nan"},
         "edges": [123, "https://ok"],
-        "probe_targets": [{"target":"t","host":123}]
+        "probe_targets": [{"target":"t","host":123}],
+        "lists": {"bench_http_ru": ["https://ya.ru", 123, true, null]}
     })";
     avpn::RemoteConfig c4; QString err4;
     CHECK(avpn::parseConfig(wrongTyped, c4, err4), "wrong-typed fields still parse");
@@ -63,6 +67,7 @@ int main(int argc, char **argv)
     CHECK(avpn::numberOr(c4, "x", 7) == 7, "string number ignored => default");
     CHECK(c4.edges.size() == 1 && c4.edges[0] == "https://ok", "non-string edge skipped");
     CHECK(c4.probeTargets.isEmpty(), "probe target with non-string host skipped");
+    CHECK(c4.lists.value("bench_http_ru") == QStringList{"https://ya.ru"}, "lists non-string entries dropped");
 
     // Идемпотентность: повторный parseConfig в ТОТ ЖЕ struct не оставляет стейл.
     avpn::RemoteConfig c5; QString err5;
@@ -71,6 +76,7 @@ int main(int argc, char **argv)
     CHECK(c5.edges.size() == 1 && c5.edges[0] == "https://only.one", "reuse: edges not accumulated");
     CHECK(c5.probeTargets.isEmpty(), "reuse: stale probe targets gone");
     CHECK(c5.features.isEmpty(), "reuse: stale features gone");
+    CHECK(c5.lists.isEmpty(), "reuse: stale lists gone");
     CHECK(avpn::featureFlag(c5, "support_chat", false) == false, "reuse: stale flag => default");
     // Битый JSON поверх валидного => struct очищен, не полу-валиден.
     CHECK(!avpn::parseConfig("{not json", c5, err5), "reuse: broken json => false");
