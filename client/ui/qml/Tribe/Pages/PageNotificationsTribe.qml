@@ -55,7 +55,8 @@ PageType {
             Layout.fillHeight: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
-            Layout.topMargin: Theme.space.sm
+            // воздух под шапкой — контент-инсет (скроллится со списком), не рамка // AVPN
+            topMargin: Theme.space.sm
             clip: true
             spacing: Theme.space.md
             boundsBehavior: Flickable.StopAtBounds
