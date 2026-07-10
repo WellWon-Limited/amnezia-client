@@ -6,6 +6,7 @@
 // неизвестные поля игнорируются, битый JSON не оставляет out полу-валидным.
 #pragma once
 
+#include <QAbstractSocket>
 #include <QByteArray>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -63,15 +64,26 @@ inline const QVector<QPair<QHostAddress, int>> &neverBypassSubnets()
     return kSubnets;
 }
 
-inline bool isNeverBypassAddr(const QHostAddress &netAddr)
+// Двусторонний overlap-тест: (netAddr,prefixLen) — сама запись сева, nb — never-bypass
+// диапазон. Проверяем ОБА направления, иначе запись-СУПЕРСЕТЬ never-диапазона (например
+// 100.0.0.0/8, которая накрывает CGNAT 100.64.0.0/10 целиком) проходит фильтр: её network-
+// адрес (100.0.0.0) сам по себе не лежит внутри более узкого never-диапазона, хотя
+// пересечение есть. Направление 1 (netAddr in nb) ловит запись-ПОДСЕТЬ never-диапазона;
+// направление 2 (nb.first in {netAddr,prefixLen}) ловит запись-СУПЕРСЕТЬ.
+inline bool isNeverBypassAddr(const QHostAddress &netAddr, int prefixLen)
 {
-    for (const auto &nb : neverBypassSubnets())
+    const QPair<QHostAddress, int> entry(netAddr, prefixLen);
+    for (const auto &nb : neverBypassSubnets()) {
         if (netAddr.isInSubnet(nb))
             return true;
+        if (nb.first.isInSubnet(entry))
+            return true;
+    }
     return false;
 }
 
-// Валидна ли отдельная CIDR-запись сева: парсится, prefixlen >= 8, вне never-bypass.
+// Валидна ли отдельная CIDR-запись сева: парсится, prefixlen >= 8, вне never-bypass
+// (в обе стороны — см. isNeverBypassAddr).
 inline bool isBypassCidrAllowed(const QString &cidr)
 {
     if (cidr.isEmpty())
@@ -81,7 +93,7 @@ inline bool isBypassCidrAllowed(const QString &cidr)
         return false; // невалидная запись (мусор, не CIDR)
     if (parsed.second < 8)
         return false; // подозрительно широкий диапазон — потенциальная дыра сева
-    if (isNeverBypassAddr(parsed.first))
+    if (isNeverBypassAddr(parsed.first, parsed.second))
         return false;
     return true;
 }
@@ -105,6 +117,37 @@ inline QStringList filterBypassCidrs(const QJsonArray &arr)
 // севе, а не переключиться на дырявый.
 constexpr int kMinValidRuCidrs = 6000;
 
+// Дефолты split_dns из контракта — per-field fallback (см. parseBypassLists): каждое из
+// трёх полей откатывается на дефолт НЕЗАВИСИМО, если пришло пустым/битым, а не всё разом.
+inline const QStringList &defaultSplitDnsSuffixes()
+{
+    static const QStringList kDefaults = {
+        QStringLiteral("ru"), QStringLiteral("su"), QStringLiteral("xn--p1ai"),
+        QStringLiteral("vk.com"), QStringLiteral("userapi.com"),
+        QStringLiteral("yandex.net"), QStringLiteral("yastatic.net"),
+    };
+    return kDefaults;
+}
+
+inline QString defaultSplitDnsServer()
+{
+    return QStringLiteral("77.88.8.8");
+}
+
+inline const QStringList &defaultMaskDns()
+{
+    static const QStringList kDefaults = { QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1") };
+    return kDefaults;
+}
+
+// Валиден ли IP-адрес (v4/v6) в виде строки — используется для split_dns.server/mask_dns.
+inline bool isValidIpAddress(const QString &s)
+{
+    if (s.isEmpty())
+        return false;
+    return QHostAddress(s).protocol() != QAbstractSocket::UnknownNetworkLayerProtocol;
+}
+
 inline bool parseBypassLists(const QByteArray &body, BypassLists &out, QString &err)
 {
     // Идемпотентность: сбрасываем out ПЕРЕД парсингом — переиспользуемый struct не должен
@@ -126,29 +169,38 @@ inline bool parseBypassLists(const QByteArray &body, BypassLists &out, QString &
     out.cnLiAutoCidrs = filterBypassCidrs(o.value(QStringLiteral("cn_liauto_cidrs")).toArray());
 
     const QJsonObject splitDns = o.value(QStringLiteral("split_dns")).toObject();
-    bool haveSplitDns = o.value(QStringLiteral("split_dns")).isObject();
+    const bool haveSplitDns = o.value(QStringLiteral("split_dns")).isObject();
+
+    QStringList suffixesIn;
+    QString serverIn;
+    QStringList maskDnsIn;
     if (haveSplitDns) {
         const QJsonArray suffixes = splitDns.value(QStringLiteral("suffixes")).toArray();
         for (const QJsonValue &v : suffixes)
-            if (v.isString())
-                out.splitDnsSuffixes << v.toString();
-        out.splitDnsServer = splitDns.value(QStringLiteral("server")).toString();
+            if (v.isString() && !v.toString().isEmpty())
+                suffixesIn << v.toString();
+        serverIn = splitDns.value(QStringLiteral("server")).toString();
         const QJsonArray maskDns = splitDns.value(QStringLiteral("mask_dns")).toArray();
         for (const QJsonValue &v : maskDns)
             if (v.isString())
-                out.maskDns << v.toString();
+                maskDnsIn << v.toString();
     }
-    // Дефолты — если split_dns целиком отсутствует ИЛИ пришёл битым (сервер выдал
-    // объект без ожидаемых полей): без этого клиент останется без split-DNS вообще.
-    if (out.splitDnsSuffixes.isEmpty() || out.splitDnsServer.isEmpty() || out.maskDns.isEmpty()) {
-        out.splitDnsSuffixes = QStringList{
-            QStringLiteral("ru"), QStringLiteral("su"), QStringLiteral("xn--p1ai"),
-            QStringLiteral("vk.com"), QStringLiteral("userapi.com"),
-            QStringLiteral("yandex.net"), QStringLiteral("yastatic.net"),
-        };
-        out.splitDnsServer = QStringLiteral("77.88.8.8");
-        out.maskDns = QStringList{ QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1") };
+
+    // Per-field откат на дефолт: пустота/битость ОДНОГО поля не должна гасить остальные
+    // два (иначе валидные свежие suffixes/mask_dns пропадают из-за, например, одного
+    // битого server). Каждое поле валидируется и откатывается независимо.
+    out.splitDnsSuffixes = suffixesIn.isEmpty() ? defaultSplitDnsSuffixes() : suffixesIn;
+
+    out.splitDnsServer = isValidIpAddress(serverIn) ? serverIn : defaultSplitDnsServer();
+
+    bool maskDnsAllValid = !maskDnsIn.isEmpty();
+    for (const QString &m : maskDnsIn) {
+        if (!isValidIpAddress(m)) {
+            maskDnsAllValid = false;
+            break;
+        }
     }
+    out.maskDns = maskDnsAllValid ? maskDnsIn : defaultMaskDns();
 
     if (out.ruCidrs.size() < kMinValidRuCidrs || out.version <= 0) {
         out.valid = false;
