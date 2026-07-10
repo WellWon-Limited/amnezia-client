@@ -2482,12 +2482,31 @@ void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStor
 void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
 {
     QString err;
-    if (!m_engine.loadSubscription(body, err)) {
+    const bool parseOk = m_engine.loadSubscription(body, err);
+    // AVPN (баг 2026-07-10 «начисленный триал не подхватился без перезахода»): исход 200-тела
+    // решает чистый decideBootstrapBody (BootstrapRetry.h, покрыт bootstrap_retry_check). Бэк для
+    // устройства без подписки отдаёт 200 со status=degraded и nodes:[] — раньше такое тело
+    // ЗАЩЁЛКИВАЛО m_bootstrapped=true и навсегда глушило ретрай (kickBootstrap — no-op по защёлке,
+    // refreshSubscription пул не наполняет) → начисленная позже подписка жила только после
+    // рестарта процесса. Теперь пустой пул = «подписки ещё нет»: стейт применяем (degraded —
+    // авторитетная правда, m_subMissingSeen поднимает CTA в UI), но цикл продолжаем — начисление
+    // подхватится ближайшим ретраем (≤60с) или kickBootstrap (foreground/сеть).
+    switch (avpn::decideBootstrapBody(parseOk, m_engine.hasSubscription())) {
+    case avpn::BootstrapBodyAction::RetryTransient:
         onBootstrapAttemptFailed(); // битое тело не затирает LKG-пул и не останавливает ретрай
         return;
+    case avpn::BootstrapBodyAction::KeepPollingEmptyPool:
+        Enrollment::saveLkgSubscription(body); // валидное (пусть и пустое) тело — честный LKG-стейт
+        m_subMissingSeen = true;
+        emit changed(); // daysLeft/traffic/subMissing обновятся; защёлку НЕ ставим, таймер жив
+        onBootstrapAttemptFailed();
+        return;
+    case avpn::BootstrapBodyAction::LatchSuccess:
+        break;
     }
     Enrollment::saveLkgSubscription(body); // AVPN (LKG): персистим ТОЛЬКО валидное тело
     if (m_transferredAway) { m_transferredAway = false; } // подписка снова валидна (новый ключ/энролл)
+    m_subMissingSeen = false;
     m_bootstrapped = true;
     m_bootstrapInFlight = false;
     m_bootstrapRetries = 0;

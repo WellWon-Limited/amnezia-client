@@ -76,7 +76,12 @@ PageType {
     // ведёт себя как при закончившейся подписке: золотая CTA вместо ротации (числа бейджа могут
     // быть стейл из LKG — им не верим, 410 терминален).
     readonly property bool transferredAwayNow: root.hasEngine && TribeEngine.transferredAway === true
+    // AVPN (баг 2026-07-10): subMissing — бэк авторитетно ответил «подписки нет» (200, nodes:[]).
+    // Без него устройство с expires_at:null (daysLeft = -1) не проходило гейт daysLeft >= 0 и
+    // вместо CTA видело вечную «загрузку» (ни серверов, ни оффера) до перезахода.
+    readonly property bool subMissingNow: root.hasEngine && TribeEngine.subMissing === true
     readonly property bool subExpired: root.hasEngine && (root.transferredAwayNow
+                              || root.subMissingNow
                               || (TribeEngine.daysLeft >= 0 && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
                               || (root.trafficLimitB > 0 && root.trafficUsedB >= root.trafficLimitB))))
