@@ -931,7 +931,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+103"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+104"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1367,7 +1367,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+95"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+121"/>
         <source>Выбор сервера</source>
         <translation>Choose server</translation>
     </message>
@@ -1382,17 +1382,17 @@ A gift for every friend!</translation>
         <translation>Search country</translation>
     </message>
     <message>
-        <location line="+63"/>
+        <location line="+64"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (fastest)</translation>
     </message>
     <message>
-        <location line="+7"/>
-        <source>Сервис сам подберёт быстрейший узел</source>
-        <translation>The service picks the fastest node for you</translation>
+        <location line="+10"/>
+        <source>Сервис подберёт быстрейший узел</source>
+        <translation>The service picks the fastest node</translation>
     </message>
     <message>
-        <location line="+43"/>
+        <location line="+45"/>
         <source>РЕЗУЛЬТАТЫ</source>
         <translation>RESULTS</translation>
     </message>
@@ -1402,12 +1402,12 @@ A gift for every friend!</translation>
         <translation>ALL LOCATIONS</translation>
     </message>
     <message>
-        <location line="+56"/>
+        <location line="+62"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+30"/>
+        <location line="+33"/>
         <source>Локации загружаются…</source>
         <translation>Loading locations…</translation>
     </message>

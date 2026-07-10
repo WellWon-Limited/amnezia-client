@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
@@ -31,7 +33,21 @@ PageType {
     // Группировка alive-нод по странам + фильтр + сортировка «быстрые СВЕРХУ» (страница читается
     // сверху вниз — осознанная инверсия шторочного rankFastestAtBottom). Лучшая нода страны:
     // min measuredRttMs; без замера — max health, потом max weight.
-    readonly property var countries: {
+    // МЕМОИЗАЦИЯ (ревью 2026-07-10): движок эмитит общий changed() часто (тик ~4с, RTT-ответы по
+    // одной ноде), а реассайн model новым JS-массивом = полный reset ListView (пересоздание
+    // делегатов, сброс скролла). Пересобираем массив ТОЛЬКО при реальном изменении содержимого.
+    property var countries: []
+    property string countriesKey: ""
+
+    function rebuildCountries() {
+        const next = computeCountries()
+        const key = JSON.stringify(next)
+        if (key === root.countriesKey) return
+        root.countriesKey = key
+        root.countries = next
+    }
+
+    function computeCountries() {
         const byCc = {}
         for (let i = 0; i < pool.length; ++i) {
             const n = pool[i]
@@ -75,10 +91,19 @@ PageType {
         return out
     }
 
+    onQueryChanged: rebuildCountries()
+    Connections {
+        target: root.hasEngine ? TribeEngine : null
+        function onChanged() { root.rebuildCountries() }
+    }
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
     // Замер RTT всех нод при открытии (async ICMP; при connected — no-op, показываем кэш).
-    Component.onCompleted: if (hasEngine) TribeEngine.probeNodeRtt()
+    Component.onCompleted: {
+        rebuildCountries()
+        if (hasEngine) TribeEngine.probeNodeRtt()
+    }
     // refreshPool — СИНХРОННЫЙ nested-loop → ТОЛЬКО отложенно, не из кадра показа (как в шторке).
     Timer {
         interval: 350; running: root.hasEngine; repeat: false
@@ -177,14 +202,20 @@ PageType {
                     Layout.fillWidth: true
                     spacing: 2
                     Text {
+                        Layout.fillWidth: true
                         text: qsTr("Авто (быстрейший)")
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
                         color: Theme.color.text1
                         font.family: Theme.font.display
                         font.pixelSize: Theme.font.bodyM
                         font.weight: Theme.font.wBold
                     }
                     Text {
-                        text: qsTr("Сервис сам подберёт быстрейший узел")
+                        Layout.fillWidth: true
+                        text: qsTr("Сервис подберёт быстрейший узел")
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
                         color: Theme.color.text2
                         font.family: Theme.font.body
                         font.pixelSize: Theme.font.caption
@@ -235,86 +266,96 @@ PageType {
             font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
         }
 
-        // ── список стран ──
-        ListView {
-            id: list
+        // ── список стран (обёртка Item: empty-state НЕ ребёнок ListView — дети Flickable
+        // репарентятся в contentItem, чья высота при пустой модели 0 → centerIn ненадёжен) ──
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
-            clip: true
-            spacing: Theme.space.sm
-            model: root.countries
-            boundsBehavior: Flickable.StopAtBounds
 
-            delegate: Rectangle {
-                id: row
-                required property var modelData
-                width: ListView.view.width
-                implicitHeight: 62
-                radius: Theme.radius.lg
-                color: modelData.isCurrent ? Theme.color.chipSelected : Theme.color.surface1
-                border.width: 1
-                border.color: modelData.isCurrent ? Theme.color.accent : Theme.color.border
-                Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+            ListView {
+                id: list
+                anchors.fill: parent
+                clip: true
+                spacing: Theme.space.sm
+                model: root.countries
+                boundsBehavior: Flickable.StopAtBounds
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Theme.space.md
-                    anchors.rightMargin: Theme.space.lg
-                    spacing: Theme.space.md
+                delegate: Rectangle {
+                    id: row
+                    required property var modelData
+                    width: ListView.view.width
+                    implicitHeight: 62
+                    radius: Theme.radius.lg
+                    color: row.modelData.isCurrent ? Theme.color.chipSelected : Theme.color.surface1
+                    border.width: 1
+                    border.color: row.modelData.isCurrent ? Theme.color.accent : Theme.color.border
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+                    Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
 
-                    TribeFlag {
-                        Layout.preferredWidth: 38
-                        Layout.preferredHeight: 38
-                        code: row.modelData.cc
-                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.space.md
+                        anchors.rightMargin: Theme.space.lg
+                        spacing: Theme.space.md
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-                        Text {
+                        TribeFlag {
+                            Layout.preferredWidth: 38
+                            Layout.preferredHeight: 38
+                            code: row.modelData.cc
+                        }
+
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            text: row.modelData.name
-                            elide: Text.ElideRight
-                            color: Theme.color.text1
-                            font.family: Theme.font.display
-                            font.pixelSize: Theme.font.bodyS + 1
-                            font.weight: Theme.font.wBold
+                            spacing: 2
+                            Text {
+                                Layout.fillWidth: true
+                                text: row.modelData.name
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                color: Theme.color.text1
+                                font.family: Theme.font.display
+                                font.pixelSize: Theme.font.bodyS + 1
+                                font.weight: Theme.font.wBold
+                            }
+                            Text {
+                                text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                textFormat: Text.PlainText
+                                color: Theme.color.text3
+                                font.family: Theme.font.mono
+                                font.pixelSize: Theme.font.caption
+                            }
                         }
-                        Text {
-                            text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
-                            color: Theme.color.text3
-                            font.family: Theme.font.mono
-                            font.pixelSize: Theme.font.caption
+
+                        LoadBars {
+                            // текущая страна при коннекте — живой замер через туннель
+                            level: (row.modelData.isCurrent && root.hasEngine
+                                    && TribeEngine.state === "connected")
+                                   ? TribeEngine.liveBars : row.modelData.bars
                         }
                     }
 
-                    LoadBars {
-                        // текущая страна при коннекте — живой замер через туннель
-                        level: (row.modelData.isCurrent && root.hasEngine
-                                && TribeEngine.state === "connected")
-                               ? TribeEngine.liveBars : row.modelData.bars
-                    }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        // уже выбрана вручную — no-op (не дёргаем реконнект)
-                        if (row.modelData.isCurrent && !root.autoMode) { root.back(); return }
-                        root.pickNode(row.modelData.nodeId)
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            // уже выбрана вручную — no-op (не дёргаем реконнект)
+                            if (row.modelData.isCurrent && !root.autoMode) { root.back(); return }
+                            root.pickNode(row.modelData.nodeId)
+                        }
                     }
                 }
             }
 
-            // пустые состояния: пул не загружен / поиск без результатов
+            // пустые состояния: пул не загружен / поиск без результатов (сиблинг ListView —
+            // центрируется по вьюпорту, не по нулевому contentItem)
             Text {
                 anchors.centerIn: parent
                 visible: list.count === 0
                 text: root.pool.length === 0 ? qsTr("Локации загружаются…")
                                              : qsTr("Ничего не найдено")
+                textFormat: Text.PlainText
                 color: Theme.color.text3
                 font.family: Theme.font.body
                 font.pixelSize: Theme.font.bodyS

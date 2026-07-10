@@ -931,7 +931,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+103"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+104"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1367,7 +1367,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+95"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+121"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1382,17 +1382,17 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Buscar país</translation>
     </message>
     <message>
-        <location line="+63"/>
+        <location line="+64"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (más rápido)</translation>
     </message>
     <message>
-        <location line="+7"/>
-        <source>Сервис сам подберёт быстрейший узел</source>
-        <translation>El servicio elige el nodo más rápido por ti</translation>
+        <location line="+10"/>
+        <source>Сервис подберёт быстрейший узел</source>
+        <translation>El servicio elige el nodo más rápido</translation>
     </message>
     <message>
-        <location line="+43"/>
+        <location line="+45"/>
         <source>РЕЗУЛЬТАТЫ</source>
         <translation>RESULTADOS</translation>
     </message>
@@ -1402,12 +1402,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>TODAS LAS UBICACIONES</translation>
     </message>
     <message>
-        <location line="+56"/>
+        <location line="+62"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+30"/>
+        <location line="+33"/>
         <source>Локации загружаются…</source>
         <translation>Cargando ubicaciones…</translation>
     </message>
