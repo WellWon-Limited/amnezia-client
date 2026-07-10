@@ -8,6 +8,7 @@
 
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
+#include "TuningStore.h"                // AVPN backend-first (T20): server-tunable handshake-пороги для iOS NE
 
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
 // уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
@@ -162,6 +163,11 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
                        bl.valid ? bl.splitDnsServer : QStringLiteral("77.88.8.8"));
         }
     }
+    // AVPN backend-first: пороги «нода мертва» для iOS NE (numbers.*; фолбэк = константы NE).
+    cfg.insert(QStringLiteral("awg_handshake_timeout_ms"),
+               int(avpn::TuningStore::numberOr(QStringLiteral("handshake_timeout_ms"), 12000)));
+    cfg.insert(QStringLiteral("awg_handshake_max_timeouts"),
+               int(avpn::TuningStore::numberOr(QStringLiteral("handshake_max_timeouts"), 3)));
     if (splitDns) {
         // AVPN split-DNS: RU-суффиксы (TLD рунета + RU-сервисы вне .ru) → Яндекс мимо туннеля.
         // Прокид: localsocketcontroller → демон → /etc/resolver/*. Яндекс отвечает ТОЛЬКО
