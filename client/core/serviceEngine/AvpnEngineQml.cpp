@@ -394,8 +394,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             });
 
     // AVPN server-driven АнтиВПН (Task 10): сервис серверных bypass-списков (/v1/bypass-lists —
-    // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/m_baseUrl/
-    // kConfigPubKeyHex, что у ConfigService — dev-эндпоинт ⇒ dev-ключ, prod ⇒ prod-ключ.
+    // ru_cidrs/bypass_extra/cn_liauto_cidrs/split_dns, подпись+LKG). Тот же m_nam/kConfigPubKeyHex,
+    // что у ConfigService — dev-эндпоинт ⇒ dev-ключ, prod ⇒ prod-ключ. baseUrl берём из
+    // m_configSvc->activeBaseUrl() (НЕ из m_baseUrl напрямую): ConfigService уже создан и
+    // поднял персистнутый edge на конструкции; activeEdgeChanged эмитится только при СМЕНЕ
+    // edge, а не на холодном старте — если бы тут стоял m_baseUrl (ещё primary), а прод уже
+    // персистнул рабочий edge с прошлой сессии, bypass-фетч бил бы в заблокированный primary
+    // до первой смены edge (которая при живом primary может не наступить вовсе).
     // Kill-switch remote_bypass_lists реализован ВНУТРИ сервиса (onRemoteConfigApplied: при
     // флаге=false → пустой invalid снапшот в BypassListStore + фетч на паузу) ⇒ точки чтения
     // (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
@@ -406,7 +411,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // BypassListService вместо актуального флага. Реордер закрывает это окно: оба connect'а
     // гарантированно ловят даже синхронный первый configApplied. m_bypassListSvc->start()
     // (loadLkg + fetch) остаётся ПОСЛЕ m_configSvc->start() — сам старт не участвует в гонке.
-    m_bypassListSvc = new avpn::BypassListService(m_nam, m_baseUrl, kConfigPubKeyHex, this);
+    m_bypassListSvc = new avpn::BypassListService(m_nam, m_configSvc->activeBaseUrl(), kConfigPubKeyHex, this);
     connect(m_configSvc, &avpn::ConfigService::configApplied,
             m_bypassListSvc, &avpn::BypassListService::onRemoteConfigApplied);
     connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged,
