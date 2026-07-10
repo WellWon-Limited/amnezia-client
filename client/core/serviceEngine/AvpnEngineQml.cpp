@@ -18,6 +18,9 @@
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
+#ifdef Q_OS_IOS
+#include "platforms/ios/AvpnDiagnostics.h" // AVPN backend-first (2026-07-10): crash-diag следует за edge-walk базой
+#endif
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
@@ -406,6 +409,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
                 rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
                 emit apiBaseChanged(base);     // AVPN backend-first: сателлиты (чат поддержки) следуют за edge
+#ifdef Q_OS_IOS
+                AvpnDiagnostics_setBase(m_baseUrl.toUtf8().constData());
+#endif
                 emit changed();
             });
 
@@ -610,7 +616,7 @@ QString AvpnEngineQml::storeUrl() const
         QStringLiteral("https://play.google.com/store/apps/details?id=com.tribevpn.client"));
 #else
     return m_remoteCfg.urls.value(QStringLiteral("store_ios"),
-        QStringLiteral("https://apps.apple.com/app/id0000000000"));
+        QStringLiteral("https://apps.apple.com/app/id6778394015"));
 #endif
 }
 
