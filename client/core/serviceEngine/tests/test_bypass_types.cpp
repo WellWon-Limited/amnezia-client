@@ -229,6 +229,44 @@ int main(int argc, char **argv)
               "(g3) fresh mask_dns kept (independent of server fallback)");
     }
 
+    // (г4) M-1: суффиксы с запятой/пробелом отбраковываются (в DNS-суффиксе их не бывает;
+    // downstream join(',') для dnsFwd иначе расщепил бы "a,b" на два суффикса молча).
+    // Остаются только валидные "ru"/"vk.com".
+    {
+        avpn::BypassLists out;
+        QString err;
+        QJsonObject splitDns;
+        splitDns[QStringLiteral("suffixes")] = QJsonArray{ QStringLiteral("ru"), QStringLiteral("a,b"),
+            QStringLiteral("c d"), QStringLiteral("vk.com") };
+        splitDns[QStringLiteral("server")] = QStringLiteral("77.88.8.8");
+        splitDns[QStringLiteral("mask_dns")] = QJsonArray{ QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1") };
+        const QByteArray body = makeBodyWithSplitDns(11, 6500, splitDns);
+        CHECK(avpn::parseBypassLists(body, out, err), "(g4) body parses");
+        CHECK(out.splitDnsSuffixes.size() == 2
+              && out.splitDnsSuffixes.contains(QStringLiteral("ru"))
+              && out.splitDnsSuffixes.contains(QStringLiteral("vk.com")),
+              "(g4) comma/space suffixes rejected, valid ones kept");
+        CHECK(!out.splitDnsSuffixes.contains(QStringLiteral("a,b"))
+              && !out.splitDnsSuffixes.contains(QStringLiteral("c d")),
+              "(g4) invalid suffixes not present");
+    }
+
+    // (г5) M-1: ВСЕ suffixes невалидны (запятая/пробел) → after-filter пусто → per-field
+    // дефолт (та же логика, что для пустого входного массива).
+    {
+        avpn::BypassLists out;
+        QString err;
+        QJsonObject splitDns;
+        splitDns[QStringLiteral("suffixes")] = QJsonArray{ QStringLiteral("a,b"), QStringLiteral("c d") };
+        splitDns[QStringLiteral("server")] = QStringLiteral("77.88.8.8");
+        splitDns[QStringLiteral("mask_dns")] = QJsonArray{ QStringLiteral("77.88.8.8"), QStringLiteral("77.88.8.1") };
+        const QByteArray body = makeBodyWithSplitDns(12, 6500, splitDns);
+        CHECK(avpn::parseBypassLists(body, out, err), "(g5) body parses");
+        CHECK(out.splitDnsSuffixes.size() == 7
+              && out.splitDnsSuffixes.contains(QStringLiteral("xn--p1ai")),
+              "(g5) all-invalid suffixes => per-field default");
+    }
+
     // (д) битый JSON → !valid, out чистый (сброшен), err непустой.
     {
         avpn::BypassLists out;
