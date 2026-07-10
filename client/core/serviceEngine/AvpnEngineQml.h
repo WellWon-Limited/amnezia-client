@@ -603,6 +603,10 @@ private:
     QNetworkAccessManager       *m_nam = nullptr;
     VpnConnection               *m_conn = nullptr;
     QTimer                       m_healthTimer;
+    // AVPN backend-first (H-3 бэклога): фоновый LKG-рефреш подписки по серверному интервалу
+    // (numbers.subscription_refresh_interval_s из /v1/config). Периодический, не singleShot;
+    // старт — из configApplied (не в конструкторе, интервал ещё неизвестен).
+    QTimer                       m_subRefreshTimer;
     // AVPN (реальные палочки): app-layer RTT-проба через туннель + сглаживание в 0..5 баров.
     QualityProbe                *m_probe = nullptr;   // создаётся в конструкторе (владелец — this)
     SignalQuality                m_signal;            // EWMA+гистерезис (чистая логика, протестирована)
