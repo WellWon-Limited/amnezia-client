@@ -107,6 +107,7 @@
         <file>Tribe/Pages/PageNotificationsTribe.qml</file>
         <file>Tribe/Pages/PageAdminTribe.qml</file>
         <file>Tribe/Pages/PageLegalTribe.qml</file>
+        <file>Tribe/Pages/PageServersTribe.qml</file>
         <!-- AVPN in-app Legal: fallback-снапшоты юр-документов (генерятся в tribe-backend
              scripts/build_legal_md.py; свежий текст приложение качает с tribevpn.com/legal/*.md) -->
         <file>Tribe/legal/privacy.ru.md</file>
