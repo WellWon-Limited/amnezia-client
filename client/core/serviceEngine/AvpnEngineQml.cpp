@@ -3884,8 +3884,8 @@ void AvpnEngineQml::ackAnnouncement(int id, const QString &event, const QString 
 
 // AVPN (оплата): POST /v1/cabinet/web-link (Bearer, тело пустое) → { url: "…?wl=<token>", expires_in }.
 // Тот же async-паттерн, что refreshReferral (armTimeout, без вложенного QEventLoop). Сигнал
-// cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка + device_uuid (кабинет откроет шит
-// тарифов на этом устройстве), провал → fallback https://tribevpn.com/account + device_uuid.
+// cabinetLinkReady эмитится на ЛЮБОМ исходе: успех → url бэка как есть (устройство вшито в wl-токен,
+// бэк PR #257), провал → fallback https://tribevpn.com/account. device_uuid в URL не дописываем.
 void AvpnEngineQml::requestCabinetLink(const QString &intent)
 {
     // intent → query-параметр (реш. 2026-07-03): "renew" (золотая CTA) — кабинет сразу выдвигает шит
@@ -3905,12 +3905,10 @@ void AvpnEngineQml::requestCabinetLink(const QString &intent)
             add(QStringLiteral("lang=") + lang);
         return out;
     };
-    // ПРИВАТНОСТЬ (аудит 2026-07-09): fallback-URL (без wl) идёт БЕЗ device_uuid — без wl
-    // кабинет не аутентифицирует и checkout невозможен, а стабильный install-id в query
-    // засветился бы в access-логах зря. На wl-URL device_uuid пока остаётся (функционален:
-    // purchase-to-device; кабинет тут же вычищает его из адресной строки replaceState'ом).
-    // План: бэк вошьёт привязку устройства в сам wl → параметр уйдёт совсем
-    // (docs/amnezia-fork/WEBLINK-DEVICE-BINDING-HANDOFF.md).
+    // ПРИВАТНОСТЬ: URL кабинета идёт БЕЗ device_uuid — устройство вшито в сам wl-токен
+    // (бэк PR #257: кабинет берёт цель авто-продления из wl-сессии), а fallback без wl
+    // кабинет всё равно не аутентифицирует. Стабильный install-id в query засветился бы
+    // в access-логах зря (docs/amnezia-fork/WEBLINK-DEVICE-BINDING-HANDOFF.md).
     const QString fallback = withIntent(QStringLiteral("https://tribevpn.com/account"));
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
@@ -3932,7 +3930,7 @@ void AvpnEngineQml::requestCabinetLink(const QString &intent)
             WebLinkResponse wl;
             QString err;
             if (Enrollment::parseWebLinkResponse(reply->readAll(), wl, err))
-                url = withIntent(Enrollment::appendDeviceUuid(wl.url, localDeviceId()));
+                url = withIntent(wl.url);
         }
         emit cabinetLinkReady(url);
     });
