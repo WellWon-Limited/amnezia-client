@@ -399,16 +399,10 @@ PageType {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.topMargin: Theme.space.sm
                     spacing: Theme.space.sm + 1
-                    BrandTile {
-                        mark: "WB"; markSize: Theme.font.bodyS
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: "#CB11AB" }
-                            GradientStop { position: 1.0; color: "#7A0FB0" }
-                        }
-                    }
-                    BrandTile { color: "#005BFF"; mark: "O"; markSize: Theme.font.h3 + 2 }
-                    BrandTile { color: "#FF6600"; glyph: "../images/brand-kinopoisk.svg" }
-                    BrandTile { color: "#FFDD2D"; mark: "Т"; markColor: "#0A0A0A"; markSize: Theme.font.h3 + 2 }
+                    BrandTile { color: "transparent"; glyph: "../images/brand-wb.png"; glyphRatio: 1.0 }
+                    BrandTile { color: "transparent"; glyph: "../images/brand-ozon.png"; glyphRatio: 1.0 }
+                    BrandTile { color: "transparent"; glyph: "../images/brand-kinopoisk.png"; glyphRatio: 1.0 }
+                    BrandTile { color: "transparent"; glyph: "../images/brand-tbank.png"; glyphRatio: 1.0 }
                     BrandTile { color: "#FFFFFF"; glyph: "../images/brand-gosuslugi.png"; glyphRatio: 1.0; radius: Theme.radius.md }
                 }
 

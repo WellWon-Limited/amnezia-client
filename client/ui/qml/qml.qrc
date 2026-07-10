@@ -122,7 +122,10 @@
         <file>Tribe/images/brand-youtube.svg</file>
         <file>Tribe/images/brand-gemini.svg</file>
         <file>Tribe/images/brand-claude.svg</file>
-        <file>Tribe/images/brand-kinopoisk.svg</file>
+        <file>Tribe/images/brand-kinopoisk.png</file>
+        <file>Tribe/images/brand-ozon.png</file>
+        <file>Tribe/images/brand-tbank.png</file>
+        <file>Tribe/images/brand-wb.png</file>
         <file>Tribe/images/brand-gosuslugi.png</file>
         <file>Pages2/PageProtocolAwgSettings.qml</file>
         <file>Pages2/PageProtocolOpenVpnSettings.qml</file>
