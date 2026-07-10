@@ -17,6 +17,11 @@ extern "C" {
 // Подписаться на MXMetricManager (идемпотентно, dispatch_once). No-op на iOS < 14 и на macOS.
 void AvpnDiagnostics_install(void);
 
+// AVPN backend-first (2026-07-10): база control plane «переезжает» вместе с edge-walk движка —
+// вызывается из AvpnEngineQml (activeEdgeChanged) при каждом переключении на живой вход.
+// Пишет NSUserDefaults-ключ AvpnDiagBase; avpnDiagPost строит URL из него (фолбэк — вкомпиленный дефолт).
+void AvpnDiagnostics_setBase(const char *baseUrl);
+
 #ifdef __cplusplus
 }
 #endif
