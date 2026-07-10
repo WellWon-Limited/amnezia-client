@@ -83,6 +83,28 @@ PageType {
         function onBack() { root.goAvpnTab(0) }
         // AVPN: админ-вход (Dev.adminMode) → просмотр пула нод (#5)
         function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
+        // AVPN (server picker): страница выбора сервера (замена шторки TribeNodeSheet)
+        function onRequestServerPicker() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageServersTribe.qml") }
+        // Тап по стране: СНАЧАЛА уход на Connect, ПОТОМ движок (CONNECT-INVARIANTS §5).
+        // pinAndReconnect сам решает: онлайн → stop→start (путь rotateNext); офлайн → только пин;
+        // kill-switch picker_instant_reconnect=false → старая семантика switchToNode.
+        function onPickNode(nodeId) {
+            root.goAvpnTab(0)
+            if (typeof TribeEngine !== "undefined") TribeEngine.pinAndReconnect(nodeId)
+        }
+        // «Авто» со страницы выбора: онлайн + флаг → reprobe (перевыбор + реконнект);
+        // иначе selectAuto (пин снят, намерение OFF — §4)
+        function onPickAuto() {
+            root.goAvpnTab(0)
+            if (typeof TribeEngine === "undefined") return
+            const st = TribeEngine.state
+            const online = (st === "connected" || st === "connecting"
+                            || st === "switching" || st === "selecting")
+            if (online && TribeEngine.featureEnabled("picker_instant_reconnect", true))
+                TribeEngine.reprobe()
+            else
+                TribeEngine.selectAuto()
+        }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN in-app Legal: Privacy/Terms внутри приложения (кэш+fallback, без выброса в браузер)
