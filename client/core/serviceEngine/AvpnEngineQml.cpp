@@ -254,6 +254,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
 
+    // AVPN backend-first: фоновый LKG-рефреш подписки (H-3 бэклога). Коннект здесь, старт —
+    // из configApplied (интервал приходит с сервера; до первого applied — не тикает).
+    connect(&m_subRefreshTimer, &QTimer::timeout, this, &AvpnEngineQml::refreshSubscription);
+
     // AVPN (реальные палочки): app-layer RTT-проба ЧЕРЕЗ туннель. AWG UDP-only ⇒ ICMP/TCP-пинг до
     // эндпоинта пуст; реальный RTT даёт крошечный HTTPS-запрос к generate_204 через поднятый full-tunnel.
     // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
@@ -371,6 +375,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 // интервалом, ничего не останавливаем/не стартуем).
                 m_healthTimer.setInterval(
                     int(avpn::TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)));
+                // AVPN backend-first: фоновый LKG-рефреш подписки по серверному интервалу
+                // (H-3 бэклога). qBound — защита от абсурда: 10 мин..7 суток.
+                const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
+                m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
                 // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
                 // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
