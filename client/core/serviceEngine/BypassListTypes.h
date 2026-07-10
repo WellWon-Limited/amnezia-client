@@ -176,9 +176,14 @@ inline bool parseBypassLists(const QByteArray &body, BypassLists &out, QString &
     QStringList maskDnsIn;
     if (haveSplitDns) {
         const QJsonArray suffixes = splitDns.value(QStringLiteral("suffixes")).toArray();
-        for (const QJsonValue &v : suffixes)
-            if (v.isString() && !v.toString().isEmpty())
+        for (const QJsonValue &v : suffixes) {
+            // M-1: суффикс с запятой/пробелом невалиден — в DNS-суффиксе их не бывает, а
+            // downstream join(',') (dnsFwd) расщепил бы "a,b" на два суффикса молча.
+            if (v.isString() && !v.toString().isEmpty()
+                && !v.toString().contains(QLatin1Char(','))
+                && !v.toString().contains(QLatin1Char(' ')))
                 suffixesIn << v.toString();
+        }
         serverIn = splitDns.value(QStringLiteral("server")).toString();
         const QJsonArray maskDns = splitDns.value(QStringLiteral("mask_dns")).toArray();
         for (const QJsonValue &v : maskDns)
