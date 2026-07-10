@@ -71,6 +71,11 @@ list(APPEND HEADERS
     ${AVPN_SE}/AvpnDeepLinkBridge.h
     ${AVPN_SE}/AvpnIntentBridge.h
     ${AVPN_SE}/AvpnShareBridge.h
+    ${AVPN_SE}/ConfigTypes.h
+    ${AVPN_SE}/Ed25519Verify.h
+    ${AVPN_SE}/ConfigStore.h
+    ${AVPN_SE}/EdgeWalk.h
+    ${AVPN_SE}/ConfigService.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -93,6 +98,8 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/AvpnDeepLinkBridge.cpp
     ${AVPN_SE}/AvpnIntentBridge.cpp
     ${AVPN_SE}/AvpnShareBridge.cpp
+    ${AVPN_SE}/Ed25519Verify.cpp
+    ${AVPN_SE}/ConfigService.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
