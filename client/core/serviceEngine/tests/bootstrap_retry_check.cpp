@@ -62,6 +62,23 @@ int main()
     CHECK(nextBootstrapDelayMs(3) == 16000, "fast phase unaffected: attempt 3 -> 16s");
     CHECK(nextBootstrapDelayMs(4) == 30000, "fast phase unaffected: attempt 4 -> 30s");
 
+    // Решатель исхода 200-тела bootstrap (баг 2026-07-10 «начисленный триал не подхватился без
+    // перезахода»): бэк для устройства без подписки отдаёт 200 OK со status=degraded и nodes:[] —
+    // это НЕ успех bootstrap. Защёлка m_bootstrapped=true на пустом пуле навсегда глушила ретрай
+    // (kickBootstrap/refreshSubscription пул не наполняют) — лечил только рестарт процесса.
+    {
+        using avpn::BootstrapBodyAction;
+        using avpn::decideBootstrapBody;
+        CHECK(decideBootstrapBody(false, false) == BootstrapBodyAction::RetryTransient,
+              "битое тело -> транзиентный ретрай (LKG не трогаем)");
+        CHECK(decideBootstrapBody(false, true) == BootstrapBodyAction::RetryTransient,
+              "parseOk=false доминирует над пулом -> транзиентный ретрай");
+        CHECK(decideBootstrapBody(true, false) == BootstrapBodyAction::KeepPollingEmptyPool,
+              "200 c nodes:[] -> НЕ защёлкивать успех, продолжать вечный цикл");
+        CHECK(decideBootstrapBody(true, true) == BootstrapBodyAction::LatchSuccess,
+              "200 с непустым пулом -> защёлка успеха (дедуп цепочки)");
+    }
+
     if (failures) {
         std::printf(">>> bootstrap_retry_check: %d FAILURE(S)\n", failures);
         return 1;

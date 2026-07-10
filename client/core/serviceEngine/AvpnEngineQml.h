@@ -54,6 +54,11 @@ class AvpnEngineQml : public QObject {
     // подписка УЕХАЛА на другое устройство. Терминально до ре-энролла/нового ключа; self-heal
     // НЕ ре-энроллит (Enrollment::decideAuthRecovery). UI показывает «Подписка перенесена».
     Q_PROPERTY(bool transferredAway READ transferredAway NOTIFY changed)
+    // AVPN (баг 2026-07-10 «вечная загрузка без подписки»): бэк авторитетно ответил 200 со
+    // status=degraded и nodes:[] — подписки у устройства НЕТ (не «ещё грузится»). UI по этому
+    // флагу показывает золотую CTA вместо бесконечного «Локации загружаются…». Сбрасывается,
+    // как только пул наполнился (любым путём: ретрай bootstrap / startFlow / refreshPool).
+    Q_PROPERTY(bool subMissing READ subMissing NOTIFY changed)
     // AVPN: JWT подписки — для авторизованного редиректа в кабинет (кнопка «Обновить ключ»).
     Q_PROPERTY(QString authToken READ authToken NOTIFY changed)
     // AVPN: реальные серверы (вместо хардкода). currentNode = {region,endpoint,ip,connected,hasNode};
@@ -163,6 +168,10 @@ public:
     qlonglong trafficLimit() const;
     bool subActive() const;
     bool transferredAway() const { return m_transferredAway; }
+    // AVPN: «подписки нет» достоверно (видели 200 с пустым пулом) И пул всё ещё пуст. Вторая
+    // половина условия — самосброс: пул может наполниться не только bootstrap-ретраем (startFlow
+    // по Connect, refreshPool со страницы серверов) — флаг не должен пережить появление нод.
+    bool subMissing() const { return m_subMissingSeen && !m_engine.hasSubscription(); }
     QString authToken() const;  // AVPN: JWT из защищённого стора (Enrollment::loadToken)
 
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
@@ -755,6 +764,7 @@ private:
     QList<QHostAddress>          m_apiHostIps;
     bool                         m_busy = false;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
+    bool                         m_subMissingSeen = false;  // AVPN: bootstrap видел авторитетный 200 с nodes:[] (подписки нет; см. subMissing())
     int                          m_pendingRedeemAttempts = 0; // AVPN: ретраи redeemTransfer, пока движок занят bootstrap'ом (холодный старт по диплинку)
     QString                      m_pendingRedeemToken;        // AVPN: токен с уже запланированным busy-ретраем (второй таймер не плодим)
     QString                      m_lastRedeemedToken;         // AVPN: успешно принятый токен — дедуп повторных сканов того же QR (иначе 401-тост поверх успеха)

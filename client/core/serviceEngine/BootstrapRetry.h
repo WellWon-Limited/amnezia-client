@@ -22,6 +22,26 @@ namespace avpn {
 
 inline constexpr int kBootstrapSlowRetryMs = 60000; // медленный вечный цикл после быстрой фазы
 
+// Исход разбора 200-тела bootstrap-фетча подписки (finishBootstrapSuccess).
+// Баг 2026-07-10 «начисленный триал не подхватился без перезахода»: бэк для устройства без
+// подписки отвечает 200 OK со status=degraded и nodes:[] (НЕ 404) — защёлка m_bootstrapped=true
+// на таком теле навсегда глушила ретрай-цикл (kickBootstrap — no-op по защёлке, а
+// refreshSubscription по конструкции не наполняет пул), лечил только рестарт процесса.
+// Пустой пул = «подписки ещё нет», НЕ успех: продолжаем тихий вечный цикл (60с / kickBootstrap).
+enum class BootstrapBodyAction {
+    RetryTransient,       // тело не распарсилось — LKG не трогаем, переарм ретрая
+    KeepPollingEmptyPool, // 200, но nodes:[] — стейт применить, защёлку НЕ ставить, поллить дальше
+    LatchSuccess          // 200 с непустым пулом — успех, дедуп цепочки (m_bootstrapped=true)
+};
+
+inline BootstrapBodyAction decideBootstrapBody(bool parseOk, bool poolNonEmpty)
+{
+    if (!parseOk)
+        return BootstrapBodyAction::RetryTransient;
+    return poolNonEmpty ? BootstrapBodyAction::LatchSuccess
+                        : BootstrapBodyAction::KeepPollingEmptyPool;
+}
+
 // Задержка перед попыткой №(attempt+1). attempt — сколько попыток уже провалилось (0-based).
 inline int nextBootstrapDelayMs(int attempt)
 {
