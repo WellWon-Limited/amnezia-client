@@ -34,6 +34,7 @@ class QualityProbe; // AVPN: app-layer RTT-проба через туннель 
 class ServiceProbe; // AVPN: проба доступности сервисов (Telegram/YouTube) через туннель (ServiceProbe.h)
 class IRttProbe;    // AVPN (выбор по скорости): прямой RTT до нод off-tunnel (IRttProbe.h / RttProbeIcmp)
 class BenchRunner;  // AVPN (панель администратора): in-app бенч соединения (BenchRunner.h)
+class BypassListService; // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки (BypassListService.h)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -717,6 +718,11 @@ private:
     // см. ConfigService.h) + снапшот последнего применённого конфига (featureEnabled/configUrl/
     // storeUrl читают отсюда) + вердикт force-update (см. updateState()).
     avpn::ConfigService          *m_configSvc = nullptr;
+    // AVPN server-driven АнтиВПН (Task 10): оркестратор /v1/bypass-lists (подписанный fetch/LKG/
+    // анти-downgrade). Kill-switch remote_bypass_lists — ВНУТРИ сервиса (onRemoteConfigApplied):
+    // при флаге=false кладёт пустой invalid снапшот в BypassListStore и ставит фетч на паузу.
+    // Точки чтения (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
+    avpn::BypassListService      *m_bypassListSvc = nullptr;
     avpn::RemoteConfig            m_remoteCfg;
     int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block
     // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
