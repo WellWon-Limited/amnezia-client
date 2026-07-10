@@ -62,7 +62,8 @@ constexpr int kIdlePollMs = 60000;
 constexpr int kMediaTimeoutMs = 180000;
 constexpr int kThumbTimeoutMs = 30000;
 
-// Лимиты бэкенда (support.py) — дублируем на клиенте, чтобы не гонять байты зря.
+// Лимиты бэкенда (support.py) — вкомпиленный ФОЛБЭК (используются, только пока
+// сервер не прислал limits в ответе /thread — см. applyThread/eff*MaxBytes T18).
 constexpr qint64 kImageMaxBytes = 10 * 1024 * 1024;
 constexpr qint64 kVideoMaxBytes = 25 * 1024 * 1024;
 // Пережатие фото (паритет с canvas-компрессией Занавеса): крупнее порога —
@@ -71,7 +72,7 @@ constexpr qint64 kImageShrinkThresholdBytes = qint64(1.5 * 1024 * 1024);
 constexpr int kImageMaxDimension = 1600;
 constexpr int kJpegQuality = 85;
 
-// Белые списки MIME бэкенда (415 на прочее).
+// Белые списки MIME бэкенда (415 на прочее) — вкомпиленный ФОЛБЭК, см. eff*Mime (T18).
 bool isAllowedImageMime(const QString &mime)
 {
     return mime == QLatin1String("image/jpeg") || mime == QLatin1String("image/png")
@@ -380,9 +381,44 @@ void TribeSupportChat::applyThread(const QByteArray &json)
         msgs.append(parseMessage(v.toObject()));
     m_serverMessages = msgs;
 
+    // AVPN backend-first (T18): лимиты вложений приходят с сервером треда (fix
+    // «дублируем support.py»). Пусто/отсутствует → маркер 0/пустой список, эффективные
+    // геттеры (eff*) падают на вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
+    const QJsonObject lim = root.value(QStringLiteral("limits")).toObject();
+    if (!lim.isEmpty()) {
+        m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
+        m_videoMaxBytes = qint64(lim.value(QStringLiteral("video_max_bytes")).toDouble(0));
+        m_imageMime.clear();
+        for (const QJsonValue &v : lim.value(QStringLiteral("image_mime")).toArray())
+            if (v.isString()) m_imageMime << v.toString();
+        m_videoMime.clear();
+        for (const QJsonValue &v : lim.value(QStringLiteral("video_mime")).toArray())
+            if (v.isString()) m_videoMime << v.toString();
+    }
+
     // Эхо, чей POST успел завершиться и чьё сообщение уже приехало с сервера,
     // здесь не живёт (снимается в postEcho); подвисшие pending-эхо остаются в хвосте.
     rebuildMessages();
+}
+
+qint64 TribeSupportChat::effImageMaxBytes() const
+{
+    return m_imageMaxBytes > 0 ? m_imageMaxBytes : kImageMaxBytes;
+}
+
+qint64 TribeSupportChat::effVideoMaxBytes() const
+{
+    return m_videoMaxBytes > 0 ? m_videoMaxBytes : kVideoMaxBytes;
+}
+
+bool TribeSupportChat::effAllowedImageMime(const QString &mime) const
+{
+    return m_imageMime.isEmpty() ? isAllowedImageMime(mime) : m_imageMime.contains(mime);
+}
+
+bool TribeSupportChat::effAllowedVideoMime(const QString &mime) const
+{
+    return m_videoMime.isEmpty() ? isAllowedVideoMime(mime) : m_videoMime.contains(mime);
 }
 
 void TribeSupportChat::rebuildMessages()
@@ -494,11 +530,11 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
     e.localUrl = QUrl::fromLocalFile(fi.absoluteFilePath()).toString();
 
     if (mime.startsWith(QLatin1String("video/"))) {
-        if (!isAllowedVideoMime(mime)) {
+        if (!effAllowedVideoMime(mime)) {
             emit sendFailed(tr("Формат видео не поддерживается (mp4/mov/webm)"));
             return;
         }
-        if (fi.size() > kVideoMaxBytes) {
+        if (fi.size() > effVideoMaxBytes()) {
             emit sendFailed(tr("Видео больше 25 МБ"));
             return;
         }
@@ -531,7 +567,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             e.mime = QStringLiteral("image/jpeg");
             const int dot = e.fileName.lastIndexOf(QLatin1Char('.'));
             e.fileName = (dot > 0 ? e.fileName.left(dot) : e.fileName) + QStringLiteral(".jpg");
-        } else if (isGif && isAllowedImageMime(mime)) {
+        } else if (isGif && effAllowedImageMime(mime)) {
             QFile f(fi.absoluteFilePath());
             if (!f.open(QIODevice::ReadOnly)) {
                 emit sendFailed(tr("Файл недоступен"));
@@ -543,7 +579,7 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
             emit sendFailed(tr("Формат изображения не поддерживается"));
             return;
         }
-        if (e.imageBytes.size() > kImageMaxBytes) {
+        if (e.imageBytes.size() > effImageMaxBytes()) {
             emit sendFailed(tr("Фото больше 10 МБ"));
             return;
         }
