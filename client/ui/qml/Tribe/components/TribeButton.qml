@@ -69,9 +69,11 @@ AbstractButton {
         gradient: control.variant === "primary" ? primaryGrad : null
         color: {
             if (control.variant === "primary") return "transparent"
-            if (control.variant === "ghost") return control.hovered ? Theme.color.glass : "transparent"
-            // glass + icon
-            return control.hovered ? Theme.color.surface2 : Theme.color.glassStrong
+            if (control.variant === "ghost") return control.hovered ? Theme.color.glassStrong : "transparent"
+            // glass + icon: ховер = surface3. НЕ surface2 — покойная заливка glassStrong (белая
+            // 7%) ПОВЕРХ карточки surface1 композитится в ~#242E3F, т.е. СВЕТЛЕЕ surface2 —
+            // «ховер» тёмным не читался, заметен был только бордер (жалоба 2026-07-10).
+            return control.hovered ? Theme.color.surface3 : Theme.color.glassStrong
         }
         border.width: control.variant === "primary" ? 0 : 1
         border.color: control.hovered ? Theme.color.border2 : Theme.color.border
