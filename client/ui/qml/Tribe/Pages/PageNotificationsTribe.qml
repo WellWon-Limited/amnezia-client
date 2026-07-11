@@ -7,8 +7,9 @@ import "../components"
 import "../../Controls2" // PageType
 
 // AVPN: центр уведомлений (#3). Открывается из колокола в шапке Connect.
-// Показывает РЕАЛЬНЫЕ пуши (APNs/FCM), сохранённые движком локально (переживают перезапуск).
-// История между сессиями/устройствами с сервера — отдельная задача (бэкенд GET /v1/notifications).
+// Локальная лента = пуши (APNs/FCM), сохранённые движком (переживают перезапуск); при открытии
+// центра её замещает СЕРВЕРНАЯ история (GET /v1/notifications, источник правды: переживает
+// переустановку, доезжает и без доставленного пуша). Неизвестный type рендерится generic-строкой.
 PageType {
     id: root
 
@@ -26,10 +27,24 @@ PageType {
     // приходило пользователю). Пусто → экран пустого состояния ниже. // AVPN
     readonly property var items: pushItems
 
-    // При открытии центра уведомлений отмечаем все пуши прочитанными → бейдж на колоколе гаснет.
+    // При открытии центра уведомлений отмечаем все пуши прочитанными → бейдж на колоколе гаснет,
+    // и подтягиваем СЕРВЕРНУЮ историю (GET /v1/notifications через движок): строки доезжают даже
+    // если пуш не был доставлен (баг 2026-07-10 «объявление в БД есть, центр пуст»). // AVPN
     Component.onCompleted: {
         if (hasPush && AvpnPush.markAllRead)
             AvpnPush.markAllRead()
+        if (typeof TribeEngine !== "undefined" && typeof TribeEngine.refreshNotifications === "function")
+            TribeEngine.refreshNotifications()
+    }
+
+    // Серверная история доехала, пока центр открыт — она уже «увидена»: гасим бейдж повторно
+    // (markAllRead выше мог отработать ДО прихода ответа). Guard по unreadCount — без цикла. // AVPN
+    Connections {
+        target: root.hasPush ? AvpnPush : null
+        function onChanged() {
+            if (root.visible && AvpnPush.unreadCount > 0 && AvpnPush.markAllRead)
+                AvpnPush.markAllRead()
+        }
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }

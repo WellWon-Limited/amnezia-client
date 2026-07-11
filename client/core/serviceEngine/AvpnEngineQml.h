@@ -433,6 +433,12 @@ public:
     // Bearer). Обнуляет серверный счётчик непрочитанных → следующий пуш придёт с низким aps.badge.
     // Связан с AvpnPushBridge::readRequested (QML зовёт AvpnPush.markAllRead()). АСИНХРОННО.
     Q_INVOKABLE void markNotificationsRead();
+    // AVPN (центр уведомлений, серверная история): GET /v1/notifications?limit=50 (Bearer) →
+    // AvpnPushBridge::setServerItems (замещение локальной ленты). Зовётся QML при открытии центра
+    // (баг 2026-07-10: строка type=announcement была в БД, но пуш не дошёл → центр пуст; теперь
+    // история доезжает без пуша — сервер = источник правды, контракт NotificationOut: неизвестный
+    // тип рендерится generic-строкой, НЕ скрывается). АСИНХРОННО (armTimeout, без nested loop).
+    Q_INVOKABLE void refreshNotifications();
     // AVPN: читается тумблером #6 — отражает текущую фазу «на паузе» для UI.
     bool paused() const { return m_paused; }
     // AVPN (реальные палочки): живое качество текущего соединения.
