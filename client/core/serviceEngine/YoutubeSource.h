@@ -25,22 +25,20 @@ public:
     // BaW_jenozKc = публичный тест-клип (используется yt-dlp как стабильный). Фолбэки на случай гео-блока одного.
     // Server-driven (backend-first, Task 3): TuningStore.lists["yt_probe_video_ids"] может переопределить
     // (YouTube время от времени удаляет/гео-блочит evergreen-видео — правка без релиза). Пустой серверный
-    // список ⇒ фолбэк на вкомпиленный (TuningStore::listOr сам по себе такой гарантии не даёт — проверяем тут).
+    // список ⇒ фолбэк на вкомпиленный — гарантия внутри TuningStore::listOr (единый источник правды).
     static QStringList evergreenVideoIds()
     {
         static const QStringList kDefault{QStringLiteral("jNQXAC9IVRw"), QStringLiteral("BaW_jenozKc")};
-        const QStringList v = TuningStore::listOr(QStringLiteral("yt_probe_video_ids"), QStringList());
-        return v.isEmpty() ? kDefault : v;
+        return TuningStore::listOr(QStringLiteral("yt_probe_video_ids"), kDefault);
     }
 
     // Публичный ключ web-InnerTube (константа из клиента YouTube, НЕ секрет).
     // Server-driven (backend-first, Task 3): TuningStore.strings["yt_innertube_key"]; пустая серверная
-    // строка ⇒ фолбэк (та же логика, что и для video-ids — stringOr сам не отбрасывает пустые значения).
+    // строка ⇒ фолбэк — гарантия внутри TuningStore::stringOr (единый источник правды).
     static QString innerTubeKey()
     {
         static const QString kDefault = QStringLiteral("AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8");
-        const QString v = TuningStore::stringOr(QStringLiteral("yt_innertube_key"), QString());
-        return v.isEmpty() ? kDefault : v;
+        return TuningStore::stringOr(QStringLiteral("yt_innertube_key"), kDefault);
     }
 
     // Тело POST для https://youtubei.googleapis.com/youtubei/v1/player?key=...

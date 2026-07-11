@@ -40,19 +40,24 @@ public:
         const auto it = f.constFind(key);
         return it != f.constEnd() ? it.value() : def;
     }
+    // Контракт (backend-first, единый источник правды): пусто с сервера = фолбэк на def, ТАК ЖЕ
+    // как отсутствующий ключ. Это осознанное решение — сервер не может «стереть» непустой
+    // вкомпиленный default пустым значением (list/string), только заменить его непустым.
+    // Все читатели (ServiceProbe/YoutubeSource/…) обязаны звать эти методы напрямую, БЕЗ
+    // локальных guard'ов/дублей поверх (единственное место с этой семантикой — здесь).
     static QStringList listOr(const QString &key, const QStringList &def)
     {
         QMutexLocker l(&mutex());
         const auto &ls = listsRef();
         const auto it = ls.constFind(key);
-        return it != ls.constEnd() ? it.value() : def;
+        return (it != ls.constEnd() && !it.value().isEmpty()) ? it.value() : def;
     }
     static QString stringOr(const QString &key, const QString &def)
     {
         QMutexLocker l(&mutex());
         const auto &s = stringsRef();
         const auto it = s.constFind(key);
-        return it != s.constEnd() ? it.value() : def;
+        return (it != s.constEnd() && !it.value().isEmpty()) ? it.value() : def;
     }
     static void reset() { set({}, {}, {}, {}); }
 
