@@ -79,6 +79,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/BypassListTypes.h
     ${AVPN_SE}/BypassListLkg.h
     ${AVPN_SE}/BypassListService.h
+    ${AVPN_SE}/TribeHaptics.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -104,6 +105,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/Ed25519Verify.cpp
     ${AVPN_SE}/ConfigService.cpp
     ${AVPN_SE}/BypassListService.cpp
+    ${AVPN_SE}/TribeHaptics.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
@@ -146,6 +148,9 @@ if(IOS)
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.mm)
+    # AVPN (haptics): тактильный отклик — UIFeedbackGenerator (UIKit уже линкуется).
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
 endif()
 
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это

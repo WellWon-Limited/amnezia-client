@@ -79,6 +79,7 @@
         <file>Tribe/qmldir</file>
         <file>Tribe/Theme.qml</file>
         <file>Tribe/Dev.qml</file>
+        <file>Tribe/Haptic.qml</file>
         <file>Tribe/components/TribeButton.qml</file>
         <file>Tribe/components/TribeCard.qml</file>
         <file>Tribe/components/TribeToggle.qml</file>
