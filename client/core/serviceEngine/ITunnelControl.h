@@ -22,10 +22,16 @@ struct TunnelStats {
 //    diff, ios_controller.mm::checkStatus — тоже), а HealthLoop ждёт КУМУЛЯТИВЫ (rxStuck/txGrew
 //    сравнивают соседние замеры). Прямая запись дельт делала «ровный rx-поток» (равные дельты)
 //    неотличимым от «rx стоит» → аккумулируем.
+//    Guard: абсурдный скачок (>1 ТБ за тик) = артефакт гонки счётчиков (iOS: стейл-ответ
+//    checkStatus старой сессии перезаписал m_rxBytes → quint64-underflow «дельта» ~2^64) —
+//    игнорируем, счётчики не портим (TDD: parse_check «tunnelstats-guard»).
 inline void accumulateByteDelta(TunnelStats &s, quint64 rxDelta, quint64 txDelta)
 {
-    s.rxBytes += static_cast<qint64>(rxDelta);
-    s.txBytes += static_cast<qint64>(txDelta);
+    constexpr quint64 kAbsurdDelta = Q_UINT64_C(1) << 40; // 1 ТБ/тик — физически невозможно
+    if (rxDelta < kAbsurdDelta)
+        s.rxBytes += static_cast<qint64>(rxDelta);
+    if (txDelta < kAbsurdDelta)
+        s.txBytes += static_cast<qint64>(txDelta);
     s.valid = true;
 }
 

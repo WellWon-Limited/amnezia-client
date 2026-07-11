@@ -315,8 +315,12 @@ bool ServiceEngine::onTunnelDisconnected() // AVPN
 void ServiceEngine::requestStop() // AVPN
 {
     // Намеренный стоп: гасим фазу до down(), чтобы Disconnected не запустил failover.
+    // Pending-свитч отменяем тоже (ревью 2026-07-11): юзер остановил — недоигранный
+    // continuePendingSwitch не должен мочь воскреснуть ни на каком последующем колбэке.
     m_state = EngineState::Disconnected;
     m_currentNodeId.clear();
+    m_pendingSwitchNodeId.clear();
+    m_pendingSwitchReason.clear();
     m_health.reset();
 }
 

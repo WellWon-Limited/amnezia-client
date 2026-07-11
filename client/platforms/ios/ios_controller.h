@@ -118,9 +118,15 @@ private:
     // autoreleased; без retain указатель повисал после долгого фона → SIGSEGV в checkStatus.
     NETunnelProviderManager *m_currentTunnel {};
     void setCurrentTunnel(NETunnelProviderManager *tunnel);
+    // AVPN (ревью 2026-07-11, гонка MRC): checkStatus работает с менеджером на ФОНОВОЙ очереди,
+    // а setCurrentTunnel(nil) при быстром реконнекте может параллельно сделать release на главном
+    // треде → UAF (класс краша AmneziaVPN-2026-07-06). Фоновые читатели берут менеджер ТОЛЬКО через
+    // retainedCurrentTunnel() (retain под локом; caller обязан release), ivar напрямую не читать.
+    NETunnelProviderManager *retainedCurrentTunnel();
     NSString *m_serverAddress {};
     bool isOurManager(NETunnelProviderManager *manager);
-    void sendVpnExtensionMessage(NSDictionary *message, std::function<void(NSDictionary *)> callback = nullptr);
+    void sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary *message,
+                                 std::function<void(NSDictionary *)> callback = nullptr);
 #endif
 
     amnezia::Proto m_proto = amnezia::Proto::Awg;   // AVPN: дефолт до connectVpn (AWG-only продукт; иначе uninit enum)
@@ -134,6 +140,9 @@ private:
     int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;
     std::atomic_bool m_statusRequestInFlight { false };
+    // AVPN (ревью 2026-07-11): поколение сессии — стейл-ответ checkStatus СТАРОЙ сессии,
+    // долетевший после реконнекта, не должен трогать счётчики/статусы новой (underflow-дельта).
+    std::atomic<uint64_t> m_statusGeneration { 0 };
 };
 
 #endif // IOS_CONTROLLER_H

@@ -1,6 +1,7 @@
 // AVPN backend-first (план 2026-07-10): юнит TuningStore — потокобезопасный снапшот
 // numbers/features/lists из последнего применённого /v1/config. Только QtCore.
 #include "../TuningStore.h"
+#include "../ConnectTunables.h"
 #include <QCoreApplication>
 #include <cstdio>
 
@@ -76,5 +77,30 @@ int main(int argc, char **argv)
           "set replaces: strings cleared => def");
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
+        // --- ConnectTunables (ревью 2026-07-11): клампы handshake-порогов + связка watchdog ---
+    {
+        avpn::TuningStore::reset();
+        bool defOk = avpn::handshakeTimeoutMsTuned() == 12000
+                     && avpn::handshakeMaxTimeoutsTuned() == 3
+                     && avpn::reconcileWatchdogMsTuned() == 15000;
+        CHECK(defOk, "connecttunables: пустой store => вкомпиленные дефолты");
+        // мусор с бэка: 0/минус/гигант — клампится, коннект не ломается
+        avpn::TuningStore::set({{"handshake_timeout_ms", 0.0}, {"handshake_max_timeouts", -5.0}}, {}, {}, {});
+        CHECK(avpn::handshakeTimeoutMsTuned() >= 2000, "connecttunables: timeout=0 => пол 2000");
+        CHECK(avpn::handshakeMaxTimeoutsTuned() >= 1, "connecttunables: maxTimeouts<1 => пол 1");
+        avpn::TuningStore::set({{"handshake_timeout_ms", 999999.0}, {"handshake_max_timeouts", 999.0}}, {}, {}, {});
+        CHECK(avpn::handshakeTimeoutMsTuned() <= 60000, "connecttunables: timeout-гигант => потолок");
+        CHECK(avpn::handshakeMaxTimeoutsTuned() <= 10, "connecttunables: maxTimeouts-гигант => потолок");
+        // ИНВАРИАНТ (CONNECT-INVARIANTS, коммент у m_watchdog): watchdog ВСЕГДА > handshake_timeout —
+        // оператор ставит watchdog=5000 при timeout=12000 => пол поднимает до timeout+запас
+        avpn::TuningStore::set({{"reconcile_watchdog_ms", 5000.0}}, {}, {}, {});
+        CHECK(avpn::reconcileWatchdogMsTuned() > avpn::handshakeTimeoutMsTuned(),
+              "connecttunables: watchdog всегда > handshake_timeout (пол связан)");
+        avpn::TuningStore::set({{"reconcile_watchdog_ms", 5000.0}, {"handshake_timeout_ms", 30000.0}}, {}, {}, {});
+        CHECK(avpn::reconcileWatchdogMsTuned() >= 33000,
+              "connecttunables: пол watchdog следует за timeout");
+        avpn::TuningStore::reset();
+    }
+
     return g_fail ? 1 : 0;
 }

@@ -16,6 +16,7 @@
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
 #include "ServiceProbeTargets.h" // AVPN (чипы): вшитые цели + мерж серверного probe_targets (не замещать!)
+#include "ConnectTunables.h" // AVPN: клампованные пороги коннекта + связка watchdog>handshake (ревью 2026-07-11)
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
@@ -369,8 +370,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
                 // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
                 // интервалом, ничего не останавливаем/не стартуем).
-                m_healthTimer.setInterval(
-                    int(avpn::TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)));
+                m_healthTimer.setInterval(avpn::healthTickMsTuned()); // кламп 1с..60с (0 с бэка = spin-loop)
                 // AVPN backend-first: фоновый LKG-рефреш подписки по серверному интервалу
                 // (H-3 бэклога). qBound — защита от абсурда: 10 мин..7 суток.
                 const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
@@ -2662,6 +2662,16 @@ void AvpnEngineQml::reconcile()
         return;          // во время авто-паузы туннель ведёт pause-логика — не вмешиваемся
     if (m_opInFlight)
         return;          // операция в полёте — ждём терминального колбэка (debounce, анти-шторм)
+    // AVPN (ревью 2026-07-11, гонка «двойной up»): движок ведёт СВОЙ внутренний двухфазный свитч
+    // (failover onDead → requestSwitch → down() → на Disconnected continuePendingSwitch → up()),
+    // state=Switching держится до Connected/Error. Терминальный Disconnected от down() уже снял
+    // m_opInFlight → отложенный reconcile() влезал guardedStart-ом ПОВЕРХ поставленного в очередь
+    // up(): второй connectToVpn back-to-back (iOS «Operation Cancelled»), причём второй connect()
+    // мог выбрать даже только что признанную DEAD ноду. Из Switching движок выходит ТОЛЬКО через
+    // колбэки туннеля (Connected/Error) — каждый снова ставит singleShot(0, reconcile), так что
+    // гейт машину не подвешивает.
+    if (m_engine.state() == avpn::EngineState::Switching)
+        return;
 
     const Vpn::ConnectionState s = m_lastTunnelState;
     const bool connected = (s == Vpn::Connected);
@@ -2743,8 +2753,9 @@ void AvpnEngineQml::guardedStart()
     m_needsRestart = false;   // свежий старт всегда поднимает целевую (pin/auto) ноду — рестарт не нужен
     // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (server-driven,
     // без ребилда); setInterval конструктора (15000) остаётся вкомпиленным дефолтом.
-    m_watchdog.setInterval(qBound(5000,
-        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
+    // Пол связан с handshake-бюджетом (ConnectTunables.h): watchdog ВСЕГДА > handshake_timeout,
+    // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
+    m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
     m_watchdog.start();
     emit changed();
 
@@ -2797,8 +2808,9 @@ void AvpnEngineQml::guardedStop()
     m_opInFlight = true;
     m_busy = true;
     // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (см. guardedStart).
-    m_watchdog.setInterval(qBound(5000,
-        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
+    // Пол связан с handshake-бюджетом (ConnectTunables.h): watchdog ВСЕГДА > handshake_timeout,
+    // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
+    m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
     m_watchdog.start();
     m_healthTimer.stop();
     m_engine.requestStop();
