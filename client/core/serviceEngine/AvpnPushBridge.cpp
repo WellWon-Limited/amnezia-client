@@ -99,6 +99,24 @@ void AvpnPushBridge::markAllRead()
         emit changed();
 }
 
+// AVPN (центр уведомлений): серверная история /v1/notifications замещает локальную. Фетч-ошибки
+// сюда не доходят (движок зовёт только на валидном 2xx-массиве) — офлайн живёт на локальной копии.
+void AvpnPushBridge::setServerItems(const QVariantList &items)
+{
+    ensureLoaded();
+    if (items == m_items)
+        return;
+    m_items = items;
+    int unread = 0;
+    for (const QVariant &v : std::as_const(m_items))
+        if (!v.toMap().value(QStringLiteral("read")).toBool())
+            ++unread;
+    m_unreadCount = unread;
+    persist();
+    updateNativeBadge();
+    emit changed();
+}
+
 void AvpnPushBridge::requestAuthorization()
 {
     // На iOS m_authRequester указывает на C-функцию из AvpnPushController.mm (запросит UN + APNs).

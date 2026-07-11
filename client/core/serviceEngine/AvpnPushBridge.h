@@ -51,6 +51,12 @@ public:
     // ДО создания QML — PageStart добирает его в onGoToPageHome). Возвращает type и чистит.
     Q_INVOKABLE QString takePendingPushTap();
 
+    // AVPN (центр уведомлений, серверная история): движок дёргает после GET /v1/notifications —
+    // серверная лента ЗАМЕЩАЕТ локальную (сервер = источник правды: переживает переустановку,
+    // кормит платформы без пушей; каждый пуш и так рождается строкой в БД бэка). Формат элементов
+    // тот же, что у items ({title, body, time, read, type, days}). Вызывать из Qt-потока.
+    void setServerItems(const QVariantList &items);
+
     // --- Натив-слой (iOS/Android), потокобезопасно (маршалят в Qt-поток) ---
     // Пришёл APNs/FCM device token. platform: "ios" | "android".
     void setDeviceToken(const QString &token, const QString &platform);

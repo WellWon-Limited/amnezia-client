@@ -4095,6 +4095,55 @@ void AvpnEngineQml::markNotificationsRead()
     connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
 }
 
+// AVPN (центр уведомлений, серверная история): GET /v1/notifications?limit=50 → мост setServerItems.
+// См. коммент в .h (фикс «строка в БД есть, центр пуст» — история доезжает и без доставленного пуша).
+void AvpnEngineQml::refreshNotifications()
+{
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty())
+        return; // не enrolled — серверной истории всё равно нет; локальная лента остаётся
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/notifications?limit=50"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+    QNetworkReply *reply = m_nam->get(req);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code < 200 || code >= 300)
+            return; // офлайн/401 → локальная лента живёт, ничего не затираем
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isArray())
+            return;
+        QVariantList items;
+        for (const QJsonValue &v : doc.array()) {
+            const QJsonObject o = v.toObject();
+            const QString title = o.value(QStringLiteral("title")).toString();
+            const QString body = o.value(QStringLiteral("body")).toString();
+            if (title.isEmpty() && body.isEmpty())
+                continue;
+            QVariantMap item;
+            item[QStringLiteral("title")] = title;
+            item[QStringLiteral("body")] = body;
+            // Формат времени как у локальных пушей (HH:mm); не-сегодня — с датой.
+            const QDateTime dt = QDateTime::fromString(o.value(QStringLiteral("created_at")).toString(),
+                                                       Qt::ISODate).toLocalTime();
+            item[QStringLiteral("time")] =
+                !dt.isValid() ? QString()
+                : (dt.date() == QDate::currentDate() ? dt.toString(QStringLiteral("HH:mm"))
+                                                     : dt.toString(QStringLiteral("dd.MM HH:mm")));
+            item[QStringLiteral("read")] = o.value(QStringLiteral("read")).toBool();
+            // Контракт NotificationOut: неизвестный тип = generic-строка title+body, НЕ скрывать
+            // (делегат QML стилизует только известные kind, остальным даёт общий вид).
+            const QString type = o.value(QStringLiteral("type")).toString();
+            item[QStringLiteral("type")] = type.isEmpty() ? QStringLiteral("generic") : type;
+            item[QStringLiteral("days")] = static_cast<int>(o.value(QStringLiteral("days")).toDouble());
+            items.append(item);
+        }
+        avpn::AvpnPushBridge::instance()->setServerItems(items);
+    });
+}
+
 QVariantMap AvpnEngineQml::debugSnapshot() const
 {
     const DebugSnapshot s = m_engine.debugSnapshot();
