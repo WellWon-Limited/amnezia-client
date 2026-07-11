@@ -6,6 +6,7 @@
 
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
+#include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
@@ -628,6 +629,17 @@ private:
     // setEndpoints (AvpnEngineQml.cpp:268-269) — только сид до первого вызова.
     void refreshQualityEndpoints();
 
+    // AVPN backend-first (Task 4): пер-сервисный kill-switch чипов (lists.service_chips_disabled).
+    // Фильтрует m_svcCfgsAll (полный список — ctor-дефолт или remote probeTargets из
+    // applyRemoteProbeTargets) → отключённые ключи НЕ попадают в m_svcProbe (не пробятся, не тратят
+    // трафик) И не попадают в m_serviceStatus (чип пропадает из UI — QML дата-driven, без правок).
+    // Пустой/отсутствующий список → фильтр не убирает ничего (TuningStore::listOr «пусто=фолбэк»),
+    // поведение байт-в-байт как до задачи. Существующие состояния (works/slow/blocked) сохраняются
+    // по key для сервисов, оставшихся включёнными — список ПЕРЕСТРАИВАЕТСЯ целиком, не мержится point-wise.
+    // Вызывается из ctor (сид), applyRemoteProbeTargets (сервер сменил цели) и probeServices() (каждый
+    // прогон подхватывает свежий disabled-список — живой цикл без отдельного хука на configApplied).
+    void rebuildServiceChips();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
@@ -650,6 +662,9 @@ private:
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
     ServiceProbe                *m_svcProbe = nullptr;
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
+    // AVPN backend-first (Task 4): ПОЛНЫЙ (нефильтрованный) список сервисов — источник правды для
+    // rebuildServiceChips(); ctor-дефолт (telegram/youtube/instagram) либо замещён applyRemoteProbeTargets.
+    QList<ServiceProbeConfig>    m_svcCfgsAll;
     QSet<QString>                m_svcRetried;        // ключи, уже получившие авто-ретрай Unknown (сброс на probeServices)
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)

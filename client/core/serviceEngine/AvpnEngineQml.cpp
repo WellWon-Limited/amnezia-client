@@ -299,23 +299,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // (ServiceProbeTargets.h): те же дефолты — база мержа applyRemoteProbeTargets, не расходятся.
         const QList<ServiceProbeConfig> cfgs = avpn::defaultServiceProbeConfigs();
         m_svcProbe = new ServiceProbe(m_nam, this);
-        m_svcProbe->setServices(cfgs);
-
-        // Сидируем список статусов (state=-1 «неизвестно») в порядке cfgs — UI рисует чипы сразу.
-        auto labelOf = [](const QString &k) {
-            if (k == QLatin1String("telegram"))  return QStringLiteral("Telegram");
-            if (k == QLatin1String("youtube"))   return QStringLiteral("YouTube");
-            if (k == QLatin1String("instagram")) return QStringLiteral("Instagram");
-            return k;
-        };
-        for (const ServiceProbeConfig &c : cfgs) {
-            QVariantMap m;
-            m[QStringLiteral("key")] = c.key;
-            m[QStringLiteral("label")] = labelOf(c.key);
-            m[QStringLiteral("state")] = -1;
-            m[QStringLiteral("rttMs")] = -1;
-            m_serviceStatus.append(m);
-        }
+        // AVPN backend-first (Task 4): m_svcCfgsAll — полный (нефильтрованный) список; rebuildServiceChips()
+        // применяет lists.service_chips_disabled и заполняет И m_svcProbe (что пробится), И m_serviceStatus
+        // (сидирует чипы state=-1 «неизвестно» в порядке cfgs — UI рисует их сразу). Пустой disabled-список
+        // (default здесь — до первого /v1/config) => фильтр не убирает ничего, поведение как раньше.
+        m_svcCfgsAll = cfgs;
+        rebuildServiceChips();
         connect(m_svcProbe, &ServiceProbe::result, this,
                 [this](const QString &key, int state, int rttMs) {
                     // rttMs для goodput-сервисов (youtube/instagram) несёт kbit/s, для telegram — RTT в мс.
@@ -691,8 +680,14 @@ void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
 {
     if (!m_svcProbe)
         return;
-    m_svcProbe->setServices(
-        avpn::mergeRemoteProbeTargets(avpn::defaultServiceProbeConfigs(), cfg.probeTargets));
+    // AVPN backend-first (Task 4 + мерж ci-build 9ad41a45): серверные probe-цели МЕРЖАТСЯ с вшитыми
+    // дефолтами (avpn::mergeRemoteProbeTargets — kind-гейт, multi-seed-группировка), НЕ замещают их.
+    // Результат мержа кладётся в m_svcCfgsAll (полный нефильтрованный набор); rebuildServiceChips()
+    // применит lists.service_chips_disabled к смерженному набору и пересоберёт m_svcProbe->setServices
+    // + m_serviceStatus (иначе дрейф чипов при remote override). Пустой disabled-список → фильтр
+    // прозрачен, поведение байт-в-байт как в 9ad41a45.
+    m_svcCfgsAll = avpn::mergeRemoteProbeTargets(avpn::defaultServiceProbeConfigs(), cfg.probeTargets);
+    rebuildServiceChips();
 }
 
 // AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk и
@@ -705,6 +700,64 @@ void AvpnEngineQml::refreshQualityEndpoints()
     m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
                            configUrl(QStringLiteral("quality_probe_url"),
                                      QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
+}
+
+// AVPN backend-first (Task 4): пер-сервисный kill-switch чипов доступности (lists.service_chips_disabled).
+// Отфильтровывает m_svcCfgsAll (полный набор — ctor-дефолт telegram/youtube/instagram ЛИБО remote
+// probeTargets из applyRemoteProbeTargets) по серверному списку отключённых ключей:
+//   · m_svcProbe получает ТОЛЬКО включённые cfgs → probeAll()/probeOne() физически не пробуют
+//     отключённый сервис (не тратят трафик через туннель);
+//   · m_serviceStatus ПЕРЕСТРАИВАЕТСЯ ЦЕЛИКОМ (не мержится point-wise) под тот же набор → отключённый
+//     чип пропадает из UI (QML TribeServiceChips дата-driven от serviceStatus, правок не требует).
+// Уже известные состояния (works/slow/blocked/rttMs) сохраняются по key для сервисов, оставшихся
+// включёнными — повторный вызов не сбрасывает их обратно в «неизвестно».
+// Пустой/отсутствующий список (TuningStore::listOr «пусто=фолбэк») → фильтр не убирает ничего,
+// поведение байт-в-байт как до задачи.
+void AvpnEngineQml::rebuildServiceChips()
+{
+    if (!m_svcProbe)
+        return;
+
+    const QStringList disabled =
+            avpn::TuningStore::listOr(QStringLiteral("service_chips_disabled"), {});
+    QList<ServiceProbeConfig> enabled;
+    enabled.reserve(m_svcCfgsAll.size());
+    for (const ServiceProbeConfig &c : std::as_const(m_svcCfgsAll)) {
+        if (!disabled.contains(c.key))
+            enabled.append(c);
+    }
+    m_svcProbe->setServices(enabled);
+
+    auto labelOf = [](const QString &k) {
+        if (k == QLatin1String("telegram"))  return QStringLiteral("Telegram");
+        if (k == QLatin1String("youtube"))   return QStringLiteral("YouTube");
+        if (k == QLatin1String("instagram")) return QStringLiteral("Instagram");
+        return k;
+    };
+    QHash<QString, QVariantMap> prevByKey;
+    for (const QVariant &v : std::as_const(m_serviceStatus)) {
+        const QVariantMap m = v.toMap();
+        prevByKey.insert(m.value(QStringLiteral("key")).toString(), m);
+    }
+    QVariantList next;
+    next.reserve(enabled.size());
+    for (const ServiceProbeConfig &c : std::as_const(enabled)) {
+        const auto it = prevByKey.constFind(c.key);
+        if (it != prevByKey.constEnd()) {
+            next.append(it.value()); // сохраняем известный state/rttMs для уже пробитого сервиса
+        } else {
+            QVariantMap m;
+            m[QStringLiteral("key")] = c.key;
+            m[QStringLiteral("label")] = labelOf(c.key);
+            m[QStringLiteral("state")] = -1;
+            m[QStringLiteral("rttMs")] = -1;
+            next.append(m);
+        }
+    }
+    if (next != m_serviceStatus) {
+        m_serviceStatus = next;
+        emit serviceStatusChanged();
+    }
 }
 
 QString AvpnEngineQml::state() const
@@ -911,8 +964,13 @@ void AvpnEngineQml::probeServices()
     // выключенный флаг должен глушить ВЕСЬ трафик проб, не только фоновый).
     if (!avpn::TuningStore::flag(QStringLiteral("service_probes")))
         return;
-    // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
-    // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
+    // AVPN backend-first (Task 4): пер-сервисный kill-switch — подхватываем СВЕЖИЙ
+    // lists.service_chips_disabled на КАЖДОМ прогоне (живой цикл: сервер выключил сервис ПОСЛЕ того,
+    // как чип уже в m_serviceStatus → следующий probeServices() уберёт его без отдельного хука на
+    // configApplied). Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша
+    // цель — нам нужно «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ
+    // поллинг (батарея).
+    rebuildServiceChips();
     m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
     if (m_svcProbe && state() == QLatin1String("connected"))
         m_svcProbe->probeAll();
