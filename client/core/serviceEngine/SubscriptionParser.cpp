@@ -75,6 +75,7 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
         n.awg = parseAwg(no.value("awg_params").toObject());
         n.proto = no.value("proto").toString(QStringLiteral("awg"));
         n.weight = no.value("weight").toDouble(1.0);
+        n.manualOnly = no.value("manual_only").toBool(false); // AVPN: только ручной pin (§14.3)
 
         const QJsonObject h = no.value("health").toObject();
         for (auto it = h.begin(); it != h.end(); ++it)

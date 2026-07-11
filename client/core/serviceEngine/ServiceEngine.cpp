@@ -27,7 +27,8 @@ bool ServiceEngine::pinnedNodeIsRu() const
 }
 
 // AVPN (live-node picker): выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB. Без I/O.
-// RU-ноды — в отдельный fallback-ярус: берём их ТОЛЬКО если живых НЕ-RU нет (не рвём коннект).
+// manual_only-ноды (вкл. RU) — в отдельный fallback-ярус: берём их ТОЛЬКО если живых обычных нет
+// (не рвём коннект).
 const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const QString &exclB) const // AVPN
 {
     const QList<SubscriptionNode> &all = m_pool.nodes();
@@ -45,7 +46,7 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        if (isRuNode(n)) {             // RU — отдельный fallback-ярус (не в основном выборе)
+        if (isManualOnlyNode(n)) {     // manual_only/RU — отдельный fallback-ярус (не в основном выборе)
             if (n.weight > maxWru + 1e-9) { maxWru = n.weight; ruTier.clear(); ruTier.append(&n); }
             else if (n.weight >= maxWru - 1e-9) { ruTier.append(&n); }
             continue;
@@ -80,7 +81,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        (isRuNode(n) ? ruRows : rows).append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) }); // RU — в fallback
+        (isManualOnlyNode(n) ? ruRows : rows).append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) }); // manual/RU — в fallback
     }
     const QString id = fastestMeasuredNodeId(rows.isEmpty() ? ruRows : rows); // fallback на RU если не-RU нет
     if (id.isEmpty())

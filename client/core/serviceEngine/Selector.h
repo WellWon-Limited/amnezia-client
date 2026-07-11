@@ -3,6 +3,7 @@
 #pragma once
 
 #include "NodePool.h"
+#include "NodeRotation.h" // AVPN: isManualOnlyNode (manual_only/RU вне авто-выбора, §14.3)
 #include "Prober.h"
 
 #include <QList>
@@ -42,16 +43,17 @@ public:
         if (scored.isEmpty())
             return std::nullopt;
 
-        // AVPN (RU-нода): исключить российские ноды (countryCode==RU) из АВТО-выбора — на них работают
-        // только РФ-сайты. Fallback: если после исключения не осталось НИ ОДНОЙ — оставляем как есть
-        // (не рвём коннект/failover). Ручной форс RU идёт мимо Selector (pin в connect()).
+        // AVPN: исключить manual_only-ноды (честный флаг контракта; RU — страховкой по countryCode)
+        // из АВТО-выбора — только явный тап пользователя (§14.3, MANUAL-ONLY-POOL-HANDOFF §4).
+        // Fallback: если после исключения не осталось НИ ОДНОЙ — оставляем как есть (не рвём
+        // коннект/failover). Ручной форс идёт мимо Selector (pin в connect()).
         {
-            QList<ScoredNodeS> nonRu;
+            QList<ScoredNodeS> regular;
             for (const ScoredNodeS &s : scored)
-                if (s.node.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) != 0)
-                    nonRu.append(s);
-            if (!nonRu.isEmpty())
-                scored = nonRu;
+                if (!isManualOnlyNode(s.node))
+                    regular.append(s);
+            if (!regular.isEmpty())
+                scored = regular;
         }
 
         std::sort(scored.begin(), scored.end(),

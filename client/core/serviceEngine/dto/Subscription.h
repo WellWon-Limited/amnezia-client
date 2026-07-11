@@ -31,6 +31,7 @@ struct SubscriptionNode {
     AwgParams awg;
     QString proto = QStringLiteral("awg");
     double  weight = 1.0;                 // score = url_rtt / weight
+    bool    manualOnly = false;          // AVPN: manual_only (openapi 0.6.1) — только ручной pin, вне авто-выбора
     QHash<QString, double> health;       // target -> [0..1]
     QStringList allowedIps;              // full-tunnel: 0.0.0.0/0, ::/0
     QStringList dns;                     // >=1 (бэкенд шлёт >=2: iOS dns1/dns2)

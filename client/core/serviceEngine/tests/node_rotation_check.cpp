@@ -16,12 +16,14 @@ static void check(bool ok, const char *what)
         ++g_fail;
 }
 
-static SubscriptionNode mk(const char *id, const char *cc, double weight, double health = 1.0)
+static SubscriptionNode mk(const char *id, const char *cc, double weight, double health = 1.0,
+                           bool manualOnly = false)
 {
     SubscriptionNode n;
     n.nodeId = QString::fromLatin1(id);
     n.countryCode = QString::fromLatin1(cc);
     n.weight = weight;
+    n.manualOnly = manualOnly;
     if (health != 1.0)
         n.health.insert(QStringLiteral("telegram"), health); // health<=0 => мёртв
     return n;
@@ -74,6 +76,30 @@ int main()
     // 7. currentNodeId не в пуле (свежий коннект) → первая (лучшая) не-RU нода.
     check(nextLiveNodeId(pool, QStringLiteral("gone")) == QLatin1String("fi-1"),
           "unknown current -> best non-RU first");
+
+    // 8. ЧЕСТНЫЙ manual_only (контракт openapi 0.6.1): не-RU нода с manual_only=true ведёт себя
+    //    как RU — вне авто-кольца, даже с максимальным weight (раньше суррогат по countryCode
+    //    пропустил бы её в авто). MANUAL-ONLY-POOL-HANDOFF §4.
+    const QList<SubscriptionNode> withManual = {
+        mk("de-m", "DE", 10.0, 1.0, /*manualOnly=*/true),
+        mk("fi-1", "FI", 5.0),
+        mk("pl-1", "PL", 3.0),
+    };
+    check(nextLiveNodeId(withManual, QStringLiteral("fi-1")) == QLatin1String("pl-1"),
+          "manual_only de-m not in ring: fi-1 -> pl-1");
+    check(nextLiveNodeId(withManual, QStringLiteral("pl-1")) == QLatin1String("fi-1"),
+          "manual_only de-m not in ring: pl-1 wraps to fi-1");
+
+    // 9. Запинен manual_only-узел → ротация уводит на лучшую обычную ноду.
+    check(nextLiveNodeId(withManual, QStringLiteral("de-m")) == QLatin1String("fi-1"),
+          "rotate from pinned manual_only -> best regular (fi-1)");
+
+    // 10. Только manual_only-ноды живы → ротировать некуда.
+    const QList<SubscriptionNode> manualOnlyPool = {
+        mk("de-m", "DE", 10.0, 1.0, true), mk("ru-1", "RU", 9.0),
+    };
+    check(nextLiveNodeId(manualOnlyPool, QStringLiteral("de-m")).isEmpty(),
+          "manual_only-only pool -> no rotation target");
 
     std::printf(g_fail ? ">>> node_rotation_check: %d FAILED\n" : ">>> node_rotation_check: all passed\n",
                 g_fail);
