@@ -342,7 +342,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     // (dead-source вердикты IG/YT) — без ретрая ложный красный жил бы до 3-мин self-heal.
                     if ((state == -1 || state == 0) && !m_svcRetried.contains(key)) {
                         m_svcRetried.insert(key);
-                        QTimer::singleShot(20000, this, [this, key]() {
+                        // Server-driven (backend-first, Task 3): svc_probe_retry_ms, фолбэк 20с (прежнее).
+                        const int retryMs = int(avpn::TuningStore::numberOr(
+                                QStringLiteral("svc_probe_retry_ms"), 20000.0));
+                        QTimer::singleShot(retryMs, this, [this, key]() {
                             if (m_svcProbe && this->state() == QLatin1String("connected"))
                                 m_svcProbe->probeOne(key);
                         });
