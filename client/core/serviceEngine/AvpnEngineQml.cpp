@@ -280,8 +280,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (reachable) {
             m_liveFailStreak = 0;
             m_liveDead = false;
-        } else if (++m_liveFailStreak >= kLiveDeadStreak) {
-            m_liveDead = true;
+        } else {
+            const int deadStreak = (int) TuningStore::numberOr(QStringLiteral("live_dead_streak"), kLiveDeadStreak);
+            if (++m_liveFailStreak >= deadStreak)
+                m_liveDead = true;
         }
         emit liveQualityChanged();
     });
