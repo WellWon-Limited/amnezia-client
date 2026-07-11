@@ -1,9 +1,15 @@
 // AVPN backend-first (план 2026-07-10): юнит порогов качества/троттлинга — GoodputThresholds::fromTuning()
 // и SignalQuality::RttBands::fromTuning() читают TuningStore (numbers.*), пусто/офлайн → те же
 // вкомпиленные константы, что были ДО задачи (1000/100/32768 и 150/230/330/500/800). Только QtCore.
+//
+// Task 3 (2026-07-10): + YoutubeSource::evergreenVideoIds()/innerTubeKey() (реальные обёртки над
+// TuningStore.listOr/stringOr, header-only ⇒ линкуются сюда без ServiceProbe.cpp) и прямой паттерн
+// чтения svc_goodput_timeout_ms/svc_probe_retry_ms (как svc_probe_slow_ms/svc_probe_sample_bytes
+// выше — ServiceProbe.cpp/AvpnEngineQml.cpp сюда не линкуются, тестируем пару key/default).
 #include "../GoodputProbe.h"
 #include "../SignalQuality.h"
 #include "../TuningStore.h"
+#include "../YoutubeSource.h"
 
 #include <QCoreApplication>
 #include <cstdio>
@@ -133,6 +139,71 @@ int main(int argc, char **argv)
         CHECK(avpn::GoodputProbe::classify(2000, 1000, th) == 0,
               "fix1: classify(2000B,1000ms,default th) => blocked by minBytes gate after reset()");
     }
+
+    // ─── svc_goodput_timeout_ms / svc_probe_retry_ms — прямые ключи (паттерн svc_probe_slow_ms
+    // выше): ServiceProbe.cpp:measureGoodput/AvpnEngineQml.cpp:351 сюда не линкуются, тестируем
+    // тот же key/default, что читает продакшен-код. ────────────────────────────────────────────
+
+    // (м) svc_goodput_timeout_ms: override 8000 → дефолт 20000 не используется; reset() → снова 20000.
+    avpn::TuningStore::set({{"svc_goodput_timeout_ms", 8000.0}}, {});
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_goodput_timeout_ms"), 20000.0)) == 8000,
+          "svc_goodput_timeout_ms: override 8000 wins over compiled default 20000");
+    avpn::TuningStore::reset();
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_goodput_timeout_ms"), 20000.0)) == 20000,
+          "svc_goodput_timeout_ms: after reset() => back to compiled default 20000");
+
+    // (н) svc_probe_retry_ms: override 5000 → дефолт 20000 не используется; reset() → снова 20000.
+    avpn::TuningStore::set({{"svc_probe_retry_ms", 5000.0}}, {});
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_retry_ms"), 20000.0)) == 5000,
+          "svc_probe_retry_ms: override 5000 wins over compiled default 20000");
+    avpn::TuningStore::reset();
+    CHECK(int(avpn::TuningStore::numberOr(QStringLiteral("svc_probe_retry_ms"), 20000.0)) == 20000,
+          "svc_probe_retry_ms: after reset() => back to compiled default 20000");
+
+    // ─── YoutubeSource::evergreenVideoIds() / innerTubeKey() — реальные обёртки TuningStore ────────
+    // Фолбэк ОБЯЗАН быть byte-for-byte старыми константами; пустой серверный список/строка = фолбэк,
+    // не «пусто» (TuningStore.listOr/stringOr сами по себе такой гарантии НЕ дают — обёртка в
+    // YoutubeSource.h должна отбрасывать пустое значение локально).
+
+    // (о) пустой store → дефолт-видео {"jNQXAC9IVRw","BaW_jenozKc"}, дефолт-ключ непустой.
+    {
+        const QStringList ids = avpn::YoutubeSource::evergreenVideoIds();
+        CHECK(ids == QStringList({QStringLiteral("jNQXAC9IVRw"), QStringLiteral("BaW_jenozKc")}),
+              "yt video-ids: empty store => compiled defaults (jNQXAC9IVRw,BaW_jenozKc)");
+        CHECK(avpn::YoutubeSource::innerTubeKey()
+                      == QStringLiteral("AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"),
+              "yt innertube key: empty store => compiled default");
+    }
+
+    // (п) TuningStore::set(yt_probe_video_ids=[...]) → новый список побеждает; yt_innertube_key
+    // тоже переопределяется.
+    avpn::TuningStore::set({}, {}, {{"yt_probe_video_ids", QStringList{"abc123", "def456"}}},
+                           {{"yt_innertube_key", "server-key-999"}});
+    {
+        CHECK(avpn::YoutubeSource::evergreenVideoIds() == QStringList({"abc123", "def456"}),
+              "yt video-ids: after set => server list overrides compiled default");
+        CHECK(avpn::YoutubeSource::innerTubeKey() == QStringLiteral("server-key-999"),
+              "yt innertube key: after set => server value overrides compiled default");
+    }
+
+    // (р) reset() → снова дефолты.
+    avpn::TuningStore::reset();
+    CHECK(avpn::YoutubeSource::evergreenVideoIds()
+                  == QStringList({QStringLiteral("jNQXAC9IVRw"), QStringLiteral("BaW_jenozKc")}),
+          "yt video-ids: after reset() => back to compiled default");
+    CHECK(avpn::YoutubeSource::innerTubeKey()
+                  == QStringLiteral("AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"),
+          "yt innertube key: after reset() => back to compiled default");
+
+    // (с) пустой серверный список/строка (край, который parseConfig() в проде не пропускает, но
+    // сама TuningStore.h ничем не гарантирует) => фолбэк, а НЕ пустое значение.
+    avpn::TuningStore::set({}, {}, {{"yt_probe_video_ids", QStringList{}}},
+                           {{"yt_innertube_key", QString()}});
+    CHECK(!avpn::YoutubeSource::evergreenVideoIds().isEmpty(),
+          "yt video-ids: empty server list => falls back to compiled default, not empty");
+    CHECK(!avpn::YoutubeSource::innerTubeKey().isEmpty(),
+          "yt innertube key: empty server string => falls back to compiled default, not empty");
+    avpn::TuningStore::reset();
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;

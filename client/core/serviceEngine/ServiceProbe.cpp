@@ -28,6 +28,15 @@ constexpr const char *kYtIosVersion   = "21.02.3";
 constexpr const char *kYtIosOsVersion = "18.3.2.22D82";
 constexpr const char *kYtIosUA        = "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)";
 constexpr const char *kYtClientNameId = "5"; // INNERTUBE_CONTEXT_CLIENT_NAME для IOS
+
+// AVPN backend-first (Task 3, 2026-07-10): пустая серверная строка ⇒ фолбэк на вкомпиленную константу,
+// а НЕ пустое значение. TuningStore::stringOr сам по себе такой гарантии не даёт (просто lookup) —
+// проверяем на месте (тот же приём, что YoutubeSource::innerTubeKey()/evergreenVideoIds()).
+QString stringOrDefault(const QString &key, const QString &def)
+{
+    const QString v = avpn::TuningStore::stringOr(key, QString());
+    return v.isEmpty() ? def : v;
+}
 } // namespace
 
 namespace avpn {
@@ -264,6 +273,17 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
         return;
     }
 
+    // Server-driven snapshot (backend-first, Task 3): один прочёт TuningStore на попытку резолва
+    // (паттерн GoodputThresholds::fromTuning() — не дёргать TuningStore на каждое обращение к полю).
+    // Пустая серверная строка = фолбэк на вкомпиленную константу (stringOrDefault), см. namespace выше.
+    const QString ytVersion = stringOrDefault(QStringLiteral("yt_client_version"),
+                                              QString::fromLatin1(kYtIosVersion));
+    const QString ytOsVersion = stringOrDefault(QStringLiteral("yt_ios_os_version"),
+                                                QString::fromLatin1(kYtIosOsVersion));
+    const QString ytUA = stringOrDefault(QStringLiteral("yt_ios_ua"), QString::fromLatin1(kYtIosUA));
+    const QString ytClientNameId = stringOrDefault(QStringLiteral("yt_client_name_id"),
+                                                    QString::fromLatin1(kYtClientNameId));
+
     // Хост = www.youtube.com, НЕ youtubei.googleapis.com (корень «серый чип при работающем YouTube»,
     // 2026-07-03): youtubei.googleapis.com резолвится в 216.239.3x.223, а 216.239.38.0/24 состоит в
     // kBypassExtra RU-direct (Госуслуги-attestation) → при включённом «Доступе к сайтам РФ» резолв уходил
@@ -277,14 +297,14 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
 
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    req.setRawHeader("User-Agent", kYtIosUA);
-    req.setRawHeader("X-YouTube-Client-Name", kYtClientNameId);
-    req.setRawHeader("X-YouTube-Client-Version", kYtIosVersion);
+    req.setRawHeader("User-Agent", ytUA.toUtf8());
+    req.setRawHeader("X-YouTube-Client-Name", ytClientNameId.toUtf8());
+    req.setRawHeader("X-YouTube-Client-Version", ytVersion.toUtf8());
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
 
     const QByteArray body = YoutubeSource::buildPlayerRequest(
-        videoIds.at(idx), QStringLiteral("IOS"), QString::fromLatin1(kYtIosVersion),
-        QStringLiteral("iPhone16,2"), QString::fromLatin1(kYtIosOsVersion));
+        videoIds.at(idx), QStringLiteral("IOS"), ytVersion,
+        QStringLiteral("iPhone16,2"), ytOsVersion);
 
     auto *done = new bool(false);
     QNetworkReply *reply = m_nam->post(req, body);
@@ -388,6 +408,9 @@ void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &ur
 {
     const qint64 N = qint64(TuningStore::numberOr(QStringLiteral("svc_probe_sample_bytes"),
                                                   double(c.sampleBytes)));
+    // Server-driven (backend-first, Task 3): свежий снапшот на весь замер (один прочёт, как N выше).
+    const int goodputTimeoutMs = int(TuningStore::numberOr(QStringLiteral("svc_goodput_timeout_ms"),
+                                                            double(kGoodputTimeoutMs)));
     QString finalUrl = url;
     QNetworkRequest req;
     if (rangeAsQuery) {
@@ -410,7 +433,7 @@ void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &ur
     auto *timer = new QTimer(reply);
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); }); // частичное всё равно классифицируем
-    timer->start(kGoodputTimeoutMs);
+    timer->start(goodputTimeoutMs);
 
     // Считаем принятые байты; окно замера стартует с ПЕРВОГО байта (исключаем TLS/TTFB — честнее для goodput).
     connect(reply, &QNetworkReply::readyRead, reply, [reply, clock, firstByte, bytes, N]() {
