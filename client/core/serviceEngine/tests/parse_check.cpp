@@ -540,6 +540,14 @@ int main(int argc, char **argv)
             fprintf(stderr, "FAIL: TunnelStats helpers mismatch\n");
             return 12;
         }
+        
+        // 5) защита от мусорной дельты (iOS: стейл-ответ checkStatus старой сессии → underflow
+        //    quint64 → «дельта» ~2^64): абсурдный скачок игнорируется, счётчики не портятся
+        TunnelStats g; accumulateByteDelta(g, 500, 500);
+        accumulateByteDelta(g, Q_UINT64_C(18446744073709000000), 100); // rx-underflow, tx нормальный
+        bool guardOk = (g.rxBytes == 500 && g.txBytes == 600 && g.valid);
+        printf("tunnelstats-guard: %d\n", guardOk);
+        if (!guardOk) { fprintf(stderr, "FAIL: absurd delta guard\n"); return 13; }
         printf("tunnelstats: OK (delta→cumulative, steady-flow alive, epoch-0 keep, connect-grace)\n");
     }
 

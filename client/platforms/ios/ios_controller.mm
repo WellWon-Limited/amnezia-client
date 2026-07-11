@@ -10,6 +10,7 @@
 
 #include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
+#import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
 #import "StoreKitController.h"
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
 
@@ -192,13 +193,32 @@ IosController* IosController::Instance() {
 // менеджер из autoreleased-массива loadAllFromPreferences жил только в кеше NE-фреймворка;
 // после ночного фона кеш освобождался → m_checkTimer (QThread) → checkStatus →
 // objc_msgSend(m_currentTunnel, 'connection') по трупу = SIGSEGV (AmneziaVPN-2026-07-06-091741.ips).
+// AVPN (ревью 2026-07-11): владение m_currentTunnel — строго под локом. Гонка: checkStatus
+// уходит на глобальную dispatch-очередь и читает менеджер с фонового треда, а быстрый реконнект
+// (connectVpn → setCurrentTunnel(nil)) параллельно делает release на главном → UAF (тот же класс,
+// что AmneziaVPN-2026-07-06-091741.ips). IosController — синглтон, статик-лок достаточен.
+static os_unfair_lock s_tunnelOwnershipLock = OS_UNFAIR_LOCK_INIT;
+
 void IosController::setCurrentTunnel(NETunnelProviderManager *tunnel)
 {
-    if (tunnel == m_currentTunnel)
+    os_unfair_lock_lock(&s_tunnelOwnershipLock);
+    if (tunnel == m_currentTunnel) {
+        os_unfair_lock_unlock(&s_tunnelOwnershipLock);
         return;
+    }
+    NETunnelProviderManager *old = m_currentTunnel;
     [tunnel retain];
-    [m_currentTunnel release];
     m_currentTunnel = tunnel;
+    os_unfair_lock_unlock(&s_tunnelOwnershipLock);
+    [old release]; // release ВНЕ лока (dealloc может дёргать KVO/колбэки)
+}
+
+NETunnelProviderManager *IosController::retainedCurrentTunnel()
+{
+    os_unfair_lock_lock(&s_tunnelOwnershipLock);
+    NETunnelProviderManager *t = [m_currentTunnel retain];
+    os_unfair_lock_unlock(&s_tunnelOwnershipLock);
+    return t; // caller обязан release
 }
 
 bool IosController::initialize()
@@ -273,6 +293,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
     m_rxBytes = 0;
     m_txBytes = 0;
+    ++m_statusGeneration; // AVPN: инвалидируем ответы checkStatus прошлой сессии (стейл-гонка)
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block bool ok = true;
@@ -385,17 +406,25 @@ void IosController::disconnectVpn()
 
 void IosController::checkStatus()
 {
-    if (!m_currentTunnel) {
+    // AVPN (ревью 2026-07-11): менеджер — только retained-копией (гонка с release на реконнекте),
+    // ответ — только для СВОЕЙ сессии (gen): стейл-ответ старой сессии, долетевший после
+    // реконнекта, перезаписывал m_rxBytes старым большим кумулятивом → следующая дельта
+    // rxBytes - m_rxBytes уходила в quint64-underflow (~2^64) в bytesChanged.
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel) {
         return;
     }
 
-    if (m_currentTunnel.connection.status != NEVPNStatusConnected) {
+    if (tunnel.connection.status != NEVPNStatusConnected) {
+        [tunnel release];
         return;
     }
 
     if (m_statusRequestInFlight.exchange(true)) {
+        [tunnel release];
         return;
     }
+    const uint64_t gen = m_statusGeneration.load();
 
     NSString *actionKey = [NSString stringWithUTF8String:MessageKey::action];
     NSString *actionValue = [NSString stringWithUTF8String:Action::getStatus];
@@ -404,10 +433,14 @@ void IosController::checkStatus()
 
     NSDictionary* message = @{actionKey: actionValue, tunnelIdKey: tunnelIdValue};
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-    sendVpnExtensionMessage(message, [&](NSDictionary* response){
+    // tunnel: наш retain (retainedCurrentTunnel) отпускается в КОНЦЕ блока — синхронно после
+    // sendProviderMessage (ответ-хендлер менеджер не трогает; release в колбэке был бы двойным
+    // при callback(nil)-ветках). Сам блок дополнительно держит tunnel как object-capture.
+    sendVpnExtensionMessage(tunnel, message, [this, gen](NSDictionary* response){
         if (!response) {
-            QMetaObject::invokeMethod(this, [this]() {
-                m_statusRequestInFlight = false;
+            QMetaObject::invokeMethod(this, [this, gen]() {
+                if (m_statusGeneration.load() == gen)
+                    m_statusRequestInFlight = false;
             }, Qt::QueuedConnection);
             return;
         }
@@ -416,7 +449,10 @@ void IosController::checkStatus()
         const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
 
-        QMetaObject::invokeMethod(this, [this, txBytes, rxBytes, last_handshake_time_sec]() {
+        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec]() {
+            // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
+            if (m_statusGeneration.load() != gen)
+                return;
             // AVPN backend-first (T20): пороги — из m_rawConfig (засеяны VpnConnectionTunnelControl::up
             // ключами awg_handshake_timeout_ms/awg_handshake_max_timeouts), пусто/офлайн → constexpr-фолбэк.
             const int handshakeTimeoutMs =
@@ -470,7 +506,10 @@ void IosController::checkStatus()
                 }
             }
 
-            emit bytesChanged(rxBytes - m_rxBytes, txBytes - m_txBytes);
+            // AVPN: счётчик «поехал назад» (рестарт NE-сессии/гонка) — пересев без эмиссии дельты,
+            // иначе беззнаковое вычитание даёт «дельту» ~2^64 (второй рубеж — guard в accumulateByteDelta).
+            if (rxBytes >= m_rxBytes && txBytes >= m_txBytes)
+                emit bytesChanged(rxBytes - m_rxBytes, txBytes - m_txBytes);
             // AVPN: отдаём возраст хендшейка наружу (unix sec; <=0 → 0 «неизвестно») — serviceEngine
             // HealthLoop использует его для DEAD-детекта на iOS (раньше latestHandshakeEpoch был 0).
             emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
@@ -479,6 +518,7 @@ void IosController::checkStatus()
             m_statusRequestInFlight = false;
         }, Qt::QueuedConnection);
     });
+    [tunnel release]; // парный к retainedCurrentTunnel() в checkStatus
     });
 }
 
@@ -1061,9 +1101,12 @@ bool IosController::isOurManager(NETunnelProviderManager* manager) {
     return true;
 }
 
-void IosController::sendVpnExtensionMessage(NSDictionary* message, std::function<void(NSDictionary*)> callback)
+void IosController::sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary* message,
+                                            std::function<void(NSDictionary*)> callback)
 {
-    if (!m_currentTunnel) {
+    // AVPN (ревью 2026-07-11): менеджер приходит retained-копией от вызывающего (checkStatus) —
+    // ivar m_currentTunnel с фоновой очереди НЕ читаем (гонка с release на главном треде).
+    if (!tunnel) {
         qDebug() << "Cannot set an extension callback without a tunnel manager";
         if (callback) {
             callback(nil);
@@ -1102,7 +1145,7 @@ void IosController::sendVpnExtensionMessage(NSDictionary* message, std::function
         if (callback) callback(nil);
     };
 
-    NETunnelProviderSession *session = (NETunnelProviderSession *)m_currentTunnel.connection;
+    NETunnelProviderSession *session = (NETunnelProviderSession *)tunnel.connection;
 
     NSError *sendError = nil;
 

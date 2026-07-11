@@ -52,6 +52,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/Prober.h
     ${AVPN_SE}/Selector.h
     ${AVPN_SE}/HealthLoop.h
+    ${AVPN_SE}/ConnectTunables.h
     ${AVPN_SE}/SignalQuality.h
     ${AVPN_SE}/MtprotoProbe.h
     ${AVPN_SE}/QualityProbe.h

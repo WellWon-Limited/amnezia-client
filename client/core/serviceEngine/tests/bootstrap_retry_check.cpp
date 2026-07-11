@@ -54,6 +54,12 @@ int main()
     // фолбэк 60с сохраняется офлайн. Быстрая фаза {2,4,8,16,30}с server-tunable НЕ подлежит.
     avpn::TuningStore::set({{QStringLiteral("bootstrap_slow_retry_ms"), 120000}}, {});
     CHECK(nextBootstrapDelayMs(7) == 120000, "server override: attempt 7 -> tuned 120s slow cycle");
+    // Ревью 2026-07-11: значение С БЭКА тоже обязано клампиться — bootstrap_slow_retry_ms=0/минус
+    // = сетевой busy-loop на всех девайсах без подписки (нарушение инварианта «every delay >= 1s»).
+    avpn::TuningStore::set({{QStringLiteral("bootstrap_slow_retry_ms"), 0.0}}, {});
+    CHECK(nextBootstrapDelayMs(7) >= 1000, "server 0 => пол 1с (не busy-loop)");
+    avpn::TuningStore::set({{QStringLiteral("bootstrap_slow_retry_ms"), -5000.0}}, {});
+    CHECK(nextBootstrapDelayMs(7) >= 1000, "server minus => пол 1с");
     avpn::TuningStore::reset();
     CHECK(nextBootstrapDelayMs(7) == 60000, "after reset: attempt 7 -> baked 60s fallback");
     CHECK(nextBootstrapDelayMs(0) == 2000,  "fast phase unaffected: attempt 0 -> 2s");

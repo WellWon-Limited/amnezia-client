@@ -8,7 +8,8 @@
 
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
-#include "TuningStore.h"                // AVPN backend-first (T20): server-tunable handshake-пороги для iOS NE
+#include "TuningStore.h"                // AVPN backend-first (T20): server-tunable пороги
+#include "ConnectTunables.h"            // AVPN: клампованные handshake-пороги (ревью 2026-07-11)
 
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
 // уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
@@ -177,10 +178,10 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         }
     }
     // AVPN backend-first: пороги «нода мертва» для iOS NE (numbers.*; фолбэк = константы NE).
-    cfg.insert(QStringLiteral("awg_handshake_timeout_ms"),
-               int(avpn::TuningStore::numberOr(QStringLiteral("handshake_timeout_ms"), 12000)));
-    cfg.insert(QStringLiteral("awg_handshake_max_timeouts"),
-               int(avpn::TuningStore::numberOr(QStringLiteral("handshake_max_timeouts"), 3)));
+    // Клампы ОБЯЗАТЕЛЬНЫ (ревью 2026-07-11): timeout=0 с бэка = каждый iOS-коннект умирает
+    // на первом тике checkStatus; связка с watchdog — ConnectTunables.h.
+    cfg.insert(QStringLiteral("awg_handshake_timeout_ms"), avpn::handshakeTimeoutMsTuned());
+    cfg.insert(QStringLiteral("awg_handshake_max_timeouts"), avpn::handshakeMaxTimeoutsTuned());
     cfg.insert(QStringLiteral("awg_handshake_rx_threshold_bytes"),
                qBound(256,
                       int(avpn::TuningStore::numberOr(QStringLiteral("handshake_rx_threshold_bytes"), 4096)),

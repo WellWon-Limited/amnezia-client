@@ -52,8 +52,10 @@ inline int nextBootstrapDelayMs(int attempt)
     if (attempt < kFastCount)
         return kFast[attempt];
     // Медленный вечный цикл — server-tunable (numbers.bootstrap_slow_retry_ms), фолбэк 60с.
-    return int(TuningStore::numberOr(QStringLiteral("bootstrap_slow_retry_ms"),
-                                     double(kBootstrapSlowRetryMs)));
+    // Пол 1с ОБЯЗАТЕЛЕН и для серверного значения: 0/минус с бэка = сетевой busy-loop
+    // на всех девайсах без подписки (ревью 2026-07-11; инвариант «every delay >= 1s»).
+    return qMax(1000, int(TuningStore::numberOr(QStringLiteral("bootstrap_slow_retry_ms"),
+                                                double(kBootstrapSlowRetryMs))));
 }
 
 } // namespace avpn

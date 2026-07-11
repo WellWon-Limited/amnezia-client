@@ -51,9 +51,15 @@ struct FakeTunnel : ITunnelControl {
         lastUpNodeId = node.nodeId;
         return TunnelResult::success();
     }
-    TunnelStats readStats() override { return {}; }
+    TunnelStats st;                       // управляемые stats для DEAD-теста (по умолчанию invalid)
+    TunnelStats readStats() override { return st; }
     void down() override { ++downCalls; }
 };
+
+static TunnelStats mkStats(qint64 hs, qint64 rx, qint64 tx)
+{
+    TunnelStats s; s.latestHandshakeEpoch = hs; s.rxBytes = rx; s.txBytes = tx; s.valid = true; return s;
+}
 
 // Пул: cur (текущая, «умрёт»), fastA (RTT измерен, weight МЕНЬШЕ), heavyB (weight max, RTT нет),
 // ruC (RU, самый быстрый RTT — приманка для проверки RU-фильтра §14.3). Endpoint'ы — блэкхол
@@ -161,6 +167,31 @@ int main(int argc, char **argv)
 
         CHECK(eng.notifyConnectionLost());
         CHECK(tun.lastUpNodeId == QLatin1String("ruC"));          // fallback на RU вместо смерти failover
+    }
+
+    // --- 3a) stop ВО ВРЕМЯ двухфазного свитча отменяет pending (ревью 2026-07-11): юзер жмёт
+    //     «Стоп» между down() свитча и приходом Disconnected — undone-свитч НЕ должен доиграть up() ---
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(bringUpOnCur(eng, tun, err));
+        const int upsBefore0 = tun.upCalls;
+        // DEAD публичным путём: tick() кормит HealthLoop управляемыми stats (tx растёт, rx стоит,
+        // handshake неизвестен) → 2 «плохих» цикла → onDead(tunnelStillUp=true) → down() + pending.
+        const qint64 now = 1000000;
+        tun.st = mkStats(0, 100, 100); CHECK(!eng.tick(now));
+        tun.st = mkStats(0, 100, 200); CHECK(!eng.tick(now));
+        tun.st = mkStats(0, 100, 300);
+        CHECK(eng.tick(now));                                     // DEAD → двухфазный свитч: down()
+        CHECK(tun.downCalls >= 1);
+        CHECK(tun.upCalls == upsBefore0);                         // up ещё НЕ было (ждём Disconnected)
+        eng.requestStop();                                        // юзер: «Стоп» до прихода Disconnected
+        const int upsBefore = tun.upCalls;
+        eng.onTunnelDisconnected();                               // реальный Disconnected от down()
+        CHECK(tun.upCalls == upsBefore);                          // pending отменён — up() не доигран
+        CHECK(eng.debugSnapshot().state == QLatin1String("disconnected"));
     }
 
     // --- 4) IPv6-CIDR валидатор (фикс «v6-половина ru_prefixes молча выбрасывается») ---
