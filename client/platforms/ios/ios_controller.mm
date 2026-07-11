@@ -11,6 +11,7 @@
 #include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
 #import "StoreKitController.h"
+#include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
 
 const char* Action::start = "start";
 const char* Action::restart = "restart";
@@ -750,6 +751,17 @@ bool IosController::setupXray()
 
     finalConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
     finalConfig.insert(configKey::config, xrayConfigStr);
+    // AVPN backend-first (Task 6): tun2socks connect/read-write timeouts + network-change reconnect
+    // debounce, server-tunable via TuningStore (numbers.xray_connect_timeout_ms/xray_rw_timeout_ms/
+    // network_change_debounce_ms). Fallbacks byte-for-byte match the pre-Task-6 NE literals
+    // (setupAndRunTun2socks: 5000/60000; scheduleNetworkChangeHandling: 1000) — absent/offline ⇒
+    // identical behavior. Decoded as optional Int? on the Swift side (XrayConfig).
+    finalConfig.insert(configKey::xrayConnectTimeoutMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)));
+    finalConfig.insert(configKey::xrayRwTimeoutMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)));
+    finalConfig.insert(configKey::networkChangeDebounceMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -766,6 +778,14 @@ bool IosController::setupSSXray()
     finalConfig.insert(configKey::dns1, m_rawConfig[configKey::dns1]);
     finalConfig.insert(configKey::dns2, m_rawConfig[configKey::dns2]);
     finalConfig.insert(configKey::config, ssXrayConfigStr);
+    // AVPN backend-first (Task 6): same tun2socks/network-change knobs as setupXray() above — SSXray
+    // shares the same NE "xray" provider-configuration blob and XrayConfig Decodable on the Swift side.
+    finalConfig.insert(configKey::xrayConnectTimeoutMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)));
+    finalConfig.insert(configKey::xrayRwTimeoutMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)));
+    finalConfig.insert(configKey::networkChangeDebounceMs,
+                       int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));

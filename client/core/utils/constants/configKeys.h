@@ -196,6 +196,15 @@ namespace amnezia
         constexpr QLatin1String xmuxHMaxReusableSecsMin("xmux_h_max_reusable_secs_min");
         constexpr QLatin1String xmuxHMaxReusableSecsMax("xmux_h_max_reusable_secs_max");
         constexpr QLatin1String xmuxHKeepAlivePeriod("xmux_h_keep_alive_period");
+
+        // AVPN backend-first (Task 6): server-tunable iOS NE timeouts — tun2socks (hev-socks5-tunnel)
+        // connect/read-write timeouts for the Xray/SSXray tunnel, and the network-change reconnect
+        // debounce. Seeded from TuningStore in ios_controller.mm::setupXray()/setupSSXray(), decoded
+        // by XrayConfig (Decodable) in PacketTunnelProvider+Xray.swift. Optional on the Swift side —
+        // absent key == fallback == pre-Task-6 literal.
+        constexpr QLatin1String xrayConnectTimeoutMs("xray_connect_timeout_ms");
+        constexpr QLatin1String xrayRwTimeoutMs("xray_rw_timeout_ms");
+        constexpr QLatin1String networkChangeDebounceMs("network_change_debounce_ms");
     }
 }
 
