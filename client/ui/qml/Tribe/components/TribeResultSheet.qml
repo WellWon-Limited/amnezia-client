@@ -22,6 +22,7 @@ Item {
     signal done()
 
     function show(t, s) {
+        Haptic.play("success") // AVPN (haptics): терминальный успех операции (зелёная галочка)
         title = t
         subtitle = s || ""
         opened = true

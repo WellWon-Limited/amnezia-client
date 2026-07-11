@@ -18,6 +18,10 @@ Switch {
     // и settling ширины/checked в первом кадре всё равно дёрнул бы Behavior). // AVPN
     property bool animReady: false
     Component.onCompleted: readyTimer.start()
+
+    // AVPN (haptics): toggled() эмитится ТОЛЬКО на пользовательское переключение
+    // (программный checked его не дёргает) — программный сев при заходе на вкладку беззвучен.
+    onToggled: Haptic.play("light")
     Timer { id: readyTimer; interval: 60; onTriggered: control.animReady = true }
 
     indicator: Rectangle {

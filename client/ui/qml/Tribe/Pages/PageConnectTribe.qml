@@ -43,6 +43,16 @@ PageType {
     readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
     readonly property bool showBusy: isBusy && !engineStopping
 
+    // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
+    // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
+    // если взведено действием пользователя и app активно (Haptic.playArmed) — автофейловер и
+    // фоновые реконнекты беззвучны.
+    readonly property string hapticPhase: isOn ? "on" : (isBusy ? "busy" : "off")
+    onHapticPhaseChanged: {
+        if (hapticPhase === "on") Haptic.playArmed("success")
+        else if (hapticPhase === "off") Haptic.playArmed("light")
+    }
+
     signal requestTab(int index)
     signal requestSettings()
     signal requestNotifications()
@@ -135,6 +145,11 @@ PageType {
     }
 
     function onOrbClicked() {
+        // AVPN (haptics): весомый medium на включение, мягкий light на выключение; arm() взводит
+        // гард терминальных откликов (success/light/error по фактическому переходу — onIsOnChanged).
+        // engineStopping: клик = «включи обратно» → это включение.
+        Haptic.play((root.engineStopping || !(isOn || isBusy)) ? "medium" : "light")
+        Haptic.arm()
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
             simConnecting = true; simTimer.restart()
@@ -159,7 +174,10 @@ PageType {
     Connections {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
-        function onError(message) { PageController.showErrorMessage(message) }
+        function onError(message) {
+            Haptic.playArmed("error") // AVPN (haptics): ошибка коннекта после действия юзера
+            PageController.showErrorMessage(message)
+        }
         // AVPN (device_fingerprint): rehome-гейт 403 при переносе по диплинку/QR — диплинк может
         // прилететь, когда живёт только эта вкладка. Терминально: тост без ретраев.
         function onFingerprintMismatch() {
