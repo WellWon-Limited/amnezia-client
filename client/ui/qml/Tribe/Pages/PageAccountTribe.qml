@@ -1055,6 +1055,9 @@ PageType {
                 PageController.decrementDrawerDepth()
         }
 
+        // свайп слева направо = закрыть (единый жест «назад», 2026-07-11)
+        TribeEdgeBack { onTriggered: seatSheet.close() }
+
         Connections {
             target: PageController
             enabled: seatSheet.opened
@@ -1182,6 +1185,9 @@ PageType {
             if (!viaController)
                 PageController.decrementDrawerDepth()
         }
+
+        // свайп слева направо = закрыть (единый жест «назад», 2026-07-11)
+        TribeEdgeBack { onTriggered: kickConfirm.close() }
 
         Connections {
             target: PageController
@@ -1353,20 +1359,8 @@ PageType {
             MouseArea { anchors.fill: parent; onClicked: transferSheet.close() }
         }
 
-        // свайп слева направо = закрыть (симметрично сканеру)
-        Item {
-            anchors.left: parent.left
-            width: 28; height: parent.height
-            z: 50
-            DragHandler {
-                target: null
-                xAxis.enabled: true; yAxis.enabled: false
-                onActiveChanged: {
-                    if (!active && activeTranslation.x > 60)
-                        transferSheet.close()
-                }
-            }
-        }
+        // свайп слева направо = закрыть (TribeEdgeBack: DragHandler жест не держал — Flickable крал)
+        TribeEdgeBack { onTriggered: transferSheet.close() }
 
         TribeCard {
             elevated: true
@@ -1523,19 +1517,7 @@ PageType {
 
         // свайп слева направо = закрыть (iOS-жест «назад»). Кромка в QML-слое: превью камеры —
         // нативное вью строго над scanArea (x ≥ отступа xl), левая полоса остаётся кликабельной.
-        Item {
-            anchors.left: parent.left
-            width: 28; height: parent.height
-            z: 50
-            DragHandler {
-                target: null
-                xAxis.enabled: true; yAxis.enabled: false
-                onActiveChanged: {
-                    if (!active && activeTranslation.x > 60)
-                        scanSheet.close()
-                }
-            }
-        }
+        TribeEdgeBack { onTriggered: scanSheet.close() }
 
         Loader {
             anchors.fill: parent

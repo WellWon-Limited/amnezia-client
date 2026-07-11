@@ -10,7 +10,11 @@ import "../../Controls2" // PageType
 PageType {
     id: root
 
+    signal back()
+
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
+    // свайп слева направо = «назад» (у страницы не было НИКАКОГО выхода кроме нижней навигации)
+    TribeEdgeBack { onTriggered: root.back() }
 
     readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
     readonly property var pool: hasEngine ? (TribeEngine.nodePool || []) : []

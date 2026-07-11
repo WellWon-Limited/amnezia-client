@@ -60,6 +60,8 @@ Item {
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     MouseArea { anchors.fill: parent }   // глушим клики в страницу под оверлеем
+    // свайп слева направо = закрыть (единый жест «назад», 2026-07-11)
+    TribeEdgeBack { onTriggered: sheet.close() }
 
     ColumnLayout {
         anchors.centerIn: parent
