@@ -57,6 +57,11 @@ class TribeSupportChat : public QObject {
     // Страница чата на экране: true → частый поллинг всего треда (и mark-read на
     // бэке), false → редкий поллинг только счётчика. Ставит QML (Component.on*).
     Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
+    // Нативный пикер обрабатывает выбранное медиа (iOS: очистка GPS/пережатие видео/постер —
+    // секунды БЕЗ какого-либо UI-фидбека) → QML показывает «Готовим…» (жалоба 2026-07-11).
+    Q_PROPERTY(bool mediaPreparing READ mediaPreparing NOTIFY mediaPreparingChanged)
+    // Прогресс аплоада вложения 0..1 (−1 = не идёт) — полоска над композером.
+    Q_PROPERTY(qreal uploadProgress READ uploadProgress NOTIFY uploadProgressChanged)
 
 public:
     explicit TribeSupportChat(QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -67,6 +72,9 @@ public:
     bool loading() const { return m_loading; }
     bool active() const { return m_active; }
     void setActive(bool on);
+    bool mediaPreparing() const { return m_mediaPreparing; }
+    qreal uploadProgress() const { return m_uploadProgress; }
+    void setMediaPreparing(bool on); // мост из TribeMediaPicker.mm (Tribe_supportMediaPreparing)
 
     Q_INVOKABLE void refresh();        // GET /thread (заодно mark-read на бэке)
     Q_INVOKABLE void refreshUnread();  // GET /unread (фоновый бейдж)
@@ -99,6 +107,8 @@ signals:
     void unreadChanged();
     void loadingChanged();
     void activeChanged();
+    void mediaPreparingChanged();
+    void uploadProgressChanged();
     // Человекочитаемая причина для тоста (429/сеть/размер/тип файла).
     void sendFailed(const QString &reason);
     void attachmentReady(int attachmentId, const QString &kind, const QUrl &fileUrl);
@@ -163,6 +173,8 @@ private:
     int m_unread = 0;
     bool m_loading = false;
     bool m_active = false;
+    bool m_mediaPreparing = false;   // нативный пикер готовит медиа (см. Q_PROPERTY)
+    qreal m_uploadProgress = -1;     // 0..1 во время POST вложения; −1 = не идёт
     bool m_threadLoadedOnce = false;
     bool m_refreshInFlight = false;
     bool m_unreadInFlight = false;

@@ -420,7 +420,13 @@ PageType {
                                               : (root.avpnNav ? (PageController.imeHeight > 0 ? parent.bottom
                                                                                               : avpnBottomNav.top)
                                                               : tabBar.top)
-        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive) ? PageController.imeHeight : 0
+        // iOS: свой margin НЕ добавляем — QIOSInputContext сам сдвигает окно к курсору
+        // (отключить нельзя), margin+сдвиг давали ДВОЙНУЮ компенсацию: чёрная дыра высотой
+        // с клавиатуру между композером и клавиатурой (билд 75, 2026-07-11). Навбар скрыт
+        // (imeHeight>0 — питается с iOS с 7a25cd72), Qt поднимает композер к клавиатуре сам.
+        // Android — прежняя схема margin=imeHeight (там окно не сдвигается).
+        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive
+                               && Qt.platform.os !== "ios") ? PageController.imeHeight : 0
 
         enabled: !root.isControlsDisabled
 

@@ -99,6 +99,9 @@ PageType {
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
+    // свайп слева-направо = «назад» (жалоба 2026-07-11)
+    TribeEdgeBack { onTriggered: root.back() }
+
     // Замер RTT всех нод при открытии (async ICMP; при connected — no-op, показываем кэш).
     Component.onCompleted: {
         rebuildCountries()

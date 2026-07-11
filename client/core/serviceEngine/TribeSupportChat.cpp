@@ -35,20 +35,38 @@ TribeSupportChat *s_instance = nullptr;
 } // namespace avpn
 
 // Колбэк TribeMediaPicker.mm (main queue iOS ≠ гарантированно Qt-поток) — маршалим.
+// Пустой путь = отмена/ошибка обработки: только снять индикатор «Готовим…».
 extern "C" void Tribe_supportPickedMedia(const char *utf8Path)
 {
     const QString path = QString::fromUtf8(utf8Path ? utf8Path : "");
     auto *chat = avpn::s_instance;
-    if (path.isEmpty() || chat == nullptr)
+    if (chat == nullptr)
         return;
     QMetaObject::invokeMethod(
-        chat, [chat, path]() { chat->sendAttachmentFile(QUrl::fromLocalFile(path)); },
+        chat,
+        [chat, path]() {
+            if (path.isEmpty())
+                chat->setMediaPreparing(false);
+            else
+                chat->sendAttachmentFile(QUrl::fromLocalFile(path));
+        },
         Qt::QueuedConnection);
 }
 
 #ifdef Q_OS_IOS
 extern "C" bool TribeMediaPicker_present();                    // TribeMediaPicker.mm
 extern "C" bool TribeMediaViewer_present(const char *utf8Path); // TribeMediaViewer.mm
+
+// Пикер начал обработку выбранного медиа (очистка GPS/пережатие/постер — секунды).
+// Вызывается из TribeMediaPicker.mm С ГЛАВНОЙ ОЧЕРЕДИ iOS → маршалим в Qt-поток.
+extern "C" void Tribe_supportMediaPreparing()
+{
+    auto *chat = avpn::s_instance;
+    if (chat == nullptr)
+        return;
+    QMetaObject::invokeMethod(
+        chat, [chat]() { chat->setMediaPreparing(true); }, Qt::QueuedConnection);
+}
 #endif
 
 namespace avpn {
@@ -530,8 +548,17 @@ void TribeSupportChat::sendText(const QString &body)
     postEcho(m_echoes.last());
 }
 
+void TribeSupportChat::setMediaPreparing(bool on)
+{
+    if (m_mediaPreparing == on)
+        return;
+    m_mediaPreparing = on;
+    emit mediaPreparingChanged();
+}
+
 void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
 {
+    setMediaPreparing(false); // файл готов (или пришёл не из нативного пикера)
     const QString path = fileUrl.isLocalFile() ? fileUrl.toLocalFile() : fileUrl.toString();
     QFileInfo fi(path);
     if (!fi.exists() || fi.size() <= 0) {
@@ -674,12 +701,26 @@ void TribeSupportChat::postEcho(Echo &echo)
         reply = m_nam->post(req, multi);
         multi->setParent(reply); // multipart живёт, пока идёт запрос
         armTimeout(reply, kMediaTimeoutMs);
+        // прогресс аплоада → полоска над композером (без него отправка видео
+        // выглядела как «ничего не происходит», жалоба 2026-07-11)
+        connect(reply, &QNetworkReply::uploadProgress, this,
+                [this](qint64 sent, qint64 total) {
+            const qreal p = total > 0 ? qreal(sent) / qreal(total) : 0.0;
+            if (!qFuzzyCompare(p, m_uploadProgress)) {
+                m_uploadProgress = p;
+                emit uploadProgressChanged();
+            }
+        });
     }
 
     ++m_postsInFlight;
     connect(reply, &QNetworkReply::finished, this, [this, reply, localId]() {
         reply->deleteLater();
         m_postsInFlight = qMax(0, m_postsInFlight - 1);
+        if (m_uploadProgress >= 0) { // аплоад кончился (успех/ошибка) — полоску убрать
+            m_uploadProgress = -1;
+            emit uploadProgressChanged();
+        }
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         if (code >= 200 && code < 300) {
