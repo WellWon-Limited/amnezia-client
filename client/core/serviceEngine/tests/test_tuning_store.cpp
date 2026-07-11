@@ -51,6 +51,17 @@ int main(int argc, char **argv)
     CHECK(avpn::TuningStore::stringOr("yt_innertube_key", "fallback") == QStringLiteral("fallback"),
           "after reset: stringOr => def");
 
+    // (г2) контракт «пусто с сервера = фолбэк» (ревью Task 3, 2026-07-11): ключ ЕСТЬ в store, но
+    // хранимое значение пустое (строка/список) → stringOr/listOr отдают def, ТАК ЖЕ как для
+    // отсутствующего ключа. Раньше эта семантика жила локальными guard'ами в ServiceProbe.cpp
+    // и YoutubeSource.h — теперь единственный источник правды — сам TuningStore.
+    avpn::TuningStore::set({}, {}, {{"empty_list_key", QStringList{}}}, {{"empty_string_key", QString()}});
+    CHECK(avpn::TuningStore::listOr("empty_list_key", QStringList{"fallback"}) == QStringList({"fallback"}),
+          "key present, empty QStringList value: listOr => def (empty != override)");
+    CHECK(avpn::TuningStore::stringOr("empty_string_key", "fallback") == QStringLiteral("fallback"),
+          "key present, empty QString value: stringOr => def (empty != override)");
+    avpn::TuningStore::reset();
+
     // (д) set полностью замещает (не мержит): второй set без "probe_interval_s" => пропадает
     avpn::TuningStore::set(numbers, features, lists, strings);
     QMap<QString, double> numbers2{{"other_key", 99.0}};

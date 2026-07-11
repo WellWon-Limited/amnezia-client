@@ -162,8 +162,9 @@ int main(int argc, char **argv)
 
     // ─── YoutubeSource::evergreenVideoIds() / innerTubeKey() — реальные обёртки TuningStore ────────
     // Фолбэк ОБЯЗАН быть byte-for-byte старыми константами; пустой серверный список/строка = фолбэк,
-    // не «пусто» (TuningStore.listOr/stringOr сами по себе такой гарантии НЕ дают — обёртка в
-    // YoutubeSource.h должна отбрасывать пустое значение локально).
+    // не «пусто» (ревью Task 3, 2026-07-11: гарантия теперь внутри самого TuningStore.listOr/stringOr —
+    // единый источник правды, YoutubeSource.h больше не отбрасывает пустое значение локально;
+    // прямой юнит на этот контракт — test_tuning_store.cpp, блок «г2»).
 
     // (о) пустой store → дефолт-видео {"jNQXAC9IVRw","BaW_jenozKc"}, дефолт-ключ непустой.
     {
@@ -196,7 +197,7 @@ int main(int argc, char **argv)
           "yt innertube key: after reset() => back to compiled default");
 
     // (с) пустой серверный список/строка (край, который parseConfig() в проде не пропускает, но
-    // сама TuningStore.h ничем не гарантирует) => фолбэк, а НЕ пустое значение.
+    // TuningStore.h теперь гарантирует и на уровне store) => фолбэк, а НЕ пустое значение.
     avpn::TuningStore::set({}, {}, {{"yt_probe_video_ids", QStringList{}}},
                            {{"yt_innertube_key", QString()}});
     CHECK(!avpn::YoutubeSource::evergreenVideoIds().isEmpty(),
