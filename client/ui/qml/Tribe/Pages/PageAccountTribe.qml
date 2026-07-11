@@ -60,7 +60,10 @@ PageType {
     // POST /v1/cabinet/web-link) и открытие web-кабинета во ВНЕШНЕМ браузере (НЕ webview — §3.1.1).
     // В store-сборке кнопки НЕТ (compile-time, см. storeBuild) — бейдж-инфо подписки остаётся,
     // путь продления = карточка «Активировать ключ» + чат поддержки (store-flow).
-    readonly property bool manageSubEnabled: !root.storeBuild
+    // Решение владельца 2026-07-11: на iOS/Android кнопки веб-кабинета НЕТ ни в какой сборке
+    // (оплата на мобилках — только через чат поддержки, store-flow); десктоп — как раньше.
+    readonly property bool mobilePlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
+    readonly property bool manageSubEnabled: !root.storeBuild && !root.mobilePlatform
     property bool cabinetLinking: false   // loading кнопки; сбрасывается в onCabinetLinkReady (приходит всегда)
 
     // Язык приложения → веб-страницы (ЛК/legal) открываются на нём же (i18n сайта, 2026-07-07).
@@ -105,7 +108,7 @@ PageType {
             if (typeof AvpnDeepLink !== "undefined") {
                 root.redeemError = false
                 redeemField.clear()
-                root.redeemHint = qsTr("Переносим подписку на это устройство…")
+                root.redeemHint = qsTr("Переносим доступ на это устройство…")
                 AvpnDeepLink.handleUrl(c)   // → transferRequested → TribeEngine.redeemTransfer
             } else {
                 root.redeemError = true
@@ -147,8 +150,8 @@ PageType {
         if (res && Number(res.granted_days) > 0) parts.push(qsTr("+%1 дней").arg(Number(res.granted_days)))
         if (res && Number(res.granted_gib) > 0)  parts.push(qsTr("+%1 ГБ").arg(Number(res.granted_gib)))
         PageController.showNotificationMessage(parts.length > 0
-            ? qsTr("Ключ активирован: %1").arg(parts.join(" · "))
-            : qsTr("Ключ активирован — доступ обновлён"))
+            ? qsTr("Код активирован: %1").arg(parts.join(" · "))
+            : qsTr("Код активирован — доступ обновлён"))
     }
 
     // общий вызов движка (обычный redeem и повтор с evict_device_id после кика устройства).
@@ -164,7 +167,7 @@ PageType {
             seatSheet.close()
             root.redeemError = false
             redeemField.clear()
-            PageController.showNotificationMessage(qsTr("Ключ активирован — доступ обновлён"))
+            PageController.showNotificationMessage(qsTr("Код активирован — доступ обновлён"))
         }
     }
 
@@ -326,7 +329,7 @@ PageType {
             return
         scanSheet.close()
         if (isTransferInput(c)) {
-            root.redeemHint = qsTr("Переносим подписку на это устройство…")
+            root.redeemHint = qsTr("Переносим доступ на это устройство…")
             if (typeof AvpnDeepLink !== "undefined")
                 AvpnDeepLink.handleUrl(c)
         } else {
@@ -347,8 +350,8 @@ PageType {
     onTransferredAwayNowChanged: {
         if (transferredAwayNow && transferSheet.opened) {
             transferSheet.close()
-            transferOutResult.show(qsTr("Подписка перенесена"),
-                                   qsTr("Новое устройство активировано. Это устройство отключено от подписки — чтобы вернуть доступ, оформите новый ключ или перенесите подписку обратно."))
+            transferOutResult.show(qsTr("Доступ перенесён"),
+                                   qsTr("Новое устройство активировано. Это устройство отключено — чтобы вернуть доступ, активируйте новый код или перенесите доступ обратно."))
         }
     }
 
@@ -415,7 +418,7 @@ PageType {
             spacing: Theme.space.md
 
             Text {
-                text: qsTr("ПОДПИСКА")
+                text: qsTr("СТАТУС ДОСТУПА")
                 color: Theme.color.text3
                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                 font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
@@ -476,14 +479,14 @@ PageType {
                 anchors.margins: Theme.space.lg
                 spacing: Theme.space.xs
                 Text {
-                    text: qsTr("Подписка перенесена на другое устройство")
+                    text: qsTr("Доступ перенесён на другое устройство")
                     color: Theme.color.warning
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wMedium
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 Text {
-                    text: qsTr("Это устройство отключено от подписки. Чтобы вернуть доступ — активируйте ключ или перенесите подписку обратно.")
+                    text: qsTr("Это устройство отключено. Чтобы вернуть доступ — активируйте код или перенесите доступ обратно.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -577,7 +580,7 @@ PageType {
                 spacing: Theme.space.md
 
                 Text {
-                    text: qsTr("Активировать ключ")
+                    text: qsTr("Активировать код")
                     color: Theme.color.text1
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wMedium
@@ -690,7 +693,7 @@ PageType {
                 spacing: Theme.space.md
 
                 Text {
-                    text: qsTr("Перенести подписку на другое устройство")
+                    text: qsTr("Перенос на новое устройство")
                     color: Theme.color.text1
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wMedium
@@ -705,14 +708,14 @@ PageType {
                 // Единственный способ самостоятельной миграции: аккаунты анонимны (без email/Telegram),
                 // без переноса восстановление доступа — только вручную через поддержку. // AVPN
                 Text {
-                    text: qsTr("Перенос — единственный способ забрать подписку с собой. Потеряете устройство без переноса — восстановление только через поддержку.")
+                    text: qsTr("Перенос — единственный способ забрать доступ с собой. Потеряете устройство без переноса — восстановление только через поддержку.")
                     color: Theme.color.text2
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 TribeButton {
                     variant: "glass"
-                    text: qsTr("Перенести подписку")
+                    text: qsTr("Перенести на новое устройство")
                     Layout.fillWidth: true
                     onClicked: root.createTransfer()
                 }
@@ -737,7 +740,7 @@ PageType {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
                 verticalAlignment: Text.AlignVCenter
-                text: qsTr("Список устройств появится после активации ключа")
+                text: qsTr("Список устройств появится после активации кода")
                 color: Theme.color.text3
                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                 wrapMode: Text.WordWrap
@@ -939,7 +942,7 @@ PageType {
                 // Восстановление при потере устройства: identity-каналов нет (аноним),
                 // единственный путь — ручной перенос оператором по данным платежа. // AVPN
                 Text {
-                    text: qsTr("Потеряли устройство? Напишите в поддержку с нового устройства и укажите платёж — сумму, дату и способ оплаты. Мы вручную перенесём подписку.")
+                    text: qsTr("Потеряли устройство? Напишите в поддержку с нового устройства и укажите платёж — сумму, дату и способ оплаты. Мы вручную перенесём доступ.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -1094,7 +1097,7 @@ PageType {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 Text {
-                    text: qsTr("Выберите устройство, которое нужно отключить, чтобы активировать ключ здесь.")
+                    text: qsTr("Выберите устройство, которое нужно отключить, чтобы активировать код здесь.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -1221,7 +1224,7 @@ PageType {
                 }
                 Text {
                     text: kickConfirm.isSelf
-                          ? qsTr("Доступ на этом устройстве будет отозван. Чтобы вернуться, активируйте ключ заново.")
+                          ? qsTr("Доступ на этом устройстве будет отозван. Чтобы вернуться, активируйте код заново.")
                           : qsTr("«%1» потеряет доступ к VPN. Это действие нельзя отменить.").arg(kickConfirm.deviceLabel)
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
@@ -1387,7 +1390,7 @@ PageType {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
                 }
                 Text {
-                    text: qsTr("На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.")
+                    text: qsTr("На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Доступ переедет целиком, это устройство отключится сразу.")
                     color: Theme.color.text3
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                     Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -1556,7 +1559,7 @@ PageType {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: qsTr("Наведите камеру на QR-код переноса или ключа и удержите пару секунд.")
+                        text: qsTr("Наведите камеру на QR-код переноса или кода активации и удержите пару секунд.")
                         color: Theme.color.text3; wrapMode: Text.WordWrap
                         font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                     }

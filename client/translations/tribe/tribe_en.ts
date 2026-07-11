@@ -9,7 +9,7 @@
         <translation>%1 · auto</translation>
     </message>
     <message>
-        <location line="+240"/>
+        <location line="+244"/>
         <source>Не отправлено</source>
         <translation>Not sent</translation>
     </message>
@@ -44,13 +44,7 @@
 <context>
     <name>PageAccountTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+108"/>
-        <location line="+221"/>
-        <source>Переносим подписку на это устройство…</source>
-        <translation>Transferring subscription to this device…</translation>
-    </message>
-    <message>
-        <location line="-217"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+115"/>
         <location line="+7"/>
         <location line="+238"/>
         <location line="+892"/>
@@ -75,18 +69,7 @@
         <translation>+%1 GB</translation>
     </message>
     <message>
-        <location line="+2"/>
-        <source>Ключ активирован: %1</source>
-        <translation>Key activated: %1</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <location line="+16"/>
-        <source>Ключ активирован — доступ обновлён</source>
-        <translation>Key activated — access updated</translation>
-    </message>
-    <message>
-        <location line="+77"/>
+        <location line="+96"/>
         <location line="+270"/>
         <source>Активна</source>
         <translation>Active</translation>
@@ -109,32 +92,7 @@
         <translation>Device</translation>
     </message>
     <message>
-        <location line="-765"/>
-        <source>Подписка перенесена</source>
-        <translation>Subscription transferred</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Новое устройство активировано. Это устройство отключено от подписки — чтобы вернуть доступ, оформите новый ключ или перенесите подписку обратно.</source>
-        <translation>A new device has been activated. This device is disconnected from the subscription — to regain access, get a new key or transfer the subscription back.</translation>
-    </message>
-    <message>
-        <location line="+67"/>
-        <source>ПОДПИСКА</source>
-        <translation>SUBSCRIPTION</translation>
-    </message>
-    <message>
-        <location line="+61"/>
-        <source>Подписка перенесена на другое устройство</source>
-        <translation>Subscription moved to another device</translation>
-    </message>
-    <message>
-        <location line="+7"/>
-        <source>Это устройство отключено от подписки. Чтобы вернуть доступ — активируйте ключ или перенесите подписку обратно.</source>
-        <translation>This device has been disconnected from the subscription. To restore access, activate a key or transfer the subscription back.</translation>
-    </message>
-    <message>
-        <location line="+22"/>
+        <location line="-607"/>
         <source>Tribe Trial</source>
         <translation>Tribe Trial</translation>
     </message>
@@ -184,23 +142,65 @@
         <translation>Manage subscription</translation>
     </message>
     <message>
-        <location line="+22"/>
-        <source>Активировать ключ</source>
-        <translation>Activate key</translation>
-    </message>
-    <message>
-        <location line="-479"/>
+        <location line="-457"/>
         <location line="+498"/>
         <source>Введите код активации</source>
         <translation>Enter activation code</translation>
     </message>
     <message>
-        <location line="-402"/>
+        <location line="-491"/>
+        <location line="+221"/>
+        <source>Переносим доступ на это устройство…</source>
+        <translation>Transferring access to this device…</translation>
+    </message>
+    <message>
+        <location line="-179"/>
+        <source>Код активирован: %1</source>
+        <translation>Code activated: %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <location line="+16"/>
+        <source>Код активирован — доступ обновлён</source>
+        <translation>Code activated — access updated</translation>
+    </message>
+    <message>
+        <location line="+30"/>
         <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
         <translation>This device is linked to another account. Contact support — we&apos;ll help.</translation>
     </message>
     <message>
-        <location line="+390"/>
+        <location line="+153"/>
+        <source>Доступ перенесён</source>
+        <translation>Access transferred</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Новое устройство активировано. Это устройство отключено — чтобы вернуть доступ, активируйте новый код или перенесите доступ обратно.</source>
+        <translation>The new device is activated. This device is disconnected — to get access back, activate a new code or transfer access back.</translation>
+    </message>
+    <message>
+        <location line="+67"/>
+        <source>СТАТУС ДОСТУПА</source>
+        <translation>ACCESS STATUS</translation>
+    </message>
+    <message>
+        <location line="+61"/>
+        <source>Доступ перенесён на другое устройство</source>
+        <translation>Access transferred to another device</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Это устройство отключено. Чтобы вернуть доступ — активируйте код или перенесите доступ обратно.</source>
+        <translation>This device is disconnected. To get access back, activate a code or transfer access back.</translation>
+    </message>
+    <message>
+        <location line="+94"/>
+        <source>Активировать код</source>
+        <translation>Activate code</translation>
+    </message>
+    <message>
+        <location line="+7"/>
         <source>Если у вас есть код активации — введите его ниже, доступ продлится сразу.</source>
         <translation>If you have an activation code, enter it below — your access will be extended right away.</translation>
     </message>
@@ -232,36 +232,61 @@
     </message>
     <message>
         <location line="+16"/>
-        <source>Перенести подписку на другое устройство</source>
-        <translation>Transfer subscription to another device</translation>
+        <source>Перенос на новое устройство</source>
+        <translation>Transfer to a new device</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Перенос — единственный способ забрать доступ с собой. Потеряете устройство без переноса — восстановление только через поддержку.</source>
+        <translation>Transfer is the only way to take your access with you. If you lose the device without transferring, recovery is only possible via support.</translation>
     </message>
     <message>
         <location line="+7"/>
+        <source>Перенести на новое устройство</source>
+        <translation>Transfer to a new device</translation>
+    </message>
+    <message>
+        <location line="+25"/>
+        <source>Список устройств появится после активации кода</source>
+        <translation>The device list will appear after code activation</translation>
+    </message>
+    <message>
+        <location line="+202"/>
+        <source>Потеряли устройство? Напишите в поддержку с нового устройства и укажите платёж — сумму, дату и способ оплаты. Мы вручную перенесём доступ.</source>
+        <translation>Lost your device? Message support from the new device and mention your payment — amount, date and method. We will transfer your access manually.</translation>
+    </message>
+    <message>
+        <location line="+155"/>
+        <source>Выберите устройство, которое нужно отключить, чтобы активировать код здесь.</source>
+        <translation>Choose the device to disconnect so you can activate the code here.</translation>
+    </message>
+    <message>
+        <location line="+127"/>
+        <source>Доступ на этом устройстве будет отозван. Чтобы вернуться, активируйте код заново.</source>
+        <translation>Access on this device will be revoked. To come back, activate a code again.</translation>
+    </message>
+    <message>
+        <location line="+166"/>
+        <source>На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Доступ переедет целиком, это устройство отключится сразу.</source>
+        <translation>On the new device: install Tribe VPN → Settings → “Scan QR” and point the camera. Or open this link there. Access moves over entirely; this device disconnects immediately.</translation>
+    </message>
+    <message>
+        <location line="+169"/>
+        <source>Наведите камеру на QR-код переноса или кода активации и удержите пару секунд.</source>
+        <translation>Point the camera at a transfer or activation-code QR and hold for a couple of seconds.</translation>
+    </message>
+    <message>
+        <location line="-859"/>
         <source>Создайте одноразовую ссылку и откройте её на другом устройстве. Текущее устройство отключится автоматически.</source>
         <translation>Create a one-time link and open it on another device. This device will be disconnected automatically.</translation>
     </message>
     <message>
-        <location line="+8"/>
-        <source>Перенос — единственный способ забрать подписку с собой. Потеряете устройство без переноса — восстановление только через поддержку.</source>
-        <translation>Transfer is the only way to take your subscription with you. If you lose the device without transferring, recovery is only possible through support.</translation>
-    </message>
-    <message>
-        <location line="+7"/>
-        <source>Перенести подписку</source>
-        <translation>Transfer subscription</translation>
-    </message>
-    <message>
-        <location line="+9"/>
+        <location line="+24"/>
         <source>УСТРОЙСТВА</source>
         <translation>DEVICES</translation>
     </message>
     <message>
-        <location line="+16"/>
-        <source>Список устройств появится после активации ключа</source>
-        <translation>The device list will appear after you activate a key</translation>
-    </message>
-    <message>
-        <location line="+25"/>
+        <location line="+41"/>
         <source>это устройство</source>
         <translation>this device</translation>
     </message>
@@ -302,12 +327,7 @@
         <translation>Device ID copied</translation>
     </message>
     <message>
-        <location line="+13"/>
-        <source>Потеряли устройство? Напишите в поддержку с нового устройства и укажите платёж — сумму, дату и способ оплаты. Мы вручную перенесём подписку.</source>
-        <translation>Lost your device? Contact support from a new device and include your payment — amount, date, and payment method. We&apos;ll transfer the subscription manually.</translation>
-    </message>
-    <message>
-        <location line="+11"/>
+        <location line="+24"/>
         <source>ПРАВОВАЯ ИНФОРМАЦИЯ</source>
         <translation>LEGAL</translation>
     </message>
@@ -337,12 +357,7 @@
         <translation>Device limit reached</translation>
     </message>
     <message>
-        <location line="+6"/>
-        <source>Выберите устройство, которое нужно отключить, чтобы активировать ключ здесь.</source>
-        <translation>Choose a device to disconnect so you can activate a key here.</translation>
-    </message>
-    <message>
-        <location line="+19"/>
+        <location line="+25"/>
         <source> (это устройство)</source>
         <translation> (this device)</translation>
     </message>
@@ -369,12 +384,7 @@
         <translation>Disconnect device?</translation>
     </message>
     <message>
-        <location line="+7"/>
-        <source>Доступ на этом устройстве будет отозван. Чтобы вернуться, активируйте ключ заново.</source>
-        <translation>Access on this device will be revoked. To return, activate a key again.</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+8"/>
         <source>«%1» потеряет доступ к VPN. Это действие нельзя отменить.</source>
         <translation>«%1» will lose access to the VPN. This action can&apos;t be undone.</translation>
     </message>
@@ -404,12 +414,7 @@
         <translation>Open on the new device</translation>
     </message>
     <message>
-        <location line="+6"/>
-        <source>На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Подписка переедет целиком, это устройство отключится сразу.</source>
-        <translation>On the new device: install Tribe VPN → Settings → «Scan QR» and point the camera. Or open this link there. The subscription moves over entirely, and this device disconnects immediately.</translation>
-    </message>
-    <message>
-        <location line="+43"/>
+        <location line="+49"/>
         <source>Ссылка истечёт через %1:%2</source>
         <translation>Link expires in %1:%2</translation>
     </message>
@@ -432,11 +437,6 @@
         <location line="+72"/>
         <source>Сканирование QR</source>
         <translation>QR scanning</translation>
-    </message>
-    <message>
-        <location line="+6"/>
-        <source>Наведите камеру на QR-код переноса или ключа и удержите пару секунд.</source>
-        <translation>Point the camera at a transfer or key QR code and hold for a couple of seconds.</translation>
     </message>
 </context>
 <context>
@@ -522,7 +522,7 @@
         <translation>Couldn&apos;t save the report</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location line="+48"/>
         <source>Панель администратора</source>
         <translation>Admin Panel</translation>
     </message>
@@ -933,7 +933,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+108"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+123"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -948,12 +948,12 @@
         <translation>∞</translation>
     </message>
     <message>
-        <location line="+42"/>
+        <location line="+47"/>
         <source>Серверы сервиса запускаются — пробный доступ появится в ближайшем обновлении, аккаунт не нужен</source>
         <translation>Our servers are starting up — trial access will arrive in an upcoming update, no account needed</translation>
     </message>
     <message>
-        <location line="+14"/>
+        <location line="+17"/>
         <source>Это устройство привязано к другому аккаунту. Обратитесь в поддержку — мы поможем.</source>
         <translation>This device is linked to another account. Contact support — we&apos;ll help.</translation>
     </message>
@@ -1018,7 +1018,7 @@
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+37"/>
+        <location line="+39"/>
         <source>Российский сервер: доступность сервисов — как внутри РФ</source>
         <translation>Russian server: service availability matches what you get inside Russia</translation>
     </message>
@@ -1029,11 +1029,16 @@
     </message>
     <message>
         <location line="+0"/>
-        <source>Обновить ключ</source>
-        <translation>Renew key</translation>
+        <source>Продлить доступ</source>
+        <translation>Renew access</translation>
     </message>
     <message>
-        <location line="+72"/>
+        <location line="+12"/>
+        <source>Хочу продлить доступ</source>
+        <translation>I want to renew my access</translation>
+    </message>
+    <message>
+        <location line="+66"/>
         <source>Сменить сервер</source>
         <translation>Change server</translation>
     </message>
@@ -1051,28 +1056,34 @@
 <context>
     <name>PageHomeTribe</name>
     <message>
+        <location filename="../../ui/qml/Pages2/PageHomeTribe.qml" line="+244"/>
         <source>Защита включена</source>
-        <translation type="vanished">Protection on</translation>
+        <translation>Protection on</translation>
     </message>
     <message>
+        <location line="+1"/>
         <source>Подключаемся…</source>
-        <translation type="vanished">Connecting…</translation>
+        <translation>Connecting…</translation>
     </message>
     <message>
+        <location line="+0"/>
         <source>Готов к подключению</source>
-        <translation type="vanished">Ready to connect</translation>
+        <translation>Ready to connect</translation>
     </message>
     <message>
+        <location line="+12"/>
         <source>Устанавливаем защищённое соединение</source>
-        <translation type="vanished">Establishing a secure connection</translation>
+        <translation>Establishing a secure connection</translation>
     </message>
     <message>
+        <location line="+1"/>
         <source>Нажмите на кнопку, чтобы подключиться</source>
-        <translation type="vanished">Tap the button to connect</translation>
+        <translation>Tap the button to connect</translation>
     </message>
     <message>
+        <location line="+16"/>
         <source>Рунет — напрямую · зарубежные сайты — через VPN</source>
-        <translation type="vanished">Runet — direct · foreign sites — via VPN</translation>
+        <translation>Runet — direct · foreign sites — via VPN</translation>
     </message>
 </context>
 <context>
@@ -1124,12 +1135,12 @@
 <context>
     <name>PageNotificationsTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+44"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+62"/>
         <source>Уведомления</source>
         <translation>Notifications</translation>
     </message>
     <message>
-        <location line="+136"/>
+        <location line="+137"/>
         <source>+%1 дней</source>
         <translation>+%1 days</translation>
     </message>
@@ -1140,8 +1151,8 @@
     </message>
     <message>
         <location line="+11"/>
-        <source>Здесь появятся важные сообщения о подписке, новых серверах и состоянии сервиса.</source>
-        <translation>Important messages about your subscription, new servers, and service status will appear here.</translation>
+        <source>Здесь появятся важные сообщения о доступе, новых серверах и состоянии сервиса.</source>
+        <translation>Important messages about your access, new servers and service status will appear here.</translation>
     </message>
 </context>
 <context>
@@ -1167,7 +1178,7 @@
         <translation>Russian — always connect directly</translation>
     </message>
     <message>
-        <location line="+24"/>
+        <location line="+18"/>
         <source>Зарубежные сайты — работают через VPN,
 Банки, кинотеатры, Госуслуги, маркетплейсы продолжают работать без переключений!</source>
         <translation>Foreign sites — work through the VPN,
@@ -1234,7 +1245,7 @@ banks, cinemas, government services and marketplaces keep working without switch
         <translation>You can change the server</translation>
     </message>
     <message>
-        <location line="-201"/>
+        <location line="-195"/>
         <source>Умная маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
         <translation>Smart routing decides on its own which traffic goes through the VPN.</translation>
     </message>
@@ -1244,7 +1255,7 @@ banks, cinemas, government services and marketplaces keep working without switch
         <translation>Access to Russian sites is on</translation>
     </message>
     <message>
-        <location line="+123"/>
+        <location line="+117"/>
         <source>Приложение подберёт самый быстрый сервер</source>
         <translation>The app will pick the fastest server</translation>
     </message>
@@ -1292,7 +1303,7 @@ banks, cinemas, government services and marketplaces keep working without switch
 <context>
     <name>PageReferralTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+40"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+42"/>
         <source>Ссылка скопирована — отправь другу</source>
         <translation>Link copied — send it to a friend</translation>
     </message>
@@ -1308,25 +1319,26 @@ banks, cinemas, government services and marketplaces keep working without switch
         <translation>Link copied — paste it in a messenger</translation>
     </message>
     <message>
-        <location line="+57"/>
+        <location line="+59"/>
         <source>Пригласи друзей</source>
         <translation>Invite friends</translation>
     </message>
     <message>
-        <location line="+137"/>
+        <location line="+138"/>
         <source>Поделиться с друзьями
 За каждого друга — подарок!</source>
         <translation>Share with friends
 A gift for every friend!</translation>
     </message>
     <message>
-        <location line="+23"/>
-        <source>&lt;font color=&apos;%1&apos;&gt;Приглашено %2&lt;/font&gt; · +%3 дней</source>
-        <translation>&lt;font color=&apos;%1&apos;&gt;Invited %2&lt;/font&gt; · +%3 days</translation>
+        <location line="+24"/>
+        <source>&lt;font color=&apos;%1&apos;&gt;Приглашено %2&lt;/font&gt; · +%3 дней · +%4 ГБ</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>&lt;font color=&apos;%1&apos;&gt;7 дней + 3 ГБ&lt;/font&gt; бесплатно</source>
-        <translation type="vanished">&lt;font color=&apos;%1&apos;&gt;7 days + 3 GB&lt;/font&gt; free</translation>
+        <location line="+1"/>
+        <source>&lt;font color=&apos;%1&apos;&gt;Приглашено %2&lt;/font&gt; · +%3 дней</source>
+        <translation>&lt;font color=&apos;%1&apos;&gt;Invited %2&lt;/font&gt; · +%3 days</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1360,19 +1372,24 @@ A gift for every friend!</translation>
     </message>
     <message>
         <location line="+1"/>
+        <source>Бонус-ГБ</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Дней за друга</source>
         <translation>Days per friend</translation>
     </message>
     <message>
         <location line="+6"/>
-        <source>Друг засчитывается, когда активирует ключ по вашей ссылке. История по каждому появится позже.</source>
-        <translation>A friend counts once they activate a key via your link. A per-friend history will appear later.</translation>
+        <source>Друг засчитывается, когда активирует код по вашей ссылке. История по каждому появится позже.</source>
+        <translation>A friend counts once they activate a code via your link. Per-friend history is coming later.</translation>
     </message>
 </context>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+120"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+123"/>
         <source>Выбор сервера</source>
         <translation>Choose server</translation>
     </message>
@@ -1397,7 +1414,7 @@ A gift for every friend!</translation>
         <translation>The service picks the fastest node</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location line="+46"/>
         <source>РЕЗУЛЬТАТЫ</source>
         <translation>RESULTS</translation>
     </message>
@@ -1407,14 +1424,14 @@ A gift for every friend!</translation>
         <translation>ALL LOCATIONS</translation>
     </message>
     <message>
-        <location line="+62"/>
+        <location line="+63"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+37"/>
-        <source>Нет активной подписки</source>
-        <translation>No active subscription</translation>
+        <location line="+38"/>
+        <source>Нет активного доступа</source>
+        <translation>No active access</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1430,7 +1447,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+62"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+72"/>
         <source>Не удалось загрузить вложение</source>
         <translation>Failed to load the attachment</translation>
     </message>
@@ -1445,7 +1462,27 @@ A gift for every friend!</translation>
         <translation>Photos and videos</translation>
     </message>
     <message>
-        <location line="+88"/>
+        <location line="+50"/>
+        <source>Поддержка</source>
+        <translation type="unfinished">Support</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Отвечаем прямо в чате</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>ID аккаунта</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+22"/>
+        <source>ID аккаунта скопирован</source>
+        <translation type="unfinished">Account ID copied</translation>
+    </message>
+    <message>
+        <location line="+90"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
         <translation>Write to us — we’ll reply right here.
@@ -1457,9 +1494,14 @@ You can attach a photo or video.</translation>
         <translation>Loading conversation…</translation>
     </message>
     <message>
-        <location line="+104"/>
+        <location line="+113"/>
         <source>Сообщение…</source>
         <translation>Message…</translation>
+    </message>
+    <message>
+        <location line="+77"/>
+        <source>Готовим медиа…</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
@@ -1507,7 +1549,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeResultSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+108"/>
+        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+109"/>
         <source>Понятно</source>
         <translation>Got it</translation>
     </message>
@@ -1569,7 +1611,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1004"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1028"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -1765,7 +1807,7 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+582"/>
+        <location line="+587"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
@@ -1840,7 +1882,7 @@ You can attach a photo or video.</translation>
         <translation>Could not activate the key</translation>
     </message>
     <message>
-        <location line="+412"/>
+        <location line="+413"/>
         <source>Не указано устройство</source>
         <translation>No device specified</translation>
     </message>
@@ -1870,7 +1912,7 @@ You can attach a photo or video.</translation>
         <translation>Could not disconnect the device (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+434"/>
+        <location line="+442"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>
@@ -1888,7 +1930,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::TribeSupportChat</name>
     <message>
-        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+122"/>
+        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+140"/>
         <source>Нет сети — сообщение не отправлено</source>
         <translation>No network — message not sent</translation>
     </message>
@@ -1909,17 +1951,17 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+497"/>
+        <location line="+506"/>
         <source>Нет авторизации</source>
         <translation>Not authorized</translation>
     </message>
     <message>
-        <location line="-496"/>
+        <location line="-505"/>
         <source>Не отправлено (ошибка %1)</source>
         <translation>Not sent (error %1)</translation>
     </message>
     <message>
-        <location line="+410"/>
+        <location line="+419"/>
         <location line="+54"/>
         <location line="+74"/>
         <source>Файл недоступен</source>
@@ -1941,17 +1983,9 @@ You can attach a photo or video.</translation>
         <translation>Photo larger than %1 MB</translation>
     </message>
     <message>
-        <source>Видео больше 25 МБ</source>
-        <translation type="vanished">Video is larger than 25 MB</translation>
-    </message>
-    <message>
         <location line="-4"/>
         <source>Формат изображения не поддерживается</source>
         <translation>Image format is not supported</translation>
-    </message>
-    <message>
-        <source>Фото больше 10 МБ</source>
-        <translation type="vanished">Photo is larger than 10 MB</translation>
     </message>
     <message>
         <location line="+9"/>

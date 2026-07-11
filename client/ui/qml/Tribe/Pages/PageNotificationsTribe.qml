@@ -242,7 +242,7 @@ PageType {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            text: qsTr("Здесь появятся важные сообщения о подписке, новых серверах и состоянии сервиса.")
+            text: qsTr("Здесь появятся важные сообщения о доступе, новых серверах и состоянии сервиса.")
             color: Theme.color.text2
             font.family: Theme.font.body
             font.pixelSize: Theme.font.bodyS
