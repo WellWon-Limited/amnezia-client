@@ -756,12 +756,15 @@ bool IosController::setupXray()
     // network_change_debounce_ms). Fallbacks byte-for-byte match the pre-Task-6 NE literals
     // (setupAndRunTun2socks: 5000/60000; scheduleNetworkChangeHandling: 1000) — absent/offline ⇒
     // identical behavior. Decoded as optional Int? on the Swift side (XrayConfig).
+    // Clamped: an operator typo (0/negative) in the backend config must not reach the NE — 0
+    // connect-timeout would go into the tun2socks YAML as-is, 0/negative debounce would cause a
+    // reconnect storm on a flapping network.
     finalConfig.insert(configKey::xrayConnectTimeoutMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)));
+                       qBound(100, int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)), 300000));
     finalConfig.insert(configKey::xrayRwTimeoutMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)));
+                       qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)));
+                       qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -780,12 +783,13 @@ bool IosController::setupSSXray()
     finalConfig.insert(configKey::config, ssXrayConfigStr);
     // AVPN backend-first (Task 6): same tun2socks/network-change knobs as setupXray() above — SSXray
     // shares the same NE "xray" provider-configuration blob and XrayConfig Decodable on the Swift side.
+    // Clamped for the same reason as setupXray(): operator typo (0/negative) must not reach the NE.
     finalConfig.insert(configKey::xrayConnectTimeoutMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)));
+                       qBound(100, int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)), 300000));
     finalConfig.insert(configKey::xrayRwTimeoutMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)));
+                       qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
-                       int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)));
+                       qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
