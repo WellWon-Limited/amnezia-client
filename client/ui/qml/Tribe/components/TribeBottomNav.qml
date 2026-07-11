@@ -14,12 +14,24 @@ Item {
     signal activated(int index)
 
     // tab spec: { label, icon path (24-grid) } — Tabler Home/Globe/Shield/User
+    // AVPN backend-first (Task 9): индексы ЗАФИКСИРОВАНЫ (0 Главная/1 Поддержка/2 Рефералка/
+    // 3 Настройки) — на них завязан роутер goAvpnTab в PageStart.qml. Модель НЕ фильтруем
+    // (это сдвинуло бы index у Repeater и сломало маппинг соседних вкладок) — вместо этого
+    // скрытая вкладка (referral) получает width:0/visible:false, остальные растягиваются
+    // (см. tabWidth ниже), чтобы в баре не оставалось пустой дыры.
     readonly property var tabs: [
         { label: qsTr("Главная"), icon: "M5 12 L3 12 L12 3 L21 12 L19 12 M5 12 L5 20 L9 20 L9 14 L15 14 L15 20 L19 20 L19 12" },
         { label: qsTr("Поддержка"), icon: "M4 13 v-2 a8 8 0 0 1 16 0 v2 M7 13 h-2 a1 1 0 0 0 -1 1 v3 a1 1 0 0 0 1 1 h1 a1 1 0 0 0 1 -1 v-4z M17 13 h2 a1 1 0 0 1 1 1 v3 a1 1 0 0 1 -1 1 h-1 a1 1 0 0 1 -1 -1 v-4z M19 18 v1 a3 3 0 0 1 -3 3 h-2" },
         { label: qsTr("Рефералка"), icon: "M4 8 h16 a1 1 0 0 1 1 1 v2 a1 1 0 0 1 -1 1 h-16 a1 1 0 0 1 -1 -1 v-2 a1 1 0 0 1 1 -1z M12 8 v13 M5 12 v7 a2 2 0 0 0 2 2 h10 a2 2 0 0 0 2 -2 v-7 M7.5 8 a2.5 2.5 0 0 1 0 -5 a4.8 8 0 0 1 4.5 5 a4.8 8 0 0 1 4.5 -5 a2.5 2.5 0 0 1 0 5" },
         { label: qsTr("Настройки"), icon: "M10.3 3.2 a1 1 0 0 1 3.4 0 l.2 1.2 a7 7 0 0 1 2 .8 l1 -.7 a1 1 0 0 1 2.4 2.4 l-.7 1 a7 7 0 0 1 .8 2 l1.2 .2 a1 1 0 0 1 0 3.4 l-1.2 .2 a7 7 0 0 1 -.8 2 l.7 1 a1 1 0 0 1 -2.4 2.4 l-1 -.7 a7 7 0 0 1 -2 .8 l-.2 1.2 a1 1 0 0 1 -3.4 0 l-.2 -1.2 a7 7 0 0 1 -2 -.8 l-1 .7 a1 1 0 0 1 -2.4 -2.4 l.7 -1 a7 7 0 0 1 -.8 -2 l-1.2 -.2 a1 1 0 0 1 0 -3.4 l1.2 -.2 a7 7 0 0 1 .8 -2 l-.7 -1 a1 1 0 0 1 2.4 -2.4 l1 .7 a7 7 0 0 1 2 -.8z M12 15 a3 3 0 1 0 0 -6 3 3 0 0 0 0 6z" }
     ]
+
+    // AVPN backend-first (Task 9): реф-вкладка (index 2) — kill-switch features.referral
+    // (default TRUE). dev-превью без движка (!hasEngine) — вкладка всегда видна.
+    readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
+    readonly property bool referralVisible: !(hasEngine && TribeEngine.referralEnabled === false)
+    readonly property int visibleTabCount: referralVisible ? tabs.length : tabs.length - 1
+    readonly property real tabWidth: nav.width / nav.visibleTabCount
 
     implicitHeight: 72 + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
@@ -46,7 +58,12 @@ Item {
         Repeater {
             model: nav.tabs
             delegate: Item {
-                width: nav.width / nav.tabs.length
+                // AVPN backend-first (Task 9): реф-вкладка (index 2) скрыта kill-switch'ем —
+                // width:0/visible:false, остальные растягиваются на nav.tabWidth (без дыры в баре).
+                readonly property bool tabVisible: index !== 2 || nav.referralVisible
+                width: tabVisible ? nav.tabWidth : 0
+                visible: tabVisible
+                enabled: tabVisible
                 height: parent.height
                 readonly property bool active: index === nav.currentIndex
                 readonly property color tint: active ? nav.navActive : nav.navIdle
