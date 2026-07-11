@@ -470,6 +470,44 @@ int main(int argc, char **argv)
         printf("healthloop: OK (one-way death→DEAD, healthy/idle/fresh-handshake→alive, exclude works)\n");
     }
 
+    // --- TunnelStats-хелперы (ИНЦИДЕНТ 2026-07-11 «сам отключился и переподключился»):
+    //     bytesChanged на ВСЕХ платформах = ДЕЛЬТЫ за период (vpnProtocol::setBytesChanged и
+    //     ios_controller.mm эмитят diff), а HealthLoop ждёт КУМУЛЯТИВЫ; плюс iOS шлёт
+    //     handshakeChanged(0)=«неизвестно» до первого отчёта wireguard-go → hsStale защёлкивался.
+    {
+        const qint64 now = 2000000;
+        // 1) аккумуляция дельт в кумулятив
+        TunnelStats s;
+        accumulateByteDelta(s, 100, 50);
+        accumulateByteDelta(s, 100, 50);
+        bool accum = (s.rxBytes == 200 && s.txBytes == 100 && s.valid);
+        // 2) регресс ложного DEAD: РОВНЫЙ rx-поток (равные дельты) + растущий tx + epoch=0.
+        //    Старая запись дельт «как есть» давала rxStuck=true → DEAD за 2 цикла; кумулятив — жив.
+        HealthLoop hb;
+        TunnelStats a; accumulateByteDelta(a, 1000, 1000);
+        TunnelStats b = a; accumulateByteDelta(b, 1000, 2000);
+        TunnelStats c = b; accumulateByteDelta(c, 1000, 3000);
+        hb.feed(a, now); hb.feed(b, now);
+        bool aliveFlow = !hb.feed(c, now);
+        // 3) epoch=0 НЕ затирает известный handshake
+        TunnelStats h; updateHandshakeEpoch(h, now - 5); updateHandshakeEpoch(h, 0);
+        bool keepEpoch = (h.latestHandshakeEpoch == now - 5);
+        // 4) посев epoch≈now на Connected (паритет с desktop-UAPI: данные текут ⇒ handshake был
+        //    только что) → пост-коннект тишина rx при tx-бёрстах проб НЕ роняет туннель (грейс 180с)
+        HealthLoop hc;
+        TunnelStats p; updateHandshakeEpoch(p, now); accumulateByteDelta(p, 0, 100);
+        TunnelStats q = p; accumulateByteDelta(q, 0, 100);
+        TunnelStats r = q; accumulateByteDelta(r, 0, 100);
+        hc.feed(p, now); hc.feed(q, now);
+        bool graceOk = !hc.feed(r, now);
+        printf("tunnelstats: accum=%d flow=%d keep=%d grace=%d\n", accum, aliveFlow, keepEpoch, graceOk);
+        if (!(accum && aliveFlow && keepEpoch && graceOk)) {
+            fprintf(stderr, "FAIL: TunnelStats helpers mismatch\n");
+            return 12;
+        }
+        printf("tunnelstats: OK (delta→cumulative, steady-flow alive, epoch-0 keep, connect-grace)\n");
+    }
+
     // --- SignalQuality: RTT→5 баров + EWMA-сглаживание + гистерезис (детерминированно) ---
     {
         // 1) Чистая таблица порогов RTT→бары (ЩЕДРАЯ калибровка под VPN-туннель: 5:<150 4:<230 3:<330 2:<500 1:<800).
