@@ -206,6 +206,80 @@ int main(int argc, char **argv)
           "yt innertube key: empty server string => falls back to compiled default, not empty");
     avpn::TuningStore::reset();
 
+    // ─── chat_media_timeout_ms / chat_thumb_timeout_ms / chat_image_max_dimension /
+    // chat_jpeg_quality — Task 8 (2026-07-11): TribeSupportChat.cpp сюда не линкуется
+    // (QNetworkAccessManager/QImageReader и т.п.), поэтому тестируем ТОТ ЖЕ паттерн
+    // key/default/qBound, что читает продакшен-код (mediaTimeoutMs/thumbTimeoutMs/
+    // imageMaxDimension/jpegQuality, TribeSupportChat.cpp:118-148).
+
+    // (т) chat_media_timeout_ms: override 90000 (в допустимом диапазоне) → побеждает
+    // дефолт 180000; reset() → снова дефолт.
+    avpn::TuningStore::set({{"chat_media_timeout_ms", 90000.0}}, {});
+    CHECK(qBound(5000, int(avpn::TuningStore::numberOr(QStringLiteral("chat_media_timeout_ms"),
+                                                        180000.0)),
+                 600000) == 90000,
+          "chat_media_timeout_ms: override 90000 wins over compiled default 180000");
+    avpn::TuningStore::reset();
+    CHECK(qBound(5000, int(avpn::TuningStore::numberOr(QStringLiteral("chat_media_timeout_ms"),
+                                                        180000.0)),
+                 600000) == 180000,
+          "chat_media_timeout_ms: after reset() => back to compiled default 180000");
+
+    // (у) chat_media_timeout_ms: злой конфиг (1 мс) клампится к минимуму 5000, не проходит как есть.
+    avpn::TuningStore::set({{"chat_media_timeout_ms", 1.0}}, {});
+    CHECK(qBound(5000, int(avpn::TuningStore::numberOr(QStringLiteral("chat_media_timeout_ms"),
+                                                        180000.0)),
+                 600000) == 5000,
+          "chat_media_timeout_ms: server value below floor clamped to 5000");
+    avpn::TuningStore::reset();
+
+    // (ф) chat_thumb_timeout_ms: override 15000 → побеждает дефолт 30000; reset() → снова дефолт.
+    avpn::TuningStore::set({{"chat_thumb_timeout_ms", 15000.0}}, {});
+    CHECK(qBound(5000, int(avpn::TuningStore::numberOr(QStringLiteral("chat_thumb_timeout_ms"),
+                                                        30000.0)),
+                 600000) == 15000,
+          "chat_thumb_timeout_ms: override 15000 wins over compiled default 30000");
+    avpn::TuningStore::reset();
+    CHECK(qBound(5000, int(avpn::TuningStore::numberOr(QStringLiteral("chat_thumb_timeout_ms"),
+                                                        30000.0)),
+                 600000) == 30000,
+          "chat_thumb_timeout_ms: after reset() => back to compiled default 30000");
+
+    // (х) chat_image_max_dimension: override 2048 → побеждает дефолт 1600; reset() → снова дефолт;
+    // злой конфиг (100) клампится к полу 320, а не проходит как есть.
+    avpn::TuningStore::set({{"chat_image_max_dimension", 2048.0}}, {});
+    CHECK(qBound(320, int(avpn::TuningStore::numberOr(QStringLiteral("chat_image_max_dimension"),
+                                                       1600.0)),
+                 8192) == 2048,
+          "chat_image_max_dimension: override 2048 wins over compiled default 1600");
+    avpn::TuningStore::reset();
+    CHECK(qBound(320, int(avpn::TuningStore::numberOr(QStringLiteral("chat_image_max_dimension"),
+                                                       1600.0)),
+                 8192) == 1600,
+          "chat_image_max_dimension: after reset() => back to compiled default 1600");
+    avpn::TuningStore::set({{"chat_image_max_dimension", 100.0}}, {});
+    CHECK(qBound(320, int(avpn::TuningStore::numberOr(QStringLiteral("chat_image_max_dimension"),
+                                                       1600.0)),
+                 8192) == 320,
+          "chat_image_max_dimension: server value below floor clamped to 320");
+    avpn::TuningStore::reset();
+
+    // (ц) chat_jpeg_quality: override 60 → побеждает дефолт 85; reset() → снова дефолт;
+    // злой конфиг (999) клампится к потолку 100.
+    avpn::TuningStore::set({{"chat_jpeg_quality", 60.0}}, {});
+    CHECK(qBound(1, int(avpn::TuningStore::numberOr(QStringLiteral("chat_jpeg_quality"), 85.0)),
+                 100) == 60,
+          "chat_jpeg_quality: override 60 wins over compiled default 85");
+    avpn::TuningStore::reset();
+    CHECK(qBound(1, int(avpn::TuningStore::numberOr(QStringLiteral("chat_jpeg_quality"), 85.0)),
+                 100) == 85,
+          "chat_jpeg_quality: after reset() => back to compiled default 85");
+    avpn::TuningStore::set({{"chat_jpeg_quality", 999.0}}, {});
+    CHECK(qBound(1, int(avpn::TuningStore::numberOr(QStringLiteral("chat_jpeg_quality"), 85.0)),
+                 100) == 100,
+          "chat_jpeg_quality: server value above ceiling clamped to 100");
+    avpn::TuningStore::reset();
+
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
 }
