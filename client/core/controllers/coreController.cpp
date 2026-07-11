@@ -18,6 +18,7 @@
     #include "core/serviceEngine/TribeSupportChat.h" // AVPN (Support): чат поддержки → QML
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
     #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
+    #include "core/serviceEngine/TribeHaptics.h" // AVPN (haptics): тактильный отклик → QML
 #endif
 
 #if defined(Q_OS_ANDROID)
@@ -208,6 +209,9 @@ void CoreController::initControllers()
     auto *avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
                                                amnApp->networkManager(), this);
     setQmlContextProperty("TribeEngine", avpnEngine);
+
+    // AVPN (haptics, спека 2026-07-11): семантический тактильный отклик для QML-слоя Tribe.
+    setQmlContextProperty("TribeHaptics", new avpn::TribeHaptics(this));
 
     // AVPN (Task 9): мост пуш-уведомлений (APNs/FCM) → QML. На desktop/Android без пушей это просто
     // пустой счётчик. Натив-слой (iOS QtAppDelegate.mm) дёргает singleton instance() из своего потока.
