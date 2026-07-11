@@ -22,6 +22,7 @@
 // AVPN: нативный iOS safe-area inset (AvpnSafeArea.mm) — Qt даёт 0 при ExpandedClientAreaHint.
 #ifdef Q_OS_IOS
     #include <QInputMethod> // AVPN: высота клавиатуры для imeHeight (см. конструктор)
+    #include <QRectF>       // AVPN: keyboardRectangle() — без включения тип только forward-declared
 extern "C" int avpnSafeAreaTop();
 extern "C" int avpnSafeAreaBottom();
 #endif
