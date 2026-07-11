@@ -367,7 +367,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
-                avpn::TuningStore::set(c.numbers, c.features, c.lists); // AVPN backend-first (T19)
+                avpn::TuningStore::set(c.numbers, c.features, c.lists, c.urls); // AVPN backend-first (T19)
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
                 // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
                 // интервалом, ничего не останавливаем/не стартуем).
