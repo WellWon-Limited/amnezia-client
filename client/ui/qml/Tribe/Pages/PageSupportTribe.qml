@@ -39,6 +39,7 @@ PageType {
         var txt = input.text.trim()
         if (txt.length === 0 || !root.hasChat)
             return
+        Haptic.play("light") // AVPN (haptics): подтверждение отправки
         TribeSupport.sendText(txt)
         input.clear()
         list.stick = true

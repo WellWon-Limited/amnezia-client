@@ -248,6 +248,7 @@ PageType {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     if (root.autoMode) { root.back(); return }  // уже авто — no-op
+                    Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
                     root.pickAuto()
                 }
             }
@@ -343,6 +344,7 @@ PageType {
                         onClicked: {
                             // уже выбрана вручную — no-op (не дёргаем реконнект)
                             if (row.modelData.isCurrent && !root.autoMode) { root.back(); return }
+                            Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
                             root.pickNode(row.modelData.nodeId)
                         }
                     }

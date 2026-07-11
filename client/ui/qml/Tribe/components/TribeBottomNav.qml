@@ -93,7 +93,11 @@ Item {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: { nav.currentIndex = index; nav.activated(index) }
+                    onClicked: {
+                        if (index !== nav.currentIndex)
+                            Haptic.play("selection") // AVPN (haptics): тик смены вкладки
+                        nav.currentIndex = index; nav.activated(index)
+                    }
                 }
             }
         }
