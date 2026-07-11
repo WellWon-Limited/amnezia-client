@@ -422,6 +422,13 @@ void IosController::checkStatus()
                     intFromRawConfig(m_rawConfig, "awg_handshake_timeout_ms", kHandshakeTimeoutMs);
             const int handshakeMaxTimeouts =
                     intFromRawConfig(m_rawConfig, "awg_handshake_max_timeouts", kHandshakeMaxTimeouts);
+            // AVPN backend-first (Task 5): rx-порог подтверждения рукопожатия — тоже из m_rawConfig
+            // (awg_handshake_rx_threshold_bytes, засеян VpnConnectionTunnelControl::up).
+            // intFromRawConfig не гарантирует положительность — порог <= 0 бессмыслен, откатываемся на фолбэк.
+            const int handshakeRxThresholdRaw =
+                    intFromRawConfig(m_rawConfig, "awg_handshake_rx_threshold_bytes", (int)kHandshakeRxThreshold);
+            const uint64_t handshakeRxThreshold =
+                    handshakeRxThresholdRaw > 0 ? (uint64_t)handshakeRxThresholdRaw : kHandshakeRxThreshold;
             if (isWireGuardBasedProto(m_proto) && m_handshakeAwaiting) {
                 const bool hasHandshakeData = (last_handshake_time_sec >= 0);
                 // AVPN: tx НЕ доказывает рукопожатие — init-ретраи можно бесконечно слать в чёрную дыру
@@ -430,7 +437,7 @@ void IosController::checkStatus()
                 // (авторитетно, wireguard-go ставит время завершённого рукопожатия) или приход данных назад (rx).
                 const bool hasFreshHandshake = hasHandshakeData &&
                         ((last_handshake_time_sec > 0) ||
-                         (rxBytes >= kHandshakeRxThreshold));
+                         (rxBytes >= handshakeRxThreshold));
 
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
