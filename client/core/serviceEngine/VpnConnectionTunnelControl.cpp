@@ -182,7 +182,9 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     cfg.insert(QStringLiteral("awg_handshake_max_timeouts"),
                int(avpn::TuningStore::numberOr(QStringLiteral("handshake_max_timeouts"), 3)));
     cfg.insert(QStringLiteral("awg_handshake_rx_threshold_bytes"),
-               int(avpn::TuningStore::numberOr(QStringLiteral("handshake_rx_threshold_bytes"), 4096)));
+               qBound(256,
+                      int(avpn::TuningStore::numberOr(QStringLiteral("handshake_rx_threshold_bytes"), 4096)),
+                      10485760));
     if (splitDns) {
         // AVPN split-DNS: RU-суффиксы (TLD рунета + RU-сервисы вне .ru) → Яндекс мимо туннеля.
         // Прокид: localsocketcontroller → демон → /etc/resolver/*. Яндекс отвечает ТОЛЬКО

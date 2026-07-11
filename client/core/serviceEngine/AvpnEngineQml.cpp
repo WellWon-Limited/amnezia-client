@@ -281,7 +281,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             m_liveFailStreak = 0;
             m_liveDead = false;
         } else {
-            const int deadStreak = (int) TuningStore::numberOr(QStringLiteral("live_dead_streak"), kLiveDeadStreak);
+            // AVPN backend-first (final review R-2): пол 1 — 0/минус латчили бы m_liveDead=true мгновенно.
+            const int deadStreak = qMax(1,
+                (int) TuningStore::numberOr(QStringLiteral("live_dead_streak"), kLiveDeadStreak));
             if (++m_liveFailStreak >= deadStreak)
                 m_liveDead = true;
         }
@@ -332,8 +334,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     if ((state == -1 || state == 0) && !m_svcRetried.contains(key)) {
                         m_svcRetried.insert(key);
                         // Server-driven (backend-first, Task 3): svc_probe_retry_ms, фолбэк 20с (прежнее).
-                        const int retryMs = int(avpn::TuningStore::numberOr(
-                                QStringLiteral("svc_probe_retry_ms"), 20000.0));
+                        // AVPN backend-first (final review R-3): клампим — 0/минус ретраил бы мгновенно
+                        // (антипаттерн), сверху потолок 10 мин.
+                        const int retryMs = qBound(1000, int(avpn::TuningStore::numberOr(
+                                QStringLiteral("svc_probe_retry_ms"), 20000.0)), 600000);
                         QTimer::singleShot(retryMs, this, [this, key]() {
                             if (m_svcProbe && this->state() == QLatin1String("connected"))
                                 m_svcProbe->probeOne(key);
@@ -2737,6 +2741,10 @@ void AvpnEngineQml::guardedStart()
     m_opInFlight = true;
     m_busy = true;
     m_needsRestart = false;   // свежий старт всегда поднимает целевую (pin/auto) ноду — рестарт не нужен
+    // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (server-driven,
+    // без ребилда); setInterval конструктора (15000) остаётся вкомпиленным дефолтом.
+    m_watchdog.setInterval(qBound(5000,
+        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
     m_watchdog.start();
     emit changed();
 
@@ -2788,6 +2796,9 @@ void AvpnEngineQml::guardedStop()
     m_op = Op::Stopping;
     m_opInFlight = true;
     m_busy = true;
+    // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (см. guardedStart).
+    m_watchdog.setInterval(qBound(5000,
+        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
     m_watchdog.start();
     m_healthTimer.stop();
     m_engine.requestStop();
