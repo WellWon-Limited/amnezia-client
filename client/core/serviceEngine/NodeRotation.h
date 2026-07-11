@@ -33,14 +33,24 @@ inline bool isRuNode(const SubscriptionNode &n)
     return n.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
 }
 
+// «Только ручной pin» — честный флаг контракта nodes[].manual_only (openapi 0.6.1,
+// MANUAL-ONLY-POOL-HANDOFF): такие ноды НИКОГДА не выбираются автоматикой (первый коннект,
+// failover, «Сменить сервер») — только явный тап. RU-проверка остаётся страховкой для тел
+// без поля (LKG-кеш старого формата) и потому, что RU manual по определению (§14.3).
+inline bool isManualOnlyNode(const SubscriptionNode &n)
+{
+    return n.manualOnly || isRuNode(n);
+}
+
 // Следующая живая нода после текущей — round-robin для кнопки «Сменить сервер» (rotateNext).
-// RU-ноды в кольцо НЕ входят (§14.3: только ручной pin); с запиненной RU ротация уводит на лучшую
-// не-RU. Сортировка стабильная: weight desc → health desc → nodeId. Пусто = ротировать некуда.
+// manual_only-ноды (вкл. RU) в кольцо НЕ входят (§14.3: только ручной pin); с запиненной manual
+// ротация уводит на лучшую обычную. Сортировка стабильная: weight desc → health desc → nodeId.
+// Пусто = ротировать некуда.
 inline QString nextLiveNodeId(const QList<SubscriptionNode> &nodes, const QString &currentNodeId)
 {
     QList<SubscriptionNode> live;
     for (const SubscriptionNode &n : nodes)
-        if (!isRuNode(n) && healthAggregate(n) > 0.0)
+        if (!isManualOnlyNode(n) && healthAggregate(n) > 0.0)
             live.append(n);
     if (live.isEmpty())
         return QString();
