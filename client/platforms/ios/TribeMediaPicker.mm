@@ -12,7 +12,12 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-extern "C" void Tribe_supportPickedMedia(const char *utf8Path); // TribeSupportChat.cpp
+extern "C" void Tribe_supportPickedMedia(const char *utf8Path);  // TribeSupportChat.cpp
+extern "C" void Tribe_supportMediaPreparing();                   // TribeSupportChat.cpp: «Готовим…» в QML
+static void tribePreparingDone(void)  // ошибка/отмена: снять «Готовим…» пустым путём
+{
+    dispatch_async(dispatch_get_main_queue(), ^{ Tribe_supportPickedMedia(""); });
+}
 
 static UIViewController *tribeTopViewController()
 {
@@ -60,37 +65,68 @@ static void tribeGenerateVideoPoster(NSString *videoPath)
 
 // ПРИВАТНОСТЬ (аудит 2026-07-09): видео с камеры несёт точный GPS в QuickTime-атоме
 // (com.apple.quicktime.location.ISO6709) — PHPicker его НЕ вырезает. Чистим штатным
-// AVMetadataItemFilter forSharing (Apple делает его именно для этого) через passthrough-
-// экспорт: без перекодирования, быстро, качество не трогаем. Мы на background-очереди
+// AVMetadataItemFilter forSharing через экспорт. Мы на background-очереди
 // completion-хендлера — семафор допустим (как и синхронный постер рядом).
-// Не смогли очистить (битый файл/таймаут) — отдаём оригинал: деградация к старому
-// поведению, чат важнее (webm AVFoundation не читает, но у него и нет GPS-стандарта).
+//
+// ОПТИМИЗАЦИЯ (жалоба 2026-07-11 «видео отправляется долго и без фидбека»): крупные видео
+// (>8 МБ — телефоны снимают 4K HEVC десятки МБ) пережимаем HW-кодеком в 720p H.264 mp4:
+// аплоад в разы меньше и быстрее, качества не теряем (бэк всё равно транскодит в ≤720p).
+// Мелкие — passthrough (только срез метаданных, без перекодирования).
+// Не смогли (битый файл/таймаут/результат не меньше) — отдаём оригинал: деградация к
+// старому поведению, чат важнее (webm AVFoundation не читает, но у него и нет GPS-стандарта).
 static NSString *tribeStripVideoLocation(NSString *path)
 {
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
-    AVAssetExportSession *ex =
-        [[AVAssetExportSession alloc] initWithAsset:asset
-                                         presetName:AVAssetExportPresetPassthrough];
+    const unsigned long long srcBytes =
+        [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize];
+    const BOOL shrink = srcBytes > 8ULL * 1024 * 1024
+        && [AVAssetExportSession.allExportPresets containsObject:AVAssetExportPreset1280x720];
+
+    AVAssetExportSession *ex = [[AVAssetExportSession alloc]
+        initWithAsset:asset
+           presetName:shrink ? AVAssetExportPreset1280x720 : AVAssetExportPresetPassthrough];
     if (ex == nil)
         return path;
-    const BOOL isMp4 = [path.pathExtension.lowercaseString isEqualToString:@"mp4"];
+    const BOOL isMp4 = shrink || [path.pathExtension.lowercaseString isEqualToString:@"mp4"];
     NSString *out = [path stringByAppendingString:isMp4 ? @".clean.mp4" : @".clean.mov"];
     [NSFileManager.defaultManager removeItemAtPath:out error:nil];
     ex.outputURL = [NSURL fileURLWithPath:out];
     ex.outputFileType = isMp4 ? AVFileTypeMPEG4 : AVFileTypeQuickTimeMovie;
     ex.metadataItemFilter = [AVMetadataItemFilter metadataItemFilterForSharing];
+    ex.shouldOptimizeForNetworkUse = YES;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     [ex exportAsynchronouslyWithCompletionHandler:^{ dispatch_semaphore_signal(sem); }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)));
-    if (ex.status == AVAssetExportSessionStatusCompleted) {
-        // Имя сохраняем (конвенция постера <видео>.poster.jpg и C++ пути) — подменяем файл.
-        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
-        if ([NSFileManager.defaultManager moveItemAtPath:out toPath:path error:nil])
-            return path;
-        return out; // переезд не удался — отдаём очищенный файл под clean-именем
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)));
+    if (ex.status != AVAssetExportSessionStatusCompleted) {
+        [ex cancelExport]; // таймаут: не дать экспорту писать в файл после ухода
+        [NSFileManager.defaultManager removeItemAtPath:out error:nil];
+        return path;
     }
-    [NSFileManager.defaultManager removeItemAtPath:out error:nil];
-    return path;
+    const unsigned long long outBytes =
+        [[NSFileManager.defaultManager attributesOfItemAtPath:out error:nil] fileSize];
+    if (shrink && outBytes >= srcBytes) { // пережатие не окупилось — оригинал
+        [NSFileManager.defaultManager removeItemAtPath:out error:nil];
+        return path;
+    }
+    if (shrink) {
+        // 720p-экспорт всегда mp4 → файл ОБЯЗАН сменить расширение (mime считается по имени):
+        // <base>.mp4. Конвенция постера <видео>.poster.jpg строится от НОВОГО пути (постер
+        // генерится ПОСЛЕ этой функции по возвращённому пути).
+        NSString *mp4 =
+            [[path stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp4"];
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        if ([mp4 isEqualToString:out])
+            return out;
+        [NSFileManager.defaultManager removeItemAtPath:mp4 error:nil];
+        if ([NSFileManager.defaultManager moveItemAtPath:out toPath:mp4 error:nil])
+            return mp4;
+        return out;
+    }
+    // passthrough: имя сохраняем (конвенция постера <видео>.poster.jpg и C++ пути) — подменяем файл.
+    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    if ([NSFileManager.defaultManager moveItemAtPath:out toPath:path error:nil])
+        return path;
+    return out; // переезд не удался — отдаём очищенный файл под clean-именем
 }
 
 // Делегат держим статически: PHPicker хранит delegate weak — локальный объект умер бы
@@ -117,10 +153,17 @@ static TribeMediaPickerDelegate *s_delegate = nil;
     if (typeId == nil)
         return;
 
+    // Медиа выбрано: копирование/очистка GPS/пережатие/постер занимают секунды БЕЗ
+    // какого-либо UI — сразу говорим QML «Готовим…» (жалоба 2026-07-11). Любой
+    // ошибочный выход ниже ОБЯЗАН снять индикатор (tribePreparingDone).
+    dispatch_async(dispatch_get_main_queue(), ^{ Tribe_supportMediaPreparing(); });
+
     [provider loadFileRepresentationForTypeIdentifier:typeId
                                     completionHandler:^(NSURL *url, NSError *error) {
-        if (error != nil || url == nil)
+        if (error != nil || url == nil) {
+            tribePreparingDone();
             return;
+        }
         // URL живёт только внутри completion — копируем во временную папку приложения.
         NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"tribe-picker"];
         [NSFileManager.defaultManager createDirectoryAtPath:dir
@@ -133,8 +176,10 @@ static TribeMediaPickerDelegate *s_delegate = nil;
         NSError *copyErr = nil;
         if (![NSFileManager.defaultManager copyItemAtURL:url
                                                    toURL:[NSURL fileURLWithPath:dst]
-                                                   error:&copyErr])
+                                                   error:&copyErr]) {
+            tribePreparingDone();
             return;
+        }
         // Видео: сначала срезать GPS/идентифицирующие метаданные, потом постер-кадр
         // (мы на background-очереди — можно синхронно).
         NSString *finalPath = dst;

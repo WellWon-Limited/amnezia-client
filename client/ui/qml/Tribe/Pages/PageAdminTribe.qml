@@ -135,6 +135,9 @@ PageType {
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
 
+    // свайп слева-направо = «назад» (жалоба 2026-07-11)
+    TribeEdgeBack { onTriggered: root.requestSettings() }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.topMargin: root.safeTop

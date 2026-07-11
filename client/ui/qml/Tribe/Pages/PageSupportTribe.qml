@@ -13,10 +13,17 @@ import "../../Controls2" // PageType
 PageType {
     id: root
 
+    // «назад» из шапки/свайпа → PageStart (onRequestTab) вернёт на Главную.
+    signal requestTab(int index)
+
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     // dev-превью без движка (qml с диска) — страница живёт на пустой модели, не падает.
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
+    // ID аккаунта в шапке (тап = копия): оператору поддержки нужен для поиска юзера.
+    readonly property bool hasEngine: typeof TribeEngine !== "undefined"
+    readonly property string accountId: hasEngine && TribeEngine.account
+                                        ? ("" + (TribeEngine.account.account_id || "")) : ""
 
     // AVPN (store-flow): черновик, подставляемый в composer при открытии (кнопка «Написать в
     // поддержку» из Настроек передаёт его через goToTabBarPageUrl). ТОЛЬКО подстановка в поле —
@@ -34,6 +41,8 @@ PageType {
     Component.onDestruction: if (root.hasChat) TribeSupport.active = false
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
+    // скрытый носитель для копирования ID (паттерн форка)
+    TextEdit { id: acctCopyEdit; width: 0; height: 0; opacity: 0; readOnly: true }
 
     function send() {
         var txt = input.text.trim()
@@ -84,11 +93,99 @@ PageType {
 
     ColumnLayout {
         anchors.fill: parent
-        // заголовок «Поддержка» убран (вкладка уже подписана в нижней навигации). В рамке ТОЛЬКО
-        // инсет чёлки — воздух 24 скроллится с лентой (topMargin ListView ниже), иначе прокрутка
-        // обрезала сообщения на 16px ниже macOS-плашки (мёртвая полоса, жалоба 2026-07-10). // AVPN
+        // В рамке ТОЛЬКО инсет чёлки — воздух скроллится с лентой (topMargin ListView ниже),
+        // иначе прокрутка обрезала сообщения ниже плашки (мёртвая полоса, 2026-07-10). // AVPN
         anchors.topMargin: root.safeTop
         spacing: 0
+
+        // ── шапка чата (жалоба 2026-07-11): назад + заголовок + ID аккаунта (тап = копия) ──
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: 52
+            color: Theme.color.bg700
+            // хайрлайн-низ — граница с лентой
+            Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.bottom: parent.bottom }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Theme.space.xs
+                anchors.rightMargin: Theme.space.lg
+                spacing: Theme.space.xs
+
+                // назад (chevron-left, 24-сетка) → Главная
+                Item {
+                    Layout.preferredWidth: 44; Layout.preferredHeight: 44
+                    Layout.alignment: Qt.AlignVCenter
+                    Shape {
+                        anchors.centerIn: parent; width: 24; height: 24
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: Theme.color.text1; fillColor: "transparent"; strokeWidth: 2
+                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                            PathSvg { path: "M14.5 6 L8.5 12 L14.5 18" }
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.requestTab(0)
+                    }
+                }
+
+                Column {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 1
+                    Text {
+                        text: qsTr("Поддержка")
+                        color: Theme.color.text1
+                        font.family: Theme.font.display
+                        font.pixelSize: Theme.font.bodyM
+                        font.weight: Theme.font.wSemibold
+                    }
+                    Text {
+                        text: qsTr("Отвечаем прямо в чате")
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                    }
+                }
+
+                // ID аккаунта: оператор ищет юзера по нему; тап — скопировать целиком
+                Column {
+                    visible: root.accountId !== ""
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 1
+                    Text {
+                        anchors.right: parent.right
+                        text: qsTr("ID аккаунта")
+                        color: Theme.color.text3
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        text: root.accountId.length > 12
+                              ? root.accountId.substring(0, 6) + "…" + root.accountId.slice(-4)
+                              : root.accountId
+                        color: idMa.pressed ? Theme.color.accent : Theme.color.text2
+                        font.family: Theme.font.mono
+                        font.pixelSize: Theme.font.caption
+                    }
+                    MouseArea {
+                        id: idMa
+                        anchors.fill: parent
+                        anchors.margins: -8   // удобная зона тапа
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            acctCopyEdit.text = root.accountId
+                            acctCopyEdit.selectAll(); acctCopyEdit.copy(); acctCopyEdit.deselect()
+                            PageController.showNotificationMessage(qsTr("ID аккаунта скопирован"))
+                        }
+                    }
+                }
+            }
+        }
 
         ListView {
             id: list
@@ -111,6 +208,11 @@ PageType {
                 stick = atYEnd
                 savedY = contentY
             }
+            // клавиатура прячется по тапу в ленту и при скролле (жалоба 2026-07-11:
+            // «тап вне поля не убирает клавиатуру»). TapHandler работает параллельно
+            // MouseArea делегатов — тапы по вложениям/кнопкам не ломает.
+            onMovementStarted: input.focus = false
+            TapHandler { onTapped: input.focus = false }
 
             delegate: ChatBubble {
                 width: ListView.view ? ListView.view.width : 0
@@ -203,6 +305,15 @@ PageType {
 
             // хайрлайн-разделитель сверху
             Rectangle { width: parent.width; height: 1; color: Theme.color.border; anchors.top: parent.top }
+            // прогресс аплоада вложения (0..1; −1 = не идёт) — тонкая полоса поверх хайрлайна.
+            // Без неё отправка видео выглядела как «ничего не происходит» (жалоба 2026-07-11).
+            Rectangle {
+                visible: root.hasChat && TribeSupport.uploadProgress >= 0
+                anchors.top: parent.top
+                height: 2
+                width: parent.width * Math.max(0.03, root.hasChat ? TribeSupport.uploadProgress : 0)
+                color: Theme.color.accent
+            }
 
             // реальные метрики шрифта поля — для ТОЧНОГО вертикального центрирования 1 строки. // AVPN
             FontMetrics { id: inputFm; font: input.font }
@@ -338,6 +449,39 @@ PageType {
         }
     }
 
+    // «Готовим видео…» — плашка над композером, пока нативный пикер чистит GPS/пережимает/
+    // делает постер (секунды БЕЗ иного фидбека — жалоба 2026-07-11). // AVPN
+    Rectangle {
+        visible: root.hasChat && TribeSupport.mediaPreparing
+        anchors.bottom: composer.top
+        anchors.bottomMargin: Theme.space.sm
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: prepRow.implicitWidth + 2 * Theme.space.lg
+        height: 34
+        radius: Theme.radius.pill
+        color: Theme.color.surface2
+        border.width: 1; border.color: Theme.color.border
+        Row {
+            id: prepRow
+            anchors.centerIn: parent
+            spacing: Theme.space.sm
+            BusyIndicator {
+                width: 16; height: 16; running: parent.parent.visible
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Готовим медиа…")
+                color: Theme.color.text2
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.bodyS
+            }
+        }
+    }
+
+    // свайп слева-направо = назад на Главную (жалоба 2026-07-11)
+    TribeEdgeBack { onTriggered: root.requestTab(0) }
+
     // лайтбокс: фото на весь экран поверх страницы, закрытие тапом/Back/свайпом вниз.
     // Участвует в back-логике (паттерн DrawerType2, аудит 2026-07-09): раньше Back при открытом
     // фото уходил в escapePressed → closePage → hideWindow (сворачивал приложение).
@@ -382,6 +526,7 @@ PageType {
             anchors.margins: Theme.space.md
             fillMode: Image.PreserveAspectFit
             asynchronous: true
+            autoTransform: true   // EXIF-поворот локальных фото (иначе лежат на боку)
             // без sourceSize 10-МБ фото декодируется в полный размер (GPU-память);
             // 2× экрана хватает и для пинч-зума в будущем
             sourceSize.width: root.width * 2

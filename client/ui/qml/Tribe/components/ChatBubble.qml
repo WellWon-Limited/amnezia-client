@@ -88,6 +88,10 @@ Item {
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     sourceSize.width: 560
+                    // localUrl эха = оригинал с EXIF-ориентацией: без autoTransform фото
+                    // камеры показывалось лёжа всю сессию (жалоба 2026-07-11 «переворачивается»;
+                    // на сервер уходит уже развёрнутым — setAutoTransform в sendAttachmentFile).
+                    autoTransform: true
                     visible: false   // источник для маски
                 }
                 Rectangle {
