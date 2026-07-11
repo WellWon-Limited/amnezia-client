@@ -8,7 +8,8 @@ import "../components"   // TribeButton
 import "../../Controls2" // PageType
 
 // AVPN (#37 рефералы): вкладка «Рефералка». Делимся реальной реф-ссылкой (в ней зашит код → бонус
-// начислится). Данные — из движка (TribeEngine.referral {code, link, invited, days_earned}). Apple-safe:
+// начислится). Данные — из движка (TribeEngine.referral {code, link, invited, days_earned, gb_earned,
+// days_per_friend, gb_per_friend}). Apple-safe:
 // только ссылка + статус, без цен/покупок-по-ссылке (§10). Перенесено из баннера Профиля.
 PageType {
     id: root
@@ -21,6 +22,7 @@ PageType {
     readonly property string referralLink: referralData && referralData.link ? ("" + referralData.link) : ""
     readonly property int invited: referralData && referralData.invited ? Number(referralData.invited) : 0
     readonly property int daysEarned: referralData && referralData.days_earned ? Number(referralData.days_earned) : 0
+    readonly property int gbEarned: referralData && referralData.gb_earned ? Number(referralData.gb_earned) : 0
     // Оффер server-driven (/v1/referral: days_per_friend/gb_per_friend); литералы = фолбэк
     // до первого ответа бэка (и для старых бэков без полей).
     readonly property int daysPerFriend: referralData && referralData.days_per_friend !== undefined
@@ -274,7 +276,9 @@ PageType {
                                 anchors.centerIn: parent
                                 textFormat: Text.StyledText
                                 text: root.invited > 0
-                                      ? qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned)
+                                      ? (root.gbEarned > 0
+                                         ? qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней · +%4 ГБ").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned).arg(root.gbEarned)
+                                         : qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned))
                                       : qsTr("<font color='%1'>%2 дней + %3 ГБ</font> бесплатно").arg(Theme.color.cta).arg(root.daysPerFriend).arg(root.gbPerFriend)
                                 color: "white"
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
@@ -363,12 +367,13 @@ PageType {
                     }
                 }
 
-                // ── 3 стата ──
+                // ── статы (карточка «Бонус-ГБ» появляется, когда реф-ГиБ реально начислены) ──
                 RowLayout {
                     width: parent.width
                     spacing: Theme.space.md
                     StatCard { Layout.fillWidth: true; value: "" + root.invited;      caption: qsTr("Приглашено") }
                     StatCard { Layout.fillWidth: true; value: "+" + root.daysEarned;  caption: qsTr("Бонус-дней") }
+                    StatCard { Layout.fillWidth: true; visible: root.gbEarned > 0; value: "+" + root.gbEarned; caption: qsTr("Бонус-ГБ") }
                     StatCard { Layout.fillWidth: true; value: "+" + root.daysPerFriend; caption: qsTr("Дней за друга") }
                 }
 

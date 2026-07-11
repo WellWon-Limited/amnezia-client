@@ -3726,7 +3726,8 @@ void AvpnEngineQml::refreshSubscription()
     });
 }
 
-// AVPN (#37 рефералы): GET /v1/referral → {code, link, invited, days_earned}. Тот же async-паттерн,
+// AVPN (#37 рефералы): GET /v1/referral → {code, link, invited, days_earned, gb_earned,
+// days_per_friend, gb_per_friend, invitee_days} (openapi 0.9.0). Тот же async-паттерн,
 // что refreshAccount (без вложенного QEventLoop). Код привязывается к устройству при первом вызове
 // (issued lazily) — поэтому бонус-дни от установки друга падают на ЭТО устройство.
 void AvpnEngineQml::refreshReferral()
@@ -3757,6 +3758,15 @@ void AvpnEngineQml::refreshReferral()
                               static_cast<int>(o.value(QStringLiteral("invited")).toDouble()));
                 result.insert(QStringLiteral("days_earned"),
                               static_cast<int>(o.value(QStringLiteral("days_earned")).toDouble()));
+                result.insert(QStringLiteral("gb_earned"),
+                              static_cast<int>(o.value(QStringLiteral("gb_earned")).toDouble()));
+                // Server-driven размер оффера — пробрасываем ТОЛЬКО если бэк прислал (QML по
+                // undefined откатывается на вкомпиленный фолбэк — старые бэки без полей).
+                for (const char *key : { "days_per_friend", "gb_per_friend", "invitee_days" }) {
+                    const QString k = QString::fromLatin1(key);
+                    if (o.contains(k))
+                        result.insert(k, static_cast<int>(o.value(k).toDouble()));
+                }
             }
         }
         // 401/сеть/таймаут → пустая мапа (баннер покажет дефолтный оффер). Эмитим всегда.
