@@ -380,7 +380,7 @@ PageType {
                 // ── футер-подсказка ──
                 Text {
                     width: parent.width
-                    text: qsTr("Друг засчитывается, когда активирует ключ по вашей ссылке. История по каждому появится позже.")
+                    text: qsTr("Друг засчитывается, когда активирует код по вашей ссылке. История по каждому появится позже.")
                     color: Theme.color.text3; wrapMode: Text.WordWrap
                     horizontalAlignment: Text.AlignHCenter
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption

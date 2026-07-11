@@ -363,7 +363,7 @@ PageType {
                 // пуле (subMissing: бэк ответил 200 с nodes:[]) честный текст вместо вечной «загрузки».
                 text: root.pool.length === 0
                           ? ((root.hasEngine && TribeEngine.subMissing === true)
-                                 ? qsTr("Нет активной подписки")
+                                 ? qsTr("Нет активного доступа")
                                  : qsTr("Локации загружаются…"))
                           : qsTr("Ничего не найдено")
                 textFormat: Text.PlainText

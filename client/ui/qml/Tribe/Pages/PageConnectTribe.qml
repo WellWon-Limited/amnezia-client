@@ -58,6 +58,7 @@ PageType {
     signal requestNotifications()
     signal requestAdminServers()  // AVPN: админ-просмотр пула нод (только Dev.adminMode)
     signal requestServerPicker()  // AVPN: страница выбора сервера (замена шторки TribeNodeSheet)
+    signal requestSupportChat(string draft)  // AVPN (store-flow 2026-07-11): CTA мобилок → чат с черновиком
 
     // AVPN: центр уведомлений — счётчик непрочитанных. Реальные пуши (#9) идут через мост
     // AvpnPush (APNs/FCM → C++ → QML). В dev-превью моста нет → фолбэк 2 (mock-бейдж).
@@ -78,6 +79,10 @@ PageType {
     // AVPN (store-flow, 2026-07-09): store-сборка (-DTRIBE_STORE_BUILD=ON) — золотая CTA ведёт
     // НЕ в web-кабинет, а в Настройки на карточку «Активировать ключ» (+ чат поддержки там же).
     readonly property bool storeBuild:    root.hasEngine && TribeEngine.storeBuild === true
+    // Решение владельца 2026-07-11: на iOS/Android оплата ТОЛЬКО через чат поддержки (все сборки) —
+    // золотая CTA открывает чат с черновиком «Хочу продлить доступ» (отправляет юзер САМ, автоответчик
+    // бэка отвечает персональной ссылкой). Web-кабинет из приложения — только desktop.
+    readonly property bool mobilePlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
     // AVPN: триал/подписка исчерпаны → монетизационный CTA «Получить ключ» вместо ротации.
     // Исчерпан, если: подписка неактивна, ИЛИ дней не осталось (0), ИЛИ лимит трафика выбран.
     // Гейт daysLeft >= 0: ПОКА данные не загружены (пустой снапшот, daysLeft = -1) CTA не показываем —
@@ -973,7 +978,7 @@ PageType {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.ctaTrafficOnly ? qsTr("Продлить трафик") : qsTr("Обновить ключ")
+                    text: root.ctaTrafficOnly ? qsTr("Продлить трафик") : qsTr("Продлить доступ")
                     color: Theme.color.bg900
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
                 }
@@ -981,8 +986,14 @@ PageType {
             MouseArea {
                 id: ctaMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    // AVPN (store-flow): в store-сборке НИКАКИХ платёжных переходов из приложения —
-                    // CTA уводит в Настройки (карточка «Активировать ключ» + «Написать в поддержку»).
+                    // AVPN (store-flow 2026-07-11): iOS/Android — оплата ТОЛЬКО через чат поддержки
+                    // (все сборки, единый UX с полиси сторов): черновик «Хочу продлить доступ»
+                    // отправляет юзер сам → автоответчик бэка присылает персональную ссылку.
+                    if (root.mobilePlatform) {
+                        root.requestSupportChat(qsTr("Хочу продлить доступ"))
+                        return
+                    }
+                    // Desktop store-сборок нет, но контракт сохраняем: НИКАКИХ платёжных переходов.
                     if (root.storeBuild) {
                         root.requestSettings()
                         return
