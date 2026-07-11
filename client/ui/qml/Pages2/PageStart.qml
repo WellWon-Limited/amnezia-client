@@ -709,7 +709,8 @@ PageType {
         }
         onScreenRequested: function(name) {
             if (name === "support") root.goAvpnTab(1)
-            else if (name === "referral") root.goAvpnTab(2)
+            // AVPN backend-first (Task 9): kill-switch features.referral гейтит и CTA объявлений
+            else if (name === "referral" && (typeof TribeEngine === "undefined" || TribeEngine.referralEnabled !== false)) root.goAvpnTab(2)
             else if (name === "settings" || name === "account") root.goAvpnTab(3)
             else if (name === "notifications") tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml")
             // неизвестный экран (рассылка новее клиента) — молча игнорируем
