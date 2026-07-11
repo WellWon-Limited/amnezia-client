@@ -155,6 +155,18 @@ class AvpnEngineQml : public QObject {
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
     // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
     Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
+    // AVPN backend-first (Task 9): реф-вкладка — kill-switch (features.referral, default TRUE —
+    // отсутствие ключа НЕ прячет вкладку). TribeBottomNav.qml прячет её при !referralEnabled.
+    Q_PROPERTY(bool referralEnabled READ referralEnabled NOTIFY changed)
+    // AVPN backend-first (Task 9): домен веб-кабинета (urls.cabinet) — CTA «Продлить»/«Аккаунт»
+    // (PageConnectTribe/PageAccountTribe), фолбэк вкомпиленный https://tribevpn.com/account.
+    Q_PROPERTY(QString cabinetUrl READ cabinetUrl NOTIFY changed)
+    // AVPN backend-first (Task 9): поллинг «перенос принят» (PageAccountTribe) — server-tunable
+    // (numbers.transfer_poll_ms), фолбэк 4000мс, клампы 1с..10мин.
+    Q_PROPERTY(int transferPollMs READ transferPollMs NOTIFY changed)
+    // AVPN backend-first (Task 9): ретрай-поллинг рефералки (PageReferralTribe) — server-tunable
+    // (numbers.referral_retry_ms), фолбэк 6000мс, клампы 1с..10мин.
+    Q_PROPERTY(int referralRetryMs READ referralRetryMs NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -225,6 +237,21 @@ public:
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов — см. Q_PROPERTY выше.
     int probeServicesIntervalMs() const
     { return int(avpn::TuningStore::numberOr(QStringLiteral("probe_services_interval_ms"), 180000)); }
+
+    // AVPN backend-first (Task 9): реф-вкладка/кабинет-URL/поллинг — см. Q_PROPERTY выше.
+    bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
+    QString cabinetUrl() const
+    { return configUrl(QStringLiteral("cabinet"), QStringLiteral("https://tribevpn.com/account")); }
+    int transferPollMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("transfer_poll_ms"), 4000)),
+                      600000);
+    }
+    int referralRetryMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("referral_retry_ms"), 6000)),
+                      600000);
+    }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics

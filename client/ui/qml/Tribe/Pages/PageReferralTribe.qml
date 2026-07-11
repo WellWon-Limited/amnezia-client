@@ -67,7 +67,8 @@ PageType {
     // нет — мягкий ретрай каждые 6с; страница живёт только пока вкладка открыта. // AVPN
     Timer {
         running: root.hasEngine && root.referralLink.length === 0
-        interval: 6000
+        // AVPN backend-first (Task 9): server-tunable numbers.referral_retry_ms, фолбэк 6000мс.
+        interval: root.hasEngine ? TribeEngine.referralRetryMs : 6000
         repeat: true
         onTriggered: root.refreshReferral()
     }
