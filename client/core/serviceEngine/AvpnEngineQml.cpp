@@ -15,6 +15,7 @@
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
 #include "ServiceProbe.h" // AVPN (чипы доступности): проба Telegram/YouTube через туннель
+#include "ServiceProbeTargets.h" // AVPN (чипы): вшитые цели + мерж серверного probe_targets (не замещать!)
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
@@ -292,18 +293,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     //   • YouTube/Instagram — GOODPUT: качаем ~128 КБ с реального душимого CDN (googlevideo/cdninstagram)
     //     и меряем kbit/s (RU-троттл ~128 кбит/с ⇒ slow; норм ⇒ works; путь срезан ⇒ blocked). См. ServiceProbe.h.
     {
-        QList<ServiceProbeConfig> cfgs;
-        // Telegram: несколько seed-DC-IP (OONI-стабильные DC2/DC4/DC5) — первый ответивший resPQ ⇒
-        // works; так один сменившийся/легший IP не даёт ложный «заблок». Рефреш через help.getConfig — TODO.
-        cfgs.append({QStringLiteral("telegram"),  ServiceProbeConfig::Mtproto,
-                     QStringLiteral("149.154.167.51"), 443, 1500,
-                     QStringList{QStringLiteral("149.154.167.91"), QStringLiteral("91.108.56.130")}});
-        // host = fallback-SNI на душимом CDN (reachability, если byte-source не резолвится). port по умолчанию,
-        // sampleBytes/пороги goodput — дефолтные (128 КБ; works≥1000, slow≥100 кбит/с).
-        cfgs.append({QStringLiteral("youtube"),   ServiceProbeConfig::Goodput,
-                     QStringLiteral("redirector.googlevideo.com")});
-        cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Goodput,
-                     QStringLiteral("static.cdninstagram.com")});
+        // Единый источник целей (seed-DC Telegram, fallback-SNI goodput) — avpn::defaultServiceProbeConfigs()
+        // (ServiceProbeTargets.h): те же дефолты — база мержа applyRemoteProbeTargets, не расходятся.
+        const QList<ServiceProbeConfig> cfgs = avpn::defaultServiceProbeConfigs();
         m_svcProbe = new ServiceProbe(m_nam, this);
         m_svcProbe->setServices(cfgs);
 
@@ -685,42 +677,17 @@ void AvpnEngineQml::rebuildApiCarveOut()
     });
 }
 
-// AVPN remote-config (T6): сервер может переопределить пробируемые сервисы (probeTargets из
-// /v1/config) — напр. добавить/убрать сервис или сменить seed-хост без ребилда. Маппинг по
-// target: telegram→Mtproto, youtube/instagram→Goodput, прочее→Https-деградация (best-effort
-// reachability, штатная деградация ServiceProbeConfig). ProbeTarget несёт ОДИН host, поэтому
-// несколько IP (напр. seed-DC Telegram) сервер выражает НЕСКОЛЬКИМИ записями с ОДИНАКОВЫМ target:
-// ГРУППИРУЕМ по target → ровно один ServiceProbeConfig на сервис (1:1 с m_serviceStatus, который
-// апдейтит только первое совпадение по key), host = первый host этой группы, остальные хосты
-// группы → fallbackHosts (тот же 4-й механизм, что у вшитого telegram-дефолта). Пусто в конфиге →
-// НЕ трогаем вшитые дефолты конструктора (см. AvpnEngineQml.cpp выше, cfgs telegram/youtube/instagram).
+// AVPN remote-config (T6): сервер может переопределить цели проб чипов (probeTargets из
+// /v1/config) — напр. сменить seed-хост без ребилда. МЕРЖ с вшитыми дефолтами, НЕ замещение:
+// семантика, kind-гейт (только явные "mtproto"/"goodput"/"https"; "tcp" = данные арбитра — игнор)
+// и multi-seed-группировка — в avpn::mergeRemoteProbeTargets (ServiceProbeTargets.h, там же
+// разбор инцидента 2026-07-11 «Telegram красный / Instagram серый» и TDD-контракт).
 void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
 {
-    if (!m_svcProbe || cfg.probeTargets.isEmpty())
+    if (!m_svcProbe)
         return;
-    QList<ServiceProbeConfig> cfgs;
-    QHash<QString, int> idxByTarget; // target → индекс в cfgs (сохраняем порядок первого появления)
-    for (const avpn::ProbeTarget &t : cfg.probeTargets) {
-        auto it = idxByTarget.constFind(t.target);
-        if (it != idxByTarget.constEnd()) {
-            // повтор того же сервиса — доп. хост в fallbackHosts уже созданного конфига (multi-IP)
-            cfgs[it.value()].fallbackHosts.append(t.host);
-            continue;
-        }
-        ServiceProbeConfig c;
-        c.key = t.target;
-        c.host = t.host; // первый host группы = основной seed
-        c.port = t.port;
-        if (t.target == QLatin1String("telegram"))
-            c.kind = ServiceProbeConfig::Mtproto;
-        else if (t.target == QLatin1String("youtube") || t.target == QLatin1String("instagram"))
-            c.kind = ServiceProbeConfig::Goodput;
-        else
-            c.kind = ServiceProbeConfig::Https;
-        idxByTarget.insert(t.target, cfgs.size());
-        cfgs.append(c);
-    }
-    m_svcProbe->setServices(cfgs);
+    m_svcProbe->setServices(
+        avpn::mergeRemoteProbeTargets(avpn::defaultServiceProbeConfigs(), cfg.probeTargets));
 }
 
 // AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk и
