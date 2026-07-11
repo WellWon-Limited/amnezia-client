@@ -26,6 +26,8 @@
     #include <QTimer>       // AVPN: отложенный анти-сдвиг окна (см. конструктор)
 extern "C" int avpnSafeAreaTop();
 extern "C" int avpnSafeAreaBottom();
+extern "C" void Avpn_resetKeyboardScroll();         // AVPN: сброс авто-сдвига окна (AvpnKeyboardFix.mm)
+extern "C" void Avpn_installKeyboardScrollKiller(); // AVPN: observer UIKeyboard* → сброс на каждом событии
 #endif
 
 PageController::PageController(ServersController* serversController, SettingsController* settingsController,
@@ -54,6 +56,9 @@ PageController::PageController(ServersController* serversController, SettingsCon
     // на iOS всегда 0, поэтому при клавиатуре навбар не скрывался и iOS выталкивала весь UI
     // (вкл. нижнее меню) вверх. Высота клавиатуры — из QInputMethod::keyboardRectangle
     // (координаты окна = логические px; окно fullscreen). Скрыта → rect пустой → 0.
+    // Гаситель ставим на нативные UIKeyboard*-уведомления: наш observer регистрируется
+    // ПОЗЖЕ Qt-плагина → выполняется после их scroll() в том же уведомлении, до кадра.
+    Avpn_installKeyboardScrollKiller();
     QInputMethod *im = QGuiApplication::inputMethod();
     connect(im, &QInputMethod::keyboardRectangleChanged, this, [this, im]() {
         const int h = qMax(0, qRound(im->keyboardRectangle().height()));
@@ -62,17 +67,16 @@ PageController::PageController(ServersController* serversController, SettingsCon
         m_imeHeight = h;
         emit imeHeightChanged(h);
         emit safeAreaBottomMarginChanged();
-        // АНТИ-СДВИГ (2026-07-11, билды 75/76): QIOSInputContext на показ клавиатуры сам
-        // сдвигает root view к курсору (отключить нельзя) — вместе с нашим margin это
-        // давало двойную компенсацию (чёрная дыра) либо «улетание» шапки. После нашего
-        // relayout курсор УЖЕ видим над клавиатурой → update(ImCursorRectangle) заставляет
-        // QIOSInputContext::scrollToCursor() снять сдвиг (scroll(0), ветка «курсор видим»).
-        // Несколько тиков — страховка от гонки с анимацией клавиатуры/ленивым cursorRect.
+        // АНТИ-СДВИГ (2026-07-11, билды 75–77): QIOSInputContext на показ клавиатуры уводит
+        // root view вверх через layer.sublayerTransform (наш margin + их сдвиг = «чёрная
+        // дыра» высотой с клавиатуру). Мягкие способы НЕ работают: их пере-проверка
+        // (update→ImeState::update) диффит ЛОКАЛЬНЫЙ прямоугольник курсора в поле — он не
+        // меняется, когда наш layout поднимает поле целиком. Сбрасываем трансформ напрямую
+        // (AvpnKeyboardFix.mm). Несколько тиков — их scroll() ставится на willShow и
+        // анимируется; одиночный сброс переигрывался бы этой анимацией.
         if (h > 0) {
-            for (const int delayMs : {0, 120, 400})
-                QTimer::singleShot(delayMs, im, []() {
-                    QGuiApplication::inputMethod()->update(Qt::ImCursorRectangle);
-                });
+            for (const int delayMs : {60, 250, 650})
+                QTimer::singleShot(delayMs, im, []() { Avpn_resetKeyboardScroll(); });
         }
     });
 #endif
