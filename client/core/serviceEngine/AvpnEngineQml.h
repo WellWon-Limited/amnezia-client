@@ -646,7 +646,7 @@ private:
     bool                         m_liveReachable = false;
     bool                         m_liveDead = false;     // проба подтверждённо не доходит → 0 зелёных + все красные
     int                          m_liveFailStreak = 0;   // неуспешных проб подряд (анти-фликер до «мертво»)
-    static constexpr int         kLiveDeadStreak = 2;    // столько неудач подряд = связь мертва (≈1-я проба+1 тик)
+    static constexpr int         kLiveDeadStreak = 2;    // фолбэк; серверный оверрайд numbers.live_dead_streak (TuningStore)
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
     ServiceProbe                *m_svcProbe = nullptr;
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
