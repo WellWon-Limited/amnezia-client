@@ -56,6 +56,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/MtprotoProbe.h
     ${AVPN_SE}/QualityProbe.h
     ${AVPN_SE}/ServiceProbe.h
+    ${AVPN_SE}/ServiceProbeTargets.h
     ${AVPN_SE}/NodeRanking.h
     ${AVPN_SE}/NodeRotation.h
     ${AVPN_SE}/IRttProbe.h
