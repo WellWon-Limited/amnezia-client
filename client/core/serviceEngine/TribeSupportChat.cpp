@@ -134,6 +134,38 @@ int pollMs(bool active)
         active ? double(kActivePollMs) : double(kIdlePollMs)));
 }
 
+// AVPN backend-first (T8): таймауты медиа-запросов и параметры клиентского пережатия фото —
+// server-tunable (numbers.chat_media_timeout_ms/chat_thumb_timeout_ms/chat_image_max_dimension/
+// chat_jpeg_quality), фолбэк — вкомпиленные kMediaTimeoutMs/kThumbTimeoutMs/kImageMaxDimension/
+// kJpegQuality. Клампы — опечатка/злой конфиг на бэке не должны угробить клиента.
+int mediaTimeoutMs()
+{
+    return qBound(5000, int(TuningStore::numberOr(QStringLiteral("chat_media_timeout_ms"),
+                                                   double(kMediaTimeoutMs))),
+                  600000);
+}
+
+int thumbTimeoutMs()
+{
+    return qBound(5000, int(TuningStore::numberOr(QStringLiteral("chat_thumb_timeout_ms"),
+                                                   double(kThumbTimeoutMs))),
+                  600000);
+}
+
+int imageMaxDimension()
+{
+    return qBound(320, int(TuningStore::numberOr(QStringLiteral("chat_image_max_dimension"),
+                                                  double(kImageMaxDimension))),
+                  8192);
+}
+
+int jpegQuality()
+{
+    return qBound(1, int(TuningStore::numberOr(QStringLiteral("chat_jpeg_quality"),
+                                                double(kJpegQuality))),
+                  100);
+}
+
 QString humanSendError(int httpCode, bool netError)
 {
     if (netError && httpCode == 0)
@@ -604,12 +636,13 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
         QImage img = reader.read();
         const bool isGif = (mime == QLatin1String("image/gif"));
         if (!img.isNull() && !isGif) {
-            if (img.width() > kImageMaxDimension || img.height() > kImageMaxDimension)
-                img = img.scaled(kImageMaxDimension, kImageMaxDimension, Qt::KeepAspectRatio,
+            const int maxDim = imageMaxDimension();
+            if (img.width() > maxDim || img.height() > maxDim)
+                img = img.scaled(maxDim, maxDim, Qt::KeepAspectRatio,
                                  Qt::SmoothTransformation);
             QBuffer buf(&e.imageBytes);
             buf.open(QIODevice::WriteOnly);
-            img.save(&buf, "JPEG", kJpegQuality);
+            img.save(&buf, "JPEG", jpegQuality());
             e.mime = QStringLiteral("image/jpeg");
             const int dot = e.fileName.lastIndexOf(QLatin1Char('.'));
             e.fileName = (dot > 0 ? e.fileName.left(dot) : e.fileName) + QStringLiteral(".jpg");
@@ -700,7 +733,7 @@ void TribeSupportChat::postEcho(Echo &echo)
         multi->append(part);
         reply = m_nam->post(req, multi);
         multi->setParent(reply); // multipart живёт, пока идёт запрос
-        armTimeout(reply, kMediaTimeoutMs);
+        armTimeout(reply, mediaTimeoutMs()); // AVPN backend-first (Task 8): таймаут медиа server-tunable
         // прогресс аплоада → полоска над композером (без него отправка видео
         // выглядела как «ничего не происходит», жалоба 2026-07-11)
         connect(reply, &QNetworkReply::uploadProgress, this,
@@ -874,7 +907,7 @@ void TribeSupportChat::fetchNextThumb()
         return;
     const int attId = m_thumbQueue.takeFirst();
     QNetworkReply *reply = authedGet(
-        QStringLiteral("/v1/support/attachments/%1?thumb=1").arg(attId), kThumbTimeoutMs);
+        QStringLiteral("/v1/support/attachments/%1?thumb=1").arg(attId), thumbTimeoutMs());
     if (!reply) {
         m_thumbQueued.remove(attId); // нет токена — вернёмся при следующем applyThread
         return;
@@ -943,7 +976,7 @@ void TribeSupportChat::openAttachment(int attachmentId)
         return;
 
     QNetworkReply *reply = authedGet(
-        QStringLiteral("/v1/support/attachments/%1").arg(attachmentId), kMediaTimeoutMs);
+        QStringLiteral("/v1/support/attachments/%1").arg(attachmentId), mediaTimeoutMs());
     if (!reply) {
         emit attachmentFailed(attachmentId);
         return;
@@ -963,7 +996,7 @@ void TribeSupportChat::openAttachment(int attachmentId)
                 return;
             }
             QNetworkReply *r2 = m_nam->get(QNetworkRequest(resolved));
-            armTimeout(r2, kMediaTimeoutMs);
+            armTimeout(r2, mediaTimeoutMs());
             connect(r2, &QNetworkReply::finished, this, [this, r2, attachmentId, kind, mime]() {
                 r2->deleteLater();
                 m_originalInFlight.remove(attachmentId);
