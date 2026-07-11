@@ -978,7 +978,11 @@ PageType {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.ctaTrafficOnly ? qsTr("Продлить трафик") : qsTr("Продлить доступ")
+                    // мобилки: CTA ведёт в чат — текст честный вопрос (он же уходит черновиком);
+                    // desktop: кнопка открывает кабинет — повелительная форма.
+                    text: root.ctaTrafficOnly
+                          ? (root.mobilePlatform ? qsTr("Как продлить трафик?") : qsTr("Продлить трафик"))
+                          : (root.mobilePlatform ? qsTr("Как продлить доступ?") : qsTr("Продлить доступ"))
                     color: Theme.color.bg900
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
                 }
@@ -990,7 +994,11 @@ PageType {
                     // (все сборки, единый UX с полиси сторов): черновик «Хочу продлить доступ»
                     // отправляет юзер сам → автоответчик бэка присылает персональную ссылку.
                     if (root.mobilePlatform) {
-                        root.requestSupportChat(qsTr("Хочу продлить доступ"))
+                        // черновик = текст кнопки (кнопка-вопрос отправляет ровно этот вопрос);
+                        // «продл»/«renew»/«renov» распознаёт интент-гейт автоответчика (PR #298)
+                        root.requestSupportChat(root.ctaTrafficOnly
+                                                ? qsTr("Как продлить трафик?")
+                                                : qsTr("Как продлить доступ?"))
                         return
                     }
                     // Desktop store-сборок нет, но контракт сохраняем: НИКАКИХ платёжных переходов.

@@ -1023,19 +1023,26 @@
         <translation>Servidor ruso: la disponibilidad de servicios es la misma que dentro de Rusia</translation>
     </message>
     <message>
-        <location line="+50"/>
+        <location line="+53"/>
         <source>Продлить трафик</source>
         <translation>Recargar tráfico</translation>
     </message>
     <message>
         <location line="+0"/>
+        <location line="+16"/>
+        <source>Как продлить трафик?</source>
+        <translation>¿Cómo renuevo el tráfico?</translation>
+    </message>
+    <message>
+        <location line="-15"/>
         <source>Продлить доступ</source>
         <translation>Renovar acceso</translation>
     </message>
     <message>
-        <location line="+12"/>
-        <source>Хочу продлить доступ</source>
-        <translation>Quiero renovar el acceso</translation>
+        <location line="+0"/>
+        <location line="+16"/>
+        <source>Как продлить доступ?</source>
+        <translation>¿Cómo renuevo el acceso?</translation>
     </message>
     <message>
         <location line="+66"/>
@@ -1447,7 +1454,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+72"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+76"/>
         <source>Не удалось загрузить вложение</source>
         <translation>No se pudo cargar el archivo adjunto</translation>
     </message>
@@ -1472,17 +1479,17 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+14"/>
-        <source>ID аккаунта</source>
+        <location line="+16"/>
+        <source>ID</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+22"/>
+        <location line="+17"/>
         <source>ID аккаунта скопирован</source>
         <translation type="unfinished">ID de cuenta copiado</translation>
     </message>
     <message>
-        <location line="+90"/>
+        <location line="+92"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
         <translation>Escríbenos y te responderemos aquí mismo.
@@ -1611,7 +1618,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1028"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+995"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
