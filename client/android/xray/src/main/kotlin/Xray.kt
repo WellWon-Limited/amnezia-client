@@ -125,6 +125,14 @@ class Xray : Protocol() {
                 if (it.isNotBlank()) setMtu(it.toInt())
             }
 
+            // AVPN backend-first (Task 7): server-tunable Xray engine memory limit, seeded by
+            // ConnectionController::createConnectionConfiguration() (already clamped to
+            // 16 MB..512 MB there). 0/absent (key not sent, e.g. pre-Task-7 backend, or offline
+            // fallback) == keep the Builder default (XRAY_DEFAULT_MAX_MEMORY, 50 MB) unchanged.
+            config.optLong("xray_max_memory_bytes", 0L).let {
+                if (it > 0) setMaxMemory(it)
+            }
+
             val inbounds = xrayJsonConfig.getJSONArray("inbounds")
             val socksIdx = findSocksInboundIndex(inbounds)
             if (socksIdx < 0) {

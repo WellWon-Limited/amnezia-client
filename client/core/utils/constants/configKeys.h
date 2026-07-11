@@ -205,6 +205,15 @@ namespace amnezia
         constexpr QLatin1String xrayConnectTimeoutMs("xray_connect_timeout_ms");
         constexpr QLatin1String xrayRwTimeoutMs("xray_rw_timeout_ms");
         constexpr QLatin1String networkChangeDebounceMs("network_change_debounce_ms");
+
+        // AVPN backend-first (Task 7): server-tunable Xray engine memory limit (LibXray.runXray
+        // maxMemory param on Android). Seeded into the shared vpnConfiguration in
+        // ConnectionController::createConnectionConfiguration() (client/core/controllers/
+        // connectionController.cpp) — the single per-connect config-assembly point both Android
+        // and iOS consume — clamped there. Read by Xray.kt::parseConfig() via optLong(); absent/0
+        // == fallback == XRAY_DEFAULT_MAX_MEMORY (XrayConfig.kt, pre-Task-7 literal, 50 MB). Harmless
+        // no-op on iOS/desktop, which don't read this key.
+        constexpr QLatin1String xrayMaxMemoryBytes("xray_max_memory_bytes");
     }
 }
 
