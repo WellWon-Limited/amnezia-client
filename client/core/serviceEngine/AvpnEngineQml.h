@@ -241,7 +241,10 @@ public:
     // AVPN backend-first (Task 9): реф-вкладка/кабинет-URL/поллинг — см. Q_PROPERTY выше.
     bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
     QString cabinetUrl() const
-    { return configUrl(QStringLiteral("cabinet"), QStringLiteral("https://tribevpn.com/account")); }
+    {
+        return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),
+                                            QStringLiteral("https://tribevpn.com/account"));
+    }
     int transferPollMs() const
     {
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("transfer_poll_ms"), 4000)),

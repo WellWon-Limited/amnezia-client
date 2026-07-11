@@ -482,11 +482,13 @@ int main(int argc, char **argv)
         HealthLoop hTuned; hTuned.feed(S(0, 100, 100), now);
         bool tunedDeadAfter1 = hTuned.feed(S(0, 100, 200), now); // 1-й плохой цикл уже DEAD
 
-        // health_dead_max_age_s=0 с сервера → даже свежий handshake считается устаревшим ⇒ DEAD раньше.
+        // health_dead_max_age_s=5 с сервера (пол final review R-2 клампит 0/минус до 10 — см.
+        // HealthThresholds::fromTuning) → эффективный порог 10с, handshake 15с уже вне него ⇒ DEAD
+        // раньше дефолта (180с), но НЕ мгновенно от любого handshake (пол защищает от false-positive).
         avpn::TuningStore::set({{QStringLiteral("health_dead_cycles"), 1.0},
-                                 {QStringLiteral("health_dead_max_age_s"), 0.0}}, {});
-        HealthLoop hAge; hAge.feed(S(now - 1, 100, 100), now);
-        bool tunedAgeDead = hAge.feed(S(now - 1, 100, 200), now); // hs "свежий" (1с), но maxAge=0 ⇒ устарел
+                                 {QStringLiteral("health_dead_max_age_s"), 5.0}}, {});
+        HealthLoop hAge; hAge.feed(S(now - 15, 100, 100), now);
+        bool tunedAgeDead = hAge.feed(S(now - 15, 100, 200), now); // hs 15с (> клампленных 10с) ⇒ stale
 
         // reset() → снова дефолт 2 (как в самом начале).
         avpn::TuningStore::reset();

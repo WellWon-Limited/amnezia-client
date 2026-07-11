@@ -20,8 +20,12 @@ struct HealthThresholds {
     static HealthThresholds fromTuning()
     {
         HealthThresholds t;
-        t.maxAgeSec = (int) TuningStore::numberOr(QStringLiteral("health_dead_max_age_s"), t.maxAgeSec);
-        t.cyclesToDead = (int) TuningStore::numberOr(QStringLiteral("health_dead_cycles"), t.cyclesToDead);
+        // AVPN backend-first (final review R-2): пол на серверные оверрайды — 0/минус сломали бы
+        // DEAD-детект (мгновенный false-positive failover).
+        t.maxAgeSec = qMax(10,
+            (int) TuningStore::numberOr(QStringLiteral("health_dead_max_age_s"), t.maxAgeSec));
+        t.cyclesToDead = qMax(1,
+            (int) TuningStore::numberOr(QStringLiteral("health_dead_cycles"), t.cyclesToDead));
         return t;
     }
 };
