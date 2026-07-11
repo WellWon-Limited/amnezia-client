@@ -150,6 +150,11 @@ extension PacketTunnelProvider {
             : NEDNSSettings(servers: ["1.1.1.1"])
             applyXraySplitTunnel(xrayConfig, settings: settings)
 
+            // AVPN backend-first (Task 6): cache the network-change reconnect debounce for this tunnel
+            // session (used by scheduleNetworkChangeHandling in PacketTunnelProvider.swift). Fallback
+            // 1.0s matches the pre-Task-6 literal byte-for-byte when the key is absent.
+            xrayNetworkChangeDebounceSeconds = xrayConfig.networkChangeDebounceMs.map { Double($0) / 1000.0 } ?? 1.0
+
             let xrayConfigData = xrayConfig.config.data(using: .utf8)
 
             guard let xrayConfigData else {
@@ -196,6 +201,8 @@ extension PacketTunnelProvider {
                                                port: port,
                                                username: socksCredentials.username,
                                                password: socksCredentials.password,
+                                               connectTimeoutMs: xrayConfig.connectTimeoutMs,
+                                               readWriteTimeoutMs: xrayConfig.readWriteTimeoutMs,
                                                completionHandler: completionHandler)
                 }
             }
@@ -309,7 +316,14 @@ extension PacketTunnelProvider {
                                       port: Int,
                                       username: String,
                                       password: String,
+                                      connectTimeoutMs: Int?,
+                                      readWriteTimeoutMs: Int?,
                                       completionHandler: @escaping (Error?) -> Void) {
+        // AVPN backend-first (Task 6): server-tunable via XrayConfig.connectTimeoutMs/readWriteTimeoutMs
+        // (TuningStore numbers.xray_connect_timeout_ms/xray_rw_timeout_ms). Fallbacks are byte-for-byte
+        // the pre-Task-6 literals. task-stack-size/limit-nofile intentionally left untouched.
+        let connectTimeout = connectTimeoutMs ?? 5000
+        let readWriteTimeout = readWriteTimeoutMs ?? 60000
         let config = """
         tunnel:
           mtu: 9000
@@ -321,8 +335,8 @@ extension PacketTunnelProvider {
           udp: 'udp'
         misc:
           task-stack-size: 20480
-          connect-timeout: 5000
-          read-write-timeout: 60000
+          connect-timeout: \(connectTimeout)
+          read-write-timeout: \(readWriteTimeout)
           log-file: stderr
           log-level: error
           limit-nofile: 65535

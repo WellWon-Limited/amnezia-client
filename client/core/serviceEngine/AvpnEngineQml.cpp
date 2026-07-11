@@ -280,8 +280,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (reachable) {
             m_liveFailStreak = 0;
             m_liveDead = false;
-        } else if (++m_liveFailStreak >= kLiveDeadStreak) {
-            m_liveDead = true;
+        } else {
+            // AVPN backend-first (final review R-2): пол 1 — 0/минус латчили бы m_liveDead=true мгновенно.
+            const int deadStreak = qMax(1,
+                (int) TuningStore::numberOr(QStringLiteral("live_dead_streak"), kLiveDeadStreak));
+            if (++m_liveFailStreak >= deadStreak)
+                m_liveDead = true;
         }
         emit liveQualityChanged();
     });
@@ -297,23 +301,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // (ServiceProbeTargets.h): те же дефолты — база мержа applyRemoteProbeTargets, не расходятся.
         const QList<ServiceProbeConfig> cfgs = avpn::defaultServiceProbeConfigs();
         m_svcProbe = new ServiceProbe(m_nam, this);
-        m_svcProbe->setServices(cfgs);
-
-        // Сидируем список статусов (state=-1 «неизвестно») в порядке cfgs — UI рисует чипы сразу.
-        auto labelOf = [](const QString &k) {
-            if (k == QLatin1String("telegram"))  return QStringLiteral("Telegram");
-            if (k == QLatin1String("youtube"))   return QStringLiteral("YouTube");
-            if (k == QLatin1String("instagram")) return QStringLiteral("Instagram");
-            return k;
-        };
-        for (const ServiceProbeConfig &c : cfgs) {
-            QVariantMap m;
-            m[QStringLiteral("key")] = c.key;
-            m[QStringLiteral("label")] = labelOf(c.key);
-            m[QStringLiteral("state")] = -1;
-            m[QStringLiteral("rttMs")] = -1;
-            m_serviceStatus.append(m);
-        }
+        // AVPN backend-first (Task 4): m_svcCfgsAll — полный (нефильтрованный) список; rebuildServiceChips()
+        // применяет lists.service_chips_disabled и заполняет И m_svcProbe (что пробится), И m_serviceStatus
+        // (сидирует чипы state=-1 «неизвестно» в порядке cfgs — UI рисует их сразу). Пустой disabled-список
+        // (default здесь — до первого /v1/config) => фильтр не убирает ничего, поведение как раньше.
+        m_svcCfgsAll = cfgs;
+        rebuildServiceChips();
         connect(m_svcProbe, &ServiceProbe::result, this,
                 [this](const QString &key, int state, int rttMs) {
                     // rttMs для goodput-сервисов (youtube/instagram) несёт kbit/s, для telegram — RTT в мс.
@@ -340,7 +333,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     // (dead-source вердикты IG/YT) — без ретрая ложный красный жил бы до 3-мин self-heal.
                     if ((state == -1 || state == 0) && !m_svcRetried.contains(key)) {
                         m_svcRetried.insert(key);
-                        QTimer::singleShot(20000, this, [this, key]() {
+                        // Server-driven (backend-first, Task 3): svc_probe_retry_ms, фолбэк 20с (прежнее).
+                        // AVPN backend-first (final review R-3): клампим — 0/минус ретраил бы мгновенно
+                        // (антипаттерн), сверху потолок 10 мин.
+                        const int retryMs = qBound(1000, int(avpn::TuningStore::numberOr(
+                                QStringLiteral("svc_probe_retry_ms"), 20000.0)), 600000);
+                        QTimer::singleShot(retryMs, this, [this, key]() {
                             if (m_svcProbe && this->state() == QLatin1String("connected"))
                                 m_svcProbe->probeOne(key);
                         });
@@ -367,7 +365,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
-                avpn::TuningStore::set(c.numbers, c.features, c.lists); // AVPN backend-first (T19)
+                avpn::TuningStore::set(c.numbers, c.features, c.lists, c.urls); // AVPN backend-first (T19)
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
                 // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
                 // интервалом, ничего не останавливаем/не стартуем).
@@ -686,8 +684,14 @@ void AvpnEngineQml::applyRemoteProbeTargets(const avpn::RemoteConfig &cfg)
 {
     if (!m_svcProbe)
         return;
-    m_svcProbe->setServices(
-        avpn::mergeRemoteProbeTargets(avpn::defaultServiceProbeConfigs(), cfg.probeTargets));
+    // AVPN backend-first (Task 4 + мерж ci-build 9ad41a45): серверные probe-цели МЕРЖАТСЯ с вшитыми
+    // дефолтами (avpn::mergeRemoteProbeTargets — kind-гейт, multi-seed-группировка), НЕ замещают их.
+    // Результат мержа кладётся в m_svcCfgsAll (полный нефильтрованный набор); rebuildServiceChips()
+    // применит lists.service_chips_disabled к смерженному набору и пересоберёт m_svcProbe->setServices
+    // + m_serviceStatus (иначе дрейф чипов при remote override). Пустой disabled-список → фильтр
+    // прозрачен, поведение байт-в-байт как в 9ad41a45.
+    m_svcCfgsAll = avpn::mergeRemoteProbeTargets(avpn::defaultServiceProbeConfigs(), cfg.probeTargets);
+    rebuildServiceChips();
 }
 
 // AVPN backend-first (T16): цели QualityProbe (живые палочки) следуют за edge-walk и
@@ -700,6 +704,64 @@ void AvpnEngineQml::refreshQualityEndpoints()
     m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
                            configUrl(QStringLiteral("quality_probe_url"),
                                      QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
+}
+
+// AVPN backend-first (Task 4): пер-сервисный kill-switch чипов доступности (lists.service_chips_disabled).
+// Отфильтровывает m_svcCfgsAll (полный набор — ctor-дефолт telegram/youtube/instagram ЛИБО remote
+// probeTargets из applyRemoteProbeTargets) по серверному списку отключённых ключей:
+//   · m_svcProbe получает ТОЛЬКО включённые cfgs → probeAll()/probeOne() физически не пробуют
+//     отключённый сервис (не тратят трафик через туннель);
+//   · m_serviceStatus ПЕРЕСТРАИВАЕТСЯ ЦЕЛИКОМ (не мержится point-wise) под тот же набор → отключённый
+//     чип пропадает из UI (QML TribeServiceChips дата-driven от serviceStatus, правок не требует).
+// Уже известные состояния (works/slow/blocked/rttMs) сохраняются по key для сервисов, оставшихся
+// включёнными — повторный вызов не сбрасывает их обратно в «неизвестно».
+// Пустой/отсутствующий список (TuningStore::listOr «пусто=фолбэк») → фильтр не убирает ничего,
+// поведение байт-в-байт как до задачи.
+void AvpnEngineQml::rebuildServiceChips()
+{
+    if (!m_svcProbe)
+        return;
+
+    const QStringList disabled =
+            avpn::TuningStore::listOr(QStringLiteral("service_chips_disabled"), {});
+    QList<ServiceProbeConfig> enabled;
+    enabled.reserve(m_svcCfgsAll.size());
+    for (const ServiceProbeConfig &c : std::as_const(m_svcCfgsAll)) {
+        if (!disabled.contains(c.key))
+            enabled.append(c);
+    }
+    m_svcProbe->setServices(enabled);
+
+    auto labelOf = [](const QString &k) {
+        if (k == QLatin1String("telegram"))  return QStringLiteral("Telegram");
+        if (k == QLatin1String("youtube"))   return QStringLiteral("YouTube");
+        if (k == QLatin1String("instagram")) return QStringLiteral("Instagram");
+        return k;
+    };
+    QHash<QString, QVariantMap> prevByKey;
+    for (const QVariant &v : std::as_const(m_serviceStatus)) {
+        const QVariantMap m = v.toMap();
+        prevByKey.insert(m.value(QStringLiteral("key")).toString(), m);
+    }
+    QVariantList next;
+    next.reserve(enabled.size());
+    for (const ServiceProbeConfig &c : std::as_const(enabled)) {
+        const auto it = prevByKey.constFind(c.key);
+        if (it != prevByKey.constEnd()) {
+            next.append(it.value()); // сохраняем известный state/rttMs для уже пробитого сервиса
+        } else {
+            QVariantMap m;
+            m[QStringLiteral("key")] = c.key;
+            m[QStringLiteral("label")] = labelOf(c.key);
+            m[QStringLiteral("state")] = -1;
+            m[QStringLiteral("rttMs")] = -1;
+            next.append(m);
+        }
+    }
+    if (next != m_serviceStatus) {
+        m_serviceStatus = next;
+        emit serviceStatusChanged();
+    }
 }
 
 QString AvpnEngineQml::state() const
@@ -906,8 +968,13 @@ void AvpnEngineQml::probeServices()
     // выключенный флаг должен глушить ВЕСЬ трафик проб, не только фоновый).
     if (!avpn::TuningStore::flag(QStringLiteral("service_probes")))
         return;
-    // Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша цель — нам нужно
-    // «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ поллинг (батарея).
+    // AVPN backend-first (Task 4): пер-сервисный kill-switch — подхватываем СВЕЖИЙ
+    // lists.service_chips_disabled на КАЖДОМ прогоне (живой цикл: сервер выключил сервис ПОСЛЕ того,
+    // как чип уже в m_serviceStatus → следующий probeServices() уберёт его без отдельного хука на
+    // configApplied). Только при активном туннеле: иначе мерили бы доступность «мимо VPN» (не наша
+    // цель — нам нужно «работает ли сервис ЧЕРЕЗ эту ноду»). On-connect (авто) + по тапу из UI; НЕ
+    // поллинг (батарея).
+    rebuildServiceChips();
     m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
     if (m_svcProbe && state() == QLatin1String("connected"))
         m_svcProbe->probeAll();
@@ -2674,6 +2741,10 @@ void AvpnEngineQml::guardedStart()
     m_opInFlight = true;
     m_busy = true;
     m_needsRestart = false;   // свежий старт всегда поднимает целевую (pin/auto) ноду — рестарт не нужен
+    // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (server-driven,
+    // без ребилда); setInterval конструктора (15000) остаётся вкомпиленным дефолтом.
+    m_watchdog.setInterval(qBound(5000,
+        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
     m_watchdog.start();
     emit changed();
 
@@ -2725,6 +2796,9 @@ void AvpnEngineQml::guardedStop()
     m_op = Op::Stopping;
     m_opInFlight = true;
     m_busy = true;
+    // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (см. guardedStart).
+    m_watchdog.setInterval(qBound(5000,
+        (int) avpn::TuningStore::numberOr(QStringLiteral("reconcile_watchdog_ms"), 15000), 120000));
     m_watchdog.start();
     m_healthTimer.stop();
     m_engine.requestStop();

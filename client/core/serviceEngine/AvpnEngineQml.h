@@ -6,6 +6,7 @@
 
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
+#include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
@@ -154,6 +155,18 @@ class AvpnEngineQml : public QObject {
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
     // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
     Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
+    // AVPN backend-first (Task 9): реф-вкладка — kill-switch (features.referral, default TRUE —
+    // отсутствие ключа НЕ прячет вкладку). TribeBottomNav.qml прячет её при !referralEnabled.
+    Q_PROPERTY(bool referralEnabled READ referralEnabled NOTIFY changed)
+    // AVPN backend-first (Task 9): домен веб-кабинета (urls.cabinet) — CTA «Продлить»/«Аккаунт»
+    // (PageConnectTribe/PageAccountTribe), фолбэк вкомпиленный https://tribevpn.com/account.
+    Q_PROPERTY(QString cabinetUrl READ cabinetUrl NOTIFY changed)
+    // AVPN backend-first (Task 9): поллинг «перенос принят» (PageAccountTribe) — server-tunable
+    // (numbers.transfer_poll_ms), фолбэк 4000мс, клампы 1с..10мин.
+    Q_PROPERTY(int transferPollMs READ transferPollMs NOTIFY changed)
+    // AVPN backend-first (Task 9): ретрай-поллинг рефералки (PageReferralTribe) — server-tunable
+    // (numbers.referral_retry_ms), фолбэк 6000мс, клампы 1с..10мин.
+    Q_PROPERTY(int referralRetryMs READ referralRetryMs NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -224,6 +237,24 @@ public:
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов — см. Q_PROPERTY выше.
     int probeServicesIntervalMs() const
     { return int(avpn::TuningStore::numberOr(QStringLiteral("probe_services_interval_ms"), 180000)); }
+
+    // AVPN backend-first (Task 9): реф-вкладка/кабинет-URL/поллинг — см. Q_PROPERTY выше.
+    bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
+    QString cabinetUrl() const
+    {
+        return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),
+                                            QStringLiteral("https://tribevpn.com/account"));
+    }
+    int transferPollMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("transfer_poll_ms"), 4000)),
+                      600000);
+    }
+    int referralRetryMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("referral_retry_ms"), 6000)),
+                      600000);
+    }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
@@ -628,6 +659,17 @@ private:
     // setEndpoints (AvpnEngineQml.cpp:268-269) — только сид до первого вызова.
     void refreshQualityEndpoints();
 
+    // AVPN backend-first (Task 4): пер-сервисный kill-switch чипов (lists.service_chips_disabled).
+    // Фильтрует m_svcCfgsAll (полный список — ctor-дефолт или remote probeTargets из
+    // applyRemoteProbeTargets) → отключённые ключи НЕ попадают в m_svcProbe (не пробятся, не тратят
+    // трафик) И не попадают в m_serviceStatus (чип пропадает из UI — QML дата-driven, без правок).
+    // Пустой/отсутствующий список → фильтр не убирает ничего (TuningStore::listOr «пусто=фолбэк»),
+    // поведение байт-в-байт как до задачи. Существующие состояния (works/slow/blocked) сохраняются
+    // по key для сервисов, оставшихся включёнными — список ПЕРЕСТРАИВАЕТСЯ целиком, не мержится point-wise.
+    // Вызывается из ctor (сид), applyRemoteProbeTargets (сервер сменил цели) и probeServices() (каждый
+    // прогон подхватывает свежий disabled-список — живой цикл без отдельного хука на configApplied).
+    void rebuildServiceChips();
+
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку
     SecureAppSettingsRepository *m_store = nullptr;
@@ -646,10 +688,13 @@ private:
     bool                         m_liveReachable = false;
     bool                         m_liveDead = false;     // проба подтверждённо не доходит → 0 зелёных + все красные
     int                          m_liveFailStreak = 0;   // неуспешных проб подряд (анти-фликер до «мертво»)
-    static constexpr int         kLiveDeadStreak = 2;    // столько неудач подряд = связь мертва (≈1-я проба+1 тик)
+    static constexpr int         kLiveDeadStreak = 2;    // фолбэк; серверный оверрайд numbers.live_dead_streak (TuningStore)
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.
     ServiceProbe                *m_svcProbe = nullptr;
     QVariantList                 m_serviceStatus;     // [{key,label,state,rttMs}] — обновляется по месту
+    // AVPN backend-first (Task 4): ПОЛНЫЙ (нефильтрованный) список сервисов — источник правды для
+    // rebuildServiceChips(); ctor-дефолт (telegram/youtube/instagram) либо замещён applyRemoteProbeTargets.
+    QList<ServiceProbeConfig>    m_svcCfgsAll;
     QSet<QString>                m_svcRetried;        // ключи, уже получившие авто-ретрай Unknown (сброс на probeServices)
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)

@@ -11,6 +11,7 @@
 #include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
 #import "StoreKitController.h"
+#include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
 
 const char* Action::start = "start";
 const char* Action::restart = "restart";
@@ -422,6 +423,13 @@ void IosController::checkStatus()
                     intFromRawConfig(m_rawConfig, "awg_handshake_timeout_ms", kHandshakeTimeoutMs);
             const int handshakeMaxTimeouts =
                     intFromRawConfig(m_rawConfig, "awg_handshake_max_timeouts", kHandshakeMaxTimeouts);
+            // AVPN backend-first (Task 5): rx-порог подтверждения рукопожатия — тоже из m_rawConfig
+            // (awg_handshake_rx_threshold_bytes, засеян VpnConnectionTunnelControl::up).
+            // intFromRawConfig не гарантирует положительность — порог <= 0 бессмыслен, откатываемся на фолбэк.
+            const int handshakeRxThresholdRaw =
+                    intFromRawConfig(m_rawConfig, "awg_handshake_rx_threshold_bytes", (int)kHandshakeRxThreshold);
+            const uint64_t handshakeRxThreshold =
+                    handshakeRxThresholdRaw > 0 ? (uint64_t)handshakeRxThresholdRaw : kHandshakeRxThreshold;
             if (isWireGuardBasedProto(m_proto) && m_handshakeAwaiting) {
                 const bool hasHandshakeData = (last_handshake_time_sec >= 0);
                 // AVPN: tx НЕ доказывает рукопожатие — init-ретраи можно бесконечно слать в чёрную дыру
@@ -430,7 +438,7 @@ void IosController::checkStatus()
                 // (авторитетно, wireguard-go ставит время завершённого рукопожатия) или приход данных назад (rx).
                 const bool hasFreshHandshake = hasHandshakeData &&
                         ((last_handshake_time_sec > 0) ||
-                         (rxBytes >= kHandshakeRxThreshold));
+                         (rxBytes >= handshakeRxThreshold));
 
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
@@ -743,6 +751,20 @@ bool IosController::setupXray()
 
     finalConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
     finalConfig.insert(configKey::config, xrayConfigStr);
+    // AVPN backend-first (Task 6): tun2socks connect/read-write timeouts + network-change reconnect
+    // debounce, server-tunable via TuningStore (numbers.xray_connect_timeout_ms/xray_rw_timeout_ms/
+    // network_change_debounce_ms). Fallbacks byte-for-byte match the pre-Task-6 NE literals
+    // (setupAndRunTun2socks: 5000/60000; scheduleNetworkChangeHandling: 1000) — absent/offline ⇒
+    // identical behavior. Decoded as optional Int? on the Swift side (XrayConfig).
+    // Clamped: an operator typo (0/negative) in the backend config must not reach the NE — 0
+    // connect-timeout would go into the tun2socks YAML as-is, 0/negative debounce would cause a
+    // reconnect storm on a flapping network.
+    finalConfig.insert(configKey::xrayConnectTimeoutMs,
+                       qBound(100, int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)), 300000));
+    finalConfig.insert(configKey::xrayRwTimeoutMs,
+                       qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
+    finalConfig.insert(configKey::networkChangeDebounceMs,
+                       qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -759,6 +781,15 @@ bool IosController::setupSSXray()
     finalConfig.insert(configKey::dns1, m_rawConfig[configKey::dns1]);
     finalConfig.insert(configKey::dns2, m_rawConfig[configKey::dns2]);
     finalConfig.insert(configKey::config, ssXrayConfigStr);
+    // AVPN backend-first (Task 6): same tun2socks/network-change knobs as setupXray() above — SSXray
+    // shares the same NE "xray" provider-configuration blob and XrayConfig Decodable on the Swift side.
+    // Clamped for the same reason as setupXray(): operator typo (0/negative) must not reach the NE.
+    finalConfig.insert(configKey::xrayConnectTimeoutMs,
+                       qBound(100, int(avpn::TuningStore::numberOr(QStringLiteral("xray_connect_timeout_ms"), 5000)), 300000));
+    finalConfig.insert(configKey::xrayRwTimeoutMs,
+                       qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
+    finalConfig.insert(configKey::networkChangeDebounceMs,
+                       qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));

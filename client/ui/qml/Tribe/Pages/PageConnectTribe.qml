@@ -1017,9 +1017,11 @@ PageType {
                         // (из «Управлять подпиской» в Настройках — чистый ЛК, без intent). // AVPN
                         TribeEngine.requestCabinetLink("renew")  // ответ всегда придёт в onCabinetLinkReady
                     } else {
-                        // без движка язык приложения недоступен — берём язык системы (сайт провалидирует)
-                        Qt.openUrlExternally("https://tribevpn.com/account?intent=renew&lang="
-                                             + Qt.locale().name.split("_")[0])
+                        // без движка язык приложения недоступен — берём язык системы (сайт провалидирует);
+                        // домен — TribeEngine.cabinetUrl (server-driven urls.cabinet), литерал ТОЛЬКО
+                        // в dev-превью без движка. // AVPN backend-first (Task 9)
+                        Qt.openUrlExternally((root.hasEngine ? TribeEngine.cabinetUrl : "https://tribevpn.com/account")
+                                             + "?intent=renew&lang=" + Qt.locale().name.split("_")[0])
                     }
                 }
             }

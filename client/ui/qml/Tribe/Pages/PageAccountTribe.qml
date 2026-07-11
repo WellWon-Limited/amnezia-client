@@ -75,8 +75,11 @@ PageType {
     function manageSubscription() {
         if (root.cabinetLinking) return
         if (!(root.hasEngine && typeof TribeEngine.requestCabinetLink === "function")) {
-            // dev-превью / стейл-бинарник без движка: кабинет без авто-логина (юзер войдёт сам)
-            Qt.openUrlExternally("https://tribevpn.com/account?lang=" + root.webLang)
+            // dev-превью / стейл-бинарник без движка: кабинет без авто-логина (юзер войдёт сам);
+            // домен — TribeEngine.cabinetUrl (server-driven urls.cabinet), литерал ТОЛЬКО
+            // в dev-превью без движка. // AVPN backend-first (Task 9)
+            Qt.openUrlExternally((root.hasEngine ? TribeEngine.cabinetUrl : "https://tribevpn.com/account")
+                                 + "?lang=" + root.webLang)
             return
         }
         root.cabinetLinking = true
@@ -1345,7 +1348,9 @@ PageType {
         // transferredAway на 410 → onTransferredAwayNowChanged закроет модалку и покажет результат).
         // Только пока модалка открыта — вне её хватает foreground-рефреша.
         Timer {
-            interval: 4000; repeat: true
+            // AVPN backend-first (Task 9): server-tunable numbers.transfer_poll_ms, фолбэк 4000мс.
+            interval: root.hasEngine ? TribeEngine.transferPollMs : 4000
+            repeat: true
             running: transferSheet.opened && root.hasEngine
             onTriggered: {
                 if (typeof TribeEngine.refreshSubscription === "function")

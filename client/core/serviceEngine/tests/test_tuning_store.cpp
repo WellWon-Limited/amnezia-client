@@ -18,16 +18,21 @@ int main(int argc, char **argv)
     CHECK(avpn::TuningStore::flag("chat_enabled", false) == false, "empty store: flag explicit def => def");
     CHECK(avpn::TuningStore::listOr("bypass_extra", QStringList{"a", "b"}) == QStringList({"a", "b"}),
           "empty store: listOr => def");
+    CHECK(avpn::TuningStore::stringOr("yt_innertube_key", "fallback") == QStringLiteral("fallback"),
+          "empty store: stringOr => def");
 
     // (б) после set — значения из store
     QMap<QString, double> numbers{{"probe_interval_s", 15.0}};
     QMap<QString, bool> features{{"chat_enabled", false}};
     QMap<QString, QStringList> lists{{"bypass_extra", QStringList{"x.com", "y.com"}}};
-    avpn::TuningStore::set(numbers, features, lists);
+    QMap<QString, QString> strings{{"yt_innertube_key", "server-key-123"}};
+    avpn::TuningStore::set(numbers, features, lists, strings);
     CHECK(avpn::TuningStore::numberOr("probe_interval_s", 30.0) == 15.0, "after set: numberOr => stored value");
     CHECK(avpn::TuningStore::flag("chat_enabled", true) == false, "after set: flag => stored value");
     CHECK(avpn::TuningStore::listOr("bypass_extra", {}) == QStringList({"x.com", "y.com"}),
           "after set: listOr => stored value");
+    CHECK(avpn::TuningStore::stringOr("yt_innertube_key", "fallback") == QStringLiteral("server-key-123"),
+          "after set: stringOr => stored value");
 
     // (в) отсутствующий ключ при непустом store → def
     CHECK(avpn::TuningStore::numberOr("missing_key", 42.0) == 42.0, "missing key: numberOr => def");
@@ -35,23 +40,40 @@ int main(int argc, char **argv)
     CHECK(avpn::TuningStore::flag("missing_flag", false) == false, "missing key: flag explicit def => def");
     CHECK(avpn::TuningStore::listOr("missing_list", QStringList{"fallback"}) == QStringList({"fallback"}),
           "missing key: listOr => def");
+    CHECK(avpn::TuningStore::stringOr("missing_string", "fallback") == QStringLiteral("fallback"),
+          "missing key: stringOr => def");
 
     // (г) reset() → снова дефолты
     avpn::TuningStore::reset();
     CHECK(avpn::TuningStore::numberOr("probe_interval_s", 30.0) == 30.0, "after reset: numberOr => def");
     CHECK(avpn::TuningStore::flag("chat_enabled") == true, "after reset: flag => def (true)");
     CHECK(avpn::TuningStore::listOr("bypass_extra", {"z"}) == QStringList({"z"}), "after reset: listOr => def");
+    CHECK(avpn::TuningStore::stringOr("yt_innertube_key", "fallback") == QStringLiteral("fallback"),
+          "after reset: stringOr => def");
+
+    // (г2) контракт «пусто с сервера = фолбэк» (ревью Task 3, 2026-07-11): ключ ЕСТЬ в store, но
+    // хранимое значение пустое (строка/список) → stringOr/listOr отдают def, ТАК ЖЕ как для
+    // отсутствующего ключа. Раньше эта семантика жила локальными guard'ами в ServiceProbe.cpp
+    // и YoutubeSource.h — теперь единственный источник правды — сам TuningStore.
+    avpn::TuningStore::set({}, {}, {{"empty_list_key", QStringList{}}}, {{"empty_string_key", QString()}});
+    CHECK(avpn::TuningStore::listOr("empty_list_key", QStringList{"fallback"}) == QStringList({"fallback"}),
+          "key present, empty QStringList value: listOr => def (empty != override)");
+    CHECK(avpn::TuningStore::stringOr("empty_string_key", "fallback") == QStringLiteral("fallback"),
+          "key present, empty QString value: stringOr => def (empty != override)");
+    avpn::TuningStore::reset();
 
     // (д) set полностью замещает (не мержит): второй set без "probe_interval_s" => пропадает
-    avpn::TuningStore::set(numbers, features, lists);
+    avpn::TuningStore::set(numbers, features, lists, strings);
     QMap<QString, double> numbers2{{"other_key", 99.0}};
-    avpn::TuningStore::set(numbers2, {}, {});
+    avpn::TuningStore::set(numbers2, {}, {}, {});
     CHECK(avpn::TuningStore::numberOr("probe_interval_s", -1.0) == -1.0,
           "set replaces, not merges: old key gone => def");
     CHECK(avpn::TuningStore::numberOr("other_key", -1.0) == 99.0, "set replaces: new key present");
     CHECK(avpn::TuningStore::flag("chat_enabled") == true,
           "set replaces: features cleared => flag back to def");
     CHECK(avpn::TuningStore::listOr("bypass_extra", {}).isEmpty(), "set replaces: lists cleared => def empty");
+    CHECK(avpn::TuningStore::stringOr("yt_innertube_key", "fallback") == QStringLiteral("fallback"),
+          "set replaces: strings cleared => def");
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;

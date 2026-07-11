@@ -70,6 +70,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
     var activeIfaceIdx: UInt32 = 0
 
+    // AVPN backend-first (Task 6): network-change reconnect debounce for the xray tunnel, cached from
+    // XrayConfig.networkChangeDebounceMs when startXray() decodes the NE provider configuration (see
+    // PacketTunnelProvider+Xray.swift). Default matches the pre-Task-6 literal (1.0s) byte-for-byte.
+    var xrayNetworkChangeDebounceSeconds: TimeInterval = 1.0
+
     func openVPNPacketFlow() -> OpenVPNAdapterPacketFlow {
         openVPNPacketFlowAdapter
     }
@@ -343,7 +348,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         pendingNetworkChangeWorkItem = workItem
-        networkChangeQueue.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        // AVPN backend-first (Task 6): server-tunable via xrayNetworkChangeDebounceSeconds (cached from
+        // XrayConfig.networkChangeDebounceMs at startXray()); fallback 1.0s unchanged.
+        networkChangeQueue.asyncAfter(deadline: .now() + xrayNetworkChangeDebounceSeconds, execute: workItem)
     }
 
     private func scheduleOpenVPNReconnect(reason: String) {

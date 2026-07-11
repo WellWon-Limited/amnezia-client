@@ -7,8 +7,28 @@
 #pragma once
 
 #include "ITunnelControl.h"
+#include "TuningStore.h"
 
 namespace avpn {
+
+// Пороги DEAD-детекта. Серверный оверрайд (numbers.*, план backend-first 2026-07-10); пусто → те же
+// вкомпиленные дефолты, что были раньше (180с / 2 цикла).
+struct HealthThresholds {
+    int maxAgeSec = 180;
+    int cyclesToDead = 2;
+
+    static HealthThresholds fromTuning()
+    {
+        HealthThresholds t;
+        // AVPN backend-first (final review R-2): пол на серверные оверрайды — 0/минус сломали бы
+        // DEAD-детект (мгновенный false-positive failover).
+        t.maxAgeSec = qMax(10,
+            (int) TuningStore::numberOr(QStringLiteral("health_dead_max_age_s"), t.maxAgeSec));
+        t.cyclesToDead = qMax(1,
+            (int) TuningStore::numberOr(QStringLiteral("health_dead_cycles"), t.cyclesToDead));
+        return t;
+    }
+};
 
 class HealthLoop {
 public:
@@ -30,13 +50,16 @@ public:
     {
         if (!cur.valid)
             return m_dead; // нет данных — состояние не меняем
-        if (m_hasPrev && badCycle(m_prev, cur, nowEpoch, m_maxAgeSec))
+        // Снапшот порогов ОДИН раз на вызов (= один тик ServiceEngine::tick() для этой ноды),
+        // не дёргать TuningStore на каждое внутреннее сравнение.
+        const HealthThresholds th = HealthThresholds::fromTuning();
+        if (m_hasPrev && badCycle(m_prev, cur, nowEpoch, th.maxAgeSec))
             ++m_bad;
         else
             m_bad = 0;
         m_prev = cur;
         m_hasPrev = true;
-        m_dead = m_bad >= m_cyclesToDead;
+        m_dead = m_bad >= th.cyclesToDead;
         return m_dead;
     }
 
@@ -56,8 +79,6 @@ private:
     bool m_hasPrev = false;
     int  m_bad = 0;
     bool m_dead = false;
-    int  m_maxAgeSec = 180;
-    int  m_cyclesToDead = 2;
 };
 
 } // namespace avpn
