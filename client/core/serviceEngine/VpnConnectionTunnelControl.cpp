@@ -20,6 +20,7 @@
     #include "platforms/android/android_controller.h"
 #endif
 
+#include <QDateTime>                    // AVPN: посев handshake-epoch ≈ now на Connected (анти-ложный-DEAD)
 #include <QMetaObject>
 
 namespace avpn {
@@ -30,27 +31,39 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     if (m_conn) {
         connect(m_conn, &VpnConnection::bytesChanged, this,
                 &VpnConnectionTunnelControl::onBytesChanged, Qt::QueuedConnection);
+        // AVPN (инцидент 2026-07-11, ложный DEAD → самопроизвольный failover): на Connected сеем
+        // handshake-epoch ≈ now — данные текут ⇒ рукопожатие только что состоялось (паритет с
+        // desktop-UAPI). Иначе на iOS/Windows epoch=0 первые секунды, и hsStale в HealthLoop
+        // считал живой туннель «протухшим» на фоне tx-бёрстов проб. Реальный отчёт (>0) уточнит.
+        connect(m_conn, &VpnConnection::connectionStateChanged, this,
+                [this](Vpn::ConnectionState st) {
+                    if (st == Vpn::ConnectionState::Connected)
+                        updateHandshakeEpoch(m_stats, QDateTime::currentSecsSinceEpoch());
+                },
+                Qt::QueuedConnection);
     }
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // AVPN: возраст хендшейка → m_stats.latestHandshakeEpoch (на iOS раньше был 0 ⇒ HealthLoop
     // опирался только на rx/tx; теперь DEAD-детект учитывает и устаревший handshake, как на desktop).
+    // updateHandshakeEpoch: 0 = «неизвестно», известное значение не затирается (ITunnelControl.h).
     connect(IosController::Instance(), &IosController::handshakeChanged, this,
-            [this](qint64 hsEpochSec) { m_stats.latestHandshakeEpoch = hsEpochSec; },
+            [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
             Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_ANDROID)
     // AVPN: то же на Android (last_handshake_time_sec из GoBackend.awgGetConfig → Statistics → JNI).
     connect(AndroidController::instance(), &AndroidController::handshakeUpdated, this,
-            [this](qint64 hsEpochSec) { m_stats.latestHandshakeEpoch = hsEpochSec; },
+            [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
             Qt::QueuedConnection);
 #endif
 }
 
 void VpnConnectionTunnelControl::onBytesChanged(quint64 rx, quint64 tx)
 {
-    m_stats.rxBytes = static_cast<qint64>(rx);
-    m_stats.txBytes = static_cast<qint64>(tx);
-    m_stats.valid = true;
+    // bytesChanged на всех платформах = ДЕЛЬТЫ за период (vpnProtocol::setBytesChanged /
+    // ios_controller.mm эмитят diff) → аккумулируем в кумулятив, как ждёт HealthLoop
+    // (rxStuck/txGrew); контракт и TDD — ITunnelControl.h + tests/parse_check.cpp.
+    accumulateByteDelta(m_stats, rx, tx);
 }
 
 bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QString &serverId)

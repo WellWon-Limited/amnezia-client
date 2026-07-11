@@ -15,6 +15,31 @@ struct TunnelStats {
     bool   valid = false;
 };
 
+// Хелперы наполнения TunnelStats (ИНЦИДЕНТ 2026-07-11 «сам отключился и переподключился»):
+// ложный DEAD HealthLoop сразу после коннекта → failover-ротация без действий юзера.
+//
+// 1) bytesChanged на ВСЕХ платформах несёт ДЕЛЬТЫ за период (vpnProtocol::setBytesChanged эмитит
+//    diff, ios_controller.mm::checkStatus — тоже), а HealthLoop ждёт КУМУЛЯТИВЫ (rxStuck/txGrew
+//    сравнивают соседние замеры). Прямая запись дельт делала «ровный rx-поток» (равные дельты)
+//    неотличимым от «rx стоит» → аккумулируем.
+inline void accumulateByteDelta(TunnelStats &s, quint64 rxDelta, quint64 txDelta)
+{
+    s.rxBytes += static_cast<qint64>(rxDelta);
+    s.txBytes += static_cast<qint64>(txDelta);
+    s.valid = true;
+}
+
+// 2) возраст хендшейка: 0 = «НЕИЗВЕСТНО», а не «не было» — iOS шлёт handshakeChanged(0) до первого
+//    отчёта wireguard-go даже на живом туннеле; нулём известное значение НЕ затираем (иначе
+//    hsStale в HealthLoop защёлкивался в true в первые секунды после Connected).
+//    Вызывающий на Connected сеет epoch≈now (паритет с desktop-UAPI: данные текут ⇒ handshake
+//    только что состоялся) — это даёт естественный грейс maxAgeSec после подъёма туннеля.
+inline void updateHandshakeEpoch(TunnelStats &s, qint64 hsEpochSec)
+{
+    if (hsEpochSec > 0)
+        s.latestHandshakeEpoch = hsEpochSec;
+}
+
 struct TunnelResult {
     bool ok = false;
     QString error;
