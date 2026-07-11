@@ -40,8 +40,19 @@ PageType {
             || s.indexOf("PageOnboardingTribe.qml") !== -1
     }
 
+    // AVPN (клавиатура): активна = высота IME > 0 ЛИБО поле ввода текущей страницы в фокусе
+    // (страница публикует property inputFocused). Фокус-срез убирает двухфазный дёрг iOS:
+    // навбар скрывается СРАЗУ по тапу в поле, до анимации клавиатуры (жалоба 2026-07-11
+    // «поднимается вместе с меню, потом исчезает»). Qt.inputMethod.visible в связке с
+    // imeHeight — страховка от «застрявшего» imeHeight (меню пропадало после «назад»).
+    readonly property bool kbActive:
+        (PageController.imeHeight > 0 && Qt.inputMethod.visible)
+        || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true)
+
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
+        Qt.inputMethod.hide()   // смена вкладки с открытой клавиатурой: спрятать ЯВНО,
+                                // иначе imeHeight мог застрять и навбар не возвращался
         avpnBottomNav.currentIndex = index
         if (index === 1)
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSupportTribe.qml")
@@ -416,17 +427,16 @@ PageType {
         // AVPN: над нашей навигацией; на онбординге навигации нет — страница до низа окна.
         // AVPN (Support, handoff Занавеса 2026-07-08): при клавиатуре навбар СКРЫТ (не едет
         // вверх), низ зоны = верх клавиатуры — над ней остаётся только композер чата.
+        // Клавиатура (телеграм-схема, единая для iOS/Android): навбар скрыт, контент СЖАТ
+        // margin'ом = высоте клавиатуры, шапка страницы на месте. Авто-сдвиг окна iOS
+        // (QIOSInputContext, давал «улетание» шапки и двойную компенсацию в билдax 75/76)
+        // гасится из pageController: update(ImCursorRectangle) → scroll(0) после relayout.
         anchors.bottom: root.onboardingActive ? parent.bottom
-                                              : (root.avpnNav ? (PageController.imeHeight > 0 ? parent.bottom
-                                                                                              : avpnBottomNav.top)
+                                              : (root.avpnNav ? (root.kbActive ? parent.bottom
+                                                                               : avpnBottomNav.top)
                                                               : tabBar.top)
-        // iOS: свой margin НЕ добавляем — QIOSInputContext сам сдвигает окно к курсору
-        // (отключить нельзя), margin+сдвиг давали ДВОЙНУЮ компенсацию: чёрная дыра высотой
-        // с клавиатуру между композером и клавиатурой (билд 75, 2026-07-11). Навбар скрыт
-        // (imeHeight>0 — питается с iOS с 7a25cd72), Qt поднимает композер к клавиатуре сам.
-        // Android — прежняя схема margin=imeHeight (там окно не сдвигается).
-        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive
-                               && Qt.platform.os !== "ios") ? PageController.imeHeight : 0
+        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive && root.kbActive)
+                              ? PageController.imeHeight : 0
 
         enabled: !root.isControlsDisabled
 
@@ -653,7 +663,9 @@ PageType {
 
         // AVPN (Support, handoff Занавеса): при клавиатуре навбар ПРЯЧЕТСЯ, а не поднимается
         // (PWA-паттерн kb-open .tabbar{display:none}) — над клавиатурой живёт только композер.
-        visible: root.avpnNav && !root.onboardingActive && PageController.imeHeight === 0
+        // kbActive включает фокус-срез (скрытие ДО анимации клавиатуры) и страховку от
+        // застрявшего imeHeight (меню «пропадало навсегда» после «назад» — 2026-07-11).
+        visible: root.avpnNav && !root.onboardingActive && !root.kbActive
         // iOS: PageController.safeArea* только для Android → SafeArea (Qt 6.9+); фон нава
         // уходит под home-индикатор до самого низа (implicitHeight = 72 + inset)
         bottomInset: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)

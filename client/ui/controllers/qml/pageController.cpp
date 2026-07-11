@@ -23,6 +23,7 @@
 #ifdef Q_OS_IOS
     #include <QInputMethod> // AVPN: высота клавиатуры для imeHeight (см. конструктор)
     #include <QRectF>       // AVPN: keyboardRectangle() — без включения тип только forward-declared
+    #include <QTimer>       // AVPN: отложенный анти-сдвиг окна (см. конструктор)
 extern "C" int avpnSafeAreaTop();
 extern "C" int avpnSafeAreaBottom();
 #endif
@@ -61,6 +62,18 @@ PageController::PageController(ServersController* serversController, SettingsCon
         m_imeHeight = h;
         emit imeHeightChanged(h);
         emit safeAreaBottomMarginChanged();
+        // АНТИ-СДВИГ (2026-07-11, билды 75/76): QIOSInputContext на показ клавиатуры сам
+        // сдвигает root view к курсору (отключить нельзя) — вместе с нашим margin это
+        // давало двойную компенсацию (чёрная дыра) либо «улетание» шапки. После нашего
+        // relayout курсор УЖЕ видим над клавиатурой → update(ImCursorRectangle) заставляет
+        // QIOSInputContext::scrollToCursor() снять сдвиг (scroll(0), ветка «курсор видим»).
+        // Несколько тиков — страховка от гонки с анимацией клавиатуры/ленивым cursorRect.
+        if (h > 0) {
+            for (const int delayMs : {0, 120, 400})
+                QTimer::singleShot(delayMs, im, []() {
+                    QGuiApplication::inputMethod()->update(Qt::ImCursorRectangle);
+                });
+        }
     });
 #endif
 

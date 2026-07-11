@@ -1,8 +1,9 @@
 import QtQuick
 
-// AVPN: краевой свайп слева-направо = «назад» (жалоба 2026-07-11: жест не работал нигде,
-// кроме QR-шита). Узкая полоса вдоль левого края поверх контента; жест не мешает тапам
-// (target: null, порог 60px). Родитель обязан заполнять страницу.
+// AVPN: краевой свайп слева-направо = «назад». Узкая полоса вдоль левого края поверх контента.
+// РЕАЛИЗАЦИЯ ЧЕРЕЗ MouseArea + preventStealing (2026-07-11): DragHandler НЕ работал — ListView/
+// Flickable отбирал жест эксклюзивным грабом при малейшей вертикальной составляющей пальца.
+// preventStealing запрещает Flickable красть нажатие, начатое в краевой зоне.
 Item {
     id: root
 
@@ -14,12 +15,13 @@ Item {
     width: 28
     z: 90
 
-    DragHandler {
-        target: null
-        xAxis.enabled: true
-        yAxis.enabled: false
-        onActiveChanged: {
-            if (!active && activeTranslation.x > 60)
+    MouseArea {
+        anchors.fill: parent
+        preventStealing: true
+        property real startX: 0
+        onPressed: function(mouse) { startX = mouse.x }
+        onReleased: function(mouse) {
+            if (mouse.x - startX > 60)
                 root.triggered()
         }
     }

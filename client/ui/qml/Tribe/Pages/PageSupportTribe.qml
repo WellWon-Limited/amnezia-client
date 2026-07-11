@@ -16,6 +16,10 @@ PageType {
     // «назад» из шапки/свайпа → PageStart (onRequestTab) вернёт на Главную.
     signal requestTab(int index)
 
+    // PageStart читает у текущей страницы: фокус в поле → навбар скрывается СРАЗУ,
+    // до анимации клавиатуры (убирает двухфазный дёрг iOS, жалоба 2026-07-11).
+    readonly property bool inputFocused: input.activeFocus
+
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     // dev-превью без движка (qml с диска) — страница живёт на пустой модели, не падает.
@@ -151,33 +155,30 @@ PageType {
                     }
                 }
 
-                // ID аккаунта: оператор ищет юзера по нему; тап — скопировать целиком
-                Column {
+                // ID аккаунта: подпись «ID» и под ней КОРОТКИЙ номер (первые 8 знаков);
+                // тап — копия полного. ColumnLayout, НЕ Column с anchors (прошлая версия
+                // давала наложение строк — жалоба 2026-07-11).
+                ColumnLayout {
                     visible: root.accountId !== ""
                     Layout.alignment: Qt.AlignVCenter
                     spacing: 1
                     Text {
-                        anchors.right: parent.right
-                        text: qsTr("ID аккаунта")
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("ID")
                         color: Theme.color.text3
                         font.family: Theme.font.body
                         font.pixelSize: Theme.font.caption
                     }
                     Text {
-                        anchors.right: parent.right
-                        text: root.accountId.length > 12
-                              ? root.accountId.substring(0, 6) + "…" + root.accountId.slice(-4)
-                              : root.accountId
-                        color: idMa.pressed ? Theme.color.accent : Theme.color.text2
+                        Layout.alignment: Qt.AlignRight
+                        text: root.accountId.substring(0, 8)
+                        color: idTap.pressed ? Theme.color.accent : Theme.color.text2
                         font.family: Theme.font.mono
                         font.pixelSize: Theme.font.caption
                     }
-                    MouseArea {
-                        id: idMa
-                        anchors.fill: parent
-                        anchors.margins: -8   // удобная зона тапа
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
+                    TapHandler {
+                        id: idTap
+                        onTapped: {
                             acctCopyEdit.text = root.accountId
                             acctCopyEdit.selectAll(); acctCopyEdit.copy(); acctCopyEdit.deselect()
                             PageController.showNotificationMessage(qsTr("ID аккаунта скопирован"))
@@ -193,9 +194,11 @@ PageType {
             Layout.fillHeight: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
-            // верхний воздух — контент-инсет ListView (скроллится с лентой), не рамка:
-            // рамочный Layout.topMargin оставлял мёртвую полосу под плашкой при прокрутке // AVPN
+            // верхний/нижний воздух — контент-инсеты ListView (скроллятся с лентой), не рамка:
+            // рамочный Layout.topMargin оставлял мёртвую полосу при прокрутке; bottomMargin —
+            // отступ последнего пузыря от дивайдера композера (жалоба 2026-07-11 «вплотную»). // AVPN
             topMargin: Theme.space.lg + Theme.space.sm
+            bottomMargin: Theme.space.md
             clip: true
             spacing: Theme.space.md
             model: root.hasChat ? TribeSupport.messages : []
