@@ -818,10 +818,51 @@ void TribeSupportChat::discardMessage(int localId)
 
 // ── медиа: превью и оригиналы ────────────────────────────────────────────────
 
+// Дисковый кэш медиа (жалоба 2026-07-11 «превью грузятся долго при каждом входе»):
+// CacheLocation (НЕ Temp — живёт дольше, ОС чистит при нехватке места сама),
+// детерминированные имена по attId → мгновенное открытие после перезапуска.
+static QString mediaCacheDir()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                        + QStringLiteral("/tribe-support");
+    QDir().mkpath(dir);
+    return dir;
+}
+
+static QString extForMime(const QString &mime)
+{
+    const QMimeDatabase db;
+    const QMimeType mt = db.mimeTypeForName(mime);
+    if (mt.isValid() && !mt.preferredSuffix().isEmpty())
+        return mt.preferredSuffix();
+    return QStringLiteral("bin");
+}
+
+static QString thumbCachePath(int attachmentId)
+{
+    return mediaCacheDir() + QStringLiteral("/thumb-%1.jpg").arg(attachmentId);
+}
+
+static QString originalCachePath(int attachmentId, const QString &mime)
+{
+    return mediaCacheDir() + QStringLiteral("/att-%1.%2").arg(attachmentId).arg(extForMime(mime));
+}
+
 void TribeSupportChat::queueThumb(int attachmentId)
 {
     if (m_thumbQueued.contains(attachmentId))
         return;
+    // сначала диск — сеть только для действительно новых превью
+    QFile f(thumbCachePath(attachmentId));
+    if (f.exists() && f.open(QIODevice::ReadOnly)) {
+        const QByteArray data = f.readAll();
+        if (!data.isEmpty()) {
+            m_thumbCache.insert(attachmentId,
+                                QStringLiteral("data:image/jpeg;base64,%1")
+                                    .arg(QString::fromLatin1(data.toBase64())));
+            return; // rebuildMessages сделает вызвавший applyThread
+        }
+    }
     m_thumbQueued.insert(attachmentId);
     m_thumbQueue.append(attachmentId);
     fetchNextThumb();
@@ -853,6 +894,10 @@ void TribeSupportChat::fetchNextThumb()
                 m_thumbCache.insert(attId,
                                     QStringLiteral("data:%1;base64,%2")
                                         .arg(mime, QString::fromLatin1(data.toBase64())));
+                // дисковый кэш (best effort): следующий вход в чат — без сети
+                QFile out(thumbCachePath(attId));
+                if (out.open(QIODevice::WriteOnly))
+                    out.write(data);
                 rebuildMessages();
             }
         } else {
@@ -885,6 +930,13 @@ void TribeSupportChat::openAttachment(int attachmentId)
     const QString cached = m_originalPath.value(attachmentId);
     if (!cached.isEmpty() && QFile::exists(cached)) {
         emit attachmentReady(attachmentId, kind, QUrl::fromLocalFile(cached));
+        return;
+    }
+    // дисковый кэш переживает перезапуск (map в памяти — нет): имя детерминированное
+    const QString onDisk = originalCachePath(attachmentId, mime);
+    if (QFile::exists(onDisk)) {
+        m_originalPath.insert(attachmentId, onDisk);
+        emit attachmentReady(attachmentId, kind, QUrl::fromLocalFile(onDisk));
         return;
     }
     if (m_originalInFlight.contains(attachmentId))
@@ -938,19 +990,9 @@ void TribeSupportChat::finishOriginal(int attachmentId, const QString &kind,
         emit attachmentFailed(attachmentId);
         return;
     }
-    QDir dir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-             + QStringLiteral("/tribe-support"));
-    if (!dir.exists())
-        dir.mkpath(QStringLiteral("."));
-
-    // Расширение — из MIME (name может отсутствовать/врать).
-    QString ext = QStringLiteral("bin");
-    const QMimeDatabase db;
-    const QMimeType mt = db.mimeTypeForName(mime);
-    if (mt.isValid() && !mt.preferredSuffix().isEmpty())
-        ext = mt.preferredSuffix();
-
-    const QString path = dir.filePath(QStringLiteral("att-%1.%2").arg(attachmentId).arg(ext));
+    // CacheLocation, детерминированное имя (att-<id>.<ext по MIME>) — повторное открытие
+    // после перезапуска идёт с диска без сети (см. openAttachment).
+    const QString path = originalCachePath(attachmentId, mime);
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
         emit attachmentFailed(attachmentId);

@@ -78,7 +78,9 @@ Window  {
     flags: Qt.platform.os === "ios" ? (Qt.Window | Qt.ExpandedClientAreaHint)
          : (roundedMac ? (Qt.Window | Qt.FramelessWindowHint) : Qt.Window)
 
-    color: roundedMac ? "transparent" : AmneziaStyle.color.midnightBlack
+    // AVPN: фон окна = bg800 — за скруглёнными углами iOS-клавиатуры и в зоне margin
+    // просвечивает именно ОКНО (чёрный midnightBlack выглядел дырами по углам, 2026-07-11).
+    color: roundedMac ? "transparent" : Theme.color.bg800
 
     onClosing: function(close) {
         close.accepted = false
