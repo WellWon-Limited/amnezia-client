@@ -12,6 +12,7 @@
 #include "../Selector.h"
 #include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
+#include "../TuningStore.h" // AVPN backend-first (Task 2): health_dead_cycles/health_dead_max_age_s юнит
 #include "../YoutubeSource.h"
 #include "../../utils/constants/protocolConstants.h" // AVPN: паритет-дефолты mtu (awg::defaultMtu)
 
@@ -468,6 +469,40 @@ int main(int argc, char **argv)
         bool hOk = dead1 && !dead2 && !dead3 && !dead4 && exPick && exPick->nodeId == QLatin1String("A");
         if (!hOk) { fprintf(stderr, "FAIL: HealthLoop/exclude mismatch\n"); return 8; }
         printf("healthloop: OK (one-way death→DEAD, healthy/idle/fresh-handshake→alive, exclude works)\n");
+
+        // --- HealthLoop: server-tunable пороги (backend-first Task 2) ---
+        // Дефолт (пустой TuningStore) — DEAD только после 2 «плохих» циклов подряд (как раньше).
+        avpn::TuningStore::reset();
+        HealthLoop hDef; hDef.feed(S(0, 100, 100), now);
+        bool defAliveAfter1 = !hDef.feed(S(0, 100, 200), now); // 1-й плохой цикл — ещё не DEAD
+        bool defDeadAfter2 = hDef.feed(S(0, 100, 300), now);   // 2-й плохой цикл — DEAD (дефолт=2)
+
+        // health_dead_cycles=1 с сервера → DEAD уже за ОДИН плохой цикл.
+        avpn::TuningStore::set({{QStringLiteral("health_dead_cycles"), 1.0}}, {});
+        HealthLoop hTuned; hTuned.feed(S(0, 100, 100), now);
+        bool tunedDeadAfter1 = hTuned.feed(S(0, 100, 200), now); // 1-й плохой цикл уже DEAD
+
+        // health_dead_max_age_s=5 с сервера (пол final review R-2 клампит 0/минус до 10 — см.
+        // HealthThresholds::fromTuning) → эффективный порог 10с, handshake 15с уже вне него ⇒ DEAD
+        // раньше дефолта (180с), но НЕ мгновенно от любого handshake (пол защищает от false-positive).
+        avpn::TuningStore::set({{QStringLiteral("health_dead_cycles"), 1.0},
+                                 {QStringLiteral("health_dead_max_age_s"), 5.0}}, {});
+        HealthLoop hAge; hAge.feed(S(now - 15, 100, 100), now);
+        bool tunedAgeDead = hAge.feed(S(now - 15, 100, 200), now); // hs 15с (> клампленных 10с) ⇒ stale
+
+        // reset() → снова дефолт 2 (как в самом начале).
+        avpn::TuningStore::reset();
+        HealthLoop hReset; hReset.feed(S(0, 100, 100), now);
+        bool resetAliveAfter1 = !hReset.feed(S(0, 100, 200), now);
+        bool resetDeadAfter2 = hReset.feed(S(0, 100, 300), now);
+
+        printf("health/tuning: defAliveAfter1=%d defDeadAfter2=%d tunedDeadAfter1=%d tunedAgeDead=%d "
+               "resetAliveAfter1=%d resetDeadAfter2=%d\n",
+               defAliveAfter1, defDeadAfter2, tunedDeadAfter1, tunedAgeDead, resetAliveAfter1, resetDeadAfter2);
+        bool tuningOk = defAliveAfter1 && defDeadAfter2 && tunedDeadAfter1 && tunedAgeDead
+                        && resetAliveAfter1 && resetDeadAfter2;
+        if (!tuningOk) { fprintf(stderr, "FAIL: HealthLoop TuningStore override mismatch\n"); return 14; }
+        printf("healthloop/tuning: OK (health_dead_cycles/health_dead_max_age_s override + reset→def)\n");
     }
 
     // --- TunnelStats-хелперы (ИНЦИДЕНТ 2026-07-11 «сам отключился и переподключился»):

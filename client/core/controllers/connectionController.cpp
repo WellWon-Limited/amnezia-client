@@ -14,6 +14,7 @@
 #include "core/utils/protocolEnum.h"
 #include "core/models/containerConfig.h"
 #include "core/models/protocolConfig.h"
+#include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 7): xray_max_memory_bytes
 
 using namespace amnezia;
 using namespace ProtocolUtils;
@@ -293,6 +294,26 @@ QJsonObject ConnectionController::createConnectionConfiguration(const QPair<QStr
     vpnConfiguration[configKey::hostName] = hostName;
     vpnConfiguration[configKey::description] = description;
     vpnConfiguration[configKey::configVersion] = configVersion;
+
+    if (proto == Proto::Xray || proto == Proto::SSXray) {
+        // AVPN backend-first (Task 7): server-tunable Xray engine memory limit — this is the single
+        // shared per-connect config-assembly point (both Android's AndroidVpnProtocol and iOS's
+        // IosController::connectVpn consume vpnConfiguration built here). Read on Android by
+        // Xray.kt::parseConfig() via optLong(); absent/0 there falls back to XRAY_DEFAULT_MAX_MEMORY
+        // (XrayConfig.kt, pre-Task-7 literal, 50 MB) — byte-for-byte unchanged behavior offline/on
+        // old backends. iOS/desktop don't read this key — harmless extra JSON field, no-op there.
+        // Clamped here (not just on read): an operator typo (0/negative/absurdly small) in the
+        // backend config must not OOM-kill the Xray engine nor hand it a useless memory ceiling.
+        const qint64 xrayMaxMemoryMin = 16LL * 1024 * 1024;
+        const qint64 xrayMaxMemoryMax = 512LL * 1024 * 1024;
+        const qint64 xrayMaxMemoryDefault = 52428800; // 50 MB, matches XRAY_DEFAULT_MAX_MEMORY
+        const qint64 xrayMaxMemoryBytes =
+                qBound(xrayMaxMemoryMin,
+                       static_cast<qint64>(avpn::TuningStore::numberOr(QStringLiteral("xray_max_memory_bytes"),
+                                                                        static_cast<double>(xrayMaxMemoryDefault))),
+                       xrayMaxMemoryMax);
+        vpnConfiguration[configKey::xrayMaxMemoryBytes] = xrayMaxMemoryBytes;
+    }
 
     return vpnConfiguration;
 }

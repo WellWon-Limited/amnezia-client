@@ -8,6 +8,8 @@
 // Этот класс — ЧИСТЫЙ билдер запроса + парсер JSON-ответа + сборка ranged-URL. Сеть — в ServiceProbe.cpp.
 #pragma once
 
+#include "TuningStore.h" // AVPN backend-first (Task 3): video-ids/key server-driven, вкомпиленное — фолбэк
+
 #include <QByteArray>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -21,15 +23,22 @@ class YoutubeSource {
 public:
     // Evergreen-видео (годами не удаляют): jNQXAC9IVRw = «Me at the zoo» (первое видео YouTube);
     // BaW_jenozKc = публичный тест-клип (используется yt-dlp как стабильный). Фолбэки на случай гео-блока одного.
+    // Server-driven (backend-first, Task 3): TuningStore.lists["yt_probe_video_ids"] может переопределить
+    // (YouTube время от времени удаляет/гео-блочит evergreen-видео — правка без релиза). Пустой серверный
+    // список ⇒ фолбэк на вкомпиленный — гарантия внутри TuningStore::listOr (единый источник правды).
     static QStringList evergreenVideoIds()
     {
-        return {QStringLiteral("jNQXAC9IVRw"), QStringLiteral("BaW_jenozKc")};
+        static const QStringList kDefault{QStringLiteral("jNQXAC9IVRw"), QStringLiteral("BaW_jenozKc")};
+        return TuningStore::listOr(QStringLiteral("yt_probe_video_ids"), kDefault);
     }
 
     // Публичный ключ web-InnerTube (константа из клиента YouTube, НЕ секрет).
+    // Server-driven (backend-first, Task 3): TuningStore.strings["yt_innertube_key"]; пустая серверная
+    // строка ⇒ фолбэк — гарантия внутри TuningStore::stringOr (единый источник правды).
     static QString innerTubeKey()
     {
-        return QStringLiteral("AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8");
+        static const QString kDefault = QStringLiteral("AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8");
+        return TuningStore::stringOr(QStringLiteral("yt_innertube_key"), kDefault);
     }
 
     // Тело POST для https://youtubei.googleapis.com/youtubei/v1/player?key=...
