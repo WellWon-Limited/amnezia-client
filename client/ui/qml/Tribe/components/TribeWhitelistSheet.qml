@@ -5,8 +5,9 @@ import QtQuick.Shapes
 import ".."   // Theme
 
 // AVPN (белые списки, спека 2026-07-12 §6): центрированный попап «Действуют "Белые списки"» —
-// РКН-режим whitelist на сотовой (TribeEngine.whitelistMode && !whitelistAcked). Глобальный
-// слой на PageStart — поверх любого экрана и нижней навигации. «Понятно» ->
+// РКН-режим whitelist на сотовой (TribeEngine.whitelistMode && !whitelistAcked). Хост —
+// ГЛАВНЫЙ экран (PageConnectTribe): это функция попытки подключения, на других вкладках/
+// оверлеях попап не показывается (реш. владельца 2026-07-12). «Понятно» ->
 // setWhitelistAcked(true), попап закрыт. Повторный показ: новый эпизод (движок сбрасывает
 // acked при выходе из режима) ИЛИ тап по коннекту при активном режиме (PageConnectTribe зовёт
 // setWhitelistAcked(false)); саму попытку подключения попап НЕ блокирует.
@@ -135,23 +136,31 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
+            // Кнопка — ФИРМЕННОЕ CTA-золото (зеркало золотой «Получить ключ» ctaBtn на
+            // PageConnectTribe: градиент cta->ctaDeep, pressed-затемнение, текст bg900) —
+            // единый язык «главная кнопка карточки» (реш. владельца 2026-07-12).
             Rectangle {
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
-                implicitHeight: okLabel.implicitHeight + 2 * Theme.space.md
-                radius: Theme.radius.md
-                color: Theme.color.warning
+                height: 52
+                radius: Theme.radius.lg
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: okMa.pressed ? Theme.color.ctaDeep : Theme.color.cta }
+                    GradientStop { position: 1.0; color: Theme.color.ctaDeep }
+                }
+                scale: okMa.pressed ? 0.985 : 1.0
+                Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
                 Text {
-                    id: okLabel
                     anchors.centerIn: parent
                     text: qsTr("Понятно")
-                    color: Theme.color.bg800
+                    color: Theme.color.bg900
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wBold
                 }
                 MouseArea {
+                    id: okMa
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     onClicked: TribeEngine.setWhitelistAcked(true)
