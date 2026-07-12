@@ -99,9 +99,14 @@ void PageController::avpnSetImeHeight(int h)
 {
     if (h == m_imeHeight)
         return;
+    const bool wasZero = (m_imeHeight == 0);
     m_imeHeight = h;
     emit imeHeightChanged(h);
     emit safeAreaBottomMarginChanged();
+    // Трекер keyboardLayoutGuide шлёт высоту ПОКАДРОВО — страховочные сбросы взводим
+    // только на переходе 0→клавиатура, а не 60 раз в секунду.
+    if (!wasZero)
+        return;
     // АНТИ-СДВИГ (2026-07-11, билды 75–77): QIOSInputContext на показ клавиатуры уводит
     // root view вверх через layer.sublayerTransform (наш margin + их сдвиг = «чёрная
     // дыра» высотой с клавиатуру). Мягкие способы НЕ работают: их пере-проверка
