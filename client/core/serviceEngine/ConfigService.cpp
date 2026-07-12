@@ -57,10 +57,18 @@ void ConfigService::fetchConfig()
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         // Только транспортный сбой = проблема ЭТОГО входа → повод шагнуть на другой edge:
         // code==0 (abort/timeout из armTimeout, либо сокет не подключился) или 5xx (серверная авария).
+        // Ревью 2026-07-12 (finding 2): для ДЕТЕКТОРА белых списков классификация ДРУГАЯ —
+        // любой дошедший HTTP-статус (вкл. 5xx: бэк упал, но сеть жива) = transportOk;
+        // транспортный фейл только code==0. Иначе обычный 5xx-инцидент бэка кормил детектор.
         if (code == 0 || code >= 500) {
+            if (code == 0)
+                emit transportFailed();
+            else
+                emit transportOk();
             reportNetworkFailure();
             return;
         }
+        emit transportOk();
         // Любой иной non-2xx (401/403/410/404/4xx) ДОКАЗЫВАЕТ, что edge достижим — ответ пришёл с
         // прикладного слоя. Проблема НЕ в маршруте (это авторизация/подписка/путь), уходить с
         // рабочего входа нельзя → сбрасываем стрик, тело не применяем.
@@ -114,15 +122,18 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64)
     emit configApplied(m_config);
 }
 
+// ВНИМАНИЕ: report* — семантика EDGE-WALK («этот вход плох», 5xx тоже повод шагнуть).
+// Сигналы transportFailed/transportOk для детектора белых списков здесь НЕ эмитятся
+// (ревью 2026-07-12, finding 2): у детектора иная классификация (5xx = сеть жива) —
+// эмиссии стоят по местам, где известен code (fetchConfig выше; движковые фетчи зовут
+// noteControlPlane* напрямую).
 void ConfigService::reportNetworkSuccess()
 {
     m_failStreak = 0;
-    emit transportOk(); // AVPN (белые списки): edge ответил прикладным слоем — сеть жива
 }
 
 void ConfigService::reportNetworkFailure()
 {
-    emit transportFailed(); // AVPN (белые списки): каждый транспортный фейл — сигнал детектору
     if (++m_failStreak < failThreshold())
         return;
     m_failStreak = 0;

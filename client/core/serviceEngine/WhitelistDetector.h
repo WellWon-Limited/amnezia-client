@@ -74,6 +74,11 @@ private:
     int             m_exitRotation = 0;      // ротация control-хостов в exit-пробе
     QTimer          m_confirmTimer;          // пауза между confirm-раундами
     QTimer          m_exitTimer;             // exit-пробы в активном режиме
+    // Ревью 2026-07-12 (finding 1): noteConnectFailure() приходит из watchdog ДО того, как
+    // async-teardown осадит туннель в disconnected → гейт tunnelIdle() режет раунд. Короткий
+    // ретрай дотягивает старт до момента, когда туннель реально idle (кап попыток — не поллинг).
+    QTimer          m_idleRetryTimer;
+    int             m_idleRetryLeft = 0;
 };
 
 } // namespace avpn
