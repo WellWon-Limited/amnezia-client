@@ -4245,7 +4245,9 @@ void AvpnEngineQml::requestCabinetLink(const QString &intent)
     // (бэк PR #257: кабинет берёт цель авто-продления из wl-сессии), а fallback без wl
     // кабинет всё равно не аутентифицирует. Стабильный install-id в query засветился бы
     // в access-логах зря (docs/amnezia-fork/WEBLINK-DEVICE-BINDING-HANDOFF.md).
-    const QString fallback = withIntent(QStringLiteral("https://tribevpn.com/account"));
+    // Домен фолбэка — cabinetUrl() (server-driven urls.cabinet через TuningStore, 0a6c1408), НЕ
+    // литерал: та же канон-точка, что уже читают PageConnectTribe/PageAccountTribe напрямую.
+    const QString fallback = withIntent(cabinetUrl());
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
         emit cabinetLinkReady(fallback);
