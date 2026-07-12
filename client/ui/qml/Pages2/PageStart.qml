@@ -451,13 +451,10 @@ PageType {
                                                : avpnBottomNav.height)
                               : 0
         Behavior on anchors.bottomMargin {
-            // iOS: БЕЗ своей анимации — imeHeight едет ПОКАДРОВО с нативного трекера,
-            // пристёгнутого к keyboardLayoutGuide (AvpnKeyboardFix.mm): margin повторяет
-            // фактическое движение клавиатуры пиксель-в-пиксель («приклеено», как
-            // WhatsApp/Telegram). Любая своя кривая поверх (пробовали 250мс OutCubic и
-            // 500мс bezier-аппроксимацию их spring) давала видимый рассинхрон.
-            // Android: инсеты приходят ДИСКРЕТНО — анимация нужна.
-            enabled: Qt.platform.os !== "ios"
+            // Кривая ≈ клавиатура iOS: bezier (.38,.7,.125,1) / 500мс — лучший подтверждённый
+            // вариант. Покадровый фид с нативного трекера ХУЖЕ (рывки: значения проходят
+            // через пайплайн Qt Quick с джиттером 1-2 кадра) — не возвращать; трекер
+            // keyboardLayoutGuide остался только ИЗМЕРИТЕЛЕМ (NSLog) для калибровки кривой.
             NumberAnimation {
                 duration: 500
                 easing.type: Easing.BezierSpline
