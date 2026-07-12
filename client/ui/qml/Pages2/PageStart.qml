@@ -743,14 +743,6 @@ PageType {
         }
     }
 
-    // AVPN (белые списки): центрированный попап «сотовая зарезана оператором» — поверх любого
-    // экрана (z ниже полноэкранных оверлеев переноса/рассылок: важные модалки перекрывают;
-    // выше остального контента). Показ управляется биндингом на TribeEngine.whitelistMode.
-    TribeWhitelistSheet {
-        z: 180
-        anchors.fill: parent
-    }
-
     function maybeShowAnnouncement() {
         if (typeof TribeEngine === "undefined" || announceSheet.opened) return
         if (!root.avpnNav || root.onboardingActive) return
