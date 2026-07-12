@@ -207,6 +207,12 @@ class AvpnEngineQml : public QObject {
     // cta_renew_traffic/cta_renew_access/cta_how_traffic/cta_how_access (localizedOr; пустые НЕ
     // кладём — QML фолбэчит на вкомпиленный qsTr-литерал). PATCH client_urls меняет CTA без релиза.
     Q_PROPERTY(QVariantMap hotTexts READ hotTexts NOTIFY changed)
+    // AVPN backend-first-3 (Task 9): server-driven состав/порядок бренд-плиток онбординга
+    // (lists.onboarding_brand_tiles). PageOnboardingTribe.qml держит вкомпиленный реестр
+    // tileDefs (ключи-слаги — "whatsapp"/"telegram"/…); сервер может ТОЛЬКО выбрать подмножество
+    // и порядок ИЗ ЭТИХ ключей (неизвестный ключ скипается на QML-стороне, новые глифы требуют
+    // релиза). Пусто/отсутствие ключа → фолбэк на вкомпиленный порядок (listOr «пусто=фолбэк»).
+    Q_PROPERTY(QStringList onboardingBrandTiles READ onboardingBrandTiles NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -323,6 +329,9 @@ public:
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("fg_refresh_throttle_ms"), 30000)),
                       600000);
     }
+    // AVPN backend-first-3 (Task 9): бренд-плитки онбординга — см. Q_PROPERTY выше.
+    QStringList onboardingBrandTiles() const
+    { return avpn::TuningStore::listOr(QStringLiteral("onboarding_brand_tiles"), {}); }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
