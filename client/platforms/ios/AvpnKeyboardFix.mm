@@ -25,6 +25,36 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
+// ── 120 Гц на ProMotion (2026-07-12) ─────────────────────────────────────────
+// CADisableMinimumFrameDurationOnPhone в Info.plist лишь РАЗРЕШАЕТ >60 FPS; чтобы их
+// реально получать, КАЖДЫЙ CADisplayLink обязан запросить preferredFrameRateRange —
+// иначе iOS будит его 60 раз/с (дефолт). Qt свой render-link не настраивает → весь UI
+// жил на 60 из 120 («скролл/панель как будто с маленьким ФПС», жалоба). Свизлим
+// -[CADisplayLink addToRunLoop:forMode:] конструктором (до старта Qt) и проставляем
+// запрос 120 всем link'ам приложения. Мин. 60 — валидно и на не-ProMotion экранах.
+static void (*g_avpnOrigAddToRunLoop)(id, SEL, NSRunLoop *, NSRunLoopMode) = NULL;
+
+static void avpnAddToRunLoopIMP(id self, SEL _cmd, NSRunLoop *rl, NSRunLoopMode mode)
+{
+    if (@available(iOS 15.0, *)) {
+        CADisplayLink *link = (CADisplayLink *)self;
+        if (link.preferredFrameRateRange.maximum < 120)
+            link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
+    }
+    if (g_avpnOrigAddToRunLoop)
+        g_avpnOrigAddToRunLoop(self, _cmd, rl, mode);
+}
+
+__attribute__((constructor)) static void avpnInstallDisplayLinkBoost(void)
+{
+    Method m = class_getInstanceMethod(CADisplayLink.class, @selector(addToRunLoop:forMode:));
+    if (!m)
+        return;
+    g_avpnOrigAddToRunLoop =
+        (void (*)(id, SEL, NSRunLoop *, NSRunLoopMode))method_getImplementation(m);
+    method_setImplementation(m, (IMP)avpnAddToRunLoopIMP);
+}
+
 static const char *kAvpnNoScrollPrefix = "AvpnNoScroll_";
 
 static void avpnSetSublayerTransformIMP(id self, SEL _cmd, CATransform3D t)
