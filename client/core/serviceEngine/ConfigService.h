@@ -27,6 +27,10 @@ public:
 signals:
     void configApplied(const avpn::RemoteConfig &cfg);
     void activeEdgeChanged(const QString &base);
+    // AVPN (белые списки): транспортный фейл/успех фетча конфига — второй (после bootstrap)
+    // источник сигналов для WhitelistDetector (noteControlPlaneFailure/Ok в AvpnEngineQml).
+    void transportFailed();
+    void transportOk();
 
 private:
     void fetchConfig();

@@ -37,6 +37,7 @@ class ServiceProbe; // AVPN: проба доступности сервисов 
 class IRttProbe;    // AVPN (выбор по скорости): прямой RTT до нод off-tunnel (IRttProbe.h / RttProbeIcmp)
 class BenchRunner;  // AVPN (панель администратора): in-app бенч соединения (BenchRunner.h)
 class BypassListService; // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки (BypassListService.h)
+class WhitelistDetector; // AVPN (белые списки): детект РКН-режима «работает только whitelist» (WhitelistDetector.h)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -61,6 +62,14 @@ class AvpnEngineQml : public QObject {
     // снапшота (degraded + пустой пул), без липкого стейта (ревью: sticky-флаг давал ложную CTA
     // платящему юзеру при транзиентно пустом пуле со status=active — все ноды в дренаже).
     Q_PROPERTY(bool subMissing READ subMissing NOTIFY changed)
+    // AVPN (белые списки, спека 2026-07-12): РКН-режим «работает только whitelist» на сотовой —
+    // детект дифф-пробами (control мертвы ВСЕ + >=2 whitelist живы, вкл. маркетплейс). UI кажет
+    // центрированный попап «подключитесь к Wi-Fi» вместо вечного Connecting (subMissing этот
+    // случай не покрывает — тело от бэка не приходит). Механизм общий, активация — iOS/Android.
+    Q_PROPERTY(bool whitelistMode READ whitelistMode NOTIFY whitelistModeChanged)
+    // «Понятно» нажато для ТЕКУЩЕГО эпизода (сессионное): false = попап виден. Сбрасывается
+    // при новом эпизоде И при тапе коннекта в активном режиме (PageConnectTribe) -> попап снова.
+    Q_PROPERTY(bool whitelistAcked READ whitelistAcked NOTIFY whitelistAckedChanged)
     // AVPN (sub-grace): движок САМ погасил туннель — «подписка истекла и грейс (+N ч,
     // numbers.subscription_grace_hours) прошёл» (enforceSubscriptionGrace из onTick). UI отличает
     // это от ручного выключения (подпись «Доступ приостановлен…» вместо «Отключено»).
@@ -192,6 +201,10 @@ public:
     // (все ноды в дренаже у подписанного юзера) сюда НЕ попадает. Без липкого члена — правда
     // пересчитывается из текущего снапшота на каждом changed().
     bool subMissing() const;
+    // AVPN (белые списки): см. Q_PROPERTY whitelistMode/whitelistAcked выше.
+    bool whitelistMode() const;
+    bool whitelistAcked() const { return m_whitelistAcked; }
+    Q_INVOKABLE void setWhitelistAcked(bool on);
     // AVPN (sub-grace): см. Q_PROPERTY subEnforcedStop выше.
     bool subEnforcedStop() const { return m_subEnforcedStop; }
     QString authToken() const;  // AVPN: JWT из защищённого стора (Enrollment::loadToken)
@@ -558,6 +571,8 @@ signals:
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
+    void whitelistModeChanged();  // AVPN (белые списки): вход/выход РКН-режима whitelist
+    void whitelistAckedChanged(); // AVPN (белые списки): «Понятно» нажато/сброшено
     void appLangChanged();   // AVPN (i18n): сменили язык через setAppLang
     void referralChanged();   // AVPN (#37): async-ответ /v1/referral готов (property referral обновлена)
     void announcementsChanged(); // AVPN (P-ANN): property announcements обновлена (fetch/LKG/read)
@@ -870,6 +885,8 @@ private:
     bool                         m_bootstrapInFlight = false; // AVPN: цепочка ретраев идёт (дедуп QML-вызовов)
     int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф → вечный медленный цикл, BootstrapRetry.h)
     QTimer                       m_bootstrapRetryTimer;       // AVPN: единый таймер ретрая (member, НЕ singleShot-фабрика) — kickBootstrap() может его поджать
+    WhitelistDetector           *m_whitelistDetector = nullptr; // AVPN (белые списки): nullptr на десктопе (гейт платформ)
+    bool                         m_whitelistAcked = false;      // AVPN (белые списки): «Понятно» текущего эпизода
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume
     bool                         m_paused = false;       // туннель реально down, ждём авто-возврат

@@ -27,6 +27,7 @@
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
+#include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
 #include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
 
@@ -601,6 +602,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 [this](Qt::ApplicationState st) {
                     if (st != Qt::ApplicationActive)
                         return;
+                    // AVPN (белые списки): foreground-триггер детектора — ДО троттла рефреша
+                    // (детектор дебаунсит сам; в активном режиме это немедленная exit-проба).
+                    if (m_whitelistDetector)
+                        m_whitelistDetector->noteForeground();
                     const qint64 now = QDateTime::currentMSecsSinceEpoch();
                     if (now - m_lastFgRefreshMs < 30000)
                         return;
@@ -620,6 +625,33 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     [this](QNetworkInformation::TransportMedium) { kickBootstrap(); });
         }
     }
+
+    // AVPN (белые списки, спека 2026-07-12): детектор дифф-проб «РКН-whitelist на сотовой».
+    // Только мобилки (PLATFORM-SCOPING): на десктопе сотовая — экзотика, гейт снимем позже.
+    // m_nam — общий QNAM движка: при опущенном туннеле (единственное состояние, когда детектор
+    // пробует — гейт tunnelIdle) запросы идут напрямую по сотовой сети. Создаётся ПОСЛЕ
+    // loadDefaultBackend — детектору нужен живой QNetworkInformation::instance().
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
+    m_whitelistDetector = new avpn::WhitelistDetector(
+        m_nam, [this]() { return state() == QStringLiteral("disconnected"); }, this);
+    connect(m_whitelistDetector, &avpn::WhitelistDetector::activeChanged, this, [this](bool on) {
+        if (!on) {
+            if (m_whitelistAcked) {
+                m_whitelistAcked = false;   // новый эпизод покажет попап снова
+                emit whitelistAckedChanged();
+            }
+            kickBootstrap();                // сеть вернулась — немедленно к нормальному циклу
+        }
+        emit whitelistModeChanged();
+    });
+    // Второй источник сигналов control plane — фетчи /v1/config (bootstrap-цепочка — первый).
+    if (m_configSvc) {
+        connect(m_configSvc, &avpn::ConfigService::transportFailed, m_whitelistDetector,
+                &avpn::WhitelistDetector::noteControlPlaneFailure);
+        connect(m_configSvc, &avpn::ConfigService::transportOk, m_whitelistDetector,
+                &avpn::WhitelistDetector::noteControlPlaneOk);
+    }
+#endif
 }
 
 // AVPN remote-config (T6): фичефлаг/URL из последнего применённого /v1/config (LKG на старте,
@@ -796,6 +828,20 @@ QString AvpnEngineQml::state() const
     if (m_paused)
         return QStringLiteral("paused");
     return debugSnapshot().value(QStringLiteral("state")).toString();
+}
+
+// AVPN (белые списки): активный РКН-режим whitelist (детектор жив только на iOS/Android).
+bool AvpnEngineQml::whitelistMode() const
+{
+    return m_whitelistDetector && m_whitelistDetector->active();
+}
+
+void AvpnEngineQml::setWhitelistAcked(bool on)
+{
+    if (m_whitelistAcked == on)
+        return;
+    m_whitelistAcked = on;
+    emit whitelistAckedChanged();
 }
 
 // AVPN: текущее устройство — нативная маркетинговая модель/ОС (DeviceModel.h). Перекрывают
@@ -2553,6 +2599,12 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         const auto outcome = Enrollment::classifyFetch(code, netErr);
+        // AVPN (белые списки): любой дошедший HTTP-статус = control plane достижим; транспортный
+        // фейл (code==0) — сигнал детектору (порог 2 фейлов подряд запускает раунд проб).
+        if (m_whitelistDetector) {
+            if (code > 0) m_whitelistDetector->noteControlPlaneOk();
+            else if (netErr) m_whitelistDetector->noteControlPlaneFailure();
+        }
         if (outcome == FetchOutcome::Transferred) { stopBootstrapTerminal(); return; } // 410: триал не выдаётся
         if (outcome != FetchOutcome::Ok) { onBootstrapAttemptFailed(); return; }
         TrialResponse tr;
@@ -2583,6 +2635,12 @@ void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStor
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         const auto outcome = Enrollment::classifyFetch(code, netErr);
+        // AVPN (белые списки): паритет с enroll-путём — HTTP-ответ гасит подозрение, транспортный
+        // фейл копит стрик детектора.
+        if (m_whitelistDetector) {
+            if (code > 0) m_whitelistDetector->noteControlPlaneOk();
+            else if (netErr) m_whitelistDetector->noteControlPlaneFailure();
+        }
         if (outcome == FetchOutcome::Ok) {
             finishBootstrapSuccess(reply->readAll());
             return;
@@ -2654,7 +2712,14 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
 // AVPN: провал попытки — тихо переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
 void AvpnEngineQml::onBootstrapAttemptFailed()
 {
-    m_bootstrapRetryTimer.start(nextBootstrapDelayMs(m_bootstrapRetries));
+    int delayMs = nextBootstrapDelayMs(m_bootstrapRetries);
+    // AVPN (белые списки): в активном режиме сеть мертва для нас ФИЗИЧЕСКИ — растянуть цикл
+    // (60с -> ~240с), не жечь батарею/радио. Выход из режима зовёт kickBootstrap() ->
+    // немедленный фетч, юзер задержки не видит.
+    if (m_whitelistDetector && m_whitelistDetector->active())
+        delayMs *= qBound(1, int(avpn::TuningStore::numberOr(
+                              QStringLiteral("whitelist_retry_stretch"), 4)), 20);
+    m_bootstrapRetryTimer.start(delayMs);
     ++m_bootstrapRetries;
 }
 
@@ -2913,6 +2978,10 @@ void AvpnEngineQml::onWatchdog()
         m_healthTimer.stop();
         m_engine.requestStop();
         m_tunnel.down();
+        // AVPN (белые списки): коннект не поднялся по watchdog — триггер раунда проб. Детектор
+        // сам проверит гейты (Cellular + туннель опущен + дебаунс); teardown выше уже запущен.
+        if (m_whitelistDetector)
+            m_whitelistDetector->noteConnectFailure();
         emit changed();
     } else {
         emit changed();
