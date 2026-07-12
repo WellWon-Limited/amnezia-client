@@ -107,6 +107,7 @@
         <file>Tribe/Pages/PageOnboardingTribe.qml</file>
         <file>Tribe/Pages/PageSupportTribe.qml</file>
         <file>Tribe/Pages/PageNotificationsTribe.qml</file>
+        <file>Tribe/Pages/PageNotificationDetailTribe.qml</file>
         <file>Tribe/Pages/PageAdminTribe.qml</file>
         <file>Tribe/Pages/PageLegalTribe.qml</file>
         <file>Tribe/Pages/PageServersTribe.qml</file>

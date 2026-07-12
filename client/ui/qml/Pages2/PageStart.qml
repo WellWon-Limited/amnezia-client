@@ -90,8 +90,14 @@ PageType {
             avpnBottomNav.currentIndex = 1
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageSupportTribe.qml", { prefillDraft: draft })
         }
-        // AVPN: колокол → центр уведомлений (#3)
+        // AVPN: колокол → центр уведомлений (#3). Тот же сигнал шлёт деталь уведомления
+        // («назад» с неё — в центр, не на Connect).
         function onRequestNotifications() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml") }
+        // AVPN (read per-элемент): тап по карточке в центре → полноэкранная деталь уведомления
+        // (снапшот данных передаём свойством страницы, как docKey у PageLegalTribe).
+        function onRequestNotificationDetail(notif) {
+            tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationDetailTribe.qml", { notif: notif })
+        }
         // AVPN: «назад» с уведомлений/админ-пула. Эти страницы открыты через replace (depth=1), поэтому
         // PageController.closePage() уходил в ветку depth<=1 → hideWindow() (прятал окно). Возвращаем на Connect.
         function onBack() { root.goAvpnTab(0) }
