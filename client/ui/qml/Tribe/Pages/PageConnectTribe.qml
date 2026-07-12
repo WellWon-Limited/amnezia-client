@@ -95,6 +95,10 @@ PageType {
     // Без него устройство с expires_at:null (daysLeft = -1) не проходило гейт daysLeft >= 0 и
     // вместо CTA видело вечную «загрузку» (ни серверов, ни оффера) до перезахода.
     readonly property bool subMissingNow: root.hasEngine && TribeEngine.subMissing === true
+    // AVPN (sub-grace): движок сам погасил туннель «подписка истекла и грейс прошёл» —
+    // подпись у орба показывает причину вместо обычного «Подключиться…». Флаг живёт в движке
+    // (сбрасывается явным start()), поэтому переживает пересоздание страницы.
+    readonly property bool subEnforcedStopNow: root.hasEngine && TribeEngine.subEnforcedStop === true
     readonly property bool subExpired: root.hasEngine && (root.transferredAwayNow
                               || root.subMissingNow
                               || (TribeEngine.daysLeft >= 0 && (!root.subActive
@@ -194,6 +198,12 @@ PageType {
             if (!root.ctaLinking) return
             root.ctaLinking = false
             Qt.openUrlExternally(url)
+        }
+        // AVPN (sub-grace): движок сам погасил туннель — подписка истекла и грейс прошёл.
+        // Готовый механизм тостов страницы; подпись у орба дублирует причину (subEnforcedStopNow).
+        function onSubscriptionEnforcedStop() {
+            PageController.showNotificationMessage(
+                qsTr("VPN отключён: подписка истекла. Продлите доступ, чтобы продолжить."))
         }
         // AVPN (macOS): обнаружен другой активный VPN → конфликт маршрутов/демонов. Предупреждаем.
         function onVpnConflict(name) {
@@ -749,8 +759,11 @@ PageType {
         anchors.bottom: root.isMobile ? undefined : bottomBlock.top
         anchors.bottomMargin: Theme.space.lg
         z: 30; horizontalAlignment: Text.AlignHCenter
+        // AVPN (sub-grace): движок сам отключил по истечению подписки → показываем причину
+        // (CTA «Продлить доступ» уже есть ниже — subExpired ведёт на золотую кнопку).
         text: root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
-                        : qsTr("Подключиться — нажмите кнопку выше")
+                        : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
+                                                   : qsTr("Подключиться — нажмите кнопку выше"))
         color: root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
     }
