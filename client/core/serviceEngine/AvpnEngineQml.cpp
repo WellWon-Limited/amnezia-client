@@ -30,6 +30,7 @@
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
+#include "AnnounceGate.h" // AVPN (announce-quiet): тихое окно попапов объявлений после онбординга
 #include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
 #include "TribeDiagReport.h" // AVPN (diag-report, Task 4 bff-3): единый диагностический отчёт для чата поддержки
 #include "logger.h" // AVPN (diag-report): Logger::userLogsFilePath() — хвост лога приложения в отчёт
@@ -4112,6 +4113,33 @@ QString announcePlatform()
 #endif
 }
 } // namespace
+
+// AVPN (announce-quiet): отметка «онбординг пройден» — якорь тихого окна попапов.
+// Синхронный QSettings (грабля 500мс QML-Settings: quiet-проверка идёт уже через 900мс).
+// Идемпотентно: НЕ сдвигаем отметку, если уже стоит (повторные onRequestStart/дев-сбросы
+// онбординга не продлевают тишину).
+void AvpnEngineQml::markOnboardingDone()
+{
+    QSettings s;
+    const QString key = QStringLiteral("AvpnAnnounce/onboardDoneAt");
+    if (s.value(key, 0).toLongLong() > 0)
+        return;
+    s.setValue(key, QDateTime::currentSecsSinceEpoch());
+    s.sync();
+}
+
+// AVPN (announce-quiet): попапы объявлений сейчас молчат? Kill-switch первой строкой
+// (default TRUE — бэк может прислать false и вернуть старое поведение без релиза);
+// размер окна server-tunable (кап 7 суток в AnnounceGate::quietMinTuned). Глушится только
+// автопоказ попапа — бейдж колокольчика, лента и пуши работают как раньше.
+bool AvpnEngineQml::announcementsQuietNow() const
+{
+    if (!avpn::TuningStore::flag(QStringLiteral("announce_onboarding_quiet")))
+        return false;
+    const qint64 doneAt = QSettings().value(QStringLiteral("AvpnAnnounce/onboardDoneAt"), 0).toLongLong();
+    return avpn::AnnounceGate::quietActive(doneAt, avpn::AnnounceGate::quietMinTuned(),
+                                           QDateTime::currentSecsSinceEpoch());
+}
 
 // LKG-персист текущего списка (мгновенный показ до сети при следующем старте — паттерн
 // saveLkgSubscription). Синхронный QSettings::sync — движок владеет записью, не QML.
