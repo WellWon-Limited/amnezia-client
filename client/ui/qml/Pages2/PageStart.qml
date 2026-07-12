@@ -451,10 +451,12 @@ PageType {
                                                : avpnBottomNav.height)
                               : 0
         Behavior on anchors.bottomMargin {
-            // Кривая ≈ клавиатура iOS: bezier (.38,.7,.125,1) / 500мс — лучший подтверждённый
-            // вариант. Покадровый фид с нативного трекера ХУЖЕ (рывки: значения проходят
-            // через пайплайн Qt Quick с джиттером 1-2 кадра) — не возвращать; трекер
-            // keyboardLayoutGuide остался только ИЗМЕРИТЕЛЕМ (NSLog) для калибровки кривой.
+            // iOS: БЕЗ своей анимации — высота применяется покадрово В ФАЗЕ кадра Qt
+            // (pageController: afterAnimating ← трекер keyboardLayoutGuide) и повторяет
+            // фактическое движение клавиатуры. Свои кривые (250мс/500мс bezier) всегда
+            // расходились с её приватным spring'ом; несинфазный фид (сет из displaylink)
+            // давал рывки. Android: инсеты приходят дискретно — анимация нужна.
+            enabled: Qt.platform.os !== "ios"
             NumberAnimation {
                 duration: 500
                 easing.type: Easing.BezierSpline

@@ -145,6 +145,20 @@ static void avpnEnsureTracker(void)
     }
 }
 
+// ФАЗОВАЯ СИНХРОНИЗАЦИЯ (2026-07-12, итог всех подходов): displaylink здесь НЕ пишет в QML —
+// он только (а) обновляет g_avpnKbLastH из presentationLayer трекера и (б) будит рендер Qt
+// (Avpn_pokeQtFrame → QQuickWindow::update). ПРИМЕНЯЕТ высоту pageController В НАЧАЛЕ КАДРА
+// Qt (QQuickWindow::afterAnimating → Avpn_currentKeyboardHeight) — значение и кадр рисуются
+// синфазно. Прошлый вариант (сет свойства из displaylink в произвольный момент ран-лупа)
+// гонялся с кадром Qt — рывки; паттерн «читать в кадре» = как keyboard-controller в RN.
+extern "C" void Avpn_pokeQtFrame(void);  // pageController.cpp: QQuickWindow::update()
+extern "C" int Avpn_qtFrameHooked(void); // pageController.cpp: окно Qt уже подхвачено?
+
+extern "C" double Avpn_currentKeyboardHeight(void)
+{
+    return g_avpnKbLink ? g_avpnKbLastH : -1.0; // −1 = трекинг не идёт, кадру нечего применять
+}
+
 @interface AvpnKbTickTarget : NSObject
 - (void)tick:(CADisplayLink *)link;
 @end
@@ -168,15 +182,14 @@ static void avpnEnsureTracker(void)
     if (fabs(h - g_avpnKbLastH) > 0.1) {
         g_avpnKbLastH = h;
         g_avpnKbStableSince = CACurrentMediaTime();
-        // AVPN DEV: УБРАТЬ после калибровки — сэмплы реальной траектории клавиатуры.
-        // ВАЖНО: в QML отсюда НЕ фидим (покадровый фид через пайплайн Qt Quick дал
-        // рывки+лаг, жалоба 2026-07-12) — трекер только измеряет; высота в QML идёт
-        // одним репортом из willShow (avpnReportKeyboardFrame), анимирует Behavior.
+        // AVPN DEV: УБРАТЬ после калибровки — сэмплы реальной траектории клавиатуры
         NSLog(@"AVPNKB %.3f %.2f", CACurrentMediaTime(), h);
     } else if (CACurrentMediaTime() - g_avpnKbStableSince > 0.6) {
         [link invalidate]; // высота устоялась — до следующего клавиатурного события
         g_avpnKbLink = nil;
+        return;
     }
+    Avpn_pokeQtFrame(); // разбудить рендер Qt — afterAnimating применит высоту в кадре
 }
 @end
 
@@ -225,8 +238,11 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(NSNotification *note) {
                 Avpn_resetKeyboardScroll(); // заодно подменяет слой (avpnNeuterLayer)
-                avpnStartKbTracking();         // только замер траектории (NSLog)
-                avpnReportKeyboardFrame(note); // высота в QML — одним репортом
+                avpnStartKbTracking();
+                // без покадрового пути (iOS <15 / окно Qt ещё не подхвачено) —
+                // одиночный репорт конечной высоты, чтобы layout не остался старым
+                if (!g_avpnKbTracker || !Avpn_qtFrameHooked())
+                    avpnReportKeyboardFrame(note);
             }];
         }
     });
