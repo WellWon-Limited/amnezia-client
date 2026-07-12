@@ -28,6 +28,7 @@
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
+#include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -981,9 +982,40 @@ void AvpnEngineQml::onTick()
             m_trafficSyncTicks = 0;
             refreshSubscription();
         }
+        // AVPN (sub-grace): подписка истекла и грейс (+N ч) прошёл → управляемое отключение.
+        // ПОСЛЕ блока refreshSubscription: тот как раз освежает expiresAt снапшота (async),
+        // так что решение принимается по максимально свежим данным, какие есть локально.
+        enforceSubscriptionGrace();
     } else {
         m_trafficSyncTicks = 0; // сброс, чтобы первый ре-синк после коннекта был через полный интервал
     }
+}
+
+// AVPN (sub-grace): движок сам гасит активный туннель, когда «подписка истекла И грейс прошёл».
+// Консервативно by design: пустой/невалидный expiresAt НИКОГДА не рвёт (SubscriptionGate);
+// kill-switch features.subscription_grace_enforce (default TRUE — бэк может прислать false и
+// выключить всё поведение без релиза); грейс server-tunable (numbers.subscription_grace_hours,
+// фолбэк 24 ч, кламп >=1). Остановка — ТЕМ ЖЕ путём, что пользовательский stop(): намерение OFF
+// (m_wantConnected=false внутри stop() — иначе reconcile поднял бы туннель обратно) + reconcile()
+// (CONNECT-INVARIANTS §2: туннель трогает только reconcile, новых путей teardown не изобретаем).
+// Гард m_graceStopInFlight: ровно ОДИН вход, пока идёт остановка (без него залипший в connected
+// снапшот при op-in-flight звал бы stop() каждый тик). Сбрасывается явным start().
+void AvpnEngineQml::enforceSubscriptionGrace()
+{
+    if (!avpn::TuningStore::flag(QStringLiteral("subscription_grace_enforce")))
+        return; // kill-switch: бэк выключил принудительное отключение целиком
+    if (m_graceStopInFlight)
+        return; // остановка уже инициирована — не входим повторно
+    const QString iso = debugSnapshot().value(QStringLiteral("expiresAt")).toString();
+    const int graceHours = avpn::SubscriptionGate::graceHoursTuned();
+    if (!avpn::SubscriptionGate::graceExpired(iso, graceHours, QDateTime::currentDateTimeUtc()))
+        return;
+    m_graceStopInFlight = true;
+    m_subEnforcedStop = true;
+    qInfo("[AVPN subgate] sub grace expired -> enforced stop (expiresAt=%s, graceHours=%d)",
+          qPrintable(iso), graceHours);
+    stop(); // тот же путь, что пользовательское выключение: намерение OFF + reconcile + changed()
+    emit subscriptionEnforcedStop();
 }
 
 void AvpnEngineQml::probeServices()
@@ -2663,6 +2695,10 @@ void AvpnEngineQml::start()
     m_pauseTimer.stop();
     m_paused = false;
     m_wasConnected = false;
+    // AVPN (sub-grace): явный старт снимает состояние «отключено из-за истечения подписки» —
+    // и флаг UI, и гард однократности (если подписка всё ещё истекшая, гейт отработает заново).
+    m_subEnforcedStop = false;
+    m_graceStopInFlight = false;
     // Намерение: хотим быть онлайн (к авто/закреплённой ноде). Факт догонит reconcile() из терминала.
     m_wantConnected = true;
     m_startAttempts = 0;        // ручной запуск — свежая серия попыток
