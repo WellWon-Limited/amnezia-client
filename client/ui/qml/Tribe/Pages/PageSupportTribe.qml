@@ -194,11 +194,12 @@ PageType {
             Layout.fillHeight: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
-            // верхний/нижний воздух — контент-инсеты ListView (скроллятся с лентой), не рамка:
-            // рамочный Layout.topMargin оставлял мёртвую полосу при прокрутке; bottomMargin —
-            // отступ последнего пузыря от дивайдера композера (жалоба 2026-07-11 «вплотную»). // AVPN
+            // верхний воздух — контент-инсет ListView (скроллится с лентой), не рамка:
+            // рамочный Layout.topMargin оставлял мёртвую полосу при прокрутке. Нижний отступ
+            // от дивайдера композера — footer, НЕ bottomMargin: positionViewAtEnd() игнорирует
+            // bottomMargin (QTBUG) — последний пузырь прилипал к композеру (жалоба 2026-07-12). // AVPN
             topMargin: Theme.space.lg + Theme.space.sm
-            bottomMargin: Theme.space.md
+            footer: Item { width: 1; height: Theme.space.md }
             clip: true
             spacing: Theme.space.md
             model: root.hasChat ? TribeSupport.messages : []
@@ -249,6 +250,9 @@ PageType {
                 onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(modelData.id)
             }
             onCountChanged: if (stick) positionViewAtEnd()
+            // сжатие/рост зоны при клавиатуре теперь АНИМИРОВАНЫ (PageStart Behavior) —
+            // читатель у низа должен ехать вместе с композером, а не отставать от него
+            onHeightChanged: if (stick) positionViewAtEnd()
             Component.onCompleted: positionViewAtEnd()
 
             // пустой диалог — приглашение вместо тишины

@@ -109,6 +109,11 @@ signals:
     void activeChanged();
     void mediaPreparingChanged();
     void uploadProgressChanged();
+    // Новое ВХОДЯЩЕЕ сообщение оператора при работающем приложении (рост unread в фоне
+    // вкладки или новый op-msg в открытом чате) — QML играет хаптику (жалоба 2026-07-12
+    // «нет тактильной связи, что прилетело сообщение»). НЕ эмитится на первичной загрузке
+    // треда/кэша и первом чтении unread после старта.
+    void incomingMessage();
     // Человекочитаемая причина для тоста (429/сеть/размер/тип файла).
     void sendFailed(const QString &reason);
     void attachmentReady(int attachmentId, const QString &kind, const QUrl &fileUrl);
@@ -135,7 +140,16 @@ private:
     QVariantMap parseMessage(const QJsonObject &m);
     void schedulePoll();
     void rebuildMessages();                  // m_serverMessages + эхо → m_messages (+ emit при изменении)
-    void applyThread(const QByteArray &json);
+    // Коалесер rebuild'ов: превью подъезжают пачкой (параллельные фетчи + диск), а каждый
+    // rebuild = полная замена модели ListView (сброс делегатов). Один отложенный rebuild
+    // на пачку вместо N подряд.
+    void scheduleRebuild();
+    // fromCache=true — рендер thread.json с диска при старте (телеграм-паттерн: история
+    // видна МГНОВЕННО, сеть только освежает). Кэш не эмитит incomingMessage и не пишется
+    // обратно на диск.
+    void applyThread(const QByteArray &json, bool fromCache = false);
+    void loadThreadCache();
+    void saveThreadCache(const QByteArray &json);
     // AVPN backend-first (T18): эффективные лимиты вложений — серверные (лимиты
     // из /thread), фолбэк — вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
     qint64 effImageMaxBytes() const;
@@ -191,7 +205,8 @@ private:
 
     QTimer m_pollTimer;
 
-    // Кэш превью: attachment id → data:-URL (живёт с процессом; WebP ≤480px — дёшево).
+    // Кэш превью: attachment id → URL для Image (file:// на дисковый кэш; data:-URL —
+    // только фолбэк, если диск не записался).
     QHash<int, QString> m_thumbCache;
     // Локальные превью бывших эх: server attId → file:// (фото или постер-кадр видео).
     // Впрыскивается в серверную историю при rebuild — превью видно непрерывно с момента
@@ -203,7 +218,12 @@ private:
     int m_posterAttempt = 0;
     QList<int> m_thumbQueue;
     QSet<int> m_thumbQueued;
-    bool m_thumbInFlight = false;
+    int m_thumbsInFlight = 0;   // параллельные фетчи превью (кап kThumbParallel в .cpp)
+    QTimer m_rebuildTimer;      // коалесер rebuild'ов (см. scheduleRebuild)
+    // Хаптика входящих: максимум виденного id сообщения оператора + гард «первое чтение
+    // unread после старта не жужжит» (там лежит непрочитанное ещё с прошлой сессии).
+    int m_maxOpMsgId = 0;
+    bool m_unreadFetchedOnce = false;
 
     // Скачивание оригиналов: id → путь готового temp-файла; и гард от дублей.
     QHash<int, QString> m_originalPath;

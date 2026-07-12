@@ -45,9 +45,12 @@ PageType {
     // навбар скрывается СРАЗУ по тапу в поле, до анимации клавиатуры (жалоба 2026-07-11
     // «поднимается вместе с меню, потом исчезает»). Qt.inputMethod.visible в связке с
     // imeHeight — страховка от «застрявшего» imeHeight (меню пропадало после «назад»).
-    readonly property bool kbActive:
-        (PageController.imeHeight > 0 && Qt.inputMethod.visible)
-        || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true)
+    // Вся клавиатурная схема — ТОЛЬКО сенсорные платформы: на десктопе клавиатура
+    // физическая, экран не делит — фокус в поле НЕ должен прятать навбар (PLATFORM-SCOPING).
+    readonly property bool kbPlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
+    readonly property bool kbActive: kbPlatform &&
+        ((PageController.imeHeight > 0 && Qt.inputMethod.visible)
+         || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true))
 
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
@@ -425,18 +428,27 @@ PageType {
         anchors.right: parent.right
         anchors.left: parent.left
         // AVPN: над нашей навигацией; на онбординге навигации нет — страница до низа окна.
-        // AVPN (Support, handoff Занавеса 2026-07-08): при клавиатуре навбар СКРЫТ (не едет
-        // вверх), низ зоны = верх клавиатуры — над ней остаётся только композер чата.
-        // Клавиатура (телеграм-схема, единая для iOS/Android): навбар скрыт, контент СЖАТ
-        // margin'ом = высоте клавиатуры, шапка страницы на месте. Авто-сдвиг окна iOS
-        // (QIOSInputContext, давал «улетание» шапки и двойную компенсацию в билдax 75/76)
-        // гасится из pageController: update(ImCursorRectangle) → scroll(0) после relayout.
-        anchors.bottom: root.onboardingActive ? parent.bottom
-                                              : (root.avpnNav ? (root.kbActive ? parent.bottom
-                                                                               : avpnBottomNav.top)
-                                                              : tabBar.top)
-        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive && root.kbActive)
-                              ? PageController.imeHeight : 0
+        // Клавиатура (телеграм-схема, единая для iOS/Android): навбар СКРЫТ (kbActive),
+        // контент СЖАТ margin'ом = высоте клавиатуры, шапка страницы на месте. Авто-сдвиг
+        // окна iOS (QIOSInputContext, «чёрная дыра» в билдах 75–77) гасится нативным
+        // observer'ом AvpnKeyboardFix.mm (ставится в pageController).
+        // Якорь у наших вкладок ВСЕГДА parent.bottom; «над навбаром» выражено margin'ом =
+        // avpnBottomNav.height. Прошлая схема (переключение якоря navbar.top ↔ parent.bottom
+        // по kbActive) в момент фокуса давала margin 0 при ещё нулевом imeHeight — композер
+        // нырял вниз на кадр и телепортом прыгал над клавиатуру («мерцает, появляется дважды»,
+        // жалоба 2026-07-12). Теперь в момент фокуса геометрия НЕ меняется
+        // (max(imeHeight=0, navH) = navH), а приход imeHeight анимируется Behavior'ом —
+        // композер плавно съезжает вверх в темпе клавиатуры, как в телеграме.
+        anchors.bottom: (root.onboardingActive || root.avpnNav) ? parent.bottom : tabBar.top
+        anchors.bottomMargin: (root.avpnNav && !root.onboardingActive)
+                              ? (root.kbActive ? Math.max(PageController.imeHeight, avpnBottomNav.height)
+                                               : avpnBottomNav.height)
+                              : 0
+        Behavior on anchors.bottomMargin {
+            // 250мс OutCubic ≈ кривая клавиатуры iOS; на смене вкладок margin не меняется —
+            // Behavior молчит. Токенов Theme в Pages2 нет (апстрим-слой) — литерал осознанно.
+            NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+        }
 
         enabled: !root.isControlsDisabled
 

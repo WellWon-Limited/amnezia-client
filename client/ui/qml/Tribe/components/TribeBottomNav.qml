@@ -35,6 +35,20 @@ Item {
 
     implicitHeight: 72 + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
+
+    // AVPN (haptics, жалоба 2026-07-12): тактильный отклик на ВХОДЯЩЕЕ сообщение поддержки
+    // при работающем приложении (рост unread в фоне вкладки / новый ответ в открытом чате).
+    // Живёт здесь: навбар — единственный всегда-живой Tribe-элемент PageStart (внутри чата
+    // он лишь visible:false — Connections работает). Движок сам молчит на первичной
+    // загрузке/кэше; гейт на активность приложения — от «жужжания из фона».
+    Connections {
+        target: (typeof TribeSupport !== "undefined") ? TribeSupport : null
+        ignoreUnknownSignals: true // dev-превью со старым бинарём без сигнала
+        function onIncomingMessage() {
+            if (Qt.application.state === Qt.ApplicationActive)
+                Haptic.play("light")
+        }
+    }
     // фон: без скруглений (плоская панель во всю ширину, реш. 2026-06-11).
     // macOS: НЕПРОЗРАЧНЫЙ bg800 — окно frameless/transparent, и через альфу токена nav (0.95)
     // просвечивал рабочий стол ЗА окном (реш. 2026-07-02)
