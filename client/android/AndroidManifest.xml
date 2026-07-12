@@ -26,7 +26,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <!-- AVPN (Play-комплайнс, 2026-07-12): QUERY_ALL_PACKAGES УБРАН. Апстрим держит его для
+         per-app split-tunnel (AppListProvider из ванильного UI Amnezia) — в Tribe этот UI
+         недостижим (requestAmnezia() не эмитится), а неиспользуемое чувствительное разрешение =
+         реджект ревью Google Play. Вернуть ТОЛЬКО вместе с реальной per-app-фичей в Tribe-UI
+         + декларацией в Play Console. AppListProvider без разрешения не крашится (API 30+
+         просто отдаёт отфильтрованный список). -->
 
     <!-- AVPN: android:label — видимое имя приложения = Tribe VPN (ребренд; плейсхолдер androiddeployqt заменён) -->
     <application
