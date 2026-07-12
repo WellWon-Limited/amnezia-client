@@ -52,6 +52,14 @@ DebugSnapshot.h               — данные для диагностическ
 ServiceEngine.{h,cpp}         — оркестратор (+ startFlow: enroll→subscription→connect; switchLog; snapshot)
 AvpnEngineQml.{h,cpp}         — QObject-фасад для QML (context property "AvpnEngine"): start/stop/reprobe/
                                 manualSwitch/resetLkg + debugSnapshot()→QVariantMap; health-QTimer; реактивный failover
+WhitelistVerdict.h            — чистый вердикт детекта РКН-«белых списков» (2 яруса whitelist: маркетплейсы
+                                решают, соц-значимые = SocialOnly «нулевой баланс»; гистерезис; guard слабой
+                                сети); спека tribe-front docs/superpowers/specs/2026-07-12-whitelist-mode-
+                                detector-design.md ✅ протестирован (build_whitelist_verdict.sh, матрица §2)
+WhitelistDetector.{h,cpp}     — драйвер проб вердикта: HTTPS-HEAD 4 наборов (инфра/якоря/маркетплейсы/
+                                соц-значимые) при Cellular+опущенном туннеле, по триггерам (не поллинг),
+                                gen-инвалидация раундов, exit-пробы; kill-switch features.whitelist_detector;
+                                UI = TribeWhitelistSheet.qml (попап на PageStart)
 TribeSupportChat.{h,cpp}      — чат поддержки (context property "TribeSupport"): поллинг /v1/support/*
                                 (device-Bearer), оптимистичные эхо, QHttpMultiPart-аплоад фото/видео
                                 (JPEG-рекомпресс, HEIC→JPEG), превью data:-URL, ручной 302→R2 без Bearer,
