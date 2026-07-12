@@ -20,6 +20,28 @@ PageType {
     // до анимации клавиатуры (убирает двухфазный дёрг iOS, жалоба 2026-07-11).
     readonly property bool inputFocused: input.activeFocus
 
+    // ── клавиатура iOS: схема «layout один раз + GPU-трансформы» (2026-07-12) ──
+    // Пока идёт анимация клавиатуры, лайаут НЕ меняется (PageController.imeHeight — цель,
+    // коммитится нативным слоем в невидимые моменты). Композер везём transform'ом, ленту —
+    // contentY (скролл = GPU-сдвиг контента) по ЖИВОЙ позиции клавиатуры imeShift —
+    // покадрово, без перелайаута (перелайаут каждый кадр = микрорывки, жалобы 2026-07-12).
+    // Высота навбара = 72 (implicitHeight TribeBottomNav) + нижний инсет — композер лежит
+    // над навбаром, клавиатура «подхватывает» его, дойдя до его нижней кромки.
+    readonly property real navBarH: 72 + Math.max(PageController.safeAreaBottomMargin,
+                                                  SafeArea.margins.bottom)
+    readonly property real kbLive: (Qt.platform.os === "ios" && typeof PageController.imeShift !== "undefined")
+                                   ? PageController.imeShift : -1
+    // Подъём поверх лайаута: лайаут стоит в «покое» (без клавиатуры), клавиатура едет —
+    // тащим композер на её кромке. Активно ТОЛЬКО пока цель не закоммичена (imeHeight 0).
+    readonly property real kbOffset: (kbLive >= 0 && PageController.imeHeight === 0)
+                                     ? Math.max(0, kbLive - navBarH) : 0
+    onKbOffsetChanged: {
+        // лента приклеена к композеру: контент едет тем же сдвигом (скролл, не layout)
+        if (list.stick)
+            list.contentY = Math.max(-list.topMargin,
+                                     list.contentHeight - list.height + kbOffset)
+    }
+
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     // dev-превью без движка (qml с диска) — страница живёт на пустой модели, не падает.
@@ -285,9 +307,15 @@ PageType {
                 onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(modelData.id)
             }
             onCountChanged: if (stick) positionViewAtEnd()
-            // сжатие/рост зоны при клавиатуре теперь АНИМИРОВАНЫ (PageStart Behavior) —
-            // читатель у низа должен ехать вместе с композером, а не отставать от него
-            onHeightChanged: if (stick) positionViewAtEnd()
+            // Коммит лайаута (jump высоты при DidShow/WillHide): прижать к концу И сразу
+            // применить текущий GPU-сдвиг — иначе один кадр между positionViewAtEnd и
+            // обработчиком kbOffset показывал контент не там (дёрг на старте скрытия).
+            onHeightChanged: {
+                if (!stick) return
+                positionViewAtEnd()
+                if (root.kbOffset > 0)
+                    contentY = Math.max(-topMargin, contentHeight - height + root.kbOffset)
+            }
             Component.onCompleted: positionViewAtEnd()
 
             // пустой диалог — приглашение вместо тишины
@@ -338,6 +366,9 @@ PageType {
             id: composer
             Layout.fillWidth: true
             color: Theme.color.bg800
+            // подъём на кромке клавиатуры во время её анимации — чистый GPU-сдвиг,
+            // лайаут страницы не трогается (см. root.kbOffset)
+            transform: Translate { y: -root.kbOffset }
             // строка composer + по md-отступу сверху/снизу. БЕЗ safe-area/IME-инсетов: без
             // клавиатуры зона вкладки кончается на верхе навбара (он несёт home-indicator в
             // bottomInset), а ПРИ клавиатуре навбар СКРЫТ и низ зоны = верх клавиатуры

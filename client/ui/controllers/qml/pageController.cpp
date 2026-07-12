@@ -40,6 +40,14 @@ extern "C" void Avpn_onKeyboardFrame(double height)
     if (s_avpnPageController)
         s_avpnPageController->avpnSetImeHeight(qMax(0, qRound(height)));
 }
+// Смена высоты УЖЕ показанной клавиатуры (emoji-переключение и т.п., DidChangeFrame):
+// применяем только в закоммиченном состоянии — ранний DidChangeFrame ВНУТРИ показа
+// (до DidShow) не должен коммитить лайаут посреди анимации.
+extern "C" void Avpn_onKeyboardFrameSteady(double height)
+{
+    if (s_avpnPageController && s_avpnPageController->getImeHeight() > 0)
+        s_avpnPageController->avpnSetImeHeight(qMax(0, qRound(height)));
+}
 // ФАЗОВАЯ СИНХРОНИЗАЦИЯ: displaylink трекера клавиатуры будит рендер Qt; высота
 // применяется в afterAnimating (начало кадра) — поле и клавиатура рисуются синфазно.
 extern "C" double Avpn_currentKeyboardHeight(void); // AvpnKeyboardFix.mm (−1 = нет трекинга)
@@ -133,8 +141,18 @@ void PageController::avpnHookQuickWindow()
     connect(qw, &QQuickWindow::afterAnimating, this, [this]() {
         const double h = Avpn_currentKeyboardHeight();
         if (h >= 0)
-            avpnSetImeHeight(qRound(h));
+            avpnSetImeShift(h); // живая позиция → GPU-трансформы чата; лайаут не трогаем
     });
+}
+
+// AVPN: живая позиция клавиатуры (per-frame). Лайаут НЕ трогает — только сигнал
+// для трансформов (PageSupportTribe.kbOffset).
+void PageController::avpnSetImeShift(qreal v)
+{
+    if (qAbs(v - m_imeShift) < 0.25)
+        return;
+    m_imeShift = v;
+    emit imeShiftChanged();
 }
 
 // AVPN: единая точка обновления высоты клавиатуры (нативный willShow-репорт + Qt-фолбэк).

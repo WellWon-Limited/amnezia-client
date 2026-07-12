@@ -110,6 +110,11 @@ public:
     Q_PROPERTY(int safeAreaTopMargin READ getSafeAreaTopMargin NOTIFY safeAreaTopMarginChanged)
     Q_PROPERTY(int safeAreaBottomMargin READ getSafeAreaBottomMargin NOTIFY safeAreaBottomMarginChanged)
     Q_PROPERTY(int imeHeight READ getImeHeight NOTIFY imeHeightChanged)
+    // AVPN (iOS, 2026-07-12): ЖИВАЯ высота клавиатуры по кадрам анимации (presentationLayer
+    // трекера keyboardLayoutGuide, применяется в afterAnimating). imeHeight = ЦЕЛЬ (лайаут,
+    // меняется один раз на показ/скрытие), imeShift = текущая позиция (для GPU-трансформов
+    // чата на время анимации). −1 = живого трекинга нет (Android/десктоп/iOS<15).
+    Q_PROPERTY(qreal imeShift READ getImeShift NOTIFY imeShiftChanged)
 
 #ifdef Q_OS_IOS
     // AVPN (2026-07-12): высота клавиатуры из НАТИВНОГО UIKeyboardWillShow/WillHide
@@ -117,6 +122,7 @@ public:
     // клавиатуры; Qt-путь (keyboardRectangleChanged) сообщал позже, и композер выезжал
     // с опозданием («клавиатура появляется, потом поле» — жалоба). Qt-путь остаётся фолбэком.
     void avpnSetImeHeight(int h);
+    void avpnSetImeShift(qreal v); // живая позиция (per-frame, afterAnimating)
     // Фазовая синхронизация: подписка на QQuickWindow::afterAnimating (применение высоты
     // трекера keyboardLayoutGuide в начале кадра — синфазно с отрисовкой клавиатуры).
     void avpnHookQuickWindow();
@@ -151,6 +157,7 @@ public slots:
     int getSafeAreaTopMargin();
     int getSafeAreaBottomMargin();
     int getImeHeight();
+    qreal getImeShift() const { return m_imeShift; } // AVPN: живая позиция клавиатуры (iOS)
 
 private slots:
     void onShowErrorMessage(amnezia::ErrorCode errorCode);
@@ -191,6 +198,7 @@ signals:
 
     void showChangelogDrawer();
     void imeHeightChanged(int height);
+    void imeShiftChanged(); // AVPN: живая позиция клавиатуры (см. imeShift)
     void safeAreaTopMarginChanged();
     void safeAreaBottomMarginChanged();
 
@@ -207,6 +215,7 @@ private:
     mutable bool m_cachedEdgeToEdgeEnabled = false;
     mutable bool m_edgeToEdgeCached = false;
     int m_imeHeight = 0;
+    qreal m_imeShift = -1; // AVPN: −1 = живого покадрового трекинга нет
 };
 
 #endif

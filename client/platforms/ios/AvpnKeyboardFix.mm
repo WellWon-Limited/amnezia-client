@@ -232,18 +232,28 @@ static void avpnStartKbTracking(void)
     }
 }
 
-// Фолбэк iOS <15 (без keyboardLayoutGuide): скачок сразу к конечной высоте из endFrame.
-static void avpnReportKeyboardFrame(NSNotification *note)
+extern "C" void Avpn_onKeyboardFrameSteady(double height); // pageController: только если уже закоммичено
+
+// Конечная высота из endFrame уведомления (−1 = мусорный кадр).
+static double avpnEndFrameHeight(NSNotification *note)
 {
     NSValue *endVal = note.userInfo[UIKeyboardFrameEndUserInfoKey];
     if (!endVal)
-        return;
+        return -1;
     const CGRect end = endVal.CGRectValue;
     const CGRect screen = UIScreen.mainScreen.bounds;
     // мусорные кадры (CGRectZero и промежуточные от сторонних клавиатур) — игнор
     if (CGRectGetWidth(end) < CGRectGetWidth(screen) * 0.5)
-        return;
-    Avpn_onKeyboardFrame(MAX(0.0, CGRectGetMaxY(screen) - CGRectGetMinY(end)));
+        return -1;
+    return MAX(0.0, CGRectGetMaxY(screen) - CGRectGetMinY(end));
+}
+
+// Фолбэк без живого трекинга (iOS <15 / окно Qt не подхвачено): скачок к конечной высоте.
+static void avpnReportKeyboardFrame(NSNotification *note)
+{
+    const double h = avpnEndFrameHeight(note);
+    if (h >= 0)
+        Avpn_onKeyboardFrame(h);
 }
 
 extern "C" void Avpn_installKeyboardScrollKiller(void)
@@ -263,10 +273,22 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                         usingBlock:^(NSNotification *note) {
                 Avpn_resetKeyboardScroll(); // заодно подменяет слой (avpnNeuterLayer)
                 avpnStartKbTracking();
-                // без покадрового пути (iOS <15 / окно Qt ещё не подхвачено) —
-                // одиночный репорт конечной высоты, чтобы layout не остался старым
-                if (!g_avpnKbTracker || !Avpn_qtFrameHooked())
+                // Нативная схема «layout один раз» (2026-07-12): imeHeight (ЦЕЛЬ, лайаут)
+                // коммитится когда скачок НЕВИДИМ — под развёрнутой клавиатурой (DidShow)
+                // или в момент старта скрытия (WillHide, композер дальше везёт трансформ).
+                // Анимацию между коммитами везут GPU-трансформы чата по imeShift.
+                if (!g_avpnKbTracker || !Avpn_qtFrameHooked()) {
+                    avpnReportKeyboardFrame(note); // нет живого пути — старый скачок к цели
+                } else if ([note.name isEqualToString:UIKeyboardDidShowNotification]) {
                     avpnReportKeyboardFrame(note);
+                } else if ([note.name isEqualToString:UIKeyboardWillHideNotification]) {
+                    Avpn_onKeyboardFrame(0);
+                } else if ([note.name isEqualToString:UIKeyboardDidChangeFrameNotification]) {
+                    // смена высоты УЖЕ показанной клавиатуры (emoji и т.п.) — гейт внутри
+                    const double h = avpnEndFrameHeight(note);
+                    if (h >= 0)
+                        Avpn_onKeyboardFrameSteady(h);
+                }
             }];
         }
     });
