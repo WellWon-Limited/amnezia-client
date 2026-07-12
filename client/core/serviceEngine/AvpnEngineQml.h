@@ -279,6 +279,11 @@ public:
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
 
+    // AVPN (diag-report, Task 4 bff-3): полный диагностический text/plain отчёт для чата поддержки —
+    // JSON-снапшот (версия/платформа/состояние/подписка/пул с RTT/switchLog/байпас) + хвост лога
+    // приложения (<= 256 КБ). Секретов нет by construction (инвариант DebugSnapshot); итог <= 2 МБ - 4 КБ.
+    Q_INVOKABLE QString buildDiagReport() const;
+
     // AVPN (панель администратора): запустить/прервать in-app бенч. label — метка методики
     // (baseline / tribe-bypass-on / tribe-bypass-off / amnezia). Один прогон ~1.5–2 мин, ~40 МБ трафика.
     Q_INVOKABLE void startBench(const QString &label);
@@ -850,6 +855,9 @@ private:
     // Точки чтения (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
     avpn::BypassListService      *m_bypassListSvc = nullptr;
     avpn::RemoteConfig            m_remoteCfg;
+    // AVPN (diag-report, Task 4 bff-3): epoch последнего configApplied (ConfigService) —
+    // в отчёте отдаём возраст; 0 = ещё не применялся (ключ в JSON опускается).
+    qint64                        m_lastConfigAppliedEpoch = 0;
     int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block
     // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
     // конструктора; T6 — дополняется резолвом НОВОГО edge-хоста при activeEdgeChanged, см.
