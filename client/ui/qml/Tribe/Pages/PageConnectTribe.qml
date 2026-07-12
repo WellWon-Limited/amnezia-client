@@ -99,7 +99,11 @@ PageType {
     // подпись у орба показывает причину вместо обычного «Подключиться…». Флаг живёт в движке
     // (сбрасывается явным start()), поэтому переживает пересоздание страницы.
     readonly property bool subEnforcedStopNow: root.hasEngine && TribeEngine.subEnforcedStop === true
-    readonly property bool subExpired: root.hasEngine && (root.transferredAwayNow
+    // AVPN (белые списки, сценарий 16 спеки): активный РКН-режим whitelist — данные подписки
+    // в эпизоде это стейл-LKG, а платёжный web-link при мёртвой сети не откроется → золотая
+    // CTA и update-баннер подавлены (гейты ниже), подпись у орба объясняет причину.
+    readonly property bool whitelistModeNow: root.hasEngine && TribeEngine.whitelistMode === true
+    readonly property bool subExpired: root.hasEngine && !root.whitelistModeNow && (root.transferredAwayNow
                               || root.subMissingNow
                               || (TribeEngine.daysLeft >= 0 && (!root.subActive
                               || (TribeEngine.daysLeft === 0)
@@ -163,6 +167,11 @@ PageType {
             if (simConnected) { simConnected = false; return }
             simConnecting = true; simTimer.restart()
         } else if (typeof TribeEngine !== "undefined") {
+            // AVPN (белые списки): тап по коннекту при активном режиме — вернуть попап-объяснение
+            // (юзер мог забыть, почему не работает), саму попытку НЕ блокируем (§3.5 спеки:
+            // вдруг детект устарел — попытка идёт своим чередом).
+            if (TribeEngine.whitelistMode === true)
+                TribeEngine.setWhitelistAcked(false)
             // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
             // Во время нашего же стопа орб показывает «Connect» — клик по нему трактуем буквально:
             // «включи обратно» (start задаёт намерение, reconcile доведёт из терминала). Раньше клик
@@ -506,6 +515,10 @@ PageType {
     // констант sceneShift (orb якорится на autoVpnCard.bottom, а не на фиксированных числах).
     TribeUpdateBanner {
         id: updateBanner
+        // AVPN (белые списки): в эпизоде store-ссылка всё равно не откроется — баннер подавлен
+        // (dismissed-биндинг вернёт баннер после выхода из режима; клик по крестику, как и
+        // раньше, перезаписывает биндинг статическим true до перезапуска — поведение сохранено).
+        dismissed: root.whitelistModeNow
         anchors.top: header.bottom
         anchors.topMargin: visible ? Theme.space.md : 0
         anchors.left: parent.left; anchors.right: parent.right
@@ -761,10 +774,13 @@ PageType {
         z: 30; horizontalAlignment: Text.AlignHCenter
         // AVPN (sub-grace): движок сам отключил по истечению подписки → показываем причину
         // (CTA «Продлить доступ» уже есть ниже — subExpired ведёт на золотую кнопку).
-        text: root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
-                        : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
-                                                   : qsTr("Подключиться — нажмите кнопку выше"))
-        color: root.slate400
+        // AVPN (белые списки): в активном режиме подпись объясняет причину — экран не врёт
+        // «Подключиться…», когда сеть зарезана оператором (попап мог быть уже закрыт).
+        text: root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
+              : root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
+                          : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
+                                                     : qsTr("Подключиться — нажмите кнопку выше"))
+        color: root.whitelistModeNow ? Theme.color.warning : root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
     }
 
