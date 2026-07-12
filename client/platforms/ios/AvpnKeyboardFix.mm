@@ -154,9 +154,32 @@ static void avpnEnsureTracker(void)
 extern "C" void Avpn_pokeQtFrame(void);  // pageController.cpp: QQuickWindow::update()
 extern "C" int Avpn_qtFrameHooked(void); // pageController.cpp: окно Qt уже подхвачено?
 
+static double g_avpnKbPrevFrameH = -1; // прошлый сэмпл КАДРА Qt (для экстраполяции)
+
+static double avpnKbHeightNow(void)
+{
+    CALayer *pres = g_avpnKbTracker.layer.presentationLayer ?: g_avpnKbTracker.layer;
+    double h = pres.frame.size.height;
+    const UIWindow *win = g_avpnKbTracker.window;
+    const double safeB = win ? win.safeAreaInsets.bottom : 0;
+    return (h <= safeB + 1.0) ? 0.0 : h;
+}
+
 extern "C" double Avpn_currentKeyboardHeight(void)
 {
-    return g_avpnKbLink ? g_avpnKbLastH : -1.0; // −1 = трекинг не идёт, кадру нечего применять
+    if (!g_avpnKbLink || !g_avpnKbTracker)
+        return -1.0; // трекинг не идёт — кадру нечего применять
+    // ЖИВОЕ значение В МОМЕНТ кадра Qt. Кэш из displaylink-тика давал микрорывки:
+    // два разных клока — между кадрами Qt сэмпл то не обновлялся, то обновлялся дважды.
+    const double h = avpnKbHeightNow();
+    // Компенсация конвейера Qt Quick (значение кадра показывается ~на кадр позже
+    // композитинга клавиатуры — «поле чуть отстаёт»): экстраполяция на один шаг по
+    // фактической скорости. На финише скорость → 0 — экстраполяция гаснет сама.
+    double out = h;
+    if (g_avpnKbPrevFrameH >= 0)
+        out = MAX(0.0, h + (h - g_avpnKbPrevFrameH));
+    g_avpnKbPrevFrameH = h;
+    return out;
 }
 
 @interface AvpnKbTickTarget : NSObject
@@ -198,6 +221,7 @@ static void avpnStartKbTracking(void)
     avpnEnsureTracker();
     if (!g_avpnKbTracker)
         return;
+    g_avpnKbPrevFrameH = -1; // новая анимация — экстраполяцию с чистого листа
     g_avpnKbStableSince = CACurrentMediaTime();
     if (!g_avpnKbLink) {
         static AvpnKbTickTarget *target = nil;
