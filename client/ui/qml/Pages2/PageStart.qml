@@ -445,9 +445,18 @@ PageType {
                                                : avpnBottomNav.height)
                               : 0
         Behavior on anchors.bottomMargin {
-            // 250мс OutCubic ≈ кривая клавиатуры iOS; на смене вкладок margin не меняется —
-            // Behavior молчит. Токенов Theme в Pages2 нет (апстрим-слой) — литерал осознанно.
-            NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+            // Кривая = клавиатура iOS (приватная curve 7 ≈ spring mass3/stiffness1000/damp500):
+            // визуально ~0.5с, быстрый старт + длинное мягкое приземление; общепринятая
+            // bezier-аппроксимация (.38,.7,.125,1). Прошлые 250мс OutCubic заканчивались
+            // вдвое раньше клавиатуры — поле «взлетало» и ждало её наверху (жалоба
+            // 2026-07-12 «поле сверху, клавиатура снизу»). Нативно встроиться в анимацию
+            // клавиатуры (inputAccessoryView/keyboardLayoutGuide, как WhatsApp/Telegram)
+            // из QML нельзя — только воспроизвести кривую. Токенов Theme в Pages2 нет.
+            NumberAnimation {
+                duration: 500
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: [0.38, 0.7, 0.125, 1.0, 1, 1]
+            }
         }
 
         enabled: !root.isControlsDisabled
