@@ -655,6 +655,7 @@ private:
     void bootstrapEnrollAsync(bool reEnrolled);                    // POST /v1/trial (async)
     void bootstrapFetchAsync(const QString &token, bool tokenFromStore, bool reEnrolled); // GET /v1/subscription (async)
     void finishBootstrapSuccess(const QByteArray &body);           // парс + LKG + probeNodeRtt + changed()
+    void flushWhitelistEpisodes(); // AVPN (белые списки): отправка очереди эпизодов после восстановления сети
     void onBootstrapAttemptFailed();                               // переарм таймера (BootstrapRetry.h)
     void stopBootstrapTerminal();                                  // 410/невосстановимый 401 — цепочку не переармируем
 
@@ -887,6 +888,8 @@ private:
     QTimer                       m_bootstrapRetryTimer;       // AVPN: единый таймер ретрая (member, НЕ singleShot-фабрика) — kickBootstrap() может его поджать
     WhitelistDetector           *m_whitelistDetector = nullptr; // AVPN (белые списки): nullptr на десктопе (гейт платформ)
     bool                         m_whitelistAcked = false;      // AVPN (белые списки): «Понятно» текущего эпизода
+    qint64                       m_whitelistEpisodeStartMs = 0; // AVPN (белые списки): старт активного эпизода (для телеметрии)
+    bool                         m_whitelistEpisodesSent = false; // AVPN (белые списки): одна попытка отправки за сессию
     // AVPN (Task 7): авто-пауза «для покупок».
     QTimer                       m_pauseTimer;           // singleShot: истёк → бездействие → resume
     bool                         m_paused = false;       // туннель реально down, ждём авто-возврат

@@ -635,7 +635,29 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_whitelistDetector = new avpn::WhitelistDetector(
         m_nam, [this]() { return state() == QStringLiteral("disconnected"); }, this);
     connect(m_whitelistDetector, &avpn::WhitelistDetector::activeChanged, this, [this](bool on) {
-        if (!on) {
+        if (on) {
+            m_whitelistEpisodeStartMs = QDateTime::currentMSecsSinceEpoch();
+        } else {
+            // Эпизод кончился — в локальную очередь телеметрии (кап 10 FIFO; шлём при первом
+            // успешном контакте с control plane — в момент эпизода сеть мертва по определению).
+            if (m_whitelistEpisodeStartMs > 0) {
+                QSettings st;
+                QJsonArray arr = QJsonDocument::fromJson(
+                    st.value(QStringLiteral("Whitelist/episodes")).toByteArray()).array();
+                QJsonObject ep;
+                ep.insert(QStringLiteral("started_at"), double(m_whitelistEpisodeStartMs / 1000));
+                ep.insert(QStringLiteral("ended_at"),
+                          double(QDateTime::currentMSecsSinceEpoch() / 1000));
+                ep.insert(QStringLiteral("net_type"), QStringLiteral("cellular"));
+                arr.append(ep);
+                while (arr.size() > 10)
+                    arr.removeFirst();
+                st.setValue(QStringLiteral("Whitelist/episodes"),
+                            QJsonDocument(arr).toJson(QJsonDocument::Compact));
+                st.sync();
+                m_whitelistEpisodeStartMs = 0;
+                m_whitelistEpisodesSent = false; // свежий эпизод — разрешить отправку
+            }
             if (m_whitelistAcked) {
                 m_whitelistAcked = false;   // новый эпизод покажет попап снова
                 emit whitelistAckedChanged();
@@ -2707,6 +2729,43 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
                     // чтобы ПЕРВЫЙ «Авто (быстрейший)» уже выбирал по реальному RTT, а не по weight.
     flushPendingPushToken(); // токен точно есть — дедуп внутри защитит от повтора
     refreshAnnouncements();  // AVPN (P-ANN): токен есть → подтянуть актуальные объявления
+    flushWhitelistEpisodes(); // AVPN (белые списки): сеть жива — отдать накопленные эпизоды
+}
+
+// AVPN (белые списки, спека §7): отправка очереди whitelist-эпизодов после восстановления
+// сети. Одна попытка за сессию (m_whitelistEpisodesSent; сброс при новом эпизоде): бэк может
+// быть без эндпоинта (handoff WHITELIST-EPISODES-BACKEND-HANDOFF.md) — 404 молчим, очередь
+// капнута 10 и не растёт. 2xx -> очередь очищена.
+void AvpnEngineQml::flushWhitelistEpisodes()
+{
+    if (m_whitelistEpisodesSent || !m_nam)
+        return;
+    QSettings st;
+    const QByteArray raw = st.value(QStringLiteral("Whitelist/episodes")).toByteArray();
+    const QJsonArray arr = QJsonDocument::fromJson(raw).array();
+    if (arr.isEmpty())
+        return;
+    const QString token = authToken();
+    if (token.isEmpty())
+        return;
+    m_whitelistEpisodesSent = true; // одна попытка за сессию, независимо от исхода
+    QJsonObject body;
+    body.insert(QStringLiteral("episodes"), arr);
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/telemetry/net-episodes"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
+    QNetworkReply *reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (code >= 200 && code < 300) {
+            QSettings s;
+            s.remove(QStringLiteral("Whitelist/episodes"));
+            s.sync();
+        }
+        // 404 (бэк ещё без эндпоинта) / прочее — молчим, очередь останется на следующую сессию
+    });
 }
 
 // AVPN: провал попытки — тихо переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
