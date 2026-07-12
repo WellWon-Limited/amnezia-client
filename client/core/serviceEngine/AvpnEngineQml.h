@@ -555,9 +555,11 @@ public:
     // Bearer). Обнуляет серверный счётчик непрочитанных → следующий пуш придёт с низким aps.badge.
     // Связан с AvpnPushBridge::readRequested (QML зовёт AvpnPush.markAllRead()). АСИНХРОННО.
     Q_INVOKABLE void markNotificationsRead();
-    // AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id]} — пометить прочитанным одно
-    // уведомление (открыта детальная страница). Связан с AvpnPushBridge::readItemRequested. АСИНХРОННО.
-    void markNotificationReadById(qlonglong id);
+    // AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id],"read":read} — read-статус
+    // одного уведомления в обе стороны. Связан с AvpnPushBridge::readItemRequested. АСИНХРОННО.
+    void markNotificationReadById(qlonglong id, bool read);
+    // AVPN (свайп «Удалить»): POST /v1/notifications/delete {"ids":[id]}. АСИНХРОННО.
+    void deleteNotificationById(qlonglong id);
     // AVPN (центр уведомлений, серверная история): GET /v1/notifications?limit=50 (Bearer) →
     // AvpnPushBridge::setServerItems (замещение локальной ленты). Зовётся QML при открытии центра
     // (баг 2026-07-10: строка type=announcement была в БД, но пуш не дошёл → центр пуст; теперь

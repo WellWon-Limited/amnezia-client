@@ -61,6 +61,7 @@
 #include <QCoreApplication> // AVPN (Task 9): applicationVersion() → app_version в push-token
 #include <QGuiApplication>  // AVPN (store-flow E): applicationStateChanged → foreground-рефреш подписки
 #include <QDateTime>
+#include <QLocale>
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
 #include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
 #include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
@@ -508,9 +509,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             });
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readRequested,
             this, &AvpnEngineQml::markNotificationsRead);
-    // AVPN (read per-элемент): открыта деталь уведомления → пометить на сервере ТОЛЬКО его.
+    // AVPN (read per-элемент): изменён read-статус / удалён элемент → синк на сервер ТОЛЬКО его.
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readItemRequested,
             this, &AvpnEngineQml::markNotificationReadById);
+    connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::deleteItemRequested,
+            this, &AvpnEngineQml::deleteNotificationById);
     // AVPN (P-ANN): пуш «объявление» → немедленный рефреш списка (попап всплывает сразу).
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::announcementPushReceived,
             this, &AvpnEngineQml::refreshAnnouncements);
@@ -4454,11 +4457,11 @@ void AvpnEngineQml::markNotificationsRead()
     connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
 }
 
-// AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id]} — пометить прочитанным ОДНО
-// уведомление (бэк декрементит unread_count по факту). Вызывается по readItemRequested моста
-// (открыта детальная страница). АСИНХРОННО, тихо: офлайн-провал не страшен — локальный read уже
-// сохранён, серверный флаг догонит следующий mark (лента с сервера хуже не станет).
-void AvpnEngineQml::markNotificationReadById(qlonglong id)
+// AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id],"read":read} — read-статус
+// ОДНОГО уведомления в обе стороны (бэк пересчитывает unread_count по остатку). Вызывается по
+// readItemRequested моста (деталь открыта / свайп-тоггл). АСИНХРОННО, тихо: офлайн-провал не
+// страшен — локальный флаг уже сохранён, серверный догонит следующий mark.
+void AvpnEngineQml::markNotificationReadById(qlonglong id, bool read)
 {
     const QString auth = authToken();
     if (!m_nam || auth.isEmpty() || id <= 0)
@@ -4469,9 +4472,29 @@ void AvpnEngineQml::markNotificationReadById(qlonglong id)
                      QByteArrayLiteral("Bearer ") + auth.toUtf8());
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 
-    const QByteArray body =
-        QJsonDocument(QJsonObject{{QStringLiteral("ids"), QJsonArray{static_cast<double>(id)}}})
-            .toJson(QJsonDocument::Compact);
+    const QByteArray body = QJsonDocument(QJsonObject{
+        {QStringLiteral("ids"), QJsonArray{static_cast<double>(id)}},
+        {QStringLiteral("read"), read}}).toJson(QJsonDocument::Compact);
+    QNetworkReply *reply = m_nam->post(req, body);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
+// AVPN (свайп «Удалить»): POST /v1/notifications/delete {"ids":[id]} — удалить строку на бэке
+// (unread_count пересчитает бэк). АСИНХРОННО, тихо; локально элемент уже убран мостом.
+void AvpnEngineQml::deleteNotificationById(qlonglong id)
+{
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty() || id <= 0)
+        return;
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/notifications/delete"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+
+    const QByteArray body = QJsonDocument(QJsonObject{
+        {QStringLiteral("ids"), QJsonArray{static_cast<double>(id)}}}).toJson(QJsonDocument::Compact);
     QNetworkReply *reply = m_nam->post(req, body);
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
@@ -4509,13 +4532,33 @@ void AvpnEngineQml::refreshNotifications()
             item[QStringLiteral("id")] = static_cast<qlonglong>(o.value(QStringLiteral("id")).toDouble());
             item[QStringLiteral("title")] = title;
             item[QStringLiteral("body")] = body;
-            // Формат времени как у локальных пушей (HH:mm); не-сегодня — с датой.
+            // Эталон 2026-07-12: сегодня/вчера — HH:mm, раньше — «10 июл»; плюс секция-группа
+            // (Сегодня/Вчера/Ранее) и полная дата для детальной страницы.
             const QDateTime dt = QDateTime::fromString(o.value(QStringLiteral("created_at")).toString(),
                                                        Qt::ISODate).toLocalTime();
-            item[QStringLiteral("time")] =
-                !dt.isValid() ? QString()
-                : (dt.date() == QDate::currentDate() ? dt.toString(QStringLiteral("HH:mm"))
-                                                     : dt.toString(QStringLiteral("dd.MM HH:mm")));
+            const QDate today = QDate::currentDate();
+            const QLocale loc;
+            if (!dt.isValid()) {
+                item[QStringLiteral("time")] = QString();
+                item[QStringLiteral("group")] = QStringLiteral("earlier");
+                item[QStringLiteral("dateFull")] = QString();
+            } else if (dt.date() == today) {
+                item[QStringLiteral("time")] = dt.toString(QStringLiteral("HH:mm"));
+                item[QStringLiteral("group")] = QStringLiteral("today");
+                item[QStringLiteral("dateFull")] =
+                    tr("Сегодня в %1").arg(dt.toString(QStringLiteral("HH:mm")));
+            } else if (dt.date() == today.addDays(-1)) {
+                item[QStringLiteral("time")] = dt.toString(QStringLiteral("HH:mm"));
+                item[QStringLiteral("group")] = QStringLiteral("yesterday");
+                item[QStringLiteral("dateFull")] =
+                    tr("Вчера в %1").arg(dt.toString(QStringLiteral("HH:mm")));
+            } else {
+                item[QStringLiteral("time")] = loc.toString(dt.date(), QStringLiteral("d MMM"));
+                item[QStringLiteral("group")] = QStringLiteral("earlier");
+                item[QStringLiteral("dateFull")] =
+                    tr("%1 в %2").arg(loc.toString(dt.date(), QStringLiteral("d MMMM")),
+                                      dt.toString(QStringLiteral("HH:mm")));
+            }
             item[QStringLiteral("read")] = o.value(QStringLiteral("read")).toBool();
             // Контракт NotificationOut: неизвестный тип = generic-строка title+body, НЕ скрывать
             // (делегат QML стилизует только известные kind, остальным даёт общий вид).
