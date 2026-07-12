@@ -75,19 +75,16 @@ static void avpnNeuterLayer(CALayer *layer)
 
 extern "C" void Avpn_resetKeyboardScroll(void)
 {
-    UIWindow *keyWin = nil;
+    UIView *root = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class])
             continue;
         for (UIWindow *win in ((UIWindowScene *)scene).windows) {
-            if (win.isKeyWindow) { keyWin = win; break; }
+            if (win.isKeyWindow) { root = win.rootViewController.view; break; }
         }
-        if (keyWin)
+        if (root)
             break;
     }
-    if (!keyWin)
-        return;
-    UIView *root = keyWin.rootViewController.view;
     if (!root)
         return;
     // Закрыть канал сдвига (идемпотентно) + вычистить, что могло примениться ДО подмены
@@ -98,12 +95,103 @@ extern "C" void Avpn_resetKeyboardScroll(void)
         root.layer.sublayerTransform = CATransform3DIdentity;
 }
 
-// pageController.cpp: единая точка m_imeHeight. Репорт из willShow/willHide = момент
-// СТАРТА анимации клавиатуры — QML-подъём композера стартует тем же кадром (жалоба
-// 2026-07-12 «клавиатура появляется, а поле выезжает позже»: Qt-путь
-// keyboardRectangleChanged сообщал высоту с опозданием).
+// ── «приклейка» композера к клавиатуре (2026-07-12, финал синхронизации) ─────
+// Как WhatsApp/Telegram, но для QML: невидимый UIView пристёгнут констрейном к
+// keyboardLayoutGuide.topAnchor (публичный API iOS 15+) — UIKit ведёт его В ТОЙ ЖЕ
+// анимации, что клавиатуру (та самая приватная spring-кривая, интерактивное закрытие
+// пальцем — тоже). CADisplayLink каждый кадр читает ФАКТИЧЕСКОЕ положение трекера
+// (presentationLayer) и отдаёт высоту в QML БЕЗ нашей анимации (Behavior на iOS выкл.) —
+// margin повторяет реальное движение клавиатуры покадрово. Аппроксимации кривой
+// (250мс OutCubic → 500мс bezier) «чуть-чуть отставали» — теперь источник один.
 extern "C" void Avpn_onKeyboardFrame(double height);
 
+static UIView *g_avpnKbTracker = nil;
+static CADisplayLink *g_avpnKbLink = nil;
+static double g_avpnKbLastH = -1;
+static CFTimeInterval g_avpnKbStableSince = 0;
+
+static UIView *avpnRootView(void)
+{
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class])
+            continue;
+        for (UIWindow *win in ((UIWindowScene *)scene).windows)
+            if (win.isKeyWindow)
+                return win.rootViewController.view;
+    }
+    return nil;
+}
+
+static void avpnEnsureTracker(void)
+{
+    if (g_avpnKbTracker)
+        return;
+    if (@available(iOS 15.0, *)) {
+        UIView *root = avpnRootView();
+        if (!root)
+            return;
+        UIView *v = [UIView new];
+        v.userInteractionEnabled = NO;
+        v.hidden = YES; // скрытые вьюхи участвуют в layout — нам нужна только геометрия
+        v.translatesAutoresizingMaskIntoConstraints = NO;
+        [root addSubview:v];
+        [NSLayoutConstraint activateConstraints:@[
+            [v.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+            [v.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+            [v.topAnchor constraintEqualToAnchor:root.keyboardLayoutGuide.topAnchor],
+            [v.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        ]];
+        g_avpnKbTracker = v;
+    }
+}
+
+@interface AvpnKbTickTarget : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation AvpnKbTickTarget
+- (void)tick:(CADisplayLink *)link
+{
+    Avpn_resetKeyboardScroll(); // канал закрыт подменой слоя; это — дешёвая страховка
+    if (!g_avpnKbTracker) {
+        [link invalidate];
+        g_avpnKbLink = nil;
+        return;
+    }
+    CALayer *pres = g_avpnKbTracker.layer.presentationLayer ?: g_avpnKbTracker.layer;
+    double h = pres.frame.size.height;
+    // клавиатура скрыта → keyboardLayoutGuide прилипает к safe area (высота = home-инсет);
+    // это «нет клавиатуры», не 34px клавиатуры
+    const UIWindow *win = g_avpnKbTracker.window;
+    const double safeB = win ? win.safeAreaInsets.bottom : 0;
+    if (h <= safeB + 1.0)
+        h = 0;
+    if (fabs(h - g_avpnKbLastH) > 0.1) {
+        g_avpnKbLastH = h;
+        g_avpnKbStableSince = CACurrentMediaTime();
+        Avpn_onKeyboardFrame(h);
+    } else if (CACurrentMediaTime() - g_avpnKbStableSince > 0.6) {
+        [link invalidate]; // высота устоялась — до следующего клавиатурного события
+        g_avpnKbLink = nil;
+    }
+}
+@end
+
+static void avpnStartKbTracking(void)
+{
+    avpnEnsureTracker();
+    if (!g_avpnKbTracker)
+        return;
+    g_avpnKbStableSince = CACurrentMediaTime();
+    if (!g_avpnKbLink) {
+        static AvpnKbTickTarget *target = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ target = [AvpnKbTickTarget new]; });
+        g_avpnKbLink = [CADisplayLink displayLinkWithTarget:target selector:@selector(tick:)];
+        [g_avpnKbLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+}
+
+// Фолбэк iOS <15 (без keyboardLayoutGuide): скачок сразу к конечной высоте из endFrame.
 static void avpnReportKeyboardFrame(NSNotification *note)
 {
     NSValue *endVal = note.userInfo[UIKeyboardFrameEndUserInfoKey];
@@ -111,11 +199,9 @@ static void avpnReportKeyboardFrame(NSNotification *note)
         return;
     const CGRect end = endVal.CGRectValue;
     const CGRect screen = UIScreen.mainScreen.bounds;
-    // мусорные кадры (CGRectZero и промежуточные от сторонних клавиатур) — игнор:
-    // высота «во весь экран» роняла margin в потолок, композер прилетал сверху
+    // мусорные кадры (CGRectZero и промежуточные от сторонних клавиатур) — игнор
     if (CGRectGetWidth(end) < CGRectGetWidth(screen) * 0.5)
         return;
-    // скрытие: endFrame целиком за нижней кромкой экрана → высота 0
     Avpn_onKeyboardFrame(MAX(0.0, CGRectGetMaxY(screen) - CGRectGetMinY(end)));
 }
 
@@ -134,8 +220,10 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                             object:nil
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(NSNotification *note) {
-                avpnReportKeyboardFrame(note);
                 Avpn_resetKeyboardScroll(); // заодно подменяет слой (avpnNeuterLayer)
+                avpnStartKbTracking();
+                if (!g_avpnKbTracker)
+                    avpnReportKeyboardFrame(note); // iOS <15
             }];
         }
     });

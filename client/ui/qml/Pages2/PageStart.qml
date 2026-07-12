@@ -451,13 +451,13 @@ PageType {
                                                : avpnBottomNav.height)
                               : 0
         Behavior on anchors.bottomMargin {
-            // Кривая = клавиатура iOS (приватная curve 7 ≈ spring mass3/stiffness1000/damp500):
-            // визуально ~0.5с, быстрый старт + длинное мягкое приземление; общепринятая
-            // bezier-аппроксимация (.38,.7,.125,1). Прошлые 250мс OutCubic заканчивались
-            // вдвое раньше клавиатуры — поле «взлетало» и ждало её наверху (жалоба
-            // 2026-07-12 «поле сверху, клавиатура снизу»). Нативно встроиться в анимацию
-            // клавиатуры (inputAccessoryView/keyboardLayoutGuide, как WhatsApp/Telegram)
-            // из QML нельзя — только воспроизвести кривую. Токенов Theme в Pages2 нет.
+            // iOS: БЕЗ своей анимации — imeHeight едет ПОКАДРОВО с нативного трекера,
+            // пристёгнутого к keyboardLayoutGuide (AvpnKeyboardFix.mm): margin повторяет
+            // фактическое движение клавиатуры пиксель-в-пиксель («приклеено», как
+            // WhatsApp/Telegram). Любая своя кривая поверх (пробовали 250мс OutCubic и
+            // 500мс bezier-аппроксимацию их spring) давала видимый рассинхрон.
+            // Android: инсеты приходят ДИСКРЕТНО — анимация нужна.
+            enabled: Qt.platform.os !== "ios"
             NumberAnimation {
                 duration: 500
                 easing.type: Easing.BezierSpline
