@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- Фон DMG Tribe VPN (референс — инсталлер WellWon OS: глиф + wordmark сверху,
+     стрелка app → Applications). Рендер: gen-background.sh (Chrome headless 1x/2x → tiff).
+     Логика координат связана с deploy/tribe/dmg/settings.py:
+       окно 660x400 pt, иконки (170,263) и (490,263), icon_size 112.
+     Цвета — ТОЛЬКО токены Theme.qml (bg900/bg800, accent #7CA2D0, text1/2/3). -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 660px; height: 400px; overflow: hidden; }
+  body {
+    position: relative;
+    font-family: "Manrope", -apple-system, "SF Pro Display", system-ui, sans-serif;
+    background:
+      radial-gradient(420px 260px at 50% 12%, rgba(124, 162, 208, 0.14), transparent 70%),
+      radial-gradient(760px 420px at 50% 120%, rgba(14, 23, 40, 0.9), transparent 75%),
+      linear-gradient(180deg, #0A111D 0%, #050B14 100%);
+  }
+  /* тонкие концентрические кольца вокруг глифа — мотив щита из иконки app */
+  .ring {
+    position: absolute; left: 50%; border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    transform: translateX(-50%);
+  }
+  .ring.r1 { width: 260px; height: 260px; top: -62px; }
+  .ring.r2 { width: 400px; height: 400px; top: -132px; border-color: rgba(255, 255, 255, 0.035); }
+  .ring.r3 { width: 560px; height: 560px; top: -212px; border-color: rgba(255, 255, 255, 0.02); }
+
+  .brand { position: absolute; top: 46px; left: 0; right: 0; text-align: center; }
+  .brand svg { display: block; margin: 0 auto; }
+  .wordmark {
+    margin-top: 22px;
+    font-size: 34px; font-weight: 700; letter-spacing: 0.42em;
+    text-indent: 0.42em; /* компенсация: letter-spacing добавляет хвост справа */
+    color: #F1F5F9;
+  }
+  .wordmark .accent { color: #7CA2D0; }
+  .subtitle {
+    margin-top: 10px;
+    font-size: 13.5px; font-weight: 600; letter-spacing: 0.02em;
+    color: #94A3B8;
+  }
+
+  /* стрелка между слотами иконок: центры (170,263) и (490,263), icon_size 112 —
+     стрелка в зазоре 240..420, стиль Lucide (stroke, без заливки) */
+  .arrow { position: absolute; top: 245px; left: 244px; }
+</style>
+</head>
+<body>
+  <div class="ring r1"></div>
+  <div class="ring r2"></div>
+  <div class="ring r3"></div>
+
+  <div class="brand">
+    <!-- канонический глиф Tribe (5 баров, центральный — accent), docs/BRAND.md бэкенд-репо -->
+    <svg width="58" height="53" viewBox="0 0 48 44" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2"    y="22" width="6" height="16" rx="3" fill="#EEF3F9"/>
+      <rect x="11.5" y="10" width="6" height="28" rx="3" fill="#EEF3F9"/>
+      <rect x="21"   y="2"  width="6" height="36" rx="3" fill="#7CA2D0"/>
+      <rect x="30.5" y="12" width="6" height="26" rx="3" fill="#EEF3F9"/>
+      <rect x="40"   y="20" width="6" height="18" rx="3" fill="#EEF3F9"/>
+    </svg>
+    <div class="wordmark">TRIBE <span class="accent">VPN</span></div>
+    <div class="subtitle">Умный VPN, который не нужно выключать</div>
+  </div>
+
+  <svg class="arrow" width="172" height="36" viewBox="0 0 172 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 18 H156 M140 6 L158 18 L140 30" stroke="#7CA2D0" stroke-width="3.2"
+          stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  </svg>
+</body>
+</html>
