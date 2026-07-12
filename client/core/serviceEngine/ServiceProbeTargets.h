@@ -29,18 +29,40 @@ namespace avpn {
 
 // Единый источник вшитых целей чипов (конструктор AvpnEngineQml + база мержа).
 // Telegram: несколько seed-DC-IP (OONI-стабильные DC2/DC4/DC5) — первый ответивший resPQ ⇒ works;
-// так один сменившийся/легший IP не даёт ложный «заблок». YouTube/Instagram: host = fallback-SNI
-// на душимом CDN (reachability, если byte-source не резолвится); sampleBytes/пороги — дефолтные.
+// так один сменившийся/легший IP не даёт ложный «заблок». YouTube/Instagram (v2): reachUrls =
+// ДВА лёгких официальных голоса разных контуров (web/API-tier + CDN-tier; все проверены вживую
+// 2026-07-12: 204/200/крошечные ответы, без consent/login-редиректов) — кворум решает
+// зелёный/красный (ChipLogic.h), server-driven через lists.chip_reach_urls_<key>;
+// host = fallback-SNI для серверных целей без пары голосов.
 inline QList<ServiceProbeConfig> defaultServiceProbeConfigs()
 {
     QList<ServiceProbeConfig> cfgs;
     cfgs.append({QStringLiteral("telegram"), ServiceProbeConfig::Mtproto,
                  QStringLiteral("149.154.167.51"), 443, 1500,
                  QStringList{QStringLiteral("149.154.167.91"), QStringLiteral("91.108.56.130")}});
-    cfgs.append({QStringLiteral("youtube"), ServiceProbeConfig::Goodput,
-                 QStringLiteral("redirector.googlevideo.com")});
-    cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Goodput,
-                 QStringLiteral("static.cdninstagram.com")});
+    {
+        ServiceProbeConfig yt;
+        yt.key = QStringLiteral("youtube");
+        yt.kind = ServiceProbeConfig::Goodput;
+        yt.host = QStringLiteral("redirector.googlevideo.com");
+        // Голос 1 — web/API-tier (204, 0 байт, consent не триггерит); голос 2 — видео-CDN-контур
+        // googlevideo (именно его душат/режут — RST здесь при живом вебе ⇒ потолок slow).
+        yt.reachUrls = QStringList{QStringLiteral("https://www.youtube.com/generate_204"),
+                                   QStringLiteral("https://redirector.googlevideo.com/generate_204")};
+        cfgs.append(yt);
+    }
+    {
+        ServiceProbeConfig ig;
+        ig.key = QStringLiteral("instagram");
+        ig.kind = ServiceProbeConfig::Goodput;
+        ig.host = QStringLiteral("static.cdninstagram.com");
+        // Голос 1 — API-домен нативного приложения (200, 15 байт, без auth; 4xx тоже = «жив»);
+        // голос 2 — web-tier favicon (200, ~2 КБ, без login-редиректа). HTML главной больше
+        // НЕ парсим (гео-A/B вёрстка/бот-детект — источник «вечно серого» чипа).
+        ig.reachUrls = QStringList{QStringLiteral("https://i.instagram.com/api/v1/si/fetch_headers/"),
+                                   QStringLiteral("https://www.instagram.com/favicon.ico")};
+        cfgs.append(ig);
+    }
     return cfgs;
 }
 

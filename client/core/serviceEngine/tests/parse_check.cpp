@@ -7,7 +7,6 @@
 #include "../Enrollment.h"
 #include "../GoodputProbe.h"
 #include "../HealthLoop.h"
-#include "../InstagramSource.h"
 #include "../MtprotoProbe.h"
 #include "../Selector.h"
 #include "../SignalQuality.h"
@@ -744,50 +743,11 @@ int main(int argc, char **argv)
         printf("youtubesource: OK (evergreen+key, player body, direct-url parse, cipher/off-path skip, ranged url)\n");
     }
 
-    // --- InstagramSource: парс публичного CDN-ассета из HTML (чистая логика) ---
-    {
-        using IG = InstagramSource;
+    // Instagram-парсер HTML и вердикт «источник мёртв» удалены в чипах v2 (2026-07-12):
+    // достижимость решает reachability-КВОРУМ лёгких эндпоинтов (ChipLogic::classifyReachVoice —
+    // та же семантика RST-без-байта=HardFail, таймаут=SoftFail; TDD tests/build_chip_logic.sh),
+    // HTML главной Instagram больше не парсим (гео-A/B вёрстка/бот-детект — источник флапа).
 
-        // 1) Достаём https://static.cdninstagram.com/....js из href/src.
-        const QByteArray html = R"(<html><head>
-            <link rel="preload" href="https://static.cdninstagram.com/rsrc.php/v3/yA/abc123.js" as="script"/>
-            <script src="https://www.instagram.com/local.js"></script></head></html>)";
-        const QString asset = IG::extractCdnAssetUrl(html);
-        bool assetOk = asset == QLatin1String("https://static.cdninstagram.com/rsrc.php/v3/yA/abc123.js");
-
-        // 2) Нет cdninstagram-ассета ⇒ пусто (раннер деградирует в reachability).
-        const QByteArray htmlNone = R"(<html><head><script src="/only/local.js"></script></head></html>)";
-        bool noneOk = IG::extractCdnAssetUrl(htmlNone).isEmpty();
-
-        printf("instagram: asset=%d none=%d\n", assetOk, noneOk);
-
-        // 3) Вердикт «источник мёртв» (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»,
-        //    общий решатель для IG и YT — GoodputProbe::decideDeadSource): homepage умерла
-        //    СОЕДИНИТЕЛЬНОЙ сетевой ошибкой (RST/refused, НЕ наш 6с-таймаут) без единого байта
-        //    и без HTTP-статуса — сервис недостижим ⇒ Blocked, а не деградация в reachability
-        //    CDN (та давала Unknown-серый при доступном static.cdninstagram.com).
-        using Out = GoodputProbe::DeadSourceOutcome;
-        bool deadOk = GoodputProbe::decideDeadSource(/*netError=*/true, /*timedOut=*/false,
-                                                     /*httpStatus=*/0, /*anyBytes=*/false)
-                      == Out::Blocked;
-        // Наш собственный таймаут-abort (медленный туннель, ни байта за 6с) неотличим от
-        // дропа — НЕ красим красным, деградация в reachability (ревью-находка A2).
-        bool slowOk = GoodputProbe::decideDeadSource(true, true, 0, false)
-                      == Out::FallbackReachability;
-        // Частичные байты / любой HTTP-статус (403 гео) / живая страница без ассета —
-        // НЕ вердикт цензуры: деградация в reachability (Unknown при живом CDN).
-        bool bytesOk = GoodputProbe::decideDeadSource(true, false, 0, true) == Out::FallbackReachability;
-        bool statusOk = GoodputProbe::decideDeadSource(true, false, 403, false) == Out::FallbackReachability;
-        bool aliveOk = GoodputProbe::decideDeadSource(false, false, 200, true) == Out::FallbackReachability;
-
-        printf("instagram: dead=%d slow=%d bytes=%d status=%d alive=%d\n",
-               deadOk, slowOk, bytesOk, statusOk, aliveOk);
-
-        bool igOk = assetOk && noneOk && deadOk && slowOk && bytesOk && statusOk && aliveOk;
-        if (!igOk) { fprintf(stderr, "FAIL: InstagramSource parse mismatch\n"); return 13; }
-        printf("instagramsource: OK (cdn asset extract, no-asset guard, dead-source verdict)\n");
-    }
-
-    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + instagram\n");
+    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube\n");
     return 0;
 }

@@ -1,21 +1,29 @@
 // AVPN serviceEngine — проба «работает ли конкретный сервис ЧЕРЕЗ эту ноду прямо сейчас». [IN-FORK / QtNetwork]
 //
-// Зачем: в РФ Telegram/YouTube чаще НЕ блокируют, а ДУШАТ по SNI/IP — reachability («200 OK») = ложно-зелёный.
-// Замер обязан идти С УСТРОЙСТВА через туннель (доступность = f(юзер,сеть,регион,нода,время); бэкенд её не
-// знает — см. memory tribe-real-signal-quality). Три вида проб — все меряют РЕАЛЬНУЮ работоспособность:
+// Зачем: в РФ Telegram/YouTube чаще НЕ блокируют, а ДУШАТ по SNI/IP — reachability одного URL = ложно-зелёный,
+// а одиночный goodput-сэмпл = флап. Замер обязан идти С УСТРОЙСТВА через туннель (доступность =
+// f(юзер,сеть,регион,нода,время); бэкенд её не знает — см. memory tribe-real-signal-quality).
+//
+// v2 (2026-07-12, анти-флап; решения — ChipLogic.h, ресёрч OONI ts-020/ts-019 + sing-box urltest):
 //   • Mtproto (Telegram): login-free handshake к seed-DC-IP — TCP→intermediate-тег→req_pq_multi→resPQ
 //     (MtprotoProbe). resPQ с нашим nonce ⇒ DC реально говорит по MTProto через туннель (сильнее TCP-connect).
-//   • Goodput (YouTube/Instagram): качаем ~128 КБ с РЕАЛЬНО-душимого CDN и меряем kbit/s (GoodputProbe):
-//     YouTube — InnerTube `player` (iOS-клиент ⇒ прямой url без cipher, YoutubeSource) → ranged-GET по
-//     SNI *.googlevideo.com; Instagram — homepage → ассет *.cdninstagram.com (InstagramSource) → ranged-GET.
-//     Троттл (RU ~128 кбит/с) ⇒ slow; норм ⇒ works; путь срезан ⇒ blocked. Fail-safe: резолв сломался/403 →
-//     reachability CDN (reachable ⇒ Unknown «не измерили», reset ⇒ Blocked) — НИКОГДА ложный works.
-//   • Https: TLS-reachability с реальным SNI (устаревшее для соцсетей — оставлено как деградация/для прочего).
+//   • Goodput (YouTube/Instagram) = ДВА СЛОЯ:
+//     1) reachability-КВОРУМ: два лёгких голоса разных контуров (web/API-tier + CDN-tier; вкомпилены в
+//        ServiceProbeTargets.h, server-driven через lists.chip_reach_urls_<key>). «Заблокировано» — только
+//        когда упали ОБА (жёстко или тихим дропом); один контур RST при живом втором ⇒ потолок slow.
+//     2) КАЧЕСТВО только уточняет works|slow при доказанной reachability: YouTube — InnerTube `player`
+//        (YoutubeSource) → ranged-GET по SNI *.googlevideo.com (реально-душимый путь) и kbit/s
+//        (GoodputProbe); Instagram — TTFB голосов. Провал качества (протухший InnerTube/403) больше
+//        НЕ красит чип серым/красным — reachability уже решила.
+//   • Https: TLS-reachability с реальным SNI (для серверных целей без пары голосов).
+// Гонки смены ноды: invalidate() поднимает поколение — результаты старой серии молча выбрасываются
+// (finish gen-гейт), продолжения цепочек (следующий seed/видео) не стартуют.
 //
 // АСИНХРОННО (анти-фриз §tribe-engine-net-async): сокеты/таймеры event-driven, БЕЗ nested QEventLoop.
-// Кэш результата per-нода и каденс (on-connect + по тапу, НЕ поллинг) — на стороне вызывающего (AvpnEngineQml).
+// Гистерезис показа, каденс (on-connect + self-heal + тап) и freshness — на стороне AvpnEngineQml.
 #pragma once
 
+#include "ChipLogic.h"
 #include "GoodputProbe.h"
 
 #include <QHostAddress>
@@ -23,6 +31,8 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+
+#include <functional>
 
 class QNetworkAccessManager;
 
@@ -48,6 +58,10 @@ struct ServiceProbeConfig {
                                      // (core.telegram.org/api/datacenter); правильный рефреш — help.getConfig (TODO).
     qint64           sampleBytes = 131072;  // Goodput: сколько байт качаем для замера (128 КБ — хватает и дёшево).
     GoodputThresholds goodput;              // Goodput: пороги works/slow/blocked (kbit/s).
+    QStringList      reachUrls;             // Goodput v2: 2 лёгких reachability-голоса разных контуров
+                                            // (web/API-tier + CDN-tier); server-driven через
+                                            // lists.chip_reach_urls_<key>, вкомпиленное — фолбэк.
+                                            // Пусто ⇒ одиночная деградация goodputFallback (host).
 };
 
 class ServiceProbe : public QObject {
@@ -61,39 +75,47 @@ public:
     // Запустить пробу всех сервисов (идемпотентно, пока серия в полёте). Результат — сигнал result()
     // на каждый сервис + allDone() в конце.
     void probeAll(int timeoutMs = 6000);
-    // Повторная проба одного сервиса по key (авто-ретрай Unknown; см. AvpnEngineQml result-handler).
+    // Повторная проба одного сервиса по key (авто-ретрай Unknown / подтверждение ухудшения гистерезиса).
     void probeOne(const QString &key, int timeoutMs = 6000);
     bool inFlight() const { return m_remaining > 0; }
+    // Смена ноды/обрыв: поднять поколение — результаты in-flight серии молча выбрасываются
+    // (гонка «вердикт старой ноды в чипе новой» — девайс-баг 2026-07-12), продолжения цепочек не стартуют.
+    void invalidate() { ++m_gen; m_remaining = 0; }
 
 signals:
     void result(const QString &key, int state /*ServiceState*/, int rttMs);
     void allDone();
 
 private:
-    void probeMtproto(const ServiceProbeConfig &c, int timeoutMs);
+    void startOne(const ServiceProbeConfig &c, int timeoutMs, int gen);
+    void probeMtproto(const ServiceProbeConfig &c, int timeoutMs, int gen);
     // Один seed-DC из списка: успех → finish(works/slow); провал → следующий seed; все провалились → finish(blocked).
-    void attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
+    void attemptMtprotoHost(int gen, const QString &key, const QStringList &hosts, int idx, int port,
                             int perHostMs, int slowMs);
-    void probeHttps(const ServiceProbeConfig &c, int timeoutMs);
+    void probeHttps(const ServiceProbeConfig &c, int timeoutMs, int gen);
 
-    // Goodput: качаем sampleBytes с реального byte-source на душимом CDN и классифицируем kbit/s.
-    void probeGoodput(const ServiceProbeConfig &c);
-    // allDead — все предыдущие попытки умерли соединительной ошибкой (GoodputProbe::decideDeadSource):
-    // исчерпали видео и allDead ⇒ www.youtube.com недостижим ⇒ Blocked (паритет с Instagram-вердиктом).
-    void resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx,
-                        bool allDead = true);
-    void resolveInstagram(const ServiceProbeConfig &c);
-    // Скачать N байт по готовому URL и померить скорость → finish(works/slow/blocked). rttMs слот = kbit/s.
-    void measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery);
-    // Fail-safe: byte-source не резолвится → проверить хотя бы TLS-достижимость CDN. reachable ⇒ Unknown
-    // (честно «не смогли измерить»), reset/timeout ⇒ Blocked. Никогда не выдаём ложный works.
-    void goodputFallback(const ServiceProbeConfig &c);
+    // Goodput v2: слой 1 — reachability-кворум двух голосов (ChipLogic.h); слой 2 — качество.
+    void probeGoodput(const ServiceProbeConfig &c, int gen);
+    void probeReachPair(const ServiceProbeConfig &c, const QStringList &urls, int gen);
+    // Один лёгкий reachability-голос: GET url, TTFB; done(outcome, rttMs) ровно один раз.
+    void runReachVoice(const QString &url, int timeoutMs, std::function<void(VoiceOutcome, int)> done);
+    // Качество YouTube при доказанной reachability: InnerTube → ranged-GET googlevideo → works|slow.
+    // Любой провал цепочки ⇒ works с потолком cap (reachability уже решила — серым/красным не красим).
+    void qualityYoutube(const ServiceProbeConfig &c, int cap, int quorumRtt,
+                        const QStringList &videoIds, int idx, int gen);
+    // Скачать N байт по готовому URL и померить kbit/s; вердикт = qMin(cap, refineReachable(classify)).
+    void measureGoodput(const ServiceProbeConfig &c, int cap, int quorumRtt, const QString &url,
+                        bool rangeAsQuery, int gen);
+    // Деградация для целей БЕЗ пары голосов (серверный goodput неизвестного сервиса): TLS-достижимость
+    // host. reachable ⇒ Unknown (честно «не измерили»), reset/timeout ⇒ Blocked.
+    void goodputFallback(const ServiceProbeConfig &c, int gen);
 
-    void finish(const QString &key, ServiceState st, int rttMs);
+    void finish(int gen, const QString &key, ServiceState st, int rttMs);
 
     QNetworkAccessManager    *m_nam = nullptr;
     QList<ServiceProbeConfig> m_cfgs;
     int                       m_remaining = 0;
+    int                       m_gen = 0; // поколение серии (гейт finish/цепочек после invalidate)
 };
 
 } // namespace avpn

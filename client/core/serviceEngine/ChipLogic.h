@@ -59,6 +59,19 @@ inline ReachQuorum reachQuorum2(VoiceOutcome a, int rttA, VoiceOutcome b, int rt
     return q;
 }
 
+// ── Потолок вердикта по кворуму ─────────────────────────────────────────────────────────────────
+// Оба голоса упали => 0 (blocked; тихий дроп-таймаут ОБОИХ — тоже блок: null-route без RST —
+// обычный способ блокировки). Живы, но один контур ЖЁСТКО срезан (RST при живом втором — напр.
+// видео-CDN мёртв при живом вебе) => максимум 1 (slow: сервис деградирован, но отвечает).
+// Мягкий фейл одного голоса при живом втором не наказываем => 2.
+// Финальный вердикт сервиса = qMin(reachCap(q), refineReachable(quality)).
+inline int reachCap(const ReachQuorum &q)
+{
+    if (!q.reachable)
+        return 0;
+    return q.anyHard ? 1 : 2;
+}
+
 // ── Уточнение качеством при доказанной reachability ─────────────────────────────────────────────
 // qualityState: ServiceState-int замера (goodput/TTFB) либо -1 «не измерилось».
 // Возвращает ТОЛЬКО 1 (slow) или 2 (works): reachability уже доказана, красный/серый запрещены.

@@ -1,6 +1,5 @@
 #include "ServiceProbe.h"
 
-#include "InstagramSource.h"
 #include "MtprotoProbe.h"
 #include "TuningStore.h"
 #include "YoutubeSource.h"
@@ -16,14 +15,20 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <memory>
+
 namespace {
 // Goodput качает до 128 КБ; при жёстком троттле (128 кбит/с) это ~8с ⇒ таймаут щедрее обычных проб.
-// Частично скачанное на таймауте всё равно классифицируется (медленно/мало ⇒ slow/blocked — честно).
+// Частично скачанное на таймауте всё равно классифицируется (медленно ⇒ slow — честно).
 constexpr int kGoodputTimeoutMs = 20000;
+// Лёгкий reachability-голос (generate_204/favicon/api): ответ приходит за сотни мс; 5с хватает
+// с запасом даже нагруженному туннелю. Server-tunable chip_reach_timeout_ms (кламп 1..30с).
+constexpr int kReachTimeoutMs = 5000;
 // InnerTube iOS-клиент: отдаёт ПРЯМОЙ videoplayback-url (без signature-cipher). Версия/UA/os ДОЛЖНЫ быть
 // свежими — YouTube отклоняет устаревший клиент («Precondition check failed» 400). Держать в актуале по
 // yt-dlp INNERTUBE_CLIENTS['ios']. Ключ НЕ нужен (и web-ключ ломает iOS-клиент). PoToken по политике
-// «required», но GVS-семпл 128 КБ по факту отдаётся; при ужесточении → measureGoodput деградирует в fallback.
+// «required», но GVS-семпл 128 КБ по факту отдаётся; при ужесточении → вердикт останется works по кворуму
+// (v2: провал качества больше НЕ красит чип — reachability уже решила).
 constexpr const char *kYtIosVersion   = "21.02.3";
 constexpr const char *kYtIosOsVersion = "18.3.2.22D82";
 constexpr const char *kYtIosUA        = "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)";
@@ -42,19 +47,14 @@ void ServiceProbe::probeAll(int timeoutMs)
     if (m_remaining > 0 || m_cfgs.isEmpty())
         return;
     m_remaining = m_cfgs.size();
-    for (const ServiceProbeConfig &c : m_cfgs) {
-        if (c.kind == ServiceProbeConfig::Mtproto)
-            probeMtproto(c, timeoutMs);
-        else if (c.kind == ServiceProbeConfig::Goodput)
-            probeGoodput(c);
-        else
-            probeHttps(c, timeoutMs);
-    }
+    const int gen = m_gen;
+    for (const ServiceProbeConfig &c : m_cfgs)
+        startOne(c, timeoutMs, gen);
 }
 
-// AVPN (анти-«вечно серый», 2026-07-03): повторная проба ОДНОГО сервиса — для авто-ретрая Unknown
-// (транзиентный провал резолва сразу после коннекта не должен оставлять чип серым до ручного тапа).
-// Тот же контракт, что probeAll: result(key) прилетит ровно один раз; идемпотентно пока серия в полёте.
+// AVPN (анти-«вечно серый», 2026-07-03; v2 — и подтверждение ухудшения гистерезиса): повторная
+// проба ОДНОГО сервиса. Тот же контракт, что probeAll: result(key) прилетит ровно один раз;
+// идемпотентно пока серия в полёте.
 void ServiceProbe::probeOne(const QString &key, int timeoutMs)
 {
     if (m_remaining > 0)
@@ -63,18 +63,27 @@ void ServiceProbe::probeOne(const QString &key, int timeoutMs)
         if (c.key != key)
             continue;
         m_remaining = 1;
-        if (c.kind == ServiceProbeConfig::Mtproto)
-            probeMtproto(c, timeoutMs);
-        else if (c.kind == ServiceProbeConfig::Goodput)
-            probeGoodput(c);
-        else
-            probeHttps(c, timeoutMs);
+        startOne(c, timeoutMs, m_gen);
         return;
     }
 }
 
-void ServiceProbe::finish(const QString &key, ServiceState st, int rttMs)
+void ServiceProbe::startOne(const ServiceProbeConfig &c, int timeoutMs, int gen)
 {
+    if (c.kind == ServiceProbeConfig::Mtproto)
+        probeMtproto(c, timeoutMs, gen);
+    else if (c.kind == ServiceProbeConfig::Goodput)
+        probeGoodput(c, gen);
+    else
+        probeHttps(c, timeoutMs, gen);
+}
+
+void ServiceProbe::finish(int gen, const QString &key, ServiceState st, int rttMs)
+{
+    // Гейт поколения (v2): результат серии, начатой ДО invalidate() (смена ноды/обрыв), молча
+    // выбрасывается — иначе вердикт старой ноды дописался бы в чипы новой (девайс-баг 2026-07-12).
+    if (gen != m_gen)
+        return;
     emit result(key, int(st), rttMs);
     if (--m_remaining <= 0) {
         m_remaining = 0;
@@ -84,7 +93,7 @@ void ServiceProbe::finish(const QString &key, ServiceState st, int rttMs)
 
 // Telegram: login-free MTProto handshake к seed-DC-IP через туннель. Пробуем seed-IP по очереди
 // (первый ответивший resPQ ⇒ works), чтобы один сменившийся/легший IP не давал ложный «заблок».
-void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
+void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs, int gen)
 {
     QStringList hosts;
     hosts << c.host;
@@ -92,14 +101,16 @@ void ServiceProbe::probeMtproto(const ServiceProbeConfig &c, int timeoutMs)
     // делим бюджет на seed'ы (мин. 1500мс на seed): худший случай (все молчат) ограничен timeoutMs·~.
     const int perHost = qMax(1500, timeoutMs / qMax(1, hosts.size()));
     const int slowMs = int(TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), double(c.slowMs)));
-    attemptMtprotoHost(c.key, hosts, 0, c.port, perHost, slowMs);
+    attemptMtprotoHost(gen, c.key, hosts, 0, c.port, perHost, slowMs);
 }
 
-void ServiceProbe::attemptMtprotoHost(const QString &key, const QStringList &hosts, int idx, int port,
-                                      int perHostMs, int slowMs)
+void ServiceProbe::attemptMtprotoHost(int gen, const QString &key, const QStringList &hosts, int idx,
+                                      int port, int perHostMs, int slowMs)
 {
+    if (gen != m_gen)
+        return; // серия инвалидирована (смена ноды) — цепочку seed'ов не продолжаем
     if (idx >= hosts.size()) {     // все seed'ы молчат/ответили мусором ⇒ заблокировано
-        finish(key, ServiceState::Blocked, -1);
+        finish(gen, key, ServiceState::Blocked, -1);
         return;
     }
 
@@ -123,17 +134,17 @@ void ServiceProbe::attemptMtprotoHost(const QString &key, const QStringList &hos
         delete clock; delete buf; delete done;
     });
     // Провал ЭТОГО seed'а → пробуем следующий (а не сразу «заблок»): один IP мог лечь/смениться.
-    auto fail = [this, key, hosts, idx, port, perHostMs, slowMs, sock, done]() {
+    auto fail = [this, gen, key, hosts, idx, port, perHostMs, slowMs, sock, done]() {
         if (*done) return;
         *done = true;
         sock->deleteLater();
-        attemptMtprotoHost(key, hosts, idx + 1, port, perHostMs, slowMs);
+        attemptMtprotoHost(gen, key, hosts, idx + 1, port, perHostMs, slowMs);
     };
-    auto ok = [this, key, slowMs, sock, done](int rtt) {
+    auto ok = [this, gen, key, slowMs, sock, done](int rtt) {
         if (*done) return;
         *done = true;
         sock->deleteLater();
-        finish(key, rtt > slowMs ? ServiceState::Slow : ServiceState::Works, rtt);
+        finish(gen, key, rtt > slowMs ? ServiceState::Slow : ServiceState::Works, rtt);
     };
 
     // Таймаут на ОДИН seed.
@@ -174,11 +185,10 @@ void ServiceProbe::attemptMtprotoHost(const QString &key, const QStringList &hos
     sock->connectToHost(hosts.at(idx), quint16(port));
 }
 
-// YouTube/прочие: TLS-complete с РЕАЛЬНЫМ SNI + TTFB. (Грубая reachability; точный троттл-детект
-// YouTube требует *.googlevideo.com SNI + резолва videoplayback — TODO, см. заголовок.)
-void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
+// Серверные цели без пары голосов: TLS-complete с РЕАЛЬНЫМ SNI + TTFB (грубая reachability).
+void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs, int gen)
 {
-    if (!m_nam) { finish(c.key, ServiceState::Unknown, -1); return; }
+    if (!m_nam) { finish(gen, c.key, ServiceState::Unknown, -1); return; }
 
     QUrl url;
     url.setScheme(QStringLiteral("https"));
@@ -201,13 +211,13 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
     timer->start(timeoutMs);
 
     // Единая точка классификации (works/slow/blocked). Идемпотентна по *done.
-    auto settle = [this, c, done](bool reachable, int rtt) {
+    auto settle = [this, c, gen, done](bool reachable, int rtt) {
         if (*done) return;
         *done = true;
         const int slowMs = int(TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"), double(c.slowMs)));
         ServiceState st = !reachable ? ServiceState::Blocked
                                      : (rtt > slowMs ? ServiceState::Slow : ServiceState::Works);
-        finish(c.key, st, reachable ? rtt : -1);
+        finish(gen, c.key, st, reachable ? rtt : -1);
     };
 
     // КЛЮЧЕВОЙ позитивный сигнал (фикс ложного «заблок» у YouTube/Instagram): TLS-handshake к РЕАЛЬНОМУ
@@ -235,32 +245,134 @@ void ServiceProbe::probeHttps(const ServiceProbeConfig &c, int timeoutMs)
     });
 }
 
-// ─── Goodput: РЕАЛЬНЫЙ замер kbit/s на душимом пути (сильный сигнал, как MTProto у Telegram) ──────────
-// reachability («TLS собрался») врёт зелёным при DPI-троттлинге. Правда — сколько байт/с реально идёт
-// через туннель на CDN сервиса: качаем sampleBytes и классифицируем скорость (GoodputProbe). // AVPN
+// ─── Goodput v2: reachability-КВОРУМ решает зелёный/красный, качество уточняет жёлтый ────────────
+// Одиночный goodput-сэмпл (InnerTube/HTML-парсинг + 128 КБ) флапал: пограничная скорость, протухание
+// клиент-версии, consent/бот-детект, нагрузка ноды. Теперь вердикт достижимости — кворум ДВУХ лёгких
+// официальных эндпоинтов разных контуров (generate_204/favicon/api; вкомпилено в ServiceProbeTargets.h,
+// server-driven через lists.chip_reach_urls_<key>), а тяжёлый замер только уточняет works|slow. // AVPN
 
-void ServiceProbe::probeGoodput(const ServiceProbeConfig &c)
+void ServiceProbe::probeGoodput(const ServiceProbeConfig &c, int gen)
 {
-    if (!m_nam) { finish(c.key, ServiceState::Unknown, -1); return; }
-    if (c.key == QLatin1String("youtube"))
-        resolveYoutube(c, YoutubeSource::evergreenVideoIds(), 0);
-    else if (c.key == QLatin1String("instagram"))
-        resolveInstagram(c);
+    if (!m_nam) { finish(gen, c.key, ServiceState::Unknown, -1); return; }
+    const QStringList urls =
+            TuningStore::listOr(QStringLiteral("chip_reach_urls_") + c.key, c.reachUrls);
+    if (!urls.isEmpty())
+        probeReachPair(c, urls, gen);
     else
-        goodputFallback(c); // неизвестный сервис goodput ⇒ хотя бы reachability
+        goodputFallback(c, gen); // серверная цель без пары голосов ⇒ хотя бы reachability host
 }
 
-// YouTube: InnerTube `player` (iOS-клиент ⇒ прямой url без cipher) для evergreen-видео по очереди.
-// Нашли googlevideo url → меряем; ни одно видео не резолвится → fail-safe reachability.
-void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList &videoIds, int idx,
-                                  bool allDead)
+void ServiceProbe::probeReachPair(const ServiceProbeConfig &c, const QStringList &urls, int gen)
 {
+    const int tmo = qBound(1000, int(TuningStore::numberOr(QStringLiteral("chip_reach_timeout_ms"),
+                                                           double(kReachTimeoutMs))), 30000);
+    struct PairState {
+        int left = 2;
+        VoiceOutcome a = VoiceOutcome::SoftFail;
+        VoiceOutcome b = VoiceOutcome::SoftFail;
+        int rttA = -1;
+        int rttB = -1;
+    };
+    auto ps = std::make_shared<PairState>();
+
+    auto settle = [this, c, gen, ps]() {
+        if (gen != m_gen)
+            return; // серия инвалидирована — качество не стартуем, вердикт не шлём
+        const ReachQuorum q = reachQuorum2(ps->a, ps->rttA, ps->b, ps->rttB);
+        const int cap = reachCap(q);
+        if (cap == 0) { // оба голоса упали (жёстко или тихим дропом) ⇒ заблокировано
+            finish(gen, c.key, ServiceState::Blocked, -1);
+            return;
+        }
+        if (c.key == QLatin1String("youtube")) {
+            // Качество YouTube — реальный душимый путь googlevideo (троттл виден только там).
+            qualityYoutube(c, cap, q.rttMs, YoutubeSource::evergreenVideoIds(), 0, gen);
+            return;
+        }
+        // Прочие (instagram и будущие): качество = TTFB живых голосов против порога slow.
+        const int slowMs = int(TuningStore::numberOr(QStringLiteral("svc_probe_slow_ms"),
+                                                     double(c.slowMs)));
+        const int quality = (q.rttMs >= 0 && q.rttMs > slowMs) ? 1 : 2;
+        finish(gen, c.key, ServiceState(qMin(cap, refineReachable(quality))), q.rttMs);
+    };
+
+    // Один URL (оператор прислал без пары): второй «голос» остаётся дефолтным SoftFail —
+    // семантика кворума сохраняется сама (живой единственный голос ⇒ достижим; его фейл ⇒ оба
+    // голоса нежилые ⇒ blocked), лишний сетевой запрос не гоняем.
+    if (urls.size() < 2)
+        ps->left = 1;
+    runReachVoice(urls.at(0), tmo, [ps, settle](VoiceOutcome o, int rtt) {
+        ps->a = o; ps->rttA = rtt;
+        if (--ps->left == 0) settle();
+    });
+    if (urls.size() > 1) {
+        runReachVoice(urls.at(1), tmo, [ps, settle](VoiceOutcome o, int rtt) {
+            ps->b = o; ps->rttB = rtt;
+            if (--ps->left == 0) settle();
+        });
+    }
+}
+
+// Один лёгкий reachability-голос: GET url с коротким таймаутом; done(outcome, ttfbMs) ровно один раз.
+// Любой валидный HTTP-статус (204/400/405/429) = Alive; RST/refused без байта = HardFail;
+// наш таймаут-abort/тишина = SoftFail (ChipLogic::classifyReachVoice).
+void ServiceProbe::runReachVoice(const QString &url, int timeoutMs,
+                                 std::function<void(VoiceOutcome, int)> done)
+{
+    QNetworkRequest req{QUrl(url)};
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    req.setRawHeader("Cache-Control", "no-cache");
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    auto *clock = new QElapsedTimer();
+    auto *ttfb = new qint64(-1);
+    auto *timedOut = new bool(false);
+    auto *gotBytes = new bool(false);
+    clock->start();
+    QNetworkReply *reply = m_nam->get(req);
+
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply, timedOut]() {
+        *timedOut = true;
+        reply->abort();
+    });
+    timer->start(timeoutMs);
+
+    connect(reply, &QNetworkReply::metaDataChanged, reply, [clock, ttfb]() {
+        if (*ttfb < 0) *ttfb = clock->elapsed();
+    });
+    connect(reply, &QNetworkReply::readyRead, reply, [reply, clock, ttfb, gotBytes]() {
+        if (*ttfb < 0) *ttfb = clock->elapsed();
+        *gotBytes = true;
+        reply->readAll(); // тело не нужно (favicon/крошечный JSON) — только факт ответа
+    });
+    connect(reply, &QNetworkReply::finished, reply,
+            [reply, clock, ttfb, timedOut, gotBytes, done]() {
+                const bool netError = (reply->error() != QNetworkReply::NoError);
+                const bool tOut = *timedOut
+                                  || (reply->error() == QNetworkReply::OperationCanceledError);
+                const int httpStatus =
+                        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                const bool anySign = *gotBytes || *ttfb >= 0;
+                const VoiceOutcome o = classifyReachVoice(netError, tOut, httpStatus, anySign);
+                const int rtt = (*ttfb >= 0) ? int(*ttfb) : -1;
+                delete clock; delete ttfb; delete timedOut; delete gotBytes;
+                reply->deleteLater();
+                done(o, rtt);
+            });
+}
+
+// Качество YouTube: InnerTube `player` (iOS-клиент ⇒ прямой url без cipher) для evergreen-видео по
+// очереди → ranged-GET по реально-душимому googlevideo. ЛЮБОЙ провал цепочки ⇒ works с потолком cap:
+// reachability-кворум уже доказал «жив», протухший InnerTube/403 — не вердикт цензуры (анти-флап v2).
+void ServiceProbe::qualityYoutube(const ServiceProbeConfig &c, int cap, int quorumRtt,
+                                  const QStringList &videoIds, int idx, int gen)
+{
+    if (gen != m_gen)
+        return;
     if (idx >= videoIds.size()) {
-        // AVPN (паритет с Instagram-вердиктом, ревью 2026-07-10): ВСЕ попытки InnerTube умерли
-        // соединительной ошибкой (RST/refused без байта и статуса; наш 6с-таймаут не считается)
-        // ⇒ www.youtube.com недостижим ⇒ честный Blocked, а не вечный серый через fallback.
-        if (allDead && !videoIds.isEmpty()) { finish(c.key, ServiceState::Blocked, -1); return; }
-        goodputFallback(c);
+        finish(gen, c.key, ServiceState(qMin(cap, 2)), quorumRtt);
         return;
     }
 
@@ -304,98 +416,28 @@ void ServiceProbe::resolveYoutube(const ServiceProbeConfig &c, const QStringList
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     timer->start(6000); // резолв URL — лёгкий JSON, короткий таймаут
 
-    connect(reply, &QNetworkReply::finished, reply, [this, c, videoIds, idx, allDead, reply, done]() {
-        if (*done) return;
-        *done = true;
-        const QByteArray raw = reply->readAll();
-        const QString url = (reply->error() == QNetworkReply::NoError)
-                                ? YoutubeSource::extractVideoplaybackUrl(raw)
-                                : QString();
-        // AVPN (паритет с Instagram-вердиктом): считаем попытку «мёртвой», только если она
-        // умерла соединительной ошибкой без байта и статуса (наш 6с-таймаут — не вердикт).
-        const bool netError = (reply->error() != QNetworkReply::NoError);
-        const bool timedOut = (reply->error() == QNetworkReply::OperationCanceledError);
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const bool attemptDead =
-                GoodputProbe::decideDeadSource(netError, timedOut, httpStatus, !raw.isEmpty())
-                == GoodputProbe::DeadSourceOutcome::Blocked;
-        reply->deleteLater();
-        delete done;
-        if (url.isEmpty())
-            resolveYoutube(c, videoIds, idx + 1, allDead && attemptDead); // следующее видео
-        else
-            measureGoodput(c, url, /*rangeAsQuery=*/true); // googlevideo уважает &range=
-    });
+    connect(reply, &QNetworkReply::finished, reply,
+            [this, c, cap, quorumRtt, videoIds, idx, gen, reply, done]() {
+                if (*done) return;
+                *done = true;
+                const QByteArray raw = reply->readAll();
+                const QString url = (reply->error() == QNetworkReply::NoError)
+                                        ? YoutubeSource::extractVideoplaybackUrl(raw)
+                                        : QString();
+                reply->deleteLater();
+                delete done;
+                if (url.isEmpty())
+                    qualityYoutube(c, cap, quorumRtt, videoIds, idx + 1, gen); // следующее видео
+                else
+                    measureGoodput(c, cap, quorumRtt, url, /*rangeAsQuery=*/true, gen); // googlevideo уважает &range=
+            });
 }
 
-// Instagram: публичная homepage (без логина) → вытащить sizeable ассет на *.cdninstagram.com → мерим.
-void ServiceProbe::resolveInstagram(const ServiceProbeConfig &c)
-{
-    QUrl url(QStringLiteral("https://www.instagram.com/"));
-    QNetworkRequest req(url);
-    req.setRawHeader("User-Agent",
-                     QByteArrayLiteral("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-                                       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"));
-    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-
-    auto *done = new bool(false);
-    auto *buf = new QByteArray();
-    auto *found = new QString();
-    QNetworkReply *reply = m_nam->get(req);
-    auto *timer = new QTimer(reply);
-    timer->setSingleShot(true);
-    connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
-    timer->start(6000);
-
-    // ИНКРЕМЕНТАЛЬНЫЙ поиск ассета (фикс «серый Instagram», 2026-07-03): homepage ~600 КБ, а первый
-    // cdninstagram-ассет (.css в <head>) появляется в первых десятках КБ. Раньше ждали ВЕСЬ body —
-    // через нагруженный туннель 600 КБ часто не влезали в 6с → abort → Unknown. Теперь ищем по мере
-    // прихода и рвём соединение сразу после находки. Гард «за матчем есть ещё байт» отсекает URL,
-    // обрезанный границей чанка (нет терминатора — ждём следующий чанк).
-    connect(reply, &QNetworkReply::readyRead, reply, [reply, buf, found]() {
-        if (!found->isEmpty())
-            return;
-        buf->append(reply->readAll());
-        const QString a = InstagramSource::extractCdnAssetUrl(*buf);
-        if (!a.isEmpty() && buf->indexOf(a.toUtf8()) + a.toUtf8().size() < buf->size()) {
-            *found = a;
-            reply->abort(); // хвост HTML не нужен — экономим туннель и укладываемся в таймаут
-        }
-    });
-    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, done, buf, found]() {
-        if (*done) return;
-        *done = true;
-        QString asset = *found;
-        if (asset.isEmpty() && reply->error() == QNetworkReply::NoError) {
-            buf->append(reply->readAll());
-            asset = InstagramSource::extractCdnAssetUrl(*buf); // полный body — терминатор не требуем
-        }
-        // AVPN (девайс-баг 2026-07-10 «IG вечно серый на RU-ноде»): исход «ассет не добыт» решает
-        // чистый GoodputProbe::decideDeadSource (покрыт parse_check): homepage умерла
-        // СОЕДИНИТЕЛЬНОЙ ошибкой (RST/refused — НЕ наш 6с-таймаут) без единого байта и без
-        // HTTP-статуса ⇒ сам сервис недостижим ⇒ честный Blocked. Таймаут-abort/частичные байты/
-        // любой HTTP-статус — деградация в reachability CDN, красным не красим (ревью A2).
-        const bool netError = (reply->error() != QNetworkReply::NoError);
-        const bool timedOut = (reply->error() == QNetworkReply::OperationCanceledError);
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const bool anyBytes = !buf->isEmpty();
-        reply->deleteLater();
-        delete done; delete buf; delete found;
-        if (asset.isEmpty()) {
-            if (GoodputProbe::decideDeadSource(netError, timedOut, httpStatus, anyBytes)
-                == GoodputProbe::DeadSourceOutcome::Blocked)
-                finish(c.key, ServiceState::Blocked, -1); // homepage мертва ⇒ вердикт, не серый
-            else
-                goodputFallback(c); // не нашли CDN-ассет в живой странице → reachability(Unknown)/blocked
-        } else {
-            measureGoodput(c, asset, /*rangeAsQuery=*/false); // CDN уважает Range-заголовок
-        }
-    });
-}
-
-// Скачать sampleBytes по готовому URL, померить скорость окна данных (firstByte→конец) → classify().
-void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &url, bool rangeAsQuery)
+// Скачать sampleBytes по готовому URL, померить скорость окна данных (firstByte→конец).
+// Вердикт v2 = qMin(cap, refineReachable(classify)): качество даёт ТОЛЬКО works|slow — красный/серый
+// при доказанной reachability запрещены (провал замера — не вердикт цензуры).
+void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, int cap, int quorumRtt,
+                                  const QString &url, bool rangeAsQuery, int gen)
 {
     const qint64 N = qint64(TuningStore::numberOr(QStringLiteral("svc_probe_sample_bytes"),
                                                   double(c.sampleBytes)));
@@ -432,40 +474,38 @@ void ServiceProbe::measureGoodput(const ServiceProbeConfig &c, const QString &ur
         *bytes += reply->readAll().size();
         if (*bytes >= N) reply->abort(); // набрали семпл — стоп (не тянем всё видео)
     });
-    connect(reply, &QNetworkReply::finished, reply, [this, c, reply, clock, firstByte, bytes, done]() {
-        if (*done) return;
-        *done = true;
-        const qint64 dur = (*firstByte >= 0) ? (clock->elapsed() - *firstByte) : clock->elapsed();
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const qint64 got = *bytes;
-        delete clock; delete firstByte; delete bytes; delete done;
-        reply->deleteLater();
+    connect(reply, &QNetworkReply::finished, reply,
+            [this, c, cap, quorumRtt, gen, reply, clock, firstByte, bytes, done]() {
+                if (*done) return;
+                *done = true;
+                const qint64 dur = (*firstByte >= 0) ? (clock->elapsed() - *firstByte) : clock->elapsed();
+                const qint64 got = *bytes;
+                delete clock; delete firstByte; delete bytes; delete done;
+                reply->deleteLater();
 
-        // Один снапшот тюнинга на оба чтения (внешний гейт и classify()) — иначе серверное
-        // ПОНИЖЕНИЕ goodput_min_bytes тихо не действует: внешний гейт всё ещё сверяется
-        // с вкомпиленным c.goodput.minBytes (32768), и диапазон [new, 32768) никогда не доходит
-        // до classify(), даже честно набрав достаточно байт.
-        const GoodputThresholds th = GoodputThresholds::fromTuning();
-        if (got >= th.minBytes) {
-            // Честный замер: набрали достаточно байт ⇒ классифицируем скорость.
-            const int state = GoodputProbe::classify(got, dur, th);
-            finish(c.key, static_cast<ServiceState>(state), int(GoodputProbe::kbitPerSec(got, dur)));
-        } else if (httpStatus == 200 || httpStatus == 206) {
-            // Сервер ОТДАВАЛ данные (2xx/partial), но их пришло мало ⇒ реально задушено/рано закрыто ⇒ blocked.
-            finish(c.key, ServiceState::Blocked, got > 0 ? int(GoodputProbe::kbitPerSec(got, dur)) : -1);
-        } else {
-            // Не-2xx (403 PoToken/auth) или сетевая ошибка без данных — это НЕ вердикт цензуры.
-            // Деградируем в reachability CDN: reachable ⇒ Unknown (честно «не смогли измерить»), иначе Blocked.
-            goodputFallback(c);
-        }
-    });
+                const GoodputThresholds th = GoodputThresholds::fromTuning();
+                if (got >= th.minBytes) {
+                    // Честный замер ⇒ классифицируем скорость; blocked-класс при живом кворуме = slow.
+                    const int refined = refineReachable(GoodputProbe::classify(got, dur, th));
+                    finish(gen, c.key, ServiceState(qMin(cap, refined)),
+                           int(GoodputProbe::kbitPerSec(got, dur)));
+                } else if (got > 0) {
+                    // Данные шли, но еле-еле (не добрали даже minBytes за весь таймаут) ⇒ троттл ⇒ slow.
+                    finish(gen, c.key, ServiceState(qMin(cap, 1)),
+                           int(GoodputProbe::kbitPerSec(got, dur)));
+                } else {
+                    // Ни байта семпла (403 PoToken/редирект/обрыв) — качество не измерилось;
+                    // reachability уже доказана кворумом ⇒ works с потолком cap, НЕ серый/красный.
+                    finish(gen, c.key, ServiceState(qMin(cap, 2)), quorumRtt);
+                }
+            });
 }
 
-// Fail-safe: byte-source не резолвится → хотя бы TLS-достижимость душимого CDN. reachable ⇒ Unknown
-// (честно «не смогли измерить скорость»), reset/timeout ⇒ Blocked. Никогда не ложный works.
-void ServiceProbe::goodputFallback(const ServiceProbeConfig &c)
+// Деградация для серверных goodput-целей БЕЗ пары голосов: TLS-достижимость host.
+// reachable ⇒ Unknown (честно «не смогли измерить»), reset/timeout ⇒ Blocked. Никогда не ложный works.
+void ServiceProbe::goodputFallback(const ServiceProbeConfig &c, int gen)
 {
-    if (!m_nam || c.host.isEmpty()) { finish(c.key, ServiceState::Unknown, -1); return; }
+    if (!m_nam || c.host.isEmpty()) { finish(gen, c.key, ServiceState::Unknown, -1); return; }
 
     QUrl url;
     url.setScheme(QStringLiteral("https"));
@@ -482,10 +522,10 @@ void ServiceProbe::goodputFallback(const ServiceProbeConfig &c)
     connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     timer->start(6000);
 
-    auto settle = [this, c, done](bool reachable) {
+    auto settle = [this, c, gen, done](bool reachable) {
         if (*done) return;
         *done = true;
-        finish(c.key, reachable ? ServiceState::Unknown : ServiceState::Blocked, -1);
+        finish(gen, c.key, reachable ? ServiceState::Unknown : ServiceState::Blocked, -1);
     };
     connect(reply, &QNetworkReply::encrypted, reply, [settle]() { settle(true); });
     connect(reply, &QNetworkReply::finished, reply, [reply, done, settle]() {

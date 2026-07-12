@@ -1,7 +1,9 @@
-// AVPN: ЖИВАЯ проверка goodput-проб ServiceProbe (сеть! не для CI) — youtube/instagram резолв+замер
-// с текущей машины. Цель: убедиться, что резолв НЕ падает в Unknown на здоровой сети (фикс 2026-07-03:
-// InnerTube на www.youtube.com; инкрементальный Instagram-резолв). Запуск: build_svcprobe_live.sh.
+// AVPN: ЖИВАЯ проверка проб ServiceProbe v2 (сеть! не для CI) — вкомпиленные дефолт-цели
+// (telegram MTProto + youtube/instagram кворум+качество) с текущей машины. Цель: на здоровой сети
+// ни один сервис не UNKNOWN и не BLOCKED (кворум официальных лёгких эндпоинтов обязан отвечать).
+// Запуск: build_svcprobe_live.sh.
 #include "../ServiceProbe.h"
+#include "../ServiceProbeTargets.h"
 
 #include <QCoreApplication>
 #include <QNetworkAccessManager>
@@ -15,29 +17,23 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     QNetworkAccessManager nam;
 
-    QList<ServiceProbeConfig> cfgs;
-    cfgs.append({QStringLiteral("youtube"), ServiceProbeConfig::Goodput,
-                 QStringLiteral("redirector.googlevideo.com")});
-    cfgs.append({QStringLiteral("instagram"), ServiceProbeConfig::Goodput,
-                 QStringLiteral("static.cdninstagram.com")});
-
     ServiceProbe probe(&nam);
-    probe.setServices(cfgs);
+    probe.setServices(defaultServiceProbeConfigs());
 
-    int unknowns = 0;
+    int bad = 0;
     QObject::connect(&probe, &ServiceProbe::result,
-                     [&unknowns](const QString &key, int state, int rttMs) {
+                     [&bad](const QString &key, int state, int rttMs) {
                          static const char *st[] = {"BLOCKED", "SLOW", "WORKS"};
-                         std::printf("%-10s -> %s (metric=%d kbit/s)\n", key.toUtf8().constData(),
+                         std::printf("%-10s -> %s (metric=%d)\n", key.toUtf8().constData(),
                                      (state >= 0 && state <= 2) ? st[state] : "UNKNOWN(-1)", rttMs);
-                         if (state == -1)
-                             ++unknowns;
+                         if (state <= 0) // на здоровой сети UNKNOWN/BLOCKED = регресс кворума
+                             ++bad;
                      });
-    QObject::connect(&probe, &ServiceProbe::allDone, [&app, &unknowns]() {
-        std::printf(unknowns ? ">>> svcprobe_live: %d UNKNOWN (резолв не отработал)\n"
-                             : ">>> svcprobe_live: все сервисы ИЗМЕРЕНЫ (без Unknown)\n",
-                    unknowns);
-        app.exit(unknowns ? 1 : 0);
+    QObject::connect(&probe, &ServiceProbe::allDone, [&app, &bad]() {
+        std::printf(bad ? ">>> svcprobe_live: %d сервис(ов) UNKNOWN/BLOCKED на здоровой сети\n"
+                        : ">>> svcprobe_live: все сервисы живы (кворум v2 отработал)\n",
+                    bad);
+        app.exit(bad ? 1 : 0);
     });
 
     QTimer::singleShot(0, [&probe]() { probe.probeAll(); });

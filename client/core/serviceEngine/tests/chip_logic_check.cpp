@@ -68,6 +68,24 @@ int main()
         CHECK(q.reachable && q.rttMs == -1, "Alive без rtt -> reachable, rtt честно неизвестен");
     }
 
+    // ── reachCap: потолок вердикта по кворуму. Оба голоса упали -> 0; живы, но один контур
+    // ЖЁСТКО срезан (RST при живом втором — видео-CDN мёртв при живом вебе) -> максимум 1 (slow);
+    // оба живы/мягкие фейлы при живом -> 2.
+    CHECK(reachCap(reachQuorum2(VoiceOutcome::HardFail, -1, VoiceOutcome::HardFail, -1)) == 0,
+          "оба упали -> потолок blocked");
+    CHECK(reachCap(reachQuorum2(VoiceOutcome::SoftFail, -1, VoiceOutcome::SoftFail, -1)) == 0,
+          "оба таймаута -> потолок blocked (тихий дроп — тоже блок)");
+    CHECK(reachCap(reachQuorum2(VoiceOutcome::Alive, 100, VoiceOutcome::HardFail, -1)) == 1,
+          "web жив + CDN RST -> потолок slow (деградация, не красный и не зелёный)");
+    CHECK(reachCap(reachQuorum2(VoiceOutcome::Alive, 100, VoiceOutcome::SoftFail, -1)) == 2,
+          "web жив + CDN таймаут -> потолок works (мягкий фейл не наказываем)");
+    CHECK(reachCap(reachQuorum2(VoiceOutcome::Alive, 100, VoiceOutcome::Alive, 200)) == 2,
+          "оба живы -> потолок works");
+    // Финальный вердикт = min(потолок, уточнение качеством).
+    CHECK(qMin(reachCap(reachQuorum2(VoiceOutcome::Alive, 100, VoiceOutcome::Alive, 200)),
+               refineReachable(1)) == 1,
+          "оба живы + троттлинг по goodput -> slow");
+
     // ── refineReachable: качество ТОЛЬКО уточняет works/slow, НИКОГДА не даёт красный/серый
     // при доказанной reachability (провал goodput-стадии — не вердикт цензуры).
     CHECK(refineReachable(2) == 2, "quality works -> works");
