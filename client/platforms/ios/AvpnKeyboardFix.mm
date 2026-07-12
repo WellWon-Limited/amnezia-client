@@ -272,23 +272,11 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(NSNotification *note) {
                 Avpn_resetKeyboardScroll(); // заодно подменяет слой (avpnNeuterLayer)
-                avpnStartKbTracking();
-                // Нативная схема «layout один раз» (2026-07-12): imeHeight (ЦЕЛЬ, лайаут)
-                // коммитится когда скачок НЕВИДИМ — под развёрнутой клавиатурой (DidShow)
-                // или в момент старта скрытия (WillHide, композер дальше везёт трансформ).
-                // Анимацию между коммитами везут GPU-трансформы чата по imeShift.
-                if (!g_avpnKbTracker || !Avpn_qtFrameHooked()) {
-                    avpnReportKeyboardFrame(note); // нет живого пути — старый скачок к цели
-                } else if ([note.name isEqualToString:UIKeyboardDidShowNotification]) {
-                    avpnReportKeyboardFrame(note);
-                } else if ([note.name isEqualToString:UIKeyboardWillHideNotification]) {
-                    Avpn_onKeyboardFrame(0);
-                } else if ([note.name isEqualToString:UIKeyboardDidChangeFrameNotification]) {
-                    // смена высоты УЖЕ показанной клавиатуры (emoji и т.п.) — гейт внутри
-                    const double h = avpnEndFrameHeight(note);
-                    if (h >= 0)
-                        Avpn_onKeyboardFrameSteady(h);
-                }
+                avpnStartKbTracking();      // замер траектории (NSLog) + пробуждение кадров Qt
+                // Цель (imeHeight) — сразу со старта анимации (willShow/willHide):
+                // margin анимирует QML-Behavior (PageStart). Схема «коммит на DidShow +
+                // GPU-сдвиги по imeShift» откачена 2026-07-12 — артефакты залипания.
+                avpnReportKeyboardFrame(note);
             }];
         }
     });
