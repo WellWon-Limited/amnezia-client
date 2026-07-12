@@ -61,6 +61,11 @@ class AvpnEngineQml : public QObject {
     // снапшота (degraded + пустой пул), без липкого стейта (ревью: sticky-флаг давал ложную CTA
     // платящему юзеру при транзиентно пустом пуле со status=active — все ноды в дренаже).
     Q_PROPERTY(bool subMissing READ subMissing NOTIFY changed)
+    // AVPN (sub-grace): движок САМ погасил туннель — «подписка истекла и грейс (+N ч,
+    // numbers.subscription_grace_hours) прошёл» (enforceSubscriptionGrace из onTick). UI отличает
+    // это от ручного выключения (подпись «Доступ приостановлен…» вместо «Отключено»).
+    // Сбрасывается при следующем явном start().
+    Q_PROPERTY(bool subEnforcedStop READ subEnforcedStop NOTIFY changed)
     // AVPN: JWT подписки — для авторизованного редиректа в кабинет (кнопка «Обновить ключ»).
     Q_PROPERTY(QString authToken READ authToken NOTIFY changed)
     // AVPN: реальные серверы (вместо хардкода). currentNode = {region,endpoint,ip,connected,hasNode};
@@ -187,6 +192,8 @@ public:
     // (все ноды в дренаже у подписанного юзера) сюда НЕ попадает. Без липкого члена — правда
     // пересчитывается из текущего снапшота на каждом changed().
     bool subMissing() const;
+    // AVPN (sub-grace): см. Q_PROPERTY subEnforcedStop выше.
+    bool subEnforcedStop() const { return m_subEnforcedStop; }
     QString authToken() const;  // AVPN: JWT из защищённого стора (Enrollment::loadToken)
 
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
@@ -594,6 +601,9 @@ signals:
     // AVPN backend-first (2026-07-10): control plane переключился на живой edge (edge-walk) —
     // сателлиты (TribeSupportChat) следуют за новым хостом вместо застревания на мёртвом.
     void apiBaseChanged(const QString &base);
+    // AVPN (sub-grace): движок инициировал управляемое отключение «подписка истекла и грейс
+    // прошёл» (см. enforceSubscriptionGrace). Парный флаг — Q_PROPERTY subEnforcedStop.
+    void subscriptionEnforcedStop();
 
 private slots:
     void onTick();
@@ -614,6 +624,9 @@ private:
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
+    // AVPN (sub-grace): из onTick при connected — «подписка истекла и грейс прошёл» → управляемый
+    // stop() (тот же путь, что пользовательский: намерение OFF + reconcile) + subscriptionEnforcedStop().
+    void enforceSubscriptionGrace();
 
     // AVPN: холодный bootstrap подписки С РЕТРАЕМ, полностью АСИНХРОННЫЙ (armTimeout, БЕЗ вложенного
     // QEventLoop на GUI-потоке — тот же паттерн, что refreshDevices/refreshAccount). Цепочка:
@@ -845,6 +858,10 @@ private:
                                                                    // состояния (в отличие от m_opInFlight) — иначе
                                                                    // reconcile внутри цикла застекал бы 2-й loop.exec
     int                          m_startAttempts = 0;              // подряд неудачных connect — анти-зацикливание
+    // AVPN (sub-grace): флаг для UI «движок сам погасил туннель по истечению подписки» (Q_PROPERTY
+    // subEnforcedStop) + гард однократности, пока идёт остановка. Оба сбрасывает явный start().
+    bool                         m_subEnforcedStop = false;
+    bool                         m_graceStopInFlight = false;
     enum class Op { None, Starting, Stopping };
     Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)
     QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
