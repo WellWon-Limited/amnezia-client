@@ -3,7 +3,9 @@
 // Зачем: reachability («TLS собрался») = ложно-зелёный при DPI-троттлинге (RU душит YouTube ~128 кбит/с
 // по SNI *.googlevideo.com — TLS проходит мгновенно, а видео не грузится). Правдивый сигнал — СКОЛЬКО
 // реальных байт в секунду идёт через туннель на CDN сервиса. Раннер (ServiceProbe.cpp) качает N байт
-// с реального byte-source (YoutubeSource/InstagramSource) и зовёт classify(). Здесь — ЧИСТАЯ арифметика.
+// с реального byte-source (YoutubeSource) и зовёт classify(). Здесь — ЧИСТАЯ арифметика.
+// v2 (2026-07-12): classify только УТОЧНЯЕТ вердикт (works|slow через ChipLogic::refineReachable) —
+// зелёный/красный решает reachability-кворум (ChipLogic.h).
 #pragma once
 
 #include "TuningStore.h"
@@ -40,23 +42,6 @@ public:
         if (elapsedMs <= 0)
             return 0.0;
         return double(bytes) * 8.0 / double(elapsedMs);
-    }
-
-    // Вердикт «byte-source мёртв» для стадии резолва (девайс-баг 2026-07-10 «IG вечно серый на
-    // RU-ноде»; общий для resolveInstagram и resolveYoutube — ServiceProbe.cpp): страница/API
-    // умерли СОЕДИНИТЕЛЬНОЙ сетевой ошибкой (RST/refused — НЕ наш таймаут-abort) без единого
-    // байта и без HTTP-статуса ⇒ сам сервис недостижим ⇒ Blocked. Всё остальное — деградация в
-    // reachability CDN (Unknown при живом CDN), красным не красим: наш 6с-таймаут (медленный
-    // туннель до первого байта), частичные байты, любой HTTP-статус (403 гео ≠ сетевой вердикт),
-    // «страница пришла, ассет не нашли» (сменилась вёрстка).
-    enum class DeadSourceOutcome { FallbackReachability, Blocked };
-
-    static DeadSourceOutcome decideDeadSource(bool netError, bool timedOut, int httpStatus,
-                                              bool anyBytes)
-    {
-        return (netError && !timedOut && httpStatus <= 0 && !anyBytes)
-                   ? DeadSourceOutcome::Blocked
-                   : DeadSourceOutcome::FallbackReachability;
     }
 
     // Классификация в ServiceState-int: 0 blocked, 1 slow, 2 works.
