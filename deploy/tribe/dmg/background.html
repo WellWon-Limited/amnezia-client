@@ -2,7 +2,7 @@
 <!-- Фон DMG Tribe VPN (референс — инсталлер WellWon OS: глиф + wordmark сверху,
      стрелка app → Applications). Рендер: gen-background.sh (Chrome headless 1x/2x → tiff).
      Логика координат связана с deploy/tribe/dmg/settings.py:
-       окно 660x400 pt, иконки (170,263) и (490,263), icon_size 112.
+       окно 660x460 pt, иконки (170,300) и (490,300), icon_size 112.
      Цвета — ТОЛЬКО токены Theme.qml (bg900/bg800, accent #7CA2D0, text1/2/3). -->
 <html lang="ru">
 <head>
@@ -12,7 +12,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 660px; height: 400px; overflow: hidden; }
+  html, body { width: 660px; height: 460px; overflow: hidden; }
   body {
     position: relative;
     font-family: "Manrope", -apple-system, "SF Pro Display", system-ui, sans-serif;
@@ -46,9 +46,9 @@
     color: #94A3B8;
   }
 
-  /* стрелка между слотами иконок: центры (170,263) и (490,263), icon_size 112 —
+  /* стрелка между слотами иконок: центры (170,300) и (490,300), icon_size 112 —
      стрелка в зазоре 240..420, стиль Lucide (stroke, без заливки) */
-  .arrow { position: absolute; top: 245px; left: 244px; }
+  .arrow { position: absolute; top: 282px; left: 244px; }
 </style>
 </head>
 <body>
