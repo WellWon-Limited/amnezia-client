@@ -102,5 +102,66 @@ int main(int argc, char **argv)
         avpn::TuningStore::reset();
     }
 
+    // --- localizedOr (Task 3, 2026-07-12): язык-суффиксные строки с цепочкой фолбэков
+    // <key>_<lang> -> <key>_en -> <key> -> def, контракт "пусто = фолбэк" на КАЖДОМ уровне ---
+    {
+        avpn::TuningStore::reset();
+
+        // (е1) отсутствие всех уровней => def
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: пустой store => def");
+
+        // (е2) точный lang-ключ побеждает над _en и базовым
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QStringLiteral("Заявка отправлена")},
+            {"cta_incident_en", QStringLiteral("Report sent")},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Заявка отправлена"),
+              "localizedOr: точный lang-ключ побеждает");
+        // нормализация: "ru_RU" => "ru" (split('_').first().toLower())
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru_RU", "def") == QStringLiteral("Заявка отправлена"),
+              "localizedOr: lang нормализуется (ru_RU => ru)");
+
+        // (е3) нет ключа под нужный lang => фолбэк на _en
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "fr", "def") == QStringLiteral("Report sent"),
+              "localizedOr: нет _fr => фолбэк на _en");
+
+        // (е4) нет ни lang, ни _en => фолбэк на базовый ключ
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "fr", "def") == QStringLiteral("Sent"),
+              "localizedOr: нет lang и _en => фолбэк на базовый ключ");
+
+        // (е5) пустое значение НА КАЖДОМ уровне проваливается ниже (контракт "пусто = фолбэк")
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QString()},
+            {"cta_incident", QString()},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: пустые значения на всех уровнях => def");
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QStringLiteral("Report sent")},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Report sent"),
+              "localizedOr: пустой lang-уровень проваливается на _en");
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QString()},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Sent"),
+              "localizedOr: пустые lang и _en проваливаются на базовый ключ");
+
+        // (е6) reset() очищает
+        avpn::TuningStore::reset();
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: после reset() => def");
+    }
+
     return g_fail ? 1 : 0;
 }

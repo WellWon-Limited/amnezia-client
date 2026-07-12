@@ -45,6 +45,7 @@ public:
     // вкомпиленный default пустым значением (list/string), только заменить его непустым.
     // Все читатели (ServiceProbe/YoutubeSource/…) обязаны звать эти методы напрямую, БЕЗ
     // локальных guard'ов/дублей поверх (единственное место с этой семантикой — здесь).
+    // Этому же контракту следует localizedOr() ниже — на каждом уровне цепочки фолбэков.
     static QStringList listOr(const QString &key, const QStringList &def)
     {
         QMutexLocker l(&mutex());
@@ -58,6 +59,34 @@ public:
         const auto &s = stringsRef();
         const auto it = s.constFind(key);
         return (it != s.constEnd() && !it.value().isEmpty()) ? it.value() : def;
+    }
+    // localizedOr: язык-суффиксные строки (напр. "cta_incident_ru") для server-driven текстов.
+    // Store статический и не знает текущего языка приложения — вызывающий передаёт lang явно.
+    // Цепочка фолбэков: strings["<key>_<lang>"] -> strings["<key>_en"] -> strings["<key>"] -> def.
+    // lang нормализуется: lang.split('_').first().toLower() ("ru_RU" => "ru"). Контракт
+    // «пусто = фолбэк» (см. коммент выше у stringOr/listOr) действует НА КАЖДОМ уровне цепочки —
+    // пустое значение под конкретным ключом трактуется как отсутствующее и проваливается ниже.
+    static QString localizedOr(const QString &key, const QString &lang, const QString &def)
+    {
+        const QString norm = lang.split(QLatin1Char('_')).first().toLower();
+        QMutexLocker l(&mutex());
+        const auto &s = stringsRef();
+        auto lookup = [&s](const QString &k) -> QString {
+            const auto it = s.constFind(k);
+            return (it != s.constEnd() && !it.value().isEmpty()) ? it.value() : QString();
+        };
+        if (!norm.isEmpty()) {
+            const QString v = lookup(key + QLatin1Char('_') + norm);
+            if (!v.isEmpty())
+                return v;
+        }
+        const QString ven = lookup(key + QStringLiteral("_en"));
+        if (!ven.isEmpty())
+            return ven;
+        const QString vbase = lookup(key);
+        if (!vbase.isEmpty())
+            return vbase;
+        return def;
     }
     static void reset() { set({}, {}, {}, {}); }
 
