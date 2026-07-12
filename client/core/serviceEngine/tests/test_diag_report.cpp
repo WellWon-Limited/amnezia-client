@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <cstdio>
+#include <cstring> // strlen — явный include (раньше доезжал транзитивно)
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { if (cond) printf("OK   %s\n", msg); \

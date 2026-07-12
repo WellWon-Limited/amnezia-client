@@ -39,9 +39,16 @@ inline bool isRuNode(const SubscriptionNode &n)
 // из ЛЮБОГО выбора (auto, failover, ротация, ручной pin) БЕЗ manual_only-фолбэка «оставить как
 // есть»: если поддерживаемых нод нет, выбор честно пуст (штатная ветка «нет нод»).
 // Пустой proto = легаси-тело без поля = awg.
+// Строковая перегрузка — для мест, где нода уже сконвертирована из SubscriptionNode
+// (QVariantMap-пул фасада: очередь админ-свипа, nodePool() для QML).
+inline bool isSupportedProto(const QString &proto)
+{
+    return proto.isEmpty() || proto == QLatin1String("awg");
+}
+
 inline bool isSupportedProtoNode(const SubscriptionNode &n)
 {
-    return n.proto.isEmpty() || n.proto == QLatin1String("awg");
+    return isSupportedProto(n.proto);
 }
 
 // «Только ручной pin» — честный флаг контракта nodes[].manual_only (openapi 0.6.1,

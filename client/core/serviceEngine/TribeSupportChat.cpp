@@ -756,7 +756,11 @@ void TribeSupportChat::sendDiagReport(const QString &reportText)
         return;
     }
     if (bytes.size() > effLogMaxBytes()) {
-        emit sendFailed(tr("Диагностика больше %1 МБ").arg(effLogMaxBytes() / (1024 * 1024)));
+        // Лимит < 1 МиБ при целочисленном делении давал «больше 0 МБ» — такие показываем в КБ.
+        const qint64 lim = effLogMaxBytes();
+        emit sendFailed(lim >= 1024 * 1024
+                            ? tr("Диагностика больше %1 МБ").arg(lim / (1024 * 1024))
+                            : tr("Диагностика больше %1 КБ").arg(lim / 1024));
         return;
     }
 

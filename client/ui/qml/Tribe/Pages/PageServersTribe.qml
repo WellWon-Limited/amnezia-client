@@ -52,6 +52,10 @@ PageType {
         for (let i = 0; i < pool.length; ++i) {
             const n = pool[i]
             if (!n || n.alive !== true) continue
+            // Task 10 (форвард-совместимость proto): ноды неподдерживаемых протоколов (xray, ...)
+            // непригодны для pin — скипаем, чтобы не стать «best» строки страны (тап = фейл).
+            // Страна, где ВСЕ ноды такие, честно не показывается вовсе (byCc[cc] не создаётся).
+            if (n.proto && n.proto !== "awg") continue
             const cc = String(n.countryCode || "??").toUpperCase()
             if (!byCc[cc]) byCc[cc] = []
             byCc[cc].push(n)

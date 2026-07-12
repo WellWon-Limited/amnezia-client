@@ -486,8 +486,10 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     }
     // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
     // manual_only) — коннект к ней невозможен, честная ошибка вместо вечного Connecting.
+    // Строка ТЕХНИЧЕСКАЯ (лог/тесты); человеческий текст для тоста — на границе фасада
+    // (AvpnEngineQml::humanPinError, финал bff-3), маппится по стабильному префиксу.
     if (!isSupportedProtoNode(*found)) {
-        error = QStringLiteral("node %1: unsupported proto '%2'").arg(nodeId, found->proto);
+        error = QStringLiteral("unsupported_proto: node %1 proto '%2'").arg(nodeId, found->proto);
         return false;
     }
     m_pinnedNodeId = nodeId;
