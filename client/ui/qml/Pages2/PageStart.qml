@@ -40,17 +40,16 @@ PageType {
             || s.indexOf("PageOnboardingTribe.qml") !== -1
     }
 
-    // AVPN (клавиатура): активна = высота IME > 0 ЛИБО поле ввода текущей страницы в фокусе
-    // (страница публикует property inputFocused). Фокус-срез убирает двухфазный дёрг iOS:
-    // навбар скрывается СРАЗУ по тапу в поле, до анимации клавиатуры (жалоба 2026-07-11
-    // «поднимается вместе с меню, потом исчезает»). Qt.inputMethod.visible в связке с
-    // imeHeight — страховка от «застрявшего» imeHeight (меню пропадало после «назад»).
+    // AVPN (клавиатура, схема «layout один раз» 2026-07-12): imeHeight = ЦЕЛЬ, коммитится
+    // нативным слоем в НЕВИДИМЫЕ моменты (iOS: DidShow — навбар и перестройка уже накрыты
+    // развёрнутой клавиатурой; WillHide — дальше композер везёт GPU-трансформ чата по
+    // imeShift). Анимацию между коммитами лайаут НЕ видит — только трансформы страницы.
+    // Qt.inputMethod.visible — страховка от «застрявшего» imeHeight (меню пропадало).
     // Вся клавиатурная схема — ТОЛЬКО сенсорные платформы: на десктопе клавиатура
-    // физическая, экран не делит — фокус в поле НЕ должен прятать навбар (PLATFORM-SCOPING).
+    // физическая, экран не делит (PLATFORM-SCOPING).
     readonly property bool kbPlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
-    readonly property bool kbActive: kbPlatform &&
-        ((PageController.imeHeight > 0 && Qt.inputMethod.visible)
-         || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true))
+    readonly property bool kbActive: kbPlatform
+        && PageController.imeHeight > 0 && Qt.inputMethod.visible
 
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
