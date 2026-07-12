@@ -515,6 +515,15 @@ public:
     // QML шлёт clicked, затем read.
     Q_INVOKABLE void ackAnnouncement(int id, const QString &event, const QString &buttonId = QString());
     Q_INVOKABLE bool announcementRead(int id) const; // локальный дубль серверного read_at
+    // AVPN (announce-quiet): онбординг завершён («Приступим») — движок пишет отметку времени
+    // (AvpnAnnounce/onboardDoneAt, синхронный QSettings — грабля 500мс QML-Settings) для
+    // «тихого окна» попапов. Идемпотентно: повторный вызов НЕ сдвигает отметку.
+    Q_INVOKABLE void markOnboardingDone();
+    // AVPN (announce-quiet): true = popup-объявления сейчас молчат (N минут после онбординга,
+    // numbers.announce_onboarding_quiet_min, кап 7 суток; kill-switch
+    // features.announce_onboarding_quiet — false выключает окно целиком). Глушится ТОЛЬКО
+    // автопоказ попапа в PageStart.maybeShowAnnouncement — бейдж/лента/пуши живут.
+    Q_INVOKABLE bool announcementsQuietNow() const;
 
     // AVPN (оплата): «Управлять подпиской» — минт одноразовой ссылки авто-логина в web-кабинет
     // (POST /v1/cabinet/web-link, Bearer = authToken()). АСИНХРОННО (armTimeout, без nested loop).
