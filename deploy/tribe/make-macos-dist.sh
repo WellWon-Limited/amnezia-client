@@ -85,12 +85,15 @@ if [ "$STAGE" = notarize ]; then
   xcrun stapler staple "$APP"
 fi
 
-echo "=== 8. dmg (из ЧИСТОГО staging — НЕ create-dmg: он путал наш app со stale в dist/) ==="
+echo "=== 8. dmg (фирменный layout через dmgbuild; staging чистый — НЕ create-dmg: он путал наш app со stale в dist/) ==="
+# Оформление (фон/иконки/стрелка) — deploy/tribe/dmg/{settings.py,background.tiff};
+# менять layout ТОЛЬКО здесь, ДО codesign dmg: после нотаризации образ трогать нельзя.
+python3 -c "import dmgbuild" 2>/dev/null || { echo "нет dmgbuild: pip3 install --user --break-system-packages dmgbuild"; exit 1; }
 mkdir -p "$DIST"; rm -rf "$DMG" "$DIST/Tribe VPN.app"
 DMGROOT="$(mktemp -d)/dmg"; mkdir -p "$DMGROOT"
 cp -R "$APP" "$DMGROOT/Tribe VPN.app"          # переименовываем копию для красивого drag-install
-ln -s /Applications "$DMGROOT/Applications"
-hdiutil create -volname "Tribe VPN" -srcfolder "$DMGROOT" -format UDZO -ov "$DMG"
+python3 -m dmgbuild -s "$REPO/deploy/tribe/dmg/settings.py" \
+  -D app="$DMGROOT/Tribe VPN.app" "Tribe VPN" "$DMG"
 rm -rf "$(dirname "$DMGROOT")"
 codesign --force --timestamp --sign "$DEVID" "$DMG"
 
