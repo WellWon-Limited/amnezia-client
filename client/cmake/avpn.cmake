@@ -82,6 +82,8 @@ list(APPEND HEADERS
     ${AVPN_SE}/BypassListLkg.h
     ${AVPN_SE}/BypassListService.h
     ${AVPN_SE}/TribeHaptics.h
+    ${AVPN_SE}/WhitelistVerdict.h
+    ${AVPN_SE}/WhitelistDetector.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -108,6 +110,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/ConfigService.cpp
     ${AVPN_SE}/BypassListService.cpp
     ${AVPN_SE}/TribeHaptics.cpp
+    ${AVPN_SE}/WhitelistDetector.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
