@@ -6,7 +6,8 @@ import QtQuick.Shapes
 import ".."   // Theme
 
 // AVPN: чипы «работает ли сервис через эту ноду» — узнаваемый лого + цветной статус-дот.
-// Модель — TribeEngine.serviceStatus: [{key,label,state,rttMs}], state: -1 неизв / 0 заблок / 1 медленно / 2 работает.
+// Модель — TribeEngine.serviceStatus: [{key,label,state,rttMs,stale}], state: -1 неизв / 0 заблок / 1 медленно / 2 работает;
+// stale=true — вердикт прошлой ноды/до транзиента (чип приглушается до свежего результата).
 // Замер идёт С УСТРОЙСТВА через туннель (ServiceProbe.cpp). Тап по чипу → повторная проба.
 // Статус-цвета — ТОКЕНЫ Theme (connected/warning/danger/text3). Цвета ЛОГО — фирменные (бренд-исключение
 // из правила «только токены», как сценические детали Connect: иначе лого нераспознаваемо). UI-DESIGN.md §3.
@@ -40,6 +41,11 @@ Row {
             required property var modelData
             readonly property string key: modelData ? (modelData.key || "") : ""
             readonly property int st: modelData && modelData.state !== undefined ? modelData.state : -1
+            // v2 (анти-мигание): на транзиенте туннеля движок НЕ гасит вердикт в серый, а помечает
+            // его stale — держим последний известный цвет приглушённым до свежего результата новой ноды.
+            readonly property bool stale: modelData && modelData.stale === true
+            opacity: stale ? 0.45 : 1
+            Behavior on opacity { NumberAnimation { duration: Theme.motion.fast } }
             height: 32
             width: chips.chipW           // равная доля ширины — гарантирует одну строку // AVPN
             radius: Theme.radius.pill

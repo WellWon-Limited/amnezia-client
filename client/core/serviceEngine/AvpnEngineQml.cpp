@@ -310,29 +310,49 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         rebuildServiceChips();
         connect(m_svcProbe, &ServiceProbe::result, this,
                 [this](const QString &key, int state, int rttMs) {
-                    // rttMs для goodput-сервисов (youtube/instagram) несёт kbit/s, для telegram — RTT в мс.
+                    // rttMs для goodput-сервисов несёт метрику качества (kbit/s или TTFB), для telegram — RTT мс.
                     static const char *stName[] = {"blocked", "slow", "works"};
-                    qInfo("[AVPN svc] %s state=%s metric=%d",
-                          key.toUtf8().constData(),
-                          (state >= 0 && state <= 2) ? stName[state] : "unknown", rttMs);
+                    auto nameOf = [](int s) { return (s >= 0 && s <= 2) ? stName[s] : "unknown"; };
+                    // AVPN чипы v2 (2026-07-12, анти-флап): сырой вердикт НЕ пишется в UI напрямую —
+                    // через гистерезис (ChipLogic::chipHystStep): ухудшение показывается только после
+                    // chip_confirm_n согласных прогонов ПОДРЯД (между ними — быстрая пере-проба ниже),
+                    // восстановление — с первого успешного, unknown не понижает известное.
+                    const int confirmN = qBound(1, int(avpn::TuningStore::numberOr(
+                            QStringLiteral("chip_confirm_n"), 2.0)), 5);
+                    const avpn::ChipHystStep stp =
+                            avpn::chipHystStep(m_chipHyst.value(key), state, confirmN);
+                    m_chipHyst.insert(key, stp.next);
+                    qInfo("[AVPN svc] %s raw=%s shown=%s metric=%d%s",
+                          key.toUtf8().constData(), nameOf(state), nameOf(stp.next.shown), rttMs,
+                          stp.wantConfirm ? " (confirm pending)" : "");
                     for (int i = 0; i < m_serviceStatus.size(); ++i) {
                         QVariantMap m = m_serviceStatus.at(i).toMap();
                         if (m.value(QStringLiteral("key")).toString() == key) {
-                            m[QStringLiteral("state")] = state;
+                            m[QStringLiteral("state")] = stp.next.shown;
                             m[QStringLiteral("rttMs")] = rttMs;
+                            m[QStringLiteral("stale")] = false; // свежий вердикт ЭТОЙ ноды
                             m_serviceStatus[i] = m;
                             break;
                         }
                     }
                     emit serviceStatusChanged();
+                    // Быстрое подтверждение ухудшения (вместо ожидания 3-мин self-heal): пере-проба
+                    // одного сервиса через chip_confirm_ms. Бюджет 3 на серию — защита от шторма
+                    // «ухудшился→отскочил→ухудшился» (сброс бюджета в probeServices).
+                    if (stp.wantConfirm && m_chipConfirms.value(key, 0) < 3) {
+                        m_chipConfirms.insert(key, m_chipConfirms.value(key, 0) + 1);
+                        const int confirmMs = qBound(1000, int(avpn::TuningStore::numberOr(
+                                QStringLiteral("chip_confirm_ms"), 8000.0)), 600000);
+                        QTimer::singleShot(confirmMs, this, [this, key]() {
+                            if (m_svcProbe && this->state() == QLatin1String("connected"))
+                                m_svcProbe->probeOne(key);
+                        });
+                    }
                     // AVPN (анти-«вечно серый», 2026-07-03): Unknown (state=-1) = «не смогли измерить»
-                    // (транзиент сразу после коннекта: маршруты/DNS не осели, туннель нагружен) — раньше
-                    // серая точка висела до ручного тапа, т.к. проба одноразовая. Один авто-ретрай через
-                    // 20с (per-key, per-connect: m_svcRetried сбрасывается в probeServices). Slow/works
-                    // НЕ ретраим — честные замеры. Blocked (state=0) тоже перепроверяем ОДИН раз (ревью
-                    // 2026-07-10): сразу после коннекта соединительная смерть неотличима от блокировки
-                    // (dead-source вердикты IG/YT) — без ретрая ложный красный жил бы до 3-мин self-heal.
-                    if ((state == -1 || state == 0) && !m_svcRetried.contains(key)) {
+                    // (транзиент сразу после коннекта: маршруты/DNS не осели) — один авто-ретрай через
+                    // 20с (per-key, per-connect: m_svcRetried сбрасывается в probeServices). Blocked
+                    // сюда больше не входит — его перепроверяет confirm-цикл гистерезиса выше.
+                    if (state == -1 && !m_svcRetried.contains(key)) {
                         m_svcRetried.insert(key);
                         // Server-driven (backend-first, Task 3): svc_probe_retry_ms, фолбэк 20с (прежнее).
                         // AVPN backend-first (final review R-3): клампим — 0/минус ретраил бы мгновенно
@@ -480,6 +500,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             });
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readRequested,
             this, &AvpnEngineQml::markNotificationsRead);
+    // AVPN (read per-элемент): открыта деталь уведомления → пометить на сервере ТОЛЬКО его.
+    connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readItemRequested,
+            this, &AvpnEngineQml::markNotificationReadById);
     // AVPN (P-ANN): пуш «объявление» → немедленный рефреш списка (попап всплывает сразу).
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::announcementPushReceived,
             this, &AvpnEngineQml::refreshAnnouncements);
@@ -755,6 +778,7 @@ void AvpnEngineQml::rebuildServiceChips()
             m[QStringLiteral("label")] = labelOf(c.key);
             m[QStringLiteral("state")] = -1;
             m[QStringLiteral("rttMs")] = -1;
+            m[QStringLiteral("stale")] = false; // v2: приглушение QML читает этот флаг
             next.append(m);
         }
     }
@@ -976,8 +1000,14 @@ void AvpnEngineQml::probeServices()
     // поллинг (батарея).
     rebuildServiceChips();
     m_svcRetried.clear(); // новая серия → каждый сервис снова имеет право на один авто-ретрай Unknown
-    if (m_svcProbe && state() == QLatin1String("connected"))
+    m_chipConfirms.clear(); // и на свежий бюджет confirm-переппроб гистерезиса (v2)
+    if (m_svcProbe && state() == QLatin1String("connected")) {
+        // Инвалидация перед стартом (v2): застрявшая in-flight серия (напр. долгий goodput при
+        // смене ноды) не блокирует новую и не дописывает старые вердикты. Гистерезис НЕ сбрасываем —
+        // self-heal каждые 3 мин обязан проходить через него (иначе гистерезис бессмыслен).
+        m_svcProbe->invalidate();
         m_svcProbe->probeAll();
+    }
 }
 
 // AVPN (панель администратора): контекст замера. Пишем ФАКТЫ конфигурации из QSettings (не метки!) —
@@ -2362,18 +2392,25 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         m_liveFailStreak = 0;
         emit liveQualityChanged();
 
-        // AVPN (чипы доступности): обрыв/смена ноды → статусы сервисов больше не актуальны → «неизвестно».
-        bool anyKnown = false;
+        // AVPN чипы v2 (2026-07-12): обрыв/смена ноды → НЕ гасим чипы в серый (источник «то цветные,
+        // то серые» на каждом транзиенте iOS Reconnecting), а помечаем последний вердикт stale —
+        // QML приглушает чип до первого свежего результата новой ноды. In-flight серию инвалидируем
+        // (вердикт старой ноды не должен дописаться в чипы новой), гистерезис сбрасываем (первый
+        // вердикт новой ноды принимается сразу — нода могла смениться, старая история не сравнима).
+        if (m_svcProbe)
+            m_svcProbe->invalidate();
+        m_chipHyst.clear();
+        m_chipConfirms.clear();
+        bool anyFresh = false;
         for (int i = 0; i < m_serviceStatus.size(); ++i) {
             QVariantMap m = m_serviceStatus.at(i).toMap();
-            if (m.value(QStringLiteral("state")).toInt() != -1) {
-                m[QStringLiteral("state")] = -1;
-                m[QStringLiteral("rttMs")] = -1;
+            if (!m.value(QStringLiteral("stale"), false).toBool()) {
+                m[QStringLiteral("stale")] = true;
                 m_serviceStatus[i] = m;
-                anyKnown = true;
+                anyFresh = true;
             }
         }
-        if (anyKnown)
+        if (anyFresh)
             emit serviceStatusChanged();
     }
 
@@ -4148,6 +4185,29 @@ void AvpnEngineQml::markNotificationsRead()
     connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
 }
 
+// AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id]} — пометить прочитанным ОДНО
+// уведомление (бэк декрементит unread_count по факту). Вызывается по readItemRequested моста
+// (открыта детальная страница). АСИНХРОННО, тихо: офлайн-провал не страшен — локальный read уже
+// сохранён, серверный флаг догонит следующий mark (лента с сервера хуже не станет).
+void AvpnEngineQml::markNotificationReadById(qlonglong id)
+{
+    const QString auth = authToken();
+    if (!m_nam || auth.isEmpty() || id <= 0)
+        return;
+
+    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/notifications/read"))};
+    req.setRawHeader(QByteArrayLiteral("Authorization"),
+                     QByteArrayLiteral("Bearer ") + auth.toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+
+    const QByteArray body =
+        QJsonDocument(QJsonObject{{QStringLiteral("ids"), QJsonArray{static_cast<double>(id)}}})
+            .toJson(QJsonDocument::Compact);
+    QNetworkReply *reply = m_nam->post(req, body);
+    armTimeout(reply);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
 // AVPN (центр уведомлений, серверная история): GET /v1/notifications?limit=50 → мост setServerItems.
 // См. коммент в .h (фикс «строка в БД есть, центр пуст» — история доезжает и без доставленного пуша).
 void AvpnEngineQml::refreshNotifications()
@@ -4176,6 +4236,8 @@ void AvpnEngineQml::refreshNotifications()
             if (title.isEmpty() && body.isEmpty())
                 continue;
             QVariantMap item;
+            // Серверный id строки — ключ поэлементного mark-read (markItemRead в мосте).
+            item[QStringLiteral("id")] = static_cast<qlonglong>(o.value(QStringLiteral("id")).toDouble());
             item[QStringLiteral("title")] = title;
             item[QStringLiteral("body")] = body;
             // Формат времени как у локальных пушей (HH:mm); не-сегодня — с датой.

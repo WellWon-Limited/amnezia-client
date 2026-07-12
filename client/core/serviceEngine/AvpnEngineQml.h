@@ -464,6 +464,9 @@ public:
     // Bearer). Обнуляет серверный счётчик непрочитанных → следующий пуш придёт с низким aps.badge.
     // Связан с AvpnPushBridge::readRequested (QML зовёт AvpnPush.markAllRead()). АСИНХРОННО.
     Q_INVOKABLE void markNotificationsRead();
+    // AVPN (read per-элемент): POST /v1/notifications/read {"ids":[id]} — пометить прочитанным одно
+    // уведомление (открыта детальная страница). Связан с AvpnPushBridge::readItemRequested. АСИНХРОННО.
+    void markNotificationReadById(qlonglong id);
     // AVPN (центр уведомлений, серверная история): GET /v1/notifications?limit=50 (Bearer) →
     // AvpnPushBridge::setServerItems (замещение локальной ленты). Зовётся QML при открытии центра
     // (баг 2026-07-10: строка type=announcement была в БД, но пуш не дошёл → центр пуст; теперь
@@ -696,6 +699,12 @@ private:
     // rebuildServiceChips(); ctor-дефолт (telegram/youtube/instagram) либо замещён applyRemoteProbeTargets.
     QList<ServiceProbeConfig>    m_svcCfgsAll;
     QSet<QString>                m_svcRetried;        // ключи, уже получившие авто-ретрай Unknown (сброс на probeServices)
+    // AVPN чипы v2 (2026-07-12, анти-флап): гистерезис показа per-key (ChipLogic::chipHystStep —
+    // ухудшение после N подряд + быстрая пере-проба, восстановление сразу) + бюджет confirm-переппроб
+    // на серию. Сбрасываются на транзиенте туннеля (нода могла смениться — первый вердикт новой ноды
+    // принимается сразу) и НЕ сбрасываются на self-heal (иначе гистерезис бессмыслен).
+    QHash<QString, avpn::ChipHyst> m_chipHyst;
+    QHash<QString, int>          m_chipConfirms;      // key → потрачено confirm-переппроб этой серии
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
