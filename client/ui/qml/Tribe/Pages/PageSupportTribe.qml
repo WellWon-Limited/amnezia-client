@@ -26,6 +26,10 @@ PageType {
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
     // ID аккаунта в шапке (тап = копия): оператору поддержки нужен для поиска юзера.
     readonly property bool hasEngine: typeof TribeEngine !== "undefined"
+    // AVPN (diag, Task 5 bff-3): отправка диагностики доступна (kill-switch features.support_diag,
+    // default TRUE). false → пункт меню скрыт, «+» открывает пикер напрямую (поведение как раньше).
+    readonly property bool diagEnabled: root.hasChat && root.hasEngine
+                                        && TribeEngine.supportDiagEnabled === true
     readonly property string accountId: hasEngine && TribeEngine.account
                                         ? ("" + (TribeEngine.account.account_id || "")) : ""
 
@@ -55,6 +59,24 @@ PageType {
         Haptic.play("light") // AVPN (haptics): подтверждение отправки
         TribeSupport.sendText(txt)
         input.clear()
+        list.stick = true
+        list.positionViewAtEnd()
+    }
+
+    // выбор медиа: iOS — нативный PHPicker (фотоплёнка); прочие платформы — FileDialog
+    function pickMedia() {
+        if (root.hasChat && TribeSupport.pickMediaNative())
+            return
+        mediaDialog.open()
+    }
+
+    // AVPN (diag, Task 5 bff-3): отправить диагностику в тред (вызов ТОЛЬКО из diagConfirm —
+    // пользователь видел, что уйдёт). Kill-switch продублирован и в C++ (sendDiagReport no-op).
+    function sendDiag() {
+        if (!root.hasChat || !root.hasEngine)
+            return
+        Haptic.play("light")
+        TribeSupport.sendDiagReport(TribeEngine.buildDiagReport())
         list.stick = true
         list.positionViewAtEnd()
     }
@@ -241,7 +263,9 @@ PageType {
                 // AVPN (store-flow D): действия server-driven карточки. open_url — внешний браузер
                 // (персональная ссылка из ответа поддержки); compose_send — отправить заготовленный
                 // сервером текст ОТ ИМЕНИ пользователя (тап = действие юзера; кнопка Т-3 карточки
-                // «Помочь с продлением»). Неизвестный action — no-op (forward-совместимость).
+                // «Помочь с продлением»); send_diag (Task 5 bff-3) — оператор запросил диагностику:
+                // тот же confirm-оверлей, что у пункта меню (без подтверждения ничего не уходит).
+                // Неизвестный action — no-op (forward-совместимость).
                 onCardButtonClicked: function(btn) {
                     if (!btn || !root.hasChat) return
                     if (btn.action === "open_url" && (btn.url || "") !== "")
@@ -250,6 +274,11 @@ PageType {
                         TribeSupport.sendText(btn.send)
                         list.stick = true
                         list.positionViewAtEnd()
+                    } else if (btn.action === "send_diag") {
+                        if (root.diagEnabled)
+                            diagConfirm.open()
+                        else
+                            PageController.showErrorMessage(qsTr("Функция временно недоступна"))
                     }
                 }
                 onRetryClicked: if (root.hasChat) TribeSupport.retryMessage(modelData.id)
@@ -364,11 +393,15 @@ PageType {
                         id: attachMa
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        // iOS — нативный PHPicker (фотоплёнка); прочие платформы — FileDialog
+                        // AVPN (diag, Task 5 bff-3): с включённой диагностикой «+» открывает меню
+                        // вложений (фото/видео ИЛИ диагностика); выключена — пикер напрямую.
                         onClicked: {
-                            if (root.hasChat && TribeSupport.pickMediaNative())
-                                return
-                            mediaDialog.open()
+                            if (root.diagEnabled) {
+                                input.focus = false
+                                attachMenu.open()
+                            } else {
+                                root.pickMedia()
+                            }
                         }
                     }
                 }
@@ -494,6 +527,233 @@ PageType {
 
     // свайп слева-направо = назад на Главную (жалоба 2026-07-11)
     TribeEdgeBack { onTriggered: root.requestTab(0) }
+
+    // ── AVPN (diag, Task 5 bff-3): меню «+» — фото/видео или диагностика ────────────
+    // Показывается ТОЛЬКО при diagEnabled (иначе «+» открывает пикер напрямую).
+    // Участвует в back-логике как дровер (4-частный drawerDepth-контракт, паттерн DrawerType2).
+    Item {
+        id: attachMenu
+        anchors.fill: parent
+        visible: opened
+        z: 110
+        property bool opened: false
+        property int depthIndex: 0
+        function open() { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
+            if (!opened) return
+            opened = false; depthIndex = 0
+            if (!viaController)
+                PageController.decrementDrawerDepth()
+        }
+        Connections {
+            target: PageController
+            enabled: attachMenu.opened
+            function onCloseTopDrawer() {
+                if (attachMenu.depthIndex === PageController.getDrawerDepth())
+                    attachMenu.close(true)
+            }
+        }
+        // смена вкладки (replace) с открытым меню → деструкция без close(): компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
+
+        // свайп слева направо = закрыть (единый жест «назад», 2026-07-11)
+        TribeEdgeBack { onTriggered: attachMenu.close() }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#CC000000"
+            MouseArea { anchors.fill: parent; onClicked: attachMenu.close() }
+        }
+
+        TribeCard {
+            elevated: true
+            width: parent.width - 2 * Theme.space.xl
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Theme.space.xl + PageController.safeAreaBottomMargin
+            implicitHeight: attachMenuCol.implicitHeight + 2 * Theme.space.md
+            MouseArea { anchors.fill: parent } // не закрывать при клике по карточке
+
+            ColumnLayout {
+                id: attachMenuCol
+                anchors.fill: parent
+                anchors.margins: Theme.space.md
+                spacing: 2
+
+                // пункт: фото или видео
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 48
+                    radius: Theme.radius.md
+                    color: mediaItemMa.pressed ? Theme.color.surface2 : "transparent"
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.space.sm
+                        anchors.rightMargin: Theme.space.sm
+                        spacing: Theme.space.md
+                        Shape {
+                            Layout.preferredWidth: 24; Layout.preferredHeight: 24
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: Theme.color.text2; fillColor: "transparent"; strokeWidth: 1.7
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                // lucide image (24-сетка)
+                                PathSvg { path: "M4 6 a2 2 0 0 1 2 -2 h12 a2 2 0 0 1 2 2 v12 a2 2 0 0 1 -2 2 h-12 a2 2 0 0 1 -2 -2z M4 16 l5 -5 4 4 3 -3 4 4 M9 9 a1 1 0 1 0 0 -.01" }
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: qsTr("Фото или видео")
+                            color: Theme.color.text1
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyM
+                        }
+                    }
+                    MouseArea {
+                        id: mediaItemMa
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            attachMenu.close()
+                            root.pickMedia()
+                        }
+                    }
+                }
+
+                // пункт: отправить диагностику (гейт diagEnabled — само меню открывается
+                // только при нём, но visible держим на случай флипа флага при открытом меню)
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: root.diagEnabled
+                    implicitHeight: 48
+                    radius: Theme.radius.md
+                    color: diagItemMa.pressed ? Theme.color.surface2 : "transparent"
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.space.sm
+                        anchors.rightMargin: Theme.space.sm
+                        spacing: Theme.space.md
+                        Shape {
+                            Layout.preferredWidth: 24; Layout.preferredHeight: 24
+                            preferredRendererType: Shape.CurveRenderer
+                            ShapePath {
+                                strokeColor: Theme.color.text2; fillColor: "transparent"; strokeWidth: 1.7
+                                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                                // lucide file-text (24-сетка)
+                                PathSvg { path: "M14 2 L6 2 a2 2 0 0 0 -2 2 L4 20 a2 2 0 0 0 2 2 L18 22 a2 2 0 0 0 2 -2 L20 8 Z M14 2 L14 8 L20 8 M16 13 L8 13 M16 17 L8 17" }
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: qsTr("Отправить диагностику")
+                            color: Theme.color.text1
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyM
+                        }
+                    }
+                    MouseArea {
+                        id: diagItemMa
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            attachMenu.close()
+                            diagConfirm.open()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── AVPN (diag, Task 5 bff-3): подтверждение отправки диагностики ───────────────
+    // Пользователь ЯВНО видит, что уйдёт в чат; без подтверждения ничего не отправляется.
+    // Тот же 4-частный drawerDepth-контракт, что у attachMenu/seatSheet.
+    Item {
+        id: diagConfirm
+        anchors.fill: parent
+        visible: opened
+        z: 120
+        property bool opened: false
+        property int depthIndex: 0
+        function open() { opened = true; depthIndex = PageController.incrementDrawerDepth() }
+        // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
+        function close(viaController) {
+            if (!opened) return
+            opened = false; depthIndex = 0
+            if (!viaController)
+                PageController.decrementDrawerDepth()
+        }
+        Connections {
+            target: PageController
+            enabled: diagConfirm.opened
+            function onCloseTopDrawer() {
+                if (diagConfirm.depthIndex === PageController.getDrawerDepth())
+                    diagConfirm.close(true)
+            }
+        }
+        // смена вкладки (replace) с открытым подтверждением → компенсируем depth
+        Component.onDestruction: if (opened) PageController.decrementDrawerDepth()
+
+        // свайп слева направо = закрыть (единый жест «назад», 2026-07-11)
+        TribeEdgeBack { onTriggered: diagConfirm.close() }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#CC000000"
+            MouseArea { anchors.fill: parent; onClicked: diagConfirm.close() }
+        }
+
+        TribeCard {
+            elevated: true
+            width: parent.width - 2 * Theme.space.xl
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Theme.space.xl + PageController.safeAreaBottomMargin
+            implicitHeight: diagCol.implicitHeight + 2 * Theme.space.lg
+            MouseArea { anchors.fill: parent } // не закрывать при клике по карточке
+
+            ColumnLayout {
+                id: diagCol
+                anchors.fill: parent
+                anchors.margins: Theme.space.lg
+                spacing: Theme.space.md
+
+                Text {
+                    text: qsTr("Отправить диагностику?")
+                    color: Theme.color.text1
+                    font.family: Theme.font.display
+                    font.pixelSize: Theme.font.h3
+                    font.weight: Theme.font.wBold
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                }
+                Text {
+                    text: qsTr("В чат уйдут лог приложения и состояние подключения — без ключей и личных данных.")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                }
+                TribeButton {
+                    Layout.fillWidth: true
+                    variant: "primary"
+                    text: qsTr("Отправить")
+                    onClicked: {
+                        diagConfirm.close()
+                        root.sendDiag()
+                    }
+                }
+                TribeButton {
+                    Layout.fillWidth: true
+                    variant: "glass"
+                    text: qsTr("Отмена")
+                    onClicked: diagConfirm.close()
+                }
+            }
+        }
+    }
 
     // лайтбокс: фото на весь экран поверх страницы, закрытие тапом/Back/свайпом вниз.
     // Участвует в back-логике (паттерн DrawerType2, аудит 2026-07-09): раньше Back при открытом

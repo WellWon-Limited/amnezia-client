@@ -178,9 +178,41 @@ class AvpnEngineQml : public QObject {
     // AVPN backend-first (Task 9): поллинг «перенос принят» (PageAccountTribe) — server-tunable
     // (numbers.transfer_poll_ms), фолбэк 4000мс, клампы 1с..10мин.
     Q_PROPERTY(int transferPollMs READ transferPollMs NOTIFY changed)
+    // AVPN backend-first-3 (Task 8): троттл авто-refresh подписки на возврат приложения в фон/
+    // foreground (PageConnectTribe.qml, Qt.application.onStateChanged) — server-tunable
+    // (numbers.fg_refresh_throttle_ms), фолбэк 30000мс, клампы 1с..10мин.
+    Q_PROPERTY(int fgRefreshThrottleMs READ fgRefreshThrottleMs NOTIFY changed)
     // AVPN backend-first (Task 9): ретрай-поллинг рефералки (PageReferralTribe) — server-tunable
     // (numbers.referral_retry_ms), фолбэк 6000мс, клампы 1с..10мин.
     Q_PROPERTY(int referralRetryMs READ referralRetryMs NOTIFY changed)
+    // AVPN (diag, Task 5 bff-3): отправка диагностики в чат поддержки — kill-switch
+    // (features.support_diag, default TRUE). PageSupportTribe прячет пункт меню при false;
+    // сам sendDiagReport гейтится и в C++ (TribeSupportChat).
+    Q_PROPERTY(bool supportDiagEnabled READ supportDiagEnabled NOTIFY changed)
+    // AVPN backend-first-3 (Task 6): перенос подписки «как SIM» — kill-switch (features.transfer,
+    // default TRUE — без сервера/на старом конфиге поведение не меняется). PageAccountTribe прячет
+    // карточку «Перенос на новое устройство» при false; redeemTransfer/createTransfer гейтятся
+    // тем же флагом в C++ (единая воронка: deep-link tribe://transfer, Universal Link, QR-скан,
+    // ввод в поле — все сходятся в redeemTransfer через AvpnDeepLinkBridge → coreController).
+    Q_PROPERTY(bool transferEnabled READ transferEnabled NOTIFY changed)
+    // AVPN backend-first-3 (Task 7): incident-баннер из подписанного /v1/config — единственный
+    // анонимно-достижимый канал оповещения (пуш/чат требуют enrollment). Текст локализованный
+    // (strings.incident_text_<lang> → _en → base через TuningStore::localizedOr), пусто = баннера
+    // нет; incident_url опционален (тап → браузер). PageConnectTribe встраивает баннер в якорную
+    // цепочку updateBanner → incidentBanner → autoVpnCard. Пересчёт: configApplied и setAppLang
+    // эмитят changed().
+    Q_PROPERTY(QString incidentText READ incidentText NOTIFY changed)
+    Q_PROPERTY(QString incidentUrl READ incidentUrl NOTIFY changed)
+    // AVPN backend-first-3 (Task 7): server-driven CTA-тексты оплаты — map по ключам
+    // cta_renew_traffic/cta_renew_access/cta_how_traffic/cta_how_access (localizedOr; пустые НЕ
+    // кладём — QML фолбэчит на вкомпиленный qsTr-литерал). PATCH client_urls меняет CTA без релиза.
+    Q_PROPERTY(QVariantMap hotTexts READ hotTexts NOTIFY changed)
+    // AVPN backend-first-3 (Task 9): server-driven состав/порядок бренд-плиток онбординга
+    // (lists.onboarding_brand_tiles). PageOnboardingTribe.qml держит вкомпиленный реестр
+    // tileDefs (ключи-слаги — "whatsapp"/"telegram"/…); сервер может ТОЛЬКО выбрать подмножество
+    // и порядок ИЗ ЭТИХ ключей (неизвестный ключ скипается на QML-стороне, новые глифы требуют
+    // релиза). Пусто/отсутствие ключа → фолбэк на вкомпиленный порядок (listOr «пусто=фолбэк»).
+    Q_PROPERTY(QStringList onboardingBrandTiles READ onboardingBrandTiles NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -260,11 +292,27 @@ public:
 
     // AVPN backend-first (Task 9): реф-вкладка/кабинет-URL/поллинг — см. Q_PROPERTY выше.
     bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
+    // AVPN (diag, Task 5 bff-3): kill-switch отправки диагностики — см. Q_PROPERTY выше.
+    bool supportDiagEnabled() const { return avpn::TuningStore::flag(QStringLiteral("support_diag")); }
+    // AVPN backend-first-3 (Task 6): kill-switch переноса подписки — см. Q_PROPERTY выше.
+    bool transferEnabled() const { return avpn::TuningStore::flag(QStringLiteral("transfer")); }
     QString cabinetUrl() const
     {
         return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),
                                             QStringLiteral("https://tribevpn.com/account"));
     }
+    // AVPN backend-first-3 (Task 7): incident-баннер + hot-тексты CTA — см. Q_PROPERTY выше.
+    // Дефолты пустые НАМЕРЕННО: пусто = «инцидента нет», баннер скрыт / CTA на qsTr-фолбэке.
+    QString incidentText() const
+    {
+        return avpn::TuningStore::localizedOr(QStringLiteral("incident_text"), appLang(),
+                                              QString());
+    }
+    QString incidentUrl() const
+    {
+        return avpn::TuningStore::stringOr(QStringLiteral("incident_url"), QString());
+    }
+    QVariantMap hotTexts() const;   // .cpp: localizedOr по 4 CTA-ключам, пустые не кладём
     int transferPollMs() const
     {
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("transfer_poll_ms"), 4000)),
@@ -275,9 +323,23 @@ public:
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("referral_retry_ms"), 6000)),
                       600000);
     }
+    // AVPN backend-first-3 (Task 8): fg-refresh троттл — см. Q_PROPERTY выше.
+    int fgRefreshThrottleMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("fg_refresh_throttle_ms"), 30000)),
+                      600000);
+    }
+    // AVPN backend-first-3 (Task 9): бренд-плитки онбординга — см. Q_PROPERTY выше.
+    QStringList onboardingBrandTiles() const
+    { return avpn::TuningStore::listOr(QStringLiteral("onboarding_brand_tiles"), {}); }
 
     // --- QML API (для PageHomeTribe / PageDiagnostics) ---
     Q_INVOKABLE QVariantMap debugSnapshot() const;  // форма = DebugSnapshot.h / PageDiagnostics
+
+    // AVPN (diag-report, Task 4 bff-3): полный диагностический text/plain отчёт для чата поддержки —
+    // JSON-снапшот (версия/платформа/состояние/подписка/пул с RTT/switchLog/байпас) + хвост лога
+    // приложения (<= 256 КБ). Секретов нет by construction (инвариант DebugSnapshot); итог <= 2 МБ - 4 КБ.
+    Q_INVOKABLE QString buildDiagReport() const;
 
     // AVPN (панель администратора): запустить/прервать in-app бенч. label — метка методики
     // (baseline / tribe-bypass-on / tribe-bypass-off / amnezia). Один прогон ~1.5–2 мин, ~40 МБ трафика.
@@ -509,6 +571,10 @@ public:
     // если пул пуст. Каждый ответ → m_nodeRtt[nodeId] + emit changed() (шторка пересортируется/обновит
     // палочки вживую по мере прихода пингов). Неизмеренные/недостижимые → -1 (фолбэк на health в UI).
     Q_INVOKABLE void probeNodeRtt();
+    // AVPN backend-first-3 (Task 11): RTT(мс)→палочки 0..5 для QML-списков (PageLocationsTribe) —
+    // канон avpn::SignalQuality::barsForRtt (RttBands::fromTuning(), server-tunable rtt_bar*_ms),
+    // чтобы список серверов и «живая» проба (m_signal) не расходились в порогах.
+    Q_INVOKABLE int barsForRtt(int rttMs) const { return avpn::SignalQuality::barsForRtt(rttMs); }
     // AVPN (Task 7): состояние тумблера #6 (AvpnSettings/autoPauseRu) — для авто-инициатора (iOS
     // App Intent / Shortcuts, Task 8): проверить ПЕРЕД авто-вызовом pauseForShopping. Ручной/intent
     // вызов pauseForShopping работает независимо от этого флага.
@@ -850,6 +916,9 @@ private:
     // Точки чтения (applyRuBypassSplit / VpnConnectionTunnelControl) проверяют только bl.valid.
     avpn::BypassListService      *m_bypassListSvc = nullptr;
     avpn::RemoteConfig            m_remoteCfg;
+    // AVPN (diag-report, Task 4 bff-3): epoch последнего configApplied (ConfigService) —
+    // в отчёте отдаём возраст; 0 = ещё не применялся (ключ в JSON опускается).
+    qint64                        m_lastConfigAppliedEpoch = 0;
     int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block
     // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
     // конструктора; T6 — дополняется резолвом НОВОГО edge-хоста при activeEdgeChanged, см.

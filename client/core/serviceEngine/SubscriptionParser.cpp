@@ -1,5 +1,7 @@
 #include "SubscriptionParser.h"
 
+#include "NodeRotation.h" // AVPN (Task 10): isSupportedProtoNode — awg-контракт неприменим к чужим proto
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -105,6 +107,12 @@ QStringList SubscriptionParser::validate(const Subscription &sub)
         issues << QStringLiteral("active subscription has no nodes");
 
     for (const SubscriptionNode &n : sub.nodes) {
+        // AVPN (Task 10, proto-форвард): нода с неизвестным протоколом (xray, ...) НЕ роняет
+        // валидацию ответа и НЕ отбрасывается — awg-требования (endpoint host:port, pubkey, dns,
+        // AWG-бандл) к ней неприменимы. Она остаётся в пуле для диагностики/будущей эскалации,
+        // а из любого выбора её исключает isSupportedProtoNode (Selector/pick*/ротация/pin).
+        if (!isSupportedProtoNode(n))
+            continue;
         const QString id = n.nodeId.isEmpty() ? QStringLiteral("<no id>") : n.nodeId;
         if (n.endpoint.isEmpty() || !n.endpoint.contains(QLatin1Char(':')))
             issues << QStringLiteral("node %1: endpoint must be host:port").arg(id);
