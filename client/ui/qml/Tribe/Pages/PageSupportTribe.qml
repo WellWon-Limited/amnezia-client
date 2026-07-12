@@ -587,20 +587,25 @@ PageType {
             // 2× экрана хватает и для пинч-зума в будущем
             sourceSize.width: root.width * 2
         }
-        // тап = закрыть. ИМЕННО TapHandler: MouseArea перехватывала пресс и съедала
-        // свайпы — «свайп вниз не работает на фото» (жалоба 2026-07-12); хендлеры кооперируются.
-        TapHandler { onTapped: lightbox.close() }
-        // жесты галереи: вниз = закрыть; влево/вправо = следующее/предыдущее фото
-        DragHandler {
-            target: null
-            onActiveChanged: {
-                if (active) return
-                var tx = activeTranslation.x
-                var ty = activeTranslation.y
-                if (ty > 80 && ty > Math.abs(tx))
+        // Жесты галереи ОДНОЙ MouseArea + preventStealing (2026-07-12): TapHandler/DragHandler
+        // берут жест ПАССИВНО — событие проваливалось в ListView под лайтбоксом, и тот
+        // отбирал его эксклюзивным грабом при первом движении (свайпы «не работали», как
+        // ранее в TribeEdgeBack). preventStealing запрещает красть нажатие.
+        MouseArea {
+            anchors.fill: parent
+            preventStealing: true
+            property real sx: 0
+            property real sy: 0
+            onPressed: function(mouse) { sx = mouse.x; sy = mouse.y }
+            onReleased: function(mouse) {
+                var dx = mouse.x - sx
+                var dy = mouse.y - sy
+                if (Math.abs(dx) < 12 && Math.abs(dy) < 12)       // тап = закрыть
                     lightbox.close()
-                else if (Math.abs(tx) > 60)
-                    lightbox.step(tx < 0 ? 1 : -1)
+                else if (dy > 80 && dy > Math.abs(dx))             // свайп вниз = закрыть
+                    lightbox.close()
+                else if (Math.abs(dx) > 60)                        // вбок = листание фото
+                    lightbox.step(dx < 0 ? 1 : -1)
             }
         }
     }

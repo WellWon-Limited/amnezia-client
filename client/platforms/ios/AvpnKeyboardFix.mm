@@ -41,15 +41,42 @@ extern "C" void Avpn_resetKeyboardScroll(void)
         root.layer.sublayerTransform = CATransform3DIdentity;
 }
 
+// ПОКАДРОВЫЙ гаситель (2026-07-12): пока наш margin АНИМИРУЕТСЯ (композер едет к
+// клавиатуре), поле первые кадры ещё «перекрыто» — Qt перезапускает scrollToCursor
+// посреди анимации (вне UIKeyboard*-уведомлений: у них триггер — смена cursor rect).
+// Редкие dispatch_after-сбросы оставляли до ~200мс отрисованного чужого сдвига —
+// контент видимо «прилетал сверху вниз». CADisplayLink снимает трансформ КАЖДЫЙ кадр
+// в течение окна после последнего клавиатурного события — сдвигу Qt не достаётся ни
+// одного кадра. Тик дёшев (проверка identity + присваивание).
+static CADisplayLink *g_avpnKbLink = nil;
+static CFTimeInterval g_avpnKbLinkUntil = 0;
+
+@interface AvpnKbResetTarget : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation AvpnKbResetTarget
+- (void)tick:(CADisplayLink *)link
+{
+    Avpn_resetKeyboardScroll();
+    if (CACurrentMediaTime() > g_avpnKbLinkUntil) {
+        [link invalidate];
+        g_avpnKbLink = nil;
+    }
+}
+@end
+
 static void avpnScheduleResets(void)
 {
     Avpn_resetKeyboardScroll();
-    // Страховочные повторы: их scroll() анимируется длительностью клавиатуры (~0.25с)
-    // и может прилететь повторно (didChangeFrame). Сброс идемпотентен и дёшев.
-    static const double kDelays[] = {0.05, 0.15, 0.35, 0.7};
-    for (double delay : kDelays) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ Avpn_resetKeyboardScroll(); });
+    // окно с запасом: анимация клавиатуры ~0.25с + поздние пере-скроллы Qt (didShow и
+    // реакция на движение поля нашим margin-Behavior 0.25с)
+    g_avpnKbLinkUntil = CACurrentMediaTime() + 1.0;
+    if (!g_avpnKbLink) {
+        static AvpnKbResetTarget *target = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ target = [AvpnKbResetTarget new]; });
+        g_avpnKbLink = [CADisplayLink displayLinkWithTarget:target selector:@selector(tick:)];
+        [g_avpnKbLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
 }
 
