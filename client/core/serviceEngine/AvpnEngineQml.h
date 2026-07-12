@@ -191,6 +191,18 @@ class AvpnEngineQml : public QObject {
     // тем же флагом в C++ (единая воронка: deep-link tribe://transfer, Universal Link, QR-скан,
     // ввод в поле — все сходятся в redeemTransfer через AvpnDeepLinkBridge → coreController).
     Q_PROPERTY(bool transferEnabled READ transferEnabled NOTIFY changed)
+    // AVPN backend-first-3 (Task 7): incident-баннер из подписанного /v1/config — единственный
+    // анонимно-достижимый канал оповещения (пуш/чат требуют enrollment). Текст локализованный
+    // (strings.incident_text_<lang> → _en → base через TuningStore::localizedOr), пусто = баннера
+    // нет; incident_url опционален (тап → браузер). PageConnectTribe встраивает баннер в якорную
+    // цепочку updateBanner → incidentBanner → autoVpnCard. Пересчёт: configApplied и setAppLang
+    // эмитят changed().
+    Q_PROPERTY(QString incidentText READ incidentText NOTIFY changed)
+    Q_PROPERTY(QString incidentUrl READ incidentUrl NOTIFY changed)
+    // AVPN backend-first-3 (Task 7): server-driven CTA-тексты оплаты — map по ключам
+    // cta_renew_traffic/cta_renew_access/cta_how_traffic/cta_how_access (localizedOr; пустые НЕ
+    // кладём — QML фолбэчит на вкомпиленный qsTr-литерал). PATCH client_urls меняет CTA без релиза.
+    Q_PROPERTY(QVariantMap hotTexts READ hotTexts NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -279,6 +291,18 @@ public:
         return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),
                                             QStringLiteral("https://tribevpn.com/account"));
     }
+    // AVPN backend-first-3 (Task 7): incident-баннер + hot-тексты CTA — см. Q_PROPERTY выше.
+    // Дефолты пустые НАМЕРЕННО: пусто = «инцидента нет», баннер скрыт / CTA на qsTr-фолбэке.
+    QString incidentText() const
+    {
+        return avpn::TuningStore::localizedOr(QStringLiteral("incident_text"), appLang(),
+                                              QString());
+    }
+    QString incidentUrl() const
+    {
+        return avpn::TuningStore::stringOr(QStringLiteral("incident_url"), QString());
+    }
+    QVariantMap hotTexts() const;   // .cpp: localizedOr по 4 CTA-ключам, пустые не кладём
     int transferPollMs() const
     {
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("transfer_poll_ms"), 4000)),

@@ -527,11 +527,26 @@ PageType {
         z: 10
     }
 
+    // AVPN backend-first-3 (Task 7): incident-баннер из подписанного /v1/config (strings.
+    // incident_text_<lang>) — оповещение об инцидентах ВСЕМ (вкл. анонимов без enrollment).
+    // Тот же приём, что updateBanner (:492-496): скрытый схлопывается в implicitHeight 0 и
+    // topMargin 0 — autoVpnCard/orb не двигаются ни на пиксель; видимый вставляет себя в
+    // якорную цепочку updateBanner → incidentBanner → autoVpnCard без правки констант sceneShift.
+    TribeIncidentBanner {
+        id: incidentBanner
+        anchors.top: updateBanner.bottom
+        anchors.topMargin: visible ? Theme.space.md : 0
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
+        z: 10
+    }
+
     // ── карточка «АвтоVPN» — НАД кнопкой Connect (перенос из bottomBlock, реш. 2026-07-02):
     //    РФ-сайты всегда работают (единый тумблер РФ-доступа AvpnBypass/masterOn) ──
     Rectangle {
         id: autoVpnCard
-        anchors.top: updateBanner.bottom; anchors.topMargin: Theme.space.lg
+        anchors.top: incidentBanner.bottom; anchors.topMargin: Theme.space.lg
         anchors.left: parent.left; anchors.right: parent.right
         anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
         anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
@@ -1009,9 +1024,15 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter
                     // мобилки: CTA ведёт в чат — текст честный вопрос (он же уходит черновиком);
                     // desktop: кнопка открывает кабинет — повелительная форма.
+                    // AVPN backend-first-3 (Task 7): текст server-driven (TribeEngine.hotTexts,
+                    // strings.cta_*_<lang> через localizedOr) — фолбэк = прежний вкомпиленный qsTr.
                     text: root.ctaTrafficOnly
-                          ? (root.mobilePlatform ? qsTr("Как продлить трафик?") : qsTr("Продлить трафик"))
-                          : (root.mobilePlatform ? qsTr("Как продлить доступ?") : qsTr("Продлить доступ"))
+                          ? (root.mobilePlatform
+                             ? ((root.hasEngine && TribeEngine.hotTexts["cta_how_traffic"]) ? TribeEngine.hotTexts["cta_how_traffic"] : qsTr("Как продлить трафик?"))
+                             : ((root.hasEngine && TribeEngine.hotTexts["cta_renew_traffic"]) ? TribeEngine.hotTexts["cta_renew_traffic"] : qsTr("Продлить трафик")))
+                          : (root.mobilePlatform
+                             ? ((root.hasEngine && TribeEngine.hotTexts["cta_how_access"]) ? TribeEngine.hotTexts["cta_how_access"] : qsTr("Как продлить доступ?"))
+                             : ((root.hasEngine && TribeEngine.hotTexts["cta_renew_access"]) ? TribeEngine.hotTexts["cta_renew_access"] : qsTr("Продлить доступ")))
                     color: Theme.color.bg900
                     font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wBold
                 }
@@ -1023,11 +1044,13 @@ PageType {
                     // (все сборки, единый UX с полиси сторов): черновик «Хочу продлить доступ»
                     // отправляет юзер сам → автоответчик бэка присылает персональную ссылку.
                     if (root.mobilePlatform) {
-                        // черновик = текст кнопки (кнопка-вопрос отправляет ровно этот вопрос);
+                        // черновик = текст кнопки (кнопка-вопрос отправляет ровно этот вопрос) —
+                        // поэтому тот же hotTexts-оверрайд, что у надписи (Task 7), иначе инвариант
+                        // «уходит ровно этот вопрос» ломался бы при серверном тексте;
                         // «продл»/«renew»/«renov» распознаёт интент-гейт автоответчика (PR #298)
                         root.requestSupportChat(root.ctaTrafficOnly
-                                                ? qsTr("Как продлить трафик?")
-                                                : qsTr("Как продлить доступ?"))
+                                                ? ((root.hasEngine && TribeEngine.hotTexts["cta_how_traffic"]) ? TribeEngine.hotTexts["cta_how_traffic"] : qsTr("Как продлить трафик?"))
+                                                : ((root.hasEngine && TribeEngine.hotTexts["cta_how_access"]) ? TribeEngine.hotTexts["cta_how_access"] : qsTr("Как продлить доступ?")))
                         return
                     }
                     // Desktop store-сборок нет, но контракт сохраняем: НИКАКИХ платёжных переходов.

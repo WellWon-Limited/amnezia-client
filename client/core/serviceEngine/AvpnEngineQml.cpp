@@ -3946,6 +3946,30 @@ void AvpnEngineQml::setAppLang(const QString &lang)
         return;
     m_store->setAppLanguage(QLocale(lang));
     emit appLangChanged();
+    // AVPN backend-first-3 (Task 7): incidentText/hotTexts — функции от appLang (localizedOr).
+    // Их NOTIFY = changed, appLangChanged его не покрывает — эмитим явно, иначе баннер/CTA
+    // остаются на старом языке до следующего configApplied.
+    emit changed();
+}
+
+// AVPN backend-first-3 (Task 7): server-driven hot-тексты CTA оплаты. Ключи фиксированы
+// (контракт с PageConnectTribe.qml), значение — localizedOr("<key>", appLang(), "") по цепочке
+// _<lang> → _en → base. Пустые НЕ кладём в map: в QML `hotTexts["key"]` даёт undefined →
+// falsy → срабатывает вкомпиленный qsTr-фолбэк (byte-for-byte прежний текст).
+QVariantMap AvpnEngineQml::hotTexts() const
+{
+    static const QString kCtaKeys[] = { QStringLiteral("cta_renew_traffic"),
+                                        QStringLiteral("cta_renew_access"),
+                                        QStringLiteral("cta_how_traffic"),
+                                        QStringLiteral("cta_how_access") };
+    QVariantMap out;
+    const QString lang = appLang();
+    for (const QString &key : kCtaKeys) {
+        const QString v = avpn::TuningStore::localizedOr(key, lang, QString());
+        if (!v.isEmpty())
+            out.insert(key, v);
+    }
+    return out;
 }
 
 // AVPN (оплата, ДВОЕ ЧАСОВ): лёгкий рефетч GET /v1/subscription — ЧАСЫ УСТРОЙСТВА (их продлевает
