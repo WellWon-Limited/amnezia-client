@@ -44,15 +44,15 @@
 <context>
     <name>PageAccountTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+115"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+118"/>
         <location line="+7"/>
         <location line="+238"/>
-        <location line="+892"/>
+        <location line="+898"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1123"/>
+        <location line="-1129"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -87,12 +87,12 @@
     </message>
     <message>
         <location line="-251"/>
-        <location line="+851"/>
+        <location line="+854"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-607"/>
+        <location line="-610"/>
         <source>Tribe Trial</source>
         <translation>Tribe Trial</translation>
     </message>
@@ -256,27 +256,27 @@
         <translation>¿Perdió el dispositivo? Escriba al soporte desde el nuevo dispositivo e indique el pago: importe, fecha y método. Transferiremos su acceso manualmente.</translation>
     </message>
     <message>
-        <location line="+155"/>
+        <location line="+158"/>
         <source>Выберите устройство, которое нужно отключить, чтобы активировать код здесь.</source>
         <translation>Elija el dispositivo que desea desconectar para activar el código aquí.</translation>
     </message>
     <message>
-        <location line="+127"/>
+        <location line="+130"/>
         <source>Доступ на этом устройстве будет отозван. Чтобы вернуться, активируйте код заново.</source>
         <translation>El acceso en este dispositivo será revocado. Para volver, active un código de nuevo.</translation>
     </message>
     <message>
-        <location line="+166"/>
+        <location line="+156"/>
         <source>На новом устройстве: установите Tribe VPN → Настройки → «Сканировать QR» и наведите камеру. Или откройте эту ссылку там. Доступ переедет целиком, это устройство отключится сразу.</source>
         <translation>En el nuevo dispositivo: instale Tribe VPN → Ajustes → «Escanear QR» y apunte con la cámara. O abra este enlace allí. El acceso se traslada por completo; este dispositivo se desconecta de inmediato.</translation>
     </message>
     <message>
-        <location line="+169"/>
+        <location line="+157"/>
         <source>Наведите камеру на QR-код переноса или кода активации и удержите пару секунд.</source>
         <translation>Apunte la cámara al QR de transferencia o del código de activación y manténgala un par de segundos.</translation>
     </message>
     <message>
-        <location line="-859"/>
+        <location line="-843"/>
         <source>Создайте одноразовую ссылку и откройте её на другом устройстве. Текущее устройство отключится автоматически.</source>
         <translation>Crea un enlace de un solo uso y ábrelo en otro dispositivo. Este dispositivo se desconectará automáticamente.</translation>
     </message>
@@ -297,12 +297,12 @@
     </message>
     <message>
         <location line="+26"/>
-        <location line="+444"/>
+        <location line="+450"/>
         <source>Отключить</source>
         <translation>Desconectar</translation>
     </message>
     <message>
-        <location line="-440"/>
+        <location line="-446"/>
         <source>устройство</source>
         <translation>dispositivo</translation>
     </message>
@@ -352,7 +352,7 @@
         <translation>Benchmark de conexión y pruebas</translation>
     </message>
     <message>
-        <location line="+84"/>
+        <location line="+87"/>
         <source>Достигнут лимит устройств</source>
         <translation>Límite de dispositivos alcanzado</translation>
     </message>
@@ -368,13 +368,13 @@
     </message>
     <message>
         <location line="+18"/>
-        <location line="+85"/>
-        <location line="+337"/>
+        <location line="+88"/>
+        <location line="+315"/>
         <source>Отмена</source>
         <translation>Cancelar</translation>
     </message>
     <message>
-        <location line="-357"/>
+        <location line="-335"/>
         <source>Выйти на этом устройстве?</source>
         <translation>¿Cerrar sesión en este dispositivo?</translation>
     </message>
@@ -409,7 +409,7 @@
         <translation>El enlace de transferencia expiró: crea uno nuevo</translation>
     </message>
     <message>
-        <location line="+54"/>
+        <location line="+44"/>
         <source>Откройте на новом устройстве</source>
         <translation>Ábrelo en el nuevo dispositivo</translation>
     </message>
@@ -434,7 +434,7 @@
         <translation>Listo</translation>
     </message>
     <message>
-        <location line="+72"/>
+        <location line="+60"/>
         <source>Сканирование QR</source>
         <translation>Escaneo de QR</translation>
     </message>
@@ -933,7 +933,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+123"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+131"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -948,7 +948,7 @@
         <translation>∞</translation>
     </message>
     <message>
-        <location line="+47"/>
+        <location line="+52"/>
         <source>Серверы сервиса запускаются — пробный доступ появится в ближайшем обновлении, аккаунт не нужен</source>
         <translation>Nuestros servidores están arrancando: el acceso de prueba llegará en una próxima actualización, sin necesidad de cuenta</translation>
     </message>
@@ -958,7 +958,12 @@
         <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+13"/>
+        <source>VPN отключён: подписка истекла. Продлите доступ, чтобы продолжить.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
         <source>Обнаружен другой активный VPN (%1). Отключите его — Tribe VPN может не подключиться из-за конфликта.</source>
         <translation>Se detectó otra VPN activa (%1). Desactívala: Tribe VPN podría no conectarse por un conflicto.</translation>
     </message>
@@ -968,7 +973,7 @@
         <translation>Acceso activado en este dispositivo</translation>
     </message>
     <message>
-        <location line="+338"/>
+        <location line="+342"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -988,9 +993,19 @@
         <translation>Ozon, WB, Gosuslugi (servicios públicos), Bancos, Kinopoisk</translation>
     </message>
     <message>
-        <location line="+193"/>
+        <location line="+197"/>
+        <source>Сеть ограничена оператором — подключитесь к Wi-Fi</source>
+        <translation>Red restringida por el operador: conéctese a Wi-Fi</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Защита активна — ваше соединение безопасно</source>
         <translation>Protección activa: tu conexión es segura</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Доступ приостановлен — подписка истекла</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1045,7 +1060,7 @@
         <translation>¿Cómo renuevo el acceso?</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+68"/>
         <source>Сменить сервер</source>
         <translation>Cambiar servidor</translation>
     </message>
@@ -1109,7 +1124,7 @@
 <context>
     <name>PageLocationsTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageLocationsTribe.qml" line="+28"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageLocationsTribe.qml" line="+32"/>
         <source>РЕЖИМ</source>
         <translation>MODO</translation>
     </message>
@@ -1140,14 +1155,32 @@
     </message>
 </context>
 <context>
+    <name>PageNotificationDetailTribe</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/Pages/PageNotificationDetailTribe.qml" line="+42"/>
+        <source>Уведомление</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+107"/>
+        <source>+%1 дней</source>
+        <translation type="unfinished">+%1 días</translation>
+    </message>
+</context>
+<context>
     <name>PageNotificationsTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+62"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+54"/>
         <source>Уведомления</source>
         <translation>Notificaciones</translation>
     </message>
     <message>
-        <location line="+137"/>
+        <location line="+12"/>
+        <source>Прочитать все</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+163"/>
         <source>+%1 дней</source>
         <translation>+%1 días</translation>
     </message>
@@ -1326,7 +1359,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Enlace copiado: pégalo en un mensajero</translation>
     </message>
     <message>
-        <location line="+59"/>
+        <location line="+60"/>
         <source>Пригласи друзей</source>
         <translation>Invita a tus amigos</translation>
     </message>
@@ -1454,7 +1487,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+76"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+81"/>
         <source>Не удалось загрузить вложение</source>
         <translation>No se pudo cargar el archivo adjunto</translation>
     </message>
@@ -1469,7 +1502,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Fotos y videos</translation>
     </message>
     <message>
-        <location line="+50"/>
+        <location line="+51"/>
         <source>Поддержка</source>
         <translation type="unfinished">Soporte</translation>
     </message>
@@ -1489,7 +1522,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation type="unfinished">ID de cuenta copiado</translation>
     </message>
     <message>
-        <location line="+92"/>
+        <location line="+96"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
         <translation>Escríbenos y te responderemos aquí mismo.
@@ -1533,7 +1566,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeBottomNav</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeBottomNav.qml" line="+18"/>
+        <location filename="../../ui/qml/Tribe/components/TribeBottomNav.qml" line="+23"/>
         <source>Главная</source>
         <translation>Inicio</translation>
     </message>
@@ -1556,7 +1589,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeResultSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+109"/>
+        <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+111"/>
         <source>Понятно</source>
         <translation>Entendido</translation>
     </message>
@@ -1564,7 +1597,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeServiceChips</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeServiceChips.qml" line="+30"/>
+        <location filename="../../ui/qml/Tribe/components/TribeServiceChips.qml" line="+31"/>
         <source>работает</source>
         <translation>funciona</translation>
     </message>
@@ -1616,9 +1649,37 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
 </context>
 <context>
+    <name>TribeWhitelistSheet</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeWhitelistSheet.qml" line="+98"/>
+        <source>Действуют «Белые списки»</source>
+        <translation>Lista blanca del operador activa</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Ваш мобильный оператор сейчас ограничивает интернет: работают только российские сайты из «белого списка» — Госуслуги, Яндекс, Ozon и подобные. Всё остальное, включая VPN, на этой сети недоступно.</source>
+        <translation>Su operador móvil está restringiendo internet: solo funcionan los sitios rusos de la lista blanca (Gosuslugi, Yandex, Ozon y similares). Todo lo demás, incluida la VPN, no está disponible en esta red.</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Это ограничение на стороне оператора, а не сбой Tribe VPN — так бывает во время отключений мобильного интернета.</source>
+        <translation>Esta restricción es del operador, no un fallo de Tribe VPN: ocurre durante los cortes de internet móvil.</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>&lt;b&gt;Что сделать:&lt;/b&gt; подключитесь к сети Wi-Fi — там VPN заработает как обычно. Или попробуйте позже: как только оператор снимет ограничение, приложение подключится само.</source>
+        <translation>&lt;b&gt;Qué hacer:&lt;/b&gt; conéctese a una red Wi-Fi, allí la VPN funcionará con normalidad. O inténtelo más tarde: en cuanto el operador retire la restricción, la aplicación se conectará sola.</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>Понятно</source>
+        <translation>Entendido</translation>
+    </message>
+</context>
+<context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+995"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1170"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -1814,12 +1875,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+587"/>
+        <location line="+627"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+208"/>
+        <location line="+221"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
@@ -1937,7 +1998,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::TribeSupportChat</name>
     <message>
-        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+140"/>
+        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+176"/>
         <source>Нет сети — сообщение не отправлено</source>
         <translation>Sin red — el mensaje no se envió</translation>
     </message>
@@ -1958,24 +2019,24 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+506"/>
+        <location line="+538"/>
         <source>Нет авторизации</source>
         <translation>No autorizado</translation>
     </message>
     <message>
-        <location line="-505"/>
+        <location line="-537"/>
         <source>Не отправлено (ошибка %1)</source>
         <translation>No enviado (error %1)</translation>
     </message>
     <message>
-        <location line="+419"/>
-        <location line="+54"/>
+        <location line="+450"/>
+        <location line="+55"/>
         <location line="+74"/>
         <source>Файл недоступен</source>
         <translation>Archivo no disponible</translation>
     </message>
     <message>
-        <location line="-113"/>
+        <location line="-114"/>
         <source>Формат видео не поддерживается (mp4/mov/webm)</source>
         <translation>Formato de vídeo no compatible (mp4/mov/webm)</translation>
     </message>
@@ -1985,7 +2046,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Video de más de %1 MB</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location line="+46"/>
         <source>Фото больше %1 МБ</source>
         <translation>Foto de más de %1 MB</translation>
     </message>
