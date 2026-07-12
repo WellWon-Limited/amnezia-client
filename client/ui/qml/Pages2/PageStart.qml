@@ -133,6 +133,10 @@ PageType {
         function onRequestStart() {
             avpnOnboard.done = true
             root.onboardingActive = false
+            // AVPN (announce-quiet): отметка времени для тихого окна попапов — синхронно в
+            // движке (НЕ QML Settings: его 500мс-флаш опоздал бы к announceShowTimer 900мс)
+            if (typeof TribeEngine !== "undefined" && typeof TribeEngine.markOnboardingDone === "function")
+                TribeEngine.markOnboardingDone()
             root.goAvpnTab(0)
             announceShowTimer.restart()   // AVPN (P-ANN): рассылка, ждавшая онбординг
         }
@@ -754,6 +758,11 @@ PageType {
     function maybeShowAnnouncement() {
         if (typeof TribeEngine === "undefined" || announceSheet.opened) return
         if (!root.avpnNav || root.onboardingActive) return
+        // AVPN (announce-quiet, инцидент «два онбординга» 2026-07-12): N минут после
+        // онбординга автопоказ попапа молчит (rich-попап визуально дублирует онбординг).
+        // Server-tunable: numbers.announce_onboarding_quiet_min + kill-switch
+        // features.announce_onboarding_quiet. Бейдж колокольчика и лента НЕ глушатся.
+        if (typeof TribeEngine.announcementsQuietNow === "function" && TribeEngine.announcementsQuietNow()) return
         var list = TribeEngine.announcements
         for (var i = 0; i < list.length; ++i) {
             if (list[i].kind === "popup") { announceSheet.show(list[i]); return }
