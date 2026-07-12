@@ -59,6 +59,44 @@ PageType {
         onTriggered: root.reveal2++
     }
 
+    // AVPN backend-first-3 (Task 9): server-driven состав/порядок бренд-плиток экрана
+    // «умная маршрутизация» (lists.onboarding_brand_tiles с бэка, TribeEngine.onboardingBrandTiles).
+    // tileDefs — ВКОМПИЛЕННЫЙ реестр (единственный источник глифов/цветов); сервер может ТОЛЬКО
+    // выбрать подмножество и порядок ключей ИЗ ЭТОГО реестра — новый бренд/глиф всё ещё требует
+    // релиза (неизвестный ключ из бэка молча скипается, см. activeTileOrder).
+    readonly property bool hasEngine: (typeof TribeEngine !== "undefined")
+    readonly property var tileDefs: ({
+        "whatsapp":   { color: "#25D366",  glyph: "../images/brand-whatsapp.svg",   glyphRatio: 0.60 },
+        "telegram":   { color: "#229ED9",  glyph: "../images/brand-telegram.svg" },
+        "youtube":    { color: "#FF0000",  glyph: "../images/brand-youtube.svg",    glyphRatio: 0.56 },
+        "gemini":     { color: "#FFFFFF",  glyph: "../images/brand-gemini.svg",     glyphRatio: 0.62 },
+        "claude":     { color: "#D97757",  glyph: "../images/brand-claude.svg" },
+        "wb":         { color: "transparent", glyph: "../images/brand-wb.png",        glyphRatio: 1.0 },
+        "ozon":       { color: "transparent", glyph: "../images/brand-ozon.png",      glyphRatio: 1.0 },
+        "kinopoisk":  { color: "transparent", glyph: "../images/brand-kinopoisk.png", glyphRatio: 1.0 },
+        "tbank":      { color: "transparent", glyph: "../images/brand-tbank.png",     glyphRatio: 1.0 },
+        "gosuslugi":  { color: "#FFFFFF",  glyph: "../images/brand-gosuslugi.png",  glyphRatio: 1.0, radius: Theme.radius.md }
+    })
+    // дефолтный (вкомпиленный) порядок = ровно текущие два ряда подряд: 5 «через VPN» + 5 «напрямую»
+    readonly property var defaultTileOrder: [
+        "whatsapp", "telegram", "youtube", "gemini", "claude",
+        "wb", "ozon", "kinopoisk", "tbank", "gosuslugi"
+    ]
+    readonly property var activeTileOrder: {
+        if (!(root.hasEngine && TribeEngine.onboardingBrandTiles && TribeEngine.onboardingBrandTiles.length > 0))
+            return root.defaultTileOrder
+        var filtered = []
+        for (var i = 0; i < TribeEngine.onboardingBrandTiles.length; i++) {
+            var key = TribeEngine.onboardingBrandTiles[i]
+            if (root.tileDefs.hasOwnProperty(key))
+                filtered.push(key)
+        }
+        return filtered.length > 0 ? filtered : root.defaultTileOrder
+    }
+    // нечётное число — больше плиток в первом ряду
+    readonly property var tileRowVpn:    root.activeTileOrder.slice(0, Math.ceil(root.activeTileOrder.length / 2))
+    readonly property var tileRowDirect: root.activeTileOrder.slice(Math.ceil(root.activeTileOrder.length / 2))
+
     // ---------- переиспользуемые блоки ----------
 
     // марка 5 баров + wordmark (пропорции лого 16/28/36/26/18 → ×31/36)
@@ -381,12 +419,18 @@ PageType {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.topMargin: Theme.space.sm
                     spacing: Theme.space.sm + 1
-                    // брендовые цвета сервисов — сценическая деталь онбординга
-                    BrandTile { color: "#25D366"; glyph: "../images/brand-whatsapp.svg"; glyphRatio: 0.60 }
-                    BrandTile { color: "#229ED9"; glyph: "../images/brand-telegram.svg" }
-                    BrandTile { color: "#FF0000"; glyph: "../images/brand-youtube.svg"; glyphRatio: 0.56 }
-                    BrandTile { color: "#FFFFFF"; glyph: "../images/brand-gemini.svg"; glyphRatio: 0.62 }
-                    BrandTile { color: "#D97757"; glyph: "../images/brand-claude.svg" }
+                    // брендовые цвета сервисов — сценическая деталь онбординга; состав/порядок —
+                    // root.tileRowVpn (server-driven, см. tileDefs выше)
+                    Repeater {
+                        model: root.tileRowVpn
+                        delegate: BrandTile {
+                            readonly property var def: root.tileDefs[modelData]
+                            color: def.color
+                            glyph: def.glyph
+                            glyphRatio: def.glyphRatio !== undefined ? def.glyphRatio : 0.58
+                            radius: def.radius !== undefined ? def.radius : Theme.radius.md
+                        }
+                    }
                 }
 
                 SectionLabel {
@@ -399,11 +443,17 @@ PageType {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.topMargin: Theme.space.sm
                     spacing: Theme.space.sm + 1
-                    BrandTile { color: "transparent"; glyph: "../images/brand-wb.png"; glyphRatio: 1.0 }
-                    BrandTile { color: "transparent"; glyph: "../images/brand-ozon.png"; glyphRatio: 1.0 }
-                    BrandTile { color: "transparent"; glyph: "../images/brand-kinopoisk.png"; glyphRatio: 1.0 }
-                    BrandTile { color: "transparent"; glyph: "../images/brand-tbank.png"; glyphRatio: 1.0 }
-                    BrandTile { color: "#FFFFFF"; glyph: "../images/brand-gosuslugi.png"; glyphRatio: 1.0; radius: Theme.radius.md }
+                    // состав/порядок — root.tileRowDirect (server-driven, см. tileDefs выше)
+                    Repeater {
+                        model: root.tileRowDirect
+                        delegate: BrandTile {
+                            readonly property var def: root.tileDefs[modelData]
+                            color: def.color
+                            glyph: def.glyph
+                            glyphRatio: def.glyphRatio !== undefined ? def.glyphRatio : 0.58
+                            radius: def.radius !== undefined ? def.radius : Theme.radius.md
+                        }
+                    }
                 }
 
                 Text {
