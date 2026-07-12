@@ -168,7 +168,11 @@ static void avpnEnsureTracker(void)
     if (fabs(h - g_avpnKbLastH) > 0.1) {
         g_avpnKbLastH = h;
         g_avpnKbStableSince = CACurrentMediaTime();
-        Avpn_onKeyboardFrame(h);
+        // AVPN DEV: УБРАТЬ после калибровки — сэмплы реальной траектории клавиатуры.
+        // ВАЖНО: в QML отсюда НЕ фидим (покадровый фид через пайплайн Qt Quick дал
+        // рывки+лаг, жалоба 2026-07-12) — трекер только измеряет; высота в QML идёт
+        // одним репортом из willShow (avpnReportKeyboardFrame), анимирует Behavior.
+        NSLog(@"AVPNKB %.3f %.2f", CACurrentMediaTime(), h);
     } else if (CACurrentMediaTime() - g_avpnKbStableSince > 0.6) {
         [link invalidate]; // высота устоялась — до следующего клавиатурного события
         g_avpnKbLink = nil;
@@ -221,9 +225,8 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(NSNotification *note) {
                 Avpn_resetKeyboardScroll(); // заодно подменяет слой (avpnNeuterLayer)
-                avpnStartKbTracking();
-                if (!g_avpnKbTracker)
-                    avpnReportKeyboardFrame(note); // iOS <15
+                avpnStartKbTracking();         // только замер траектории (NSLog)
+                avpnReportKeyboardFrame(note); // высота в QML — одним репортом
             }];
         }
     });
