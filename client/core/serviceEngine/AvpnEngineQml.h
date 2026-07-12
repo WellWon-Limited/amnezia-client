@@ -185,6 +185,12 @@ class AvpnEngineQml : public QObject {
     // (features.support_diag, default TRUE). PageSupportTribe прячет пункт меню при false;
     // сам sendDiagReport гейтится и в C++ (TribeSupportChat).
     Q_PROPERTY(bool supportDiagEnabled READ supportDiagEnabled NOTIFY changed)
+    // AVPN backend-first-3 (Task 6): перенос подписки «как SIM» — kill-switch (features.transfer,
+    // default TRUE — без сервера/на старом конфиге поведение не меняется). PageAccountTribe прячет
+    // карточку «Перенос на новое устройство» при false; redeemTransfer/createTransfer гейтятся
+    // тем же флагом в C++ (единая воронка: deep-link tribe://transfer, Universal Link, QR-скан,
+    // ввод в поле — все сходятся в redeemTransfer через AvpnDeepLinkBridge → coreController).
+    Q_PROPERTY(bool transferEnabled READ transferEnabled NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -266,6 +272,8 @@ public:
     bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
     // AVPN (diag, Task 5 bff-3): kill-switch отправки диагностики — см. Q_PROPERTY выше.
     bool supportDiagEnabled() const { return avpn::TuningStore::flag(QStringLiteral("support_diag")); }
+    // AVPN backend-first-3 (Task 6): kill-switch переноса подписки — см. Q_PROPERTY выше.
+    bool transferEnabled() const { return avpn::TuningStore::flag(QStringLiteral("transfer")); }
     QString cabinetUrl() const
     {
         return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),

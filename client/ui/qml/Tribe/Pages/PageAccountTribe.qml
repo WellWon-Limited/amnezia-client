@@ -108,6 +108,12 @@ PageType {
             return
         }
         if (isTransferInput(c)) {
+            // AVPN backend-first-3 (Task 6): kill-switch features.transfer — гасим ДО диплинка
+            // (redeemTransfer тоже гейтит, но так не гоняем поле/хинт впустую).
+            if (root.hasEngine && TribeEngine.transferEnabled === false) {
+                PageController.showErrorMessage(qsTr("Перенос временно недоступен"))
+                return
+            }
             if (typeof AvpnDeepLink !== "undefined") {
                 root.redeemError = false
                 redeemField.clear()
@@ -332,6 +338,12 @@ PageType {
             return
         scanSheet.close()
         if (isTransferInput(c)) {
+            // AVPN backend-first-3 (Task 6): kill-switch features.transfer — тост вместо действия
+            // (симметрично redeemKey; redeemTransfer тоже гейтит как страховка).
+            if (root.hasEngine && TribeEngine.transferEnabled === false) {
+                PageController.showErrorMessage(qsTr("Перенос временно недоступен"))
+                return
+            }
             root.redeemHint = qsTr("Переносим доступ на это устройство…")
             if (typeof AvpnDeepLink !== "undefined")
                 AvpnDeepLink.handleUrl(c)
@@ -686,7 +698,10 @@ PageType {
         }
 
         // перенос подписки «как SIM» — тоже часть ПОДПИСКИ. Вторичная (glass) кнопка во всю ширину.
+        // AVPN backend-first-3 (Task 6): kill-switch features.transfer (default TRUE — без сервера/
+        // на старом конфиге карточка видима, как раньше). Dev-превью без движка (!hasEngine) — видима.
         TribeCard {
+            visible: !(root.hasEngine && TribeEngine.transferEnabled === false)
             Layout.fillWidth: true
             implicitHeight: transferCol.implicitHeight + 2 * Theme.space.lg
             ColumnLayout {
