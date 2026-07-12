@@ -4,6 +4,11 @@
 <dict>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<!-- AVPN (2026-07-12): разлочить >60 FPS на ProMotion (120 Гц). Без ключа iOS
+	     ограничивает CADisplayLink приложения 60 кадрами — скролл/анимации выглядят
+	     «дёргано» рядом с нативными 120 (жалоба: чат «не как на iOS»). -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>

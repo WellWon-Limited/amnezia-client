@@ -40,16 +40,14 @@ PageType {
             || s.indexOf("PageOnboardingTribe.qml") !== -1
     }
 
-    // AVPN (клавиатура, схема «layout один раз» 2026-07-12): imeHeight = ЦЕЛЬ, коммитится
-    // нативным слоем в НЕВИДИМЫЕ моменты (iOS: DidShow — навбар и перестройка уже накрыты
-    // развёрнутой клавиатурой; WillHide — дальше композер везёт GPU-трансформ чата по
-    // imeShift). Анимацию между коммитами лайаут НЕ видит — только трансформы страницы.
-    // Qt.inputMethod.visible — страховка от «застрявшего» imeHeight (меню пропадало).
-    // Вся клавиатурная схема — ТОЛЬКО сенсорные платформы: на десктопе клавиатура
-    // физическая, экран не делит (PLATFORM-SCOPING).
+    // AVPN (клавиатура): imeHeight = цель, приходит с willShow (старт анимации клавиатуры);
+    // margin анимирует Behavior ниже. Фокус-срез (inputFocused страницы) прячет навбар
+    // СРАЗУ по тапу в поле. Qt.inputMethod.visible — страховка от «застрявшего» imeHeight
+    // (меню пропадало). Вся схема — ТОЛЬКО сенсорные платформы (PLATFORM-SCOPING).
     readonly property bool kbPlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
-    readonly property bool kbActive: kbPlatform
-        && PageController.imeHeight > 0 && Qt.inputMethod.visible
+    readonly property bool kbActive: kbPlatform &&
+        ((PageController.imeHeight > 0 && Qt.inputMethod.visible)
+         || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true))
 
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
@@ -454,12 +452,11 @@ PageType {
                                                : avpnBottomNav.height)
                               : 0
         Behavior on anchors.bottomMargin {
-            // iOS: БЕЗ своей анимации — высота применяется покадрово В ФАЗЕ кадра Qt
-            // (pageController: afterAnimating ← трекер keyboardLayoutGuide) и повторяет
-            // фактическое движение клавиатуры. Свои кривые (250мс/500мс bezier) всегда
-            // расходились с её приватным spring'ом; несинфазный фид (сет из displaylink)
-            // давал рывки. Android: инсеты приходят дискретно — анимация нужна.
-            enabled: Qt.platform.os !== "ios"
+            // Кривая ≈ клавиатура iOS (bezier .38,.7,.125,1 / 500мс). На 120 Гц
+            // (CADisableMinimumFrameDurationOnPhone в Info.plist) анимация лайаута идёт
+            // вдвое чаще прежнего — плавно; кадр рендерится за 2-3мс (QSG_RENDER_TIMING).
+            // Экспериментальные покадровые фиды/GPU-сдвиги откачены (артефакты хуже
+            // микро-рассинхрона кривой — история в памяти tribe-support-chat-native).
             NumberAnimation {
                 duration: 500
                 easing.type: Easing.BezierSpline
