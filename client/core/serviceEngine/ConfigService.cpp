@@ -117,10 +117,12 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64)
 void ConfigService::reportNetworkSuccess()
 {
     m_failStreak = 0;
+    emit transportOk(); // AVPN (белые списки): edge ответил прикладным слоем — сеть жива
 }
 
 void ConfigService::reportNetworkFailure()
 {
+    emit transportFailed(); // AVPN (белые списки): каждый транспортный фейл — сигнал детектору
     if (++m_failStreak < failThreshold())
         return;
     m_failStreak = 0;
