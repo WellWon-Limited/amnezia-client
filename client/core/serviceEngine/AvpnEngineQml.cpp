@@ -18,6 +18,7 @@
 #include "ServiceProbeTargets.h" // AVPN (чипы): вшитые цели + мерж серверного probe_targets (не замещать!)
 #include "ConnectTunables.h" // AVPN: клампованные пороги коннекта + связка watchdog>handshake (ревью 2026-07-11)
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
+#include "NodeRotation.h" // AVPN (Task 10 финал): isSupportedProto — xray-ноды мимо свипа/выбора
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #ifdef Q_OS_IOS
@@ -1244,11 +1245,17 @@ void AvpnEngineQml::startNodeSweep()
 {
     if (sweepRunning() || m_benchRunning || abRunning() || !m_bench)
         return;
-    // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера)
+    // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера).
+    // Task 10 финал: КРОМЕ неподдерживаемых протоколов (xray, ...) — switchToNode к ним невозможен,
+    // каждая такая нода лишь выжигала бы сторожа фазы (до 25с) впустую.
     m_sweepQueue.clear();
     const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
-    for (const QVariant &v : pool)
-        m_sweepQueue << v.toMap().value(QStringLiteral("nodeId")).toString();
+    for (const QVariant &v : pool) {
+        const QVariantMap n = v.toMap();
+        if (!avpn::isSupportedProto(n.value(QStringLiteral("proto")).toString()))
+            continue;
+        m_sweepQueue << n.value(QStringLiteral("nodeId")).toString();
+    }
     m_sweepQueue.removeAll(QString());
     if (m_sweepQueue.isEmpty()) {
         emit error(tr("Свип: пул нод пуст — обнови подписку"));
@@ -3080,6 +3087,17 @@ void AvpnEngineQml::resetLkg()
     emit changed();
 }
 
+// AVPN (Task 10 финал): setPinnedNode отдаёт ТЕХНИЧЕСКУЮ строку (английская, с nodeId/proto) —
+// её место в логе, не в тосте. Человеческий текст — здесь, на границе фасада: маппим по
+// стабильному префиксу движка; неизвестные причины сворачиваем в общий текст (детали в лог).
+static QString humanPinError(const QString &technical)
+{
+    qWarning() << "avpn: setPinnedNode failed:" << technical;
+    if (technical.startsWith(QLatin1String("unsupported_proto")))
+        return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
+    return AvpnEngineQml::tr("Не удалось выбрать сервер — обновите список серверов");
+}
+
 // AVPN (live-node picker): «Выбрать» сервер из шторки. Модель «выбор = задать цель, коннект —
 // ВРУЧНУЮ кнопкой Connect» (по требованию пользователя): НЕ коннектим автоматически. setPinnedNode
 // закрепляет узел; если сейчас онлайн — опускаем туннель (намерение «офлайн»), чтобы орб стал OFF и
@@ -3090,7 +3108,7 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
 {
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     // Намерение: офлайн. Если онлайн — reconcile сделает guardedStop (орб OFF); офлайн — no-op.
@@ -3116,7 +3134,7 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
     }
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
@@ -3163,7 +3181,7 @@ void AvpnEngineQml::rotateNext()
     }
     QString err;
     if (!m_engine.setPinnedNode(next, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     m_wantConnected = true;
@@ -4500,6 +4518,9 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         n["alive"] = r.alive;       // жив по backend-данным (фильтр «только живые» в шторке)
         n["current"] = r.current;   // == текущая нода → акцент #7CA2D0 + галка
         n["reason"] = r.reason;
+        // AVPN (Task 10 финал): протокол ноды — QML-пикер и админ-свип скипают неподдерживаемые
+        // (xray, ...): коннект к ним невозможен, тап/свип упирался бы в сторожа. Пусто = awg.
+        n["proto"] = r.proto;
         pool.append(n);
     }
     m["pool"] = pool;
