@@ -23,6 +23,7 @@
 //    JPEG (как canvas-компрессия Занавеса), видео стримится из файла.
 #pragma once
 
+#include <QAbstractListModel>
 #include <QByteArray>
 #include <QHash>
 #include <QObject>
@@ -39,6 +40,29 @@ class QNetworkReply;
 
 namespace avpn {
 
+// Точечная модель сообщений для ListView (жалоба 2026-07-12 «скролл дёрганый, медиа
+// мигают/пропадают»): полная замена QVariantList-модели на КАЖДОЕ изменение (поллинг 5с,
+// приезд превью, прогресс эха) пересоздавала ВСЕ делегаты — async-картинки мигали, позиция
+// скролла слетала, флики становились рваными. Золотой паттерн QML-чатов (NeoChat/Kaidan):
+// QAbstractListModel с дифом — изменившаяся строка = dataChanged, новое сообщение =
+// insertRows в хвост; остальные делегаты НЕ трогаются. Диф по общему префиксу id:
+// история append-only, меняется только хвост (эхо → серверная копия).
+class TribeSupportMsgModel : public QAbstractListModel {
+    Q_OBJECT
+public:
+    explicit TribeSupportMsgModel(QObject *parent = nullptr) : QAbstractListModel(parent) {}
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override
+    {
+        return parent.isValid() ? 0 : int(m_rows.size());
+    }
+    QVariant data(const QModelIndex &index, int role) const override;
+    QHash<int, QByteArray> roleNames() const override;
+    void applyList(const QVariantList &msgs);
+
+private:
+    QList<QVariantMap> m_rows;
+};
+
 class TribeSupportChat : public QObject {
     Q_OBJECT
     // Сообщения треда (хронология) + наши неподтверждённые «эхо» в хвосте.
@@ -51,6 +75,9 @@ class TribeSupportChat : public QObject {
     //                          action: "open_url"|"compose_send", url, send}]} —
     //                          server-driven карточка, рендерится ВМЕСТО body}
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
+    // Модель для ListView (роли msgId/sender/body/…): точечные обновления вместо полного
+    // пересоздания делегатов. messages (QVariantList) остаётся для галереи лайтбокса.
+    Q_PROPERTY(QObject *msgModel READ msgModel CONSTANT)
     Q_PROPERTY(QString status READ status NOTIFY messagesChanged)      // "open" | "resolved"
     Q_PROPERTY(int unread READ unread NOTIFY unreadChanged)            // бейдж вкладки
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)        // первый фетч треда
@@ -67,6 +94,7 @@ public:
     explicit TribeSupportChat(QNetworkAccessManager *nam, QObject *parent = nullptr);
 
     QVariantList messages() const { return m_messages; }
+    QObject *msgModel() const { return m_msgModel; }
     QString status() const { return m_status; }
     int unread() const { return m_unread; }
     bool loading() const { return m_loading; }
@@ -189,7 +217,8 @@ private:
     QStringList m_videoMime;
     QStringList m_logMime;
 
-    QVariantList m_messages;                 // готовая модель для QML
+    QVariantList m_messages;                 // готовая модель для QML (галерея лайтбокса)
+    TribeSupportMsgModel *m_msgModel = nullptr; // точечная модель ленты (создаётся в кторе)
     QVariantList m_serverMessages;           // последняя разобранная серверная история
     QByteArray m_lastSnapshot;               // анти-дребезг: не эмитим без изменений
     QString m_status = QStringLiteral("open");

@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
-import Qt5Compat.GraphicalEffects as Fx   // OpacityMask: скругление превью (clip режет прямоугольно)
+import QtQuick.Effects   // MultiEffect: скругление превью маской (clip режет прямоугольно)
 
 import ".."   // Theme
 
@@ -103,13 +103,18 @@ Item {
                     anchors.fill: parent
                     radius: mediaCard.radius
                     visible: false
+                    layer.enabled: true   // MultiEffect берёт maskSource текстурой
+                    layer.smooth: true
                 }
-                Fx.OpacityMask {
+                // MultiEffect (QtQuick.Effects) вместо Qt5Compat OpacityMask: однопроходный
+                // оптимизированный шейдер — старая маска на флике с несколькими медиа
+                // заметно грузила GPU (жалоба 2026-07-12 «скролл дёрганый»). // AVPN
+                MultiEffect {
                     anchors.fill: parent
                     source: mediaImg
+                    maskEnabled: true
                     maskSource: mediaMask
                     visible: mediaCard.previewUrl !== ""
-                    cached: true
                 }
 
                 // AVPN (diag, Task 5 bff-3): компактная строка диагностики — file-text

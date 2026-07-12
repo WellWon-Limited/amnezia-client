@@ -124,17 +124,9 @@ PageType {
         function onAttachmentFailed(attachmentId) {
             PageController.showErrorMessage(qsTr("Не удалось загрузить вложение"))
         }
-        // Полная замена QVariantList сбрасывает позицию ListView — возвращаем:
-        // читатель у низа → прижать к концу (новое сообщение видно сразу),
-        // листает историю → вернуть сохранённый contentY (near-bottom-гард Занавеса).
-        function onMessagesChanged() {
-            Qt.callLater(function() {
-                if (list.stick)
-                    list.positionViewAtEnd()
-                else
-                    list.contentY = list.savedY
-            })
-        }
+        // Позицию при обновлениях больше НЕ трогаем: лента на TribeSupport.msgModel
+        // (точечные dataChanged/insertRows) — позиция скролла сохраняется сама, делегаты
+        // не пересоздаются (мигание медиа/сброс позиции ушли вместе с QVariantList-моделью).
     }
 
     FileDialog {
@@ -252,7 +244,11 @@ PageType {
             footer: Item { width: 1; height: Theme.space.md }
             clip: true
             spacing: Theme.space.md
-            model: root.hasChat ? TribeSupport.messages : []
+            // Точечная модель (msgModel): dataChanged/insertRows вместо полного пересоздания
+            // делегатов на каждый поллинг/превью — скролл не слетает, медиа не мигают.
+            // Старый бинарь в dev-превью без msgModel → фолбэк на QVariantList.
+            model: root.hasChat ? (TribeSupport.msgModel || TribeSupport.messages) : []
+            reuseItems: true   // флики: делегаты переиспользуются, а не создаются заново
             cacheBuffer: 4000
 
             // прижатие к низу: пока пользователь не ушёл в историю — держим конец
@@ -269,16 +265,18 @@ PageType {
             TapHandler { onTapped: input.focus = false }
 
             delegate: ChatBubble {
+                // model.* — роли TribeSupportMsgModel (msgId вместо id: голый id в QML
+                // зарезервирован); с фолбэком QVariantList роли резолвятся так же.
                 width: ListView.view ? ListView.view.width : 0
-                text: modelData.body
-                mine: modelData.sender === "client"
-                time: Qt.formatTime(new Date(modelData.atMs), "HH:mm")
-                operatorName: modelData.operatorName
-                isAuto: modelData.isAuto
-                pending: modelData.pending
-                failed: modelData.failed
-                attachments: modelData.attachments
-                card: modelData.card
+                text: model.body
+                mine: model.sender === "client"
+                time: Qt.formatTime(new Date(model.atMs), "HH:mm")
+                operatorName: model.operatorName
+                isAuto: model.isAuto
+                pending: model.pending
+                failed: model.failed
+                attachments: model.attachments
+                card: model.card
                 onAttachmentClicked: function(attachmentId, kind) {
                     if (root.hasChat) TribeSupport.openAttachment(attachmentId)
                 }
@@ -303,15 +301,20 @@ PageType {
                             PageController.showErrorMessage(qsTr("Функция временно недоступна"))
                     }
                 }
-                onRetryClicked: if (root.hasChat) TribeSupport.retryMessage(modelData.id)
-                onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(modelData.id)
+                onRetryClicked: if (root.hasChat) TribeSupport.retryMessage(model.msgId)
+                onDiscardClicked: if (root.hasChat) TribeSupport.discardMessage(model.msgId)
             }
             onCountChanged: if (stick) positionViewAtEnd()
             // Коммит лайаута (jump высоты при DidShow/WillHide): прижать к концу И сразу
             // применить текущий GPU-сдвиг — иначе один кадр между positionViewAtEnd и
             // обработчиком kbOffset показывал контент не там (дёрг на старте скрытия).
+            // Ре-пин: жест, закрывший клавиатуру, мог чуть сдвинуть ленту (stick слетал —
+            // после скрытия история оставалась «где-то вверху», жалоба 2026-07-12) —
+            // если читатель был около низа, прижимаем обратно.
             onHeightChanged: {
-                if (!stick) return
+                const nearBottom = (contentHeight - height - contentY) < height * 0.5
+                if (!stick && !nearBottom) return
+                stick = true
                 positionViewAtEnd()
                 if (root.kbOffset > 0)
                     contentY = Math.max(-topMargin, contentHeight - height + root.kbOffset)
