@@ -415,6 +415,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     s.trafficUsed = sub.trafficUsed;
     s.trafficLimit = sub.trafficLimit;
     s.expiresAt = sub.expiresAt; // AVPN: для AvpnEngineQml::daysLeft()
+    s.graceUntil = sub.graceUntil; // AVPN (diag-report): grace-окно в диагностику
     s.lkgStale = m_lkgActive; // AVPN (LKG, C-7): пул из дискового кэша, свежий фетч ещё не доехал
 
     // реальные рантайм-статы туннеля
@@ -434,6 +435,10 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         row.name = n.name;         // AVPN: имя сервера (опц.)
         row.countryCode = n.countryCode; // AVPN: ISO-3166 alpha-2 → флаг-эмодзи в UI
         row.endpoint = n.endpoint; // AVPN: реальный host:port для UI
+        row.proto = n.proto;       // AVPN (diag-report): протокол ноды
+        // AVPN (diag-report): измеренный off-tunnel ICMP RTT из кэша m_measuredRtt (probeNodeRtt);
+        // нет замера → 0 (осталось легаси-значением scoreMs).
+        row.scoreMs = m_measuredRtt.value(n.nodeId, 0);
         // AVPN (live-node picker): обогащаем строку backend-данными (weight + health-агрегат). Источник
         // правды — подписка; TCP-RTT не показываем (AWG = UDP). alive/current → акцент/бары в шторке.
         const double agg = healthAggregate(n);

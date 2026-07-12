@@ -30,6 +30,8 @@
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
 #include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
+#include "TribeDiagReport.h" // AVPN (diag-report, Task 4 bff-3): единый диагностический отчёт для чата поддержки
+#include "logger.h" // AVPN (diag-report): Logger::userLogsFilePath() — хвост лога приложения в отчёт
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -398,6 +400,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
                 m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN (diag-report, Task 4 bff-3): timestamp применения конфига → возраст в отчёте.
+                m_lastConfigAppliedEpoch = QDateTime::currentSecsSinceEpoch();
                 // AVPN backend-first (T19): down/up speed-URL бенча — urls.bench_speed_down_url/
                 // bench_speed_up_url с сервера, фолбэк = вкомпиленные литералы (BenchRunner ctor).
                 if (m_bench)
@@ -4465,6 +4469,31 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         log.append(l);
     m["switchLog"] = log;
     return m;
+}
+
+// AVPN (diag-report, Task 4 bff-3): полный диагностический отчёт — юзер отправляет его в чат
+// поддержки. Снапшот движка (уже обогащён RTT-кэшем/proto/grace в ServiceEngine::debugSnapshot) +
+// версия серверных bypass-списков (движок BypassListService не знает — сеем здесь) + bypassMasterOn
+// (QSettings в QML-домене, как applyRuBypassSplit) + хвост лога приложения. Сборка/кламп — в
+// header-only TribeDiagReport (покрыт tests/test_diag_report.cpp).
+QString AvpnEngineQml::buildDiagReport() const
+{
+    avpn::DebugSnapshot s = m_engine.debugSnapshot();
+    if (m_bypassListSvc)
+        s.bypassListVersion = m_bypassListSvc->lkgVersion();
+
+    avpn::DiagMeta meta;
+    meta.appVersion = QCoreApplication::applicationVersion(); // tribe_version — как в bench-отчёте (benchExtra)
+    meta.platform = QSysInfo::productType() + QLatin1Char(' ') + QSysInfo::productVersion();
+    meta.lang = appLang();
+    meta.configAppliedAgeSec = (m_lastConfigAppliedEpoch > 0)
+        ? (QDateTime::currentSecsSinceEpoch() - m_lastConfigAppliedEpoch)
+        : -1; // конфиг ещё не применялся → ключ опускается
+
+    const bool bypassOn =
+        QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    const QString logTail = avpn::TribeDiagReport::readLogTail(Logger::userLogsFilePath());
+    return avpn::TribeDiagReport::build(s, bypassOn, logTail, meta);
 }
 
 // ── AVPN in-app Legal (Privacy/Terms) ────────────────────────────────────────

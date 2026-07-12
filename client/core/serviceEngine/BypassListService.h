@@ -27,6 +27,10 @@ public:
     // loadLkg() (мгновенно, без сети) + первый fetch() + взводит таймер повторного фетча (6ч).
     void start();
 
+    // AVPN (diag-report, Task 4 bff-3): версия последних применённых списков (LKG или свежий
+    // fetch); 0 = серверные списки не применялись (работают вкомпиленные фолбэки).
+    int lkgVersion() const { return m_lkgVersion; }
+
 public slots:
     // Смена активного edge (Task 10 подключит ConfigService::activeEdgeChanged). Влияет
     // ТОЛЬКО на будущие фетчи — смена базы сама по себе НЕ триггерит немедленный рефетч.
