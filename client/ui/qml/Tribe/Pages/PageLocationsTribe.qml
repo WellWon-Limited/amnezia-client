@@ -99,7 +99,10 @@ PageType {
                             if (modelData.ping !== undefined) {
                                 var p = Number(modelData.ping)
                                 if (isNaN(p) || p < 0) return 0
-                                return p < 50 ? 5 : (p < 100 ? 4 : (p < 150 ? 3 : (p < 300 ? 2 : 1)))
+                                // канон-шкала — TribeEngine.barsForRtt (avpn::SignalQuality, server-tunable
+                                // rtt_bar*_ms); dev-превью без движка держит прежний вкомпиленный литерал.
+                                return root.hasEngine ? TribeEngine.barsForRtt(p)
+                                                       : (p < 50 ? 5 : (p < 100 ? 4 : (p < 150 ? 3 : (p < 300 ? 2 : 1))))
                             }
                             return 3
                         }

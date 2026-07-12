@@ -571,6 +571,10 @@ public:
     // если пул пуст. Каждый ответ → m_nodeRtt[nodeId] + emit changed() (шторка пересортируется/обновит
     // палочки вживую по мере прихода пингов). Неизмеренные/недостижимые → -1 (фолбэк на health в UI).
     Q_INVOKABLE void probeNodeRtt();
+    // AVPN backend-first-3 (Task 11): RTT(мс)→палочки 0..5 для QML-списков (PageLocationsTribe) —
+    // канон avpn::SignalQuality::barsForRtt (RttBands::fromTuning(), server-tunable rtt_bar*_ms),
+    // чтобы список серверов и «живая» проба (m_signal) не расходились в порогах.
+    Q_INVOKABLE int barsForRtt(int rttMs) const { return avpn::SignalQuality::barsForRtt(rttMs); }
     // AVPN (Task 7): состояние тумблера #6 (AvpnSettings/autoPauseRu) — для авто-инициатора (iOS
     // App Intent / Shortcuts, Task 8): проверить ПЕРЕД авто-вызовом pauseForShopping. Ручной/intent
     // вызов pauseForShopping работает независимо от этого флага.
