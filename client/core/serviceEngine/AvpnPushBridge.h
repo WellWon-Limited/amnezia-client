@@ -52,6 +52,12 @@ public:
     // только его: локально сразу (точка гаснет, бейдж -1), на сервер — readItemRequested(id),
     // если у элемента есть серверный id. index — позиция в items (модель ListView).
     Q_INVOKABLE void markItemRead(int index);
+    // Свайп-тоггл в списке (эталон 2026-07-12): выставить read-состояние ОДНОГО элемента
+    // в обе стороны (read=false = «пометить непрочитанным»). Локально сразу + сервер.
+    Q_INVOKABLE void setItemRead(int index, bool read);
+    // Свайп «Удалить»: убрать элемент из ленты (локально сразу; на сервере строка
+    // удаляется по deleteItemRequested(id) → POST /v1/notifications/delete).
+    Q_INVOKABLE void removeItem(int index);
     // Принудительная (пере)регистрация на пуши (например, после логина). На desktop — no-op.
     Q_INVOKABLE void requestAuthorization();
     // AVPN (Support): забрать отложенный «тап по пушу» (cold start: сигнал pushTapped ушёл
@@ -97,9 +103,12 @@ signals:
     void deviceTokenReady(const QString &token, const QString &platform, const QString &environment);
     // AVPN: пользователь отметил всё прочитанным → движок шлёт POST /v1/notifications/read (сброс счётчика).
     void readRequested();
-    // AVPN (read per-элемент): открыта деталь уведомления с серверным id → движок шлёт
-    // POST /v1/notifications/read {"ids":[id]} (помечает только его + декремент unread_count).
-    void readItemRequested(qlonglong id);
+    // AVPN (read per-элемент): изменён read-статус элемента с серверным id → движок шлёт
+    // POST /v1/notifications/read {"ids":[id], "read":read} (unread_count пересчитает бэк).
+    void readItemRequested(qlonglong id, bool read);
+    // AVPN (свайп «Удалить»): элемент с серверным id удалён из ленты → движок шлёт
+    // POST /v1/notifications/delete {"ids":[id]}.
+    void deleteItemRequested(qlonglong id);
     // AVPN (Support): пришёл пуш type=support (ответ оператора чата поддержки). В колокол
     // НЕ попадает (гейт в applyRemoteNotification) — слушает TribeSupportChat::onSupportPush.
     void supportPushReceived();

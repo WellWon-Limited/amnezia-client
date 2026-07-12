@@ -105,15 +105,21 @@ void AvpnPushBridge::markAllRead()
 // заместит строкой с id при ближайшем refreshNotifications — рассинхрон само-чинится.
 void AvpnPushBridge::markItemRead(int index)
 {
+    setItemRead(index, true);
+}
+
+// AVPN (свайп-тоггл, эталон 2026-07-12): read-состояние одного элемента в обе стороны.
+void AvpnPushBridge::setItemRead(int index, bool read)
+{
     ensureLoaded();
     if (index < 0 || index >= m_items.size())
         return;
     QVariantMap m = m_items[index].toMap();
-    if (m.value(QStringLiteral("read")).toBool())
-        return;   // уже прочитано — ни persist, ни сеть не нужны
-    m[QStringLiteral("read")] = true;
+    if (m.value(QStringLiteral("read")).toBool() == read)
+        return;   // уже в целевом состоянии — ни persist, ни сеть не нужны
+    m[QStringLiteral("read")] = read;
     m_items[index] = m;
-    m_unreadCount = qMax(0, m_unreadCount - 1);
+    m_unreadCount = qMax(0, m_unreadCount + (read ? -1 : 1));
     persist();
     updateNativeBadge();   // macOS dockTile ← unreadCount
     // iOS: числового сеттера нет (aps.badge ставит сервер) — гасим системный бейдж,
@@ -122,7 +128,28 @@ void AvpnPushBridge::markItemRead(int index)
         m_badgeClearer();
     const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
     if (id > 0)
-        emit readItemRequested(id);
+        emit readItemRequested(id, read);
+    emit changed();
+}
+
+// AVPN (свайп «Удалить»): локально сразу (лента и бейдж), сервер — по сигналу.
+void AvpnPushBridge::removeItem(int index)
+{
+    ensureLoaded();
+    if (index < 0 || index >= m_items.size())
+        return;
+    const QVariantMap m = m_items[index].toMap();
+    const bool wasUnread = !m.value(QStringLiteral("read")).toBool();
+    m_items.removeAt(index);
+    if (wasUnread)
+        m_unreadCount = qMax(0, m_unreadCount - 1);
+    persist();
+    updateNativeBadge();
+    if (m_unreadCount == 0 && m_badgeClearer)
+        m_badgeClearer();
+    const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
+    if (id > 0)
+        emit deleteItemRequested(id);
     emit changed();
 }
 
@@ -274,6 +301,10 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     item[QStringLiteral("title")] = title;
     item[QStringLiteral("body")] = body;
     item[QStringLiteral("time")] = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm"));
+    // AVPN (эталон 2026-07-12): группа для секций списка + полная дата для детали.
+    item[QStringLiteral("group")] = QStringLiteral("today");
+    item[QStringLiteral("dateFull")] =
+        tr("Сегодня в %1").arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm")));
     item[QStringLiteral("read")] = false;
     // Тип для стиля делегата в центре: пустой payload (старый пуш) → "generic".
     item[QStringLiteral("type")] = type.isEmpty() ? QStringLiteral("generic") : type;
