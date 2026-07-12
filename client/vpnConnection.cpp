@@ -30,6 +30,7 @@
 #endif
 
 #include "core/serviceEngine/CidrValidate.h" // AVPN: IPv6-CIDR для split-фильтра (header-only)
+#include "core/serviceEngine/TuningStore.h" // AVPN backend-first-3 (Task 8): status_poll_ms (header-only)
 #include "core/utils/networkUtilities.h"
 #include "core/utils/serverConfigUtils.h"
 #include "vpnConnection.h"
@@ -40,7 +41,7 @@ VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureA
     : QObject(parent), m_serversRepository(serversRepository), m_appSettingsRepository(appSettingsRepository), m_checkTimer(this)
 {
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
-    m_checkTimer.setInterval(1000);
+    m_checkTimer.setInterval(qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000)); // AVPN: server-tunable
     connect(IosController::Instance(), &IosController::connectionStateChanged, this, &VpnConnection::setConnectionState);
     connect(IosController::Instance(), &IosController::bytesChanged, this, &VpnConnection::onBytesChanged);
 #endif
@@ -183,6 +184,9 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
     if (state == Vpn::ConnectionState::Connected ||
         state == Vpn::ConnectionState::Connecting ||
         state == Vpn::ConnectionState::Reconnecting) {
+        // AVPN (Task 8): перечитать интервал перед стартом — в конструкторе конфиг ещё мог не
+        // примениться (numberOr => вкомпиленный 1000), здесь уже свежий TuningStore-снапшот.
+        m_checkTimer.setInterval(qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000)); // AVPN: server-tunable
         m_checkTimer.start();
     } else {
         m_checkTimer.stop();

@@ -248,7 +248,9 @@ PageType {
             if (typeof TribeEngine.kickBootstrap === "function")
                 TribeEngine.kickBootstrap()
             var now = Date.now()
-            if (now - root.lastFgRefreshMs < 30000) return
+            // AVPN backend-first-3 (Task 8): троттл server-tunable (numbers.fg_refresh_throttle_ms,
+            // клампы 1с..10мин); 30000 — вкомпиленный QML-фолбэк при отсутствии движка (dev-превью).
+            if (now - root.lastFgRefreshMs < (root.hasEngine ? TribeEngine.fgRefreshThrottleMs : 30000)) return
             root.lastFgRefreshMs = now
             if (typeof TribeEngine.refreshSubscription === "function")
                 TribeEngine.refreshSubscription()   // device-часы: бейдж/CTA

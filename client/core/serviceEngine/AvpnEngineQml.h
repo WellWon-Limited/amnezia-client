@@ -178,6 +178,10 @@ class AvpnEngineQml : public QObject {
     // AVPN backend-first (Task 9): поллинг «перенос принят» (PageAccountTribe) — server-tunable
     // (numbers.transfer_poll_ms), фолбэк 4000мс, клампы 1с..10мин.
     Q_PROPERTY(int transferPollMs READ transferPollMs NOTIFY changed)
+    // AVPN backend-first-3 (Task 8): троттл авто-refresh подписки на возврат приложения в фон/
+    // foreground (PageConnectTribe.qml, Qt.application.onStateChanged) — server-tunable
+    // (numbers.fg_refresh_throttle_ms), фолбэк 30000мс, клампы 1с..10мин.
+    Q_PROPERTY(int fgRefreshThrottleMs READ fgRefreshThrottleMs NOTIFY changed)
     // AVPN backend-first (Task 9): ретрай-поллинг рефералки (PageReferralTribe) — server-tunable
     // (numbers.referral_retry_ms), фолбэк 6000мс, клампы 1с..10мин.
     Q_PROPERTY(int referralRetryMs READ referralRetryMs NOTIFY changed)
@@ -311,6 +315,12 @@ public:
     int referralRetryMs() const
     {
         return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("referral_retry_ms"), 6000)),
+                      600000);
+    }
+    // AVPN backend-first-3 (Task 8): fg-refresh троттл — см. Q_PROPERTY выше.
+    int fgRefreshThrottleMs() const
+    {
+        return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("fg_refresh_throttle_ms"), 30000)),
                       600000);
     }
 
