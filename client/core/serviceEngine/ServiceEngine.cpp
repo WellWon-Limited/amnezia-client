@@ -44,6 +44,8 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
+        if (!isSupportedProtoNode(n))  // Task 10: неизвестный proto (xray, ...) — коннект невозможен, ни в один ярус
+            continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
         if (isManualOnlyNode(n)) {     // manual_only/RU — отдельный fallback-ярус (не в основном выборе)
@@ -78,6 +80,8 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
         if (!exclA.isEmpty() && n.nodeId == exclA)
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
+            continue;
+        if (!isSupportedProtoNode(n))  // Task 10: неизвестный proto — коннект невозможен, ни в основной, ни в fallback
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -138,9 +142,12 @@ bool ServiceEngine::connect(QString &error)
     std::optional<SubscriptionNode> candidate; // AVPN: optional — закрепление/weight-фолбэк ниже
     // AVPN (live-node picker): если пользователь закрепил ноду — стартуем с неё (она есть и жива).
     // Закрепление имеет приоритет над авто-скорингом: «движок не уходит ради скорости» (spec §23-25).
+    // Task 10: гард isSupportedProtoNode — страховка от стейл-pin на ноду, чей proto сменился
+    // на неподдерживаемый после обновления подписки (setPinnedNode такой pin уже не пропустит);
+    // падаем в авто-выбор ниже вместо заведомо мёртвого up().
     if (!m_pinnedNodeId.isEmpty()) {
         for (const SubscriptionNode &n : m_pool.nodes())
-            if (n.nodeId == m_pinnedNodeId && healthAggregate(n) > 0.0) {
+            if (n.nodeId == m_pinnedNodeId && isSupportedProtoNode(n) && healthAggregate(n) > 0.0) {
                 candidate = n;
                 break;
             }
@@ -352,9 +359,11 @@ bool ServiceEngine::onDead(bool tunnelStillUp)
 bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, const QString &reason)
 {
     if (!m_tunnel) { m_state = EngineState::Error; return false; }
+    // Task 10: цель с неподдерживаемым proto = «нет такой ноды» — up() на неё заведомо мёртв
+    // (страховка последнего рубежа: все выборные пути её уже отфильтровали).
     bool found = false;
     for (const SubscriptionNode &n : m_pool.nodes())
-        if (n.nodeId == targetNodeId) { found = true; break; }
+        if (n.nodeId == targetNodeId) { found = isSupportedProtoNode(n); break; }
     if (!found)
         return false;
     m_pendingSwitchNodeId = targetNodeId;
@@ -415,6 +424,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     s.trafficUsed = sub.trafficUsed;
     s.trafficLimit = sub.trafficLimit;
     s.expiresAt = sub.expiresAt; // AVPN: для AvpnEngineQml::daysLeft()
+    s.graceUntil = sub.graceUntil; // AVPN (diag-report): grace-окно в диагностику
     s.lkgStale = m_lkgActive; // AVPN (LKG, C-7): пул из дискового кэша, свежий фетч ещё не доехал
 
     // реальные рантайм-статы туннеля
@@ -434,6 +444,10 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         row.name = n.name;         // AVPN: имя сервера (опц.)
         row.countryCode = n.countryCode; // AVPN: ISO-3166 alpha-2 → флаг-эмодзи в UI
         row.endpoint = n.endpoint; // AVPN: реальный host:port для UI
+        row.proto = n.proto;       // AVPN (diag-report): протокол ноды
+        // AVPN (diag-report): измеренный off-tunnel ICMP RTT из кэша m_measuredRtt (probeNodeRtt);
+        // нет замера → 0 (осталось легаси-значением scoreMs).
+        row.scoreMs = m_measuredRtt.value(n.nodeId, 0);
         // AVPN (live-node picker): обогащаем строку backend-данными (weight + health-агрегат). Источник
         // правды — подписка; TCP-RTT не показываем (AWG = UDP). alive/current → акцент/бары в шторке.
         const double agg = healthAggregate(n);
@@ -463,11 +477,19 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
         return false;
     }
     // Узел должен существовать в подписке (иначе нечего закреплять/поднимать).
-    bool found = false;
+    const SubscriptionNode *found = nullptr;
     for (const SubscriptionNode &n : m_pool.nodes())
-        if (n.nodeId == nodeId) { found = true; break; }
+        if (n.nodeId == nodeId) { found = &n; break; }
     if (!found) {
         error = QStringLiteral("node not in subscription: %1").arg(nodeId);
+        return false;
+    }
+    // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
+    // manual_only) — коннект к ней невозможен, честная ошибка вместо вечного Connecting.
+    // Строка ТЕХНИЧЕСКАЯ (лог/тесты); человеческий текст для тоста — на границе фасада
+    // (AvpnEngineQml::humanPinError, финал bff-3), маппится по стабильному префиксу.
+    if (!isSupportedProtoNode(*found)) {
+        error = QStringLiteral("unsupported_proto: node %1 proto '%2'").arg(nodeId, found->proto);
         return false;
     }
     m_pinnedNodeId = nodeId;
@@ -484,7 +506,7 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
     m_pinnedNodeId.clear(); // AVPN
     QList<SubscriptionNode> live;
     for (const SubscriptionNode &n : m_pool.nodes())
-        if (healthAggregate(n) > 0.0)
+        if (isSupportedProtoNode(n) && healthAggregate(n) > 0.0) // Task 10: xray — не «живая альтернатива»
             live.append(n);
     if (live.size() < 2) {
         error = QStringLiteral("not enough live nodes to rotate");

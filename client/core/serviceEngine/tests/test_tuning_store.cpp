@@ -102,5 +102,116 @@ int main(int argc, char **argv)
         avpn::TuningStore::reset();
     }
 
+    // --- localizedOr (Task 3, 2026-07-12): язык-суффиксные строки с цепочкой фолбэков
+    // <key>_<lang> -> <key>_en -> <key> -> def, контракт "пусто = фолбэк" на КАЖДОМ уровне ---
+    {
+        avpn::TuningStore::reset();
+
+        // (е1) отсутствие всех уровней => def
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: пустой store => def");
+
+        // (е2) точный lang-ключ побеждает над _en и базовым
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QStringLiteral("Заявка отправлена")},
+            {"cta_incident_en", QStringLiteral("Report sent")},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Заявка отправлена"),
+              "localizedOr: точный lang-ключ побеждает");
+        // нормализация: "ru_RU" => "ru" (split('_').first().toLower())
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru_RU", "def") == QStringLiteral("Заявка отправлена"),
+              "localizedOr: lang нормализуется (ru_RU => ru)");
+
+        // (е3) нет ключа под нужный lang => фолбэк на _en
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "fr", "def") == QStringLiteral("Report sent"),
+              "localizedOr: нет _fr => фолбэк на _en");
+
+        // (е4) нет ни lang, ни _en => фолбэк на базовый ключ
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "fr", "def") == QStringLiteral("Sent"),
+              "localizedOr: нет lang и _en => фолбэк на базовый ключ");
+
+        // (е5) пустое значение НА КАЖДОМ уровне проваливается ниже (контракт "пусто = фолбэк")
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QString()},
+            {"cta_incident", QString()},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: пустые значения на всех уровнях => def");
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QStringLiteral("Report sent")},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Report sent"),
+              "localizedOr: пустой lang-уровень проваливается на _en");
+        avpn::TuningStore::set({}, {}, {}, {
+            {"cta_incident_ru", QString()},
+            {"cta_incident_en", QString()},
+            {"cta_incident", QStringLiteral("Sent")},
+        });
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("Sent"),
+              "localizedOr: пустые lang и _en проваливаются на базовый ключ");
+
+        // (е6) reset() очищает
+        avpn::TuningStore::reset();
+        CHECK(avpn::TuningStore::localizedOr("cta_incident", "ru", "def") == QStringLiteral("def"),
+              "localizedOr: после reset() => def");
+    }
+
+    // --- Task 8 (backend-first-3, 2026-07-12): клампы трёх остаточных чисел ---
+    // BypassListService.cpp/vpnConnection.cpp/AvpnEngineQml.h читают TuningStore напрямую
+    // (не header-only helper'ы — эти TU не линкуются в standalone-тест: сеть/QNetworkAccessManager
+    // и QQmlEngine соответственно), поэтому формулы qBound здесь ЗЕРКАЛЯТ продакшен-код 1:1
+    // (тот же паттерн, что и блок svc_probe_slow_ms/svc_probe_sample_bytes в test_quality_tuning.cpp).
+    {
+        avpn::TuningStore::reset();
+
+        auto bypassRefetchMsTuned = []() {
+            return qBound(900000, int(avpn::TuningStore::numberOr(QStringLiteral("bypass_refetch_ms"),
+                                                                   double(6 * 60 * 60 * 1000))),
+                          86400000);
+        };
+        auto statusPollMsTuned = []() {
+            return qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000);
+        };
+        auto fgRefreshThrottleMsTuned = []() {
+            return qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("fg_refresh_throttle_ms"), 30000)),
+                          600000);
+        };
+
+        // (о1) пустой store => вкомпиленные дефолты
+        CHECK(bypassRefetchMsTuned() == 21600000, "bypass_refetch_ms: пустой store => дефолт 6ч (21600000)");
+        CHECK(statusPollMsTuned() == 1000, "status_poll_ms: пустой store => дефолт 1000");
+        CHECK(fgRefreshThrottleMsTuned() == 30000, "fg_refresh_throttle_ms: пустой store => дефолт 30000");
+
+        // (о2) валидное значение в диапазоне => как есть
+        avpn::TuningStore::set({{"bypass_refetch_ms", 3600000.0}, {"status_poll_ms", 500.0},
+                                {"fg_refresh_throttle_ms", 60000.0}}, {}, {}, {});
+        CHECK(bypassRefetchMsTuned() == 3600000, "bypass_refetch_ms: валидное значение проходит без клампа");
+        CHECK(statusPollMsTuned() == 500, "status_poll_ms: валидное значение проходит без клампа");
+        CHECK(fgRefreshThrottleMsTuned() == 60000, "fg_refresh_throttle_ms: валидное значение проходит без клампа");
+
+        // (о3) мусор с бэка снизу (0/минус) => пол
+        avpn::TuningStore::set({{"bypass_refetch_ms", 0.0}, {"status_poll_ms", -5.0},
+                                {"fg_refresh_throttle_ms", 0.0}}, {}, {}, {});
+        CHECK(bypassRefetchMsTuned() == 900000, "bypass_refetch_ms: 0 => пол 900000 (15мин)");
+        CHECK(statusPollMsTuned() == 250, "status_poll_ms: минус => пол 250");
+        CHECK(fgRefreshThrottleMsTuned() == 1000, "fg_refresh_throttle_ms: 0 => пол 1000");
+
+        // (о4) гигант с бэка => потолок
+        avpn::TuningStore::set({{"bypass_refetch_ms", 999999999.0}, {"status_poll_ms", 999999.0},
+                                {"fg_refresh_throttle_ms", 999999999.0}}, {}, {}, {});
+        CHECK(bypassRefetchMsTuned() == 86400000, "bypass_refetch_ms: гигант => потолок 86400000 (24ч)");
+        CHECK(statusPollMsTuned() == 5000, "status_poll_ms: гигант => потолок 5000");
+        CHECK(fgRefreshThrottleMsTuned() == 600000, "fg_refresh_throttle_ms: гигант => потолок 600000 (10мин)");
+
+        avpn::TuningStore::reset();
+    }
+
     return g_fail ? 1 : 0;
 }

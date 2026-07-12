@@ -33,6 +33,24 @@ inline bool isRuNode(const SubscriptionNode &n)
     return n.countryCode.compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0;
 }
 
+// Форвард-совместимость по протоколу (Task 10, backend-first-3): клиентский Tribe-слой умеет
+// ТОЛЬКО awg; бэкенд может добавлять в пул ноды будущих протоколов (xray, ...). Такая нода
+// ОСТАЁТСЯ в пуле (диагностика/эскалация), но непригодна для коннекта в принципе — исключается
+// из ЛЮБОГО выбора (auto, failover, ротация, ручной pin) БЕЗ manual_only-фолбэка «оставить как
+// есть»: если поддерживаемых нод нет, выбор честно пуст (штатная ветка «нет нод»).
+// Пустой proto = легаси-тело без поля = awg.
+// Строковая перегрузка — для мест, где нода уже сконвертирована из SubscriptionNode
+// (QVariantMap-пул фасада: очередь админ-свипа, nodePool() для QML).
+inline bool isSupportedProto(const QString &proto)
+{
+    return proto.isEmpty() || proto == QLatin1String("awg");
+}
+
+inline bool isSupportedProtoNode(const SubscriptionNode &n)
+{
+    return isSupportedProto(n.proto);
+}
+
 // «Только ручной pin» — честный флаг контракта nodes[].manual_only (openapi 0.6.1,
 // MANUAL-ONLY-POOL-HANDOFF): такие ноды НИКОГДА не выбираются автоматикой (первый коннект,
 // failover, «Сменить сервер») — только явный тап. RU-проверка остаётся страховкой для тел
@@ -50,7 +68,7 @@ inline QString nextLiveNodeId(const QList<SubscriptionNode> &nodes, const QStrin
 {
     QList<SubscriptionNode> live;
     for (const SubscriptionNode &n : nodes)
-        if (!isManualOnlyNode(n) && healthAggregate(n) > 0.0)
+        if (isSupportedProtoNode(n) && !isManualOnlyNode(n) && healthAggregate(n) > 0.0)
             live.append(n);
     if (live.isEmpty())
         return QString();

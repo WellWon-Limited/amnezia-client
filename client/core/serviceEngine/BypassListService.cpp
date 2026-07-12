@@ -7,6 +7,7 @@
 #include "BypassListLkg.h"
 #include "Ed25519Verify.h"
 #include "NetAwait.h"
+#include "TuningStore.h"
 
 #include <QDebug>
 #include <QDir>
@@ -30,6 +31,16 @@ BypassLists g_bypassStoreSnapshot; // default: valid=false (пусто до пе
 // AVPN: повторный фетч раз в 6ч — сервер меняет ru_cidrs редко (реестр РКН обновляется не
 // поминутно), никакой ретрай-шторм не нужен; сетевые/verify-ошибки просто ждут следующего тика.
 constexpr int kRefetchIntervalMs = 6 * 60 * 60 * 1000;
+
+// AVPN backend-first-3 (Task 8): server-tunable (numbers.bypass_refetch_ms), клампы 15мин..24ч.
+// Читается на КАЖДОМ взводе таймера (см. start()), не только один раз в конструкторе/первом
+// start() — PATCH /admin/config подхватывается после очередного цикла без рестарта клиента.
+int bypassRefetchIntervalMsTuned()
+{
+    return qBound(900000,
+                  int(TuningStore::numberOr(QStringLiteral("bypass_refetch_ms"), double(kRefetchIntervalMs))),
+                  86400000);
+}
 
 QString lkgFilePath()
 {
@@ -76,10 +87,13 @@ void BypassListService::start()
     if (!m_timer) {
         m_timer = new QTimer(this);
         connect(m_timer, &QTimer::timeout, this, [this]() {
+            // AVPN (Task 8): перечитать интервал ПЕРЕД следующим взводом — так PATCH
+            // numbers.bypass_refetch_ms доезжает без пересоздания таймера/рестарта сервиса.
+            m_timer->setInterval(bypassRefetchIntervalMsTuned());
             if (!m_disabled)
                 fetch();
         });
-        m_timer->start(kRefetchIntervalMs);
+        m_timer->start(bypassRefetchIntervalMsTuned());
     }
     if (!m_disabled)
         fetch();

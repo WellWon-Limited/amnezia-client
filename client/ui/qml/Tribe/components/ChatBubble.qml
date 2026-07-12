@@ -18,7 +18,7 @@ Item {
     property bool isAuto: false
     property bool pending: false
     property bool failed: false
-    // [{id, kind: "image"|"video", mime, name, width, height, thumbUrl, localUrl}]
+    // [{id, kind: "image"|"video"|"log", mime, name, bytes, width, height, thumbUrl, localUrl}]
     property var attachments: []
     // AVPN (store-flow D): server-driven карточка {title, body, buttons:[{label, action, url, send}]}.
     // Есть card → рендерим её ВМЕСТО текстового пузыря (text = фолбэк старых клиентов).
@@ -58,6 +58,9 @@ Item {
                 id: mediaCard
                 required property var modelData
                 required property int index
+                // AVPN (diag, Task 5 bff-3): kind="log" (диагностика) — компактная строка
+                // «иконка + имя + размер» БЕЗ превью (has_thumb=false у бэка by design).
+                readonly property bool isLog: modelData.kind === "log"
                 // localUrl — ВСЕГДА картинка (фото или локальный постер-кадр видео из
                 // TribeMediaPicker; сам видеофайл сюда не попадает — движок кладёт в
                 // localUrl только <видео>.poster.jpg). Локальное превью непрерывно с
@@ -71,7 +74,8 @@ Item {
                 anchors.left: bubble.mine ? undefined : parent.left
                 anchors.right: bubble.mine ? parent.right : undefined
                 width: bubble.mediaWidth
-                height: Math.round(width * ratio)
+                height: isLog ? logRow.implicitHeight + 2 * Theme.space.md
+                              : Math.round(width * ratio)
                 radius: Theme.radius.lg
                 color: Theme.color.surface1
                 border.width: bubble.mine ? 0 : 1
@@ -108,9 +112,54 @@ Item {
                     cached: true
                 }
 
+                // AVPN (diag, Task 5 bff-3): компактная строка диагностики — file-text
+                // иконка + имя + размер; превью нет и не будет (kind="log").
+                Row {
+                    id: logRow
+                    visible: mediaCard.isLog
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: bubble.pad
+                    spacing: Theme.space.sm
+
+                    Shape {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 24; height: 24
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeColor: Theme.color.text2; fillColor: "transparent"; strokeWidth: 1.7
+                            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                            // lucide file-text (24-сетка)
+                            PathSvg { path: "M14 2 L6 2 a2 2 0 0 0 -2 2 L4 20 a2 2 0 0 0 2 2 L18 22 a2 2 0 0 0 2 -2 L20 8 Z M14 2 L14 8 L20 8 M16 13 L8 13 M16 17 L8 17" }
+                        }
+                    }
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+                        Text {
+                            text: (mediaCard.modelData.name || "") !== ""
+                                  ? mediaCard.modelData.name : qsTr("Диагностика")
+                            color: Theme.color.text1
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                            font.weight: Theme.font.wMedium
+                        }
+                        Text {
+                            visible: mediaCard.modelData.bytes > 0
+                            // размер по-человечески: до 1 МБ — КБ, дальше МБ c десятой
+                            text: mediaCard.modelData.bytes >= 1024 * 1024
+                                  ? qsTr("%1 МБ").arg((mediaCard.modelData.bytes / (1024 * 1024)).toFixed(1))
+                                  : qsTr("%1 КБ").arg(Math.max(1, Math.round(mediaCard.modelData.bytes / 1024)))
+                            color: Theme.color.text3
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.caption
+                        }
+                    }
+                }
+
                 // плейсхолдер, пока превью не приехало (или постер видео в постпроцессе)
                 Shape {
-                    visible: mediaCard.previewUrl === ""
+                    visible: mediaCard.previewUrl === "" && !mediaCard.isLog
                     anchors.centerIn: parent
                     width: 24; height: 24
                     preferredRendererType: Shape.CurveRenderer

@@ -22,6 +22,8 @@ struct NodeDebugRow {
     bool    alive = true;    // AVPN: жив ли узел по backend-данным (healthAgg > 0)
     bool    current = false; // AVPN: == текущая выбранная нода (для акцента/галки в UI)
     QString reason;          // почему так ранжирована / последний вердикт пробы
+    // AVPN (diag-report, Task 4 bff-3): протокол ноды из подписки ("awg") — для диагностики.
+    QString proto;
 };
 
 struct DebugSnapshot {
@@ -33,6 +35,10 @@ struct DebugSnapshot {
     bool    lkgStale = false;
     qint64  trafficUsed = 0, trafficLimit = 0;
     QString expiresAt;                   // AVPN: ISO-8601 из Subscription; "" = бессрочно (для daysLeft)
+    // AVPN (diag-report, Task 4 bff-3): новые поля с дефолтами — существующих потребителей не ломают.
+    QString graceUntil;                  // AVPN: expires_at + 24ч из Subscription; "" = нет
+    int     bypassListVersion = 0;       // AVPN: версия применённых серверных bypass-списков (0 = вкомпиленные);
+                                         // сеет фасад из BypassListService::lkgVersion() (движок его не знает)
     QList<NodeDebugRow> pool;
     QStringList switchLog;               // «switch A→B: причина»
     // Секреты (токен/приватный ключ) сюда НЕ кладём — маскировка на уровне UI (план §7).

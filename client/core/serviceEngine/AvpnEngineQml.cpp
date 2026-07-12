@@ -18,6 +18,7 @@
 #include "ServiceProbeTargets.h" // AVPN (чипы): вшитые цели + мерж серверного probe_targets (не замещать!)
 #include "ConnectTunables.h" // AVPN: клампованные пороги коннекта + связка watchdog>handshake (ревью 2026-07-11)
 #include "NodeRanking.h"  // AVPN (выбор по скорости): RTT→палочки + сортировка «быстрые внизу»
+#include "NodeRotation.h" // AVPN (Task 10 финал): isSupportedProto — xray-ноды мимо свипа/выбора
 #include "RttProbeIcmp.h" // AVPN (выбор по скорости): прямой ICMP-замер RTT до нод off-tunnel
 #include "BenchAnalysis.h" // AVPN (панель администратора): вердикты + A/B-сравнение замеров
 #ifdef Q_OS_IOS
@@ -30,6 +31,8 @@
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
 #include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
+#include "TribeDiagReport.h" // AVPN (diag-report, Task 4 bff-3): единый диагностический отчёт для чата поддержки
+#include "logger.h" // AVPN (diag-report): Logger::userLogsFilePath() — хвост лога приложения в отчёт
 
 #include <algorithm> // AVPN (панель администратора): сортировка строк свипа
 #include "AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы → pause/resume
@@ -398,6 +401,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 const int refreshMs = qBound(600, c.subscriptionRefreshIntervalS, 7 * 24 * 3600) * 1000;
                 m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN (diag-report, Task 4 bff-3): timestamp применения конфига → возраст в отчёте.
+                m_lastConfigAppliedEpoch = QDateTime::currentSecsSinceEpoch();
                 // AVPN backend-first (T19): down/up speed-URL бенча — urls.bench_speed_down_url/
                 // bench_speed_up_url с сервера, фолбэк = вкомпиленные литералы (BenchRunner ctor).
                 if (m_bench)
@@ -1240,11 +1245,17 @@ void AvpnEngineQml::startNodeSweep()
 {
     if (sweepRunning() || m_benchRunning || abRunning() || !m_bench)
         return;
-    // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера)
+    // очередь: ВСЕ ноды пула (вкл. RU — это тест, не авто-выбор; §14.3 касается выбора, не замера).
+    // Task 10 финал: КРОМЕ неподдерживаемых протоколов (xray, ...) — switchToNode к ним невозможен,
+    // каждая такая нода лишь выжигала бы сторожа фазы (до 25с) впустую.
     m_sweepQueue.clear();
     const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
-    for (const QVariant &v : pool)
-        m_sweepQueue << v.toMap().value(QStringLiteral("nodeId")).toString();
+    for (const QVariant &v : pool) {
+        const QVariantMap n = v.toMap();
+        if (!avpn::isSupportedProto(n.value(QStringLiteral("proto")).toString()))
+            continue;
+        m_sweepQueue << n.value(QStringLiteral("nodeId")).toString();
+    }
     m_sweepQueue.removeAll(QString());
     if (m_sweepQueue.isEmpty()) {
         emit error(tr("Свип: пул нод пуст — обнови подписку"));
@@ -3076,6 +3087,17 @@ void AvpnEngineQml::resetLkg()
     emit changed();
 }
 
+// AVPN (Task 10 финал): setPinnedNode отдаёт ТЕХНИЧЕСКУЮ строку (английская, с nodeId/proto) —
+// её место в логе, не в тосте. Человеческий текст — здесь, на границе фасада: маппим по
+// стабильному префиксу движка; неизвестные причины сворачиваем в общий текст (детали в лог).
+static QString humanPinError(const QString &technical)
+{
+    qWarning() << "avpn: setPinnedNode failed:" << technical;
+    if (technical.startsWith(QLatin1String("unsupported_proto")))
+        return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
+    return AvpnEngineQml::tr("Не удалось выбрать сервер — обновите список серверов");
+}
+
 // AVPN (live-node picker): «Выбрать» сервер из шторки. Модель «выбор = задать цель, коннект —
 // ВРУЧНУЮ кнопкой Connect» (по требованию пользователя): НЕ коннектим автоматически. setPinnedNode
 // закрепляет узел; если сейчас онлайн — опускаем туннель (намерение «офлайн»), чтобы орб стал OFF и
@@ -3086,7 +3108,7 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
 {
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     // Намерение: офлайн. Если онлайн — reconcile сделает guardedStop (орб OFF); офлайн — no-op.
@@ -3112,7 +3134,7 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
     }
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
@@ -3159,7 +3181,7 @@ void AvpnEngineQml::rotateNext()
     }
     QString err;
     if (!m_engine.setPinnedNode(next, err)) {
-        emit error(err);
+        emit error(humanPinError(err));
         return;
     }
     m_wantConnected = true;
@@ -3243,6 +3265,13 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
 // (AvpnDeepLinkBridge) по tribe://transfer?t=… . Синхронно (как redeemCode).
 void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 {
+    // AVPN backend-first-3 (Task 6): kill-switch (features.transfer, default TRUE) — единая
+    // воронка для deep-link/Universal Link/QR-скан/ввод в поле (все сходятся сюда через
+    // AvpnDeepLinkBridge → coreController). Бэкенд может погасить перенос без релиза.
+    if (!avpn::TuningStore::flag(QStringLiteral("transfer"))) {
+        emit error(tr("Перенос временно недоступен"));
+        return;
+    }
     const QString trimmed = transferToken.trimmed();
     if (trimmed.isEmpty()) {
         emit error(tr("Пустая ссылка переноса"));
@@ -3324,6 +3353,13 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 QVariantMap AvpnEngineQml::createTransfer()
 {
     QVariantMap result;
+    // AVPN backend-first-3 (Task 6): kill-switch (features.transfer, default TRUE) — симметрично
+    // redeemTransfer. Пустая мапа + тост, QML createTransfer() уже трактует пустой deep_link как
+    // «onError уже показал тост» (см. PageAccountTribe.qml).
+    if (!avpn::TuningStore::flag(QStringLiteral("transfer"))) {
+        emit error(tr("Перенос временно недоступен"));
+        return result;
+    }
     if (m_busy)
         return result;
 
@@ -3928,6 +3964,30 @@ void AvpnEngineQml::setAppLang(const QString &lang)
         return;
     m_store->setAppLanguage(QLocale(lang));
     emit appLangChanged();
+    // AVPN backend-first-3 (Task 7): incidentText/hotTexts — функции от appLang (localizedOr).
+    // Их NOTIFY = changed, appLangChanged его не покрывает — эмитим явно, иначе баннер/CTA
+    // остаются на старом языке до следующего configApplied.
+    emit changed();
+}
+
+// AVPN backend-first-3 (Task 7): server-driven hot-тексты CTA оплаты. Ключи фиксированы
+// (контракт с PageConnectTribe.qml), значение — localizedOr("<key>", appLang(), "") по цепочке
+// _<lang> → _en → base. Пустые НЕ кладём в map: в QML `hotTexts["key"]` даёт undefined →
+// falsy → срабатывает вкомпиленный qsTr-фолбэк (byte-for-byte прежний текст).
+QVariantMap AvpnEngineQml::hotTexts() const
+{
+    static const QString kCtaKeys[] = { QStringLiteral("cta_renew_traffic"),
+                                        QStringLiteral("cta_renew_access"),
+                                        QStringLiteral("cta_how_traffic"),
+                                        QStringLiteral("cta_how_access") };
+    QVariantMap out;
+    const QString lang = appLang();
+    for (const QString &key : kCtaKeys) {
+        const QString v = avpn::TuningStore::localizedOr(key, lang, QString());
+        if (!v.isEmpty())
+            out.insert(key, v);
+    }
+    return out;
 }
 
 // AVPN (оплата, ДВОЕ ЧАСОВ): лёгкий рефетч GET /v1/subscription — ЧАСЫ УСТРОЙСТВА (их продлевает
@@ -4203,7 +4263,9 @@ void AvpnEngineQml::requestCabinetLink(const QString &intent)
     // (бэк PR #257: кабинет берёт цель авто-продления из wl-сессии), а fallback без wl
     // кабинет всё равно не аутентифицирует. Стабильный install-id в query засветился бы
     // в access-логах зря (docs/amnezia-fork/WEBLINK-DEVICE-BINDING-HANDOFF.md).
-    const QString fallback = withIntent(QStringLiteral("https://tribevpn.com/account"));
+    // Домен фолбэка — cabinetUrl() (server-driven urls.cabinet через TuningStore, 0a6c1408), НЕ
+    // литерал: та же канон-точка, что уже читают PageConnectTribe/PageAccountTribe напрямую.
+    const QString fallback = withIntent(cabinetUrl());
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
         emit cabinetLinkReady(fallback);
@@ -4456,6 +4518,9 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         n["alive"] = r.alive;       // жив по backend-данным (фильтр «только живые» в шторке)
         n["current"] = r.current;   // == текущая нода → акцент #7CA2D0 + галка
         n["reason"] = r.reason;
+        // AVPN (Task 10 финал): протокол ноды — QML-пикер и админ-свип скипают неподдерживаемые
+        // (xray, ...): коннект к ним невозможен, тап/свип упирался бы в сторожа. Пусто = awg.
+        n["proto"] = r.proto;
         pool.append(n);
     }
     m["pool"] = pool;
@@ -4465,6 +4530,31 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         log.append(l);
     m["switchLog"] = log;
     return m;
+}
+
+// AVPN (diag-report, Task 4 bff-3): полный диагностический отчёт — юзер отправляет его в чат
+// поддержки. Снапшот движка (уже обогащён RTT-кэшем/proto/grace в ServiceEngine::debugSnapshot) +
+// версия серверных bypass-списков (движок BypassListService не знает — сеем здесь) + bypassMasterOn
+// (QSettings в QML-домене, как applyRuBypassSplit) + хвост лога приложения. Сборка/кламп — в
+// header-only TribeDiagReport (покрыт tests/test_diag_report.cpp).
+QString AvpnEngineQml::buildDiagReport() const
+{
+    avpn::DebugSnapshot s = m_engine.debugSnapshot();
+    if (m_bypassListSvc)
+        s.bypassListVersion = m_bypassListSvc->lkgVersion();
+
+    avpn::DiagMeta meta;
+    meta.appVersion = QCoreApplication::applicationVersion(); // tribe_version — как в bench-отчёте (benchExtra)
+    meta.platform = QSysInfo::productType() + QLatin1Char(' ') + QSysInfo::productVersion();
+    meta.lang = appLang();
+    meta.configAppliedAgeSec = (m_lastConfigAppliedEpoch > 0)
+        ? (QDateTime::currentSecsSinceEpoch() - m_lastConfigAppliedEpoch)
+        : -1; // конфиг ещё не применялся → ключ опускается
+
+    const bool bypassOn =
+        QSettings().value(QStringLiteral("AvpnBypass/masterOn"), true).toBool();
+    const QString logTail = avpn::TribeDiagReport::readLogTail(Logger::userLogsFilePath());
+    return avpn::TribeDiagReport::build(s, bypassOn, logTail, meta);
 }
 
 // ── AVPN in-app Legal (Privacy/Terms) ────────────────────────────────────────
