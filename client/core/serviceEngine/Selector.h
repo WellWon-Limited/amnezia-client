@@ -34,9 +34,12 @@ public:
                                                   int toleranceMs, quint32 jitterSeed,
                                                   const QString &excludeNodeId = QString())
     {
+        // AVPN (Task 10, proto-форвард): неподдерживаемый протокол = коннект невозможен в принципе —
+        // жёсткое отбрасывание БЕЗ фолбэка (в отличие от manual_only ниже): все неподдерживаемые →
+        // честный nullopt (штатная ветка «нет нод»).
         scored.erase(std::remove_if(scored.begin(), scored.end(),
                                     [&](const ScoredNodeS &s) {
-                                        return s.rttMs < 0
+                                        return s.rttMs < 0 || !isSupportedProtoNode(s.node)
                                                || (!excludeNodeId.isEmpty() && s.node.nodeId == excludeNodeId);
                                     }),
                      scored.end());
