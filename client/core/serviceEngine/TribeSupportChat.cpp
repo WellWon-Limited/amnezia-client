@@ -16,7 +16,11 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSaveFile>
 #include <QStandardPaths>
+#include <QUrl>
+
+#include <utility> // std::as_const
 
 #include "Enrollment.h"
 #include "NetAwait.h"
@@ -208,6 +212,15 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     // конструкторе: enroll/токен могли ещё не подняться).
     QTimer::singleShot(3000, this, &TribeSupportChat::refreshUnread);
 
+    // Коалесер rebuild'ов: пачка превью (диск/параллельная сеть) → ОДИН пересбор модели.
+    m_rebuildTimer.setSingleShot(true);
+    m_rebuildTimer.setInterval(80);
+    connect(&m_rebuildTimer, &QTimer::timeout, this, &TribeSupportChat::rebuildMessages);
+
+    // Телеграм-паттерн (жалоба 2026-07-12 «каждый раз грузишь старое»): история чата
+    // рендерится с диска МГНОВЕННО при старте (thumb'ы тоже с диска), сеть — освежение.
+    loadThreadCache();
+
     // Бэкофф-поллер серверного постера видео (см. watchPoster).
     m_posterTimer.setSingleShot(true);
     connect(&m_posterTimer, &QTimer::timeout, this, [this]() {
@@ -321,7 +334,8 @@ void TribeSupportChat::refresh()
     if (!reply)
         return; // ещё нет токена (до enroll) — просто ждём следующий тик
     m_refreshInFlight = true;
-    if (!m_threadLoadedOnce && !m_loading) {
+    // спиннер «Загружаем диалог…» — только если показать вообще нечего (кэша нет)
+    if (!m_threadLoadedOnce && !m_loading && m_serverMessages.isEmpty()) {
         m_loading = true;
         emit loadingChanged();
     }
@@ -361,6 +375,11 @@ void TribeSupportChat::refreshUnread()
             return;
         const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
         const int n = o.value(QStringLiteral("count")).toInt();
+        // Рост счётчика при работающем приложении = прилетело сообщение → хаптика в QML.
+        // Первое чтение после старта молчит: там непрочитанное ещё с прошлой сессии.
+        if (m_unreadFetchedOnce && n > m_unread)
+            emit incomingMessage();
+        m_unreadFetchedOnce = true;
         if (n != m_unread) {
             m_unread = n;
             emit unreadChanged();
@@ -433,7 +452,7 @@ QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
     return mm;
 }
 
-void TribeSupportChat::applyThread(const QByteArray &json)
+void TribeSupportChat::applyThread(const QByteArray &json, bool fromCache)
 {
     const QJsonObject root = QJsonDocument::fromJson(json).object();
     m_status = root.value(QStringLiteral("status")).toString(QStringLiteral("open"));
@@ -443,6 +462,22 @@ void TribeSupportChat::applyThread(const QByteArray &json)
     for (const QJsonValue &v : arr)
         msgs.append(parseMessage(v.toObject()));
     m_serverMessages = msgs;
+
+    // Хаптика входящего: вырос максимум id среди сообщений оператора. Молчат: кэш
+    // (уже виденное) и ПЕРВЫЙ сетевой тред сессии (m_threadLoadedOnce ещё false —
+    // ставится в refresh() ПОСЛЕ applyThread) — он лишь инициализирует базу.
+    int maxOp = m_maxOpMsgId;
+    for (const auto &mv : std::as_const(msgs)) {
+        const QVariantMap mm = mv.toMap();
+        if (mm.value(QStringLiteral("sender")).toString() != QLatin1String("client"))
+            maxOp = qMax(maxOp, mm.value(QStringLiteral("id")).toInt());
+    }
+    if (!fromCache && m_threadLoadedOnce && maxOp > m_maxOpMsgId)
+        emit incomingMessage();
+    m_maxOpMsgId = maxOp;
+
+    if (!fromCache)
+        saveThreadCache(json);
 
     // AVPN backend-first (T18): лимиты вложений приходят с сервером треда (fix
     // «дублируем support.py»). Пусто/отсутствует → маркер 0/пустой список, эффективные
@@ -885,16 +920,14 @@ void TribeSupportChat::queueThumb(int attachmentId)
 {
     if (m_thumbQueued.contains(attachmentId))
         return;
-    // сначала диск — сеть только для действительно новых превью
-    QFile f(thumbCachePath(attachmentId));
-    if (f.exists() && f.open(QIODevice::ReadOnly)) {
-        const QByteArray data = f.readAll();
-        if (!data.isEmpty()) {
-            m_thumbCache.insert(attachmentId,
-                                QStringLiteral("data:image/jpeg;base64,%1")
-                                    .arg(QString::fromLatin1(data.toBase64())));
-            return; // rebuildMessages сделает вызвавший applyThread
-        }
+    // сначала диск — сеть только для действительно новых превью. В QML уходит file://
+    // (короткий ключ pixmap-кэша Image), а не мегабайтный data:-URL — повторные
+    // пересборы модели не перечитывают/не передекодируют base64.
+    QFileInfo fi(thumbCachePath(attachmentId));
+    if (fi.exists() && fi.size() > 0) {
+        m_thumbCache.insert(attachmentId,
+                            QUrl::fromLocalFile(fi.absoluteFilePath()).toString());
+        return; // rebuildMessages сделает вызвавший applyThread
     }
     m_thumbQueued.insert(attachmentId);
     m_thumbQueue.append(attachmentId);
@@ -903,41 +936,83 @@ void TribeSupportChat::queueThumb(int attachmentId)
 
 void TribeSupportChat::fetchNextThumb()
 {
-    if (m_thumbInFlight || m_thumbQueue.isEmpty())
-        return;
-    const int attId = m_thumbQueue.takeFirst();
-    QNetworkReply *reply = authedGet(
-        QStringLiteral("/v1/support/attachments/%1?thumb=1").arg(attId), thumbTimeoutMs());
-    if (!reply) {
-        m_thumbQueued.remove(attId); // нет токена — вернёмся при следующем applyThread
-        return;
-    }
-    m_thumbInFlight = true;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, attId]() {
-        reply->deleteLater();
-        m_thumbInFlight = false;
-        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (code >= 200 && code < 300) {
-            const QString mime =
-                reply->header(QNetworkRequest::ContentTypeHeader).toString();
-            const QByteArray data = reply->readAll();
-            // Превью без миниатюры (видео до постпроцесса) может «тихо» отдать
-            // оригинал видео — data:-URL из него в Image бесполезен, пропускаем.
-            if (!data.isEmpty() && mime.startsWith(QLatin1String("image/"))) {
-                m_thumbCache.insert(attId,
-                                    QStringLiteral("data:%1;base64,%2")
-                                        .arg(mime, QString::fromLatin1(data.toBase64())));
-                // дисковый кэш (best effort): следующий вход в чат — без сети
-                QFile out(thumbCachePath(attId));
-                if (out.open(QIODevice::WriteOnly))
-                    out.write(data);
-                rebuildMessages();
-            }
-        } else {
-            m_thumbQueued.remove(attId); // дать шанс перезапросить следующим поллом
+    // Параллелим до kThumbParallel: последовательная очередь на свежей истории с
+    // несколькими фото грузилась заметно дольше (жалоба 2026-07-12 «превью медленно»).
+    static constexpr int kThumbParallel = 3;
+    while (m_thumbsInFlight < kThumbParallel && !m_thumbQueue.isEmpty()) {
+        const int attId = m_thumbQueue.takeFirst();
+        QNetworkReply *reply = authedGet(
+            QStringLiteral("/v1/support/attachments/%1?thumb=1").arg(attId), thumbTimeoutMs());
+        if (!reply) {
+            m_thumbQueued.remove(attId); // нет токена — вернёмся при следующем applyThread
+            continue;
         }
-        fetchNextThumb();
-    });
+        ++m_thumbsInFlight;
+        connect(reply, &QNetworkReply::finished, this, [this, reply, attId]() {
+            reply->deleteLater();
+            --m_thumbsInFlight;
+            const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (code >= 200 && code < 300) {
+                const QString mime =
+                    reply->header(QNetworkRequest::ContentTypeHeader).toString();
+                const QByteArray data = reply->readAll();
+                // Превью без миниатюры (видео до постпроцесса) может «тихо» отдать
+                // оригинал видео — превью из него в Image бесполезно, пропускаем.
+                if (!data.isEmpty() && mime.startsWith(QLatin1String("image/"))) {
+                    // дисковый кэш: следующий вход в чат — без сети; QML читает file://
+                    QSaveFile out(thumbCachePath(attId));
+                    if (out.open(QIODevice::WriteOnly) && out.write(data) == data.size()
+                        && out.commit()) {
+                        m_thumbCache.insert(
+                            attId, QUrl::fromLocalFile(out.fileName()).toString());
+                    } else {
+                        // диск не записался (место/права) — фолбэк data:-URL из памяти
+                        m_thumbCache.insert(attId,
+                                            QStringLiteral("data:%1;base64,%2")
+                                                .arg(mime, QString::fromLatin1(data.toBase64())));
+                    }
+                    scheduleRebuild(); // пачка параллельных превью → один пересбор модели
+                }
+            } else {
+                m_thumbQueued.remove(attId); // дать шанс перезапросить следующим поллом
+            }
+            fetchNextThumb();
+        });
+    }
+}
+
+void TribeSupportChat::scheduleRebuild()
+{
+    if (!m_rebuildTimer.isActive())
+        m_rebuildTimer.start();
+}
+
+// ── дисковый кэш треда (телеграм-паттерн, 2026-07-12) ───────────────────────
+// Последний серверный ответ /thread как есть; при старте рендерится ДО сети —
+// история и превью (с диска) видны мгновенно, поллинг только освежает.
+
+static QString threadCachePath()
+{
+    return mediaCacheDir() + QStringLiteral("/thread.json");
+}
+
+void TribeSupportChat::loadThreadCache()
+{
+    QFile f(threadCachePath());
+    if (!f.exists() || !f.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray data = f.readAll();
+    if (!data.isEmpty())
+        applyThread(data, /*fromCache*/ true);
+}
+
+void TribeSupportChat::saveThreadCache(const QByteArray &json)
+{
+    QSaveFile f(threadCachePath());
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(json);
+        f.commit(); // best effort: не записалось — при следующем старте отработает сеть
+    }
 }
 
 void TribeSupportChat::openAttachment(int attachmentId)
