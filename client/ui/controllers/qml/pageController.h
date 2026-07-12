@@ -117,6 +117,9 @@ public:
     // клавиатуры; Qt-путь (keyboardRectangleChanged) сообщал позже, и композер выезжал
     // с опозданием («клавиатура появляется, потом поле» — жалоба). Qt-путь остаётся фолбэком.
     void avpnSetImeHeight(int h);
+    // Фазовая синхронизация: подписка на QQuickWindow::afterAnimating (применение высоты
+    // трекера keyboardLayoutGuide в начале кадра — синфазно с отрисовкой клавиатуры).
+    void avpnHookQuickWindow();
 #endif
 
 public slots:

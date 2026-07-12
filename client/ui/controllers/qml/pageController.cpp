@@ -22,6 +22,7 @@
 // AVPN: нативный iOS safe-area inset (AvpnSafeArea.mm) — Qt даёт 0 при ExpandedClientAreaHint.
 #ifdef Q_OS_IOS
     #include <QInputMethod> // AVPN: высота клавиатуры для imeHeight (см. конструктор)
+    #include <QQuickWindow> // AVPN: фазовая синхронизация — применение высоты в afterAnimating
     #include <QRectF>       // AVPN: keyboardRectangle() — без включения тип только forward-declared
     #include <QTimer>       // AVPN: отложенный анти-сдвиг окна (см. конструктор)
 extern "C" int avpnSafeAreaTop();
@@ -33,10 +34,23 @@ extern "C" void Avpn_installKeyboardScrollKiller(); // AVPN: observer UIKeyboard
 // — синхронный старт подъёма композера с анимацией клавиатуры. Уведомления UIKit приходят
 // на main thread (= GUI-поток Qt) — прямой вызов безопасен.
 static PageController *s_avpnPageController = nullptr;
+static QQuickWindow *s_avpnQuickWindow = nullptr;
 extern "C" void Avpn_onKeyboardFrame(double height)
 {
     if (s_avpnPageController)
         s_avpnPageController->avpnSetImeHeight(qMax(0, qRound(height)));
+}
+// ФАЗОВАЯ СИНХРОНИЗАЦИЯ: displaylink трекера клавиатуры будит рендер Qt; высота
+// применяется в afterAnimating (начало кадра) — поле и клавиатура рисуются синфазно.
+extern "C" double Avpn_currentKeyboardHeight(void); // AvpnKeyboardFix.mm (−1 = нет трекинга)
+extern "C" void Avpn_pokeQtFrame(void)
+{
+    if (s_avpnQuickWindow)
+        s_avpnQuickWindow->update(); // main thread (см. tick displaylink) — безопасно
+}
+extern "C" int Avpn_qtFrameHooked(void)
+{
+    return s_avpnQuickWindow != nullptr;
 }
 #endif
 
@@ -75,8 +89,12 @@ PageController::PageController(ServersController* serversController, SettingsCon
     // СТАРТА анимации клавиатуры; Qt сообщает позже — композер выезжал с опозданием).
     QInputMethod *im = QGuiApplication::inputMethod();
     connect(im, &QInputMethod::keyboardRectangleChanged, this, [this, im]() {
-        avpnSetImeHeight(qMax(0, qRound(im->keyboardRectangle().height())));
+        // Фолбэк ТОЛЬКО когда нет покадрового трекинга (iOS <15 / трекер не поднялся):
+        // при живом трекинге этот поздний репорт дёргал бы margin мимо фазы кадра.
+        if (Avpn_currentKeyboardHeight() < 0)
+            avpnSetImeHeight(qMax(0, qRound(im->keyboardRectangle().height())));
     });
+    avpnHookQuickWindow(); // afterAnimating: применение высоты трекера в начале кадра
 #endif
 
 #if defined Q_OS_MACX
@@ -94,6 +112,31 @@ PageController::PageController(ServersController* serversController, SettingsCon
 }
 
 #ifdef Q_OS_IOS
+// AVPN: подключение к кадру Qt Quick. Окно может ещё не существовать при создании
+// контроллера (QML грузится позже) — ретраим, пока не появится.
+void PageController::avpnHookQuickWindow()
+{
+    QQuickWindow *qw = nullptr;
+    const auto wins = QGuiApplication::allWindows();
+    for (QWindow *w : wins) {
+        qw = qobject_cast<QQuickWindow *>(w);
+        if (qw)
+            break;
+    }
+    if (!qw) {
+        QTimer::singleShot(500, this, [this]() { avpnHookQuickWindow(); });
+        return;
+    }
+    s_avpnQuickWindow = qw;
+    // afterAnimating = GUI-поток, начало каждого кадра (до синхронизации сцены):
+    // высота, применённая здесь, рисуется В ЭТОМ ЖЕ кадре — синфазно с клавиатурой.
+    connect(qw, &QQuickWindow::afterAnimating, this, [this]() {
+        const double h = Avpn_currentKeyboardHeight();
+        if (h >= 0)
+            avpnSetImeHeight(qRound(h));
+    });
+}
+
 // AVPN: единая точка обновления высоты клавиатуры (нативный willShow-репорт + Qt-фолбэк).
 void PageController::avpnSetImeHeight(int h)
 {
