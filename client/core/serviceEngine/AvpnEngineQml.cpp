@@ -3247,6 +3247,13 @@ void AvpnEngineQml::redeemCode(const QString &code, const QString &evictDeviceId
 // (AvpnDeepLinkBridge) по tribe://transfer?t=… . Синхронно (как redeemCode).
 void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 {
+    // AVPN backend-first-3 (Task 6): kill-switch (features.transfer, default TRUE) — единая
+    // воронка для deep-link/Universal Link/QR-скан/ввод в поле (все сходятся сюда через
+    // AvpnDeepLinkBridge → coreController). Бэкенд может погасить перенос без релиза.
+    if (!avpn::TuningStore::flag(QStringLiteral("transfer"))) {
+        emit error(tr("Перенос временно недоступен"));
+        return;
+    }
     const QString trimmed = transferToken.trimmed();
     if (trimmed.isEmpty()) {
         emit error(tr("Пустая ссылка переноса"));
@@ -3328,6 +3335,13 @@ void AvpnEngineQml::redeemTransfer(const QString &transferToken)
 QVariantMap AvpnEngineQml::createTransfer()
 {
     QVariantMap result;
+    // AVPN backend-first-3 (Task 6): kill-switch (features.transfer, default TRUE) — симметрично
+    // redeemTransfer. Пустая мапа + тост, QML createTransfer() уже трактует пустой deep_link как
+    // «onError уже показал тост» (см. PageAccountTribe.qml).
+    if (!avpn::TuningStore::flag(QStringLiteral("transfer"))) {
+        emit error(tr("Перенос временно недоступен"));
+        return result;
+    }
     if (m_busy)
         return result;
 
