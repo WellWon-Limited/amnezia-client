@@ -193,9 +193,84 @@ QString humanSendError(int httpCode, bool netError)
 
 } // namespace
 
+// ── TribeSupportMsgModel: точечная модель ленты ──────────────────────────────
+
+namespace {
+// роль → ключ QVariantMap строки; msgId вместо id (голый id в QML — зарезервированное слово)
+const struct { int role; const char *name; const char *key; } kMsgRoles[] = {
+    { Qt::UserRole + 1,  "msgId",        "id" },
+    { Qt::UserRole + 2,  "sender",       "sender" },
+    { Qt::UserRole + 3,  "body",         "body" },
+    { Qt::UserRole + 4,  "operatorName", "operatorName" },
+    { Qt::UserRole + 5,  "isAuto",       "isAuto" },
+    { Qt::UserRole + 6,  "atMs",         "atMs" },
+    { Qt::UserRole + 7,  "pending",      "pending" },
+    { Qt::UserRole + 8,  "failed",       "failed" },
+    { Qt::UserRole + 9,  "attachments",  "attachments" },
+    { Qt::UserRole + 10, "card",         "card" },
+};
+} // namespace
+
+QVariant TribeSupportMsgModel::data(const QModelIndex &index, int role) const
+{
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_rows.size())
+        return {};
+    const QVariantMap &m = m_rows.at(index.row());
+    for (const auto &r : kMsgRoles)
+        if (r.role == role)
+            return m.value(QLatin1String(r.key));
+    return {};
+}
+
+QHash<int, QByteArray> TribeSupportMsgModel::roleNames() const
+{
+    QHash<int, QByteArray> names;
+    for (const auto &r : kMsgRoles)
+        names.insert(r.role, r.name);
+    return names;
+}
+
+void TribeSupportMsgModel::applyList(const QVariantList &msgs)
+{
+    QList<QVariantMap> rows;
+    rows.reserve(msgs.size());
+    for (const auto &v : msgs)
+        rows.append(v.toMap());
+
+    // Общий префикс по id: история append-only, перестановок внутри не бывает —
+    // меняется только хвост (эхо → серверная копия, discard, новые сообщения).
+    const int common = int(qMin(rows.size(), m_rows.size()));
+    int prefix = 0;
+    while (prefix < common
+           && rows.at(prefix).value(QLatin1String("id")) == m_rows.at(prefix).value(QLatin1String("id")))
+        ++prefix;
+
+    // Изменившиеся строки префикса (приехало превью, сменился pending) — точечно.
+    for (int i = 0; i < prefix; ++i) {
+        if (rows.at(i) != m_rows.at(i)) {
+            m_rows[i] = rows.at(i);
+            const QModelIndex ix = index(i);
+            emit dataChanged(ix, ix);
+        }
+    }
+    if (m_rows.size() > prefix) {
+        beginRemoveRows(QModelIndex(), prefix, int(m_rows.size()) - 1);
+        while (m_rows.size() > prefix)
+            m_rows.removeLast();
+        endRemoveRows();
+    }
+    if (rows.size() > prefix) {
+        beginInsertRows(QModelIndex(), prefix, int(rows.size()) - 1);
+        for (int i = prefix; i < rows.size(); ++i)
+            m_rows.append(rows.at(i));
+        endInsertRows();
+    }
+}
+
 TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     : QObject(parent), m_nam(nam), m_baseUrl(QStringLiteral("https://api.tribevpn.com"))
 {
+    m_msgModel = new TribeSupportMsgModel(this); // ДО loadThreadCache (rebuild кормит модель)
     // dev/E2E: тот же оверрайд control plane, что у AvpnEngineQml.
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
@@ -623,7 +698,8 @@ void TribeSupportChat::rebuildMessages()
         return;
     m_lastSnapshot = snapshot;
     m_messages = list;
-    emit messagesChanged();
+    m_msgModel->applyList(list); // лента: точечные dataChanged/insertRows, без пересоздания
+    emit messagesChanged();      // messages: галерея лайтбокса и пр.
 }
 
 // ── отправка ─────────────────────────────────────────────────────────────────
