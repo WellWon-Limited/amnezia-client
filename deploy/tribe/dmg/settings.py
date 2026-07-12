@@ -17,7 +17,7 @@ symlinks = {"Applications": "/Applications"}
 icon = os.path.join(here, "..", "..", "..", "client", "images", "app.icns")
 
 background = os.path.join(here, "background.tiff")
-window_rect = ((200, 120), (660, 400))
+window_rect = ((200, 120), (660, 460))
 default_view = "icon-view"
 show_status_bar = False
 show_tab_view = False
@@ -28,6 +28,6 @@ show_sidebar = False
 icon_size = 112
 text_size = 12
 icon_locations = {
-    app_name: (170, 263),
-    "Applications": (490, 263),
+    app_name: (170, 300),
+    "Applications": (490, 300),
 }
