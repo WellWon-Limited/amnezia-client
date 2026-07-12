@@ -53,6 +53,23 @@ static void avpnScheduleResets(void)
     }
 }
 
+// pageController.cpp: единая точка m_imeHeight. Репорт из willShow/willHide = момент
+// СТАРТА анимации клавиатуры — QML-подъём композера стартует тем же кадром (жалоба
+// 2026-07-12 «клавиатура появляется, а поле выезжает позже»: Qt-путь
+// keyboardRectangleChanged сообщал высоту с опозданием).
+extern "C" void Avpn_onKeyboardFrame(double height);
+
+static void avpnReportKeyboardFrame(NSNotification *note)
+{
+    NSValue *endVal = note.userInfo[UIKeyboardFrameEndUserInfoKey];
+    if (!endVal)
+        return;
+    const CGRect end = endVal.CGRectValue;
+    const CGFloat screenH = UIScreen.mainScreen.bounds.size.height;
+    // скрытие: endFrame целиком за нижней кромкой экрана → высота 0
+    Avpn_onKeyboardFrame(MAX(0.0, screenH - CGRectGetMinY(end)));
+}
+
 extern "C" void Avpn_installKeyboardScrollKiller(void)
 {
     static dispatch_once_t once;
@@ -62,12 +79,13 @@ extern "C" void Avpn_installKeyboardScrollKiller(void)
                  UIKeyboardWillShowNotification,
                  UIKeyboardDidShowNotification,
                  UIKeyboardWillChangeFrameNotification,
-                 UIKeyboardDidChangeFrameNotification ]) {
+                 UIKeyboardDidChangeFrameNotification,
+                 UIKeyboardWillHideNotification ]) {
             [nc addObserverForName:name
                             object:nil
                              queue:NSOperationQueue.mainQueue
                         usingBlock:^(NSNotification *note) {
-                (void)note;
+                avpnReportKeyboardFrame(note);
                 avpnScheduleResets();
             }];
         }

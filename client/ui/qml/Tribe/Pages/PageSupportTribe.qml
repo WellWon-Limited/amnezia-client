@@ -64,7 +64,12 @@ PageType {
         function onSendFailed(reason) { PageController.showErrorMessage(reason) }
         function onAttachmentReady(attachmentId, kind, fileUrl) {
             if (kind === "image") {
-                lightbox.show(fileUrl)
+                // открытый лайтбокс = долистали свайпом (оригинал доехал) — обновить кадр;
+                // иначе — первое открытие по тапу
+                if (lightbox.opened)
+                    lightbox.arrived(attachmentId, fileUrl)
+                else
+                    lightbox.show(attachmentId, fileUrl)
                 return
             }
             // видео: iOS — нативный QuickLook-плеер (Qt.openUrlExternally с file:// на iOS
@@ -132,7 +137,8 @@ PageType {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.requestTab(0)
+                        // AVPN (haptics): «назад» тикает как смена вкладки
+                        onClicked: { Haptic.play("selection"); root.requestTab(0) }
                     }
                 }
 
@@ -500,15 +506,58 @@ PageType {
         z: 100
         property bool opened: false
         property int  depthIndex: 0
+        // листание между фото треда (телеграм-жест, жалоба 2026-07-12):
+        // упорядоченный список серверных фото-вложений [{id, thumb}] + текущий id
+        property var  gallery: []
+        property int  curId: 0
 
-        function show(fileUrl) {
+        function buildGallery() {
+            var out = []
+            var msgs = root.hasChat ? TribeSupport.messages : []
+            for (var i = 0; i < msgs.length; ++i) {
+                var atts = msgs[i].attachments || []
+                for (var j = 0; j < atts.length; ++j) {
+                    var a = atts[j]
+                    if (a.kind === "image" && a.id > 0)
+                        out.push({ id: a.id, thumb: (a.localUrl || a.thumbUrl || "") })
+                }
+            }
+            return out
+        }
+
+        function show(attId, fileUrl) {
+            gallery = buildGallery()
+            curId = attId
             lightboxImage.source = fileUrl
             opened = true
             depthIndex = PageController.incrementDrawerDepth()
         }
+
+        // свайп влево/вправо: dir +1 = следующее фото, −1 = предыдущее. Мгновенно
+        // показываем превью (диск/кэш), оригинал подъедет через attachmentReady.
+        function step(dir) {
+            var idx = -1
+            for (var i = 0; i < gallery.length; ++i)
+                if (gallery[i].id === curId) { idx = i; break }
+            if (idx < 0) return
+            var next = idx + dir
+            if (next < 0 || next >= gallery.length) return
+            curId = gallery[next].id
+            if (gallery[next].thumb !== "")
+                lightboxImage.source = gallery[next].thumb
+            TribeSupport.openAttachment(curId)
+        }
+
+        // оригинал доехал: применяем ТОЛЬКО если это всё ещё текущий кадр
+        // (быстрое листание — стейл-загрузки прошлых кадров игнорируются)
+        function arrived(attId, fileUrl) {
+            if (attId === curId)
+                lightboxImage.source = fileUrl
+        }
         // viaController=true — по Back/Escape: pageController декрементит depth САМ после emit
         function close(viaController) {
             if (!opened) return
+            Haptic.play("selection") // AVPN (haptics): закрытие просмотра = «назад»
             opened = false
             depthIndex = 0
             lightboxImage.source = ""
@@ -538,17 +587,20 @@ PageType {
             // 2× экрана хватает и для пинч-зума в будущем
             sourceSize.width: root.width * 2
         }
-        MouseArea {
-            anchors.fill: parent
-            onClicked: lightbox.close()
-        }
-        // свайп вниз = закрыть (жест галерей)
+        // тап = закрыть. ИМЕННО TapHandler: MouseArea перехватывала пресс и съедала
+        // свайпы — «свайп вниз не работает на фото» (жалоба 2026-07-12); хендлеры кооперируются.
+        TapHandler { onTapped: lightbox.close() }
+        // жесты галереи: вниз = закрыть; влево/вправо = следующее/предыдущее фото
         DragHandler {
             target: null
-            yAxis.enabled: true; xAxis.enabled: false
             onActiveChanged: {
-                if (!active && activeTranslation.y > 80)
+                if (active) return
+                var tx = activeTranslation.x
+                var ty = activeTranslation.y
+                if (ty > 80 && ty > Math.abs(tx))
                     lightbox.close()
+                else if (Math.abs(tx) > 60)
+                    lightbox.step(tx < 0 ? 1 : -1)
             }
         }
     }

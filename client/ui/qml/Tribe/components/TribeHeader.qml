@@ -31,7 +31,11 @@ Item {
                 PathSvg { path: "M15 5 8 12 15 19" }
             }
         }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: header.backClicked() }
+        MouseArea {
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+            // AVPN (haptics, 2026-07-12): «назад» тикает как смена вкладки навбара
+            onClicked: { Haptic.play("selection"); header.backClicked() }
+        }
     }
 
     Text {

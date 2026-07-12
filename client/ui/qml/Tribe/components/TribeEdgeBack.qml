@@ -1,5 +1,7 @@
 import QtQuick
 
+import ".."   // Haptic
+
 // AVPN: краевой свайп слева-направо = «назад». Узкая полоса вдоль левого края поверх контента.
 // РЕАЛИЗАЦИЯ ЧЕРЕЗ MouseArea + preventStealing (2026-07-11): DragHandler НЕ работал — ListView/
 // Flickable отбирал жест эксклюзивным грабом при малейшей вертикальной составляющей пальца.
@@ -21,8 +23,10 @@ Item {
         property real startX: 0
         onPressed: function(mouse) { startX = mouse.x }
         onReleased: function(mouse) {
-            if (mouse.x - startX > 60)
+            if (mouse.x - startX > 60) {
+                Haptic.play("selection") // AVPN (haptics): тик «назад» = тик смены вкладки
                 root.triggered()
+            }
         }
     }
 }

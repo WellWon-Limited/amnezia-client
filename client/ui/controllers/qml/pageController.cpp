@@ -28,6 +28,16 @@ extern "C" int avpnSafeAreaTop();
 extern "C" int avpnSafeAreaBottom();
 extern "C" void Avpn_resetKeyboardScroll();         // AVPN: сброс авто-сдвига окна (AvpnKeyboardFix.mm)
 extern "C" void Avpn_installKeyboardScrollKiller(); // AVPN: observer UIKeyboard* → сброс на каждом событии
+
+// AVPN (2026-07-12): нативный willShow/willHide-репорт высоты клавиатуры (AvpnKeyboardFix.mm)
+// — синхронный старт подъёма композера с анимацией клавиатуры. Уведомления UIKit приходят
+// на main thread (= GUI-поток Qt) — прямой вызов безопасен.
+static PageController *s_avpnPageController = nullptr;
+extern "C" void Avpn_onKeyboardFrame(double height)
+{
+    if (s_avpnPageController)
+        s_avpnPageController->avpnSetImeHeight(qMax(0, qRound(height)));
+}
 #endif
 
 PageController::PageController(ServersController* serversController, SettingsController* settingsController,
@@ -58,26 +68,14 @@ PageController::PageController(ServersController* serversController, SettingsCon
     // (координаты окна = логические px; окно fullscreen). Скрыта → rect пустой → 0.
     // Гаситель ставим на нативные UIKeyboard*-уведомления: наш observer регистрируется
     // ПОЗЖЕ Qt-плагина → выполняется после их scroll() в том же уведомлении, до кадра.
+    // Указатель — ДО install: observers сразу репортят высоту через Avpn_onKeyboardFrame.
+    s_avpnPageController = this;
     Avpn_installKeyboardScrollKiller();
+    // Фолбэк-путь через Qt (основной — нативный willShow-репорт, он приходит в момент
+    // СТАРТА анимации клавиатуры; Qt сообщает позже — композер выезжал с опозданием).
     QInputMethod *im = QGuiApplication::inputMethod();
     connect(im, &QInputMethod::keyboardRectangleChanged, this, [this, im]() {
-        const int h = qMax(0, qRound(im->keyboardRectangle().height()));
-        if (h == m_imeHeight)
-            return;
-        m_imeHeight = h;
-        emit imeHeightChanged(h);
-        emit safeAreaBottomMarginChanged();
-        // АНТИ-СДВИГ (2026-07-11, билды 75–77): QIOSInputContext на показ клавиатуры уводит
-        // root view вверх через layer.sublayerTransform (наш margin + их сдвиг = «чёрная
-        // дыра» высотой с клавиатуру). Мягкие способы НЕ работают: их пере-проверка
-        // (update→ImeState::update) диффит ЛОКАЛЬНЫЙ прямоугольник курсора в поле — он не
-        // меняется, когда наш layout поднимает поле целиком. Сбрасываем трансформ напрямую
-        // (AvpnKeyboardFix.mm). Несколько тиков — их scroll() ставится на willShow и
-        // анимируется; одиночный сброс переигрывался бы этой анимацией.
-        if (h > 0) {
-            for (const int delayMs : {60, 250, 650})
-                QTimer::singleShot(delayMs, im, []() { Avpn_resetKeyboardScroll(); });
-        }
+        avpnSetImeHeight(qMax(0, qRound(im->keyboardRectangle().height())));
     });
 #endif
 
@@ -94,6 +92,29 @@ PageController::PageController(ServersController* serversController, SettingsCon
     
     m_isTriggeredByConnectButton = false;
 }
+
+#ifdef Q_OS_IOS
+// AVPN: единая точка обновления высоты клавиатуры (нативный willShow-репорт + Qt-фолбэк).
+void PageController::avpnSetImeHeight(int h)
+{
+    if (h == m_imeHeight)
+        return;
+    m_imeHeight = h;
+    emit imeHeightChanged(h);
+    emit safeAreaBottomMarginChanged();
+    // АНТИ-СДВИГ (2026-07-11, билды 75–77): QIOSInputContext на показ клавиатуры уводит
+    // root view вверх через layer.sublayerTransform (наш margin + их сдвиг = «чёрная
+    // дыра» высотой с клавиатуру). Мягкие способы НЕ работают: их пере-проверка
+    // (update→ImeState::update) диффит ЛОКАЛЬНЫЙ прямоугольник курсора в поле — он не
+    // меняется, когда наш layout поднимает поле целиком. Сбрасываем трансформ напрямую
+    // (AvpnKeyboardFix.mm). Несколько тиков — их scroll() ставится на willShow и
+    // анимируется; одиночный сброс переигрывался бы этой анимацией.
+    if (h > 0) {
+        for (const int delayMs : {60, 250, 650})
+            QTimer::singleShot(delayMs, this, []() { Avpn_resetKeyboardScroll(); });
+    }
+}
+#endif
 
 bool PageController::isStartPageVisible()
 {

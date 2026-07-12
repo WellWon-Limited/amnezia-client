@@ -111,6 +111,14 @@ public:
     Q_PROPERTY(int safeAreaBottomMargin READ getSafeAreaBottomMargin NOTIFY safeAreaBottomMarginChanged)
     Q_PROPERTY(int imeHeight READ getImeHeight NOTIFY imeHeightChanged)
 
+#ifdef Q_OS_IOS
+    // AVPN (2026-07-12): высота клавиатуры из НАТИВНОГО UIKeyboardWillShow/WillHide
+    // (AvpnKeyboardFix.mm → Avpn_onKeyboardFrame) — приходит в момент СТАРТА анимации
+    // клавиатуры; Qt-путь (keyboardRectangleChanged) сообщал позже, и композер выезжал
+    // с опозданием («клавиатура появляется, потом поле» — жалоба). Qt-путь остаётся фолбэком.
+    void avpnSetImeHeight(int h);
+#endif
+
 public slots:
     bool isStartPageVisible();
     QString getPagePath(PageLoader::PageEnum page);
