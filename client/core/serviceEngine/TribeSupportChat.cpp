@@ -89,6 +89,8 @@ constexpr int kThumbTimeoutMs = 30000;
 // сервер не прислал limits в ответе /thread — см. applyThread/eff*MaxBytes T18).
 constexpr qint64 kImageMaxBytes = 10 * 1024 * 1024;
 constexpr qint64 kVideoMaxBytes = 25 * 1024 * 1024;
+// AVPN (diag, Task 5 bff-3): лимит text/plain диагностики (бэк: kind="log" ≤ 2 МиБ).
+constexpr qint64 kLogMaxBytes = 2 * 1024 * 1024;
 // Пережатие фото (паритет с canvas-компрессией Занавеса): крупнее порога —
 // в JPEG ≤1600px q85; мельче — как есть.
 constexpr qint64 kImageShrinkThresholdBytes = qint64(1.5 * 1024 * 1024);
@@ -107,6 +109,12 @@ bool isAllowedVideoMime(const QString &mime)
 {
     return mime == QLatin1String("video/mp4") || mime == QLatin1String("video/quicktime")
         || mime == QLatin1String("video/webm");
+}
+
+// AVPN (diag, Task 5 bff-3): вкомпиленный фолбэк MIME диагностики — см. effAllowedLogMime.
+bool isAllowedLogMime(const QString &mime)
+{
+    return mime == QLatin1String("text/plain");
 }
 
 // created_at бэкенда: ISO с микросекундами ("…T12:34:56.789012+00:00").
@@ -488,6 +496,9 @@ void TribeSupportChat::applyThread(const QByteArray &json, bool fromCache)
             m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
         if (lim.contains(QStringLiteral("video_max_bytes")))
             m_videoMaxBytes = qint64(lim.value(QStringLiteral("video_max_bytes")).toDouble(0));
+        // AVPN (diag, Task 5 bff-3): лимиты диагностики kind="log" — тот же паттерн, что image/video.
+        if (lim.contains(QStringLiteral("log_max_bytes")))
+            m_logMaxBytes = qint64(lim.value(QStringLiteral("log_max_bytes")).toDouble(0));
         if (lim.contains(QStringLiteral("image_mime"))) {
             m_imageMime.clear();
             for (const QJsonValue &v : lim.value(QStringLiteral("image_mime")).toArray())
@@ -497,6 +508,11 @@ void TribeSupportChat::applyThread(const QByteArray &json, bool fromCache)
             m_videoMime.clear();
             for (const QJsonValue &v : lim.value(QStringLiteral("video_mime")).toArray())
                 if (v.isString()) m_videoMime << v.toString();
+        }
+        if (lim.contains(QStringLiteral("log_mime"))) {
+            m_logMime.clear();
+            for (const QJsonValue &v : lim.value(QStringLiteral("log_mime")).toArray())
+                if (v.isString()) m_logMime << v.toString();
         }
     }
 
@@ -515,6 +531,11 @@ qint64 TribeSupportChat::effVideoMaxBytes() const
     return m_videoMaxBytes > 0 ? m_videoMaxBytes : kVideoMaxBytes;
 }
 
+qint64 TribeSupportChat::effLogMaxBytes() const
+{
+    return m_logMaxBytes > 0 ? m_logMaxBytes : kLogMaxBytes;
+}
+
 bool TribeSupportChat::effAllowedImageMime(const QString &mime) const
 {
     return m_imageMime.isEmpty() ? isAllowedImageMime(mime) : m_imageMime.contains(mime);
@@ -523,6 +544,11 @@ bool TribeSupportChat::effAllowedImageMime(const QString &mime) const
 bool TribeSupportChat::effAllowedVideoMime(const QString &mime) const
 {
     return m_videoMime.isEmpty() ? isAllowedVideoMime(mime) : m_videoMime.contains(mime);
+}
+
+bool TribeSupportChat::effAllowedLogMime(const QString &mime) const
+{
+    return m_logMime.isEmpty() ? isAllowedLogMime(mime) : m_logMime.contains(mime);
 }
 
 void TribeSupportChat::rebuildMessages()
@@ -575,7 +601,8 @@ void TribeSupportChat::rebuildMessages()
             am.insert(QStringLiteral("kind"), e.kind);
             am.insert(QStringLiteral("mime"), e.mime);
             am.insert(QStringLiteral("name"), e.fileName);
-            am.insert(QStringLiteral("bytes"), qint64(0));
+            // размер известен только у in-memory payload (фото/диагностика); видео с диска — 0
+            am.insert(QStringLiteral("bytes"), qint64(e.imageBytes.size()));
             am.insert(QStringLiteral("width"), 0);
             am.insert(QStringLiteral("height"), 0);
             am.insert(QStringLiteral("hasThumb"), false);
@@ -708,6 +735,43 @@ void TribeSupportChat::sendAttachmentFile(const QUrl &fileUrl)
     postEcho(m_echoes.last());
 }
 
+// AVPN (diag, Task 5 bff-3): диагностический отчёт (buildDiagReport) в тред поддержки.
+// Тот же multipart-путь, что у фото/видео (postEcho), но text/plain и generic-имя diag.log
+// (privacy-паттерн: реальных имён файлов на бэк не шлём). Kill-switch features.support_diag
+// (default TRUE) — бэкенд может выключить фичу без релиза.
+void TribeSupportChat::sendDiagReport(const QString &reportText)
+{
+    if (!TuningStore::flag(QStringLiteral("support_diag"))) {
+        emit sendFailed(tr("Функция временно недоступна"));
+        return;
+    }
+    const QByteArray bytes = reportText.toUtf8();
+    if (bytes.isEmpty()) {
+        emit sendFailed(tr("Диагностика пуста — нечего отправлять"));
+        return;
+    }
+    const QString mime = QStringLiteral("text/plain");
+    if (!effAllowedLogMime(mime)) { // сервер сузил log_mime до чего-то иного — честно откажем
+        emit sendFailed(tr("Формат диагностики не поддерживается сервером"));
+        return;
+    }
+    if (bytes.size() > effLogMaxBytes()) {
+        emit sendFailed(tr("Диагностика больше %1 МБ").arg(effLogMaxBytes() / (1024 * 1024)));
+        return;
+    }
+
+    Echo e;
+    e.localId = -(++m_localSeq);
+    e.atMs = QDateTime::currentMSecsSinceEpoch();
+    e.kind = QStringLiteral("log");
+    e.mime = mime;
+    e.fileName = QStringLiteral("diag.log");
+    e.imageBytes = bytes; // text/plain грузится из памяти, как пережатое фото
+    m_echoes.append(e);
+    rebuildMessages();
+    postEcho(m_echoes.last());
+}
+
 void TribeSupportChat::postEcho(Echo &echo)
 {
     const QString token = authToken();
@@ -741,7 +805,9 @@ void TribeSupportChat::postEcho(Echo &echo)
         // (IMG_1234.HEIC / переименованные юзером файлы могут нести PII). Локальное
         // echo.fileName остаётся только для отображения в UI.
         QString wireName;
-        if (echo.kind == QLatin1String("video")) {
+        if (echo.kind == QLatin1String("log")) {
+            wireName = QStringLiteral("diag.log"); // диагностика: единое generic-имя (Task 5 bff-3)
+        } else if (echo.kind == QLatin1String("video")) {
             wireName = echo.mime.contains(QLatin1String("quicktime")) ? QStringLiteral("video.mov")
                      : echo.mime.contains(QLatin1String("webm"))      ? QStringLiteral("video.webm")
                                                                       : QStringLiteral("video.mp4");
@@ -836,12 +902,22 @@ void TribeSupportChat::postEcho(Echo &echo)
             rebuildMessages();
             m_refreshPending = true; // подтянуть автоответ/постер (уйдёт в хвосте ниже)
         } else {
-            if (Echo *e = echoByLocalId(localId)) {
-                e->pending = false;
-                e->failed = true;
+            Echo *e = echoByLocalId(localId);
+            // AVPN (diag, Task 5 bff-3): 404/405/415 на диагностике = бэк ещё не принимает
+            // text/plain (эндпоинт/MIME не раскатан) — честный тост БЕЗ «Повторить»
+            // (ретрай бессмысленен до обновления бэка; образец uploadReport AvpnEngineQml).
+            if (e && e->kind == QLatin1String("log")
+                && (code == 404 || code == 405 || code == 415)) {
+                discardMessage(localId); // убирает эхо + rebuildMessages
+                emit sendFailed(tr("Сервер ещё не принимает диагностику — обновление скоро"));
+            } else {
+                if (e) {
+                    e->pending = false;
+                    e->failed = true;
+                }
+                rebuildMessages();
+                emit sendFailed(humanSendError(code, netErr));
             }
-            rebuildMessages();
-            emit sendFailed(humanSendError(code, netErr));
         }
         // Отложенные во время POST'ов запросы (поллинг/пуш) — одним refresh(),
         // когда последний POST завершился (любой исход).

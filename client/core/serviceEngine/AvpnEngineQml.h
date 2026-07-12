@@ -181,6 +181,10 @@ class AvpnEngineQml : public QObject {
     // AVPN backend-first (Task 9): ретрай-поллинг рефералки (PageReferralTribe) — server-tunable
     // (numbers.referral_retry_ms), фолбэк 6000мс, клампы 1с..10мин.
     Q_PROPERTY(int referralRetryMs READ referralRetryMs NOTIFY changed)
+    // AVPN (diag, Task 5 bff-3): отправка диагностики в чат поддержки — kill-switch
+    // (features.support_diag, default TRUE). PageSupportTribe прячет пункт меню при false;
+    // сам sendDiagReport гейтится и в C++ (TribeSupportChat).
+    Q_PROPERTY(bool supportDiagEnabled READ supportDiagEnabled NOTIFY changed)
 public:
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
@@ -260,6 +264,8 @@ public:
 
     // AVPN backend-first (Task 9): реф-вкладка/кабинет-URL/поллинг — см. Q_PROPERTY выше.
     bool referralEnabled() const { return avpn::TuningStore::flag(QStringLiteral("referral")); }
+    // AVPN (diag, Task 5 bff-3): kill-switch отправки диагностики — см. Q_PROPERTY выше.
+    bool supportDiagEnabled() const { return avpn::TuningStore::flag(QStringLiteral("support_diag")); }
     QString cabinetUrl() const
     {
         return avpn::TuningStore::stringOr(QStringLiteral("cabinet"),

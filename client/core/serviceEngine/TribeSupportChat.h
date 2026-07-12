@@ -44,7 +44,7 @@ class TribeSupportChat : public QObject {
     // Сообщения треда (хронология) + наши неподтверждённые «эхо» в хвосте.
     // Элемент: {id, sender: "client"|"operator", body, operatorName, isAuto,
     //           atMs (epoch мс, локальное время считает QML), pending, failed,
-    //           attachments: [{id, kind: "image"|"video", mime, name, bytes,
+    //           attachments: [{id, kind: "image"|"video"|"log", mime, name, bytes,
     //                          width, height, hasThumb, thumbUrl (data:-URL или ""),
     //                          localUrl (file:// для эха, иначе "")}],
     //           card (опц., store-flow D): {title, body, buttons: [{label,
@@ -81,6 +81,11 @@ public:
     Q_INVOKABLE void sendText(const QString &body);
     // Файл из пикера (file://…). Валидация типа/размера + пережатие фото — тут.
     Q_INVOKABLE void sendAttachmentFile(const QUrl &fileUrl);
+    // AVPN (diag, Task 5 bff-3): диагностический отчёт (TribeEngine.buildDiagReport) в тред —
+    // multipart text/plain на /v1/support/attachments, generic-имя diag.log (privacy-паттерн).
+    // Гейт: kill-switch features.support_diag (default TRUE) — при false no-op с тостом.
+    // 404/405/415 бэка = «эндпоинт ещё не принимает text/plain» → честный тост БЕЗ «Повторить».
+    Q_INVOKABLE void sendDiagReport(const QString &reportText);
     Q_INVOKABLE void retryMessage(int localId);    // повторить failed-эхо
     Q_INVOKABLE void discardMessage(int localId);  // убрать failed-эхо
     // Скачать оригинал вложения во временный файл → attachmentReady(file://…).
@@ -123,11 +128,11 @@ private:
     struct Echo {
         int localId = 0;          // отрицательный — не пересекается с серверными id
         QString body;             // текст (пусто у вложения)
-        QString kind;             // "" | "image" | "video"
+        QString kind;             // "" | "image" | "video" | "log"
         QString mime;
         QString fileName;
         QString filePath;         // исходный файл (видео стримится с диска)
-        QByteArray imageBytes;    // пережатое фото (грузим из памяти)
+        QByteArray imageBytes;    // пережатое фото ЛИБО text/plain диагностика (грузим из памяти)
         QString localUrl;         // file:// для локального превью эха
         qint64 atMs = 0;
         bool pending = true;
@@ -154,8 +159,10 @@ private:
     // из /thread), фолбэк — вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
     qint64 effImageMaxBytes() const;
     qint64 effVideoMaxBytes() const;
+    qint64 effLogMaxBytes() const;
     bool effAllowedImageMime(const QString &mime) const;
     bool effAllowedVideoMime(const QString &mime) const;
+    bool effAllowedLogMime(const QString &mime) const;
     void postEcho(Echo &echo);               // POST messages|attachments для эха
     void queueThumb(int attachmentId);
     void fetchNextThumb();
@@ -177,8 +184,10 @@ private:
     // (kImageMaxBytes — constexpr анонимного namespace в .cpp, тут недоступен).
     qint64 m_imageMaxBytes = 0;
     qint64 m_videoMaxBytes = 0;
+    qint64 m_logMaxBytes = 0;
     QStringList m_imageMime;
     QStringList m_videoMime;
+    QStringList m_logMime;
 
     QVariantList m_messages;                 // готовая модель для QML
     QVariantList m_serverMessages;           // последняя разобранная серверная история
