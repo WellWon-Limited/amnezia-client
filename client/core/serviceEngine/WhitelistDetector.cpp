@@ -64,6 +64,9 @@ WhitelistDetector::WhitelistDetector(QNetworkAccessManager *nam, std::function<b
     m_exitTimer.setSingleShot(false);
     connect(&m_exitTimer, &QTimer::timeout, this, &WhitelistDetector::runExitProbe);
 
+    m_idleRetryTimer.setSingleShot(true);
+    connect(&m_idleRetryTimer, &QTimer::timeout, this, &WhitelistDetector::maybeStartRound);
+
     if (auto *ni = QNetworkInformation::instance()) { // backend уже загружен движком
         connect(ni, &QNetworkInformation::transportMediumChanged, this,
                 [this](QNetworkInformation::TransportMedium) { onTransportChanged(); });
@@ -88,6 +91,8 @@ void WhitelistDetector::onTransportChanged()
     if (!cellularNow()) {
         // Ушли с сотовой (напр. юзер послушал совет и включил Wi-Fi) — режим снимается сразу,
         // дальше штатный bootstrap сам всё проверит (kickBootstrap дёргает движок).
+        m_idleRetryTimer.stop();
+        m_idleRetryLeft = 0;
         const bool wasActive = m_hyst.active;
         m_hyst.feed(WlVerdict::NotApplicable, false);
         m_failStreak = 0;
@@ -123,6 +128,10 @@ void WhitelistDetector::noteControlPlaneOk()
 
 void WhitelistDetector::noteConnectFailure()
 {
+    // Watchdog зовёт нас ДО завершения async-teardown (state ещё "connecting") — гейт
+    // tunnelIdle() в maybeStartRound срежет попытку. Взводим короткий ретрай-бюджет:
+    // раунд стартует, как только туннель реально осядет в disconnected (ревью, finding 1).
+    m_idleRetryLeft = 5;
     maybeStartRound();
 }
 
@@ -140,8 +149,16 @@ void WhitelistDetector::maybeStartRound()
         return; // kill-switch с бэка, рантайм
     if (m_roundInFlight || !m_nam)
         return;
-    if (!cellularNow() || !m_tunnelIdle || !m_tunnelIdle())
-        return; // §3.1/§3.3: только сотовая + полностью опущенный туннель
+    if (!cellularNow() || !m_tunnelIdle || !m_tunnelIdle()) {
+        // §3.1/§3.3: только сотовая + полностью опущенный туннель. Триггер от watchdog приходит
+        // во время async-teardown — дотянуть старт коротким ретраем (кап m_idleRetryLeft).
+        if (cellularNow() && m_idleRetryLeft > 0) {
+            --m_idleRetryLeft;
+            m_idleRetryTimer.start(2000);
+        }
+        return;
+    }
+    m_idleRetryLeft = 0;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const int minGap = qBound(5000,
         int(TuningStore::numberOr(QStringLiteral("whitelist_round_min_gap_ms"), 20000)), 300000);

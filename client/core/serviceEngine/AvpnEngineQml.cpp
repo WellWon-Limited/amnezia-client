@@ -2768,13 +2768,17 @@ void AvpnEngineQml::flushWhitelistEpisodes()
     req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
     QNetworkReply *reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, raw]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code >= 200 && code < 300) {
+            // Ревью: чистим ТОЛЬКО если очередь не изменилась за время полёта — иначе
+            // сотрём эпизод, завершившийся между отправкой и ответом (уйдёт следующей сессией).
             QSettings s;
-            s.remove(QStringLiteral("Whitelist/episodes"));
-            s.sync();
+            if (s.value(QStringLiteral("Whitelist/episodes")).toByteArray() == raw) {
+                s.remove(QStringLiteral("Whitelist/episodes"));
+                s.sync();
+            }
         }
         // 404 (бэк ещё без эндпоинта) / прочее — молчим, очередь останется на следующую сессию
     });
@@ -3920,6 +3924,12 @@ void AvpnEngineQml::refreshAccount()
             else
                 m_configSvc->reportNetworkSuccess();
         }
+        // AVPN (белые списки, ревью finding 2): у детектора классификация иная, чем у edge-walk —
+        // ЛЮБОЙ дошедший HTTP-статус (вкл. 5xx) = control plane достижим, фейл только code==0.
+        if (m_whitelistDetector) {
+            if (code > 0) m_whitelistDetector->noteControlPlaneOk();
+            else m_whitelistDetector->noteControlPlaneFailure();
+        }
         // AVPN (перенос «как SIM»): 410 transferred — см. refreshSubscription (тот же флаг).
         if (code == 410 && !m_transferredAway) { m_transferredAway = true; emit changed(); }
         QVariantMap result;
@@ -4017,6 +4027,11 @@ void AvpnEngineQml::refreshSubscription()
                 m_configSvc->reportNetworkFailure();
             else
                 m_configSvc->reportNetworkSuccess();
+        }
+        // AVPN (белые списки, ревью finding 2): паритет с refreshAccount — детектору свой сигнал.
+        if (m_whitelistDetector) {
+            if (code > 0) m_whitelistDetector->noteControlPlaneOk();
+            else m_whitelistDetector->noteControlPlaneFailure();
         }
         // AVPN (перенос «как SIM»): 410 transferred — подписка уехала на другое устройство.
         // Взводим терминальный флаг для UI («Подписка перенесена»); НЕ ре-энроллим.
