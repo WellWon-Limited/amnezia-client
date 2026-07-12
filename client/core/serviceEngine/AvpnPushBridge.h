@@ -26,9 +26,11 @@ class AvpnPushBridge : public QObject {
     Q_PROPERTY(QString platform READ platform NOTIFY changed)
     // Статус разрешения на пуши: "unknown" | "granted" | "denied".
     Q_PROPERTY(QString authStatus READ authStatus NOTIFY changed)
-    // Последние входящие уведомления (для центра уведомлений #3): [{title, body, time, read, type, days}].
+    // Последние входящие уведомления (для центра уведомлений #3): [{id, title, body, time, read, type, days}].
     // type: "bonus_gift" | "payment" | "reminder" | "generic" (для типовых стилей делегата в QML,
     // «золотой подарок» и т.п.); days: >0 для бонус/оплата (показать «+N дней»), иначе 0.
+    // id: серверный id строки /v1/notifications (>0) — для поэлементного mark-read; у локального
+    // пуша id нет (0) — серверная история заместит его строкой с id при ближайшем refresh.
     Q_PROPERTY(QVariantList items READ items NOTIFY changed)
 
 public:
@@ -43,8 +45,13 @@ public:
     QVariantList items() const { const_cast<AvpnPushBridge *>(this)->ensureLoaded(); return m_items; }
 
     // --- QML API ---
-    // Пользователь открыл центр уведомлений / отметил всё прочитанным → обнулить бейдж.
+    // Пользователь нажал «Прочитать все» в центре уведомлений → обнулить бейдж.
+    // (С 2026-07-12 центр НЕ зовёт это при открытии: read-state честный, per-элемент.)
     Q_INVOKABLE void markAllRead();
+    // Пользователь открыл КОНКРЕТНОЕ уведомление (детальная страница) → пометить прочитанным
+    // только его: локально сразу (точка гаснет, бейдж -1), на сервер — readItemRequested(id),
+    // если у элемента есть серверный id. index — позиция в items (модель ListView).
+    Q_INVOKABLE void markItemRead(int index);
     // Принудительная (пере)регистрация на пуши (например, после логина). На desktop — no-op.
     Q_INVOKABLE void requestAuthorization();
     // AVPN (Support): забрать отложенный «тап по пушу» (cold start: сигнал pushTapped ушёл
@@ -90,6 +97,9 @@ signals:
     void deviceTokenReady(const QString &token, const QString &platform, const QString &environment);
     // AVPN: пользователь отметил всё прочитанным → движок шлёт POST /v1/notifications/read (сброс счётчика).
     void readRequested();
+    // AVPN (read per-элемент): открыта деталь уведомления с серверным id → движок шлёт
+    // POST /v1/notifications/read {"ids":[id]} (помечает только его + декремент unread_count).
+    void readItemRequested(qlonglong id);
     // AVPN (Support): пришёл пуш type=support (ответ оператора чата поддержки). В колокол
     // НЕ попадает (гейт в applyRemoteNotification) — слушает TribeSupportChat::onSupportPush.
     void supportPushReceived();

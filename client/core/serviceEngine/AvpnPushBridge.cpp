@@ -99,6 +99,33 @@ void AvpnPushBridge::markAllRead()
         emit changed();
 }
 
+// AVPN (read per-элемент): пометить прочитанным ОДНО уведомление (открыта детальная страница).
+// Локально — сразу (точка в списке гаснет, бейдж -1); серверу — сигнал readItemRequested(id),
+// только если у элемента есть серверный id (>0). Локальный пуш без id серверная история
+// заместит строкой с id при ближайшем refreshNotifications — рассинхрон само-чинится.
+void AvpnPushBridge::markItemRead(int index)
+{
+    ensureLoaded();
+    if (index < 0 || index >= m_items.size())
+        return;
+    QVariantMap m = m_items[index].toMap();
+    if (m.value(QStringLiteral("read")).toBool())
+        return;   // уже прочитано — ни persist, ни сеть не нужны
+    m[QStringLiteral("read")] = true;
+    m_items[index] = m;
+    m_unreadCount = qMax(0, m_unreadCount - 1);
+    persist();
+    updateNativeBadge();   // macOS dockTile ← unreadCount
+    // iOS: числового сеттера нет (aps.badge ставит сервер) — гасим системный бейдж,
+    // когда непрочитанных не осталось; частичное чтение подтянет следующий пуш.
+    if (m_unreadCount == 0 && m_badgeClearer)
+        m_badgeClearer();
+    const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
+    if (id > 0)
+        emit readItemRequested(id);
+    emit changed();
+}
+
 // AVPN (центр уведомлений): серверная история /v1/notifications замещает локальную. Фетч-ошибки
 // сюда не доходят (движок зовёт только на валидном 2xx-массиве) — офлайн живёт на локальной копии.
 void AvpnPushBridge::setServerItems(const QVariantList &items)
@@ -243,6 +270,7 @@ void AvpnPushBridge::applyRemoteNotification(const QString &title, const QString
     }
     ensureLoaded();   // подгрузить прошлую историю, чтобы новый пуш не затёр её при persist()
     QVariantMap item;
+    item[QStringLiteral("id")] = 0;   // серверного id у локального пуша нет — появится после refresh
     item[QStringLiteral("title")] = title;
     item[QStringLiteral("body")] = body;
     item[QStringLiteral("time")] = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm"));

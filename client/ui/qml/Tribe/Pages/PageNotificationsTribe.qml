@@ -14,6 +14,9 @@ PageType {
     id: root
 
     signal back()
+    // AVPN (read per-элемент): тап по карточке → PageStart открывает детальную страницу
+    // PageNotificationDetailTribe (полноэкранно, по паттерну PageLegalTribe с extraProps).
+    signal requestNotificationDetail(var notif)
 
     // iOS: PageController.safeArea* только для Android → max с SafeArea (Qt 6.9+, реактивный инсет).
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
@@ -27,24 +30,13 @@ PageType {
     // приходило пользователю). Пусто → экран пустого состояния ниже. // AVPN
     readonly property var items: pushItems
 
-    // При открытии центра уведомлений отмечаем все пуши прочитанными → бейдж на колоколе гаснет,
-    // и подтягиваем СЕРВЕРНУЮ историю (GET /v1/notifications через движок): строки доезжают даже
-    // если пуш не был доставлен (баг 2026-07-10 «объявление в БД есть, центр пуст»). // AVPN
+    // При открытии центра подтягиваем СЕРВЕРНУЮ историю (GET /v1/notifications через движок):
+    // строки доезжают даже если пуш не был доставлен (баг 2026-07-10 «объявление в БД есть,
+    // центр пуст»). Read-state ЧЕСТНЫЙ per-элемент (реворк 2026-07-12): открытие центра НИЧЕГО
+    // не помечает — точка гаснет по тапу на карточку (markItemRead) или по «Прочитать все». // AVPN
     Component.onCompleted: {
-        if (hasPush && AvpnPush.markAllRead)
-            AvpnPush.markAllRead()
         if (typeof TribeEngine !== "undefined" && typeof TribeEngine.refreshNotifications === "function")
             TribeEngine.refreshNotifications()
-    }
-
-    // Серверная история доехала, пока центр открыт — она уже «увидена»: гасим бейдж повторно
-    // (markAllRead выше мог отработать ДО прихода ответа). Guard по unreadCount — без цикла. // AVPN
-    Connections {
-        target: root.hasPush ? AvpnPush : null
-        function onChanged() {
-            if (root.visible && AvpnPush.unreadCount > 0 && AvpnPush.markAllRead)
-                AvpnPush.markAllRead()
-        }
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
@@ -65,6 +57,28 @@ PageType {
             // PageController.closePage() — страница открыта через replace (depth=1), и closePage уходил
             // в hideWindow() (прятал окно) вместо возврата. Отсюда «кнопка назад не работает».
             onBackClicked: root.back()
+
+            // AVPN (read per-элемент): «Прочитать все» — единственный массовый mark-read
+            // (существующий POST /v1/notifications/read без тела). Виден только при непрочитанных.
+            rightItem: Text {
+                visible: root.hasPush && Number(AvpnPush.unreadCount) > 0
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Прочитать все")
+                color: Theme.color.accent
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.bodyS
+                font.weight: Theme.font.wMedium
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -Theme.space.sm   // зона тапа шире текста
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        Haptic.play("selection")
+                        if (root.hasPush && AvpnPush.markAllRead)
+                            AvpnPush.markAllRead()
+                    }
+                }
+            }
         }
 
         ListView {
@@ -103,12 +117,28 @@ PageType {
                     anchors.leftMargin: Theme.space.md; anchors.topMargin: Theme.space.lg + 4
                 }
 
-                // AVPN (объявления P-ANN): тап по карточке объявления → на главную, где попап
-                // с полным текстом/кнопками всплывёт сам, пока объявление не прочитано.
+                // AVPN (read per-элемент, 2026-07-12): тап по ЛЮБОЙ карточке = пометить прочитанным
+                // именно её (локально сразу + POST {"ids":[id]} через мост) и открыть полноэкранную
+                // деталь. Старый хак «announcement → back() → авось попап всплывёт» убран: связи по id
+                // между лентой и TribeEngine.announcements нет, попап часто не всплывал — выглядело
+                // как выброс на главную.
                 MouseArea {
                     anchors.fill: parent
-                    enabled: card.kind === "announcement"
-                    onClicked: root.back()
+                    onClicked: {
+                        Haptic.play("selection")
+                        // снапшот данных ДО markItemRead: он меняет items → модель пересоздаст делегаты
+                        var n = {
+                            "id": modelData.id ? Number(modelData.id) : 0,
+                            "title": modelData.title || "",
+                            "body": modelData.body || "",
+                            "time": modelData.time || "",
+                            "type": card.kind,
+                            "days": card.giftDays
+                        }
+                        if (root.hasPush && AvpnPush.markItemRead)
+                            AvpnPush.markItemRead(index)
+                        root.requestNotificationDetail(n)
+                    }
                 }
 
                 RowLayout {
