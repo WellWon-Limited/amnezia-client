@@ -49,8 +49,18 @@ PageType {
         ((PageController.imeHeight > 0 && Qt.inputMethod.visible)
          || (tabBarStackView.currentItem && tabBarStackView.currentItem.inputFocused === true))
 
+    // Смена вкладки с открытой клавиатурой: margin схлопывается МГНОВЕННО (без Behavior) —
+    // иначе 500мс-анимация доигрывалась уже на новой странице и её контент «съезжал
+    // сверху вниз» (жалоба 2026-07-13: свайп-назад из чата → блок кнопок Главной едет).
+    property bool kbInstant: false
+    Timer { id: kbInstantReset; interval: 600; onTriggered: root.kbInstant = false }
+
     // AVPN: единый роутер наших вкладок (0 Главная / 1 Поддержка / 2 Рефералка / 3 Настройки=Профиль).
     function goAvpnTab(index) {
+        if (PageController.imeHeight > 0 || Qt.inputMethod.visible) {
+            root.kbInstant = true
+            kbInstantReset.restart()
+        }
         Qt.inputMethod.hide()   // смена вкладки с открытой клавиатурой: спрятать ЯВНО,
                                 // иначе imeHeight мог застрять и навбар не возвращался
         avpnBottomNav.currentIndex = index
@@ -457,6 +467,8 @@ PageType {
             // вдвое чаще прежнего — плавно; кадр рендерится за 2-3мс (QSG_RENDER_TIMING).
             // Экспериментальные покадровые фиды/GPU-сдвиги откачены (артефакты хуже
             // микро-рассинхрона кривой — история в памяти tribe-support-chat-native).
+            // kbInstant: уход со страницы с клавиатурой — схлопнуться мгновенно.
+            enabled: !root.kbInstant
             NumberAnimation {
                 duration: 500
                 easing.type: Easing.BezierSpline
