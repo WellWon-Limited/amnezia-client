@@ -443,13 +443,15 @@ PageType {
         Row {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.space.md
+            spacing: Theme.space.sm
 
             // бейдж подписки (одна строка): остаток трафика (real) + дни (real daysLeft).
             // тап → Профиль (заменяет шестерёнку). subActive гейтит цвет рамки.
+            // Отступы компактные (md внутри, sm до колокола): широкий текст «9.8 TB · 369 дн.»
+            // с жирным паддингом визуально уползал к логотипу, отрываясь от колокола.
             Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
-                width: statRow.width + 2 * Theme.space.lg
+                width: statRow.width + 2 * Theme.space.md
                 height: 36
                 radius: Theme.radius.pill
                 color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
