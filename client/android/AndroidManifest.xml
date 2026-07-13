@@ -249,5 +249,13 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/qtprovider_paths" />
         </provider>
+        <!-- AVPN (Task 9, FCM): приём пушей (токен/входящие) → AvpnFcmService.kt -->
+        <service
+            android:name="org.amnezia.vpn.AvpnFcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

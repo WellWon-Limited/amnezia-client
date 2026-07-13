@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     id("property-delegate")
+    alias(libs.plugins.google.services) // AVPN (Task 9, FCM): читает client/android/google-services.json
 }
 
 kotlin {
@@ -82,6 +83,7 @@ dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.fragment)
     implementation(libs.kotlinx.coroutines)
+    implementation(libs.firebase.messaging) // AVPN (Task 9, FCM): AvpnFcmService
     implementation(libs.kotlinx.serialization.protobuf)
     implementation(libs.bundles.androidx.camera)
     implementation(libs.google.mlkit)

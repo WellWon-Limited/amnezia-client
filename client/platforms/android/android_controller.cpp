@@ -8,6 +8,7 @@
 
 #include "android_controller.h"
 #include "android_utils.h"
+#include "avpn_fcm_bridge.h" // AVPN (Task 9): FCM natives + запрос токена
 #include "ui/controllers/importUiController.h"
 
 namespace
@@ -113,6 +114,10 @@ bool AndroidController::initialize()
         qCritical() << "Failed native method registration";
         return false;
     }
+
+    // AVPN (Task 9, FCM): natives пуш-сервиса + старт Kotlin-половины (см. avpn_fcm_bridge.cpp).
+    // Неуспех НЕ валит контроллер: без Play Services пуши деградируют до поллинга чата.
+    avpn::registerFcmNatives();
     qtAndroidControllerInitialized();
     return true;
 }

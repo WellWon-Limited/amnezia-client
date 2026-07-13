@@ -986,6 +986,7 @@ private:
     // после ротации subscription_token (redeemCode/redeemTransfer: старый токен на сервере сброшен).
     QString                      m_pushToken;
     QString                      m_pushEnv;
+    QString                      m_pushPlatform; // "ios"|"android" из deviceTokenReady (пусто = легаси iOS)
     // AVPN (Task 9): запрос разрешения на пуши — один раз, после первого успешного коннекта (persist).
     bool                         m_pushPermissionAsked = false;
     // AVPN (Task 9): один device token-POST за сессию на пару (token,env) — без дублей на каждый коннект.

@@ -1,4 +1,7 @@
 [versions]
+# AVPN (Task 9, FCM): пуш-канал Android (см. AvpnFcmService.kt)
+googleServices = "4.4.2"
+firebaseMessaging = "24.1.0"
 agp = "8.6.1"
 kotlin = "1.9.24"
 androidx-core = "1.13.1"
@@ -14,6 +17,7 @@ kotlinx-serialization = "1.6.3"
 google-mlkit = "17.3.0"
 
 [libraries]
+firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebaseMessaging" } # AVPN
 androidx-core = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
 androidx-activity = { module = "androidx.activity:activity-ktx", version.ref = "androidx-activity" }
 androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "androidx-annotation" }
@@ -39,6 +43,7 @@ androidx-camera = [
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" } # AVPN (Task 9, FCM)
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin"}
