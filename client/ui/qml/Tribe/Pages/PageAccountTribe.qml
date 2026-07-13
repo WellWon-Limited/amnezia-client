@@ -518,18 +518,21 @@ PageType {
                 anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
 
-                // название плана + статус (active/trial/expired из движка, fallback — пробный)
+                // заголовок = короткий ID аккаунта с бэка (а не маркетинговое имя плана);
+                // название подписки живёт в бейдже: Премиум / Пробный / Истекла
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
                         Layout.fillWidth: true
-                        text: qsTr("Tribe Trial"); color: Theme.color.text1
+                        text: root.accountNumber() !== "" ? qsTr("ID: %1").arg(root.accountNumber()) : "Tribe VPN"
+                        color: Theme.color.text1
                         font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
+                        elide: Text.ElideMiddle
                     }
                     TribeBadge {
                         variant: (root.accountData && root.accountData.status === "active") ? "on"
                                : (root.accountData && root.accountData.status === "expired") ? "off" : "warn"
-                        text: (root.accountData && root.accountData.status === "active") ? qsTr("Активна")
+                        text: (root.accountData && root.accountData.status === "active") ? qsTr("Премиум")
                             : (root.accountData && root.accountData.status === "expired") ? qsTr("Истекла")
                             : qsTr("Пробный")
                     }
@@ -551,21 +554,27 @@ PageType {
                     }
                 }
 
-                // трафик
+                // трафик: ОСТАТОК (не «израсходовано/лимит») — юзеру важно «сколько ещё можно»;
+                // единицы адаптивные как в пилюле Главной (≥1024 ГиБ → ТБ), двоичная база
                 RowLayout {
                     Layout.fillWidth: true
-                    Text { text: qsTr("Трафик"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
+                    Text { text: qsTr("Осталось трафика"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
                     Text {
-                        text: root.trafficLimitB > 0
-                              ? (root.fmtGb(root.trafficUsedB) + " / " + root.fmtGb(root.trafficLimitB) + qsTr(" ГБ"))
-                              : qsTr("Безлимит")
+                        text: {
+                            if (!(root.trafficLimitB > 0)) return qsTr("Безлимит")
+                            var gib = Math.max(0, root.trafficLimitB - root.trafficUsedB) / 1073741824
+                            if (isNaN(gib)) return qsTr("Безлимит")
+                            if (gib >= 1024) return (gib / 1024).toFixed(1).replace(/\.0$/, "") + qsTr(" ТБ")
+                            return gib.toFixed(1).replace(/\.0$/, "") + qsTr(" ГБ")
+                        }
                         color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
                     }
                 }
+                // полоса — тоже остаток (полная = весь трафик на месте), в тон тексту выше
                 Rectangle {
                     Layout.fillWidth: true; height: 6; radius: 3; color: Theme.color.surface3
                     visible: root.trafficLimitB > 0
-                    Rectangle { width: parent.width * root.usedFrac; height: parent.height; radius: 3; color: Theme.color.accent }
+                    Rectangle { width: parent.width * (1 - root.usedFrac); height: parent.height; radius: 3; color: Theme.color.accent }
                 }
 
                 // AVPN (оплата): открыть web-кабинет (продление/тарифы — ТОЛЬКО на сайте). Без цен

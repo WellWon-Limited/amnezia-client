@@ -9,7 +9,22 @@
         <translation>%1 · auto</translation>
     </message>
     <message>
-        <location line="+244"/>
+        <location line="+98"/>
+        <source>Диагностика</source>
+        <translation>Diagnóstico</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>%1 МБ</source>
+        <translation>%1 MB</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 КБ</source>
+        <translation>%1 KB</translation>
+    </message>
+    <message>
+        <location line="+189"/>
         <source>Не отправлено</source>
         <translation>No enviado</translation>
     </message>
@@ -44,15 +59,15 @@
 <context>
     <name>PageAccountTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+118"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+124"/>
         <location line="+7"/>
-        <location line="+238"/>
-        <location line="+898"/>
+        <location line="+244"/>
+        <location line="+910"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Motor no disponible: actualiza la app</translation>
     </message>
     <message>
-        <location line="-1129"/>
+        <location line="-1147"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -70,34 +85,28 @@
     </message>
     <message>
         <location line="+96"/>
-        <location line="+270"/>
         <source>Активна</source>
         <translation>Activa</translation>
     </message>
     <message>
-        <location line="-269"/>
+        <location line="+1"/>
         <source>Пробный доступ</source>
         <translation>Acceso de prueba</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+269"/>
+        <location line="+278"/>
         <source>Истекла</source>
         <translation>Expirada</translation>
     </message>
     <message>
-        <location line="-251"/>
-        <location line="+854"/>
+        <location line="-260"/>
+        <location line="+872"/>
         <source>Устройство</source>
         <translation>Dispositivo</translation>
     </message>
     <message>
-        <location line="-610"/>
-        <source>Tribe Trial</source>
-        <translation>Tribe Trial</translation>
-    </message>
-    <message>
-        <location line="+8"/>
+        <location line="-611"/>
         <source>Пробный</source>
         <translation>Prueba</translation>
     </message>
@@ -122,39 +131,35 @@
         <translation>Activo</translation>
     </message>
     <message>
-        <location line="+9"/>
-        <source>Трафик</source>
-        <translation>Tráfico</translation>
-    </message>
-    <message>
-        <location line="+3"/>
+        <location line="+17"/>
         <source> ГБ</source>
         <translation> GB</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-4"/>
+        <location line="+2"/>
         <source>Безлимит</source>
         <translation>Ilimitado</translation>
     </message>
     <message>
-        <location line="+15"/>
+        <location line="+19"/>
         <source>Управлять подпиской</source>
         <translation>Gestionar suscripción</translation>
     </message>
     <message>
-        <location line="-457"/>
-        <location line="+498"/>
+        <location line="-478"/>
+        <location line="+519"/>
         <source>Введите код активации</source>
         <translation>Introduce el código de activación</translation>
     </message>
     <message>
-        <location line="-491"/>
-        <location line="+221"/>
+        <location line="-506"/>
+        <location line="+227"/>
         <source>Переносим доступ на это устройство…</source>
         <translation>Transfiriendo el acceso a este dispositivo…</translation>
     </message>
     <message>
-        <location line="-179"/>
+        <location line="-185"/>
         <source>Код активирован: %1</source>
         <translation>Código activado: %1</translation>
     </message>
@@ -170,7 +175,7 @@
         <translation>Este dispositivo está vinculado a otra cuenta. Contacta con soporte: te ayudaremos.</translation>
     </message>
     <message>
-        <location line="+153"/>
+        <location line="+159"/>
         <source>Доступ перенесён</source>
         <translation>Acceso transferido</translation>
     </message>
@@ -195,7 +200,7 @@
         <translation>Este dispositivo está desconectado. Para recuperar el acceso, active un código o transfiera el acceso de vuelta.</translation>
     </message>
     <message>
-        <location line="+94"/>
+        <location line="+103"/>
         <source>Активировать код</source>
         <translation>Activar código</translation>
     </message>
@@ -231,7 +236,7 @@
         <translation>¡Hola! Al activar, aparece «el dispositivo está vinculado a otra cuenta». Ayúdenme a resolverlo, por favor.</translation>
     </message>
     <message>
-        <location line="+16"/>
+        <location line="+19"/>
         <source>Перенос на новое устройство</source>
         <translation>Transferencia a un dispositivo nuevo</translation>
     </message>
@@ -281,7 +286,33 @@
         <translation>Crea un enlace de un solo uso y ábrelo en otro dispositivo. Este dispositivo se desconectará automáticamente.</translation>
     </message>
     <message>
-        <location line="+24"/>
+        <location line="-616"/>
+        <location line="+230"/>
+        <source>Перенос временно недоступен</source>
+        <translation>Transferencia temporalmente no disponible</translation>
+    </message>
+    <message>
+        <location line="+183"/>
+        <source>ID: %1</source>
+        <translation>ID: %1</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Премиум</source>
+        <translation>Premium</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Осталось трафика</source>
+        <translation>Tráfico restante</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source> ТБ</source>
+        <translation> TB</translation>
+    </message>
+    <message>
+        <location line="+187"/>
         <source>УСТРОЙСТВА</source>
         <translation>DISPOSITIVOS</translation>
     </message>
@@ -973,7 +1004,7 @@
         <translation>Acceso activado en este dispositivo</translation>
     </message>
     <message>
-        <location line="+342"/>
+        <location line="+361"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Acceso a sitios rusos activado</translation>
     </message>
@@ -1038,24 +1069,24 @@
         <translation>Servidor ruso: la disponibilidad de servicios es la misma que dentro de Rusia</translation>
     </message>
     <message>
-        <location line="+53"/>
+        <location line="+57"/>
         <source>Продлить трафик</source>
         <translation>Recargar tráfico</translation>
     </message>
     <message>
-        <location line="+0"/>
-        <location line="+16"/>
+        <location line="-1"/>
+        <location line="+21"/>
         <source>Как продлить трафик?</source>
         <translation>¿Cómo renuevo el tráfico?</translation>
     </message>
     <message>
-        <location line="-15"/>
+        <location line="-17"/>
         <source>Продлить доступ</source>
         <translation>Renovar acceso</translation>
     </message>
     <message>
-        <location line="+0"/>
-        <location line="+16"/>
+        <location line="-1"/>
+        <location line="+19"/>
         <source>Как продлить доступ?</source>
         <translation>¿Cómo renuevo el acceso?</translation>
     </message>
@@ -1149,7 +1180,7 @@
         <translation>  • activo</translation>
     </message>
     <message>
-        <location line="+37"/>
+        <location line="+40"/>
         <source>Узлы появятся после первого подключения</source>
         <translation>Los nodos aparecerán después de tu primera conexión</translation>
     </message>
@@ -1157,48 +1188,138 @@
 <context>
     <name>PageNotificationDetailTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageNotificationDetailTribe.qml" line="+42"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageNotificationDetailTribe.qml" line="+29"/>
+        <source>Объявление</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Бонус</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Оплата</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Поддержка</source>
+        <translation type="unfinished">Soporte</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Напоминание</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Новости</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Уведомление</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+107"/>
+        <location line="+7"/>
+        <source>Пригласить ещё</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Открыть чат поддержки</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+90"/>
+        <source>Уведомления</source>
+        <translation type="unfinished">Notificaciones</translation>
+    </message>
+    <message>
+        <location line="+119"/>
         <source>+%1 дней</source>
         <translation type="unfinished">+%1 días</translation>
+    </message>
+    <message>
+        <location line="+70"/>
+        <source>Прочитал</source>
+        <translation type="unfinished">Entendido</translation>
     </message>
 </context>
 <context>
     <name>PageNotificationsTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+54"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageNotificationsTribe.qml" line="+125"/>
         <source>Уведомления</source>
         <translation>Notificaciones</translation>
     </message>
     <message>
-        <location line="+12"/>
-        <source>Прочитать все</source>
+        <location line="+55"/>
+        <source>Все</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+163"/>
-        <source>+%1 дней</source>
-        <translation>+%1 días</translation>
+        <location line="+1"/>
+        <source>Непрочитанные</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+68"/>
+        <source>СЕГОДНЯ</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>ВЧЕРА</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>РАНЕЕ</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+59"/>
+        <source>Не прочит.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Прочитать</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+27"/>
+        <source>Удалить</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+201"/>
         <source>Пока нет уведомлений</source>
         <translation>Aún no hay notificaciones</translation>
     </message>
     <message>
-        <location line="+11"/>
+        <location line="+10"/>
         <source>Здесь появятся важные сообщения о доступе, новых серверах и состоянии сервиса.</source>
         <translation>Aquí aparecerán mensajes importantes sobre el acceso, nuevos servidores y el estado del servicio.</translation>
+    </message>
+    <message>
+        <location line="+32"/>
+        <source>Всё прочитано</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Пока нет непрочитанных сообщений</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>PageOnboardingTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageOnboardingTribe.qml" line="+271"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageOnboardingTribe.qml" line="+309"/>
         <source>Надоело выключать VPN?</source>
         <translation>¿Cansado de apagar el VPN?</translation>
     </message>
@@ -1213,12 +1334,12 @@
         <translation>Extranjeros — se enrutan por VPN</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+24"/>
         <source>Российские — всегда работают напрямую</source>
         <translation>Rusos — siempre conectan directamente</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+24"/>
         <source>Зарубежные сайты — работают через VPN,
 Банки, кинотеатры, Госуслуги, маркетплейсы продолжают работать без переключений!</source>
         <translation>Los sitios extranjeros funcionan por VPN,
@@ -1285,7 +1406,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Puedes cambiar de servidor</translation>
     </message>
     <message>
-        <location line="-195"/>
+        <location line="-207"/>
         <source>Умная маршрутизация сама решает, какой трафик нужно направить через VPN.</source>
         <translation>El enrutamiento inteligente decide por sí solo qué tráfico pasa por la VPN.</translation>
     </message>
@@ -1295,7 +1416,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Acceso a sitios rusos activado</translation>
     </message>
     <message>
-        <location line="+117"/>
+        <location line="+129"/>
         <source>Приложение подберёт самый быстрый сервер</source>
         <translation>La app elegirá el servidor más rápido</translation>
     </message>
@@ -1429,7 +1550,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+123"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+127"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1487,17 +1608,18 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageSupportTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+81"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageSupportTribe.qml" line="+110"/>
         <source>Не удалось загрузить вложение</source>
         <translation>No se pudo cargar el archivo adjunto</translation>
     </message>
     <message>
-        <location line="+17"/>
+        <location line="+9"/>
+        <location line="+501"/>
         <source>Фото или видео</source>
         <translation>Foto o video</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-500"/>
         <source>Фото и видео</source>
         <translation>Fotos y videos</translation>
     </message>
@@ -1522,7 +1644,12 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation type="unfinished">ID de cuenta copiado</translation>
     </message>
     <message>
-        <location line="+96"/>
+        <location line="+76"/>
+        <source>Функция временно недоступна</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+41"/>
         <source>Напишите нам — ответим прямо здесь.
 Можно приложить фото или видео.</source>
         <translation>Escríbenos y te responderemos aquí mismo.
@@ -1534,7 +1661,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Cargando la conversación…</translation>
     </message>
     <message>
-        <location line="+113"/>
+        <location line="+117"/>
         <source>Сообщение…</source>
         <translation>Mensaje…</translation>
     </message>
@@ -1542,6 +1669,31 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+77"/>
         <source>Готовим медиа…</source>
         <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+129"/>
+        <source>Отправить диагностику</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+74"/>
+        <source>Отправить диагностику?</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>В чат уйдут лог приложения и состояние подключения — без ключей и личных данных.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Отправить</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Отмена</source>
+        <translation type="unfinished">Cancelar</translation>
     </message>
 </context>
 <context>
@@ -1651,7 +1803,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeWhitelistSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeWhitelistSheet.qml" line="+98"/>
+        <location filename="../../ui/qml/Tribe/components/TribeWhitelistSheet.qml" line="+99"/>
         <source>Действуют «Белые списки»</source>
         <translation>Lista blanca del operador activa</translation>
     </message>
@@ -1671,7 +1823,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>&lt;b&gt;Qué hacer:&lt;/b&gt; conéctese a una red Wi-Fi, allí la VPN funcionará con normalidad. O inténtelo más tarde: en cuanto el operador retire la restricción, la aplicación se conectará sola.</translation>
     </message>
     <message>
-        <location line="+18"/>
+        <location line="+25"/>
         <source>Понятно</source>
         <translation>Entendido</translation>
     </message>
@@ -1679,12 +1831,12 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1170"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1203"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
     <message>
-        <location line="+58"/>
+        <location line="+64"/>
         <source>Свип: пул нод пуст — обнови подписку</source>
         <translation>Barrido: el pool de nodos está vacío; actualiza tu suscripción</translation>
     </message>
@@ -1875,12 +2027,22 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+627"/>
+        <location line="+668"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+221"/>
+        <location line="+150"/>
+        <source>Сервер недоступен в этой версии приложения — обновите приложение</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Не удалось выбрать сервер — обновите список серверов</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+81"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
@@ -1900,7 +2062,13 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo activar el código</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+14"/>
+        <location line="+88"/>
+        <source>Перенос временно недоступен</source>
+        <translation>Transferencia temporalmente no disponible</translation>
+    </message>
+    <message>
+        <location line="-83"/>
         <source>Пустая ссылка переноса</source>
         <translation>Enlace de transferencia vacío</translation>
     </message>
@@ -1925,7 +2093,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo aceptar la transferencia</translation>
     </message>
     <message>
-        <location line="+52"/>
+        <location line="+59"/>
         <source>Не удалось создать перенос</source>
         <translation>No se pudo crear la transferencia</translation>
     </message>
@@ -1980,7 +2148,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo desconectar el dispositivo (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+442"/>
+        <location line="+508"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Primero inicia sesión o conéctate</translation>
     </message>
@@ -1994,11 +2162,34 @@ Puedes adjuntar una foto o un video.</translation>
         <source>Не удалось сбросить триал (код %1)</source>
         <translation>No se pudo reiniciar la prueba (código %1)</translation>
     </message>
+    <message>
+        <location line="+124"/>
+        <source>Сегодня в %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Вчера в %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>%1 в %2</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>avpn::AvpnPushBridge</name>
+    <message>
+        <location filename="../../core/serviceEngine/AvpnPushBridge.cpp" line="+342"/>
+        <source>Сегодня в %1</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>avpn::TribeSupportChat</name>
     <message>
-        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+176"/>
+        <location filename="../../core/serviceEngine/TribeSupportChat.cpp" line="+184"/>
         <source>Нет сети — сообщение не отправлено</source>
         <translation>Sin red — el mensaje no se envió</translation>
     </message>
@@ -2019,24 +2210,24 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+538"/>
+        <location line="+674"/>
         <source>Нет авторизации</source>
         <translation>No autorizado</translation>
     </message>
     <message>
-        <location line="-537"/>
+        <location line="-673"/>
         <source>Не отправлено (ошибка %1)</source>
         <translation>No enviado (error %1)</translation>
     </message>
     <message>
-        <location line="+450"/>
+        <location line="+545"/>
         <location line="+55"/>
-        <location line="+74"/>
+        <location line="+117"/>
         <source>Файл недоступен</source>
         <translation>Archivo no disponible</translation>
     </message>
     <message>
-        <location line="-114"/>
+        <location line="-157"/>
         <source>Формат видео не поддерживается (mp4/mov/webm)</source>
         <translation>Formato de vídeo no compatible (mp4/mov/webm)</translation>
     </message>
@@ -2051,7 +2242,37 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Foto de más de %1 MB</translation>
     </message>
     <message>
-        <location line="-4"/>
+        <location line="+21"/>
+        <source>Функция временно недоступна</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Диагностика пуста — нечего отправлять</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Формат диагностики не поддерживается сервером</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Диагностика больше %1 МБ</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Диагностика больше %1 КБ</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+153"/>
+        <source>Сервер ещё не принимает диагностику — обновление скоро</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="-196"/>
         <source>Формат изображения не поддерживается</source>
         <translation>Formato de imagen no compatible</translation>
     </message>
