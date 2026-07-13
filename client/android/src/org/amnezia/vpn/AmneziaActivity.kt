@@ -248,6 +248,9 @@ class AmneziaActivity : QtActivity() {
     }
 
     private fun processIntent(intent: Intent) {
+        // AVPN (Task 9, FCM): тап по системному пушу — data-ключи в extras интента; cold start
+        // буферизуется в AvpnFcmService (natives поднимутся позже). Покрывает onCreate и onNewIntent.
+        AvpnFcmService.handleLaunchIntent(intent)
         // disable config import when starting activity from history
         if (intent.flags and FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0) {
             if (intent.action == ACTION_IMPORT_CONFIG) {

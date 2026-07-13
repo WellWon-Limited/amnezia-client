@@ -504,8 +504,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // серверного счётчика. Singleton-мост, как AvpnIntentBridge.
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::deviceTokenReady,
             this, [this](const QString &token, const QString &platform, const QString &environment) {
-                if (platform == QLatin1String("ios")) // Android-FCM пойдёт своим путём позже
-                    registerPushToken(token, environment);
+                // AVPN (FCM 2026-07-13): платформа токена сквозная — бэк по ней выбирает
+                // провайдера (ios→apns, android→fcm, POST /v1/devices/push-token).
+                m_pushPlatform = platform;
+                registerPushToken(token, environment);
             });
     connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::readRequested,
             this, &AvpnEngineQml::markNotificationsRead);
@@ -4361,7 +4363,9 @@ void AvpnEngineQml::registerPushToken(const QString &token, const QString &envir
 
     QJsonObject body;
     body.insert(QStringLiteral("token"), token);
-    body.insert(QStringLiteral("platform"), QStringLiteral("ios"));
+    // Платформа из моста (deviceTokenReady); пусто = легаси-путь iOS (до FCM-волны).
+    body.insert(QStringLiteral("platform"),
+                m_pushPlatform.isEmpty() ? QStringLiteral("ios") : m_pushPlatform);
     if (!environment.isEmpty())
         body.insert(QStringLiteral("environment"), environment);
     const QString ver = QCoreApplication::applicationVersion();
