@@ -9,7 +9,9 @@
 // Overlay: апстрим не трогаем. На desktop/Android без пушей это просто пустой счётчик (no-op).
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QVariantList>
 #include <QVariantMap>
@@ -147,6 +149,11 @@ private:
     QString      m_pendingTapType;   // AVPN (Support): cold-start тап до готовности QML
     QVariantList m_items;
     bool         m_loaded = false;   // AVPN: история уже подгружена из QSettings (ленивая инициализация)
+    // AVPN (анти-гонка, 2026-07-13): «намерения» пользователя между локальной правкой и
+    // подтверждением сервера. Стейл-ответ GET /v1/notifications (ушёл ДО нашего POST) не
+    // должен откатывать read-статус/воскрешать удалённое — setServerItems сверяется с ними.
+    QHash<qlonglong, bool> m_readIntent;   // id → целевой read
+    QSet<qlonglong> m_deleteIntent;        // id, удалённые локально
     void (*m_authRequester)() = nullptr;
     void (*m_badgeClearer)() = nullptr;   // AVPN: натив-сброс бейджа иконки
     void (*m_badgeSetter)(int) = nullptr; // AVPN (P-ANN): натив-установка числа (macOS dockTile)

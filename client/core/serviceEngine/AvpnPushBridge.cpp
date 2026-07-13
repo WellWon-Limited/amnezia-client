@@ -93,6 +93,7 @@ void AvpnPushBridge::markAllRead()
     if (m_badgeClearer)
         m_badgeClearer();
     updateNativeBadge();   // AVPN (P-ANN, macOS): dockTile → 0
+    m_readIntent.clear();   // массовый mark кроет точечные намерения
     // AVPN: сказать серверу «прочитано» (обнулит серверный счётчик) — движок слушает readRequested.
     emit readRequested();
     if (changedAny)
@@ -115,8 +116,16 @@ void AvpnPushBridge::setItemRead(int index, bool read)
     if (index < 0 || index >= m_items.size())
         return;
     QVariantMap m = m_items[index].toMap();
+    // Сервер синхроним ВСЕГДА (идемпотентно), даже если локально состояние уже такое:
+    // локальное «уже прочитано» может расходиться с сервером (стейл-ответ, другой девайс),
+    // и молчание здесь оставляло рассинхрон навсегда (баг «клик снял галочку», 2026-07-13).
+    const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
+    if (id > 0) {
+        m_readIntent[id] = read;   // намерение переживает стейл-ответы GET (setServerItems)
+        emit readItemRequested(id, read);
+    }
     if (m.value(QStringLiteral("read")).toBool() == read)
-        return;   // уже в целевом состоянии — ни persist, ни сеть не нужны
+        return;   // локально уже так — persist/бейджи не нужны
     m[QStringLiteral("read")] = read;
     m_items[index] = m;
     m_unreadCount = qMax(0, m_unreadCount + (read ? -1 : 1));
@@ -126,9 +135,6 @@ void AvpnPushBridge::setItemRead(int index, bool read)
     // когда непрочитанных не осталось; частичное чтение подтянет следующий пуш.
     if (m_unreadCount == 0 && m_badgeClearer)
         m_badgeClearer();
-    const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
-    if (id > 0)
-        emit readItemRequested(id, read);
     emit changed();
 }
 
@@ -148,8 +154,11 @@ void AvpnPushBridge::removeItem(int index)
     if (m_unreadCount == 0 && m_badgeClearer)
         m_badgeClearer();
     const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
-    if (id > 0)
+    if (id > 0) {
+        m_deleteIntent.insert(id);   // стейл-ответ GET не воскресит удалённое
+        m_readIntent.remove(id);
         emit deleteItemRequested(id);
+    }
     emit changed();
 }
 
@@ -158,9 +167,35 @@ void AvpnPushBridge::removeItem(int index)
 void AvpnPushBridge::setServerItems(const QVariantList &items)
 {
     ensureLoaded();
-    if (items == m_items)
+    // AVPN (анти-гонка, 2026-07-13): ответ GET мог уйти с бэка ДО того, как долетел наш
+    // POST read/delete — свежие ЛОКАЛЬНЫЕ намерения пользователя сильнее стейл-снапшота.
+    QVariantList merged;
+    QSet<qlonglong> seen;
+    merged.reserve(items.size());
+    for (const QVariant &v : items) {
+        QVariantMap m = v.toMap();
+        const qlonglong id = m.value(QStringLiteral("id")).toLongLong();
+        if (id > 0) {
+            seen.insert(id);
+            if (m_deleteIntent.contains(id))
+                continue;   // удалено локально — ждём, пока сервер перестанет отдавать
+            const auto it = m_readIntent.constFind(id);
+            if (it != m_readIntent.constEnd()) {
+                if (m.value(QStringLiteral("read")).toBool() == it.value())
+                    m_readIntent.remove(id);   // сервер догнал намерение
+                else
+                    m[QStringLiteral("read")] = it.value();
+            }
+        }
+        merged.append(m);
+    }
+    // сервер больше не отдаёт id → delete подтверждён, интент можно забыть
+    for (auto it = m_deleteIntent.begin(); it != m_deleteIntent.end();)
+        it = seen.contains(*it) ? std::next(it) : m_deleteIntent.erase(it);
+
+    if (merged == m_items)
         return;
-    m_items = items;
+    m_items = merged;
     int unread = 0;
     for (const QVariant &v : std::as_const(m_items))
         if (!v.toMap().value(QStringLiteral("read")).toBool())
