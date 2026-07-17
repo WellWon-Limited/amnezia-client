@@ -124,6 +124,18 @@ int main()
     CHECK(altNodesStage({QStringLiteral("A"), QStringLiteral("B")}, {false, false}, {}).status == Bad,
           "alt: все мертвы -> Bad «дело в вашей сети»");
 
+    // стадия РФ-сплита
+    CHECK(ruSplitStage({}, {}).status == Skip, "rusplit: не проверялись -> Skip");
+    CHECK(ruSplitStage({QStringLiteral("Яндекс"), QStringLiteral("VK")}, {true, true}).status == Ok,
+          "rusplit: все открылись -> Ok");
+    CHECK(ruSplitStage({QStringLiteral("Яндекс"), QStringLiteral("Аэрофлот")}, {true, false}).status == Warn,
+          "rusplit: часть не открылась -> Warn с именами");
+    CHECK(ruSplitStage({QStringLiteral("Яндекс"), QStringLiteral("Аэрофлот")}, {true, false})
+              .note.contains(QStringLiteral("Аэрофлот")),
+          "rusplit: имя упавшего сайта в тексте");
+    CHECK(ruSplitStage({QStringLiteral("Яндекс")}, {false}).status == Bad,
+          "rusplit: всё мертво -> Bad «проблема с Доступом к РФ»");
+
     // сборка отчёта
     {
         QList<StageResult> st;

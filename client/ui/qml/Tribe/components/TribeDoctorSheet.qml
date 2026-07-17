@@ -37,6 +37,7 @@ Item {
         { id: "connect",  label: qsTr("Подключаюсь к VPN") },
         { id: "servers",  label: qsTr("Проверяю сервер") },
         { id: "services", label: qsTr("Проверяю мессенджеры и видео") },
+        { id: "rusplit",  label: qsTr("Проверяю доступ к сайтам РФ"), optional: true },
         { id: "speed",    label: qsTr("Проверяю скорость") },
         { id: "altnodes", label: qsTr("Проверяю другие серверы"), optional: true },
     ]
@@ -302,6 +303,9 @@ Item {
                                  : stageRow.st !== -100 ? Theme.color.text2 : Theme.color.text3
                             font.family: Theme.font.body
                             font.pixelSize: Theme.font.bodyS
+                            // перенос до 2 строк вместо обрезки («интернет работ…» — жалоба)
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 2
                             elide: Text.ElideRight
                         }
                     }
