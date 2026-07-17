@@ -20,6 +20,7 @@ find_library(FW_PHOTOSUI PhotosUI)     # AVPN (Support): PHPicker фото/ви�
 find_library(FW_UTTYPES UniformTypeIdentifiers) # AVPN (Support): UTType для фильтров пикера (TribeMediaPicker.mm)
 find_library(FW_COREMEDIA CoreMedia)   # AVPN (Support): CMTimeMakeWithSeconds — кадр-превью видео (TribeMediaPicker.mm)
 find_library(FW_QUICKLOOK QuickLook)   # AVPN (Support): QLPreviewController — просмотр вложений (TribeMediaViewer.mm)
+find_library(FW_CORETELEPHONY CoreTelephony) # AVPN (Доктор D-3): поколение сотовой (TribeNetInfoIos.mm); #import не авто-линкует → явный линк
 
 set(LIBS ${LIBS}
     ${FW_AUTHENTICATIONSERVICES}
@@ -34,6 +35,7 @@ set(LIBS ${LIBS}
     ${FW_UTTYPES}
     ${FW_COREMEDIA}
     ${FW_QUICKLOOK}
+    ${FW_CORETELEPHONY}
 )
 
 
