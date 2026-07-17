@@ -1,5 +1,5 @@
-// AVPN (Доктор v1): юнит чистой логики DoctorReport.h — вердикты стадий, клампы,
-// humanSummary, сборка отчёта. Запуск: tests/build_doctor_check.sh (только QtCore).
+// AVPN (Доктор v2, активная модель): юнит чистой логики DoctorReport.h — вердикты стадий,
+// клампы, humanSummary, сборка отчёта. Запуск: tests/build_doctor_check.sh (только QtCore).
 #include "../DoctorReport.h"
 
 #include <QJsonDocument>
@@ -22,36 +22,38 @@ int main()
     CHECK(clampStageTimeoutMs(999999) == 60000, "timeout: верх клампится в 60с");
     CHECK(clampStageTimeoutMs(30000) == 30000, "timeout: валидный проходит");
 
-    // стадия подключения
-    auto c1 = connectionStage(QStringLiteral("connected"), 200, 0, 5000);
-    CHECK(c1.status == Bad, "connection: handshake стар + rx=0 при tx>0 -> Bad (зелёный-но-мёртвый)");
-    auto c2 = connectionStage(QStringLiteral("connected"), 10, 4096, 2048);
-    CHECK(c2.status == Ok, "connection: свежий handshake + трафик -> Ok");
-    auto c3 = connectionStage(QStringLiteral("disconnected"), -1, 0, 0);
-    CHECK(c3.status == Skip, "connection: выключен -> Skip (диагностируем прямую сеть)");
-    auto c4 = connectionStage(QStringLiteral("connected"), 200, 4096, 2048);
-    CHECK(c4.status == Warn, "connection: только старый handshake -> Warn");
+    // стадия подключения (активная)
+    CHECK(connectStage(false, false, -1).status == Bad,
+          "connect: не поднялся -> Bad «не удалось подключиться»");
+    CHECK(connectStage(true, false, 200).status == Bad,
+          "connect: поднят, но данные не идут -> Bad (зелёный-но-мёртвый)");
+    CHECK(connectStage(true, true, 10).status == Ok,
+          "connect: поднят + данные идут -> Ok");
 
     // стадия серверов
-    CHECK(serversStage(0, 0, -1, false).status == Bad, "servers: пустой пул -> Bad");
-    CHECK(serversStage(5, 0, -1, false).status == Warn, "servers: ноль замеров -> Warn (ICMP-блок не приговор)");
-    CHECK(serversStage(5, 5, 48, false).status == Ok, "servers: живой замер -> Ok");
-    CHECK(serversStage(5, 3, 420, true).status == Warn, "servers: лучший RTT >=300 -> Warn");
+    CHECK(serverStage(QStringLiteral("Финляндия"), QStringLiteral("FI"), 28).status == Ok,
+          "servers: близкий сервер -> Ok");
+    CHECK(serverStage(QStringLiteral("США"), QStringLiteral("US"), 450).status == Warn,
+          "servers: RTT>=400 -> Warn (далеко)");
+    CHECK(serverStage({}, {}, -1).status == Ok,
+          "servers: без региона/RTT -> Ok (нейтрально)");
+    CHECK(serverStage(QStringLiteral("Латвия"), QStringLiteral("LV"), 28).note.contains(QStringLiteral("Латвия")),
+          "servers: регион попадает в текст");
 
-    // стадия оператора
-    CHECK(operatorStage(QStringLiteral("cellular"), 0, 4, true, {}).status == Bad,
-          "operator: кворум весь красный при живом DNS -> Bad (блокировка)");
-    CHECK(operatorStage(QStringLiteral("wifi"), 4, 4, true, QStringLiteral("FI")).status == Ok,
-          "operator: кворум зелёный -> Ok");
-    CHECK(operatorStage(QStringLiteral("wifi"), 2, 4, true, {}).status == Warn,
-          "operator: частичный кворум -> Warn");
-    CHECK(operatorStage(QStringLiteral("wifi"), 4, 4, false, {}).status == Warn,
-          "operator: DNS мёртв при живых пробах -> Warn");
-
-    // стадия белых списков
-    CHECK(whitelistStage(false, false, 0).status == Skip, "whitelist: Wi-Fi -> Skip");
-    CHECK(whitelistStage(true, true, 2).status == Bad, "whitelist: детект активен -> Bad");
-    CHECK(whitelistStage(true, false, 0).status == Ok, "whitelist: чисто -> Ok");
+    // стадия сервисов
+    CHECK(servicesStage(4, 4, {}, false, false).status == Ok,
+          "services: все works -> Ok");
+    CHECK(servicesStage(3, 4, {QStringLiteral("WhatsApp")}, false, false).status == Bad,
+          "services: один заблокирован -> Bad с названием");
+    CHECK(servicesStage(3, 4, {QStringLiteral("WhatsApp")}, false, false)
+              .note.contains(QStringLiteral("WhatsApp")),
+          "services: имя заблокированного в тексте");
+    CHECK(servicesStage(0, 0, {}, false, false).status == Skip,
+          "services: ничего не измерено -> Skip");
+    CHECK(servicesStage(2, 4, {}, true, true).status == Bad,
+          "services: whitelist активен -> Bad (оператор ограничивает)");
+    CHECK(servicesStage(4, 4, {}, true, false).status == Ok,
+          "services: whitelist применим, но не активен -> Ok");
 
     // стадия скорости
     CHECK(speedStage(-1, 0, 0).status == Skip, "speed: не мерялась -> Skip");
@@ -63,43 +65,66 @@ int main()
     // humanSummary: худшая стадия побеждает; Skip не участвует
     {
         QList<StageResult> st;
-        st << connectionStage(QStringLiteral("connected"), 10, 4096, 2048)   // Ok
-           << whitelistStage(false, false, 0)                                // Skip
-           << speedStage(2.0, 40, 400);                                      // Bad
+        st << connectStage(true, true, 10)                      // Ok
+           << servicesStage(0, 0, {}, false, false)             // Skip
+           << speedStage(2.0, 40, 400);                         // Bad
         CHECK(humanSummary(st) == speedStage(2.0, 40, 400).note,
               "summary: строка = худшая стадия (Bad скорости)");
     }
     {
         QList<StageResult> st;
-        st << connectionStage(QStringLiteral("connected"), 10, 4096, 2048);
-        CHECK(humanSummary(st).contains(QStringLiteral("Проблем не найдено")),
-              "summary: всё Ok -> «проблем не найдено»");
+        st << connectStage(true, true, 10);
+        CHECK(humanSummary(st).contains(QStringLiteral("Всё работает")),
+              "summary: всё Ok -> «всё работает»");
     }
     {
         QList<StageResult> st;
-        st << whitelistStage(false, false, 0);   // только Skip
+        st << servicesStage(0, 0, {}, false, false);   // только Skip
         CHECK(humanSummary(st) == QStringLiteral("Диагностика выполнена"),
               "summary: только Skip -> нейтральная строка");
+    }
+
+    // страны и человекочитаемое резюме для менеджера
+    CHECK(countryNameRu(QStringLiteral("lv")) == QStringLiteral("Латвия"),
+          "country: lv -> Латвия (регистронезависимо)");
+    CHECK(countryNameRu(QStringLiteral("ZZ")) == QStringLiteral("ZZ"),
+          "country: неизвестный код -> код заглавными");
+    {
+        QList<StageResult> st;
+        st << connectStage(true, true, 10)
+           << serverStage(QStringLiteral("Латвия"), QStringLiteral("LV"), 28);
+        CHECK(!hasProblem(st), "hasProblem: всё Ok -> false");
+        st << servicesStage(3, 4, {QStringLiteral("WhatsApp")}, false, false);
+        CHECK(hasProblem(st), "hasProblem: есть Bad -> true");
+        const QString rep = humanReport(st, QStringLiteral("wifi"), QStringLiteral("Europe/Riga"));
+        CHECK(rep.contains(QStringLiteral("[x]")) && rep.contains(QStringLiteral("WhatsApp")),
+              "humanReport: маркер и имя сервиса на месте");
+        CHECK(rep.contains(QStringLiteral("Wi-Fi")), "humanReport: тип сети словами");
+    }
+    {
+        QList<StageResult> st;
+        st << connectStage(true, true, 10) << speedStage(-1, 0, 0);   // Ok + Skip
+        CHECK(humanSummary(st).contains(QStringLiteral("часть проверок")),
+              "summary: Ok+Skip -> честная оговорка, не «всё работает»");
     }
 
     // сборка отчёта
     {
         QList<StageResult> st;
-        st << connectionStage(QStringLiteral("connected"), 10, 4096, 2048)
-           << speedStage(48.0, 40, 60);
+        st << connectStage(true, true, 10) << speedStage(48.0, 40, 60);
         QJsonObject extra; extra.insert(QStringLiteral("app_ver"), QStringLiteral("test"));
         const QJsonObject rep = buildReport(st, extra);
         CHECK(rep.value(QStringLiteral("type")).toString() == QLatin1String("doctor"),
               "report: type=doctor");
+        CHECK(rep.value(QStringLiteral("schema")).toInt() == 2, "report: schema=2 (активная)");
         CHECK(rep.value(QStringLiteral("stages")).toArray().size() == 2, "report: 2 стадии");
         CHECK(rep.value(QStringLiteral("stages")).toArray().at(0).toObject()
-                  .value(QStringLiteral("id")).toString() == QLatin1String("connection"),
+                  .value(QStringLiteral("id")).toString() == QLatin1String("connect"),
               "report: id стадии на месте");
         CHECK(!rep.value(QStringLiteral("summary")).toString().isEmpty(), "report: summary не пуст");
         CHECK(rep.value(QStringLiteral("extra")).toObject()
                   .value(QStringLiteral("app_ver")).toString() == QLatin1String("test"),
               "report: extra прокинут");
-        // приватность: в отчёте нет ключей/IP-полей
         const QByteArray raw = QJsonDocument(rep).toJson();
         CHECK(!raw.contains("private_key") && !raw.contains("\"ip\""),
               "report: нет ключей и IP");
