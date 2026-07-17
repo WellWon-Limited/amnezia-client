@@ -185,6 +185,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (m_docPhase != DoctorPhase::Speed || !m_docBenchStarted)
             return;
         m_docBenchStarted = false;
+        m_docBenchFull = result; // полный замер (dns/tls/http/ping/…) уходит в extra отчёта
         const QJsonObject thr = result.value(QStringLiteral("throughput")).toObject();
         const QJsonObject nq  = result.value(QStringLiteral("network_quality")).toObject();
         const double down = thr.value(QStringLiteral("down_mbit")).isDouble()
@@ -4750,6 +4751,7 @@ void AvpnEngineQml::startDoctor()
     ++m_docEpoch;
     m_docStages.clear();
     m_docReport = QJsonObject();
+    m_docBenchFull = QJsonObject();
     m_docSummary.clear();
     m_docBenchStarted = false;
     m_docConnecting = false;
@@ -4757,14 +4759,18 @@ void AvpnEngineQml::startDoctor()
     docEnter(DoctorPhase::Connect);
 
     if (m_docWasConnected) {
-        // VPN уже поднят — сразу проверяем, идут ли данные через туннель
+        // VPN уже поднят — сразу проверяем, идут ли данные через туннель. Сторож ОБЯЗАТЕЛЕН:
+        // у QNetworkReply нет таймаута общей длительности (урок NetAwait.h), а docEnter для
+        // Connect guard не ставит — без него зависшая проба вешала Доктора навсегда (ревью v2 #1).
         m_docRx0 = m_tunnel.readStats().rxBytes;
+        m_docGuard.start(15000);
         QTimer::singleShot(300, this, [this, e = m_docEpoch] {
             if (e == m_docEpoch && m_docPhase == DoctorPhase::Connect) docVerifyDataplane();
         });
     } else {
         // АКТИВНО: поднимаем VPN (авто-выбор лучшего по measuredRtt внутри start) и ждём connected
         m_docConnecting = true;
+        m_docSawProgress = false;
         start();
         // сторож фазы Connect отдельный — подъём может занять дольше стандартной стадии
         m_docGuard.start(45000);
@@ -4822,18 +4828,24 @@ void AvpnEngineQml::docConnectAdvance()
     const QString st = state();
     if (st == QLatin1String("connected")) {
         m_docConnecting = false;
-        m_docGuard.stop();
         m_docRx0 = m_tunnel.readStats().rxBytes;
+        // сторож ПЕРЕВЗВОДИМ на пробу данных (не гасим: зависший reply без него вешал бы фазу)
+        m_docGuard.start(15000);
         // дать data-plane секунду прогреться перед пробой
         QTimer::singleShot(1000, this, [this, e = m_docEpoch] {
             if (e == m_docEpoch && m_docPhase == DoctorPhase::Connect) docVerifyDataplane();
         });
-    } else if (st == QLatin1String("error")) {
+    } else if (st == QLatin1String("error")
+               || (st == QLatin1String("disconnected") && m_docSawProgress)) {
+        // error — коннект не удался; disconnected ПОСЛЕ начала подъёма — туннель остановили
+        // извне (виджет/App Intent/grace-энфорс): честный вердикт сразу, не ждать 45с сторожа
+        // (ревью v2 #3). Стартовый disconnected (start() ещё не перевёл машину) — НЕ провал.
         m_docConnecting = false;
         m_docGuard.stop();
         docStageDone(doctor::connectStage(/*couldConnect=*/false, false, -1));
+    } else if (st != QLatin1String("disconnected")) {
+        m_docSawProgress = true; // connecting/switching/selecting — подъём реально начался
     }
-    // иные состояния (connecting/switching/selecting) — ждём дальше
 }
 
 void AvpnEngineQml::docVerifyDataplane()
@@ -4879,11 +4891,14 @@ void AvpnEngineQml::docGuardFired()
 {
     // стадия не уложилась в сторож: честный частичный вердикт, диагностика продолжается
     switch (m_docPhase) {
-    case DoctorPhase::Connect:
-        // не поднялись за 45с — «не удалось подключиться»
+    case DoctorPhase::Connect: {
+        // сторож: либо не поднялись (45с), либо зависла проба данных (15с) — вердикт по факту
         m_docConnecting = false;
-        docStageDone(doctor::connectStage(/*couldConnect=*/false, false, -1));
+        const bool up = (state() == QLatin1String("connected"));
+        docStageDone(doctor::connectStage(/*couldConnect=*/up, /*dataFlows=*/false,
+            up ? debugSnapshot().value(QStringLiteral("latestHandshakeAgeSec")).toLongLong() : -1));
         break;
+    }
     case DoctorPhase::Servers: {
         const QVariantMap cur = currentNode();
         QString nm = cur.value(QStringLiteral("name")).toString();
@@ -4931,6 +4946,13 @@ void AvpnEngineQml::docStartServers()
 void AvpnEngineQml::docStartServices()
 {
     docEnter(DoctorPhase::Services);
+    // Туннель не поднят (Connect провалился) — probeServices() тихо no-op'нется, а
+    // m_serviceStatus хранит СТАРЫЕ вердикты прошлой сессии: читать их = ложное
+    // «мессенджеры работают» рядом с «не удалось подключиться» (ревью v2 #2). Честный Skip.
+    if (state() != QLatin1String("connected")) {
+        docStageDone(doctor::servicesStage(0, 0, {}, false, false));
+        return;
+    }
     // РЕАЛЬНАЯ проверка сервисов ЧЕРЕЗ туннель: WhatsApp/Telegram/YouTube/Instagram (те же
     // чипы, что на главном экране). Запускаем пробу и ждём заполнения m_serviceStatus.
     probeServices();
@@ -4973,7 +4995,12 @@ void AvpnEngineQml::docStartSpeed()
 void AvpnEngineQml::docFinish()
 {
     docEnter(DoctorPhase::Send);
-    m_docReport = doctor::buildReport(m_docStages, benchExtra());
+    {
+        QJsonObject extra = benchExtra();
+        if (!m_docBenchFull.isEmpty()) // полный lite-бенч: разложение dns/tls/http/ping для анализа
+            extra.insert(QStringLiteral("bench"), m_docBenchFull);
+        m_docReport = doctor::buildReport(m_docStages, extra);
+    }
     m_docSummary = m_docReport.value(QStringLiteral("summary")).toString();
     m_docHasProblem = doctor::hasProblem(m_docStages);
     // Анонимный отчёт на control plane ВСЕГДА (наш анализ /v1/bench/report — все прогоны,

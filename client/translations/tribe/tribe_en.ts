@@ -1092,7 +1092,7 @@
     </message>
     <message>
         <location line="+68"/>
-        <source>Сменить сервер</source>
+        <source>Заменить сервер</source>
         <translation>Change server</translation>
     </message>
     <message>
@@ -1104,6 +1104,10 @@
         <location line="+0"/>
         <source>Подбираем сервер…</source>
         <translation>Picking a server…</translation>
+    </message>
+    <message>
+        <source>Доктор</source>
+        <translation>Doctor</translation>
     </message>
 </context>
 <context>
@@ -1372,7 +1376,7 @@ banks, cinemas, government services and marketplaces keep working without switch
     </message>
     <message>
         <location line="+8"/>
-        <source>Если скорость интернета низкая вы можете нажать &quot;Сменить сервер&quot;</source>
+        <source>Если скорость интернета низкая вы можете нажать &quot;Заменить сервер&quot;</source>
         <translation>If your internet is slow you can tap &quot;Change server&quot;</translation>
     </message>
     <message>
@@ -1402,7 +1406,7 @@ banks, cinemas, government services and marketplaces keep working without switch
     </message>
     <message>
         <location line="-69"/>
-        <source>Вы можете сменить сервер</source>
+        <source>Вы можете заменить сервер</source>
         <translation>You can change the server</translation>
     </message>
     <message>
@@ -2280,6 +2284,53 @@ You can attach a photo or video.</translation>
         <location line="+9"/>
         <source>Можно отправить только фото или видео</source>
         <translation>Only photos or videos can be sent</translation>
+    </message>
+</context>
+<context>
+    <name>TribeDoctorSheet</name>
+    <message>
+        <source>Подключаюсь к VPN</source>
+        <translation>Connecting to VPN</translation>
+    </message>
+    <message>
+        <source>Проверяю сервер</source>
+        <translation>Checking server</translation>
+    </message>
+    <message>
+        <source>Проверяю мессенджеры и видео</source>
+        <translation>Checking messengers and video</translation>
+    </message>
+    <message>
+        <source>Проверяю скорость</source>
+        <translation>Checking speed</translation>
+    </message>
+    <message>
+        <source>Провожу диагностику</source>
+        <translation>Running diagnostics</translation>
+    </message>
+    <message>
+        <source>Диагностика завершена</source>
+        <translation>Diagnostics complete</translation>
+    </message>
+    <message>
+        <source>Не закрывайте приложение — идёт проверка</source>
+        <translation>Keep the app open — check in progress</translation>
+    </message>
+    <message>
+        <source>Отчёт отправлен в тех. поддержку. Ожидайте ответа.</source>
+        <translation>Report sent to support. Please wait for a reply.</translation>
+    </message>
+    <message>
+        <source>Понятно</source>
+        <translation>Got it</translation>
+    </message>
+    <message>
+        <source>Отменить</source>
+        <translation>Cancel</translation>
+    </message>
+    <message>
+        <source> с</source>
+        <translation> s</translation>
     </message>
 </context>
 </TS>
