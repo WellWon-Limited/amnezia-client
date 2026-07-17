@@ -236,6 +236,27 @@ void WhitelistDetector::abortRound()
     m_roundInFlight = false;
     m_pending = 0;
     m_samples.clear();
+    if (m_forcedRound) { // D-3: Доктор ждёт ответ — отдать честный Inconclusive, не молчать
+        m_forcedRound = false;
+        auto cb = std::move(m_forcedCb);
+        m_forcedCb = nullptr;
+        if (cb) cb(WlVerdict::Inconclusive, false);
+    }
+}
+
+// D-3 п.17: форс-прогон для Доктора. Мимо дебаунса, но предусловия валидности те же.
+bool WhitelistDetector::runRoundNow(std::function<void(WlVerdict, bool)> cb)
+{
+    if (!m_nam || m_roundInFlight)
+        return false;
+    if (!TuningStore::flag(QStringLiteral("whitelist_detector"), true))
+        return false; // kill-switch распространяется и на форс-прогон
+    if (!cellularNow() || !m_tunnelIdle || !m_tunnelIdle())
+        return false; // на Wi-Fi/при поднятом туннеле дифф-пробы не валидны
+    m_forcedRound = true;
+    m_forcedCb = std::move(cb);
+    startRound();
+    return true;
 }
 
 void WhitelistDetector::finishRound()
@@ -243,6 +264,15 @@ void WhitelistDetector::finishRound()
     m_roundInFlight = false;
     const WlVerdict v = decideWhitelistRound(m_samples, m_roundCellular && cellularNow());
     const bool marginal = whitelistMarginalNetwork(m_samples);
+    if (m_forcedRound) { // D-3: диагностический раунд Доктора — вердикт в колбэк, гистерезис не трогаем
+        m_forcedRound = false;
+        auto cb = std::move(m_forcedCb);
+        m_forcedCb = nullptr;
+        qInfo().noquote() << QStringLiteral("avpn: whitelist FORCED round verdict=%1 marginal=%2")
+                                 .arg(int(v)).arg(marginal);
+        if (cb) cb(v, marginal);
+        return;
+    }
     const bool wasActive = m_hyst.active;
     const bool nowActive = m_hyst.feed(v, marginal);
     qInfo().noquote() << QStringLiteral("avpn: whitelist round verdict=%1 marginal=%2 streak=%3 active=%4")

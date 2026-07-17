@@ -13,6 +13,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <algorithm>
+
 namespace doctor {
 
 // Статус стадии для UI и отчёта.
@@ -34,6 +36,56 @@ inline int clampStageTimeoutMs(double v)
     if (v < 5000)  return 5000;
     if (v > 60000) return 60000;
     return int(v);
+}
+
+// Стадия 0 (D-3): СЕТЬ КЛИЕНТА — до подъёма туннеля. Captive-портал (отель/аэропорт),
+// тип сети + поколение сотовой (3G сам по себе медленный — не вина VPN), metered/roaming,
+// форс-прогон дифф-проб «белых списков» (валиден ТОЛЬКО при опущенном туннеле — пробы через
+// туннель врут, тогда wlForced = -1).
+//   captive: -1 не проверялось | 0 нет | 1 портал (generate_204 вернул редирект/чужое тело);
+//   cellGen: "5g"/"lte"/"3g"/"2g"/"" (пусто = неизвестно/не сотовая);
+//   metered/roaming: -1 неизвестно | 0 | 1;
+//   wlForced: -1 не гонялись | 0 сеть нормальная | 1 сигнатура «белых списков».
+inline StageResult networkStage(int captive, const QString &netType, const QString &cellGen,
+                                int metered, int roaming, int wlForced)
+{
+    StageResult r; r.id = QStringLiteral("network");
+    if (captive >= 0) r.data.insert(QStringLiteral("captive"), captive == 1);
+    if (!netType.isEmpty()) r.data.insert(QStringLiteral("net_type"), netType);
+    if (!cellGen.isEmpty()) r.data.insert(QStringLiteral("cellular_gen"), cellGen);
+    if (metered >= 0) r.data.insert(QStringLiteral("metered"), metered == 1);
+    if (roaming >= 0) r.data.insert(QStringLiteral("roaming"), roaming == 1);
+    if (wlForced >= 0) r.data.insert(QStringLiteral("wl_forced"), wlForced == 1);
+
+    const QString netRu = netType == QLatin1String("cellular")
+            ? (cellGen.isEmpty() ? QStringLiteral("сотовая")
+                                 : QStringLiteral("сотовая %1").arg(cellGen.toUpper()))
+            : netType == QLatin1String("wifi")     ? QStringLiteral("Wi-Fi")
+            : netType == QLatin1String("ethernet") ? QStringLiteral("проводная")
+                                                   : QString();
+    if (captive == 1) {
+        r.status = Bad;
+        r.note = QStringLiteral("Сеть требует входа — откройте браузер и залогиньтесь");
+        return r;
+    }
+    if (wlForced == 1) {
+        r.status = Bad;
+        r.note = QStringLiteral("Оператор ограничивает интернет («белые списки»)");
+        return r;
+    }
+    const bool slowGen = cellGen == QLatin1String("2g") || cellGen == QLatin1String("3g");
+    if (slowGen) {
+        r.status = Warn;
+        r.note = QStringLiteral("Сеть %1 — медленно само по себе, не из-за VPN")
+                     .arg(cellGen.toUpper());
+        return r;
+    }
+    r.status = Ok;
+    r.note = netRu.isEmpty() ? QStringLiteral("Сеть доступна")
+                             : QStringLiteral("Сеть: %1").arg(netRu);
+    if (roaming == 1)
+        r.note += QStringLiteral(" (роуминг)");
+    return r;
 }
 
 // Стадия 1: ПОДКЛЮЧЕНИЕ (активная). Доктор поднял VPN (или он уже был поднят) и проверил,
@@ -149,20 +201,56 @@ inline StageResult servicesStage(int works, int total, const QStringList &blocke
     return r;
 }
 
+// D-3 п.18: вердикт «коллапс» по посекундному профилю download — сигнатура ТСПУ-троттлинга
+// «первые секунды летит, потом душат». Среднее за замер это маскирует. Правило: пик первых
+// 3 секунд >= 8 Мбит/с, дальше (без последней, возможно неполной, корзины) в среднем <= 25%
+// пика И < 5 Мбит/с; профиль не короче 6 секунд.
+inline bool speedCollapsed(const QList<double> &mbitPerSec)
+{
+    if (mbitPerSec.size() < 6) return false;
+    double head = 0;
+    for (int i = 0; i < 3; ++i) head = std::max(head, mbitPerSec.at(i));
+    if (head < 8.0) return false;
+    double tailSum = 0; int tailN = 0;
+    for (int i = 3; i < mbitPerSec.size() - 1; ++i) { tailSum += mbitPerSec.at(i); ++tailN; }
+    if (tailN < 2) return false;
+    const double tailAvg = tailSum / tailN;
+    return tailAvg <= head * 0.25 && tailAvg < 5.0;
+}
+
 // Стадия 4: СКОРОСТЬ (бенч через туннель). Пороги согласованы с BenchAnalysis
 // (kLowGoodputMbit=5, bufferbloat = loaded/idle > 2.5 при idle>0).
-inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
+// D-3: collapsed — вердикт speedCollapsed() по посекундному профилю (ТСПУ-сигнатура);
+// directMbit — контрольный замер МИМО туннеля к RU-endpoint (<0 = не мерялся): различает
+// «душат VPN» (напрямую быстро, через туннель коллапс) от «сеть сама слабая».
+inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs,
+                              bool collapsed = false, double directMbit = -1)
 {
     StageResult r; r.id = QStringLiteral("speed");
     r.data.insert(QStringLiteral("down_mbit"), downMbit);
     r.data.insert(QStringLiteral("idle_rtt_ms"), idleRttMs);
     r.data.insert(QStringLiteral("loaded_rtt_ms"), loadedRttMs);
+    if (collapsed) r.data.insert(QStringLiteral("collapsed"), true);
+    if (directMbit >= 0) r.data.insert(QStringLiteral("direct_mbit"), directMbit);
     if (downMbit < 0) {         // стадия не мерялась (обрыв/таймаут)
         r.status = Skip;
         r.note = QStringLiteral("Замер скорости не выполнен");
         return r;
     }
+    if (collapsed) {
+        r.status = Bad;
+        r.note = directMbit >= 8.0
+            ? QStringLiteral("Скорость VPN обрезается после первых секунд (напрямую сеть быстрая)")
+            : QStringLiteral("Скорость обрывается после первых секунд — похоже на ограничение оператора");
+        return r;
+    }
     const bool slow = downMbit < 5.0;
+    if (slow && directMbit >= 0 && directMbit < 5.0) {
+        r.status = Warn;
+        r.note = QStringLiteral("Сеть медленная и без VPN (%1 Мбит/с) — дело не в VPN")
+                     .arg(QString::number(directMbit, 'f', 1));
+        return r;
+    }
     // «Пухнет» — только при БОЛИ в абсолюте: loaded RTT >= 400мс (звонок разваливается)
     // И росте от покоя. Относительный порог сам по себе ложно ругал сотовые сети
     // (idle 40 -> loaded 120 = ratio 3 при отличных 30+ Мбит — это норма LTE, не проблема).
@@ -311,7 +399,7 @@ inline QJsonObject buildReport(const QList<StageResult> &stages, const QJsonObje
 {
     QJsonObject o;
     o.insert(QStringLiteral("type"), QStringLiteral("doctor"));
-    o.insert(QStringLiteral("schema"), 2);   // v2: активная модель
+    o.insert(QStringLiteral("schema"), 3);   // v3 (D-3): + стадия network, профиль скорости, A/B direct
     QJsonArray arr;
     for (const auto &s : stages) {
         QJsonObject so = s.data;

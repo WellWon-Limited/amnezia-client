@@ -309,6 +309,10 @@ public:
     // Отметить отчёт отправленным — удаляет pending/<id>.json.
     void markSent(const QString &pendingId);
 
+    // Чистый выход (aboutToQuit): удалить sentinel — штатное завершение НЕ классифицируется
+    // как dirty_exit на следующем старте. Идемпотентна.
+    void markCleanExit();
+
     // Накопленный локальный счётчик dirty_exit (мобилки): движок может прицепить к отчёту Доктора.
     int  dirtyExitCount() const;
     void resetDirtyExitCount();
@@ -316,9 +320,10 @@ public:
     // true на десктопах (macOS/Windows/Linux), false на iOS/Android — определяется #ifdef в .cpp.
     static bool isDesktopPlatform();
 
+    struct Priv; // определён в .cpp; там же free-хелперы классификации (не API)
+
 private:
     explicit CrashGuard(QObject *parent = nullptr);
-    struct Priv;
     Priv *d;
 };
 

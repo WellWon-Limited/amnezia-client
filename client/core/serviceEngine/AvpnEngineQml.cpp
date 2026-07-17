@@ -29,6 +29,9 @@
 #include "ConfigStore.h" // AVPN remote-config (T6): compareVersions/UpdateVerdict + APP_VERSION (version.h)
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки + BypassListStore
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
+#include "CrashGuard.h" // AVPN (CR-1): свой краш-репортинг (sentinel+сигналы) -> type:"crash" в /v1/bench/report
+#include "TribeNetInfo.h" // AVPN (Доктор D-3): поколение сотовой/metered/roaming для стадии network
+#include "RuSplitSentinel.h" // AVPN (Доктор D-3 п.26): фоновый дозор RU-сайтов при вкл. сплите
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
 #include "AnnounceGate.h" // AVPN (announce-quiet): тихое окно попапов объявлений после онбординга
 #include "SubscriptionGate.h" // AVPN (sub-grace): «подписка истекла и грейс прошёл» → управляемый stop
@@ -93,6 +96,25 @@ extern "C" void AvpnDockBadge_install();
 
 namespace avpn {
 
+// AVPN (CR-1): tee лог-строк в кольцо CrashGuard поверх текущего message-handler (chain —
+// апстрим-логгер работает как раньше). Ставится один раз из конструктора движка.
+namespace {
+QtMessageHandler g_crashPrevHandler = nullptr;
+void crashLogTeeHandler(QtMsgType t, const QMessageLogContext &c, const QString &m)
+{
+    CrashGuard::instance().appendLogLine(m);
+    if (g_crashPrevHandler)
+        g_crashPrevHandler(t, c, m);
+}
+void installCrashLogTee()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+    g_crashPrevHandler = qInstallMessageHandler(crashLogTeeHandler);
+}
+} // namespace
+
 AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                              QNetworkAccessManager *nam, QObject *parent)
     : QObject(parent), m_tunnel(conn, this), m_store(store), m_nam(nam), m_conn(conn)
@@ -141,6 +163,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
     // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
     m_rttProbe = new RttProbeIcmp(this);
+    // AVPN (Доктор D-3 п.3): отдельный ICMP-инстанс для пробы ЧЕРЕЗ туннель — m_rttProbe
+    // гейтится «connected⇒cancel» (off-tunnel семантика), делить нельзя.
+    m_docPing = new RttProbeIcmp(this);
 
     // AVPN (панель администратора): in-app бенч соединения. Запуск ТОЛЬКО вручную (startBench из QML),
     // коннект-путь не трогает; результат — schema:1 (сводится с Mac-замерами tools/connect-bench).
@@ -191,10 +216,18 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         const QJsonObject nq  = result.value(QStringLiteral("network_quality")).toObject();
         const double down = thr.value(QStringLiteral("down_mbit")).isDouble()
                                 ? thr.value(QStringLiteral("down_mbit")).toDouble() : -1.0;
-        docStageDone(doctor::speedStage(
-            down,
-            int(nq.value(QStringLiteral("base_rtt_ms")).toDouble(0)),
-            int(nq.value(QStringLiteral("loaded_rtt_ms")).toDouble(0))));
+        // D-3 п.18: посекундный профиль -> вердикт «коллапс» (ТСПУ-сигнатура)
+        QList<double> prof;
+        const QJsonArray profArr = thr.value(QStringLiteral("down_mbit_per_sec")).toArray();
+        prof.reserve(profArr.size());
+        for (const QJsonValue &v : profArr)
+            prof.append(v.toDouble());
+        const bool collapsed = doctor::speedCollapsed(prof);
+        // D-3 п.19: при подозрении — контрольный замер МИМО туннеля (внутри docDirectSpeed),
+        // иначе сразу вердикт
+        docDirectSpeed(down,
+                       int(nq.value(QStringLiteral("base_rtt_ms")).toDouble(0)),
+                       int(nq.value(QStringLiteral("loaded_rtt_ms")).toDouble(0)), collapsed);
     });
     connect(this, &AvpnEngineQml::benchChanged, this, [this] {
         if (m_docPhase == DoctorPhase::Speed && m_docBenchStarted) {
@@ -202,6 +235,54 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             emit doctorChanged();
         }
     });
+
+    // ── AVPN (CR-1): краш-репортинг — install СНАЧАЛА классифицирует прошлый запуск,
+    // затем пишет свежий sentinel и ставит сигнал-хендлеры. Отчёты прошлых крашей уходят
+    // тихо в /v1/bench/report (kill-switch features.crash_report). Спека:
+    // tribe-front specs/2026-07-17-observability-crash-telemetry-design.md §1.
+    {
+        QString ver = QCoreApplication::applicationVersion();
+        CrashGuard::instance().install(
+            QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                + QStringLiteral("/crash"),
+            ver, QSysInfo::productType(), QSysInfo::productVersion());
+        auto *hb = new QTimer(this);
+        hb->setInterval(30000);
+        connect(hb, &QTimer::timeout, this, [] { CrashGuard::instance().heartbeat(); });
+        hb->start();
+        // штатный выход != dirty_exit
+        connect(qApp, &QCoreApplication::aboutToQuit, this,
+                [] { CrashGuard::instance().markCleanExit(); });
+        // лог-хвост: tee поверх ТЕКУЩЕГО message-handler (chain; апстрим-логгер не трогаем)
+        installCrashLogTee();
+        // отправка pending прошлых запусков: тихо, когда сеть скорее всего поднялась
+        QTimer::singleShot(12000, this, [this] { crashFlushPending(); });
+        QTimer::singleShot(120000, this, [this] { crashFlushPending(); });
+    }
+    // ── AVPN (Доктор D-3 п.26): RU-split-дозорный — сам замечает «сайт РФ не открывается»
+    // и шлёт rusplit_fail (только на смене состояния, 1/сутки на target, kill-switch
+    // rusplit_sentinel). Приватность: только наш вахт-лист, браузинг юзера не трогаем.
+    m_ruSentinel = new RuSplitSentinel(
+        m_nam,
+        [this](const QJsonObject &o) {
+            uploadReport(QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)),
+                         /*quiet=*/true);
+        },
+        [this] { return benchExtra().value(QStringLiteral("net_type")).toString(); },
+        [] {
+            QSettings st;
+            return st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
+        },
+        this);
+    connect(this, &AvpnEngineQml::changed, this, [this] {
+        const QString st = state();
+        if (m_ruSentinel)
+            m_ruSentinel->onTunnelStateChanged(st);
+        if (m_docPhase == DoctorPhase::Idle) // во время Доктора фаза "doctor" приоритетнее
+            CrashGuard::instance().setPhase(st == QLatin1String("connected") ? "connected"
+                                            : st == QLatin1String("disconnected") ? "idle"
+                                                                                  : "connecting");
+    }, Qt::QueuedConnection);
 
     // прогресс-бар мастера: пересчитывать на каждом тике под-машин (v5.4)
     auto ftTick = [this] { if (ftRunning()) ftUpdatePercent(); };
@@ -4757,8 +4838,72 @@ void AvpnEngineQml::startDoctor()
     m_docBenchStarted = false;
     m_docConnecting = false;
     m_docWasConnected = (state() == QLatin1String("connected"));
-    docEnter(DoctorPhase::Connect);
+    // D-3: сброс партиалов новых стадий
+    m_docNetCaptive = -1;
+    m_docNetWl = -1;
+    m_docNetPending = 0;
+    m_docTunIcmpMs = -1;
+    m_docSpeedDown = -1;
+    m_docSpeedIdle = 0;
+    m_docSpeedLoaded = 0;
+    m_docSpeedCollapsed = false;
+    CrashGuard::instance().setPhase("doctor");
+    docStartNetwork();
+}
 
+// D-3: стадия 0 — сеть клиента ДО подъёма туннеля. Captive + сигналы платформы + форс-прогон
+// дифф-проб белых списков. При уже поднятом туннеле captive/whitelist не валидны (пробы пойдут
+// через VPN) — честные "-1", собираем только сигналы.
+void AvpnEngineQml::docStartNetwork()
+{
+    docEnter(DoctorPhase::Network);
+    const bool tunnelUp = m_docWasConnected;
+    if (!tunnelUp) {
+        // captive-детект: generate_204 МИМО туннеля; редирект/200 = портал подменяет ответы
+        ++m_docNetPending;
+        QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
+        req.setTransferTimeout(5000);
+        req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        QNetworkReply *rep = m_nam->head(req);
+        connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
+            rep->deleteLater();
+            if (e != m_docEpoch || m_docPhase != DoctorPhase::Network) return;
+            const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (code == 204)                    m_docNetCaptive = 0;
+            else if (code >= 200 && code < 400) m_docNetCaptive = 1; // портал перехватил
+            // сетевой фейл -> остаётся -1: «нет сети» != captive (не врём)
+            docNetMaybeDone();
+        });
+        // форс-раунд белых списков (только мобилки+сотовая+опущенный туннель — гейты внутри)
+        if (m_whitelistDetector) {
+            const bool started = m_whitelistDetector->runRoundNow(
+                [this, e = m_docEpoch](WlVerdict v, bool /*marginal*/) {
+                    if (e != m_docEpoch || m_docPhase != DoctorPhase::Network) return;
+                    m_docNetWl = (v == WlVerdict::Candidate) ? 1
+                               : (v == WlVerdict::Normal || v == WlVerdict::SocialOnly) ? 0 : -1;
+                    docNetMaybeDone();
+                });
+            if (started)
+                ++m_docNetPending;
+        }
+    }
+    if (m_docNetPending == 0)
+        docNetMaybeDone();
+}
+
+void AvpnEngineQml::docNetMaybeDone()
+{
+    if (m_docNetPending > 0 && --m_docNetPending > 0)
+        return; // ждём вторую параллельную пробу
+    docStageDone(doctor::networkStage(
+        m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
+        avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl));
+}
+
+void AvpnEngineQml::docStartConnect()
+{
+    docEnter(DoctorPhase::Connect);
     if (m_docWasConnected) {
         // VPN уже поднят — сразу проверяем, идут ли данные через туннель. Сторож ОБЯЗАТЕЛЕН:
         // у QNetworkReply нет таймаута общей длительности (урок NetAwait.h), а docEnter для
@@ -4803,6 +4948,7 @@ void AvpnEngineQml::cancelDoctor()
         emit benchChanged();
     }
     m_docPhase = DoctorPhase::Idle;
+    CrashGuard::instance().setPhase(state() == QLatin1String("connected") ? "connected" : "idle");
     emit doctorChanged();
 }
 
@@ -4811,6 +4957,7 @@ void AvpnEngineQml::docEnter(DoctorPhase ph)
     m_docPhase = ph;
     // базовый процент стадии (Speed дотикивает по benchStageFrac в проводке конструктора)
     switch (ph) {
+    case DoctorPhase::Network:  m_docPercent = 3;  break;
     case DoctorPhase::Connect:  m_docPercent = 8;  break;
     case DoctorPhase::Servers:  m_docPercent = 36; break;
     case DoctorPhase::Services: m_docPercent = 46; break;
@@ -4884,6 +5031,19 @@ void AvpnEngineQml::docVerifyDataplane()
     // проба generate_204 ЧЕРЕЗ туннель: первый байт получен ⇒ данные идут; параллельно смотрим
     // рост rx (сигнатура S4-blackhole: handshake есть, но rx стоит).
     const qint64 hsAge = debugSnapshot().value(QStringLiteral("latestHandshakeAgeSec")).toLongLong();
+    // D-3 п.3: ICMP к 1.1.1.1 ЧЕРЕЗ туннель (default-route) — fire-and-collect, отдельный
+    // инстанс (m_rttProbe гейтится connected⇒cancel). L3-жив != L7-жив: различает «туннель
+    // доводит пакеты» от «HTTPS зарезан за нодой». Windows — стаб, результат просто не пишется.
+    m_docTunIcmpMs = -1;
+    if (m_docPing) {
+        m_docPing->probeAll({{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}}, 3000,
+            [this, e = m_docEpoch](const QString &, int rttMs) {
+                if (e == m_docEpoch && rttMs >= 0
+                    && (m_docTunIcmpMs < 0 || rttMs < m_docTunIcmpMs))
+                    m_docTunIcmpMs = rttMs;
+            },
+            [] {});
+    }
     QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
@@ -4895,7 +5055,10 @@ void AvpnEngineQml::docVerifyDataplane()
         const bool httpOk = rep->error() == QNetworkReply::NoError && code > 0;
         const qint64 rxNow = m_tunnel.readStats().rxBytes;
         const bool rxGrew = rxNow > m_docRx0;
-        docStageDone(doctor::connectStage(/*couldConnect=*/true, httpOk || rxGrew, hsAge));
+        doctor::StageResult r = doctor::connectStage(/*couldConnect=*/true, httpOk || rxGrew, hsAge);
+        if (m_docTunIcmpMs >= 0)
+            r.data.insert(QStringLiteral("tunnel_icmp_ms"), m_docTunIcmpMs);
+        docStageDone(r);
     });
 }
 
@@ -4909,6 +5072,7 @@ void AvpnEngineQml::docStageDone(const doctor::StageResult &r)
         if (e != m_docEpoch)
             return;
         switch (donePh) {
+        case DoctorPhase::Network:  docStartConnect();  break;
         case DoctorPhase::Connect:  docStartServers();  break;
         case DoctorPhase::Servers:  docStartServices(); break;
         case DoctorPhase::Services: docStartRuSplit();  break; // при вкл. сплите — RU-корпус
@@ -4924,6 +5088,13 @@ void AvpnEngineQml::docGuardFired()
 {
     // стадия не уложилась в сторож: честный частичный вердикт, диагностика продолжается
     switch (m_docPhase) {
+    case DoctorPhase::Network:
+        // собираем что успели (незавершённые пробы останутся -1 — честно)
+        m_docNetPending = 0;
+        docStageDone(doctor::networkStage(
+            m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
+            avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl));
+        break;
     case DoctorPhase::Connect: {
         // сторож: либо не поднялись (45с), либо зависла проба данных (15с) — вердикт по факту
         m_docConnecting = false;
@@ -4949,8 +5120,12 @@ void AvpnEngineQml::docGuardFired()
             m_docBenchStarted = false;
             m_benchRunning = false;
             emit benchChanged();
+            docStageDone(doctor::speedStage(-1, 0, 0));
+        } else {
+            // бенч УСПЕЛ, завис A/B-замер мимо туннеля — не терять реальный результат бенча
+            docStageDone(doctor::speedStage(m_docSpeedDown, m_docSpeedIdle, m_docSpeedLoaded,
+                                            m_docSpeedCollapsed, -1));
         }
-        docStageDone(doctor::speedStage(-1, 0, 0));
         break;
     case DoctorPhase::RuSplit:
         // не все пробы успели — вердикт по собранному (m_docRuOks предзаполнен false по индексам)
@@ -5033,6 +5208,53 @@ void AvpnEngineQml::docStartSpeed()
     const bool lite = TuningStore::numberOr(QStringLiteral("diag_bench_lite"), 1) != 0;
     m_bench->start(QStringLiteral("doctor"), benchExtra(), lite,
                    currentNodeEndpointIp(currentNode()));
+}
+
+// D-3 п.19: A/B — тот же класс замера МИМО туннеля. На мобилках off-tunnel HTTP возможен
+// только маршрутом байпаса (RU-endpoint при включённом «Доступе к РФ»), поэтому гейты:
+// подозрение (коллапс/медленно) + server-driven urls.diag_ru_speed_url задан (пустой
+// фолбэк = стадия без A/B, бэк включает без релиза) + сплит включён. Кап: 8с транспортом.
+void AvpnEngineQml::docDirectSpeed(double down, int idle, int loaded, bool collapsed)
+{
+    m_docSpeedDown = down; // партиалы: сторож фазы не должен терять готовый бенч
+    m_docSpeedIdle = idle;
+    m_docSpeedLoaded = loaded;
+    m_docSpeedCollapsed = collapsed;
+    const bool suspicious = collapsed || (down >= 0 && down < 5.0);
+    const QString url = configUrl(QStringLiteral("diag_ru_speed_url"), QString());
+    bool masterOn = false;
+    {
+        QSettings st;
+        masterOn = st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
+    }
+    if (!suspicious || url.isEmpty() || !masterOn) {
+        docStageDone(doctor::speedStage(down, idle, loaded, collapsed, -1));
+        return;
+    }
+    m_docGuard.start(15000); // свой сторож на контрольный замер (Speed-сторож мог истечь)
+    QNetworkRequest req{QUrl(url)};
+    req.setTransferTimeout(8000);
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    auto *t = new QElapsedTimer();
+    t->start();
+    QNetworkReply *rep = m_nam->get(req);
+    auto bytes = std::make_shared<qint64>(0);
+    connect(rep, &QNetworkReply::readyRead, this, [rep, bytes] {
+        *bytes += rep->readAll().size();
+        if (*bytes > 6 * 1024 * 1024)
+            rep->abort(); // кап трафика: 6 МБ хватает для оценки, замер закончит finished
+    });
+    connect(rep, &QNetworkReply::finished, this,
+            [this, rep, t, bytes, down, idle, loaded, collapsed, e = m_docEpoch] {
+        rep->deleteLater();
+        const qint64 ms = t->elapsed();
+        delete t;
+        if (e != m_docEpoch || m_docPhase != DoctorPhase::Speed) return;
+        // abort после капа — валидный замер; настоящий фейл = байтов почти нет
+        const double direct = (*bytes > 64 * 1024 && ms > 300)
+                                  ? avpn::BenchRunner::mbit(*bytes, ms) : -1.0;
+        docStageDone(doctor::speedStage(down, idle, loaded, collapsed, direct));
+    });
 }
 
 void AvpnEngineQml::docStartRuSplit()
@@ -5178,6 +5400,13 @@ void AvpnEngineQml::docFinish()
         QJsonObject extra = benchExtra();
         if (!m_docBenchFull.isEmpty()) // полный lite-бенч: разложение dns/tls/http/ping для анализа
             extra.insert(QStringLiteral("bench"), m_docBenchFull);
+        // CR-1: локальный счётчик аварийных смертей на мобилках (dirty_exit там не шлётся
+        // отдельным отчётом — ОС штатно убивает фон; но в контексте Доктора он информативен)
+        const int dirty = CrashGuard::instance().dirtyExitCount();
+        if (dirty > 0) {
+            extra.insert(QStringLiteral("dirty_exits_since_last"), dirty);
+            CrashGuard::instance().resetDirtyExitCount();
+        }
         m_docReport = doctor::buildReport(m_docStages, extra);
     }
     m_docSummary = m_docReport.value(QStringLiteral("summary")).toString();
@@ -5192,8 +5421,26 @@ void AvpnEngineQml::docFinish()
     m_docGuard.stop();
     m_docPhase = DoctorPhase::Idle;
     m_docPercent = 100;
+    CrashGuard::instance().setPhase(state() == QLatin1String("connected") ? "connected" : "idle");
     emit doctorChanged();
     emit doctorFinished();
+}
+
+// CR-1: отправить накопленные краш-отчёты прошлых запусков. Best-effort + оптимистичный
+// markSent (дубликаты в телеметрии хуже редкой потери — отчёт уже классифицирован локально).
+void AvpnEngineQml::crashFlushPending()
+{
+    if (!featureEnabled(QStringLiteral("crash_report"), true))
+        return; // kill-switch: бэк глушит поток без релиза
+    const QList<QJsonObject> pend = CrashGuard::instance().takePendingReports();
+    for (QJsonObject r : pend) {
+        const QString id = r.take(QStringLiteral("_pending_id")).toString();
+        if (id.isEmpty())
+            continue;
+        uploadReport(QString::fromUtf8(QJsonDocument(r).toJson(QJsonDocument::Compact)),
+                     /*quiet=*/true);
+        CrashGuard::instance().markSent(id);
+    }
 }
 
 QString AvpnEngineQml::doctorReportJson() const
@@ -5225,6 +5472,7 @@ QString AvpnEngineQml::doctorDiagText() const
 QString AvpnEngineQml::doctorStage() const
 {
     switch (m_docPhase) {
+    case DoctorPhase::Network:  return QStringLiteral("network");
     case DoctorPhase::Connect:  return QStringLiteral("connect");
     case DoctorPhase::Servers:  return QStringLiteral("servers");
     case DoctorPhase::Services: return QStringLiteral("services");

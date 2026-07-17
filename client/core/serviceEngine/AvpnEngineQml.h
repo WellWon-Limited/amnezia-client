@@ -40,6 +40,7 @@ class IRttProbe;    // AVPN (выбор по скорости): прямой RTT
 class BenchRunner;  // AVPN (панель администратора): in-app бенч соединения (BenchRunner.h)
 class BypassListService; // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки (BypassListService.h)
 class WhitelistDetector; // AVPN (белые списки): детект РКН-режима «работает только whitelist» (WhitelistDetector.h)
+class RuSplitSentinel;   // AVPN (Доктор D-3 п.26): фоновый дозор RU-сайтов при вкл. сплите (RuSplitSentinel.h)
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -945,7 +946,10 @@ private:
     // рабочая альтернатива найдена → ОСТАЁМСЯ на ней (активная модель: юзеру сразу хорошо).
     // RuSplit — опциональная фаза: при включённом «Доступе к сайтам РФ» пробы RU-корпуса
     // (Яндекс/VK/Аэрофлот) — сплит обязан вести их напрямую (кейс владельца с аэрофлотом).
-    enum class DoctorPhase { Idle, Connect, Servers, Services, RuSplit, Speed, AltNodes, Send };
+    // Network (D-3) — ПЕРВАЯ стадия, до подъёма туннеля: captive-детект (generate_204 ->
+    // редирект/чужое тело = портал), сигналы платформы (поколение сотовой/metered/roaming)
+    // и форс-прогон дифф-проб «белых списков» (валиден только при опущенном туннеле).
+    enum class DoctorPhase { Idle, Network, Connect, Servers, Services, RuSplit, Speed, AltNodes, Send };
     DoctorPhase m_docPhase = DoctorPhase::Idle;
     int         m_docEpoch = 0;
     QTimer      m_docGuard;
@@ -971,6 +975,20 @@ private:
     QStringList m_docRuNames;         // RU-корпус: имена проверяемых сайтов
     QList<bool> m_docRuOks;           // результаты (порядок = m_docRuNames)
     int         m_docRuPending = 0;
+    // D-3: стадия Network + ICMP-через-туннель + A/B-замер мимо туннеля
+    int  m_docNetCaptive = -1;        // -1 не проверялось / 0 нет / 1 портал
+    int  m_docNetWl = -1;             // форс-раунд белых списков: -1 не гонялся / 0 норм / 1 сигнатура
+    int  m_docNetPending = 0;         // незавершённые async-пробы стадии Network
+    int  m_docTunIcmpMs = -1;         // ICMP 1.1.1.1 ЧЕРЕЗ туннель (fire-and-collect в Connect)
+    IRttProbe *m_docPing = nullptr;   // отдельный инстанс (m_rttProbe гейтится connected⇒cancel)
+    double m_docSpeedDown = -1;       // партиалы Speed на время A/B-замера (сторож не теряет бенч)
+    int    m_docSpeedIdle = 0, m_docSpeedLoaded = 0;
+    bool   m_docSpeedCollapsed = false;
+    void docStartNetwork();           // captive + сигналы + форс-whitelist (первая стадия)
+    void docNetMaybeDone();           // сведение параллельных проб Network -> networkStage
+    void docStartConnect();           // вход фазы Connect (вынесен из startDoctor)
+    void docDirectSpeed(double down, int idle, int loaded, bool collapsed); // A/B мимо туннеля
+    void crashFlushPending();         // CR-1: отправка pending краш-отчётов (kill-switch crash_report)
     void docStartRuSplit();           // пробы RU-корпуса (или сразу Speed при выкл. сплите)
     void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)
     void docAltNext();                // переключиться на следующую альтернативу
@@ -1046,6 +1064,7 @@ private:
     int                          m_bootstrapRetries = 0;      // AVPN: счётчик попыток фетча подписки (бэкофф → вечный медленный цикл, BootstrapRetry.h)
     QTimer                       m_bootstrapRetryTimer;       // AVPN: единый таймер ретрая (member, НЕ singleShot-фабрика) — kickBootstrap() может его поджать
     WhitelistDetector           *m_whitelistDetector = nullptr; // AVPN (белые списки): nullptr на десктопе (гейт платформ)
+    RuSplitSentinel             *m_ruSentinel = nullptr; // AVPN (D-3 п.26): дозор RU-сайтов (все платформы)
     bool                         m_whitelistAcked = false;      // AVPN (белые списки): «Понятно» текущего эпизода
     qint64                       m_whitelistEpisodeStartMs = 0; // AVPN (белые списки): старт активного эпизода (для телеметрии)
     bool                         m_whitelistEpisodesSent = false; // AVPN (белые списки): одна попытка отправки за сессию
