@@ -15,6 +15,7 @@ PageType {
 
     // «назад» из шапки/свайпа → PageStart (onRequestTab) вернёт на Главную.
     signal requestTab(int index)
+    signal requestDoctor()   // AVPN (Доктор v1): карточка run_diag / пункт меню «+» → попап (хост PageStart)
 
     // PageStart читает у текущей страницы: фокус в поле → навбар скрывается СРАЗУ,
     // до анимации клавиатуры (убирает двухфазный дёрг iOS, жалоба 2026-07-11).
@@ -269,9 +270,10 @@ PageType {
                 // AVPN (store-flow D): действия server-driven карточки. open_url — внешний браузер
                 // (персональная ссылка из ответа поддержки); compose_send — отправить заготовленный
                 // сервером текст ОТ ИМЕНИ пользователя (тап = действие юзера; кнопка Т-3 карточки
-                // «Помочь с продлением»); send_diag (Task 5 bff-3) — оператор запросил диагностику:
-                // тот же confirm-оверлей, что у пункта меню (без подтверждения ничего не уходит).
-                // Неизвестный action — no-op (forward-совместимость).
+                // «Помочь с продлением»); run_diag / send_diag (Доктор v1) — запустить полную
+                // диагностику (тап по кнопке карточки = согласие; попап ведёт стадии и сам шлёт
+                // отчёт в тред). При выключенном diag_v2 send_diag падает на легаси-конфирм
+                // (только лог+снапшот). Неизвестный action — задизейбленная кнопка (ChatBubble).
                 onCardButtonClicked: function(btn) {
                     if (!btn || !root.hasChat) return
                     if (btn.action === "open_url" && (btn.url || "") !== "")
@@ -280,8 +282,10 @@ PageType {
                         TribeSupport.sendText(btn.send)
                         list.stick = true
                         list.positionViewAtEnd()
-                    } else if (btn.action === "send_diag") {
-                        if (root.diagEnabled)
+                    } else if (btn.action === "run_diag" || btn.action === "send_diag") {
+                        if (root.hasEngine && TribeEngine.featureEnabled("diag_v2", true))
+                            root.requestDoctor()
+                        else if (btn.action === "send_diag" && root.diagEnabled)
                             diagConfirm.open()
                         else
                             PageController.showErrorMessage(qsTr("Функция временно недоступна"))
@@ -671,7 +675,12 @@ PageType {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             attachMenu.close()
-                            diagConfirm.open()
+                            // AVPN (Доктор v1): полная диагностика; при выключенном diag_v2 —
+                            // легаси-путь (лог+снапшот через конфирм)
+                            if (root.hasEngine && TribeEngine.featureEnabled("diag_v2", true))
+                                root.requestDoctor()
+                            else
+                                diagConfirm.open()
                         }
                     }
                 }

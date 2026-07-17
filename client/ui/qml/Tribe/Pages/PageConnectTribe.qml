@@ -59,6 +59,7 @@ PageType {
     signal requestAdminServers()  // AVPN: админ-просмотр пула нод (только Dev.adminMode)
     signal requestServerPicker()  // AVPN: страница выбора сервера (замена шторки TribeNodeSheet)
     signal requestSupportChat(string draft)  // AVPN (store-flow 2026-07-11): CTA мобилок → чат с черновиком
+    signal requestDoctor()        // AVPN (Доктор v1): кнопка «Доктор» → попап диагностики (хост PageStart)
 
     // AVPN: центр уведомлений — счётчик непрочитанных. Реальные пуши (#9) идут через мост
     // AvpnPush (APNs/FCM → C++ → QML). В dev-превью моста нет → фолбэк 2 (mock-бейдж).
@@ -1083,12 +1084,56 @@ PageType {
             }
         }
 
+        // AVPN (Доктор v1, реш. владельца 2026-07-17): нижняя строка = кнопка «Доктор» слева
+        // (компактная, диагностика «не работает») + «Сменить сервер» справа (на остаток ширины).
+        Row {
+            width: parent.width
+            spacing: Theme.space.md
+            visible: !root.subExpired
+
+        // AVPN (Доктор v1): кнопка «Доктор» — полная диагностика. Стиль строки «Сменить сервер»
+        // (прозрачный фон + бордер, hover-заливка, height 52). Гейт kill-switch features.diag_v2.
+        Rectangle {
+            id: doctorBtn
+            visible: !root.hasEngine || TribeEngine.featureEnabled("diag_v2", true)
+            width: visible ? Math.round((parent.width - Theme.space.md) * 0.38) : 0
+            height: 52; radius: 16
+            color: doctorMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
+            border.width: 1
+            border.color: doctorMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
+            Behavior on color { ColorAnimation { duration: 160 } }
+            Row {
+                anchors.centerIn: parent; spacing: 8
+                Shape {
+                    width: 24; height: 24; anchors.verticalCenter: parent.verticalCenter
+                    scale: 20/24; transformOrigin: Item.Center
+                    preferredRendererType: Shape.CurveRenderer
+                    ShapePath {
+                        strokeColor: root.blueAccent; fillColor: "transparent"; strokeWidth: 2
+                        capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                        PathSvg { path: "M22 12 L18 12 L15 21 L9 3 L6 12 L2 12" }   // activity/пульс
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Доктор")
+                    color: "#DBEAFE"; font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
+                }
+            }
+            MouseArea {
+                id: doctorMa
+                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: { Haptic.play("light"); root.requestDoctor() }
+            }
+        }
+
         // кнопка «Обновить коннект» → round-robin на следующую живую ноду (TribeEngine.rotateNext,
         // круговой обход от текущей с заворотом). Активна только при подключении; на время свитча — busy. // AVPN
         Rectangle {
             id: refreshBtn
-            visible: !root.subExpired
-            width: parent.width; height: 52; radius: 16
+            width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
+            height: 52; radius: 16
             // ротация осмысленна только когда туннель поднят; иначе приглушаем
             opacity: (root.hasEngine && !root.isOn) ? 0.45 : 1.0
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
@@ -1140,6 +1185,7 @@ PageType {
                 }
             }
         }
+        } // Row (Доктор + Сменить сервер)
     }
 
     // AVPN (белые списки): попап «Действуют "Белые списки"» — функция ГЛАВНОГО экрана

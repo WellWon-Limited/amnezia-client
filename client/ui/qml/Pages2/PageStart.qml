@@ -134,6 +134,8 @@ PageType {
         }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
+        // AVPN (Доктор v1): любая страница просит попап диагностики (главная/чат)
+        function onRequestDoctor() { doctorSheet.show() }
         // AVPN in-app Legal: Privacy/Terms внутри приложения (кэш+fallback, без выброса в браузер)
         function onRequestLegalDoc(doc) { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLegalTribe.qml", { docKey: doc }) }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
@@ -753,6 +755,14 @@ PageType {
             else if (name === "notifications") tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageNotificationsTribe.qml")
             // неизвестный экран (рассылка новее клиента) — молча игнорируем
         }
+    }
+
+    // AVPN (Доктор v1): попап полной диагностики — глобальный хост (тест переживает смену
+    // вкладок; входы: кнопка «Доктор» на главной, чат — карточка run_diag / send_diag при
+    // включённом diag_v2 / пункт меню «+»). Спека: 2026-07-17-doctor-v1-design.md.
+    TribeDoctorSheet {
+        id: doctorSheet
+        z: 185   // под объявлениями/transferInResult; поверх вкладок и навигации
     }
 
     function maybeShowAnnouncement() {

@@ -48,7 +48,7 @@ int main(int argc, char **argv)
 
     // --- Дефолты (единый источник для конструктора и мержа) ---
     const QList<ServiceProbeConfig> def = avpn::defaultServiceProbeConfigs();
-    CHECK(def.size() == 3, "defaults: три сервиса");
+    CHECK(def.size() == 4, "defaults: четыре сервиса (Доктор v1: +whatsapp)");
     CHECK(def[0].key == "telegram" && def[0].kind == ServiceProbeConfig::Mtproto,
           "defaults: telegram = Mtproto");
     CHECK(def[0].host == "149.154.167.51" && def[0].fallbackHosts
@@ -78,7 +78,7 @@ int main(int argc, char **argv)
     // --- Явный mtproto-оверрайд: один хост заменяет seed'ы ---
     {
         const auto out = avpn::mergeRemoteProbeTargets(def, {pt("telegram", "mtproto", "1.2.3.4", 8443)});
-        CHECK(out.size() == 3, "mtproto-оверрайд: набор сервисов не худеет");
+        CHECK(out.size() == 4, "mtproto-оверрайд: набор сервисов не худеет");
         CHECK(out[0].key == "telegram" && out[0].kind == ServiceProbeConfig::Mtproto
                   && out[0].host == "1.2.3.4" && out[0].port == 8443
                   && out[0].fallbackHosts.isEmpty(),
@@ -114,8 +114,14 @@ int main(int argc, char **argv)
     }
 
     // --- Неизвестный target / неизвестный kind => игнор ---
-    CHECK(sameAsDefaults(avpn::mergeRemoteProbeTargets(def, {pt("whatsapp", "https", "web.whatsapp.com")})),
+    // (Доктор v1: whatsapp теперь В ДЕФОЛТАХ — контракт сменён осознанно; «неизвестным» стал discord)
+    CHECK(sameAsDefaults(avpn::mergeRemoteProbeTargets(def, {pt("discord", "https", "discord.com")})),
           "неизвестный target => игнор (чипа в UI нет)");
+    {
+        const auto out = avpn::mergeRemoteProbeTargets(def, {pt("whatsapp", "https", "wa.example.org")});
+        CHECK(out.last().key == "whatsapp" && out.last().host == "wa.example.org",
+              "whatsapp в дефолтах (последним) => сервер оверрайдит хост");
+    }
     CHECK(sameAsDefaults(avpn::mergeRemoteProbeTargets(def, {pt("telegram", "udp", "1.2.3.4")})),
           "неизвестный kind => игнор");
 

@@ -64,6 +64,7 @@ Row {
                     sourceComponent: chip.key === "telegram" ? logoTelegram
                                    : chip.key === "youtube"  ? logoYoutube
                                    : chip.key === "instagram" ? logoInstagram
+                                   : chip.key === "whatsapp" ? logoWhatsapp
                                    : logoGeneric
                 }
                 Text {
@@ -94,6 +95,21 @@ Row {
     }
 
     // --- логотипы (18×18, viewBox 24) ---
+    Component {
+        // AVPN (Доктор v1): WhatsApp — пузырь с хвостиком + трубка, бренд-зелёный (искл. как у TG/YT/IG)
+        id: logoWhatsapp
+        Shape {
+            width: 18; height: 18; preferredRendererType: Shape.CurveRenderer
+            transform: Scale { xScale: 18/24; yScale: 18/24 }
+            ShapePath {
+                fillColor: "#25D366"   // бренд WhatsApp
+                strokeColor: "transparent"
+                fillRule: ShapePath.OddEvenFill
+                // круг-пузырь с хвостиком слева-внизу; вырез трубки (odd-even)
+                PathSvg { path: "M12 2 a10 10 0 1 0 0 20 a10 10 0 0 0 5.2-1.5 L21.5 21.8 20.6 17.4 a10 10 0 0 0-8.6-15.4 Z M8.6 7.2 c0.3-0.7 0.8-0.7 1.1-0.1 l0.9 1.7 c0.2 0.4 0 0.8-0.3 1.1 l-0.5 0.5 c0.6 1.3 1.7 2.4 3 3 l0.5-0.5 c0.3-0.3 0.7-0.5 1.1-0.3 l1.7 0.9 c0.6 0.3 0.6 0.8-0.1 1.1 -0.9 0.5-1.9 0.7-2.8 0.3 -2-0.8-3.8-2.6-4.6-4.6 -0.4-0.9-0.2-1.9 0.3-2.8 Z" }
+            }
+        }
+    }
     Component {
         id: logoTelegram
         Shape {
