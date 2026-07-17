@@ -2289,6 +2289,10 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeDoctorSheet</name>
     <message>
+        <source>Проверяю вашу сеть</source>
+        <translation>Comprobando su red</translation>
+    </message>
+    <message>
         <source>Подключаюсь к VPN</source>
         <translation>Conectando a la VPN</translation>
     </message>
