@@ -26,6 +26,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "DoctorReport.h" // AVPN (Доктор v1): чистые вердикты стадий диагностики (юнит-покрыты)
+
 class VpnConnection;
 class SecureAppSettingsRepository;
 class QNetworkAccessManager;
@@ -162,6 +164,12 @@ class AvpnEngineQml : public QObject {
     // v5.5: судьба последней отправки отчёта на сервер («Отправлен ✓ (HH:mm)» / причина) — видно
     // в финальной карточке мастера, а не только мимолётным тостом.
     Q_PROPERTY(QString uploadStatus READ uploadStatus NOTIFY ftChanged)
+    // AVPN (Доктор v1): попап диагностики — статус машины/стадия/процент/список стадий/резюме.
+    Q_PROPERTY(bool doctorRunning READ doctorRunning NOTIFY doctorChanged)
+    Q_PROPERTY(QString doctorStage READ doctorStage NOTIFY doctorChanged)
+    Q_PROPERTY(int doctorPercent READ doctorPercent NOTIFY doctorChanged)
+    Q_PROPERTY(QVariantList doctorStages READ doctorStages NOTIFY doctorChanged)
+    Q_PROPERTY(QString doctorSummary READ doctorSummary NOTIFY doctorChanged)
     // AVPN remote-config (T6): вердикт force-update (0 Ok/1 Recommend/2 Block, из ConfigService::configApplied)
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
@@ -389,6 +397,21 @@ public:
     int ftPercent() const { return m_ftPercent; }
     QString lastFullTestJson() const;
     QString uploadStatus() const { return m_lastUploadStatus; }
+
+    // AVPN (Доктор v1, 2026-07-17): пользовательская диагностика «У меня не работает» —
+    // фазовая машина поверх готовых блоков (RTT-кеш/пробы, reach-кворум, WhitelistDetector,
+    // lite-бенч). Спека: specs/2026-07-17-doctor-v1-design.md. Kill-switch features.diag_v2.
+    // Отчёт: doctorReportJson() → uploadReport (quiet) сам; текст в тред поддержки шлёт QML
+    // (TribeSupport.sendDiagReport(doctorDiagText()) — чат принадлежит своему слою).
+    Q_INVOKABLE void startDoctor();
+    Q_INVOKABLE void cancelDoctor();
+    Q_INVOKABLE QString doctorReportJson() const;  // итоговый JSON type:"doctor" (после finish)
+    Q_INVOKABLE QString doctorDiagText() const;    // buildDiagReport() + секция DOCTOR (в чат)
+    bool doctorRunning() const { return m_docPhase != DoctorPhase::Idle; }
+    QString doctorStage() const;                   // connection|servers|operator|whitelist|speed|send
+    int doctorPercent() const { return m_docPercent; }
+    QVariantList doctorStages() const;             // [{id,status,note}] для списка стадий в попапе
+    QString doctorSummary() const { return m_docSummary; }
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -685,6 +708,9 @@ signals:
     // AVPN (bench v5.2, мастер): полный тест завершён — единый мега-отчёт (все секции + methodology
     // + summary). UI сразу предлагает сохранить файлом.
     void ftFinished(const QString &json);
+    // AVPN (Доктор v1): прогресс/стадии попапа + финал (отчёт готов, можно слать в чат).
+    void doctorChanged();
+    void doctorFinished();
     // AVPN (bench v5.3): итог отправки отчёта на сервер (message — готовый текст для тоста).
     void reportUploadDone(bool ok, const QString &message);
     // AVPN (bench v5, connect{}): циклы завершены. summary — {cycles, ok_cycles, median_connect_ms,
@@ -904,6 +930,33 @@ private:
     void ftFinish();
     QString assembleMegaReport() const; // buildFullReport + methodology + summary (+baseline-suspect)
     QJsonObject benchExtra() const;     // контекст замера: факты конфигурации + тип сети
+
+    // AVPN (Доктор v1): пользовательская диагностика — канон машин (enum+epoch+guard),
+    // дирижёр поверх готовых блоков. Каждая стадия пишет doctor::StageResult; сторож фазы
+    // (clampStageTimeoutMs) гасит зависшую стадию честным Skip и идёт дальше — частичный
+    // отчёт ценнее прерванного (урок ftStepDone). Спека: 2026-07-17-doctor-v1-design.md.
+    enum class DoctorPhase { Idle, Connection, Servers, Operator, Whitelist, Speed, Send };
+    DoctorPhase m_docPhase = DoctorPhase::Idle;
+    int         m_docEpoch = 0;
+    QTimer      m_docGuard;
+    QList<doctor::StageResult> m_docStages;
+    int         m_docPercent = 0;
+    QString     m_docSummary;
+    QJsonObject m_docReport;         // итог buildReport (живёт до следующего запуска)
+    qint64      m_docRx0 = 0, m_docTx0 = 0;   // срез счётчиков для rx/tx-дельты
+    int         m_docReachOk = 0, m_docReachTotal = 0, m_docReachPending = 0;
+    bool        m_docDnsOk = false, m_docDnsDone = false;
+    QString     m_docEgress;          // loc/colo из cdn-cgi/trace (IP отброшен)
+    bool        m_docBenchStarted = false; // Speed-стадию запустил доктор (для cancel)
+    void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
+    void docStageDone(const doctor::StageResult &r); // записать стадию и перейти к следующей
+    void docGuardFired();             // стадия не уложилась в сторож -> Skip и дальше
+    void docStartServers();
+    void docStartOperator();
+    void docOperatorMaybeDone(bool force = false); // все колбэки собраны (или сторож) -> вердикт
+    void docStartWhitelist();
+    void docStartSpeed();
+    void docFinish();                 // buildReport + upload(quiet) + doctorFinished
     static QString bypassLabel(bool on)
     { return on ? QStringLiteral("tribe-bypass-on") : QStringLiteral("tribe-bypass-off"); }
 

@@ -63,6 +63,18 @@ inline QList<ServiceProbeConfig> defaultServiceProbeConfigs()
                                    QStringLiteral("https://www.instagram.com/favicon.ico")};
         cfgs.append(ig);
     }
+    {
+        // AVPN (Доктор v1, 2026-07-17): WhatsApp — HEAD https://web.whatsapp.com/ с реальным SNI
+        // (probeHttps): DPI-блок домена = RST/timeout ⇒ Blocked; живой ответ (2xx/3xx) ⇒ works.
+        // Сырой TCP-connect к e{1..16}.whatsapp.net:443/5222 (OONI ts-018) — v2 (нужен новый Kind).
+        // Сервер может оверрайдить через probe_targets, гасить — lists.service_chips_disabled.
+        // В КОНЦЕ списка намеренно: контракт-тесты и чипы держат порядок tg/yt/ig стабильным.
+        ServiceProbeConfig wa;
+        wa.key = QStringLiteral("whatsapp");
+        wa.kind = ServiceProbeConfig::Https;
+        wa.host = QStringLiteral("web.whatsapp.com");
+        cfgs.append(wa);
+    }
     return cfgs;
 }
 

@@ -271,9 +271,17 @@ Item {
                     delegate: TribeButton {
                         required property var modelData
                         required property int index
+                        // AVPN (Доктор v1): защита от version-skew — кнопка с action, которого
+                        // клиент не знает, рисуется ЗАДИЗЕЙБЛЕННОЙ с подсказкой (урок мёртвой
+                        // кнопки на mac build 74: молчаливый no-op выглядел как поломка).
+                        readonly property bool knownAction:
+                            ["open_url", "compose_send", "send_diag", "run_diag"]
+                                .indexOf((modelData && modelData.action) || "") !== -1
+                        enabled: knownAction
                         width: cardCol.width
                         variant: index === 0 ? "primary" : "glass"
-                        text: modelData.label || ""
+                        text: knownAction ? (modelData.label || "")
+                                          : qsTr("%1 — обновите приложение").arg(modelData.label || "")
                         onClicked: bubble.cardButtonClicked(modelData)
                     }
                 }
