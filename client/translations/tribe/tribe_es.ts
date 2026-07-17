@@ -1092,7 +1092,7 @@
     </message>
     <message>
         <location line="+68"/>
-        <source>Сменить сервер</source>
+        <source>Заменить сервер</source>
         <translation>Cambiar servidor</translation>
     </message>
     <message>
@@ -1104,6 +1104,10 @@
         <location line="+0"/>
         <source>Подбираем сервер…</source>
         <translation>Eligiendo un servidor…</translation>
+    </message>
+    <message>
+        <source>Доктор</source>
+        <translation>Doctor</translation>
     </message>
 </context>
 <context>
@@ -1372,7 +1376,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     </message>
     <message>
         <location line="+8"/>
-        <source>Если скорость интернета низкая вы можете нажать &quot;Сменить сервер&quot;</source>
+        <source>Если скорость интернета низкая вы можете нажать &quot;Заменить сервер&quot;</source>
         <translation>Si la velocidad de internet es baja puedes pulsar &quot;Cambiar servidor&quot;</translation>
     </message>
     <message>
@@ -1402,7 +1406,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     </message>
     <message>
         <location line="-69"/>
-        <source>Вы можете сменить сервер</source>
+        <source>Вы можете заменить сервер</source>
         <translation>Puedes cambiar de servidor</translation>
     </message>
     <message>
@@ -2280,6 +2284,53 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+9"/>
         <source>Можно отправить только фото или видео</source>
         <translation>Solo se pueden enviar fotos o vídeos</translation>
+    </message>
+</context>
+<context>
+    <name>TribeDoctorSheet</name>
+    <message>
+        <source>Подключаюсь к VPN</source>
+        <translation>Conectando a la VPN</translation>
+    </message>
+    <message>
+        <source>Проверяю сервер</source>
+        <translation>Comprobando el servidor</translation>
+    </message>
+    <message>
+        <source>Проверяю мессенджеры и видео</source>
+        <translation>Comprobando mensajería y vídeo</translation>
+    </message>
+    <message>
+        <source>Проверяю скорость</source>
+        <translation>Comprobando la velocidad</translation>
+    </message>
+    <message>
+        <source>Провожу диагностику</source>
+        <translation>Ejecutando diagnóstico</translation>
+    </message>
+    <message>
+        <source>Диагностика завершена</source>
+        <translation>Diagnóstico completado</translation>
+    </message>
+    <message>
+        <source>Не закрывайте приложение — идёт проверка</source>
+        <translation>No cierre la aplicación: comprobación en curso</translation>
+    </message>
+    <message>
+        <source>Отчёт отправлен в тех. поддержку. Ожидайте ответа.</source>
+        <translation>Informe enviado a soporte. Espere la respuesta.</translation>
+    </message>
+    <message>
+        <source>Понятно</source>
+        <translation>Entendido</translation>
+    </message>
+    <message>
+        <source>Отменить</source>
+        <translation>Cancelar</translation>
+    </message>
+    <message>
+        <source> с</source>
+        <translation> s</translation>
     </message>
 </context>
 </TS>

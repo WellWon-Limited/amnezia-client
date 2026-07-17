@@ -949,9 +949,12 @@ private:
     QString     m_docSummary;
     bool        m_docHasProblem = false; // финал: есть Bad/Warn (слать в тред поддержки)
     QJsonObject m_docReport;          // итог buildReport (живёт до следующего запуска)
+    QJsonObject m_docBenchFull;       // полный JSON lite-бенча Speed-стадии (в extra отчёта)
     qint64      m_docRx0 = 0;         // срез rx для проверки «данные идут»
     bool        m_docWasConnected = false; // VPN был поднят ДО теста (не опускать в конце)
     bool        m_docConnecting = false;   // фаза Connect ждёт connected по changed()
+    bool        m_docSawProgress = false;  // видели connecting/selecting: disconnected ПОСЛЕ
+                                           // этого = остановили извне (а не «ещё не стартовали»)
     bool        m_docBenchStarted = false; // Speed-стадию запустил доктор (для cancel)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
     void docStageDone(const doctor::StageResult &r); // записать стадию и перейти к следующей
