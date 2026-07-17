@@ -26,6 +26,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- AVPN (Доктор D-3): поколение сотовой для диагностики; normal-разрешение (API 33+),
+         рантайм-диалога нет; ниже 33 вызов кидает SecurityException и честно даёт "неизвестно" -->
+    <uses-permission android:name="android.permission.READ_BASIC_PHONE_STATE" />
     <!-- AVPN (Play-комплайнс, 2026-07-12): QUERY_ALL_PACKAGES УБРАН. Апстрим держит его для
          per-app split-tunnel (AppListProvider из ванильного UI Amnezia) — в Tribe этот UI
          недостижим (requestAmnezia() не эмитится), а неиспользуемое чувствительное разрешение =
