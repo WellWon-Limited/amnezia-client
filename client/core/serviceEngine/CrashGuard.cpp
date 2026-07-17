@@ -341,6 +341,13 @@ void CrashGuard::heartbeat()
     }
 }
 
+void CrashGuard::markCleanExit()
+{
+    QMutexLocker lock(&d->mtx);
+    if (!d->installed) return;
+    QFile::remove(d->sentinelPath); // штатный выход — следующий старт не увидит dirty_exit
+}
+
 void CrashGuard::appendLogLine(const QString &line)
 {
     QMutexLocker lock(&d->mtx);

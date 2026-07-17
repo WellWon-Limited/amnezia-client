@@ -85,6 +85,10 @@ list(APPEND HEADERS
     ${AVPN_SE}/TribeHaptics.h
     ${AVPN_SE}/WhitelistVerdict.h
     ${AVPN_SE}/WhitelistDetector.h
+    ${AVPN_SE}/DoctorReport.h
+    ${AVPN_SE}/CrashGuard.h
+    ${AVPN_SE}/TribeNetInfo.h
+    ${AVPN_SE}/RuSplitSentinel.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -112,6 +116,9 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/BypassListService.cpp
     ${AVPN_SE}/TribeHaptics.cpp
     ${AVPN_SE}/WhitelistDetector.cpp
+    ${AVPN_SE}/CrashGuard.cpp
+    ${AVPN_SE}/TribeNetInfo.cpp
+    ${AVPN_SE}/RuSplitSentinel.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
@@ -160,6 +167,9 @@ if(IOS)
     # AVPN (haptics): тактильный отклик — UIFeedbackGenerator (UIKit уже линкуется).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
+    # AVPN (Доктор D-3): поколение сотовой — CoreTelephony (авто-линк clang-модулем).
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeNetInfoIos.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeNetInfoIos.mm)
 endif()
 
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это

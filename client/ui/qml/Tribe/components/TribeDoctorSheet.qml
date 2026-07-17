@@ -34,6 +34,7 @@ Item {
 
     // Фикс-порядок стадий (id движка -> подпись). Статусы доезжают в doctorStages.
     readonly property var stageDefs: [
+        { id: "network",  label: qsTr("Проверяю вашу сеть") },
         { id: "connect",  label: qsTr("Подключаюсь к VPN") },
         { id: "servers",  label: qsTr("Проверяю сервер") },
         { id: "services", label: qsTr("Проверяю мессенджеры и видео") },

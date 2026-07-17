@@ -158,6 +158,8 @@ private:
     QVector<double> m_idleRtt;   // [0] = прогрев (DNS+TCP+TLS) → уходит в conn_setup_ms, НЕ в медиану
     QVector<double> m_loadedRtt;
     qint64 m_downBytes = 0, m_downFirstByteMs = -1, m_downEndMs = -1;
+    QVector<qint64> m_downPerSec; // D-3 п.18: байты по секундам download (профиль ТСПУ-троттлинга
+                                  // «первые секунды летит, потом коллапс»); индекс = секунда от старта
     double m_upMbit = -1;        // -1 = не мерялось (lite/фейл) → в JSON null, НЕ ноль
 };
 

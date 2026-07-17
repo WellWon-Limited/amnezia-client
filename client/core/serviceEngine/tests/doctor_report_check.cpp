@@ -55,6 +55,47 @@ int main()
     CHECK(servicesStage(4, 4, {}, true, false).status == Ok,
           "services: whitelist применим, но не активен -> Ok");
 
+    // D-3: стадия сети (network) — captive/поколение/белые списки
+    CHECK(networkStage(1, QStringLiteral("wifi"), {}, -1, -1, -1).status == Bad,
+          "network: captive-портал -> Bad «залогиньтесь»");
+    CHECK(networkStage(0, QStringLiteral("cellular"), QStringLiteral("lte"), -1, -1, 1).status == Bad,
+          "network: форс-пробы дали whitelist -> Bad");
+    CHECK(networkStage(0, QStringLiteral("cellular"), QStringLiteral("3g"), -1, -1, 0).status == Warn,
+          "network: 3G -> Warn «медленно само по себе»");
+    CHECK(networkStage(0, QStringLiteral("cellular"), QStringLiteral("lte"), 1, 0, 0).status == Ok,
+          "network: LTE без captive/wl -> Ok");
+    CHECK(networkStage(0, QStringLiteral("cellular"), QStringLiteral("lte"), -1, 1, 0)
+              .note.contains(QStringLiteral("роуминг")),
+          "network: роуминг попадает в текст");
+    CHECK(networkStage(-1, QStringLiteral("wifi"), {}, -1, -1, -1).status == Ok,
+          "network: Wi-Fi, captive не проверялся -> Ok (без вранья)");
+    CHECK(!networkStage(-1, {}, {}, -1, -1, -1).data.contains(QStringLiteral("captive")),
+          "network: непроверенные поля не пишутся в data");
+
+    // D-3: коллапс посекундного профиля (ТСПУ-сигнатура)
+    const QList<double> flat{20, 21, 19, 20, 22, 20, 21, 20};
+    const QList<double> tspu{25, 24, 20, 2.0, 1.5, 1.0, 0.8, 0.5};
+    const QList<double> slowAll{2, 2.5, 2, 1.8, 2.2, 2, 2.1};
+    CHECK(!speedCollapsed(flat), "collapse: ровный профиль -> нет");
+    CHECK(speedCollapsed(tspu), "collapse: летит-потом-душат -> да");
+    CHECK(!speedCollapsed(slowAll), "collapse: медленно с самого начала -> нет (не ТСПУ)");
+    CHECK(!speedCollapsed({25, 24, 20, 2.0}), "collapse: профиль короче 6с -> нет");
+    CHECK(!speedCollapsed({25, 24, 20, 10, 9, 8, 7, 6}), "collapse: плавное снижение -> нет");
+
+    // D-3: speedStage с коллапсом и A/B direct
+    CHECK(speedStage(6.0, 40, 60, true, -1).status == Bad,
+          "speed: коллапс -> Bad независимо от среднего");
+    CHECK(speedStage(6.0, 40, 60, true, 30.0).note.contains(QStringLiteral("напрямую")),
+          "speed: коллапс + direct быстрый -> текст про «напрямую быстрая»");
+    CHECK(speedStage(3.0, 40, 60, false, 2.5).status == Warn,
+          "speed: медленно и без VPN -> Warn «дело не в VPN»");
+    CHECK(speedStage(3.0, 40, 60, false, 2.5).note.contains(QStringLiteral("не в VPN")),
+          "speed: текст «дело не в VPN» присутствует");
+    CHECK(speedStage(48.0, 40, 60, false, -1).status == Ok,
+          "speed: direct не мерялся -> поведение прежнее");
+    CHECK(!speedStage(48.0, 40, 60).data.contains(QStringLiteral("direct_mbit")),
+          "speed: без direct замера поле не пишется");
+
     // стадия скорости
     CHECK(speedStage(-1, 0, 0).status == Skip, "speed: не мерялась -> Skip");
     CHECK(speedStage(48.0, 40, 60).status == Ok, "speed: быстро без блоата -> Ok");
@@ -144,7 +185,7 @@ int main()
         const QJsonObject rep = buildReport(st, extra);
         CHECK(rep.value(QStringLiteral("type")).toString() == QLatin1String("doctor"),
               "report: type=doctor");
-        CHECK(rep.value(QStringLiteral("schema")).toInt() == 2, "report: schema=2 (активная)");
+        CHECK(rep.value(QStringLiteral("schema")).toInt() == 3, "report: schema=3 (D-3)");
         CHECK(rep.value(QStringLiteral("stages")).toArray().size() == 2, "report: 2 стадии");
         CHECK(rep.value(QStringLiteral("stages")).toArray().at(0).toObject()
                   .value(QStringLiteral("id")).toString() == QLatin1String("connect"),

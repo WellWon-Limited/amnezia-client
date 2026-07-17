@@ -111,6 +111,7 @@ void BenchRunner::start(const QString &label, const QJsonObject &extra, bool lit
     m_pingRound = 0; m_icmpSamples.clear(); m_pingProbes = QJsonArray();
     m_idleIdx = 0; m_idleRtt.clear(); m_loadedRtt.clear();
     m_downBytes = 0; m_downFirstByteMs = -1; m_downEndMs = -1;
+    m_downPerSec.clear();
     m_upMbit = -1;
     stageTrace();
 }
@@ -684,7 +685,14 @@ void BenchRunner::stageDown()
         if (epoch != m_epoch) return;
         if (m_downFirstByteMs < 0)
             m_downFirstByteMs = dl->elapsed();
-        m_downBytes += r->readAll().size();
+        const qint64 chunk = r->readAll().size();
+        m_downBytes += chunk;
+        const int sec = int(dl->elapsed() / 1000);
+        if (sec >= 0 && sec < 120) { // кламп: транспортный таймаут всё равно короче
+            if (m_downPerSec.size() <= sec)
+                m_downPerSec.resize(sec + 1);
+            m_downPerSec[sec] += chunk;
+        }
     });
     connect(r, &QNetworkReply::finished, this, [this, r, dl, epoch] {
         r->deleteLater();
@@ -762,6 +770,12 @@ void BenchRunner::assemble()
     thr.insert(QStringLiteral("down_mbit"), downWindow > 0 ? QJsonValue(mbit(m_downBytes, downWindow))
                                                            : QJsonValue(QJsonValue::Null));
     thr.insert(QStringLiteral("up_mbit"), num(m_upMbit));
+    if (!m_downPerSec.isEmpty()) { // D-3 п.18: посекундный профиль (Мбит/с на корзину)
+        QJsonArray prof;
+        for (qint64 b : m_downPerSec)
+            prof.append(double(b) * 8.0 / 1e6);
+        thr.insert(QStringLiteral("down_mbit_per_sec"), prof);
+    }
 
     // прогрев (DNS+TCP+TLS первого HEAD) — отдельная метрика, в медиану RTT не входит
     double connSetup = -1;

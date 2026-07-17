@@ -40,6 +40,14 @@ public:
 
     bool active() const { return m_hyst.active; }
 
+    // D-3 п.17 (Доктор): форс-прогон дифф-проб ВСЕХ 4 наборов прямо сейчас, мимо дебаунса.
+    // Диагностический: гистерезис НЕ трогает (одиночный раунд != вход в режим). Предусловия
+    // те же, что у обычного раунда (сотовая + опущенный туннель — пробы через туннель врут)
+    // и отсутствие уже летящего раунда; не выполнены -> false, колбэк НЕ будет вызван
+    // (звонящий обязан иметь свой таймаут). При смене сети посреди раунда колбэк получает
+    // Inconclusive.
+    bool runRoundNow(std::function<void(WlVerdict verdict, bool marginal)> cb);
+
     // Триггеры (§3.1 спеки) — дешёвые, дебаунс внутри.
     void noteControlPlaneFailure(); // транспортный фейл bootstrap/ConfigService (не 4xx)
     void noteControlPlaneOk();      // ЛЮБОЙ HTTP-ответ control plane = сеть жива -> сброс/выход
@@ -79,6 +87,9 @@ private:
     // ретрай дотягивает старт до момента, когда туннель реально idle (кап попыток — не поллинг).
     QTimer          m_idleRetryTimer;
     int             m_idleRetryLeft = 0;
+    // D-3: форс-раунд Доктора (диагностический, без гистерезиса)
+    std::function<void(WlVerdict, bool)> m_forcedCb;
+    bool            m_forcedRound = false;
 };
 
 } // namespace avpn
