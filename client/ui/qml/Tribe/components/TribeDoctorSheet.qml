@@ -176,9 +176,11 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
             }
 
-            // ── ХОД ТЕСТА: стадии с живыми статусами ─────────────────────────────────────
+            // ── ХОД + ФИНАЛ на ОДНОМ экране (реш. владельца 2026-07-17): список стадий
+            //    остаётся виден и после завершения; внизу прогресс-бар сменяется итогом.
+            //    Отдельного попапа «Диагностика завершена» НЕТ. ────────────────────────────
             ColumnLayout {
-                visible: root.mode === "running"
+                visible: root.mode === "running" || root.mode === "done"
                 Layout.fillWidth: true
                 spacing: Theme.space.sm
 
@@ -265,8 +267,9 @@ Item {
                     }
                 }
 
-                // прогресс-бар: трек + акцент-заполнение по doctorPercent
+                // прогресс-бар (ТОЛЬКО во время теста): трек + акцент по doctorPercent
                 Rectangle {
+                    visible: root.mode === "running"
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
                     height: 6
@@ -283,6 +286,7 @@ Item {
                     }
                 }
                 Text {
+                    visible: root.mode === "running"
                     Layout.fillWidth: true
                     text: qsTr("Не закрывайте приложение — идёт проверка")
                     color: Theme.color.text3
@@ -290,32 +294,40 @@ Item {
                     font.pixelSize: Theme.font.caption
                     horizontalAlignment: Text.AlignHCenter
                 }
-            }
 
-            // ── ФИНАЛ ────────────────────────────────────────────────────────────────────
-            Text {
-                visible: root.mode === "done"
-                Layout.fillWidth: true
-                text: root.hasEngine ? TribeEngine.doctorSummary : ""
-                color: Theme.color.text1
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.bodyM
-                font.weight: Theme.font.wSemibold
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-            }
-            Text {
-                visible: root.mode === "done"
-                Layout.fillWidth: true
-                text: root.sentToSupport
-                      ? qsTr("Отчёт отправлен в тех. поддержку. Ожидайте ответа.")
-                      : qsTr("Отчёт готов — откройте чат поддержки, чтобы отправить его.")
-                color: Theme.color.text2
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.bodyS
-                lineHeight: 1.25
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
+                // ── ИТОГ (тот же экран, вместо прогресс-бара): вердикт + судьба отчёта ──
+                Rectangle {   // тонкий разделитель над итогом
+                    visible: root.mode === "done"
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.xs
+                    height: 1
+                    color: Theme.color.border
+                }
+                Text {
+                    visible: root.mode === "done"
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.xs
+                    text: root.hasEngine ? TribeEngine.doctorSummary : ""
+                    color: Theme.color.text1
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyM
+                    font.weight: Theme.font.wSemibold
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+                Text {
+                    visible: root.mode === "done"
+                    Layout.fillWidth: true
+                    text: root.sentToSupport
+                          ? qsTr("Отчёт отправлен в тех. поддержку. Ожидайте ответа.")
+                          : qsTr("Отчёт готов — откройте чат поддержки, чтобы отправить его.")
+                    color: Theme.color.text2
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                    lineHeight: 1.25
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
             }
 
             // ── КНОПКА (одна: интро «Запустить диагностику» / финал «Понятно»; во время
