@@ -15,6 +15,7 @@ class AmneziaApplication : QtApplication(), CameraXConfig.Provider {
         super.onCreate()
         Prefs.init(this)
         Log.init(this)
+        TribeCrashHandler.install(this) // AVPN (CR-1): Java-краши -> crash/-каталог (chain к прежнему)
         VpnStateStore.init(this)
         Log.d(TAG, "Create Amnezia application")
         ServiceNotification.createNotificationChannel(this)
