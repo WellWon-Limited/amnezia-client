@@ -53,10 +53,12 @@ Row {
             border.width: 1
             border.color: Qt.rgba(chips.stateColor(st).r, chips.stateColor(st).g, chips.stateColor(st).b, 0.45)
 
+            // AVPN (2026-07-17): подписи Telegram/YouTube/… УБРАНЫ — не влезали в чип (обрезались
+            // «Telegr…»), тем более с 4-м сервисом (WhatsApp). Теперь только лого + статус-дот.
             Row {
                 id: row
                 anchors.centerIn: parent
-                spacing: Theme.space.xs   // плотнее (было sm) — чтобы полный лейбл влезал в узкий чип // AVPN
+                spacing: Theme.space.sm
 
                 // лого сервиса (фирменный цвет — бренд-исключение)
                 Loader {
@@ -66,17 +68,6 @@ Row {
                                    : chip.key === "instagram" ? logoInstagram
                                    : chip.key === "whatsapp" ? logoWhatsapp
                                    : logoGeneric
-                }
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData ? (modelData.label || chip.key) : ""
-                    color: Theme.color.text1
-                    font.family: Theme.font.body
-                    font.pixelSize: Theme.font.caption   // 12 (было bodyS 14) — полные Telegram/YouTube/Instagram влезают // AVPN
-                    font.weight: Theme.font.wMedium
-                    // эллипсис только если совсем не влезает; накладные = лого 18 + дот 8 + 2 зазора xs
-                    elide: Text.ElideRight
-                    width: Math.min(implicitWidth, chip.width - 18 - 8 - 2 * Theme.space.xs)
                 }
                 // статус-дот (цвет = статус)
                 Rectangle {
