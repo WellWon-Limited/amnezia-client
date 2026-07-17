@@ -1,19 +1,17 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Qt5Compat.GraphicalEffects
 
 import ".."   // Tribe/qmldir → Theme singleton
 
-// AVPN: Tribe VPN button. Variants: "primary" (gradient + glow), "glass", "ghost", "icon".
-// Tokens only (Theme). UI-DESIGN.md §3.
+// AVPN: Tribe VPN button. Variants: "primary" (gradient), "glass", "ghost", "icon".
+// Tokens only (Theme). UI-DESIGN.md §3. Glow-ореолы убраны совсем (реш. 2026-07-17).
 AbstractButton {
     id: control
 
     property string variant: "primary"          // primary | glass | ghost | icon
     property string iconSource: ""
     property bool loading: false
-    property bool glow: true                    // primary: выключаемый Glow-ореол (рефералка — без засветов)
     readonly property bool isIcon: variant === "icon"
 
     implicitHeight: isIcon ? 44 : 46
@@ -85,12 +83,6 @@ AbstractButton {
         }
         border.width: control.variant === "primary" ? 0 : 1
         border.color: control.hover ? Theme.color.border2 : Theme.color.border
-        layer.enabled: control.variant === "primary" && control.glow
-        layer.effect: Glow {
-            color: Theme.color.accentGlow
-            radius: 18; samples: 25; spread: 0.2
-            transparentBorder: true
-        }
         // БЕЗ Behavior/ColorAnimation: любой редкий дребезг ховера анимация растягивает в
         // заметное «загорается-гаснет»; мгновенная смена стабильна глазу.
 
