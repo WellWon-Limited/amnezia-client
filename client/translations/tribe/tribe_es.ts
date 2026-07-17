@@ -1672,13 +1672,13 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+129"/>
-        <source>Отправить диагностику</source>
-        <translation type="unfinished"></translation>
+        <source>Запустить диагностику</source>
+        <translation>Ejecutar diagnóstico</translation>
     </message>
     <message>
         <location line="+74"/>
-        <source>Отправить диагностику?</source>
-        <translation type="unfinished"></translation>
+        <source>Запустить диагностику?</source>
+        <translation>¿Ejecutar diagnóstico?</translation>
     </message>
     <message>
         <location line="+9"/>
@@ -1687,8 +1687,8 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+10"/>
-        <source>Отправить</source>
-        <translation type="unfinished"></translation>
+        <source>Запустить</source>
+        <translation>Ejecutar</translation>
     </message>
     <message>
         <location line="+9"/>

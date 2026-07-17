@@ -659,7 +659,7 @@ PageType {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: qsTr("Отправить диагностику")
+                            text: qsTr("Запустить диагностику")
                             color: Theme.color.text1
                             font.family: Theme.font.body
                             font.pixelSize: Theme.font.bodyM
@@ -733,7 +733,7 @@ PageType {
                 spacing: Theme.space.md
 
                 Text {
-                    text: qsTr("Отправить диагностику?")
+                    text: qsTr("Запустить диагностику?")
                     color: Theme.color.text1
                     font.family: Theme.font.display
                     font.pixelSize: Theme.font.h3
@@ -752,7 +752,7 @@ PageType {
                 TribeButton {
                     Layout.fillWidth: true
                     variant: "primary"
-                    text: qsTr("Отправить")
+                    text: qsTr("Запустить")
                     onClicked: {
                         diagConfirm.close()
                         root.sendDiag()
