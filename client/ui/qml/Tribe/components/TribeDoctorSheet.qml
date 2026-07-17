@@ -4,24 +4,26 @@ import QtQuick.Layouts
 import QtQuick.Shapes
 
 import ".."   // Theme
+import "."    // TribeFlag
 
-// AVPN (Доктор v1, спека 2026-07-17-doctor-v1-design.md): попап полной диагностики
-// «У меня не работает». Хост — ГЛОБАЛЬНО в PageStart (z поверх вкладок, как
-// TribeAnnouncementSheet): тест переживает смену вкладок. Управление императивное:
-// show() (интро) -> «Запустить диагностику» -> TribeEngine.startDoctor() -> живые стадии
-// с прогрессом -> финал «Отчёт отправлен в поддержку». Отчёт в тред шлёт ЭТОТ слой
-// (TribeSupport.sendDiagReport(doctorDiagText())) по doctorFinished — движок чата не трогает.
-// Интро — по скриншоту владельца: ОДНА кнопка, без «Отмены» (закрытие — тап мимо/назад).
-// Во время теста тап мимо НЕ закрывает; «назад» = отмена теста (эскейп-хатч без кнопки).
+// AVPN (Доктор v2, активная; спека 2026-07-17-doctor-v1-design.md + правки владельца):
+// попап полной диагностики. Хост — ГЛОБАЛЬНО в PageStart (тест переживает смену вкладок).
+// Тап по кнопке «Доктор» = согласие: интро НЕТ, панель стадий открывается СРАЗУ и тест
+// стартует (реш. владельца 2026-07-17). Во время теста есть «Отменить»; над прогресс-баром
+// справа — серый таймер прошедшего времени. Финал НА ТОМ ЖЕ экране (статусы стадий остаются),
+// «Отчёт отправлен в поддержку. Ожидайте ответа» — ТОЛЬКО когда была проблема и отчёт реально
+// ушёл в тред; при «всё ок» тред не дёргаем (анонимный отчёт на бэк уходит всегда, движок).
+// Менеджеру уходит ЧИТАЕМОЕ резюме текстом (doctorHumanReport) + diag.log вложением.
 Item {
     id: root
     anchors.fill: parent
     visible: opened
 
     property bool opened: false
-    // "intro" | "running" | "done"
-    property string mode: "intro"
+    // "running" | "done"
+    property string mode: "running"
     property bool sentToSupport: false
+    property int elapsedSec: 0
 
     readonly property bool hasEngine: typeof TribeEngine !== "undefined"
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
@@ -29,21 +31,25 @@ Item {
 
     // Фикс-порядок стадий (id движка -> подпись). Статусы доезжают в doctorStages.
     readonly property var stageDefs: [
-        { id: "connection", label: qsTr("Проверяю подключение") },
-        { id: "servers",    label: qsTr("Проверяю серверы") },
-        { id: "operator",   label: qsTr("Проверяю оператора") },
-        { id: "whitelist",  label: qsTr("Проверяю «белые списки»") },
-        { id: "speed",      label: qsTr("Проверяю скорость") },
+        { id: "connect",  label: qsTr("Подключаюсь к VPN") },
+        { id: "servers",  label: qsTr("Проверяю сервер") },
+        { id: "services", label: qsTr("Проверяю мессенджеры и видео") },
+        { id: "speed",    label: qsTr("Проверяю скорость") },
     ]
 
     property int depthIndex: 0
     function show() {
         if (opened)
             return
-        mode = "intro"
+        mode = "running"
         sentToSupport = false
+        elapsedSec = 0
         opened = true
         depthIndex = PageController.incrementDrawerDepth()
+        if (hasEngine) {
+            Haptic.play("light")
+            TribeEngine.startDoctor()   // тап по «Доктор» = согласие, тест сразу
+        }
     }
     function close() {
         if (!opened)
@@ -51,7 +57,7 @@ Item {
         if (root.running && root.hasEngine)
             TribeEngine.cancelDoctor()
         opened = false
-        mode = "intro"
+        mode = "running"
         if (depthIndex > 0) {
             depthIndex = 0
             PageController.decrementDrawerDepth()
@@ -60,19 +66,32 @@ Item {
     Connections {
         target: PageController
         enabled: root.opened
-        // Системный «назад»/Escape: pageController после emit сам декрементит глубину —
-        // закрываемся без повторного декремента (паттерн diagConfirm viaController).
+        // «назад»/Escape: pageController после emit сам декрементит глубину —
+        // закрываемся без повторного декремента.
         function onCloseTopDrawer() {
             if (root.depthIndex !== PageController.getDrawerDepth())
                 return
             if (root.running && root.hasEngine)
                 TribeEngine.cancelDoctor()
             root.opened = false
-            root.mode = "intro"
+            root.mode = "running"
             root.depthIndex = 0
         }
     }
     Component.onDestruction: if (opened && depthIndex > 0) PageController.decrementDrawerDepth()
+
+    // таймер прошедшего времени (правее прогресс-бара, серым)
+    Timer {
+        interval: 1000; repeat: true
+        running: root.opened && root.mode === "running"
+        onTriggered: root.elapsedSec += 1
+    }
+    function fmtElapsed(s) {
+        if (s < 60) return s + qsTr(" с")
+        var m = Math.floor(s / 60)
+        var r = s % 60
+        return m + ":" + (r < 10 ? "0" : "") + r
+    }
 
     Connections {
         target: root.hasEngine ? TribeEngine : null
@@ -81,8 +100,10 @@ Item {
             if (!root.opened)
                 return
             root.mode = "done"
-            // отчёт в тред поддержки: человекочитаемый diag.log + секция DOCTOR
-            if (root.hasChat && root.hasEngine) {
+            // в тред поддержки — ТОЛЬКО при реальной проблеме: читаемое резюме текстом
+            // (менеджеру) + diag.log вложением (разработчику). «Всё ок» тред не дёргает.
+            if (TribeEngine.doctorHasProblem && root.hasChat) {
+                TribeSupport.sendText(TribeEngine.doctorHumanReport())
                 TribeSupport.sendDiagReport(TribeEngine.doctorDiagText())
                 root.sentToSupport = true
             }
@@ -90,12 +111,7 @@ Item {
     }
 
     Rectangle { anchors.fill: parent; color: Qt.alpha(Theme.color.bg800, 0.85) }
-    MouseArea {
-        anchors.fill: parent
-        // тап мимо карточки: в интро — закрыть (кнопки «Отмена» нет по скриншоту),
-        // во время теста и на финале — глотаем (закрытие только «назад»/«Понятно»)
-        onClicked: if (root.mode === "intro") root.close()
-    }
+    MouseArea { anchors.fill: parent }   // тап мимо карточки не закрывает (есть кнопки)
 
     Rectangle {
         id: card
@@ -116,7 +132,7 @@ Item {
             anchors.leftMargin: Theme.space.xl; anchors.rightMargin: Theme.space.xl
             spacing: Theme.space.md
 
-            // Круглая иконка: стетоскоп-пульс (activity, Lucide 24-grid) — акцентная
+            // Круглая иконка activity — акцентная
             Rectangle {
                 Layout.alignment: Qt.AlignHCenter
                 implicitWidth: 52; implicitHeight: 52; radius: 26
@@ -143,8 +159,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 text: root.mode === "done" ? qsTr("Диагностика завершена")
-                    : root.mode === "running" ? qsTr("Провожу диагностику")
-                    : qsTr("Запустить диагностику?")
+                                           : qsTr("Провожу диагностику")
                 color: Theme.color.text1
                 font.family: Theme.font.display
                 font.pixelSize: Theme.font.h3
@@ -153,34 +168,8 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
-            // ── ИНТРО (текст по скриншоту владельца 2026-07-17) ──────────────────────────
-            Text {
-                visible: root.mode === "intro"
-                Layout.fillWidth: true
-                text: qsTr("Диагностика запустит процесс проверки состояния подключений, скорости, лучших серверов, наличия ошибок и др. (полностью анонимно)")
-                color: Theme.color.text2
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.bodyS
-                lineHeight: 1.25
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-            }
-            Text {
-                visible: root.mode === "intro"
-                Layout.fillWidth: true
-                text: qsTr("Займёт 1–2 минуты — не закрывайте приложение.")
-                color: Theme.color.text3
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.caption
-                wrapMode: Text.WordWrap
-                horizontalAlignment: Text.AlignHCenter
-            }
-
-            // ── ХОД + ФИНАЛ на ОДНОМ экране (реш. владельца 2026-07-17): список стадий
-            //    остаётся виден и после завершения; внизу прогресс-бар сменяется итогом.
-            //    Отдельного попапа «Диагностика завершена» НЕТ. ────────────────────────────
+            // ── СТАДИИ (видны и во время теста, и на финале) ─────────────────────────────
             ColumnLayout {
-                visible: root.mode === "running" || root.mode === "done"
                 Layout.fillWidth: true
                 spacing: Theme.space.sm
 
@@ -193,7 +182,6 @@ Item {
                         Layout.fillWidth: true
                         spacing: Theme.space.sm
 
-                        // статус стадии: из doctorStages (завершена) / текущая / будущая
                         readonly property var doneInfo: {
                             if (!root.hasEngine) return undefined
                             const arr = TribeEngine.doctorStages || []
@@ -204,19 +192,19 @@ Item {
                         readonly property bool isCurrent: root.hasEngine
                                                           && TribeEngine.doctorStage === modelData.id
                         readonly property int st: doneInfo !== undefined ? (doneInfo.status ?? 0) : -100
+                        readonly property string cc: doneInfo !== undefined
+                                                     ? (doneInfo.countryCode || "") : ""
 
                         Item {
                             implicitWidth: 20; implicitHeight: 20
-                            // завершена: галка/точка цветом статуса; текущая: пульсирующая точка
-                            Rectangle {
+                            Rectangle {   // будущая стадия
                                 anchors.centerIn: parent
                                 width: 8; height: 8; radius: 4
                                 visible: !stageRow.isCurrent && stageRow.st === -100
                                 color: Theme.color.text3
                                 opacity: 0.4
                             }
-                            Rectangle {
-                                id: pulseDot
+                            Rectangle {   // активная — пульс
                                 anchors.centerIn: parent
                                 width: 10; height: 10; radius: 5
                                 visible: stageRow.isCurrent
@@ -228,7 +216,7 @@ Item {
                                     NumberAnimation { from: 0.35; to: 1.0; duration: 600; easing.type: Easing.InOutSine }
                                 }
                             }
-                            Shape {
+                            Shape {       // Ok — галка
                                 anchors.centerIn: parent
                                 width: 14; height: 14
                                 visible: stageRow.st === 0
@@ -240,18 +228,25 @@ Item {
                                     PathSvg { path: "M2 8 L6 12 L13 3" }
                                 }
                             }
-                            Rectangle {
+                            Rectangle {   // Warn/Bad — точка цветом
                                 anchors.centerIn: parent
                                 width: 10; height: 10; radius: 5
                                 visible: stageRow.st === 1 || stageRow.st === 2
                                 color: stageRow.st === 2 ? Theme.color.danger : Theme.color.warning
                             }
-                            Rectangle {
+                            Rectangle {   // Skip — тире
                                 anchors.centerIn: parent
                                 width: 8; height: 2; radius: 1
-                                visible: stageRow.st === -1   // Skip
+                                visible: stageRow.st === -1
                                 color: Theme.color.text3
                             }
+                        }
+
+                        // флаг страны у серверной стадии (country_code из движка)
+                        TribeFlag {
+                            visible: stageRow.cc !== ""
+                            Layout.preferredWidth: 16; Layout.preferredHeight: 16
+                            code: stageRow.cc
                         }
 
                         Text {
@@ -267,11 +262,23 @@ Item {
                     }
                 }
 
-                // прогресс-бар (ТОЛЬКО во время теста): трек + акцент по doctorPercent
-                Rectangle {
+                // прогресс-бар + серый таймер справа над ним (ТОЛЬКО во время теста)
+                RowLayout {
                     visible: root.mode === "running"
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
+                    spacing: Theme.space.sm
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: root.fmtElapsed(root.elapsedSec)
+                        color: Theme.color.text3
+                        font.family: Theme.font.mono
+                        font.pixelSize: Theme.font.caption
+                    }
+                }
+                Rectangle {
+                    visible: root.mode === "running"
+                    Layout.fillWidth: true
                     height: 6
                     radius: Theme.radius.pill
                     color: Theme.color.surface3
@@ -295,8 +302,8 @@ Item {
                     horizontalAlignment: Text.AlignHCenter
                 }
 
-                // ── ИТОГ (тот же экран, вместо прогресс-бара): вердикт + судьба отчёта ──
-                Rectangle {   // тонкий разделитель над итогом
+                // ── ИТОГ (тот же экран): вердикт; про поддержку — только если реально ушло ──
+                Rectangle {
                     visible: root.mode === "done"
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xs
@@ -316,11 +323,9 @@ Item {
                     wrapMode: Text.WordWrap
                 }
                 Text {
-                    visible: root.mode === "done"
+                    visible: root.mode === "done" && root.sentToSupport
                     Layout.fillWidth: true
-                    text: root.sentToSupport
-                          ? qsTr("Отчёт отправлен в тех. поддержку. Ожидайте ответа.")
-                          : qsTr("Отчёт готов — откройте чат поддержки, чтобы отправить его.")
+                    text: qsTr("Отчёт отправлен в тех. поддержку. Ожидайте ответа.")
                     color: Theme.color.text2
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyS
@@ -330,34 +335,22 @@ Item {
                 }
             }
 
-            // ── КНОПКА (одна: интро «Запустить диагностику» / финал «Понятно»; во время
-            //    теста кнопки нет — только «назад» отменяет). Интро = CTA-золото (главное
-            //    действие); финал = нейтральная серая (закрытие вторично, реш. владельца). ──
+            // ── КНОПКА: во время теста — серая «Отменить»; на финале — серая «Понятно» ──
             Rectangle {
-                readonly property bool isDone: root.mode === "done"
-                visible: root.mode !== "running"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
                 height: 52
                 radius: Theme.radius.lg
-                // финал: плоская серая surface2 (+glassStrong на нажатии); интро: золото
-                color: isDone ? (goMa.pressed ? Theme.color.surface3 : Theme.color.surface2)
-                              : "transparent"
-                border.width: isDone ? 1 : 0
+                color: goMa.pressed ? Theme.color.surface3 : Theme.color.surface2
+                border.width: 1
                 border.color: Theme.color.border2
-                gradient: isDone ? null : goGrad
                 scale: goMa.pressed ? 0.985 : 1.0
                 Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                Gradient {
-                    id: goGrad
-                    GradientStop { position: 0.0; color: goMa.pressed ? Theme.color.ctaDeep : Theme.color.cta }
-                    GradientStop { position: 1.0; color: Theme.color.ctaDeep }
-                }
 
                 Text {
                     anchors.centerIn: parent
-                    text: parent.isDone ? qsTr("Понятно") : qsTr("Запустить диагностику")
-                    color: parent.isDone ? Theme.color.text1 : Theme.color.bg900
+                    text: root.mode === "done" ? qsTr("Понятно") : qsTr("Отменить")
+                    color: Theme.color.text1
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wBold
@@ -366,15 +359,7 @@ Item {
                     id: goMa
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (root.mode === "done") {
-                            root.close()
-                        } else if (root.hasEngine) {
-                            Haptic.play("light")
-                            root.mode = "running"
-                            TribeEngine.startDoctor()
-                        }
-                    }
+                    onClicked: root.close()
                 }
             }
         }

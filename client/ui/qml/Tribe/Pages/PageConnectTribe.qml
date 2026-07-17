@@ -819,7 +819,7 @@ PageType {
         // (карточка «АвтоVPN» перенесена НАД орб — см. autoVpnCard выше, реш. 2026-07-02)
         Rectangle {
             id: serverCard
-            width: parent.width; implicitHeight: 84; height: 84
+            width: parent.width; implicitHeight: 80; height: 80
             radius: 24
             color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
             border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
@@ -1097,7 +1097,7 @@ PageType {
             id: doctorBtn
             visible: !root.hasEngine || TribeEngine.featureEnabled("diag_v2", true)
             width: visible ? Math.round((parent.width - Theme.space.md) * 0.38) : 0
-            height: 52; radius: 16
+            height: 49; radius: 16
             color: doctorMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
             border.width: 1
             border.color: doctorMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
@@ -1133,7 +1133,7 @@ PageType {
         Rectangle {
             id: refreshBtn
             width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
-            height: 52; radius: 16
+            height: 49; radius: 16
             // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
             // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"

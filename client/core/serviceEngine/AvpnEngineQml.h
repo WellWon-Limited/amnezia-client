@@ -170,6 +170,7 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(int doctorPercent READ doctorPercent NOTIFY doctorChanged)
     Q_PROPERTY(QVariantList doctorStages READ doctorStages NOTIFY doctorChanged)
     Q_PROPERTY(QString doctorSummary READ doctorSummary NOTIFY doctorChanged)
+    Q_PROPERTY(bool doctorHasProblem READ doctorHasProblem NOTIFY doctorChanged)
     // AVPN remote-config (T6): вердикт force-update (0 Ok/1 Recommend/2 Block, из ConfigService::configApplied)
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
@@ -406,12 +407,14 @@ public:
     Q_INVOKABLE void startDoctor();
     Q_INVOKABLE void cancelDoctor();
     Q_INVOKABLE QString doctorReportJson() const;  // итоговый JSON type:"doctor" (после finish)
-    Q_INVOKABLE QString doctorDiagText() const;    // buildDiagReport() + секция DOCTOR (в чат)
+    Q_INVOKABLE QString doctorHumanReport() const; // читаемое резюме для менеджера (текст в тред)
+    Q_INVOKABLE QString doctorDiagText() const;    // buildDiagReport() + секция DOCTOR (файл-вложение)
     bool doctorRunning() const { return m_docPhase != DoctorPhase::Idle; }
-    QString doctorStage() const;                   // connection|servers|operator|whitelist|speed|send
+    QString doctorStage() const;                   // connect|servers|services|speed|send
     int doctorPercent() const { return m_docPercent; }
-    QVariantList doctorStages() const;             // [{id,status,note}] для списка стадий в попапе
+    QVariantList doctorStages() const;             // [{id,status,note,country_code}] для попапа
     QString doctorSummary() const { return m_docSummary; }
+    bool doctorHasProblem() const { return m_docHasProblem; } // есть Bad/Warn → слать в поддержку
 
     // AVPN (панель администратора): история последних замеров по меткам (QSettings AvpnBench/*) —
     // A/B-сравнение работает между запусками (baseline утром, amnezia вечером). Пусто = не мерили.
@@ -931,30 +934,32 @@ private:
     QString assembleMegaReport() const; // buildFullReport + methodology + summary (+baseline-suspect)
     QJsonObject benchExtra() const;     // контекст замера: факты конфигурации + тип сети
 
-    // AVPN (Доктор v1): пользовательская диагностика — канон машин (enum+epoch+guard),
-    // дирижёр поверх готовых блоков. Каждая стадия пишет doctor::StageResult; сторож фазы
-    // (clampStageTimeoutMs) гасит зависшую стадию честным Skip и идёт дальше — частичный
+    // AVPN (Доктор v2, активная): пользовательская диагностика — канон машин (enum+epoch+guard),
+    // дирижёр поверх готовых блоков. Доктор САМ поднимает VPN и проверяет РЕАЛЬНУЮ работу через
+    // туннель (Connect поднимает туннель если выключен → ждёт connected → проба данных; Services
+    // гоняет чипы WhatsApp/TG/YT/IG через туннель; Speed — бенч через туннель). Сторож фазы
+    // (clampStageTimeoutMs) гасит зависшую стадию честным вердиктом и идёт дальше — частичный
     // отчёт ценнее прерванного (урок ftStepDone). Спека: 2026-07-17-doctor-v1-design.md.
-    enum class DoctorPhase { Idle, Connection, Servers, Operator, Whitelist, Speed, Send };
+    enum class DoctorPhase { Idle, Connect, Servers, Services, Speed, Send };
     DoctorPhase m_docPhase = DoctorPhase::Idle;
     int         m_docEpoch = 0;
     QTimer      m_docGuard;
     QList<doctor::StageResult> m_docStages;
     int         m_docPercent = 0;
     QString     m_docSummary;
-    QJsonObject m_docReport;         // итог buildReport (живёт до следующего запуска)
-    qint64      m_docRx0 = 0, m_docTx0 = 0;   // срез счётчиков для rx/tx-дельты
-    int         m_docReachOk = 0, m_docReachTotal = 0, m_docReachPending = 0;
-    bool        m_docDnsOk = false, m_docDnsDone = false;
-    QString     m_docEgress;          // loc/colo из cdn-cgi/trace (IP отброшен)
+    bool        m_docHasProblem = false; // финал: есть Bad/Warn (слать в тред поддержки)
+    QJsonObject m_docReport;          // итог buildReport (живёт до следующего запуска)
+    qint64      m_docRx0 = 0;         // срез rx для проверки «данные идут»
+    bool        m_docWasConnected = false; // VPN был поднят ДО теста (не опускать в конце)
+    bool        m_docConnecting = false;   // фаза Connect ждёт connected по changed()
     bool        m_docBenchStarted = false; // Speed-стадию запустил доктор (для cancel)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
     void docStageDone(const doctor::StageResult &r); // записать стадию и перейти к следующей
-    void docGuardFired();             // стадия не уложилась в сторож -> Skip и дальше
+    void docGuardFired();             // стадия не уложилась в сторож -> вердикт и дальше
+    void docConnectAdvance();         // реакция на changed() в фазе Connect (поднялся/упал туннель)
+    void docVerifyDataplane();        // проба generate_204 через туннель + рост rx -> connectStage
     void docStartServers();
-    void docStartOperator();
-    void docOperatorMaybeDone(bool force = false); // все колбэки собраны (или сторож) -> вердикт
-    void docStartWhitelist();
+    void docStartServices();
     void docStartSpeed();
     void docFinish();                 // buildReport + upload(quiet) + doctorFinished
     static QString bypassLabel(bool on)

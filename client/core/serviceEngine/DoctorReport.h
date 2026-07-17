@@ -1,7 +1,11 @@
 #pragma once
-// AVPN (Доктор v1, 2026-07-17): чистая логика диагностики — вердикты стадий, сборка
-// JSON-отчёта и человеческое резюме. БЕЗ I/O и Qt-сети: всё тестируется юнитом
-// (tests/doctor_report_check.cpp). Оркестрация (фазы/таймеры/пробы) — в AvpnEngineQml.
+// AVPN (Доктор, 2026-07-17): чистая логика диагностики — вердикты стадий, сборка JSON-отчёта
+// и человеческое резюме. БЕЗ I/O и Qt-сети: всё тестируется юнитом (tests/doctor_report_check.cpp).
+// Оркестрация (фазы/таймеры/пробы/подъём туннеля) — в AvpnEngineQml.
+//
+// АКТИВНАЯ модель (v2): Доктор САМ поднимает VPN и тестирует РЕАЛЬНУЮ работу через туннель
+// (не пассивно смотрит на выключенный VPN). Стадии: подключение (поднять+проверить данные) →
+// серверы (где/качество) → сервисы (WhatsApp/TG/YT/IG через туннель) → скорость (бенч через туннель).
 // Спека: tribe-front docs/superpowers/specs/2026-07-17-doctor-v1-design.md.
 
 #include <QJsonArray>
@@ -15,14 +19,14 @@ namespace doctor {
 enum StageStatus { Skip = -1, Ok = 0, Warn = 1, Bad = 2 };
 
 struct StageResult {
-    QString id;              // connection|servers|operator|whitelist|speed
+    QString id;              // connect|servers|services|speed
     int status = Ok;         // StageStatus
     QString note;            // короткая человеческая строка для UI
     QJsonObject data;        // сырые факты стадии (в отчёт)
 };
 
-// numbers.diag_stage_timeout_ms: кламп 5с..60с (сторож фазы; стадия дольше — гасится
-// с честным status=Skip, диагностика продолжается).
+// numbers.diag_stage_timeout_ms: кламп 5с..60с (сторож фазы; стадия дольше — гасится с честным
+// вердиктом, диагностика продолжается).
 inline int clampStageTimeoutMs(double v)
 {
     if (v != v || v <= 0)      // NaN/нет ключа
@@ -32,105 +36,121 @@ inline int clampStageTimeoutMs(double v)
     return int(v);
 }
 
-// Стадия 1: подключение. rx/tx-дельты за окно наблюдения ловят «зелёный, но мёртвый»
-// (сигнатура S4-blackhole/протухшего NAT: handshake старый И приёма нет при исходящем).
-inline StageResult connectionStage(const QString &state, qint64 handshakeAgeSec,
-                                   qint64 rxDelta, qint64 txDelta)
+// Стадия 1: ПОДКЛЮЧЕНИЕ (активная). Доктор поднял VPN (или он уже был поднят) и проверил,
+// идут ли данные через туннель (проба + рост rx). Ловит «зелёный, но мёртвый» (S4-blackhole).
+//   couldConnect — туннель поднялся до connected (или уже был);
+//   dataFlows    — проба через туннель дошла (первый байт получен) ИЛИ rx подрос;
+//   handshakeAgeSec — возраст последнего WG-handshake (для отчёта).
+inline StageResult connectStage(bool couldConnect, bool dataFlows, qint64 handshakeAgeSec)
 {
-    StageResult r; r.id = QStringLiteral("connection");
-    r.data.insert(QStringLiteral("state"), state);
+    StageResult r; r.id = QStringLiteral("connect");
+    r.data.insert(QStringLiteral("could_connect"), couldConnect);
+    r.data.insert(QStringLiteral("data_flows"), dataFlows);
     r.data.insert(QStringLiteral("handshake_age_sec"), double(handshakeAgeSec));
-    r.data.insert(QStringLiteral("rx_delta"), double(rxDelta));
-    r.data.insert(QStringLiteral("tx_delta"), double(txDelta));
-    if (state != QLatin1String("connected")) {
-        r.status = Skip;
-        r.note = QStringLiteral("VPN выключен — проверяю сеть напрямую");
-        return r;
-    }
-    const bool staleHs = handshakeAgeSec >= 180;   // WG: сессия старше 3 мин без ре-handshake
-    const bool deadRx  = txDelta > 0 && rxDelta <= 0;
-    if (staleHs && deadRx) {
+    if (!couldConnect) {
+        r.status = Bad;
+        r.note = QStringLiteral("Не удалось подключиться к VPN");
+    } else if (!dataFlows) {
         r.status = Bad;
         r.note = QStringLiteral("Подключено, но данные не проходят");
-    } else if (staleHs || deadRx) {
-        r.status = Warn;
-        r.note = QStringLiteral("Подключение нестабильно");
     } else {
-        r.note = QStringLiteral("Туннель живой");
+        r.status = Ok;
+        r.note = QStringLiteral("VPN подключён — интернет работает");
     }
     return r;
 }
 
-// Стадия 2: серверы. bestRttMs<0 = ни одного замера (все недостижимы off-tunnel — обычно
-// оператор режет ICMP или сети нет; сам по себе НЕ приговор, поэтому Warn, не Bad).
-inline StageResult serversStage(int aliveCount, int measuredCount, int bestRttMs,
-                                bool fromCache)
+// ISO-3166 alpha-2 → русское название страны (наш пул нод). Фолбэк — код заглавными.
+inline QString countryNameRu(const QString &code)
+{
+    const QString cc = code.trimmed().toUpper();
+    static const QHash<QString, QString> t{
+        {QStringLiteral("LV"), QStringLiteral("Латвия")},
+        {QStringLiteral("FI"), QStringLiteral("Финляндия")},
+        {QStringLiteral("NL"), QStringLiteral("Нидерланды")},
+        {QStringLiteral("DE"), QStringLiteral("Германия")},
+        {QStringLiteral("US"), QStringLiteral("США")},
+        {QStringLiteral("GB"), QStringLiteral("Великобритания")},
+        {QStringLiteral("FR"), QStringLiteral("Франция")},
+        {QStringLiteral("SE"), QStringLiteral("Швеция")},
+        {QStringLiteral("PL"), QStringLiteral("Польша")},
+        {QStringLiteral("RU"), QStringLiteral("Россия")},
+        {QStringLiteral("TR"), QStringLiteral("Турция")},
+        {QStringLiteral("CH"), QStringLiteral("Швейцария")},
+        {QStringLiteral("AT"), QStringLiteral("Австрия")},
+        {QStringLiteral("CA"), QStringLiteral("Канада")},
+        {QStringLiteral("JP"), QStringLiteral("Япония")},
+        {QStringLiteral("SG"), QStringLiteral("Сингапур")},
+        {QStringLiteral("HK"), QStringLiteral("Гонконг")},
+        {QStringLiteral("ES"), QStringLiteral("Испания")},
+        {QStringLiteral("IT"), QStringLiteral("Италия")},
+        {QStringLiteral("EE"), QStringLiteral("Эстония")},
+        {QStringLiteral("LT"), QStringLiteral("Литва")},
+        {QStringLiteral("NO"), QStringLiteral("Норвегия")},
+        {QStringLiteral("DK"), QStringLiteral("Дания")},
+        {QStringLiteral("CZ"), QStringLiteral("Чехия")},
+    };
+    const auto it = t.constFind(cc);
+    return it != t.constEnd() ? it.value() : cc;
+}
+
+// Стадия 2: СЕРВЕРЫ. На каком сервере сидим и его отклик (live RTT через туннель / app-layer).
+//   displayName — человекочитаемое имя («Латвия»); countryCode — ISO для флага в UI;
+//   rttMs — отклик текущего сервера (<0 = не измерен).
+inline StageResult serverStage(const QString &displayName, const QString &countryCode, int rttMs)
 {
     StageResult r; r.id = QStringLiteral("servers");
-    r.data.insert(QStringLiteral("alive"), aliveCount);
-    r.data.insert(QStringLiteral("measured"), measuredCount);
-    r.data.insert(QStringLiteral("best_rtt_ms"), bestRttMs);
-    r.data.insert(QStringLiteral("from_cache"), fromCache);
-    if (aliveCount <= 0) {
-        r.status = Bad;
-        r.note = QStringLiteral("Нет доступных серверов в пуле");
-    } else if (measuredCount <= 0 || bestRttMs < 0) {
+    if (!displayName.isEmpty()) r.data.insert(QStringLiteral("region"), displayName);
+    if (!countryCode.isEmpty()) r.data.insert(QStringLiteral("country_code"), countryCode.toUpper());
+    r.data.insert(QStringLiteral("rtt_ms"), rttMs);
+    const QString where = displayName.isEmpty() ? QStringLiteral("Сервер")
+                                                : QStringLiteral("Сервер: %1").arg(displayName);
+    if (rttMs < 0) {
+        r.status = Ok;
+        r.note = where;
+    } else if (rttMs >= 400) {
         r.status = Warn;
-        r.note = QStringLiteral("Серверы не отвечают на прямой замер");
+        r.note = QStringLiteral("%1 — далеко (~%2 мс)").arg(where).arg(rttMs);
     } else {
-        r.note = QStringLiteral("Лучший сервер: ~%1 мс").arg(bestRttMs);
-        if (bestRttMs >= 300) r.status = Warn;
+        r.status = Ok;
+        r.note = QStringLiteral("%1 · ~%2 мс").arg(where).arg(rttMs);
     }
     return r;
 }
 
-// Стадия 3: оператор. Кворум reach-проб (generate_204) через текущий путь + факт DNS.
-inline StageResult operatorStage(const QString &netType, int reachOk, int reachTotal,
-                                 bool dnsOk, const QString &egressLoc)
+// Стадия 3: СЕРВИСЫ через туннель. works/total + список недоступных (blocked). Плюс опц.
+// whitelist-факт (на сотовой): whitelistActive поднимает вердикт до Bad с понятной причиной.
+inline StageResult servicesStage(int works, int total, const QStringList &blocked,
+                                 bool whitelistApplicable, bool whitelistActive)
 {
-    StageResult r; r.id = QStringLiteral("operator");
-    r.data.insert(QStringLiteral("net_type"), netType);
-    r.data.insert(QStringLiteral("reach_ok"), reachOk);
-    r.data.insert(QStringLiteral("reach_total"), reachTotal);
-    r.data.insert(QStringLiteral("dns_ok"), dnsOk);
-    if (!egressLoc.isEmpty())
-        r.data.insert(QStringLiteral("egress_loc"), egressLoc); // страна/colo, БЕЗ IP
-    if (reachTotal > 0 && reachOk <= 0) {
-        r.status = Bad;
-        r.note = dnsOk ? QStringLiteral("Оператор блокирует доступ")
-                       : QStringLiteral("Сеть недоступна (DNS и пробы молчат)");
-    } else if (!dnsOk || (reachTotal > 0 && reachOk < reachTotal)) {
-        r.status = Warn;
-        r.note = QStringLiteral("Сеть работает с ограничениями");
-    } else {
-        r.note = egressLoc.isEmpty() ? QStringLiteral("Сеть оператора в порядке")
-                                     : QStringLiteral("Выход в сеть: %1").arg(egressLoc);
-    }
-    return r;
-}
+    StageResult r; r.id = QStringLiteral("services");
+    r.data.insert(QStringLiteral("works"), works);
+    r.data.insert(QStringLiteral("total"), total);
+    if (!blocked.isEmpty())
+        r.data.insert(QStringLiteral("blocked"), QJsonArray::fromStringList(blocked));
+    if (whitelistApplicable)
+        r.data.insert(QStringLiteral("whitelist_active"), whitelistActive);
 
-// Стадия 4: белые списки. applicable=false (Wi-Fi/ethernet) → Skip: детект работает
-// только на сотовой (инварианты WhitelistDetector не трогаем).
-inline StageResult whitelistStage(bool applicable, bool active, int episodes)
-{
-    StageResult r; r.id = QStringLiteral("whitelist");
-    r.data.insert(QStringLiteral("applicable"), applicable);
-    r.data.insert(QStringLiteral("active"), active);
-    r.data.insert(QStringLiteral("episodes"), episodes);
-    if (!applicable) {
+    if (whitelistActive) {
+        r.status = Bad;
+        r.note = QStringLiteral("Оператор ограничивает интернет («белые списки»)");
+        return r;
+    }
+    if (total <= 0) {
         r.status = Skip;
-        r.note = QStringLiteral("Не сотовая сеть — не применимо");
-    } else if (active) {
+        r.note = QStringLiteral("Сервисы не проверены");
+    } else if (!blocked.isEmpty()) {
         r.status = Bad;
-        r.note = QStringLiteral("Похоже на режим «белых списков» у оператора");
+        r.note = QStringLiteral("Недоступно: %1").arg(blocked.join(QStringLiteral(", ")));
     } else {
-        r.note = QStringLiteral("Признаков «белых списков» нет");
+        r.status = Ok;
+        r.note = QStringLiteral("Мессенджеры и видео работают");
     }
     return r;
 }
 
-// Стадия 5: скорость. Пороги согласованы с BenchAnalysis (kLowGoodputMbit=5,
-// bufferbloat = loaded/idle > 2.5 при idle>0).
+// Стадия 4: СКОРОСТЬ (бенч через туннель). Пороги согласованы с BenchAnalysis
+// (kLowGoodputMbit=5, bufferbloat = loaded/idle > 2.5 при idle>0).
 inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
 {
     StageResult r; r.id = QStringLiteral("speed");
@@ -157,35 +177,77 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
         r.note = QStringLiteral("Канал «пухнет» под нагрузкой (%1 Мбит/с)")
                      .arg(QString::number(downMbit, 'f', 1));
     } else {
+        r.status = Ok;
         r.note = QStringLiteral("Скорость в порядке: %1 Мбит/с")
                      .arg(QString::number(downMbit, 'f', 1));
     }
     return r;
 }
 
-// Главная человеческая строка для финала попапа: первая стадия с худшим статусом.
+// Есть ли реальная проблема (Bad/Warn). Skip — не проблема, но и не «всё ок».
+inline bool hasProblem(const QList<StageResult> &stages)
+{
+    for (const auto &s : stages)
+        if (s.status == Warn || s.status == Bad) return true;
+    return false;
+}
+
+// Главная человеческая строка для финала попапа: худшая стадия; при отсутствии проблем —
+// с оговоркой, если часть проверок пропущена (Skip) — не врём «всё работает» вслепую.
 inline QString humanSummary(const QList<StageResult> &stages)
 {
     const StageResult *worst = nullptr;
+    bool anySkip = false, anyOk = false;
     for (const auto &s : stages) {
-        if (s.status == Skip) continue;
+        if (s.status == Skip) { anySkip = true; continue; }
+        if (s.status == Ok) anyOk = true;
         if (!worst || s.status > worst->status) worst = &s;
     }
-    if (!worst)
+    if (worst && (worst->status == Warn || worst->status == Bad))
+        return worst->note;
+    if (!anyOk)
         return QStringLiteral("Диагностика выполнена");
-    if (worst->status == Ok)
-        return QStringLiteral("Проблем не найдено — всё работает штатно");
-    return worst->note;
+    if (anySkip)
+        return QStringLiteral("Основное работает — часть проверок не завершилась");
+    return QStringLiteral("Всё работает — VPN подключён, интернет доступен");
+}
+
+// Человекочитаемое резюме для МЕНЕДЖЕРА поддержки (текст-сообщение в тред: сырой diag.log
+// оператору бесполезен — ему нужны выводы). Маркеры статуса словами, без эмодзи (правило проекта).
+inline QString humanReport(const QList<StageResult> &stages, const QString &netType,
+                           const QString &tz)
+{
+    auto mark = [](int st) -> QString {
+        switch (st) {
+        case Ok:   return QStringLiteral("[ok]");
+        case Warn: return QStringLiteral("[!]");
+        case Bad:  return QStringLiteral("[x]");
+        default:   return QStringLiteral("[-]");
+        }
+    };
+    QString out = QStringLiteral("Диагностика Tribe VPN\n");
+    for (const auto &s : stages)
+        out += mark(s.status) + QStringLiteral(" ") + s.note + QStringLiteral("\n");
+    out += QStringLiteral("Итог: ") + humanSummary(stages) + QStringLiteral("\n");
+    QStringList ctx;
+    if (!netType.isEmpty() && netType != QLatin1String("unknown"))
+        ctx << (netType == QLatin1String("cellular") ? QStringLiteral("сеть: сотовая")
+              : netType == QLatin1String("wifi")     ? QStringLiteral("сеть: Wi-Fi")
+                                                     : QStringLiteral("сеть: ") + netType);
+    if (!tz.isEmpty())
+        ctx << QStringLiteral("tz: ") + tz;
+    if (!ctx.isEmpty())
+        out += ctx.join(QStringLiteral(" · "));
+    return out.trimmed();
 }
 
 // Итоговый JSON-отчёт (уходит в /v1/bench/report и в секцию diag.log).
-// PII нет by construction: стадии кладут только loc/colo и агрегаты.
-inline QJsonObject buildReport(const QList<StageResult> &stages,
-                               const QJsonObject &extra)
+// PII нет by construction: стадии кладут только агрегаты (loc/colo, регион, статусы).
+inline QJsonObject buildReport(const QList<StageResult> &stages, const QJsonObject &extra)
 {
     QJsonObject o;
     o.insert(QStringLiteral("type"), QStringLiteral("doctor"));
-    o.insert(QStringLiteral("schema"), 1);
+    o.insert(QStringLiteral("schema"), 2);   // v2: активная модель
     QJsonArray arr;
     for (const auto &s : stages) {
         QJsonObject so = s.data;
