@@ -108,6 +108,22 @@ int main()
               "summary: Ok+Skip -> честная оговорка, не «всё работает»");
     }
 
+    // фикс «канал пухнет» на сотовой: относительный рост при МАЛОМ абсолюте — НЕ блоат
+    CHECK(speedStage(30.0, 40, 120).status == Ok,
+          "speed: 30 Мбит, idle 40 -> loaded 120 (ratio 3, но < 400мс) -> Ok, НЕ «пухнет»");
+    CHECK(speedStage(30.0, 100, 450).status == Warn,
+          "speed: loaded 450мс при росте — честный Warn «пухнет»");
+
+    // стадия других серверов
+    CHECK(altNodesStage({}, {}, {}).status == Skip, "alt: не проверялись -> Skip");
+    CHECK(altNodesStage({QStringLiteral("Финляндия")}, {true}, QStringLiteral("Финляндия")).status == Ok,
+          "alt: рабочая найдена -> Ok «переключил»");
+    CHECK(altNodesStage({QStringLiteral("Финляндия")}, {true}, QStringLiteral("Финляндия"))
+              .note.contains(QStringLiteral("Финляндия")),
+          "alt: имя ноды в тексте");
+    CHECK(altNodesStage({QStringLiteral("A"), QStringLiteral("B")}, {false, false}, {}).status == Bad,
+          "alt: все мертвы -> Bad «дело в вашей сети»");
+
     // сборка отчёта
     {
         QList<StageResult> st;

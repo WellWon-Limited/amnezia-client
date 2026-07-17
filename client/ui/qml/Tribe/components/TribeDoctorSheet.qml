@@ -8,20 +8,23 @@ import "."    // TribeFlag
 
 // AVPN (Доктор v2, активная; спека 2026-07-17-doctor-v1-design.md + правки владельца):
 // попап полной диагностики. Хост — ГЛОБАЛЬНО в PageStart (тест переживает смену вкладок).
-// Тап по кнопке «Доктор» = согласие: интро НЕТ, панель стадий открывается СРАЗУ и тест
-// стартует (реш. владельца 2026-07-17). Во время теста есть «Отменить»; над прогресс-баром
-// справа — серый таймер прошедшего времени. Финал НА ТОМ ЖЕ экране (статусы стадий остаются),
-// «Отчёт отправлен в поддержку. Ожидайте ответа» — ТОЛЬКО когда была проблема и отчёт реально
-// ушёл в тред; при «всё ок» тред не дёргаем (анонимный отчёт на бэк уходит всегда, движок).
-// Менеджеру уходит ЧИТАЕМОЕ резюме текстом (doctorHumanReport) + diag.log вложением.
+// Флоу: интро-плашка с ЗОЛОТОЙ «Запустить диагностику» (возвращена реш. владельца
+// 2026-07-17 вечер) → панель стадий с серым таймером и «Отменить» → финал НА ТОМ ЖЕ экране.
+// Серверная стадия: «Сервер: [флаг] Страна · мс» — флаг МЕЖДУ двоеточием и названием.
+// Стадия «Проверяю другие серверы» опциональна (движок запускает её только при проблеме —
+// до 2 альтернатив; рабочая найдена → остаёмся на ней). «Отчёт отправлен в поддержку.
+// Ожидайте ответа» — ТОЛЬКО когда была проблема и отчёт реально ушёл в тред; «всё ок»
+// тред не дёргает (анонимный отчёт на бэк уходит всегда, движок). Менеджеру — ЧИТАЕМОЕ
+// резюме текстом (doctorHumanReport) + diag.log вложением.
 Item {
     id: root
     anchors.fill: parent
     visible: opened
 
     property bool opened: false
-    // "running" | "done"
-    property string mode: "running"
+    // "intro" | "running" | "done" — интро-плашка с золотой кнопкой ВОЗВРАЩЕНА
+    // (реш. владельца 2026-07-17 вечер: запуск только по явному «Запустить диагностику»)
+    property string mode: "intro"
     property bool sentToSupport: false
     property int elapsedSec: 0
 
@@ -35,21 +38,18 @@ Item {
         { id: "servers",  label: qsTr("Проверяю сервер") },
         { id: "services", label: qsTr("Проверяю мессенджеры и видео") },
         { id: "speed",    label: qsTr("Проверяю скорость") },
+        { id: "altnodes", label: qsTr("Проверяю другие серверы"), optional: true },
     ]
 
     property int depthIndex: 0
     function show() {
         if (opened)
             return
-        mode = "running"
+        mode = "intro"
         sentToSupport = false
         elapsedSec = 0
         opened = true
         depthIndex = PageController.incrementDrawerDepth()
-        if (hasEngine) {
-            Haptic.play("light")
-            TribeEngine.startDoctor()   // тап по «Доктор» = согласие, тест сразу
-        }
     }
     function close() {
         if (!opened)
@@ -57,7 +57,7 @@ Item {
         if (root.running && root.hasEngine)
             TribeEngine.cancelDoctor()
         opened = false
-        mode = "running"
+        mode = "intro"
         if (depthIndex > 0) {
             depthIndex = 0
             PageController.decrementDrawerDepth()
@@ -74,7 +74,7 @@ Item {
             if (root.running && root.hasEngine)
                 TribeEngine.cancelDoctor()
             root.opened = false
-            root.mode = "running"
+            root.mode = "intro"
             root.depthIndex = 0
         }
     }
@@ -111,7 +111,10 @@ Item {
     }
 
     Rectangle { anchors.fill: parent; color: Qt.alpha(Theme.color.bg800, 0.85) }
-    MouseArea { anchors.fill: parent }   // тап мимо карточки не закрывает (есть кнопки)
+    MouseArea {
+        anchors.fill: parent
+        onClicked: if (root.mode === "intro") root.close()   // в тесте/финале — есть кнопки
+    }
 
     Rectangle {
         id: card
@@ -159,7 +162,8 @@ Item {
             Text {
                 Layout.fillWidth: true
                 text: root.mode === "done" ? qsTr("Диагностика завершена")
-                                           : qsTr("Провожу диагностику")
+                    : root.mode === "running" ? qsTr("Провожу диагностику")
+                    : qsTr("Запустить диагностику?")
                 color: Theme.color.text1
                 font.family: Theme.font.display
                 font.pixelSize: Theme.font.h3
@@ -168,8 +172,32 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
-            // ── СТАДИИ (видны и во время теста, и на финале) ─────────────────────────────
+            // ── ИНТРО: описание + предупреждение (текст по скриншоту владельца) ──────────
+            Text {
+                visible: root.mode === "intro"
+                Layout.fillWidth: true
+                text: qsTr("Диагностика запустит процесс проверки состояния подключений, скорости, лучших серверов, наличия ошибок и др. (полностью анонимно)")
+                color: Theme.color.text2
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.bodyS
+                lineHeight: 1.25
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                visible: root.mode === "intro"
+                Layout.fillWidth: true
+                text: qsTr("Займёт 1–2 минуты — не закрывайте приложение.")
+                color: Theme.color.text3
+                font.family: Theme.font.body
+                font.pixelSize: Theme.font.caption
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+            }
+
+            // ── СТАДИИ (ход теста и финал) ───────────────────────────────────────────────
             ColumnLayout {
+                visible: root.mode !== "intro"
                 Layout.fillWidth: true
                 spacing: Theme.space.sm
 
@@ -181,6 +209,8 @@ Item {
                         required property int index
                         Layout.fillWidth: true
                         spacing: Theme.space.sm
+                        // опциональные стадии (altnodes) видны только когда реально запущены
+                        visible: modelData.optional !== true || stageRow.st !== -100 || stageRow.isCurrent
 
                         readonly property var doneInfo: {
                             if (!root.hasEngine) return undefined
@@ -242,17 +272,32 @@ Item {
                             }
                         }
 
-                        // флаг страны у серверной стадии (country_code из движка)
+                        // серверная стадия: «Сервер: [флаг] Страна · мс» — флаг МЕЖДУ
+                        // двоеточием и названием (реш. владельца). Прочие стадии — просто note.
+                        Text {
+                            visible: stageRow.cc !== ""
+                            text: qsTr("Сервер:")
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.bodyS
+                        }
                         TribeFlag {
                             visible: stageRow.cc !== ""
                             Layout.preferredWidth: 16; Layout.preferredHeight: 16
                             code: stageRow.cc
                         }
-
                         Text {
                             Layout.fillWidth: true
-                            text: stageRow.doneInfo !== undefined && (stageRow.doneInfo.note || "") !== ""
-                                  ? stageRow.doneInfo.note : stageRow.modelData.label
+                            text: {
+                                if (stageRow.cc !== "" && stageRow.doneInfo !== undefined) {
+                                    var s = stageRow.doneInfo.region || ""
+                                    var rtt = stageRow.doneInfo.rttMs
+                                    if (rtt !== undefined && rtt > 0) s += " · ~" + rtt + qsTr(" мс")
+                                    return s
+                                }
+                                return stageRow.doneInfo !== undefined && (stageRow.doneInfo.note || "") !== ""
+                                       ? stageRow.doneInfo.note : stageRow.modelData.label
+                            }
                             color: stageRow.isCurrent ? Theme.color.text1
                                  : stageRow.st !== -100 ? Theme.color.text2 : Theme.color.text3
                             font.family: Theme.font.body
@@ -335,22 +380,32 @@ Item {
                 }
             }
 
-            // ── КНОПКА: во время теста — серая «Отменить»; на финале — серая «Понятно» ──
+            // ── КНОПКА: интро = ЗОЛОТАЯ «Запустить диагностику»; running = серая «Отменить»;
+            //    done = серая «Понятно» ────────────────────────────────────────────────────
             Rectangle {
+                readonly property bool isIntro: root.mode === "intro"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
                 height: 52
                 radius: Theme.radius.lg
-                color: goMa.pressed ? Theme.color.surface3 : Theme.color.surface2
-                border.width: 1
+                color: isIntro ? "transparent"
+                               : (goMa.pressed ? Theme.color.surface3 : Theme.color.surface2)
+                border.width: isIntro ? 0 : 1
                 border.color: Theme.color.border2
+                gradient: isIntro ? goGrad : null
                 scale: goMa.pressed ? 0.985 : 1.0
                 Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Gradient {
+                    id: goGrad
+                    GradientStop { position: 0.0; color: goMa.pressed ? Theme.color.ctaDeep : Theme.color.cta }
+                    GradientStop { position: 1.0; color: Theme.color.ctaDeep }
+                }
 
                 Text {
                     anchors.centerIn: parent
-                    text: root.mode === "done" ? qsTr("Понятно") : qsTr("Отменить")
-                    color: Theme.color.text1
+                    text: parent.isIntro ? qsTr("Запустить диагностику")
+                        : root.mode === "done" ? qsTr("Понятно") : qsTr("Отменить")
+                    color: parent.isIntro ? Theme.color.bg900 : Theme.color.text1
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
                     font.weight: Theme.font.wBold
@@ -359,7 +414,16 @@ Item {
                     id: goMa
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.close()
+                    onClicked: {
+                        if (root.mode === "intro" && root.hasEngine) {
+                            Haptic.play("light")
+                            root.mode = "running"
+                            root.elapsedSec = 0
+                            TribeEngine.startDoctor()
+                        } else {
+                            root.close()
+                        }
+                    }
                 }
             }
         }
