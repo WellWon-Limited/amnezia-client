@@ -1134,8 +1134,8 @@ PageType {
             id: refreshBtn
             width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
             height: 52; radius: 16
-            // ротация осмысленна только когда туннель поднят; иначе приглушаем
-            opacity: (root.hasEngine && !root.isOn) ? 0.45 : 1.0
+            // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
+            // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
             border.width: 1
             border.color: refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
@@ -1167,7 +1167,7 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter
                     // AVPN: «Подбираем сервер…» ТОЛЬКО в авто-режиме (узел выбирает движок). При РУЧНОМ
                     // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
-                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Сменить сервер")
+                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
                           : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
