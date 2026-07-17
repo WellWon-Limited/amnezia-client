@@ -1488,7 +1488,6 @@ PageType {
 
                 TribeButton {
                     variant: "primary"
-                    glow: false
                     text: qsTr("Поделиться")
                     Layout.fillWidth: true
                     onClicked: transferSheet.shareUrlNative()

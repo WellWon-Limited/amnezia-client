@@ -252,7 +252,6 @@ Item {
                 Layout.fillWidth: true
                 visible: slideView.currentIndex < sheet.richSlides.length - 1
                 variant: "primary"
-                glow: false
                 text: qsTr("Далее")
                 onClicked: slideView.incrementCurrentIndex()
             }
@@ -265,7 +264,6 @@ Item {
                     visible: slideView.currentIndex === sheet.richSlides.length - 1
                              && sheet.knownActions.indexOf(modelData.action) !== -1
                     variant: index === 0 ? "primary" : "glass"
-                    glow: false
                     text: modelData.label || ""
                     onClicked: sheet.handleButton(modelData)
                 }
@@ -274,7 +272,6 @@ Item {
                 Layout.fillWidth: true
                 visible: slideView.currentIndex === sheet.richSlides.length - 1
                 variant: (!sheet.ann || !(sheet.ann.buttons || []).length) ? "primary" : "ghost"
-                glow: false
                 text: qsTr("Прочитал")
                 onClicked: sheet.markRead()
             }
@@ -483,7 +480,6 @@ Item {
                         Layout.fillWidth: true
                         visible: sheet.knownActions.indexOf(modelData.action) !== -1
                         variant: index === 0 ? "primary" : "glass"
-                        glow: false
                         text: modelData.label || ""
                         onClicked: sheet.handleButton(modelData)
                     }
@@ -491,7 +487,6 @@ Item {
                 TribeButton {
                     Layout.fillWidth: true
                     variant: "glass"
-                    glow: false
                     text: qsTr("Прочитал")
                     onClicked: sheet.markRead()
                 }

@@ -107,7 +107,6 @@ Item {
 
     TribeButton {
         variant: "primary"
-        glow: false
         text: qsTr("Понятно")
         width: parent.width - 2 * Theme.space.xl
         anchors.horizontalCenter: parent.horizontalCenter

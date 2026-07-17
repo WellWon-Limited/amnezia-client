@@ -361,7 +361,6 @@ PageType {
                         TribeButton {
                             width: parent.width
                             variant: "primary"
-                            glow: false            // голубая, но без засветов (правка 2026-07-03)
                             text: qsTr("Поделиться")
                             onClicked: root.shareLink()
                         }
