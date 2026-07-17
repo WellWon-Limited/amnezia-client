@@ -2,10 +2,10 @@
 // CTTelephonyNetworkInfo.serviceCurrentRadioAccessTechnology (без разрешений).
 // Возвращает статическую C-строку: "5g" | "lte" | "3g" | "2g" | "" (не сотовая/неизвестно).
 // Образец моста — TribeHapticsIos.mm (extern "C", зовётся из TribeNetInfo.cpp).
-// @import — авто-линк CoreTelephony clang-модулем (паттерн AvpnDiagnostics.mm: обычный
-// #import НЕ линкует фреймворк, ld падал «symbol(s) not found» на архиве)
-@import CoreTelephony;
-@import Foundation;
+// НЕ @import: в .mm C++-модули выключены (-fcxx-modules off) → @import не компилится;
+// фреймворк линкуется явно в ios.cmake (FW_CORETELEPHONY) — паттерн AvpnDiagnostics.mm.
+#import <CoreTelephony/CTTelephonyNetworkInfo.h>
+#import <Foundation/Foundation.h>
 
 extern "C" const char *TribeNetInfo_cellGen()
 {
