@@ -943,7 +943,9 @@ private:
     // AltNodes — опциональная фаза: при проблеме на текущей ноде проверяем до 2 лучших
     // альтернатив (переключение + проба данных) — различает «нода сломана» от «сеть/оператор»;
     // рабочая альтернатива найдена → ОСТАЁМСЯ на ней (активная модель: юзеру сразу хорошо).
-    enum class DoctorPhase { Idle, Connect, Servers, Services, Speed, AltNodes, Send };
+    // RuSplit — опциональная фаза: при включённом «Доступе к сайтам РФ» пробы RU-корпуса
+    // (Яндекс/VK/Аэрофлот) — сплит обязан вести их напрямую (кейс владельца с аэрофлотом).
+    enum class DoctorPhase { Idle, Connect, Servers, Services, RuSplit, Speed, AltNodes, Send };
     DoctorPhase m_docPhase = DoctorPhase::Idle;
     int         m_docEpoch = 0;
     QTimer      m_docGuard;
@@ -966,6 +968,10 @@ private:
     QString     m_docOrigNode;        // nodeId на момент старта AltNodes (для возврата)
     QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
+    QStringList m_docRuNames;         // RU-корпус: имена проверяемых сайтов
+    QList<bool> m_docRuOks;           // результаты (порядок = m_docRuNames)
+    int         m_docRuPending = 0;
+    void docStartRuSplit();           // пробы RU-корпуса (или сразу Speed при выкл. сплите)
     void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)
     void docAltNext();                // переключиться на следующую альтернативу
     void docAltVerify();              // проба данных на альтернативе -> ok/fail -> next

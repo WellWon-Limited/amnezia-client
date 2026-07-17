@@ -187,6 +187,37 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
     return r;
 }
 
+// Стадия 4a (опциональная): ДОСТУП К САЙТАМ РФ (РФ-сплит). Запускается только при включённом
+// тумблере: пробы RU-корпуса (Яндекс/VK/Аэрофлот) текущим путём — сплит обязан вести их
+// напрямую. names/oks — параллельные списки проверенных сайтов.
+inline StageResult ruSplitStage(const QStringList &names, const QList<bool> &oks)
+{
+    StageResult r; r.id = QStringLiteral("rusplit");
+    QStringList bad;
+    int ok = 0;
+    for (int i = 0; i < names.size() && i < oks.size(); ++i) {
+        if (oks.at(i)) ++ok;
+        else bad.append(names.at(i));
+    }
+    r.data.insert(QStringLiteral("ok"), ok);
+    r.data.insert(QStringLiteral("total"), names.size());
+    if (!bad.isEmpty()) r.data.insert(QStringLiteral("failed"), QJsonArray::fromStringList(bad));
+    if (names.isEmpty()) {
+        r.status = Skip;
+        r.note = QStringLiteral("Сайты РФ не проверялись");
+    } else if (bad.isEmpty()) {
+        r.status = Ok;
+        r.note = QStringLiteral("Сайты РФ открываются напрямую");
+    } else if (ok > 0) {
+        r.status = Warn;
+        r.note = QStringLiteral("Не открылись: %1").arg(bad.join(QStringLiteral(", ")));
+    } else {
+        r.status = Bad;
+        r.note = QStringLiteral("Сайты РФ недоступны — проблема с «Доступом к сайтам РФ»");
+    }
+    return r;
+}
+
 // Стадия 5 (опциональная): ДРУГИЕ СЕРВЕРЫ. Запускается только при проблеме на текущей ноде —
 // различает «нода сломана» (альтернатива работает → переключаем) от «сеть/оператор»
 // (все недоступны). names/oks — параллельные списки проверенных альтернатив.

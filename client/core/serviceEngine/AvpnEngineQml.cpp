@@ -4812,8 +4812,9 @@ void AvpnEngineQml::docEnter(DoctorPhase ph)
     // базовый процент стадии (Speed дотикивает по benchStageFrac в проводке конструктора)
     switch (ph) {
     case DoctorPhase::Connect:  m_docPercent = 8;  break;
-    case DoctorPhase::Servers:  m_docPercent = 38; break;
-    case DoctorPhase::Services: m_docPercent = 50; break;
+    case DoctorPhase::Servers:  m_docPercent = 36; break;
+    case DoctorPhase::Services: m_docPercent = 46; break;
+    case DoctorPhase::RuSplit:  m_docPercent = 58; break;
     case DoctorPhase::Speed:    m_docPercent = 66; break;
     case DoctorPhase::AltNodes: m_docPercent = 88; break;
     case DoctorPhase::Send:     m_docPercent = 97; break;
@@ -4910,7 +4911,8 @@ void AvpnEngineQml::docStageDone(const doctor::StageResult &r)
         switch (donePh) {
         case DoctorPhase::Connect:  docStartServers();  break;
         case DoctorPhase::Servers:  docStartServices(); break;
-        case DoctorPhase::Services: docStartSpeed();    break;
+        case DoctorPhase::Services: docStartRuSplit();  break; // при вкл. сплите — RU-корпус
+        case DoctorPhase::RuSplit:  docStartSpeed();    break;
         case DoctorPhase::Speed:    docStartAltNodes(); break; // при проблеме — до 2 альтернатив
         case DoctorPhase::AltNodes: docFinish();        break;
         default: break;
@@ -4949,6 +4951,10 @@ void AvpnEngineQml::docGuardFired()
             emit benchChanged();
         }
         docStageDone(doctor::speedStage(-1, 0, 0));
+        break;
+    case DoctorPhase::RuSplit:
+        // не все пробы успели — вердикт по собранному (m_docRuOks предзаполнен false по индексам)
+        docStageDone(doctor::ruSplitStage(m_docRuNames, m_docRuOks));
         break;
     case DoctorPhase::AltNodes:
         // подъём/проба альтернативы не уложились — считаем её мёртвой и идём дальше
@@ -5027,6 +5033,52 @@ void AvpnEngineQml::docStartSpeed()
     const bool lite = TuningStore::numberOr(QStringLiteral("diag_bench_lite"), 1) != 0;
     m_bench->start(QStringLiteral("doctor"), benchExtra(), lite,
                    currentNodeEndpointIp(currentNode()));
+}
+
+void AvpnEngineQml::docStartRuSplit()
+{
+    // Только при включённом «Доступе к сайтам РФ»: сплит обязан вести RU-корпус напрямую.
+    // Выключен → стадия не показывается вовсе (optional в UI, фазу пропускаем).
+    bool masterOn = false;
+    {
+        QSettings st;
+        masterOn = st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
+    }
+    if (!masterOn) {
+        docStartSpeed();
+        return;
+    }
+    docEnter(DoctorPhase::RuSplit);
+    // корпус: Яндекс + VK (эталоны рунета) + Аэрофлот (кейс владельца 2026-07-17: NGENIX-CDN,
+    // префиксы в байпас-листе есть — проверяем фактическую проходимость текущим путём)
+    struct RuTarget { const char *name; const char *url; };
+    const RuTarget targets[] = {
+        {"Яндекс",   "https://ya.ru/"},
+        {"VK",       "https://vk.com/favicon.ico"},
+        {"Аэрофлот", "https://www.aeroflot.ru/"},
+    };
+    m_docRuNames.clear(); m_docRuOks.clear();
+    m_docRuPending = 0;
+    for (const auto &t : targets) {
+        m_docRuNames.append(QString::fromUtf8(t.name));
+        m_docRuOks.append(false); // предзаполнение по индексам (параллельные колбэки)
+    }
+    for (int i = 0; i < m_docRuNames.size(); ++i) {
+        ++m_docRuPending;
+        QNetworkRequest req{QUrl(QString::fromUtf8(targets[i].url))};
+        req.setTransferTimeout(6000);
+        req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+        QNetworkReply *rep = m_nam->head(req);
+        connect(rep, &QNetworkReply::finished, this, [this, rep, i, e = m_docEpoch] {
+            rep->deleteLater();
+            if (e != m_docEpoch || m_docPhase != DoctorPhase::RuSplit) return;
+            const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (i < m_docRuOks.size())
+                m_docRuOks[i] = (rep->error() == QNetworkReply::NoError && code > 0 && code < 500);
+            if (--m_docRuPending <= 0)
+                docStageDone(doctor::ruSplitStage(m_docRuNames, m_docRuOks));
+        });
+    }
 }
 
 void AvpnEngineQml::docStartAltNodes()
@@ -5176,6 +5228,7 @@ QString AvpnEngineQml::doctorStage() const
     case DoctorPhase::Connect:  return QStringLiteral("connect");
     case DoctorPhase::Servers:  return QStringLiteral("servers");
     case DoctorPhase::Services: return QStringLiteral("services");
+    case DoctorPhase::RuSplit:  return QStringLiteral("rusplit");
     case DoctorPhase::Speed:    return QStringLiteral("speed");
     case DoctorPhase::AltNodes: return QStringLiteral("altnodes");
     case DoctorPhase::Send:     return QStringLiteral("send");
