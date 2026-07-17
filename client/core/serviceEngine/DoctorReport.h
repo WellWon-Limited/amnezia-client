@@ -163,7 +163,10 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
         return r;
     }
     const bool slow = downMbit < 5.0;
-    const bool bloat = idleRttMs > 0 && loadedRttMs > 0
+    // «Пухнет» — только при БОЛИ в абсолюте: loaded RTT >= 400мс (звонок разваливается)
+    // И росте от покоя. Относительный порог сам по себе ложно ругал сотовые сети
+    // (idle 40 -> loaded 120 = ratio 3 при отличных 30+ Мбит — это норма LTE, не проблема).
+    const bool bloat = idleRttMs > 0 && loadedRttMs >= 400
                        && double(loadedRttMs) / double(idleRttMs) > 2.5;
     if (slow && bloat) {
         r.status = Bad;
@@ -180,6 +183,36 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs)
         r.status = Ok;
         r.note = QStringLiteral("Скорость в порядке: %1 Мбит/с")
                      .arg(QString::number(downMbit, 'f', 1));
+    }
+    return r;
+}
+
+// Стадия 5 (опциональная): ДРУГИЕ СЕРВЕРЫ. Запускается только при проблеме на текущей ноде —
+// различает «нода сломана» (альтернатива работает → переключаем) от «сеть/оператор»
+// (все недоступны). names/oks — параллельные списки проверенных альтернатив.
+inline StageResult altNodesStage(const QStringList &names, const QList<bool> &oks,
+                                 const QString &switchedTo)
+{
+    StageResult r; r.id = QStringLiteral("altnodes");
+    QStringList good, bad;
+    for (int i = 0; i < names.size() && i < oks.size(); ++i)
+        (oks.at(i) ? good : bad).append(names.at(i));
+    r.data.insert(QStringLiteral("checked"), names.size());
+    if (!good.isEmpty()) r.data.insert(QStringLiteral("good"), QJsonArray::fromStringList(good));
+    if (!bad.isEmpty())  r.data.insert(QStringLiteral("bad"), QJsonArray::fromStringList(bad));
+    if (!switchedTo.isEmpty()) r.data.insert(QStringLiteral("switched_to"), switchedTo);
+    if (names.isEmpty()) {
+        r.status = Skip;
+        r.note = QStringLiteral("Другие серверы не проверялись");
+    } else if (!switchedTo.isEmpty()) {
+        r.status = Ok;
+        r.note = QStringLiteral("Переключил на %1 — там работает").arg(switchedTo);
+    } else if (!good.isEmpty()) {
+        r.status = Ok;
+        r.note = QStringLiteral("Работает: %1").arg(good.join(QStringLiteral(", ")));
+    } else {
+        r.status = Bad;
+        r.note = QStringLiteral("Другие серверы тоже недоступны — похоже, дело в вашей сети");
     }
     return r;
 }

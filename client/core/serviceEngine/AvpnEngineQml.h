@@ -940,7 +940,10 @@ private:
     // гоняет чипы WhatsApp/TG/YT/IG через туннель; Speed — бенч через туннель). Сторож фазы
     // (clampStageTimeoutMs) гасит зависшую стадию честным вердиктом и идёт дальше — частичный
     // отчёт ценнее прерванного (урок ftStepDone). Спека: 2026-07-17-doctor-v1-design.md.
-    enum class DoctorPhase { Idle, Connect, Servers, Services, Speed, Send };
+    // AltNodes — опциональная фаза: при проблеме на текущей ноде проверяем до 2 лучших
+    // альтернатив (переключение + проба данных) — различает «нода сломана» от «сеть/оператор»;
+    // рабочая альтернатива найдена → ОСТАЁМСЯ на ней (активная модель: юзеру сразу хорошо).
+    enum class DoctorPhase { Idle, Connect, Servers, Services, Speed, AltNodes, Send };
     DoctorPhase m_docPhase = DoctorPhase::Idle;
     int         m_docEpoch = 0;
     QTimer      m_docGuard;
@@ -956,7 +959,16 @@ private:
     bool        m_docSawProgress = false;  // видели connecting/selecting: disconnected ПОСЛЕ
                                            // этого = остановили извне (а не «ещё не стартовали»)
     bool        m_docBenchStarted = false; // Speed-стадию запустил доктор (для cancel)
+    QStringList m_docAltQueue;        // nodeId альтернатив на проверку (до 2)
+    int         m_docAltIdx = -1;     // текущая альтернатива (-1 = не начали)
+    QStringList m_docAltNames;        // человеческие имена проверенных
+    QList<bool> m_docAltOks;          // результат per-альтернатива
+    QString     m_docOrigNode;        // nodeId на момент старта AltNodes (для возврата)
+    QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
+    void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)
+    void docAltNext();                // переключиться на следующую альтернативу
+    void docAltVerify();              // проба данных на альтернативе -> ok/fail -> next
     void docStageDone(const doctor::StageResult &r); // записать стадию и перейти к следующей
     void docGuardFired();             // стадия не уложилась в сторож -> вердикт и дальше
     void docConnectAdvance();         // реакция на changed() в фазе Connect (поднялся/упал туннель)

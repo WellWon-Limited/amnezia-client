@@ -178,7 +178,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_docGuard.setSingleShot(true);
     connect(&m_docGuard, &QTimer::timeout, this, [this] { docGuardFired(); });
     connect(this, &AvpnEngineQml::changed, this, [this] {
-        if (m_docConnecting && m_docPhase == DoctorPhase::Connect)
+        if (m_docConnecting && (m_docPhase == DoctorPhase::Connect
+                                || m_docPhase == DoctorPhase::AltNodes))
             docConnectAdvance();
     }, Qt::QueuedConnection);
     connect(m_bench, &BenchRunner::finished, this, [this](const QJsonObject &result) {
@@ -4787,6 +4788,13 @@ void AvpnEngineQml::cancelDoctor()
         return;
     ++m_docEpoch; // стейл-колбэки всех стадий отбрасываются
     m_docGuard.stop();
+    // отмена посреди перебора альтернатив — вернуть исходный выбор (fire-and-forget)
+    if (m_docPhase == DoctorPhase::AltNodes) {
+        if (!m_docOrigPin.isEmpty())
+            pinAndReconnect(m_docOrigPin);
+        else if (!m_docOrigNode.isEmpty())
+            pinAndReconnect(m_docOrigNode);
+    }
     m_docConnecting = false;
     if (m_docBenchStarted) {
         m_bench->cancel(); // после cancel сигналов НЕ будет — флаг бенча гасим сами
@@ -4804,18 +4812,18 @@ void AvpnEngineQml::docEnter(DoctorPhase ph)
     // базовый процент стадии (Speed дотикивает по benchStageFrac в проводке конструктора)
     switch (ph) {
     case DoctorPhase::Connect:  m_docPercent = 8;  break;
-    case DoctorPhase::Servers:  m_docPercent = 40; break;
-    case DoctorPhase::Services: m_docPercent = 52; break;
-    case DoctorPhase::Speed:    m_docPercent = 70; break;
+    case DoctorPhase::Servers:  m_docPercent = 38; break;
+    case DoctorPhase::Services: m_docPercent = 50; break;
+    case DoctorPhase::Speed:    m_docPercent = 66; break;
+    case DoctorPhase::AltNodes: m_docPercent = 88; break;
     case DoctorPhase::Send:     m_docPercent = 97; break;
     case DoctorPhase::Idle:     break;
     }
-    // сторож: server-tunable с клампом; бенч-стадии нужен запас (lite ~30-60с). Фаза Connect
-    // ставит собственный сторож (45с на подъём) в startDoctor — здесь его НЕ перетираем.
-    if (ph != DoctorPhase::Connect) {
+    // сторож: server-tunable с клампом; бенч-стадии нужен запас (lite ~30-45с → 60с). Фазы
+    // Connect и AltNodes ведут сторожа сами (подъём 45/40с, проба 15с) — НЕ перетираем.
+    if (ph != DoctorPhase::Connect && ph != DoctorPhase::AltNodes) {
         const int base = doctor::clampStageTimeoutMs(
             TuningStore::numberOr(QStringLiteral("diag_stage_timeout_ms"), 0));
-        // Speed — бенч lite ~30-45с; сторож 60с (было 120 — юзер ждал «минуту+» при зависании)
         m_docGuard.start(ph == DoctorPhase::Speed ? 60000 : base);
     }
     emit doctorChanged();
@@ -4823,7 +4831,29 @@ void AvpnEngineQml::docEnter(DoctorPhase ph)
 
 void AvpnEngineQml::docConnectAdvance()
 {
-    if (!m_docConnecting || m_docPhase != DoctorPhase::Connect)
+    if (!m_docConnecting)
+        return;
+    // AltNodes: ждём подъёма на альтернативе (после pinAndReconnect)
+    if (m_docPhase == DoctorPhase::AltNodes) {
+        const QString st = state();
+        if (st == QLatin1String("connected")) {
+            m_docConnecting = false;
+            m_docGuard.start(15000); // сторож на пробу данных
+            QTimer::singleShot(800, this, [this, e = m_docEpoch] {
+                if (e == m_docEpoch && m_docPhase == DoctorPhase::AltNodes) docAltVerify();
+            });
+        } else if (st == QLatin1String("error")
+                   || (st == QLatin1String("disconnected") && m_docSawProgress)) {
+            m_docConnecting = false;
+            m_docGuard.stop();
+            m_docAltOks.append(false); // альтернатива не поднялась
+            docAltNext();
+        } else if (st != QLatin1String("disconnected")) {
+            m_docSawProgress = true;
+        }
+        return;
+    }
+    if (m_docPhase != DoctorPhase::Connect)
         return;
     const QString st = state();
     if (st == QLatin1String("connected")) {
@@ -4881,7 +4911,8 @@ void AvpnEngineQml::docStageDone(const doctor::StageResult &r)
         case DoctorPhase::Connect:  docStartServers();  break;
         case DoctorPhase::Servers:  docStartServices(); break;
         case DoctorPhase::Services: docStartSpeed();    break;
-        case DoctorPhase::Speed:    docFinish();        break;
+        case DoctorPhase::Speed:    docStartAltNodes(); break; // при проблеме — до 2 альтернатив
+        case DoctorPhase::AltNodes: docFinish();        break;
         default: break;
         }
     });
@@ -4918,6 +4949,12 @@ void AvpnEngineQml::docGuardFired()
             emit benchChanged();
         }
         docStageDone(doctor::speedStage(-1, 0, 0));
+        break;
+    case DoctorPhase::AltNodes:
+        // подъём/проба альтернативы не уложились — считаем её мёртвой и идём дальше
+        m_docConnecting = false;
+        m_docAltOks.append(false);
+        docAltNext();
         break;
     case DoctorPhase::Send:
         docFinish();
@@ -4992,6 +5029,96 @@ void AvpnEngineQml::docStartSpeed()
                    currentNodeEndpointIp(currentNode()));
 }
 
+void AvpnEngineQml::docStartAltNodes()
+{
+    // Триггер: только при реальной проблеме на текущей ноде И наличии альтернатив.
+    // Различает «нода сломана» (альтернатива работает → остаёмся на ней) от «сеть/оператор»
+    // (все мертвы → честный вердикт + возврат исходного выбора).
+    if (!doctor::hasProblem(m_docStages)) {
+        docFinish();
+        return;
+    }
+    const QVariantMap cur = currentNode();
+    const QString curId = cur.value(QStringLiteral("nodeId")).toString();
+    // очередь: живые поддерживаемые ноды, отсортированные по измеренному RTT (кеш), != текущей
+    QList<QPair<int, QVariantMap>> cand;
+    const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
+    for (const QVariant &v : pool) {
+        const QVariantMap n = v.toMap();
+        if (!n.value(QStringLiteral("alive")).toBool()) continue;
+        const QString id = n.value(QStringLiteral("nodeId")).toString();
+        if (id.isEmpty() || id == curId) continue;
+        if (!avpn::isSupportedProto(n.value(QStringLiteral("proto")).toString())) continue;
+        const int rtt = m_nodeRtt.value(id, 99999);
+        cand.append({rtt, n});
+    }
+    std::sort(cand.begin(), cand.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+    m_docAltQueue.clear(); m_docAltNames.clear(); m_docAltOks.clear();
+    m_docAltIdx = -1;
+    for (const auto &c : cand) {
+        if (m_docAltQueue.size() >= 2) break;
+        m_docAltQueue.append(c.second.value(QStringLiteral("nodeId")).toString());
+        QString nm = c.second.value(QStringLiteral("name")).toString();
+        if (nm.isEmpty())
+            nm = doctor::countryNameRu(c.second.value(QStringLiteral("countryCode")).toString());
+        m_docAltNames.append(nm);
+    }
+    if (m_docAltQueue.isEmpty()) {
+        docFinish();
+        return;
+    }
+    m_docOrigNode = curId;
+    m_docOrigPin = m_engine.pinnedNodeId();
+    docEnter(DoctorPhase::AltNodes);
+    docAltNext();
+}
+
+void AvpnEngineQml::docAltNext()
+{
+    // предыдущая альтернатива оказалась РАБОЧЕЙ → остаёмся на ней (юзеру сразу хорошо),
+    // дальше не перебираем
+    if (m_docAltIdx >= 0 && m_docAltIdx < m_docAltOks.size() && m_docAltOks.at(m_docAltIdx)) {
+        docStageDone(doctor::altNodesStage(
+            m_docAltNames.mid(0, m_docAltIdx + 1), m_docAltOks,
+            /*switchedTo=*/m_docAltNames.at(m_docAltIdx)));
+        return;
+    }
+    ++m_docAltIdx;
+    if (m_docAltIdx >= m_docAltQueue.size()) {
+        // все альтернативы мертвы — возвращаем исходный выбор (fire-and-forget: реконнект
+        // виден на карточке; итог диагностики от него не зависит)
+        if (!m_docOrigPin.isEmpty())
+            pinAndReconnect(m_docOrigPin);
+        else if (!m_docOrigNode.isEmpty())
+            pinAndReconnect(m_docOrigNode);
+        docStageDone(doctor::altNodesStage(m_docAltNames, m_docAltOks, QString()));
+        return;
+    }
+    m_docConnecting = true;
+    m_docSawProgress = false;
+    m_docGuard.start(40000); // подъём альтернативы
+    emit doctorChanged();    // note текущей стадии в UI обновится (docStage прежний)
+    pinAndReconnect(m_docAltQueue.at(m_docAltIdx)); // stop→start на выбранную (путь пикера)
+}
+
+void AvpnEngineQml::docAltVerify()
+{
+    // данные через туннель на альтернативе: HEAD 204 (первый ответ = работает)
+    QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
+    req.setTransferTimeout(6000);
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    QNetworkReply *rep = m_nam->head(req);
+    connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
+        rep->deleteLater();
+        if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;
+        m_docGuard.stop();
+        const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        m_docAltOks.append(rep->error() == QNetworkReply::NoError && code > 0);
+        docAltNext();
+    });
+}
+
 void AvpnEngineQml::docFinish()
 {
     docEnter(DoctorPhase::Send);
@@ -5050,6 +5177,7 @@ QString AvpnEngineQml::doctorStage() const
     case DoctorPhase::Servers:  return QStringLiteral("servers");
     case DoctorPhase::Services: return QStringLiteral("services");
     case DoctorPhase::Speed:    return QStringLiteral("speed");
+    case DoctorPhase::AltNodes: return QStringLiteral("altnodes");
     case DoctorPhase::Send:     return QStringLiteral("send");
     case DoctorPhase::Idle:     break;
     }
@@ -5064,10 +5192,13 @@ QVariantList AvpnEngineQml::doctorStages() const
         m.insert(QStringLiteral("id"), s.id);
         m.insert(QStringLiteral("status"), s.status);
         m.insert(QStringLiteral("note"), s.note);
-        // серверная стадия несёт country_code — попап рисует флаг TribeFlag рядом со страной
+        // серверная стадия несёт country_code/region/rtt — попап рисует «Сервер: [флаг] Страна · мс»
         const QString cc = s.data.value(QStringLiteral("country_code")).toString();
-        if (!cc.isEmpty())
+        if (!cc.isEmpty()) {
             m.insert(QStringLiteral("countryCode"), cc);
+            m.insert(QStringLiteral("region"), s.data.value(QStringLiteral("region")).toString());
+            m.insert(QStringLiteral("rttMs"), s.data.value(QStringLiteral("rtt_ms")).toInt(-1));
+        }
         out.append(m);
     }
     return out;
