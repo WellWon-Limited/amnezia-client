@@ -518,6 +518,8 @@ QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
         QVariantMap cm;
         cm.insert(QStringLiteral("title"), card.value(QStringLiteral("title")).toString());
         cm.insert(QStringLiteral("body"), card.value(QStringLiteral("body")).toString());
+        // cards v2: tone info|warning|success — валидация на стороне QML (неизвестный = info)
+        cm.insert(QStringLiteral("tone"), card.value(QStringLiteral("tone")).toString());
         QVariantList btns;
         const QJsonArray bArr = card.value(QStringLiteral("buttons")).toArray();
         for (const QJsonValue &bv : bArr) {
@@ -527,6 +529,8 @@ QVariantMap TribeSupportChat::parseMessage(const QJsonObject &m)
             bm.insert(QStringLiteral("action"), b.value(QStringLiteral("action")).toString());
             bm.insert(QStringLiteral("url"), b.value(QStringLiteral("url")).toString());
             bm.insert(QStringLiteral("send"), b.value(QStringLiteral("send")).toString());
+            // cards v2: variant primary|secondary — маппинг в стили кнопки на стороне QML
+            bm.insert(QStringLiteral("variant"), b.value(QStringLiteral("variant")).toString());
             btns.append(bm);
         }
         cm.insert(QStringLiteral("buttons"), btns);

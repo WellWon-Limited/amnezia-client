@@ -71,8 +71,10 @@ class TribeSupportChat : public QObject {
     //           attachments: [{id, kind: "image"|"video"|"log", mime, name, bytes,
     //                          width, height, hasThumb, thumbUrl (data:-URL или ""),
     //                          localUrl (file:// для эха, иначе "")}],
-    //           card (опц., store-flow D): {title, body, buttons: [{label,
-    //                          action: "open_url"|"compose_send", url, send}]} —
+    //           card (опц., store-flow D + cards v2): {title, body,
+    //                          tone: "info"|"warning"|"success", buttons: [{label,
+    //                          action: "open_url"|"compose_send", url, send,
+    //                          variant: "primary"|"secondary"}]} —
     //                          server-driven карточка, рендерится ВМЕСТО body}
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
     // Модель для ListView (роли msgId/sender/body/…): точечные обновления вместо полного
