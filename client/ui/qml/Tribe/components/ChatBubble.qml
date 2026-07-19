@@ -26,6 +26,11 @@ Item {
     // действий — у страницы (cardButtonClicked).
     property var card: undefined
     readonly property bool hasCard: !!card && ((card.title || "") !== "" || (card.body || "") !== "")
+    // AVPN (cards v2): card.tone info|warning|success — неизвестный tone = info, карточку не прятать
+    readonly property string cardTone: {
+        const t = (hasCard && card.tone) || ""
+        return (t === "warning" || t === "success") ? t : "info"
+    }
     signal attachmentClicked(int attachmentId, string kind)
     signal cardButtonClicked(var button)
     signal retryClicked()
@@ -41,11 +46,12 @@ Item {
         anchors.left: bubble.mine ? undefined : parent.left
         anchors.right: bubble.mine ? parent.right : undefined
 
-        // имя оператора над входящим пузырём (у автоответа помечаем)
+        // имя оператора над входящим пузырём — как прислал бэк (локализованное «Поддержка»);
+        // суффикс «· авто» убран по STOREFLOW-CARDS-V2 (isAuto остаётся флагом логики)
         Text {
             visible: !bubble.mine && bubble.operatorName !== ""
             anchors.left: parent.left
-            text: bubble.isAuto ? qsTr("%1 · авто").arg(bubble.operatorName) : bubble.operatorName
+            text: bubble.operatorName
             color: Theme.color.text3
             font.family: Theme.font.body
             font.pixelSize: 11
@@ -226,8 +232,9 @@ Item {
             }
         }
 
-        // AVPN (store-flow D): server-driven карточка — рамка surface1 с заголовком/текстом и
-        // кнопками во всю ширину. Первая кнопка primary (главное действие), остальные glass.
+        // AVPN (store-flow D + cards v2): server-driven карточка — заголовок/текст/кнопки.
+        // tone красит подложку: warning = янтарь (финалы/истечение), success = зелёный
+        // (оплата прошла), info = нейтральная surface1 (идиома тона — TribeResultSheet).
         Rectangle {
             id: cardBox
             visible: bubble.hasCard
@@ -236,9 +243,13 @@ Item {
             width: Math.min(bubble.width * 0.78, 320)
             implicitHeight: cardCol.implicitHeight + 2 * bubble.pad
             radius: Theme.radius.lg
-            color: Theme.color.surface1
+            color: bubble.cardTone === "warning" ? Qt.alpha(Theme.color.warning, 0.14)
+                 : bubble.cardTone === "success" ? Qt.alpha(Theme.color.connected, 0.14)
+                 : Theme.color.surface1
             border.width: 1
-            border.color: Theme.color.border
+            border.color: bubble.cardTone === "warning" ? Qt.alpha(Theme.color.warning, 0.45)
+                        : bubble.cardTone === "success" ? Qt.alpha(Theme.color.connected, 0.45)
+                        : Theme.color.border
 
             Column {
                 id: cardCol
@@ -279,7 +290,15 @@ Item {
                                 .indexOf((modelData && modelData.action) || "") !== -1
                         enabled: knownAction
                         width: cardCol.width
-                        variant: index === 0 ? "primary" : "glass"
+                        // AVPN (cards v2): buttons[].variant primary|secondary с бэка;
+                        // secondary → наш "glass". Нет поля (старые карточки) — прежний
+                        // фолбэк «первая primary, остальные glass». Неизвестное значение = primary.
+                        variant: {
+                            const v = (modelData && modelData.variant) || ""
+                            if (v === "secondary") return "glass"
+                            if (v === "primary") return "primary"
+                            return index === 0 ? "primary" : "glass"
+                        }
                         text: knownAction ? (modelData.label || "")
                                           : qsTr("%1 — обновите приложение").arg(modelData.label || "")
                         onClicked: bubble.cardButtonClicked(modelData)
