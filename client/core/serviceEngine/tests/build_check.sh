@@ -15,3 +15,6 @@ clang++ -std=c++17 -fPIC -include arm_acle.h \
 echo ">>> сборка ок: $OUT"
 cd "$HERE"
 "$OUT"
+
+# AVPN H-4: сверка ручных копий never-bypass (клиент vs бэкенд)
+"$HERE/check_neverbypass_sync.sh"
