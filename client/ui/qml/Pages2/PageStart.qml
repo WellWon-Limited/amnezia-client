@@ -731,6 +731,13 @@ PageType {
             transferInResult.show(qsTr("Подписка перенесена на это устройство"),
                                   qsTr("Дни и трафик уже здесь. Прежнее устройство отключено — можно подключаться."))
         }
+        // AVPN: ЕДИНСТВЕННАЯ точка тоста TribeEngine.error — хост жив на любой вкладке,
+        // ошибка deep-link/kill-switch не теряется вне Connect/Настроек. Страницы в своих
+        // onError держат ТОЛЬКО побочные эффекты (хаптика, redeem-флаги) и тост НЕ зовут —
+        // добавишь showErrorMessage в странице → будет дубль.
+        function onError(message) {
+            PageController.showErrorMessage(message)
+        }
     }
 
     // AVPN (рассылки P-ANN v2): попап важной рассылки — ГЛОБАЛЬНЫЙ слой поверх любого

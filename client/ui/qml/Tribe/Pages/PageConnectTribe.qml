@@ -189,13 +189,13 @@ PageType {
         }
     }
 
-    // ошибки движка — в стандартный тост
+    // ошибки движка: тост показывает host-обработчик в PageStart (единая точка, работает
+    // на любой вкладке) — здесь ТОЛЬКО побочный эффект хаптики, тост не дублировать
     Connections {
         target: typeof TribeEngine !== "undefined" ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) {
             Haptic.playArmed("error") // AVPN (haptics): ошибка коннекта после действия юзера
-            PageController.showErrorMessage(message)
         }
         // AVPN (device_fingerprint): rehome-гейт 403 при переносе по диплинку/QR — диплинк может
         // прилететь, когда живёт только эта вкладка. Терминально: тост без ретраев.
