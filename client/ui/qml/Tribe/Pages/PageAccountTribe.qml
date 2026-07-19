@@ -185,11 +185,11 @@ PageType {
         target: root.hasEngine ? TribeEngine : null
         ignoreUnknownSignals: true
         function onError(message) {
+            // тост показывает host-обработчик в PageStart — здесь только redeem-флаги
             root.redeemFailed = true
             root.redeeming = false
             root.redeemError = true
             root.redeemHint = ""
-            PageController.showErrorMessage(message)
         }
         function onSeatLimitReached(devices) {
             root.redeemFailed = true
