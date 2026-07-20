@@ -46,4 +46,13 @@ inline int healthTickMsTuned()
     return qBound(1000, int(TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)), 60000);
 }
 
+// macOS wake-рестарт (спека 2026-07-17): кап НАШИХ попыток переподнять туннель после пробуждения
+// (ретраи цепляются к reachabilityChanged). После капа — честный OFF («усталость = внешние
+// обстоятельства», дух §13). Пол 1 (0/минус с бэка = wake-фикс молча выключен — для этого есть
+// kill-switch features.wake_restart), потолок 10 (выше — вечная борьба с реально мёртвой сетью).
+inline int wakeRestartMaxTriesTuned()
+{
+    return qBound(1, int(TuningStore::numberOr(QStringLiteral("wake_restart_max_tries"), 5)), 10);
+}
+
 } // namespace avpn

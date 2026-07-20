@@ -80,13 +80,34 @@ QString macForeignVpnName()
     return QString();
 }
 
-bool macInstallService(QString *errOut)
+bool macInstallServiceConfirm(QString *errOut)
 {
     @autoreleasepool {
-        // Установщик + payload-tarball — РЕСУРСЫ app. Скрипт распаковывает tarball в /Library и
-        // поднимает демон. Привилегии запрашиваем через Authorization Services (а НЕ osascript) —
-        // тогда системное окно показывает «Tribe VPN» + НАШ понятный текст (что ставится VPN-служба),
-        // а не пугающее «osascript хочет внести изменения».
+        // ГЛАВНЫЙ поток. NSAppleScript IN-PROCESS → диалог идёт от «Tribe VPN» (а не «osascript»);
+        // display dialog крутит СВОЙ модальный цикл и качает события — окно приложения живое.
+        // Пароль здесь НЕ спрашиваем — привилегированная часть ушла в macInstallServiceRun (фон).
+        NSString *src =
+            @"button returned of (display dialog \"«Tribe VPN» установит системную службу VPN, "
+             "необходимую для подключения. Сейчас потребуется пароль администратора Mac.\" "
+             "with title \"Установка службы Tribe VPN\" buttons {\"Отмена\", \"Продолжить\"} "
+             "default button \"Продолжить\" with icon note)";
+        NSDictionary *asErr = nil;
+        NSAppleScript *as = [[NSAppleScript alloc] initWithSource:src];
+        NSAppleEventDescriptor *res = [as executeAndReturnError:&asErr];
+        // -128 = отмена; любой другой исход без «Продолжить» трактуем так же.
+        if (asErr != nil || res == nil || ![[res stringValue] isEqualToString:@"Продолжить"]) {
+            if (errOut) *errOut = QStringLiteral("Установка службы VPN отменена");
+            return false;
+        }
+        return true;
+    }
+}
+
+bool macInstallServiceRun(QString *errOut)
+{
+    @autoreleasepool {
+        // ФОНОВЫЙ поток (можно и главный, но тогда beachball). Установщик + payload-tarball —
+        // РЕСУРСЫ app. Скрипт распаковывает tarball в /Library и поднимает демон.
         NSString *script = [[NSBundle mainBundle] pathForResource:@"tribe-svc-install" ofType:@"sh"];
         NSString *tar    = [[[NSBundle mainBundle] resourcePath]
             stringByAppendingPathComponent:@"tribe-svc.tar.gz"];
@@ -106,37 +127,28 @@ bool macInstallService(QString *errOut)
         NSString *shForAS = [shellCmd stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
         shForAS = [shForAS stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
 
-        // NSAppleScript IN-PROCESS → запрос прав показывает «Tribe VPN» (а НЕ «osascript»), и
+        // NSAppleScript IN-PROCESS → системный промпт пароля атрибутирован «Tribe VPN» (а НЕ
+        // «osascript»); промпт рисует SecurityAgent (отдельный процесс) — поток вызова ему не важен.
         // `do shell script ... with administrator privileges` НАДЁЖНО поднимает root (в отличие от
-        // AuthorizationExecuteWithPrivileges, который на macOS 26 не элевейтит). Сначала — понятный
-        // пояснительный диалог (что произойдёт), потом системное окно пароля.
+        // AuthorizationExecuteWithPrivileges, который на macOS 26 не элевейтит). UI-элементов
+        // (display dialog и т.п.) в этом скрипте быть НЕ должно — вне главного потока это -1713.
         NSString *src = [NSString stringWithFormat:
-            @"set q to button returned of (display dialog \"«Tribe VPN» установит системную службу VPN, "
-             "необходимую для подключения. Сейчас потребуется пароль администратора Mac.\" "
-             "with title \"Установка службы Tribe VPN\" buttons {\"Отмена\", \"Продолжить\"} "
-             "default button \"Продолжить\" with icon note)\n"
-             "if q is \"Продолжить\" then\n"
-             "  do shell script \"%@\" with administrator privileges\n"
-             "end if\n"
-             "return q", shForAS];
+            @"do shell script \"%@\" with administrator privileges", shForAS];
 
         NSDictionary *asErr = nil;
         NSAppleScript *as = [[NSAppleScript alloc] initWithSource:src];
-        NSAppleEventDescriptor *res = [as executeAndReturnError:&asErr];
+        [as executeAndReturnError:&asErr];
         if (asErr != nil) {
-            // -128 = пользователь отменил.
+            // -128 = пользователь отменил промпт пароля.
             NSNumber *code = asErr[@"NSAppleScriptErrorNumber"];
             if (errOut) *errOut = (code.intValue == -128)
                 ? QStringLiteral("Установка службы VPN отменена")
                 : QStringLiteral("Не удалось установить службу VPN (нет прав администратора)");
             return false;
         }
-        if (res != nil && ![[res stringValue] isEqualToString:@"Продолжить"]) {
-            if (errOut) *errOut = QStringLiteral("Установка службы VPN отменена");
-            return false;
-        }
 
-        // Подтверждаем, что демон реально поднялся (postinstall bootstrap синхронен; ждём до ~5с).
+        // Подтверждаем, что демон реально поднялся (postinstall bootstrap синхронен; ждём до ~5с —
+        // мы на фоновом потоке, GUI это не трогает).
         for (int i = 0; i < 16 && !macServiceRunning(); ++i)
             QThread::msleep(300);
         if (!macServiceRunning()) {

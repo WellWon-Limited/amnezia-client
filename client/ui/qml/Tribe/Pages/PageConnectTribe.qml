@@ -1167,8 +1167,11 @@ PageType {
                     anchors.verticalCenter: parent.verticalCenter
                     // AVPN: «Подбираем сервер…» ТОЛЬКО в авто-режиме (узел выбирает движок). При РУЧНОМ
                     // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
+                    // macOS: на время фоновой установки root-демона — честный статус установки
+                    // (=== true — гард на старый бинарь без свойства). // AVPN
                     text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
-                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))
+                          : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем службу VPN…")
+                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…")))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
             }
