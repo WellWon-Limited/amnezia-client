@@ -175,6 +175,12 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
                                 : QStringLiteral("ru,su,xn--p1ai,vk.com,userapi.com,yandex.net,yastatic.net"));
             cfg.insert(QStringLiteral("dnsFwdServer"),
                        bl.valid ? bl.splitDnsServer : QStringLiteral("77.88.8.8"));
+            // AVPN: прогрев WG-рукопожатия при подъёме — первый DNS не ловит холодный туннель
+            // («первый запрос мимо, второй ок»). Kill-switch features.dns_fwd_warmup (default ВКЛ):
+            // бэк гасит без релиза, прислав "0". Значение СТРОКОЙ (JSONDecoder-грабля iOS).
+            cfg.insert(QStringLiteral("dnsFwdWarmup"),
+                       avpn::TuningStore::flag(QStringLiteral("dns_fwd_warmup"), true)
+                           ? QStringLiteral("1") : QStringLiteral("0"));
         }
     }
     // AVPN backend-first: пороги «нода мертва» для iOS NE (numbers.*; фолбэк = константы NE).

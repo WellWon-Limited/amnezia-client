@@ -14,11 +14,11 @@ from conan.tools.scm import Git
 import os
 
 TRIBE_GIT_URL = "https://github.com/wellwon/amneziawg-apple.git"
-TRIBE_GIT_REF = "b887ebd016084f31149b890c68c346383428b71a"  # tribe-dnsfwd: dnsfwd.go + wgSetSplitDns
+TRIBE_GIT_REF = "cbf9f72"  # tribe-dnsfwd: dnsfwd.go + wgSetSplitDns + handshake warmup
 
 class AwgAppleTribe(ConanFile):
     name = "awg-apple"
-    version = "2.0.2-tribe.1"
+    version = "2.0.2-tribe.2"
     settings = "os", "arch", "compiler"
 
     @property

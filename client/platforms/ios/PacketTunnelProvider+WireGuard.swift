@@ -25,10 +25,11 @@ extension PacketTunnelProvider {
                                        wgConfig.dnsFwdServer ?? "77.88.8.8",
                                        wgConfig.dns1,
                                        wgConfig.clientIP,
-                                       1)
-                wg_log(.info, message: "AVPN dnsfwd: enable rc=\(rc)")
+                                       1,
+                                       wgConfig.dnsFwdWarmupEnabled ? 1 : 0)
+                wg_log(.info, message: "AVPN dnsfwd: enable rc=\(rc) warmup=\(wgConfig.dnsFwdWarmupEnabled)")
             } else {
-                _ = wgSetSplitDns("", "", "", "", 0)
+                _ = wgSetSplitDns("", "", "", "", 0, 0)
             }
 
             let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgConfigStr)
