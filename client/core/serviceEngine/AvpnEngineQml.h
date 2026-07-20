@@ -965,10 +965,16 @@ private:
     bool        m_docSawProgress = false;  // видели connecting/selecting: disconnected ПОСЛЕ
                                            // этого = остановили извне (а не «ещё не стартовали»)
     bool        m_docBenchStarted = false; // Speed-стадию запустил доктор (для cancel)
-    QStringList m_docAltQueue;        // nodeId альтернатив на проверку (до 2)
+    QStringList m_docAltQueue;        // nodeId альтернатив на проверку (до 3, самые быстрые по RTT)
     int         m_docAltIdx = -1;     // текущая альтернатива (-1 = не начали)
     QStringList m_docAltNames;        // человеческие имена проверенных
-    QList<bool> m_docAltOks;          // результат per-альтернатива
+    QList<bool> m_docAltOks;          // итог per-альтернатива (стабильна = обе пробы прошли)
+    QVariantList m_docAltDetails;     // per-нода факты: name/cc/handshake/rx/rtt/обе пробы/verdict
+    QVariantList m_docAltCand;        // очередь-кандидаты (nodeId+name+cc) для деталей
+    qint64      m_docAltRx0 = 0;      // rx на момент connected альтернативы (рост = данные идут)
+    int         m_docAltIcmpMs = -1;  // ICMP 1.1.1.1 через туннель на альтернативе
+    qint64      m_docAltHsSec = -1;   // возраст handshake на альтернативе
+    bool        m_docAltProbe1 = false; // результат первой пробы (до re-probe)
     QString     m_docOrigNode;        // nodeId на момент старта AltNodes (для возврата)
     QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
@@ -992,7 +998,9 @@ private:
     void docStartRuSplit();           // пробы RU-корпуса (или сразу Speed при выкл. сплите)
     void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)
     void docAltNext();                // переключиться на следующую альтернативу
-    void docAltVerify();              // проба данных на альтернативе -> ok/fail -> next
+    void docAltVerify();              // проба 1 данных на альтернативе (сразу после connected)
+    void docAltVerify2();             // проба 2 (после ~keepalive) — ловит задержанный blackhole
+    void docAltRecord(bool probe2);   // свести обе пробы в per-нода деталь -> docAltNext
     void docStageDone(const doctor::StageResult &r); // записать стадию и перейти к следующей
     void docGuardFired();             // стадия не уложилась в сторож -> вердикт и дальше
     void docConnectAdvance();         // реакция на changed() в фазе Connect (поднялся/упал туннель)

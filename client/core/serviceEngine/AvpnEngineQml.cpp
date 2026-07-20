@@ -4987,7 +4987,12 @@ void AvpnEngineQml::docConnectAdvance()
         const QString st = state();
         if (st == QLatin1String("connected")) {
             m_docConnecting = false;
-            m_docGuard.start(15000); // сторож на пробу данных
+            m_docAltRx0 = m_tunnel.readStats().rxBytes; // база для «данные идут» (рост rx)
+            m_docAltProbe1 = false; m_docAltIcmpMs = -1; m_docAltHsSec = -1;
+            // сторож накрывает обе пробы: 800мс прогрев + проба1 + re-probe-гэп + проба2
+            const int gap = qBound(3000, int(avpn::TuningStore::numberOr(
+                                       QStringLiteral("doctor_alt_reprobe_ms"), 12000.0)), 30000);
+            m_docGuard.start(gap + 16000);
             QTimer::singleShot(800, this, [this, e = m_docEpoch] {
                 if (e == m_docEpoch && m_docPhase == DoctorPhase::AltNodes) docAltVerify();
             });
@@ -4995,8 +5000,8 @@ void AvpnEngineQml::docConnectAdvance()
                    || (st == QLatin1String("disconnected") && m_docSawProgress)) {
             m_docConnecting = false;
             m_docGuard.stop();
-            m_docAltOks.append(false); // альтернатива не поднялась
-            docAltNext();
+            m_docAltProbe1 = false; // альтернатива не поднялась — обе пробы «мимо»
+            docAltRecord(/*probe2=*/false);
         } else if (st != QLatin1String("disconnected")) {
             m_docSawProgress = true;
         }
@@ -5133,10 +5138,10 @@ void AvpnEngineQml::docGuardFired()
         docStageDone(doctor::ruSplitStage(m_docRuNames, m_docRuOks));
         break;
     case DoctorPhase::AltNodes:
-        // подъём/проба альтернативы не уложились — считаем её мёртвой и идём дальше
+        // подъём/проба альтернативы не уложились в сторож. Если проба 1 уже прошла (зависла
+        // проба 2) — это нестабильная нода (одна проба), не мёртвая: docAltRecord с probe2=false.
         m_docConnecting = false;
-        m_docAltOks.append(false);
-        docAltNext();
+        docAltRecord(/*probe2=*/false);
         break;
     case DoctorPhase::Send:
         docFinish();
@@ -5333,14 +5338,27 @@ void AvpnEngineQml::docStartAltNodes()
     std::sort(cand.begin(), cand.end(),
               [](const auto &a, const auto &b) { return a.first < b.first; });
     m_docAltQueue.clear(); m_docAltNames.clear(); m_docAltOks.clear();
+    m_docAltDetails.clear(); m_docAltCand.clear();
     m_docAltIdx = -1;
+    // До 3 самых быстрых альтернатив (server-driven: doctor_alt_max). Каждую держим и пробуем
+    // ДВАЖДЫ (сразу + после ~keepalive) — ловит «handshake есть, данные пропали через 20с».
+    const int altMax = qBound(1, int(avpn::TuningStore::numberOr(
+                                  QStringLiteral("doctor_alt_max"), 3.0)), 5);
     for (const auto &c : cand) {
-        if (m_docAltQueue.size() >= 2) break;
-        m_docAltQueue.append(c.second.value(QStringLiteral("nodeId")).toString());
+        if (m_docAltQueue.size() >= altMax) break;
+        const QString id = c.second.value(QStringLiteral("nodeId")).toString();
+        m_docAltQueue.append(id);
         QString nm = c.second.value(QStringLiteral("name")).toString();
+        const QString cc = c.second.value(QStringLiteral("countryCode")).toString();
         if (nm.isEmpty())
-            nm = doctor::countryNameRu(c.second.value(QStringLiteral("countryCode")).toString());
+            nm = doctor::countryNameRu(cc);
         m_docAltNames.append(nm);
+        QVariantMap meta;
+        meta.insert(QStringLiteral("name"), nm);
+        meta.insert(QStringLiteral("cc"), cc);
+        meta.insert(QStringLiteral("nodeId"), id);
+        meta.insert(QStringLiteral("rtt_ms"), c.first < 99999 ? c.first : -1);
+        m_docAltCand.append(meta);
     }
     if (m_docAltQueue.isEmpty()) {
         docFinish();
@@ -5354,23 +5372,36 @@ void AvpnEngineQml::docStartAltNodes()
 
 void AvpnEngineQml::docAltNext()
 {
-    // предыдущая альтернатива оказалась РАБОЧЕЙ → остаёмся на ней (юзеру сразу хорошо),
-    // дальше не перебираем
+    // предыдущая альтернатива оказалась СТАБИЛЬНОЙ (обе пробы) → остаёмся на ней (юзеру сразу
+    // хорошо), дальше не перебираем. Нестабильная (одна проба из двух = задержанный blackhole)
+    // НЕ считается рабочей — перебираем дальше, ищем по-настоящему живую.
     if (m_docAltIdx >= 0 && m_docAltIdx < m_docAltOks.size() && m_docAltOks.at(m_docAltIdx)) {
         docStageDone(doctor::altNodesStage(
             m_docAltNames.mid(0, m_docAltIdx + 1), m_docAltOks,
-            /*switchedTo=*/m_docAltNames.at(m_docAltIdx)));
+            /*switchedTo=*/m_docAltNames.at(m_docAltIdx),
+            QJsonArray::fromVariantList(m_docAltDetails)));
         return;
     }
     ++m_docAltIdx;
     if (m_docAltIdx >= m_docAltQueue.size()) {
-        // все альтернативы мертвы — возвращаем исходный выбор (fire-and-forget: реконнект
-        // виден на карточке; итог диагностики от него не зависит)
-        if (!m_docOrigPin.isEmpty())
+        // ни одна альтернатива не стабильна. Если была нестабильная (одна проба прошла) —
+        // возвращаем на неё (хоть что-то), иначе — исходный выбор. Fire-and-forget.
+        int bestShaky = -1;
+        for (int i = 0; i < m_docAltDetails.size(); ++i)
+            if (m_docAltDetails.at(i).toMap().value(QStringLiteral("verdict")).toInt() == 1) {
+                bestShaky = i; break; // первый = самый быстрый (очередь отсортирована по RTT)
+            }
+        QString switchedTo;
+        if (bestShaky >= 0 && bestShaky < m_docAltQueue.size()) {
+            pinAndReconnect(m_docAltQueue.at(bestShaky));
+            switchedTo = m_docAltNames.value(bestShaky);
+        } else if (!m_docOrigPin.isEmpty()) {
             pinAndReconnect(m_docOrigPin);
-        else if (!m_docOrigNode.isEmpty())
+        } else if (!m_docOrigNode.isEmpty()) {
             pinAndReconnect(m_docOrigNode);
-        docStageDone(doctor::altNodesStage(m_docAltNames, m_docAltOks, QString()));
+        }
+        docStageDone(doctor::altNodesStage(m_docAltNames, m_docAltOks, switchedTo,
+                                           QJsonArray::fromVariantList(m_docAltDetails)));
         return;
     }
     m_docConnecting = true;
@@ -5380,9 +5411,21 @@ void AvpnEngineQml::docAltNext()
     pinAndReconnect(m_docAltQueue.at(m_docAltIdx)); // stop→start на выбранную (путь пикера)
 }
 
+// Проба 1 сразу после connected: HEAD 204 + ICMP через туннель + возраст handshake. Результат
+// НЕ финализируем — планируем пробу 2 после ~keepalive (задержанный blackhole S4/ТСПУ виден
+// только тогда: handshake жив, data-плейн умирает через ~20-28с).
 void AvpnEngineQml::docAltVerify()
 {
-    // данные через туннель на альтернативе: HEAD 204 (первый ответ = работает)
+    m_docAltHsSec = debugSnapshot().value(QStringLiteral("latestHandshakeAgeSec")).toLongLong();
+    if (m_docPing) {
+        m_docPing->probeAll({{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}}, 3000,
+            [this, e = m_docEpoch](const QString &, int rttMs) {
+                if (e == m_docEpoch && rttMs >= 0
+                    && (m_docAltIcmpMs < 0 || rttMs < m_docAltIcmpMs))
+                    m_docAltIcmpMs = rttMs;
+            },
+            [] {});
+    }
     QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
@@ -5390,11 +5433,51 @@ void AvpnEngineQml::docAltVerify()
     connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;
-        m_docGuard.stop();
         const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        m_docAltOks.append(rep->error() == QNetworkReply::NoError && code > 0);
-        docAltNext();
+        m_docAltProbe1 = rep->error() == QNetworkReply::NoError && code > 0;
+        const int gap = qBound(3000, int(avpn::TuningStore::numberOr(
+                                   QStringLiteral("doctor_alt_reprobe_ms"), 12000.0)), 30000);
+        QTimer::singleShot(gap, this, [this, e = m_docEpoch] {
+            if (e == m_docEpoch && m_docPhase == DoctorPhase::AltNodes) docAltVerify2();
+        });
     });
+}
+
+// Проба 2 (после гэпа): второй HEAD 204. verdict сводит обе.
+void AvpnEngineQml::docAltVerify2()
+{
+    QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
+    req.setTransferTimeout(6000);
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    QNetworkReply *rep = m_nam->head(req);
+    connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
+        rep->deleteLater();
+        if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;
+        const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        docAltRecord(/*probe2=*/rep->error() == QNetworkReply::NoError && code > 0);
+    });
+}
+
+// Свести обе пробы в per-нода деталь. verdict: 2=обе прошли (стабильна), 1=одна (нестабильна,
+// задержанный blackhole), 0=обе мимо (мертва). m_docAltOks[idx] = стабильна (для switch-логики).
+void AvpnEngineQml::docAltRecord(bool probe2)
+{
+    m_docGuard.stop();
+    const qint64 rxNow = m_tunnel.readStats().rxBytes;
+    const bool rxGrew = rxNow > m_docAltRx0;
+    const int hits = (m_docAltProbe1 ? 1 : 0) + (probe2 ? 1 : 0);
+    const int verdict = hits >= 2 ? 2 : (hits == 1 ? 1 : 0);
+    QVariantMap d = (m_docAltIdx >= 0 && m_docAltIdx < m_docAltCand.size())
+                        ? m_docAltCand.at(m_docAltIdx).toMap() : QVariantMap{};
+    d.insert(QStringLiteral("probe1"), m_docAltProbe1);
+    d.insert(QStringLiteral("probe2"), probe2);
+    d.insert(QStringLiteral("rx_grew"), rxGrew);
+    d.insert(QStringLiteral("handshake_sec"), double(m_docAltHsSec));
+    if (m_docAltIcmpMs >= 0) d.insert(QStringLiteral("tunnel_icmp_ms"), m_docAltIcmpMs);
+    d.insert(QStringLiteral("verdict"), verdict);
+    m_docAltDetails.append(d);
+    m_docAltOks.append(verdict >= 2); // РАБОЧАЯ только если стабильна (обе пробы)
+    docAltNext();
 }
 
 void AvpnEngineQml::docFinish()
