@@ -4,6 +4,7 @@
 // Образец моста — TribeHapticsIos.mm (extern "C", зовётся из TribeNetInfo.cpp).
 // НЕ @import: в .mm C++-модули выключены (-fcxx-modules off) → @import не компилится;
 // фреймворк линкуется явно в ios.cmake (FW_CORETELEPHONY) — паттерн AvpnDiagnostics.mm.
+#import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <Foundation/Foundation.h>
 
