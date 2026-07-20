@@ -4723,6 +4723,7 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         // AVPN (Task 10 финал): протокол ноды — QML-пикер и админ-свип скипают неподдерживаемые
         // (xray, ...): коннект к ним невозможен, тап/свип упирался бы в сторожа. Пусто = awg.
         n["proto"] = r.proto;
+        n["manualOnly"] = r.manualOnly; // AVPN (Доктор): manual/RU скипаются в авто-очередях
         pool.append(n);
     }
     m["pool"] = pool;
@@ -5323,6 +5324,9 @@ void AvpnEngineQml::docStartAltNodes()
         const QString id = n.value(QStringLiteral("nodeId")).toString();
         if (id.isEmpty() || id == curId) continue;
         if (!avpn::isSupportedProto(n.value(QStringLiteral("proto")).toString())) continue;
+        // manual_only/RU (§14.3) — вне авто-выбора ВЕЗДЕ: иначе Доктор проверял бы RU-ноду и,
+        // пройди её проба, пересадил бы пользователя на RU-egress (реальный случай 2026-07-20).
+        if (n.value(QStringLiteral("manualOnly")).toBool()) continue;
         const int rtt = m_nodeRtt.value(id, 99999);
         cand.append({rtt, n});
     }
