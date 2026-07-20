@@ -416,6 +416,11 @@ public:
     Q_INVOKABLE QString doctorReportJson() const;  // итоговый JSON type:"doctor" (после finish)
     Q_INVOKABLE QString doctorHumanReport() const; // читаемое резюме для менеджера (текст в тред)
     Q_INVOKABLE QString doctorDiagText() const;    // buildDiagReport() + секция DOCTOR (файл-вложение)
+    // AVPN (Доктор): ручной оператор — единственный путь на iOS 16+ (Apple закрыл CTCarrier).
+    // Пусто = сбросить (вернуться к авто MCC-MNC). Читается в benchExtra (QSettings AvpnDiag/carrier).
+    Q_INVOKABLE void setDiagCarrier(const QString &code);
+    Q_INVOKABLE QString diagCarrier() const;        // текущий (ручной приоритетнее авто)
+    Q_INVOKABLE QString diagCarrierAuto() const;     // авто MCC-MNC ("" если недоступно)
     bool doctorRunning() const { return m_docPhase != DoctorPhase::Idle; }
     QString doctorStage() const;                   // connect|servers|services|speed|send
     int doctorPercent() const { return m_docPercent; }

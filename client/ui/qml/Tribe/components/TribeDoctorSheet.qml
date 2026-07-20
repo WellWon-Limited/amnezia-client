@@ -197,6 +197,70 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
+            // ── ОПЕРАТОР (ручной): iOS 16+ закрыл доступ к оператору через API, поэтому если
+            // авто-код пуст — даём выбрать вручную. Помогает выявить «на этом операторе нода не
+            // работает». Только на сотовой; необязательно. На Android авто-код есть → блок скрыт.
+            ColumnLayout {
+                id: carrierPick
+                visible: root.mode === "intro" && root.hasEngine
+                         && TribeEngine.diagCarrierAuto() === ""
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.space.sm
+                spacing: Theme.space.xs
+                readonly property var ops: [
+                    { code: "250-02", name: "МегаФон" }, { code: "250-01", name: "МТС" },
+                    { code: "250-99", name: "Билайн" }, { code: "250-20", name: "Теле2" },
+                    { code: "250-11", name: "Yota" }
+                ]
+                property string sel: root.hasEngine ? TribeEngine.diagCarrier() : ""
+
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("Если вы на мобильном интернете — укажите оператора (необязательно):")
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.caption
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.space.xs
+                    Repeater {
+                        model: carrierPick.ops
+                        delegate: Rectangle {
+                            required property var modelData
+                            readonly property bool on: carrierPick.sel === modelData.code
+                            radius: Theme.radius.pill
+                            color: on ? Theme.color.accent : Theme.color.surface2
+                            border.width: 1
+                            border.color: on ? Theme.color.accent : Theme.color.border
+                            implicitHeight: 32
+                            implicitWidth: opLabel.implicitWidth + Theme.space.md * 2
+                            Text {
+                                id: opLabel
+                                anchors.centerIn: parent
+                                text: parent.modelData.name
+                                color: parent.on ? Theme.color.bg800 : Theme.color.text2
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.bodyS
+                                font.weight: Theme.font.wSemibold
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Haptic.play("selection")
+                                    const code = parent.on ? "" : parent.modelData.code
+                                    carrierPick.sel = code
+                                    if (root.hasEngine) TribeEngine.setDiagCarrier(code)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── СТАДИИ (ход теста и финал) ───────────────────────────────────────────────
             ColumnLayout {
                 visible: root.mode !== "intro"
