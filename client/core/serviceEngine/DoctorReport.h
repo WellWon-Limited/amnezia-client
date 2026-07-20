@@ -308,17 +308,31 @@ inline StageResult ruSplitStage(const QStringList &names, const QList<bool> &oks
 
 // Стадия 5 (опциональная): ДРУГИЕ СЕРВЕРЫ. Запускается только при проблеме на текущей ноде —
 // различает «нода сломана» (альтернатива работает → переключаем) от «сеть/оператор»
-// (все недоступны). names/oks — параллельные списки проверенных альтернатив.
+// (все недоступны). names/oks — параллельные списки проверенных альтернатив; details —
+// per-нода факты (обе пробы/handshake/rx/RTT) для честного разбора «там работает» постфактум.
+// verdict per-нода: 0=мертва (обе пробы мимо), 1=нестабильна (одна проба, задержанный blackhole),
+// 2=жива (обе пробы прошли). good = verdict>=2 (стабильная), иначе в bad.
 inline StageResult altNodesStage(const QStringList &names, const QList<bool> &oks,
-                                 const QString &switchedTo)
+                                 const QString &switchedTo,
+                                 const QJsonArray &details = {})
 {
     StageResult r; r.id = QStringLiteral("altnodes");
-    QStringList good, bad;
+    QStringList good, bad, shaky;
     for (int i = 0; i < names.size() && i < oks.size(); ++i)
         (oks.at(i) ? good : bad).append(names.at(i));
+    // details несут per-нода verdict — из них вытаскиваем «нестабильные» (одна проба из двух).
+    for (const QJsonValue &v : details) {
+        const QJsonObject d = v.toObject();
+        if (d.value(QStringLiteral("verdict")).toInt() == 1) {
+            const QString nm = d.value(QStringLiteral("name")).toString();
+            if (!nm.isEmpty()) shaky.append(nm);
+        }
+    }
     r.data.insert(QStringLiteral("checked"), names.size());
     if (!good.isEmpty()) r.data.insert(QStringLiteral("good"), QJsonArray::fromStringList(good));
     if (!bad.isEmpty())  r.data.insert(QStringLiteral("bad"), QJsonArray::fromStringList(bad));
+    if (!shaky.isEmpty()) r.data.insert(QStringLiteral("unstable"), QJsonArray::fromStringList(shaky));
+    if (!details.isEmpty()) r.data.insert(QStringLiteral("details"), details);
     if (!switchedTo.isEmpty()) r.data.insert(QStringLiteral("switched_to"), switchedTo);
     if (names.isEmpty()) {
         r.status = Skip;
@@ -329,6 +343,10 @@ inline StageResult altNodesStage(const QStringList &names, const QList<bool> &ok
     } else if (!good.isEmpty()) {
         r.status = Ok;
         r.note = QStringLiteral("Работает: %1").arg(good.join(QStringLiteral(", ")));
+    } else if (!shaky.isEmpty()) {
+        r.status = Warn;
+        r.note = QStringLiteral("Нестабильно: %1 — данные пропадают через ~%2 c после подключения")
+                     .arg(shaky.join(QStringLiteral(", "))).arg(20);
     } else {
         r.status = Bad;
         r.note = QStringLiteral("Другие серверы тоже недоступны — похоже, дело в вашей сети");
