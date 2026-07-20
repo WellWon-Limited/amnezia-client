@@ -47,12 +47,14 @@ inline int clampStageTimeoutMs(double v)
 //   metered/roaming: -1 неизвестно | 0 | 1;
 //   wlForced: -1 не гонялись | 0 сеть нормальная | 1 сигнатура «белых списков».
 inline StageResult networkStage(int captive, const QString &netType, const QString &cellGen,
-                                int metered, int roaming, int wlForced)
+                                int metered, int roaming, int wlForced,
+                                const QString &carrier = QString())
 {
     StageResult r; r.id = QStringLiteral("network");
     if (captive >= 0) r.data.insert(QStringLiteral("captive"), captive == 1);
     if (!netType.isEmpty()) r.data.insert(QStringLiteral("net_type"), netType);
     if (!cellGen.isEmpty()) r.data.insert(QStringLiteral("cellular_gen"), cellGen);
+    if (!carrier.isEmpty()) r.data.insert(QStringLiteral("carrier"), carrier); // MCC-MNC / ручной
     if (metered >= 0) r.data.insert(QStringLiteral("metered"), metered == 1);
     if (roaming >= 0) r.data.insert(QStringLiteral("roaming"), roaming == 1);
     if (wlForced >= 0) r.data.insert(QStringLiteral("wl_forced"), wlForced == 1);

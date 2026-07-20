@@ -1303,6 +1303,14 @@ QJsonObject AvpnEngineQml::benchExtra() const
             }
         }
     }
+    // AVPN (Доктор): оператор для паттернов «оператор X режет ноду Y». Приоритет — ручной выбор
+    // пользователя (QSettings, единственный путь на iOS 16+, где API оператора закрыт), иначе
+    // обезличенный авто-код MCC-MNC. Пусто → поле не пишем (Wi-Fi/десктоп/недоступно).
+    QSettings carrierSettings;
+    const QString carrierManual = carrierSettings.value(QStringLiteral("AvpnDiag/carrier")).toString();
+    const QString carrier = !carrierManual.isEmpty() ? carrierManual : avpn::carrierCode();
+    if (!carrier.isEmpty())
+        extra.insert(QStringLiteral("carrier"), carrier);
     return extra;
 }
 
@@ -5084,7 +5092,8 @@ void AvpnEngineQml::docNetMaybeDone()
         return; // ждём вторую параллельную пробу
     docStageDone(doctor::networkStage(
         m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
-        avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl));
+        avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
+        benchExtra().value(QStringLiteral("carrier")).toString()));
 }
 
 void AvpnEngineQml::docStartConnect()
@@ -5284,7 +5293,8 @@ void AvpnEngineQml::docGuardFired()
         m_docNetPending = 0;
         docStageDone(doctor::networkStage(
             m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
-            avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl));
+            avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
+            benchExtra().value(QStringLiteral("carrier")).toString()));
         break;
     case DoctorPhase::Connect: {
         // сторож: либо не поднялись (45с), либо зависла проба данных (15с) — вердикт по факту
@@ -5720,6 +5730,30 @@ QString AvpnEngineQml::doctorReportJson() const
     if (m_docReport.isEmpty())
         return {};
     return QString::fromUtf8(QJsonDocument(m_docReport).toJson(QJsonDocument::Compact));
+}
+
+// AVPN (Доктор): ручной оператор — QSettings AvpnDiag/carrier (benchExtra отдаёт ему приоритет
+// над авто MCC-MNC). На iOS 16+ Apple закрыл CTCarrier → это единственный способ узнать оператора.
+void AvpnEngineQml::setDiagCarrier(const QString &code)
+{
+    QSettings s;
+    if (code.isEmpty())
+        s.remove(QStringLiteral("AvpnDiag/carrier"));
+    else
+        s.setValue(QStringLiteral("AvpnDiag/carrier"), code);
+    s.sync();
+    emit changed();
+}
+
+QString AvpnEngineQml::diagCarrier() const
+{
+    const QString manual = QSettings().value(QStringLiteral("AvpnDiag/carrier")).toString();
+    return manual.isEmpty() ? avpn::carrierCode() : manual;
+}
+
+QString AvpnEngineQml::diagCarrierAuto() const
+{
+    return avpn::carrierCode();
 }
 
 QString AvpnEngineQml::doctorHumanReport() const

@@ -8,6 +8,7 @@
 
 #if defined(Q_OS_IOS)
 extern "C" const char *TribeNetInfo_cellGen(); // TribeNetInfoIos.mm
+extern "C" const char *TribeNetInfo_carrier(); // TribeNetInfoIos.mm — MCC-MNC (iOS<16), иначе ""
 #endif
 
 #if defined(Q_OS_ANDROID)
@@ -56,6 +57,30 @@ QString cellularGeneration()
     case 16:                                        return QStringLiteral("2g");  // GPRS/EDGE/CDMA/GSM
     default:                                        return {};
     }
+#else
+    return {};
+#endif
+}
+
+// Обезличенный код оператора "MCC-MNC" (напр. "250-02"), НЕ имя сети. Для идентификации паттернов
+// «оператор X режет ноду Y» в диагностике. iOS 16+ (Apple закрыл CTCarrier) → "" → в UI ручной выбор.
+QString carrierCode()
+{
+#if defined(Q_OS_IOS)
+    return QString::fromLatin1(TribeNetInfo_carrier());
+#elif defined(Q_OS_ANDROID)
+    QJniObject tm = telephonyManager();
+    if (!tm.isValid())
+        return {};
+    // getNetworkOperator() → "MCCMNC" склеенной строкой (напр. "25002"); пусто = не сотовая/нет SIM.
+    QJniObject op = tm.callObjectMethod("getNetworkOperator", "()Ljava/lang/String;");
+    QJniEnvironment env;
+    if (env.checkAndClearExceptions() || !op.isValid())
+        return {};
+    const QString raw = op.toString();
+    if (raw.size() < 5)
+        return {};
+    return raw.left(3) + QLatin1Char('-') + raw.mid(3); // "250-02"
 #else
     return {};
 #endif

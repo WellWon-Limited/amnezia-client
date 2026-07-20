@@ -49,3 +49,25 @@ extern "C" const char *TribeNetInfo_cellGen()
     default: return "";
     }
 }
+
+// AVPN (Доктор): обезличенный код оператора MCC-MNC (напр. "250-02" = МегаФон РФ) — НЕ имя сети.
+// Apple с iOS 16 задепрекейтила CTCarrier: mobileCountryCode/mobileNetworkCode возвращают nil или
+// "65535" (спец-значение «недоступно») → тогда честное "". Работает лишь на iOS < 16; на новых
+// устройствах оператор через API недоступен вообще (для них — ручной выбор в UI).
+extern "C" const char *TribeNetInfo_carrier()
+{
+    static char buf[16] = "";
+    buf[0] = '\0';
+    static CTTelephonyNetworkInfo *info = [[CTTelephonyNetworkInfo alloc] init];
+    NSDictionary<NSString *, CTCarrier *> *carriers = info.serviceSubscriberCellularProviders;
+    for (CTCarrier *c in carriers.allValues) {
+        NSString *mcc = c.mobileCountryCode;
+        NSString *mnc = c.mobileNetworkCode;
+        if (mcc.length && mnc.length
+            && ![mcc isEqualToString:@"65535"] && ![mnc isEqualToString:@"65535"]) {
+            snprintf(buf, sizeof(buf), "%s-%s", mcc.UTF8String, mnc.UTF8String);
+            return buf;
+        }
+    }
+    return buf; // "" — iOS 16+ закрыл оператора, либо не сотовая
+}
