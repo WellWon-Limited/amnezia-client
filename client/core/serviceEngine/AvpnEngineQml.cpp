@@ -1054,18 +1054,24 @@ int AvpnEngineQml::daysLeft() const
 QVariantMap AvpnEngineQml::currentNode() const
 {
     const DebugSnapshot s = m_engine.debugSnapshot();
-    const bool live = (s.state == QLatin1String("connected") || s.state == QLatin1String("switching"));
     const QString pinned = m_engine.pinnedNodeId();
+    const bool connectedNow = (s.state == QLatin1String("connected"));
     // Какой узел показывать на карточке Connect:
-    //  • онлайн (connected/switching) → реальный текущий узел (s.currentNodeId);
-    //  • НЕ онлайн, но закреплён пользователем → закреплённый (виден сразу после выбора в шторке,
-    //    ещё ДО нажатия Connect — модель «выбор = задать цель, коннект — кнопкой»);
-    //  • иначе → ничего (hasNode=false) → карточка показывает «Умный выбор сервера».
+    //  • ПОДКЛЮЧЕНЫ → реальный текущий узел (s.currentNodeId) — честно даже если failover увёл
+    //    с закреплённого;
+    //  • закреплён вручную И НЕ подключены (переключаемся/оффлайн) → закреплённый узел СРАЗУ
+    //    (оптимистично): тап по Латвии в пикере мгновенно показывает Латвию + орб «подключаюсь»,
+    //    а не висит на старой Польше 1–3 c до нового рукопожатия (жалоба 2026-07-20). Орб
+    //    отражает реальное состояние отдельно — обмана нет;
+    //  • авто-switching без pin → пока старый узел;
+    //  • иначе → ничего (hasNode=false) → карточка «Умный выбор сервера».
     QString showId;
-    if (live && !s.currentNodeId.isEmpty())
+    if (connectedNow && !s.currentNodeId.isEmpty())
         showId = s.currentNodeId;
     else if (!pinned.isEmpty())
         showId = pinned;
+    else if (s.state == QLatin1String("switching") && !s.currentNodeId.isEmpty())
+        showId = s.currentNodeId;
     const NodeDebugRow *pick = nullptr;
     if (!showId.isEmpty()) {
         for (const NodeDebugRow &r : s.pool)

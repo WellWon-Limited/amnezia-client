@@ -23,6 +23,7 @@ struct WGConfig: Decodable {
   let dnsFwdOn: String?
   let dnsFwdSuffixes: String?
   let dnsFwdServer: String?
+  let dnsFwdWarmup: String?
 
   enum CodingKeys: String, CodingKey {
     case initPacketMagicHeader = "H1", responsePacketMagicHeader = "H2"
@@ -46,11 +47,15 @@ struct WGConfig: Decodable {
     case dnsFwdOn
     case dnsFwdSuffixes
     case dnsFwdServer
+    case dnsFwdWarmup
   }
 
   // AVPN split-DNS: форвардер включён → система получает виртуальный резолвер (100.100.100.53),
   // реальная маршрутизация DNS — в Go-слое (wgSetSplitDns до wgTurnOn).
   var dnsFwdEnabled: Bool { dnsFwdOn == "1" }
+  // Прогрев рукопожатия при подъёме туннеля — включён по умолчанию (нет ключа = вкл), бэк может
+  // погасить, прислав "0" (kill-switch features.dns_fwd_warmup → cfg["dnsFwdWarmup"] в C++).
+  var dnsFwdWarmupEnabled: Bool { dnsFwdWarmup != "0" }
   var effectiveDns: String { dnsFwdEnabled ? "100.100.100.53" : "\(dns1), \(dns2)" }
 
   var settings: String {
