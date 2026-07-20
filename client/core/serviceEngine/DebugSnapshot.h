@@ -24,6 +24,9 @@ struct NodeDebugRow {
     QString reason;          // почему так ранжирована / последний вердикт пробы
     // AVPN (diag-report, Task 4 bff-3): протокол ноды из подписки ("awg") — для диагностики.
     QString proto;
+    // AVPN (Доктор): manual_only/RU — только ручной pin; авто-потребители снапшота (очередь
+    // запасных нод) обязаны такие скипать, иначе Доктор пересадит пользователя на RU-ноду.
+    bool    manualOnly = false;
 };
 
 struct DebugSnapshot {
