@@ -50,6 +50,10 @@ class AvpnEngineQml : public QObject {
     // Источник правды для «не показывать Connecting… при выключении»: живёт в движке (не в странице),
     // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
     Q_PROPERTY(bool stopping READ stopping NOTIFY changed)
+    // AVPN (macOS, beachball-фикс 2026-07-21): идёт установка root-демона Tribe-service (фоновый
+    // поток, GUI живой) — QML показывает «Устанавливаем службу VPN…» вместо «Подбираем сервер…».
+    // На остальных платформах всегда false.
+    Q_PROPERTY(bool svcInstalling READ svcInstalling NOTIFY changed)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
     Q_PROPERTY(qlonglong trafficUsed READ trafficUsed NOTIFY changed)
@@ -231,6 +235,8 @@ public:
     bool busy() const { return m_busy; }
     // busy при намерении «офлайн» = идёт teardown (вкл. отмену недоехавшего коннекта). // AVPN
     bool stopping() const { return m_busy && !m_wantConnected; }
+    // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
+    bool svcInstalling() const { return m_svcInstalling; }
 
     // AVPN: статус подписки (Task 3). daysLeft<0 = бессрочно/неизвестно; trafficLimit==0 = безлимит.
     int daysLeft() const;
@@ -746,6 +752,26 @@ private:
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (beachball-фикс): финиш фоновой установки root-демона (главный поток, queued из worker).
+    // ok → reconcile() продолжает старт (намерение живо); fail → error + счёт попытки.
+    void finishSvcInstall(bool ok, const QString &err);
+
+    // AVPN (macOS wake-реконнект, спека 2026-07-17-macos-wake-reconnect-design.md): «закрыл крышку —
+    // утром VPN off». Wake — НАША операция, а не внешний обрыв: демон туннель через ночь держит,
+    // рвал его ванильный reconnectToVpn (stop+start в неготовую сеть) + наш 20с-сторож + §13.
+    // Перехват: на каждом Connected срезаем ванильные подписки rep→VpnConnection (hook) и слушаем
+    // wakeup/networkChanged сами; сначала проверка живости (HEAD generate_204 через туннель),
+    // рестарт — только если туннель реально мёртв, и ТОЛЬКО через reconcile (m_needsRestart:
+    // m_op взведён → §13-гард weAreOperating держит намерение). Ретраи — по reachabilityChanged,
+    // кап wakeRestartMaxTriesTuned. Kill-switch features.wake_restart (false = ваниль).
+    void hookDaemonWakeSignals();     // подписка + срез ванильного пути (зов: onConnectionStateChanged/Connected)
+    void onDaemonWakeup();            // сигнал wakeup реплики демона (queued)
+    void onDaemonNetworkChanged();    // сигнал networkChanged реплики (та же обработка)
+    void daemonWakeEvent(const char *why);
+    void wakeLivenessProbe();         // async HEAD через туннель; мёртв → needsRestart+reconcile
+    void wakeKick();                  // ретрай подъёма по появлению сети (кап tries)
+#endif
     // AVPN (sub-grace): из onTick при connected — «подписка истекла и грейс прошёл» → управляемый
     // stop() (тот же путь, что пользовательский: намерение OFF + reconcile) + subscriptionEnforcedStop().
     void enforceSubscriptionGrace();
@@ -1043,6 +1069,18 @@ private:
     QList<QHostAddress>          m_apiHostIps;
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
+    // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит
+    // повторный вход guardedStart (reconcile может тикать во время установки) и питает свойство
+    // svcInstalling. На не-macOS всегда false.
+    bool                         m_svcInstalling = false;
+    bool                         m_svcInstallInFlight = false;
+    // AVPN (macOS wake-реконнект): состояние wake-операции. wakeProbing — дедуп пробы живости
+    // (wakeup+networkChanged летят пачкой); wakeRestartPending — наш рестарт в полёте, ретраи по
+    // reachabilityChanged восстанавливают намерение (это НЕ авто-коннект §13 — операция наша);
+    // wakeTries — счётчик против капа wakeRestartMaxTriesTuned. Не-macOS: не используются.
+    bool                         m_wakeProbing = false;
+    bool                         m_wakeRestartPending = false;
+    int                          m_wakeTries = 0;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)
     int                          m_pendingRedeemAttempts = 0; // AVPN: ретраи redeemTransfer, пока движок занят bootstrap'ом (холодный старт по диплинку)
     QString                      m_pendingRedeemToken;        // AVPN: токен с уже запланированным busy-ретраем (второй таймер не плодим)

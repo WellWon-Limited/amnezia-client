@@ -74,6 +74,10 @@ public:
     //  Возвращают true, если произошёл свитч/обработка DEAD.
     bool tick(qint64 nowEpoch);
     bool notifyConnectionLost();
+    // AVPN (macOS wake-реконнект, спека 2026-07-17 §2.2): сброс prev-сэмпла HealthLoop на
+    // пробуждении — ночные дельты rx/tx против свежего замера дали бы ложный onDead (up() в ещё
+    // не готовую сеть). Аналог общий с iOS P1 (foreground-ресинк). Только сэмплинг, фазу не трогает.
+    void resetHealthSampling() { m_health.reset(); }
     QString currentNodeId() const { return m_currentNodeId; }
 
     // AVPN (live-node picker): ручной выбор/ротация поверх авто-логики.

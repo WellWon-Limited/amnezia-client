@@ -92,6 +92,7 @@ extern "C" void AvpnDockBadge_install();
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
 #include "MacServiceInstaller.h" // AVPN (macOS desktop): авто-установка root-демона из вшитого pkg (ноль терминала)
 #include <QThread>
+#include "core/utils/ipcClient.h" // AVPN (wake-реконнект): подписка на wakeup/networkChanged реплики демона
 #endif
 
 namespace avpn {
@@ -740,8 +741,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (auto *ni = QNetworkInformation::instance()) {
             connect(ni, &QNetworkInformation::reachabilityChanged, this,
                     [this](QNetworkInformation::Reachability r) {
-                        if (r == QNetworkInformation::Reachability::Online)
+                        if (r == QNetworkInformation::Reachability::Online) {
                             kickBootstrap();
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+                            // AVPN (wake-реконнект): сеть вернулась после сна — ретрай нашего
+                            // wake-рестарта (кап внутри wakeKick). 1.5с — DHCP/DNS доседают.
+                            if (m_wakeRestartPending)
+                                QTimer::singleShot(1500, this, [this]() { wakeKick(); });
+#endif
+                        }
                     });
             connect(ni, &QNetworkInformation::transportMediumChanged, this,
                     [this](QNetworkInformation::TransportMedium) { kickBootstrap(); });
@@ -2534,6 +2542,14 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     switch (s) {
     case Vpn::Connected:
         m_engine.onTunnelConnected();
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+        // AVPN (wake-реконнект): успешный подъём закрывает wake-операцию (если шла) и заново
+        // перехватывает wakeup/networkChanged — createProtocolConnections на КАЖДОМ connectToVpn
+        // переподключает ванильный rep→reconnectToVpn, срезать надо после каждого коннекта.
+        m_wakeRestartPending = false;
+        m_wakeTries = 0;
+        hookDaemonWakeSignals();
+#endif
         if (m_rttProbe)
             m_rttProbe->cancel(); // подключились → off-tunnel ICMP больше не нужен (был бы внутри туннеля)
         // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
@@ -3064,22 +3080,52 @@ void AvpnEngineQml::guardedStart()
     // ВШИТОГО tarball одним системным промптом пароля (MacServiceInstaller). Триггер: демон не запущен
     // ЛИБО устарел (macServiceOutdated: хэш бинарей вшитого ≠ установленного). Без апдейт-триггера
     // правки логики демона (split-DNS и т.п.) не доезжали бы до юзеров с уже стоящим демоном.
-    // Актуальный запущенный демон → мгновенный выход, путь коннекта НЕ меняется. Без nested QEventLoop
-    // (CONNECT-INVARIANTS) — только короткий msleep на (пере)установке.
+    // Актуальный запущенный демон → мгновенный выход, путь коннекта НЕ меняется.
+    //
+    // AVPN (beachball-фикс 2026-07-21): установка БОЛЬШЕ НЕ блокирует GUI-поток. Раньше пароль +
+    // распаковка tarball + msleep-ожидание демона (до ~5с) жили прямо здесь — окно «висело» с
+    // радужным курсором на всё время ввода пароля. Теперь: подтверждение — на главном потоке
+    // (macInstallServiceConfirm, display dialog качает события), привилегированная установка +
+    // ожидание живого демона — в фоновом QThread (nested QEventLoop нет — CONNECT-INVARIANTS
+    // соблюдён), а UI показывает svcInstalling («Устанавливаем службу VPN…»). Продолжение старта —
+    // finishSvcInstall → reconcile(): намерение (m_wantConnected) всё это время взведено.
+    if (m_svcInstallInFlight)
+        return;                       // установка уже идёт — reconcile дождётся finishSvcInstall
     const bool needInstall = !avpn::macServiceInstalled() || avpn::macServiceOutdated();
     if (!avpn::macServiceRunning() || needInstall) {
         if (needInstall) {
-            QString ierr;
-            if (!avpn::macInstallService(&ierr)) {
+            QString cerr;
+            if (!avpn::macInstallServiceConfirm(&cerr)) {
+                // Пользователь отменил — снимаем намерение (иначе ближайший reconcile переспросит).
+                m_wantConnected = false;
                 ++m_startAttempts;
-                emit error(ierr.isEmpty() ? tr("Не удалось установить службу VPN") : ierr);
+                emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
                 emit changed();
                 return;
             }
         }
-        // installer синхронно отработал postinstall (bootstrap демона) — ждём живой процесс до ~5с.
-        for (int i = 0; i < 16 && !avpn::macServiceRunning(); ++i)
-            QThread::msleep(300);
+        m_svcInstallInFlight = true;
+        m_svcInstalling = true;
+        m_busy = true;               // орб — спиннер; текст даёт svcInstalling
+        emit changed();
+        QThread *worker = QThread::create([this, needInstall]() {
+            QString ierr;
+            bool ok = true;
+            if (needInstall) {
+                ok = avpn::macInstallServiceRun(&ierr); // пароль + tarball + bootstrap + ожидание демона
+            } else {
+                // Демон установлен, но не бежит (рестарт/kill) — даём launchd до ~5с поднять его;
+                // старт продолжаем в любом случае (паритет с прежним поведением: up() сам упадёт
+                // честной ошибкой, если демона так и нет).
+                for (int i = 0; i < 16 && !avpn::macServiceRunning(); ++i)
+                    QThread::msleep(300);
+            }
+            QMetaObject::invokeMethod(this, [this, ok, ierr]() { finishSvcInstall(ok, ierr); },
+                                      Qt::QueuedConnection);
+        });
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+        return;                       // продолжение старта — из finishSvcInstall (queued)
     }
 #endif
 
@@ -3138,6 +3184,139 @@ void AvpnEngineQml::guardedStart()
 
 // AVPN: опустить туннель. requestStop() гасит фазу/failover ДО down() (иначе прилетевший Disconnected
 // переподнял бы ноду); реальный Disconnected снимет op-in-flight и reconcile поднимет цель при смене.
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+// AVPN (beachball-фикс): финиш фоновой установки root-демона. Главный поток (queued из worker).
+void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
+{
+    m_svcInstallInFlight = false;
+    m_svcInstalling = false;
+    m_busy = false;              // guardedStart сам вернёт busy, если старт продолжится
+    if (!ok) {
+        ++m_startAttempts;
+        emit error(err.isEmpty() ? tr("Не удалось установить службу VPN") : err);
+        emit changed();
+        return;
+    }
+    emit changed();
+    // Намерение всё это время было взведено; если пользователь за время установки передумал
+    // (нажал «Отключить»), reconcile честно останется no-op. Иначе — штатный guardedStart,
+    // теперь по быстрому пути (демон запущен и актуален).
+    reconcile();
+}
+
+// ---- AVPN macOS wake-реконнект (спека 2026-07-17-macos-wake-reconnect-design.md) --------------
+// Корень «закрыл крышку — утром OFF»: демон туннель через ночь ДЕРЖИТ, а на wakeup ванильный
+// reconnectToVpn рвал его stop()+start() в ещё не готовую сеть; 20с-сторож (§16) форсил
+// Disconnected, §13 снимал намерение (путь мимо guardedStart, m_op==None) → reconcile не поднимал.
+// Фикс: wake — НАША операция. §13/§16 не трогаем (внешние обрывы ведут себя как раньше).
+
+void AvpnEngineQml::hookDaemonWakeSignals()
+{
+    // Kill-switch: features.wake_restart=false — ванильное поведение (подписки не срезаем).
+    if (!avpn::TuningStore::flag(QStringLiteral("wake_restart")))
+        return;
+    // На Connected демон гарантированно жив → waitForSource внутри withInterface мгновенен.
+    IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
+        // Срез ванильного пути БЕЗ правки апстрима: снимаем все подписки rep→VpnConnection
+        // (createProtocolConnections их к тому же копит дубликатами на каждый connectToVpn).
+        // Окно между connectToVpn и Connected безопасно: reconnectToVpn игнорирует не-Connected.
+        QObject::disconnect(rep.data(), &IpcInterfaceReplica::wakeup, m_conn, nullptr);
+        QObject::disconnect(rep.data(), &IpcInterfaceReplica::networkChanged, m_conn, nullptr);
+        // Наши обработчики (UniqueConnection — на каждом Connected хук повторяется).
+        connect(rep.data(), &IpcInterfaceReplica::wakeup, this, &AvpnEngineQml::onDaemonWakeup,
+                Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
+        connect(rep.data(), &IpcInterfaceReplica::networkChanged, this,
+                &AvpnEngineQml::onDaemonNetworkChanged,
+                Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
+    });
+}
+
+void AvpnEngineQml::onDaemonWakeup()         { daemonWakeEvent("wakeup"); }
+void AvpnEngineQml::onDaemonNetworkChanged() { daemonWakeEvent("networkChanged"); }
+
+void AvpnEngineQml::daemonWakeEvent(const char *why)
+{
+    // Kill-switch мог флипнуться уже ПОСЛЕ среза ванильных подписок — честно возвращаем ваниль.
+    if (!avpn::TuningStore::flag(QStringLiteral("wake_restart"))) {
+        m_conn->reconnectToVpn();
+        return;
+    }
+    if (!m_wantConnected)
+        return;                                  // намерения нет — спека §2.1 шаг 1
+    if (m_lastTunnelState != Vpn::Connected)
+        return;                                  // туннель не поднят — рвать/чинить нечего
+    // Ночные дельты rx/tx не должны дать ложный onDead первым же health-tick (спека §2.2).
+    m_engine.resetHealthSampling();
+    if (m_wakeProbing)
+        return;                                  // wakeup+networkChanged летят пачкой — одна проба
+    m_wakeProbing = true;
+    qInfo() << "[wake]" << why << "— probing tunnel liveness";
+    // Сети после сна нужно время (реассоциация Wi-Fi, DHCP) — пробуем чуть отложенно.
+    QTimer::singleShot(2500, this, [this]() { wakeLivenessProbe(); });
+}
+
+void AvpnEngineQml::wakeLivenessProbe()
+{
+    if (!m_wantConnected || m_lastTunnelState != Vpn::Connected) {
+        m_wakeProbing = false;                   // состояние уехало, пока ждали — не вмешиваемся
+        return;
+    }
+    // Сначала проверка живости, потом рестарт (спека §2.1 шаг 2): HEAD generate_204 ЧЕРЕЗ туннель
+    // (full-tunnel — весь трафик в нём). Успех = туннель пережил сон сам (как у ванили его держал
+    // демон) → НИЧЕГО не делаем. Async + transferTimeout — никакого nested QEventLoop (§1).
+    QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
+    req.setTransferTimeout(4000);
+    QNetworkReply *r = m_nam->head(req);
+    connect(r, &QNetworkReply::finished, this, [this, r]() {
+        r->deleteLater();
+        m_wakeProbing = false;
+        const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool alive = (r->error() == QNetworkReply::NoError && (code == 204 || code == 200));
+        if (alive) {
+            m_wakeRestartPending = false;
+            m_wakeTries = 0;
+            qInfo() << "[wake] tunnel alive — nothing to do";
+            return;
+        }
+        if (!m_wantConnected || m_lastTunnelState != Vpn::Connected)
+            return;                              // за время пробы состояние уехало
+        // Мёртв → штатный рестарт ЧЕРЕЗ reconcile (спека §2.1 шаг 3, паттерн pinAndReconnect):
+        // m_needsRestart → guardedStop→Disconnected→guardedStart; m_op взведён → §13-гард
+        // weAreOperating держит намерение; сторож — движковый клампованный, не жёсткие 20с.
+        qInfo() << "[wake] tunnel dead after sleep — restarting (our operation)";
+        m_wakeRestartPending = true;
+        m_wakeTries = 1;
+        m_startAttempts = 0;                     // wake-попытки меряем своим капом
+        m_needsRestart = true;
+        reconcile();
+    });
+}
+
+void AvpnEngineQml::wakeKick()
+{
+    if (!m_wakeRestartPending)
+        return;
+    if (m_lastTunnelState == Vpn::Connected) {   // уже поднялись (сами или предыдущим ретраем)
+        m_wakeRestartPending = false;
+        m_wakeTries = 0;
+        return;
+    }
+    if (m_wakeTries >= avpn::wakeRestartMaxTriesTuned()) {
+        // Усталость = внешние обстоятельства — честный OFF, подключение вручную (дух §13).
+        qInfo() << "[wake] restart tries exhausted — honest OFF";
+        m_wakeRestartPending = false;
+        return;
+    }
+    ++m_wakeTries;
+    qInfo() << "[wake] network is back — retry" << m_wakeTries;
+    // Намерение восстанавливаем: неудача СОБСТВЕННОГО wake-рестарта ≠ «пользователь выключил»
+    // (спека §2.1 шаг 4). Это не авто-коннект §13 — операция началась с живого туннеля до сна.
+    m_wantConnected = true;
+    m_startAttempts = 0;
+    reconcile();
+}
+#endif
+
 void AvpnEngineQml::guardedStop()
 {
     m_op = Op::Stopping;
