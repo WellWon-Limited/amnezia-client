@@ -1317,6 +1317,16 @@ QJsonObject AvpnEngineQml::benchExtra() const
             }
         }
     }
+    // Волна UX Доктора 07-22: iOS на сотовой отдаёт Unknown из QNetworkInformation («сеть
+    // доступна» вместо «сотовая» — жалоба владельца). Деривация из CoreTelephony: поколение
+    // сотовой непусто ⇒ мы на сотовой (работает и под VPN). Последний фолбэк — ручной выбор
+    // в интро Доктора (не персистится: сеть могла смениться между запусками).
+    if (!extra.contains(QStringLiteral("net_type"))) {
+        if (!avpn::cellularGeneration().isEmpty())
+            extra.insert(QStringLiteral("net_type"), QStringLiteral("cellular"));
+        else if (!m_diagNetManual.isEmpty())
+            extra.insert(QStringLiteral("net_type"), m_diagNetManual);
+    }
     // AVPN (Доктор): оператор для паттернов «оператор X режет ноду Y». Приоритет — ручной выбор
     // пользователя (QSettings, единственный путь на iOS 16+, где API оператора закрыт), иначе
     // обезличенный авто-код MCC-MNC. Пусто → поле не пишем (Wi-Fi/десктоп/недоступно).
@@ -5149,7 +5159,7 @@ void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)
 // IP отброшен), вердикт WhitelistDetector, lite-бенч. Вердикты стадий — чистый DoctorReport.h
 // (юнит tests/doctor_report_check.cpp). Спека: specs/2026-07-17-doctor-v1-design.md.
 
-void AvpnEngineQml::startDoctor()
+void AvpnEngineQml::startDoctor(bool full)
 {
     if (doctorRunning())
         return;
@@ -5159,6 +5169,7 @@ void AvpnEngineQml::startDoctor()
     if (m_benchRunning || sweepRunning() || abRunning() || ccRunning() || ftRunning())
         return;
     ++m_docEpoch;
+    m_docFull = full && featureEnabled(QStringLiteral("doctor_full"), true);
     m_docStages.clear();
     m_docReport = QJsonObject();
     m_docBenchFull = QJsonObject();
@@ -5298,12 +5309,15 @@ void AvpnEngineQml::docEnter(DoctorPhase ph)
     case DoctorPhase::Send:     m_docPercent = 97; break;
     case DoctorPhase::Idle:     break;
     }
-    // сторож: server-tunable с клампом; бенч-стадии нужен запас (lite ~30-45с → 60с). Фазы
-    // Connect и AltNodes ведут сторожа сами (подъём 45/40с, проба 15с) — НЕ перетираем.
+    // сторож: server-tunable с клампом. Бенч-стадии нужен свой запас — numbers.doctor_speed_guard_ms
+    // (жалоба владельца «иногда скорость проверяется очень долго»: было 60с намертво, теперь 45с
+    // по умолчанию и рычаг у бэка). Фазы Connect и AltNodes ведут сторожа сами — НЕ перетираем.
     if (ph != DoctorPhase::Connect && ph != DoctorPhase::AltNodes) {
         const int base = doctor::clampStageTimeoutMs(
             TuningStore::numberOr(QStringLiteral("diag_stage_timeout_ms"), 0));
-        m_docGuard.start(ph == DoctorPhase::Speed ? 60000 : base);
+        const int spd = qBound(20000, int(TuningStore::numberOr(
+                                   QStringLiteral("doctor_speed_guard_ms"), 45000.0)), 90000);
+        m_docGuard.start(ph == DoctorPhase::Speed ? spd : base);
     }
     emit doctorChanged();
 }
@@ -5537,7 +5551,10 @@ void AvpnEngineQml::docStartServers()
         const QString cc = cur.value(QStringLiteral("countryCode")).toString();
         if (nm.isEmpty()) nm = doctor::countryNameRu(cc); // «lv» → «Латвия» + флаг по cc в UI
         const int rtt = liveReachable() ? liveRttMs() : -1;
-        docStageDone(doctor::serverStage(nm, cc, rtt));
+        // порог жёлтого server-driven (пересмотр владельца: до ~секунды — зелёный)
+        const int warnMs = qBound(300, int(avpn::TuningStore::numberOr(
+                                      QStringLiteral("doctor_rtt_warn_ms"), 800.0)), 3000);
+        docStageDone(doctor::serverStage(nm, cc, rtt, warnMs));
     });
 }
 
@@ -5639,44 +5656,64 @@ void AvpnEngineQml::docDirectSpeed(double down, int idle, int loaded, bool colla
 
 void AvpnEngineQml::docStartRuSplit()
 {
-    // Только при включённом «Доступе к сайтам РФ»: сплит обязан вести RU-корпус напрямую.
-    // Выключен → стадия не показывается вовсе (optional в UI, фазу пропускаем).
+    docEnter(DoctorPhase::RuSplit);
+    // Выключенный «Доступ к сайтам РФ» — честный Skip с причиной (раньше фаза молча
+    // пропускалась, и поддержка не видела, что сплит у клиента вовсе не включён).
     bool masterOn = false;
     {
         QSettings st;
         masterOn = st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
     }
     if (!masterOn) {
-        docStartSpeed();
+        docStageDone(doctor::ruSplitStage({}, {}, /*enabled=*/false));
         return;
     }
-    docEnter(DoctorPhase::RuSplit);
-    // корпус: Яндекс + VK (эталоны рунета) + Аэрофлот (кейс владельца 2026-07-17: NGENIX-CDN,
-    // префиксы в байпас-листе есть — проверяем фактическую проходимость текущим путём)
-    struct RuTarget { const char *name; const char *url; };
-    const RuTarget targets[] = {
-        {"Яндекс",   "https://ya.ru/"},
-        {"VK",       "https://vk.com/favicon.ico"},
-        {"Аэрофлот", "https://www.aeroflot.ru/"},
-    };
+    // Корпус server-driven — ЕДИНЫЙ ключ lists.rusplit_watch с дозорным RuSplitSentinel
+    // (фолбэк rusentinel::defaultWatch: Яндекс/Ozon/Wildberries/Госуслуги, "Имя|URL").
+    // BUG-5 (2026-07-22): было HEAD + требование error()==NoError — бот-защита VK/Аэрофлота
+    // отвечает 418/403 на HEAD ⇒ вечное ложное «Не открылись» в КАЖДОМ отчёте на любой сети.
+    // Теперь GET (обрываем после заголовков — тело не тянем) + успех = ЛЮБОЙ HTTP-код <500
+    // (семантика rusentinel::classifyProbe: ответ дошёл ⇒ маршрут до сайта работает).
+    const QStringList raw =
+        TuningStore::listOr(QStringLiteral("rusplit_watch"), rusentinel::defaultWatch());
     m_docRuNames.clear(); m_docRuOks.clear();
     m_docRuPending = 0;
-    for (const auto &t : targets) {
-        m_docRuNames.append(QString::fromUtf8(t.name));
+    QStringList urls;
+    for (const QString &entry : raw) {
+        QString name, url;
+        if (!rusentinel::parseWatchEntry(entry, name, url))
+            continue;
+        m_docRuNames.append(name);
         m_docRuOks.append(false); // предзаполнение по индексам (параллельные колбэки)
+        urls.append(url);
     }
-    for (int i = 0; i < m_docRuNames.size(); ++i) {
+    if (m_docRuNames.isEmpty()) {
+        docStageDone(doctor::ruSplitStage({}, {}));
+        return;
+    }
+    for (int i = 0; i < urls.size(); ++i) {
         ++m_docRuPending;
-        QNetworkRequest req{QUrl(QString::fromUtf8(targets[i].url))};
+        QNetworkRequest req{QUrl(urls.at(i))};
         req.setTransferTimeout(6000);
         req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-        QNetworkReply *rep = m_nam->head(req);
-        connect(rep, &QNetworkReply::finished, this, [this, rep, i, e = m_docEpoch] {
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        QNetworkReply *rep = m_nam->get(req);
+        auto code = std::make_shared<int>(0);
+        connect(rep, &QNetworkReply::metaDataChanged, this, [rep, code] {
+            if (*code > 0)
+                return;
+            *code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (*code > 0)
+                rep->abort(); // заголовков достаточно для вердикта — трафик не жжём
+        });
+        connect(rep, &QNetworkReply::finished, this, [this, rep, code, i, e = m_docEpoch] {
             rep->deleteLater();
             if (e != m_docEpoch || m_docPhase != DoctorPhase::RuSplit) return;
-            const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            int c = *code;
+            if (c <= 0)
+                c = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             if (i < m_docRuOks.size())
-                m_docRuOks[i] = (rep->error() == QNetworkReply::NoError && code > 0 && code < 500);
+                m_docRuOks[i] = (c > 0 && c < 500);
             if (--m_docRuPending <= 0)
                 docStageDone(doctor::ruSplitStage(m_docRuNames, m_docRuOks));
         });
@@ -5685,10 +5722,13 @@ void AvpnEngineQml::docStartRuSplit()
 
 void AvpnEngineQml::docStartAltNodes()
 {
-    // Триггер: только при реальной проблеме на текущей ноде И наличии альтернатив.
-    // Различает «нода сломана» (альтернатива работает → остаёмся на ней) от «сеть/оператор»
-    // (все мертвы → честный вердикт + возврат исходного выбора).
-    if (!doctor::hasProblem(m_docStages)) {
+    // Триггер (быстрый режим): только при реальной проблеме на текущей ноде И наличии
+    // альтернатив. Различает «нода сломана» (альтернатива работает → остаёмся на ней) от
+    // «сеть/оператор» (все мертвы → честный вердикт + возврат исходного выбора).
+    // Полный режим (m_docFull): обзор ВСЕХ кандидатов независимо от проблемы — без ранней
+    // остановки на первой рабочей; в конце пересадка только если проблема БЫЛА.
+    m_docAltHadProblem = doctor::hasProblem(m_docStages);
+    if (!m_docFull && !m_docAltHadProblem) {
         docFinish();
         return;
     }
@@ -5706,6 +5746,10 @@ void AvpnEngineQml::docStartAltNodes()
         // manual_only/RU (§14.3) — вне авто-выбора ВЕЗДЕ: иначе Доктор проверял бы RU-ноду и,
         // пройди её проба, пересадил бы пользователя на RU-egress (реальный случай 2026-07-20).
         if (n.value(QStringLiteral("manualOnly")).toBool()) continue;
+        // Канон владельца (полная диагностика): RU-нода ВСЕГДА в исключениях — ремень поверх
+        // manual_only на случай, если флаг у RU-ноды когда-нибудь снимут на бэке.
+        if (n.value(QStringLiteral("countryCode")).toString()
+                .compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0) continue;
         const int rtt = m_nodeRtt.value(id, 99999);
         cand.append({rtt, n});
     }
@@ -5714,10 +5758,14 @@ void AvpnEngineQml::docStartAltNodes()
     m_docAltQueue.clear(); m_docAltNames.clear(); m_docAltOks.clear();
     m_docAltDetails.clear(); m_docAltCand.clear();
     m_docAltIdx = -1;
-    // До 3 самых быстрых альтернатив (server-driven: doctor_alt_max). Каждую держим и пробуем
+    // Быстрый режим: до 3 самых быстрых альтернатив (doctor_alt_max). Полный: все кандидаты
+    // (кап doctor_full_max — предохранитель от гигантского пула). Каждую держим и пробуем
     // ДВАЖДЫ (сразу + после ~keepalive) — ловит «handshake есть, данные пропали через 20с».
-    const int altMax = qBound(1, int(avpn::TuningStore::numberOr(
-                                  QStringLiteral("doctor_alt_max"), 3.0)), 5);
+    const int altMax = m_docFull
+        ? qBound(3, int(avpn::TuningStore::numberOr(
+                      QStringLiteral("doctor_full_max"), 12.0)), 20)
+        : qBound(1, int(avpn::TuningStore::numberOr(
+                      QStringLiteral("doctor_alt_max"), 3.0)), 5);
     for (const auto &c : cand) {
         if (m_docAltQueue.size() >= altMax) break;
         const QString id = c.second.value(QStringLiteral("nodeId")).toString();
@@ -5746,10 +5794,12 @@ void AvpnEngineQml::docStartAltNodes()
 
 void AvpnEngineQml::docAltNext()
 {
-    // предыдущая альтернатива оказалась СТАБИЛЬНОЙ (обе пробы) → остаёмся на ней (юзеру сразу
-    // хорошо), дальше не перебираем. Нестабильная (одна проба из двух = задержанный blackhole)
-    // НЕ считается рабочей — перебираем дальше, ищем по-настоящему живую.
-    if (m_docAltIdx >= 0 && m_docAltIdx < m_docAltOks.size() && m_docAltOks.at(m_docAltIdx)) {
+    // Быстрый режим: предыдущая альтернатива оказалась СТАБИЛЬНОЙ (обе пробы) → остаёмся на
+    // ней (юзеру сразу хорошо), дальше не перебираем. Нестабильная (одна проба из двух =
+    // задержанный blackhole) НЕ считается рабочей — перебираем дальше, ищем по-настоящему
+    // живую. Полный режим ранней остановки НЕ делает — обзор всех кандидатов до конца.
+    if (!m_docFull
+        && m_docAltIdx >= 0 && m_docAltIdx < m_docAltOks.size() && m_docAltOks.at(m_docAltIdx)) {
         docStageDone(doctor::altNodesStage(
             m_docAltNames.mid(0, m_docAltIdx + 1), m_docAltOks,
             /*switchedTo=*/m_docAltNames.at(m_docAltIdx),
@@ -5758,15 +5808,23 @@ void AvpnEngineQml::docAltNext()
     }
     ++m_docAltIdx;
     if (m_docAltIdx >= m_docAltQueue.size()) {
-        // ни одна альтернатива не стабильна. Если была нестабильная (одна проба прошла) —
-        // возвращаем на неё (хоть что-то), иначе — исходный выбор. Fire-and-forget.
+        // Конец очереди. Пересадка ТОЛЬКО если проблема была (в полном режиме сюда доходим
+        // всегда — обзор без проблемы не должен молча менять сервер пользователю): сначала
+        // лучшая стабильная (полный режим), потом нестабильная (хоть что-то), иначе — возврат
+        // исходного выбора. Fire-and-forget.
+        int bestStable = -1;
+        for (int i = 0; i < m_docAltOks.size(); ++i)
+            if (m_docAltOks.at(i)) { bestStable = i; break; } // первый = самый быстрый по RTT
         int bestShaky = -1;
         for (int i = 0; i < m_docAltDetails.size(); ++i)
             if (m_docAltDetails.at(i).toMap().value(QStringLiteral("verdict")).toInt() == 1) {
-                bestShaky = i; break; // первый = самый быстрый (очередь отсортирована по RTT)
+                bestShaky = i; break;
             }
         QString switchedTo;
-        if (bestShaky >= 0 && bestShaky < m_docAltQueue.size()) {
+        if (m_docAltHadProblem && bestStable >= 0 && bestStable < m_docAltQueue.size()) {
+            pinAndReconnect(m_docAltQueue.at(bestStable));
+            switchedTo = m_docAltNames.value(bestStable);
+        } else if (m_docAltHadProblem && bestShaky >= 0 && bestShaky < m_docAltQueue.size()) {
             pinAndReconnect(m_docAltQueue.at(bestShaky));
             switchedTo = m_docAltNames.value(bestShaky);
         } else if (!m_docOrigPin.isEmpty()) {
@@ -5778,6 +5836,9 @@ void AvpnEngineQml::docAltNext()
                                            QJsonArray::fromVariantList(m_docAltDetails)));
         return;
     }
+    // полный обзор долгий — прогресс тикает по числу пройденных нод (70..96%)
+    if (m_docFull && !m_docAltQueue.isEmpty())
+        m_docPercent = 70 + (26 * m_docAltIdx) / m_docAltQueue.size();
     m_docConnecting = true;
     m_docSawProgress = false;
     m_docGuard.start(40000); // подъём альтернативы
@@ -5875,6 +5936,8 @@ void AvpnEngineQml::docFinish()
     docEnter(DoctorPhase::Send);
     {
         QJsonObject extra = benchExtra();
+        extra.insert(QStringLiteral("doctor_mode"),
+                     m_docFull ? QStringLiteral("full") : QStringLiteral("quick"));
         if (!m_docBenchFull.isEmpty()) // полный lite-бенч: разложение dns/tls/http/ping для анализа
             extra.insert(QStringLiteral("bench"), m_docBenchFull);
         // CR-1: локальный счётчик аварийных смертей на мобилках (dirty_exit там не шлётся
@@ -5951,6 +6014,71 @@ QString AvpnEngineQml::diagCarrierAuto() const
     return avpn::carrierCode();
 }
 
+// AVPN (волна UX Доктора 07-22): авто-тип сети для интро-шагов. БЕЗ ручного фолбэка — по нему
+// интро решает, задавать ли вопрос «какой у вас интернет» (авто знает → не спрашиваем).
+QString AvpnEngineQml::doctorNetType() const
+{
+    static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
+    if (niLoaded) {
+        if (auto *ni = QNetworkInformation::instance()) {
+            switch (ni->transportMedium()) {
+            case QNetworkInformation::TransportMedium::Ethernet: return QStringLiteral("ethernet");
+            case QNetworkInformation::TransportMedium::WiFi:     return QStringLiteral("wifi");
+            case QNetworkInformation::TransportMedium::Cellular: return QStringLiteral("cellular");
+            default: break;
+            }
+        }
+    }
+    // iOS на сотовой: Qt отдаёт Unknown, CoreTelephony знает (работает и под VPN)
+    if (!avpn::cellularGeneration().isEmpty())
+        return QStringLiteral("cellular");
+    return {};
+}
+
+// Ручной тип сети из интро. НЕ персистится (сеть меняется между запусками) — живёт до
+// перезапуска приложения; benchExtra берёт его только когда авто-детект промолчал.
+void AvpnEngineQml::setDiagNetType(const QString &t)
+{
+    const QString v = (t == QLatin1String("wifi") || t == QLatin1String("cellular"))
+                          ? t : QString();
+    if (m_diagNetManual == v)
+        return;
+    m_diagNetManual = v;
+    emit changed();
+}
+
+// Операторы РФ для плашки интро (server-driven lists.doctor_operators, формат "MCC-MNC|Имя").
+// Фолбэк — актуальные операторы 2026: большая четвёрка + заметные MVNO (Т-Мобайл экс-Тинькофф,
+// СберМобайл, МОТИВ, Ростелеком). "other" = «Другой»: ценность выбора — категория для паттернов
+// «оператор X режет ноду Y», точный MNC не обязателен.
+QVariantList AvpnEngineQml::diagOperators() const
+{
+    static const QStringList def{
+        QStringLiteral("250-01|МТС"),
+        QStringLiteral("250-02|МегаФон"),
+        QStringLiteral("250-99|Билайн"),
+        QStringLiteral("250-20|T2"),
+        QStringLiteral("250-11|Yota"),
+        QStringLiteral("250-62|Т-Мобайл"),
+        QStringLiteral("250-40|СберМобайл"),
+        QStringLiteral("250-35|МОТИВ"),
+        QStringLiteral("250-39|Ростелеком"),
+        QStringLiteral("other|Другой"),
+    };
+    QVariantList out;
+    const QStringList raw = TuningStore::listOr(QStringLiteral("doctor_operators"), def);
+    for (const QString &e : raw) {
+        const int sep = e.indexOf(QLatin1Char('|'));
+        if (sep <= 0)
+            continue;
+        QVariantMap m;
+        m.insert(QStringLiteral("code"), e.left(sep).trimmed());
+        m.insert(QStringLiteral("name"), e.mid(sep + 1).trimmed());
+        out.append(m);
+    }
+    return out;
+}
+
 QString AvpnEngineQml::doctorHumanReport() const
 {
     // Читаемое резюме для менеджера поддержки: текст-СООБЩЕНИЕ в тред (сырой diag.log
@@ -6001,6 +6129,24 @@ QVariantList AvpnEngineQml::doctorStages() const
             m.insert(QStringLiteral("region"), s.data.value(QStringLiteral("region")).toString());
             m.insert(QStringLiteral("rttMs"), s.data.value(QStringLiteral("rtt_ms")).toInt(-1));
         }
+        // волна UX 07-22: факты текущей ноды (вкладка «текущий сервер» в финале попапа)
+        if (s.id == QLatin1String("connect")) {
+            m.insert(QStringLiteral("dataFlows"),
+                     s.data.value(QStringLiteral("data_flows")).toBool());
+            if (s.data.contains(QStringLiteral("tunnel_icmp_ms")))
+                m.insert(QStringLiteral("tunnelIcmpMs"),
+                         s.data.value(QStringLiteral("tunnel_icmp_ms")).toInt(-1));
+            if (s.data.contains(QStringLiteral("ep_icmp_ms")))
+                m.insert(QStringLiteral("epIcmpMs"),
+                         s.data.value(QStringLiteral("ep_icmp_ms")).toInt(-1));
+            if (s.data.contains(QStringLiteral("ep_icmp_big")))
+                m.insert(QStringLiteral("epIcmpBig"),
+                         s.data.value(QStringLiteral("ep_icmp_big")).toBool());
+        }
+        // per-нода факты обзора альтернатив — вкладки по серверам в финале попапа
+        if (s.id == QLatin1String("altnodes") && s.data.contains(QStringLiteral("details")))
+            m.insert(QStringLiteral("details"),
+                     s.data.value(QStringLiteral("details")).toArray().toVariantList());
         out.append(m);
     }
     return out;

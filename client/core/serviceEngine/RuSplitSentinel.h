@@ -74,6 +74,21 @@ inline int clampIntervalHours(double v)
     return int(v);
 }
 
+// Фолбэк вахт-листа (ЕДИНЫЙ для дозорного и стадии «Сайты РФ» Доктора; server-driven
+// lists.rusplit_watch, формат "Имя|URL"). Пересмотр 2026-07-22 (BUG-5): VK и Аэрофлот убраны —
+// их бот-защита отвечает 418/403 и давала вечное ложное «Не открылись» в каждом отчёте;
+// вместо них реальные маркеры рунета, которыми пользуются (Ozon/Wildberries/Госуслуги).
+inline const QStringList &defaultWatch()
+{
+    static const QStringList w{
+        QStringLiteral("Яндекс|https://ya.ru/"),
+        QStringLiteral("Ozon|https://www.ozon.ru/"),
+        QStringLiteral("Wildberries|https://www.wildberries.ru/"),
+        QStringLiteral("Госуслуги|https://www.gosuslugi.ru/"),
+    };
+    return w;
+}
+
 // Парс элемента вахт-листа "Имя|https://url" -> (name, url); без '|' -> (host, url).
 inline bool parseWatchEntry(const QString &entry, QString &name, QString &url)
 {

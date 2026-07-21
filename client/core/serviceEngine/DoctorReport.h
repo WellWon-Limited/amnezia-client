@@ -150,8 +150,11 @@ inline QString countryNameRu(const QString &code)
 
 // Стадия 2: СЕРВЕРЫ. На каком сервере сидим и его отклик (live RTT через туннель / app-layer).
 //   displayName — человекочитаемое имя («Латвия»); countryCode — ISO для флага в UI;
-//   rttMs — отклик текущего сервера (<0 = не измерен).
-inline StageResult serverStage(const QString &displayName, const QString &countryCode, int rttMs)
+//   rttMs — отклик текущего сервера (<0 = не измерен);
+//   warnMs — порог жёлтого (server-driven numbers.doctor_rtt_warn_ms; пересмотр владельца
+//   2026-07-21: 470 мс до Латвии — не повод желтить, «до секунды можно зелёную»).
+inline StageResult serverStage(const QString &displayName, const QString &countryCode, int rttMs,
+                               int warnMs = 800)
 {
     StageResult r; r.id = QStringLiteral("servers");
     if (!displayName.isEmpty()) r.data.insert(QStringLiteral("region"), displayName);
@@ -162,7 +165,7 @@ inline StageResult serverStage(const QString &displayName, const QString &countr
     if (rttMs < 0) {
         r.status = Ok;
         r.note = where;
-    } else if (rttMs >= 400) {
+    } else if (rttMs >= warnMs) {
         r.status = Warn;
         r.note = QStringLiteral("%1 — далеко (~%2 мс)").arg(where).arg(rttMs);
     } else {
@@ -277,12 +280,21 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs,
     return r;
 }
 
-// Стадия 4a (опциональная): ДОСТУП К САЙТАМ РФ (РФ-сплит). Запускается только при включённом
-// тумблере: пробы RU-корпуса (Яндекс/VK/Аэрофлот) текущим путём — сплит обязан вести их
-// напрямую. names/oks — параллельные списки проверенных сайтов.
-inline StageResult ruSplitStage(const QStringList &names, const QList<bool> &oks)
+// Стадия 4a (опциональная): ДОСТУП К САЙТАМ РФ (РФ-сплит). Пробы RU-корпуса (server-driven
+// lists.rusplit_watch, фолбэк rusentinel::defaultWatch — Яндекс/Ozon/WB/Госуслуги) текущим
+// путём — сплит обязан вести их напрямую. names/oks — параллельные списки проверенных сайтов.
+// enabled=false — тумблер «Доступ к сайтам РФ» выключен: честный Skip с причиной (раньше фаза
+// молча пропускалась и поддержка не видела, что сплит у клиента не включён вовсе).
+inline StageResult ruSplitStage(const QStringList &names, const QList<bool> &oks,
+                                bool enabled = true)
 {
     StageResult r; r.id = QStringLiteral("rusplit");
+    if (!enabled) {
+        r.status = Skip;
+        r.data.insert(QStringLiteral("enabled"), false);
+        r.note = QStringLiteral("«Доступ к сайтам РФ» выключен — не проверялся");
+        return r;
+    }
     QStringList bad;
     int ok = 0;
     for (int i = 0; i < names.size() && i < oks.size(); ++i) {
@@ -419,7 +431,8 @@ inline QJsonObject buildReport(const QList<StageResult> &stages, const QJsonObje
 {
     QJsonObject o;
     o.insert(QStringLiteral("type"), QStringLiteral("doctor"));
-    o.insert(QStringLiteral("schema"), 3);   // v3 (D-3): + стадия network, профиль скорости, A/B direct
+    o.insert(QStringLiteral("schema"), 4);   // v4 (волна UX 07-22): RU-корпус GET<500, full-режим,
+                                             // порог RTT server-driven, ручной net_type/оператор
     QJsonArray arr;
     for (const auto &s : stages) {
         QJsonObject so = s.data;
