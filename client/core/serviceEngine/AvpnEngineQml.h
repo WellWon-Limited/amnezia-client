@@ -26,6 +26,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <functional> // AVPN (Доктор D-6): sink большого DF-echo блок-профиля эндпоинта
+
 #include "DoctorReport.h" // AVPN (Доктор v1): чистые вердикты стадий диагностики (юнит-покрыты)
 
 class VpnConnection;
@@ -1024,6 +1026,15 @@ private:
     int  m_docNetPending = 0;         // незавершённые async-пробы стадии Network
     int  m_docTunIcmpMs = -1;         // ICMP 1.1.1.1 ЧЕРЕЗ туннель (fire-and-collect в Connect)
     IRttProbe *m_docPing = nullptr;   // отдельный инстанс (m_rttProbe гейтится connected⇒cancel)
+    // D-6 (блок-профиль эндпоинта): ICMP до IP ТЕКУЩЕЙ ноды МИМО туннеля (host-route WG) —
+    // различает причину смерти ноды у оператора: IP-блэкхол / фильтр по размеру / верхние слои
+    int  m_docEpMs = -1;              // Connect: маленький echo до эндпоинта, -1 = нет ответа
+    int  m_docEpBig = -1;             // Connect: большой DF-echo, -1 не мерили / 0 дроп / 1 ок
+    bool m_docEpTried = false;
+    int  m_docAltEpMs = -1;           // то же для текущей альтернативы перебора
+    int  m_docAltEpBig = -1;
+    bool m_docAltEpTried = false;
+    QString docEpProbeStart(std::function<void(bool)> bigSink); // -> IP цели "ep" ("" = пропуск)
     double m_docSpeedDown = -1;       // партиалы Speed на время A/B-замера (сторож не теряет бенч)
     int    m_docSpeedIdle = 0, m_docSpeedLoaded = 0;
     bool   m_docSpeedCollapsed = false;
