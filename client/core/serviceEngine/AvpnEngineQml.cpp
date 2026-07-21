@@ -5042,6 +5042,8 @@ void AvpnEngineQml::startDoctor()
     m_docNetWl = -1;
     m_docNetPending = 0;
     m_docTunIcmpMs = -1;
+    m_docEpMs = -1; m_docEpBig = -1; m_docEpTried = false;          // D-6
+    m_docAltEpMs = -1; m_docAltEpBig = -1; m_docAltEpTried = false; // D-6
     m_docSpeedDown = -1;
     m_docSpeedIdle = 0;
     m_docSpeedLoaded = 0;
@@ -5188,6 +5190,7 @@ void AvpnEngineQml::docConnectAdvance()
             m_docConnecting = false;
             m_docAltRx0 = m_tunnel.readStats().rxBytes; // база для «данные идут» (рост rx)
             m_docAltProbe1 = false; m_docAltIcmpMs = -1; m_docAltHsSec = -1;
+            m_docAltEpMs = -1; m_docAltEpBig = -1; m_docAltEpTried = false; // D-6
             // сторож накрывает обе пробы: 800мс прогрев + проба1 + re-probe-гэп + проба2
             const int gap = qBound(3000, int(avpn::TuningStore::numberOr(
                                        QStringLiteral("doctor_alt_reprobe_ms"), 12000.0)), 30000);
@@ -5231,6 +5234,32 @@ void AvpnEngineQml::docConnectAdvance()
     }
 }
 
+// D-6 (блок-профиль эндпоинта): запуск проб до IP ТЕКУЩЕЙ ноды МИМО туннеля — host-route WG
+// выводит пакеты к эндпоинту в физический интерфейс даже при full-tunnel. Вместе с handshake/rx
+// стадии различает ПРИЧИНУ смерти ноды у оператора: IP-блэкхол (echo мимо) vs фильтр по размеру
+// пакета (маленький ок, большой DF-echo ~1400Б дропнут — профиль ТСПУ/DPI) vs верхние слои
+// (оба ок, а 204 мимо). Возвращает IP для цели "ep" в общий probeAll вызывающего (пусто = не
+// пробуем); большой echo уходит тут же отдельным сокетом (probeMtuOne самодостаточна, состояние
+// probeAll не трогает). bigSink(ok) зовётся ТОЛЬКО для IPv4-литерала (probeMtuOne не резолвит
+// хосты; не звался = «не мерили», не ложное «дропнут»). false при payload>MTU интерфейса =
+// локальный EMSGSIZE — тоже честное «не проходит» (дефолт 1372+28=1400 < реальных MTU).
+// Гейт features.doctor_ep_probe; размер — numbers.doctor_ep_big_payload (REMOTE-TUNING §1).
+QString AvpnEngineQml::docEpProbeStart(std::function<void(bool)> bigSink)
+{
+    if (!m_docPing || !featureEnabled(QStringLiteral("doctor_ep_probe"), true))
+        return QString();
+    const QString epIp = currentNodeEndpointIp(currentNode());
+    if (epIp.isEmpty())
+        return QString();
+    const QHostAddress lit(epIp);
+    if (!lit.isNull() && lit.protocol() == QAbstractSocket::IPv4Protocol) {
+        const int payload = qBound(200, int(avpn::TuningStore::numberOr(
+                                       QStringLiteral("doctor_ep_big_payload"), 1372.0)), 1400);
+        m_docPing->probeMtuOne(epIp, payload, 4000, std::move(bigSink));
+    }
+    return epIp;
+}
+
 void AvpnEngineQml::docVerifyDataplane()
 {
     // проба generate_204 ЧЕРЕЗ туннель: первый байт получен ⇒ данные идут; параллельно смотрим
@@ -5240,12 +5269,23 @@ void AvpnEngineQml::docVerifyDataplane()
     // инстанс (m_rttProbe гейтится connected⇒cancel). L3-жив != L7-жив: различает «туннель
     // доводит пакеты» от «HTTPS зарезан за нодой». Windows — стаб, результат просто не пишется.
     m_docTunIcmpMs = -1;
+    m_docEpMs = -1; m_docEpBig = -1;
+    const QString epIp = docEpProbeStart([this, e = m_docEpoch](bool ok) {
+        if (e == m_docEpoch) m_docEpBig = ok ? 1 : 0;
+    });
+    m_docEpTried = !epIp.isEmpty();
     if (m_docPing) {
-        m_docPing->probeAll({{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}}, 3000,
-            [this, e = m_docEpoch](const QString &, int rttMs) {
-                if (e == m_docEpoch && rttMs >= 0
-                    && (m_docTunIcmpMs < 0 || rttMs < m_docTunIcmpMs))
+        QList<avpn::RttTarget> targets{{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}};
+        if (!epIp.isEmpty())
+            targets.append({QStringLiteral("ep"), epIp, 0});
+        m_docPing->probeAll(targets, 3000,
+            [this, e = m_docEpoch](const QString &id, int rttMs) {
+                if (e != m_docEpoch || rttMs < 0) return;
+                if (id == QLatin1String("ep")) {
+                    if (m_docEpMs < 0 || rttMs < m_docEpMs) m_docEpMs = rttMs;
+                } else if (m_docTunIcmpMs < 0 || rttMs < m_docTunIcmpMs) {
                     m_docTunIcmpMs = rttMs;
+                }
             },
             [] {});
     }
@@ -5263,6 +5303,11 @@ void AvpnEngineQml::docVerifyDataplane()
         doctor::StageResult r = doctor::connectStage(/*couldConnect=*/true, httpOk || rxGrew, hsAge);
         if (m_docTunIcmpMs >= 0)
             r.data.insert(QStringLiteral("tunnel_icmp_ms"), m_docTunIcmpMs);
+        if (m_docEpTried) { // D-6: блок-профиль эндпоинта текущей ноды (docEpProbeStart)
+            r.data.insert(QStringLiteral("ep_icmp_ms"), m_docEpMs); // -1 = IP молчит мимо туннеля
+            if (m_docEpBig != -1)
+                r.data.insert(QStringLiteral("ep_icmp_big"), m_docEpBig == 1);
+        }
         docStageDone(r);
     });
 }
@@ -5617,12 +5662,23 @@ void AvpnEngineQml::docAltNext()
 void AvpnEngineQml::docAltVerify()
 {
     m_docAltHsSec = debugSnapshot().value(QStringLiteral("latestHandshakeAgeSec")).toLongLong();
+    // D-6: блок-профиль эндпоинта альтернативы — мы к ней подключены, host-route активен
+    const QString epIp = docEpProbeStart([this, e = m_docEpoch](bool ok) {
+        if (e == m_docEpoch) m_docAltEpBig = ok ? 1 : 0;
+    });
+    m_docAltEpTried = !epIp.isEmpty();
     if (m_docPing) {
-        m_docPing->probeAll({{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}}, 3000,
-            [this, e = m_docEpoch](const QString &, int rttMs) {
-                if (e == m_docEpoch && rttMs >= 0
-                    && (m_docAltIcmpMs < 0 || rttMs < m_docAltIcmpMs))
+        QList<avpn::RttTarget> targets{{QStringLiteral("tunnel"), QStringLiteral("1.1.1.1"), 0}};
+        if (!epIp.isEmpty())
+            targets.append({QStringLiteral("ep"), epIp, 0});
+        m_docPing->probeAll(targets, 3000,
+            [this, e = m_docEpoch](const QString &id, int rttMs) {
+                if (e != m_docEpoch || rttMs < 0) return;
+                if (id == QLatin1String("ep")) {
+                    if (m_docAltEpMs < 0 || rttMs < m_docAltEpMs) m_docAltEpMs = rttMs;
+                } else if (m_docAltIcmpMs < 0 || rttMs < m_docAltIcmpMs) {
                     m_docAltIcmpMs = rttMs;
+                }
             },
             [] {});
     }
@@ -5674,6 +5730,11 @@ void AvpnEngineQml::docAltRecord(bool probe2)
     d.insert(QStringLiteral("rx_grew"), rxGrew);
     d.insert(QStringLiteral("handshake_sec"), double(m_docAltHsSec));
     if (m_docAltIcmpMs >= 0) d.insert(QStringLiteral("tunnel_icmp_ms"), m_docAltIcmpMs);
+    if (m_docAltEpTried) { // D-6: блок-профиль эндпоинта (docEpProbeStart)
+        d.insert(QStringLiteral("ep_icmp_ms"), m_docAltEpMs); // -1 = IP молчит мимо туннеля
+        if (m_docAltEpBig != -1)
+            d.insert(QStringLiteral("ep_icmp_big"), m_docAltEpBig == 1);
+    }
     d.insert(QStringLiteral("verdict"), verdict);
     m_docAltDetails.append(d);
     m_docAltOks.append(verdict >= 2); // РАБОЧАЯ только если стабильна (обе пробы)
