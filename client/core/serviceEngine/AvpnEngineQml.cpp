@@ -51,6 +51,7 @@
 #include <QDir>                   // AVPN in-app Legal: каталог кэша
 #include <QImage>                 // AVPN: QR → PNG для share-листа переноса (shareTextWithQr)
 #include <QFile>                  // AVPN in-app Legal: чтение кэша
+#include <QLocalSocket>           // AVPN (BUG-6): стартовая проба статуса root-демона (macOS)
 #include <QSaveFile>              // AVPN in-app Legal: атомарная запись кэша
 #include <QStandardPaths>         // AVPN in-app Legal: AppDataLocation
 #ifdef Q_OS_IOS
@@ -691,6 +692,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (QQuickItem::setFocus). 1200мс гарантируют, что окно показано и loop простаивает (как при
     // пользовательском start()). Идемпотентно (m_bootstrapped). // AVPN
     QTimer::singleShot(1200, this, &AvpnEngineQml::bootstrap);
+
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (BUG-6, адопция при перезапуске GUI): демон держит туннель через выход GUI — спросить
+    // его статус на старте и адоптировать живой туннель (см. probeDaemonTunnelOnStartup). 1500мс:
+    // после показа окна; чисто async (QLocalSocket), вложенных QEventLoop нет — конфликт с
+    // bootstrap(1200мс) исключён.
+    QTimer::singleShot(1500, this, &AvpnEngineQml::probeDaemonTunnelOnStartup);
+#endif
 
     // AVPN (LKG, C-7): мгновенный бейдж/пул из последнего удачного ответа /v1/subscription —
     // холодный старт не мигает «∞» и список серверов не пустой, пока сетевой bootstrap в пути.
@@ -2554,7 +2563,21 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
     switch (s) {
     case Vpn::Connected:
-        m_engine.onTunnelConnected();
+        // AVPN (BUG-6, адопция живого туннеля): onTunnelConnected() поднимает Connected только из
+        // фаз подъёма; false = факт «туннель жив» пришёл, когда движок в терминале и это НЕ наша
+        // операция — туннель пережил перезапуск GUI (iOS: NE после смахивания, initialize() эмитит
+        // Connected; desktop: демон держит туннель, факт приходит из стартовой пробы). Раньше факт
+        // игнорировался (UI «выключен»), а ближайший reconcile ГАСИЛ живой туннель (wantConnected
+        // false → guardedStop). Адопт по образцу Android §13a: намерение ПЕРЕД воскрешением —
+        // иначе reconcile погасит. §13 цел: это не авто-коннект из OFF, а факт живого СВОЕГО
+        // туннеля (iOS-обсервер фильтрует чужие сессии; Android-путь сюда же — идемпотентен).
+        // Kill-switch: features.adopt_live_tunnel (default ON).
+        if (!m_engine.onTunnelConnected()
+            && m_op == Op::None
+            && avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel"))) {
+            m_wantConnected = true;
+            m_engine.adoptTunnelConnected();
+        }
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
         // AVPN (wake-реконнект): успешный подъём закрывает wake-операцию (если шла) и заново
         // перехватывает wakeup/networkChanged — createProtocolConnections на КАЖДОМ connectToVpn
@@ -3072,6 +3095,10 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (BUG-6): реальный старт создаст протокол — дальше stop идёт штатным путём.
+    m_adoptedNoProto = false;
+#endif
     // AVPN (краш-фикс iOS, анти-реэнтрантность): startFlow ниже крутит вложенный QEventLoop на главном
     // потоке. Если guardedStart переисполнен ИЗ этого цикла (queued onConnectionStateChanged очищает
     // m_opInFlight, затем отложенный reconcile→guardedStart прилетает внутри того же loop.exec()),
@@ -3328,6 +3355,79 @@ void AvpnEngineQml::wakeKick()
     m_startAttempts = 0;
     reconcile();
 }
+
+// AVPN (BUG-6): путь к сокету демона — тот же, что у LocalSocketController (initializeInternal).
+static QString avpnDaemonSocketPath()
+{
+    const QString primary = QStringLiteral("/var/run/avpn/daemon.socket");
+    return QFile::exists(primary) ? primary : QStringLiteral("/tmp/avpn.socket");
+}
+
+// AVPN (BUG-6, адопция при перезапуске GUI): демон переживает выход GUI и держит туннель, но
+// до клика Connect протокол не существует и статус демона никто не спрашивает — GUI показывал
+// «выключено», а reconcile мог погасить живой туннель. Лёгкая async-проба (без nested loop,
+// NetAwait-доктрина): connect → {"type":"status"} → connected==true → адопт через общий
+// choke-point onConnectionStateChanged(Connected) (там же встанет hookDaemonWakeSignals §18).
+void AvpnEngineQml::probeDaemonTunnelOnStartup()
+{
+    if (!avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel")))
+        return;
+    if (m_op != Op::None || m_lastTunnelState == Vpn::Connected)
+        return; // уже оперируем/подключены — пробе нечего чинить
+    auto *sock = new QLocalSocket(this);
+    auto *guard = new QTimer(sock);
+    guard->setSingleShot(true);
+    connect(guard, &QTimer::timeout, sock, &QObject::deleteLater); // демона нет/молчит — тихо уходим
+    connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("status") } })
+                        .toJson(QJsonDocument::Compact));
+        sock->write("\n");
+        sock->flush();
+    });
+    connect(sock, &QLocalSocket::readyRead, sock, [this, sock]() {
+        while (sock->canReadLine()) {
+            const QJsonObject o = QJsonDocument::fromJson(sock->readLine()).object();
+            if (o.value(QStringLiteral("type")).toString() != QLatin1String("status"))
+                continue;
+            if (o.value(QStringLiteral("connected")).toBool()
+                && m_op == Op::None && m_lastTunnelState != Vpn::Connected) {
+                qInfo() << "[adopt] daemon holds a live tunnel — adopting (GUI restart)";
+                m_adoptedNoProto = true;
+                onConnectionStateChanged(Vpn::Connected); // адопт внутри (BUG-6 ветка Connected)
+            }
+            sock->deleteLater();
+            return;
+        }
+    });
+    connect(sock, &QLocalSocket::errorOccurred, sock, [sock](QLocalSocket::LocalSocketError) {
+        sock->deleteLater(); // демон не установлен/не поднят — штатно, адоптить нечего
+    });
+    guard->start(3000);
+    sock->connectToServer(avpnDaemonSocketPath());
+}
+
+// AVPN (BUG-6): выключение адоптированного туннеля. Протокола нет (эту GUI-сессию не коннектили),
+// m_tunnel.down() дойдёт до VpnConnection с null-протоколом (ноль-оп для демона) — гасим демона
+// напрямую его же командой протокола. Иначе пользователь не может выключить VPN (зеркало §13a).
+void AvpnEngineQml::daemonDirectDeactivate()
+{
+    auto *sock = new QLocalSocket(this);
+    auto *guard = new QTimer(sock);
+    guard->setSingleShot(true);
+    connect(guard, &QTimer::timeout, sock, &QObject::deleteLater);
+    connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("deactivate") } })
+                        .toJson(QJsonDocument::Compact));
+        sock->write("\n");
+        sock->flush();
+        QTimer::singleShot(300, sock, &QObject::deleteLater); // байты ушли — сокет больше не нужен
+    });
+    connect(sock, &QLocalSocket::errorOccurred, sock, [sock](QLocalSocket::LocalSocketError) {
+        sock->deleteLater();
+    });
+    guard->start(3000);
+    sock->connectToServer(avpnDaemonSocketPath());
+}
 #endif
 
 void AvpnEngineQml::guardedStop()
@@ -3343,6 +3443,16 @@ void AvpnEngineQml::guardedStop()
     m_healthTimer.stop();
     m_engine.requestStop();
     m_tunnel.down();
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (BUG-6): туннель был адоптирован без протокола этой GUI-сессии — down() демона не
+    // достигнет (null-протокол), гасим напрямую. Терминальный Disconnected приедет ретрансляцией
+    // демона? Нет — соединения-слушателя тоже нет, поэтому полагаемся на m_tunnel.down()-путь
+    // (null-протокол шлёт синхронный Disconnected) + факт деактивации демона этой командой.
+    if (m_adoptedNoProto) {
+        m_adoptedNoProto = false;
+        daemonDirectDeactivate();
+    }
+#endif
     emit changed();
 }
 

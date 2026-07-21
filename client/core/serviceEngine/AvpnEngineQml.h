@@ -784,6 +784,15 @@ private:
     void daemonWakeEvent(const char *why);
     void wakeLivenessProbe();         // async HEAD через туннель; мёртв → needsRestart+reconcile
     void wakeKick();                  // ретрай подъёма по появлению сети (кап tries)
+    // AVPN (BUG-6, адопция при перезапуске GUI): демон держит туннель после выхода GUI, но на
+    // холодном старте протокол (LocalSocketController) не создаётся до клика Connect — факт
+    // «connected» демона никто не спрашивает. Стартовая проба: свой QLocalSocket → {"type":"status"}
+    // → connected==true → адопт (намерение + adoptTunnelConnected + onConnectionStateChanged).
+    // m_adoptedNoProto: туннель адоптирован БЕЗ живого протокола — пользовательский stop обязан
+    // гасить демона напрямую ({"type":"deactivate"}), иначе выключение станет ноль-оп (§13a-зеркало).
+    void probeDaemonTunnelOnStartup();
+    void daemonDirectDeactivate();
+    bool m_adoptedNoProto = false;
 #endif
     // AVPN (sub-grace): из onTick при connected — «подписка истекла и грейс прошёл» → управляемый
     // stop() (тот же путь, что пользовательский: намерение OFF + reconcile) + subscriptionEnforcedStop().
