@@ -1170,7 +1170,7 @@ PageType {
                     // macOS: на время фоновой установки root-демона — честный статус установки
                     // (=== true — гард на старый бинарь без свойства). // AVPN
                     text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
-                          : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем службу VPN…")
+                          : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем…")
                           : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…")))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
