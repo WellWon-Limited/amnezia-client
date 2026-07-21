@@ -4262,6 +4262,25 @@ void AvpnEngineQml::refreshAccount()
                 // AVPN (admin-гейт): devices.is_admin с бэка. Отсутствие ключа/оффлайн/401 →
                 // пустая мапа → isAdminDevice()==false — панель администратора скрыта.
                 result.insert(QStringLiteral("is_admin"), o.value(QStringLiteral("is_admin")).toBool());
+                // AVPN (короткий ID, канон 2026-07-21): порядковый числовой Account.id —
+                // ЕГО показываем юзеру (шапка чата, карточка «Статус доступа»); длинный
+                // hex account_id — технический (копия/перенос). 0/нет поля = старый бэк →
+                // UI падает на фолбэк (первые 8 hex).
+                result.insert(QStringLiteral("account_number"),
+                              o.value(QStringLiteral("account_number")).toInt(0));
+                // AVPN (плашка группы, group-aware волна): операторская группа аккаунта —
+                // бейдж карточки показывает её имя вместо Премиум/Пробный/Истекла.
+                // null/нет поля → ключ не пишем, UI рисует обычный бейдж.
+                const QJsonValue gv = o.value(QStringLiteral("group"));
+                if (gv.isObject()) {
+                    const QJsonObject g = gv.toObject();
+                    QVariantMap gm;
+                    gm.insert(QStringLiteral("name"), g.value(QStringLiteral("name")).toString());
+                    gm.insert(QStringLiteral("color"), g.value(QStringLiteral("color")).toString());
+                    gm.insert(QStringLiteral("unlimited"),
+                              g.value(QStringLiteral("unlimited")).toBool());
+                    result.insert(QStringLiteral("group"), gm);
+                }
             }
         }
         m_account = result;

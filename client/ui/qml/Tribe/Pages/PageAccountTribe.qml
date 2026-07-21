@@ -306,6 +306,17 @@ PageType {
     // AVPN: идентификаторы для поддержки. account_id (номер аккаунта, /v1/account) и device_id
     // ТЕКУЩЕГО устройства (/v1/devices, где is_current). Оба уже у клиента — копируем и шлём в саппорт.
     function accountNumber() { return root.accountData ? ("" + (root.accountData.account_id || "")) : "" }
+    // КОРОТКИЙ отображаемый ID (канон 2026-07-21): порядковый числовой account_number с бэка
+    // («ID: 83»); старый бэк без поля → фолбэк первые 8 hex. Полный hex — только копия в саппорт.
+    function shortAccountId() {
+        var n = root.accountData ? Number(root.accountData.account_number || 0) : 0
+        if (n > 0) return "" + n
+        return root.accountNumber().substring(0, 8)
+    }
+    // Плашка операторской группы (group-aware волна): есть group.name → бейдж показывает её.
+    readonly property var accountGroup: (root.accountData && root.accountData.group
+                                         && ("" + (root.accountData.group.name || "")) !== "")
+                                        ? root.accountData.group : null
     function currentDeviceId() {
         var l = root.devicesList || []
         for (var i = 0; i < l.length; i++)
@@ -530,24 +541,27 @@ PageType {
                 anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
 
-                // заголовок = короткий ID аккаунта с бэка (первые 8 hex — тот же срез, что в шапке
-                // чата поддержки; полный ID копируется в саппорт-блоке ниже); название подписки
-                // живёт в бейдже: Премиум / Пробный / Истекла
+                // заголовок = КОРОТКИЙ ID аккаунта (порядковый account_number с бэка, «ID: 83»;
+                // фолбэк для старого бэка — первые 8 hex; полный hex копируется в саппорт-блоке
+                // ниже); название подписки живёт в бейдже: группа / Премиум / Пробный / Истекла
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
                         Layout.fillWidth: true
-                        text: root.accountNumber() !== "" ? qsTr("ID: %1").arg(root.accountNumber().substring(0, 8)) : "Tribe VPN"
+                        text: root.shortAccountId() !== "" ? qsTr("ID: %1").arg(root.shortAccountId()) : "Tribe VPN"
                         color: Theme.color.text1
                         font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                         elide: Text.ElideMiddle
                     }
-                    // «Истекла» — только device-часы (subDeadNow, group-aware); account.status
-                    // даёт лишь оттенок живой подписки (active=Премиум, иначе Пробный).
+                    // Приоритет бейджа: живая операторская группа (плашка с её именем) →
+                    // «Истекла» по device-часам (subDeadNow, group-aware) → оттенок из
+                    // account.status (active=Премиум, иначе Пробный).
                     TribeBadge {
-                        variant: root.subDeadNow ? "off"
+                        variant: (root.accountGroup && !root.subDeadNow) ? "on"
+                               : root.subDeadNow ? "off"
                                : (root.accountData && root.accountData.status === "active") ? "on" : "warn"
-                        text: root.subDeadNow ? qsTr("Истекла")
+                        text: (root.accountGroup && !root.subDeadNow) ? ("" + root.accountGroup.name)
+                            : root.subDeadNow ? qsTr("Истекла")
                             : (root.accountData && root.accountData.status === "active") ? qsTr("Премиум")
                             : qsTr("Пробный")
                     }
