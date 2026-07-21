@@ -13,13 +13,6 @@
 namespace avpn {
 
 namespace {
-// Фолбэк вахт-листа (server-driven через lists.rusplit_watch, формат "Имя|URL").
-const QStringList kDefaultWatch{
-    QStringLiteral("Яндекс|https://ya.ru/"),
-    QStringLiteral("VK|https://vk.com/favicon.ico"),
-    QStringLiteral("Аэрофлот|https://www.aeroflot.ru/"),
-};
-
 QString stateKey(const QString &name)
 {
     // ключ QSettings на target: состояние + день последнего отчёта
@@ -71,7 +64,7 @@ void RuSplitSentinel::runProbes()
     if (!m_masterOn || !m_masterOn())
         return; // дозор имеет смысл только при включённом «Доступе к РФ»
     const QStringList raw =
-        TuningStore::listOr(QStringLiteral("rusplit_watch"), kDefaultWatch);
+        TuningStore::listOr(QStringLiteral("rusplit_watch"), rusentinel::defaultWatch());
     m_round.clear();
     m_pending = 0;
     m_tunnelAlive = false;

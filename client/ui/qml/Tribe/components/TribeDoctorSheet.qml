@@ -32,6 +32,80 @@ Item {
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
     readonly property bool running: hasEngine && TribeEngine.doctorRunning === true
 
+    // ── Интро-шаги (волна UX 07-22): тип сети → оператор (если сотовая) → режим → запуск ────
+    // Авто-детект знает тип сети → вопросов нет (кейс владельца: на Wi-Fi спрашивало оператора).
+    property string autoNet: ""      // авто-тип на момент открытия ("" = платформа не знает)
+    property string netChoice: ""    // ручной выбор шага 1 ("wifi"/"cellular")
+    readonly property string effNet: autoNet !== "" ? autoNet : netChoice
+    property bool fullMode: false    // false = быстрая (дефолт), true = полная (все серверы)
+    property string carrierSel: ""   // выбранный оператор (код из diagOperators)
+    property int nodeTab: 0          // активная вкладка финала «по серверам»
+    readonly property bool needNet: autoNet === "" && netChoice === ""
+    readonly property bool needOp: effNet === "cellular" && hasEngine
+                                   && TribeEngine.diagCarrierAuto() === "" && carrierSel === ""
+    readonly property bool canRun: !needNet && !needOp
+
+    // Финал: вкладки по проверенным серверам — текущий + все альтернативы обзора (жалоба
+    // владельца: «анализировал три ноды — где инфа по всем трём?»). Пусто = обзора не было.
+    readonly property var nodeTabs: {
+        if (mode !== "done" || !hasEngine) return []
+        const arr = TribeEngine.doctorStages || []
+        var cur = ({ kind: "current", name: "", cc: "", rtt: -1 })
+        var alts = []
+        for (var i = 0; i < arr.length; ++i) {
+            const s = arr[i]
+            if (s.id === "servers") {
+                cur.name = s.region || ""
+                cur.cc = s.countryCode || ""
+                cur.rtt = (s.rttMs !== undefined ? s.rttMs : -1)
+            } else if (s.id === "connect") {
+                cur.dataFlows = s.dataFlows === true
+                cur.tunMs = s.tunnelIcmpMs
+                cur.epMs = s.epIcmpMs
+                cur.epBig = s.epIcmpBig
+            } else if (s.id === "altnodes" && s.details !== undefined) {
+                for (var j = 0; j < s.details.length; ++j) alts.push(s.details[j])
+            }
+        }
+        if (alts.length === 0) return []
+        var tabs = []
+        if (cur.name !== "" || cur.cc !== "") tabs.push(cur)
+        return tabs.concat(alts)
+    }
+    function tabDotColor(d) {
+        if (d.kind === "current")
+            return d.dataFlows === true ? Theme.color.connected : Theme.color.danger
+        return d.verdict === 2 ? Theme.color.connected
+             : d.verdict === 1 ? Theme.color.warning : Theme.color.danger
+    }
+    function tabLines(d) {
+        var out = []
+        if (d.kind === "current") {
+            if (d.rtt !== undefined && d.rtt > 0)
+                out.push(qsTr("Отклик: ~%1 мс").arg(d.rtt))
+            out.push(d.dataFlows === true ? qsTr("Данные через туннель идут")
+                                          : qsTr("Данные через туннель не проходят"))
+            if (d.tunMs !== undefined && d.tunMs >= 0)
+                out.push(qsTr("Пинг через туннель: ~%1 мс").arg(d.tunMs))
+        } else {
+            if (d.rtt_ms !== undefined && d.rtt_ms > 0)
+                out.push(qsTr("Отклик: ~%1 мс").arg(d.rtt_ms))
+            out.push(d.verdict === 2 ? qsTr("Работает стабильно — обе пробы прошли")
+                   : d.verdict === 1 ? qsTr("Нестабильно — данные пропадают после подключения")
+                                     : qsTr("Не отвечает — данные не проходят"))
+            if (d.tunnel_icmp_ms !== undefined && d.tunnel_icmp_ms >= 0)
+                out.push(qsTr("Пинг через туннель: ~%1 мс").arg(d.tunnel_icmp_ms))
+        }
+        var epMs = d.kind === "current" ? d.epMs : d.ep_icmp_ms
+        var epBig = d.kind === "current" ? d.epBig : d.ep_icmp_big
+        if (epMs !== undefined)
+            out.push(epMs >= 0 ? qsTr("Сервер отвечает напрямую: ~%1 мс").arg(epMs)
+                               : qsTr("Сервер не отвечает напрямую — возможна блокировка адреса"))
+        if (epBig === false)
+            out.push(qsTr("Большие пакеты режутся — признак ограничений оператора"))
+        return out
+    }
+
     // Фикс-порядок стадий (id движка -> подпись). Статусы доезжают в doctorStages.
     readonly property var stageDefs: [
         { id: "network",  label: qsTr("Проверяю вашу сеть") },
@@ -50,6 +124,12 @@ Item {
         mode = "intro"
         sentToSupport = false
         elapsedSec = 0
+        fullMode = false
+        netChoice = ""
+        nodeTab = 0
+        // тип сети замеряем на момент открытия; выбранный ранее оператор — из настроек
+        autoNet = hasEngine ? TribeEngine.doctorNetType() : "wifi"
+        carrierSel = hasEngine ? TribeEngine.diagCarrier() : ""
         opened = true
         depthIndex = PageController.incrementDrawerDepth()
     }
@@ -102,6 +182,7 @@ Item {
             if (!root.opened)
                 return
             root.mode = "done"
+            root.nodeTab = 0
             // в тред поддержки — ТОЛЬКО при реальной проблеме: читаемое резюме текстом
             // (менеджеру) + diag.log вложением (разработчику). «Всё ок» тред не дёргает.
             if (TribeEngine.doctorHasProblem && root.hasChat) {
@@ -121,7 +202,9 @@ Item {
     Rectangle {
         id: card
         anchors.centerIn: parent
-        width: Math.min(parent.width - 2 * Theme.space.xl, 360)
+        // шире (реш. владельца 07-21): те же боковые отступы, что у остальных элементов
+        // приложения (Theme.space.xl), кап 520 — только чтобы не распластаться на десктопе
+        width: Math.min(parent.width - 2 * Theme.space.xl, 520)
         implicitHeight: col.implicitHeight + 2 * Theme.space.xl
         height: implicitHeight
         radius: Theme.radius.xl
@@ -189,7 +272,9 @@ Item {
             Text {
                 visible: root.mode === "intro"
                 Layout.fillWidth: true
-                text: qsTr("Займёт 1–2 минуты — не закрывайте приложение.")
+                text: root.fullMode
+                      ? qsTr("Полная проверка переберёт все серверы — займёт 5–10 минут.")
+                      : qsTr("Займёт 1–2 минуты — не закрывайте приложение.")
                 color: Theme.color.text3
                 font.family: Theme.font.body
                 font.pixelSize: Theme.font.caption
@@ -197,51 +282,43 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
-            // ── ОПЕРАТОР (ручной): iOS 16+ закрыл доступ к оператору через API, поэтому если
-            // авто-код пуст — даём выбрать вручную. Помогает выявить «на этом операторе нода не
-            // работает». Только на сотовой; необязательно. На Android авто-код есть → блок скрыт.
+            // ── ШАГ 1: тип интернета — ТОЛЬКО когда платформа сама не знает (иначе не спрашиваем;
+            // жалоба владельца: на Wi-Fi предлагало выбрать оператора) ────────────────────────
             ColumnLayout {
-                id: carrierPick
-                visible: root.mode === "intro" && root.hasEngine
-                         && TribeEngine.diagCarrierAuto() === ""
+                visible: root.mode === "intro" && root.autoNet === ""
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
                 spacing: Theme.space.xs
-                readonly property var ops: [
-                    { code: "250-02", name: "МегаФон" }, { code: "250-01", name: "МТС" },
-                    { code: "250-99", name: "Билайн" }, { code: "250-20", name: "Теле2" },
-                    { code: "250-11", name: "Yota" }
-                ]
-                property string sel: root.hasEngine ? TribeEngine.diagCarrier() : ""
-
                 Text {
                     Layout.fillWidth: true
-                    text: qsTr("Если вы на мобильном интернете — укажите оператора (необязательно):")
-                    color: Theme.color.text3
+                    text: qsTr("Какой у вас интернет?")
+                    color: Theme.color.text2
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.caption
+                    font.weight: Theme.font.wSemibold
                     horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
                 }
-                Flow {
-                    Layout.fillWidth: true
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
                     spacing: Theme.space.xs
                     Repeater {
-                        model: carrierPick.ops
+                        model: [ { code: "wifi", name: qsTr("Wi-Fi") },
+                                 { code: "cellular", name: qsTr("Мобильный") } ]
                         delegate: Rectangle {
+                            id: netChip
                             required property var modelData
-                            readonly property bool on: carrierPick.sel === modelData.code
+                            readonly property bool on: root.netChoice === modelData.code
                             radius: Theme.radius.pill
                             color: on ? Theme.color.accent : Theme.color.surface2
                             border.width: 1
                             border.color: on ? Theme.color.accent : Theme.color.border
                             implicitHeight: 32
-                            implicitWidth: opLabel.implicitWidth + Theme.space.md * 2
+                            implicitWidth: netLabel.implicitWidth + Theme.space.md * 2
                             Text {
-                                id: opLabel
+                                id: netLabel
                                 anchors.centerIn: parent
-                                text: parent.modelData.name
-                                color: parent.on ? Theme.color.bg800 : Theme.color.text2
+                                text: netChip.modelData.name
+                                color: netChip.on ? Theme.color.bg800 : Theme.color.text2
                                 font.family: Theme.font.body
                                 font.pixelSize: Theme.font.bodyS
                                 font.weight: Theme.font.wSemibold
@@ -251,9 +328,118 @@ Item {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     Haptic.play("selection")
-                                    const code = parent.on ? "" : parent.modelData.code
-                                    carrierPick.sel = code
+                                    root.netChoice = netChip.modelData.code
+                                    if (root.hasEngine)
+                                        TribeEngine.setDiagNetType(netChip.modelData.code)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── ШАГ 2: оператор — только на сотовой и только когда авто-код недоступен (iOS 16+
+            // закрыл CTCarrier; на Android авто-код есть → блок скрыт). Выбор обязателен для
+            // запуска — паттерны «оператор X режет ноду Y» без него слепые; есть «Другой».
+            ColumnLayout {
+                id: carrierPick
+                visible: root.mode === "intro" && root.hasEngine && root.effNet === "cellular"
+                         && TribeEngine.diagCarrierAuto() === ""
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.space.sm
+                spacing: Theme.space.xs
+                readonly property var ops: root.hasEngine ? TribeEngine.diagOperators() : []
+
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("Выберите вашего мобильного оператора:")
+                    color: Theme.color.text2
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.caption
+                    font.weight: Theme.font.wSemibold
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.space.xs
+                    Repeater {
+                        model: carrierPick.ops
+                        delegate: Rectangle {
+                            id: opChip
+                            required property var modelData
+                            readonly property bool on: root.carrierSel === modelData.code
+                            radius: Theme.radius.pill
+                            color: on ? Theme.color.accent : Theme.color.surface2
+                            border.width: 1
+                            border.color: on ? Theme.color.accent : Theme.color.border
+                            implicitHeight: 32
+                            implicitWidth: opLabel.implicitWidth + Theme.space.md * 2
+                            Text {
+                                id: opLabel
+                                anchors.centerIn: parent
+                                text: opChip.modelData.name
+                                color: opChip.on ? Theme.color.bg800 : Theme.color.text2
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.bodyS
+                                font.weight: Theme.font.wSemibold
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Haptic.play("selection")
+                                    const code = opChip.on ? "" : opChip.modelData.code
+                                    root.carrierSel = code
                                     if (root.hasEngine) TribeEngine.setDiagCarrier(code)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── ШАГ 3: режим — «Быстрая» (дефолт) / «Полная» (все серверы, кроме РФ) ─────────
+            Rectangle {
+                visible: root.mode === "intro"
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.space.sm
+                implicitHeight: 36
+                radius: Theme.radius.pill
+                color: Theme.color.surface2
+                border.width: 1
+                border.color: Theme.color.border
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 3
+                    spacing: 3
+                    Repeater {
+                        model: [ { full: false, name: qsTr("Быстрая") },
+                                 { full: true,  name: qsTr("Полная") } ]
+                        delegate: Rectangle {
+                            id: modeSeg
+                            required property var modelData
+                            readonly property bool on: root.fullMode === modelData.full
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            radius: Theme.radius.pill
+                            color: on ? Theme.color.surface3 : "transparent"
+                            border.width: on ? 1 : 0
+                            border.color: Theme.color.border2
+                            Text {
+                                anchors.centerIn: parent
+                                text: modeSeg.modelData.name
+                                color: modeSeg.on ? Theme.color.text1 : Theme.color.text3
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.bodyS
+                                font.weight: Theme.font.wSemibold
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Haptic.play("selection")
+                                    root.fullMode = modeSeg.modelData.full
                                 }
                             }
                         }
@@ -436,6 +622,77 @@ Item {
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
                 }
+                // ── ВКЛАДКИ ПО СЕРВЕРАМ (обзор альтернатив был): текущий + каждая проверенная
+                // нода; тап по чипу-флагу листает детали («инфа по всем нодам» — реш. владельца)
+                Flow {
+                    visible: root.mode === "done" && root.nodeTabs.length > 0
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.xs
+                    spacing: Theme.space.xs
+                    Repeater {
+                        model: root.nodeTabs
+                        delegate: Rectangle {
+                            id: tabChip
+                            required property var modelData
+                            required property int index
+                            readonly property bool on: root.nodeTab === index
+                            radius: Theme.radius.pill
+                            color: on ? Qt.alpha(Theme.color.accent, 0.16) : Theme.color.surface2
+                            border.width: 1
+                            border.color: on ? Theme.color.accent : Theme.color.border
+                            implicitHeight: 30
+                            implicitWidth: tabRow.implicitWidth + Theme.space.md * 2
+                            RowLayout {
+                                id: tabRow
+                                anchors.centerIn: parent
+                                spacing: 5
+                                TribeFlag {
+                                    visible: (tabChip.modelData.cc || "") !== ""
+                                    Layout.preferredWidth: 14; Layout.preferredHeight: 14
+                                    code: tabChip.modelData.cc || ""
+                                }
+                                Text {
+                                    text: tabChip.modelData.name || ""
+                                    color: tabChip.on ? Theme.color.text1 : Theme.color.text2
+                                    font.family: Theme.font.body
+                                    font.pixelSize: Theme.font.caption
+                                    font.weight: Theme.font.wSemibold
+                                }
+                                Rectangle {
+                                    implicitWidth: 6; implicitHeight: 6; radius: 3
+                                    color: root.tabDotColor(tabChip.modelData)
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Haptic.play("selection")
+                                    root.nodeTab = tabChip.index
+                                }
+                            }
+                        }
+                    }
+                }
+                ColumnLayout {
+                    visible: root.mode === "done" && root.nodeTabs.length > 0
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Repeater {
+                        model: root.nodeTab >= 0 && root.nodeTab < root.nodeTabs.length
+                               ? root.tabLines(root.nodeTabs[root.nodeTab]) : []
+                        delegate: Text {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            text: modelData
+                            color: Theme.color.text2
+                            font.family: Theme.font.body
+                            font.pixelSize: Theme.font.caption
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
                 Text {
                     visible: root.mode === "done" && root.sentToSupport
                     Layout.fillWidth: true
@@ -462,6 +719,8 @@ Item {
                 border.width: isIntro ? 0 : 1
                 border.color: Theme.color.border2
                 gradient: isIntro ? goGrad : null
+                // гейт шагов: пока не выбраны тип сети/оператор — кнопка приглушена и молчит
+                opacity: isIntro && !root.canRun ? 0.45 : 1.0
                 scale: goMa.pressed ? 0.985 : 1.0
                 Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 Gradient {
@@ -485,10 +744,12 @@ Item {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                         if (root.mode === "intro" && root.hasEngine) {
+                            if (!root.canRun)
+                                return // шаги не пройдены (тип сети/оператор)
                             Haptic.play("light")
                             root.mode = "running"
                             root.elapsedSec = 0
-                            TribeEngine.startDoctor()
+                            TribeEngine.startDoctor(root.fullMode)
                         } else {
                             root.close()
                         }

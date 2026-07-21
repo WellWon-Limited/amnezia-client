@@ -419,7 +419,9 @@ public:
     // lite-бенч). Спека: specs/2026-07-17-doctor-v1-design.md. Kill-switch features.diag_v2.
     // Отчёт: doctorReportJson() → uploadReport (quiet) сам; текст в тред поддержки шлёт QML
     // (TribeSupport.sendDiagReport(doctorDiagText()) — чат принадлежит своему слою).
-    Q_INVOKABLE void startDoctor();
+    // full=true — «Полная диагностика» (волна UX 07-22): обзор ВСЕХ живых нод пула (кроме RU и
+    // manual_only) вместо «до 3 при проблеме»; kill-switch features.doctor_full.
+    Q_INVOKABLE void startDoctor(bool full = false);
     Q_INVOKABLE void cancelDoctor();
     Q_INVOKABLE QString doctorReportJson() const;  // итоговый JSON type:"doctor" (после finish)
     Q_INVOKABLE QString doctorHumanReport() const; // читаемое резюме для менеджера (текст в тред)
@@ -429,6 +431,13 @@ public:
     Q_INVOKABLE void setDiagCarrier(const QString &code);
     Q_INVOKABLE QString diagCarrier() const;        // текущий (ручной приоритетнее авто)
     Q_INVOKABLE QString diagCarrierAuto() const;     // авто MCC-MNC ("" если недоступно)
+    // AVPN (волна UX Доктора 07-22): интро-шаги. Авто-тип сети ("wifi"/"cellular"/"ethernet"/"" =
+    // неизвестно) — по нему интро решает, спрашивать ли «какой у вас интернет». Ручной выбор НЕ
+    // персистится (сеть меняется между запусками) — benchExtra берёт его последним фолбэком.
+    Q_INVOKABLE QString doctorNetType() const;
+    Q_INVOKABLE void setDiagNetType(const QString &t);
+    // Операторы РФ для плашки интро (server-driven lists.doctor_operators "MCC-MNC|Имя").
+    Q_INVOKABLE QVariantList diagOperators() const;
     bool doctorRunning() const { return m_docPhase != DoctorPhase::Idle; }
     QString doctorStage() const;                   // connect|servers|services|speed|send
     int doctorPercent() const { return m_docPercent; }
@@ -1025,6 +1034,9 @@ private:
     bool        m_docAltProbe1 = false; // результат первой пробы (до re-probe)
     QString     m_docOrigNode;        // nodeId на момент старта AltNodes (для возврата)
     QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
+    bool        m_docFull = false;    // «Полная диагностика»: обзор всех нод (кроме RU/manual_only)
+    bool        m_docAltHadProblem = false; // была ли проблема ДО обзора альтернатив (решает пересадку)
+    QString     m_diagNetManual;      // ручной тип сети из интро (не персистится)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
     QStringList m_docRuNames;         // RU-корпус: имена проверяемых сайтов
     QList<bool> m_docRuOks;           // результаты (порядок = m_docRuNames)

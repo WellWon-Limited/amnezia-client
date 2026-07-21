@@ -33,8 +33,12 @@ int main()
     // стадия серверов
     CHECK(serverStage(QStringLiteral("Финляндия"), QStringLiteral("FI"), 28).status == Ok,
           "servers: близкий сервер -> Ok");
-    CHECK(serverStage(QStringLiteral("США"), QStringLiteral("US"), 450).status == Warn,
-          "servers: RTT>=400 -> Warn (далеко)");
+    CHECK(serverStage(QStringLiteral("США"), QStringLiteral("US"), 450).status == Ok,
+          "servers: 450 мс при дефолтном пороге 800 -> Ok (пересмотр владельца 07-21)");
+    CHECK(serverStage(QStringLiteral("США"), QStringLiteral("US"), 900).status == Warn,
+          "servers: RTT>=800 (дефолт) -> Warn (далеко)");
+    CHECK(serverStage(QStringLiteral("США"), QStringLiteral("US"), 450, 400).status == Warn,
+          "servers: порог server-driven — 450 при warnMs=400 -> Warn");
     CHECK(serverStage({}, {}, -1).status == Ok,
           "servers: без региона/RTT -> Ok (нейтрально)");
     CHECK(serverStage(QStringLiteral("Латвия"), QStringLiteral("LV"), 28).note.contains(QStringLiteral("Латвия")),
@@ -176,6 +180,10 @@ int main()
           "rusplit: имя упавшего сайта в тексте");
     CHECK(ruSplitStage({QStringLiteral("Яндекс")}, {false}).status == Bad,
           "rusplit: всё мертво -> Bad «проблема с Доступом к РФ»");
+    CHECK(ruSplitStage({}, {}, /*enabled=*/false).status == Skip,
+          "rusplit: тумблер выключен -> Skip (не Bad)");
+    CHECK(ruSplitStage({}, {}, /*enabled=*/false).note.contains(QStringLiteral("выключен")),
+          "rusplit: причина Skip — «выключен» видна поддержке");
 
     // сборка отчёта
     {
@@ -185,7 +193,7 @@ int main()
         const QJsonObject rep = buildReport(st, extra);
         CHECK(rep.value(QStringLiteral("type")).toString() == QLatin1String("doctor"),
               "report: type=doctor");
-        CHECK(rep.value(QStringLiteral("schema")).toInt() == 3, "report: schema=3 (D-3)");
+        CHECK(rep.value(QStringLiteral("schema")).toInt() == 4, "report: schema=4 (волна UX 07-22)");
         CHECK(rep.value(QStringLiteral("stages")).toArray().size() == 2, "report: 2 стадии");
         CHECK(rep.value(QStringLiteral("stages")).toArray().at(0).toObject()
                   .value(QStringLiteral("id")).toString() == QLatin1String("connect"),
