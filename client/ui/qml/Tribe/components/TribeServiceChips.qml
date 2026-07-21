@@ -22,10 +22,10 @@ Row {
                                   ? (width - (model.length - 1) * spacing) / model.length : 0
 
     function stateColor(s) {
-        if (s === 2) return Theme.color.connected   // работает — зелёный
+        if (s === 2) return Theme.color.connected   // работает — зелёный (ТОЛЬКО когда проба позеленела)
         if (s === 1) return Theme.color.warning      // медленно (троттлинг) — янтарь
         if (s === 0) return Theme.color.danger       // заблокировано — красный
-        return Theme.color.text3                      // неизвестно — серый
+        return Theme.color.accent                     // неизвестно / ещё не проверено — синий (дефолт) // AVPN
     }
     function stateLabel(s) {
         if (s === 2) return qsTr("работает")
