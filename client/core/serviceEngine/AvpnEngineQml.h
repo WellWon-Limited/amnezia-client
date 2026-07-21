@@ -56,6 +56,11 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(bool svcInstalling READ svcInstalling NOTIFY changed)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
+    // AVPN (group-aware, 2026-07-21): ISO-дата конца подписки из /v1/subscription (device-часы,
+    // бэк учитывает группу). Для UI-дат — ТОЛЬКО она; account.expires_at (аккаунт-часы) для
+    // дат не использовать: рассинхрон «361 дн. · до <прошлогодняя дата>» у членов групп.
+    // Пусто = бессрочно/ещё не загружено (daysLeft тогда -1).
+    Q_PROPERTY(QString subExpiresAt READ subExpiresAt NOTIFY changed)
     Q_PROPERTY(qlonglong trafficUsed READ trafficUsed NOTIFY changed)
     Q_PROPERTY(qlonglong trafficLimit READ trafficLimit NOTIFY changed)
     Q_PROPERTY(bool subActive READ subActive NOTIFY changed)
@@ -240,6 +245,7 @@ public:
 
     // AVPN: статус подписки (Task 3). daysLeft<0 = бессрочно/неизвестно; trafficLimit==0 = безлимит.
     int daysLeft() const;
+    QString subExpiresAt() const;
     qlonglong trafficUsed() const;
     qlonglong trafficLimit() const;
     bool subActive() const;

@@ -1055,6 +1055,11 @@ int AvpnEngineQml::daysLeft() const
     return secs <= 0 ? 0 : static_cast<int>((secs + 86399) / 86400);
 }
 
+QString AvpnEngineQml::subExpiresAt() const
+{
+    return debugSnapshot().value(QStringLiteral("expiresAt")).toString();
+}
+
 // AVPN: текущий сервер для карточки Connect. Показываем ноду ТОЛЬКО когда реально подключены/
 // переключаемся; до коннекта и после стопа hasNode=false → карточка показывает «Умный выбор сервера»
 // (умный выбор происходит в момент connect, выбранная нода видна уже подключённой). Без fallback на
