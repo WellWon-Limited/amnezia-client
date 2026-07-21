@@ -66,8 +66,13 @@ AmneziaApplication::~AmneziaApplication()
 #ifdef AMNEZIA_DESKTOP
     if (m_vpnConnection && m_vpnConnectionThread.isRunning()) {
         QMetaObject::invokeMethod(m_vpnConnection.get(), "disconnectSlots", Qt::BlockingQueuedConnection);
-        
+#ifndef Q_OS_MACOS
         QMetaObject::invokeMethod(m_vpnConnection.get(), "disconnectFromVpn", Qt::BlockingQueuedConnection);
+#endif
+        // AVPN (BUG-6, macOS): выход GUI НЕ гасит туннель — root-демон держит его (анти-«засветка»:
+        // Cmd+Q/смахивание не рвёт сессии), при следующем запуске GUI адоптирует живой туннель
+        // (probeDaemonTunnelOnStartup). Выключение VPN — только явной кнопкой в приложении.
+        // Win/Linux оставлены как в апстриме (deactivate на выходе) до отдельной проверки.
     }
 #endif
 
