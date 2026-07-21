@@ -40,6 +40,12 @@ PageType {
                                         && TribeEngine.supportDiagEnabled === true
     readonly property string accountId: hasEngine && TribeEngine.account
                                         ? ("" + (TribeEngine.account.account_id || "")) : ""
+    // КОРОТКИЙ отображаемый ID (канон 2026-07-21): порядковый account_number с бэка
+    // («83»); старый бэк без поля → фолбэк первые 8 hex. Тап по шапке копирует полный hex.
+    readonly property string shortId: {
+        var n = (hasEngine && TribeEngine.account) ? Number(TribeEngine.account.account_number || 0) : 0
+        return n > 0 ? ("" + n) : accountId.substring(0, 8)
+    }
 
     // AVPN (store-flow): черновик, подставляемый в composer при открытии (кнопка «Написать в
     // поддержку» из Настроек передаёт его через goToTabBarPageUrl). ТОЛЬКО подстановка в поле —
@@ -199,7 +205,7 @@ PageType {
                     }
                     Text {
                         Layout.alignment: Qt.AlignRight
-                        text: root.accountId.substring(0, 8)
+                        text: root.shortId
                         color: idTap.pressed ? Theme.color.accent : Theme.color.text2
                         font.family: Theme.font.mono
                         font.pixelSize: Theme.font.caption
