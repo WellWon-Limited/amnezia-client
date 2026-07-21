@@ -33,6 +33,16 @@ PageType {
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property int  daysLeftN:     hasEngine ? TribeEngine.daysLeft : -1
     readonly property real usedFrac: trafficLimitB > 0 ? Math.min(1, trafficUsedB / trafficLimitB) : 0
+    // AVPN (group-aware, 2026-07-21): «истекла» решают device-часы /v1/subscription (бэк учитывает
+    // группы: unlimited/bonus_days/bonus_traffic), КАК на Connect (subExpired). account.status —
+    // аккаунт-часы, групп не знает → членам групп показывал «Истекла» при живом доступе; за ним
+    // остаётся только оттенок Премиум/Пробный. Композит зеркалит PageConnectTribe.subExpired
+    // (без transferredAway/whitelist — у них тут свои экраны/состояния).
+    readonly property bool subDeadNow: hasEngine
+        && ((TribeEngine.subMissing === true)
+            || (daysLeftN >= 0 && (!(TribeEngine.subActive === true)
+                                   || daysLeftN === 0
+                                   || (trafficLimitB > 0 && trafficUsedB >= trafficLimitB))))
     // AVPN: traffic_limit/used = СЫРЫЕ БАЙТЫ, двоичная база (бэк подтвердил по openapi/schemas/models/
     // collector + живым значениям: триал=10·1024³, кап=100·1024³). ГиБ = ÷1024³ → ровно. НЕ ×1e9 и НЕ
     // ×1024⁴. (Откат ошибочного ÷1024⁴ из build 38; 2026-06-23.)
@@ -250,12 +260,14 @@ PageType {
             TribeEngine.refreshAccount()
     }
 
-    // человекочитаемый статус аккаунта для строки ПРОФИЛЬ.
+    // человекочитаемый статус аккаунта для строки ПРОФИЛЬ. «Истекла» — только по device-часам
+    // (subDeadNow); account.status=expired при живой подписке = отставшие аккаунт-часы (группы).
     function accountStatusLabel() {
+        if (root.subDeadNow) return qsTr("Истекла")
         var s = root.accountData ? (root.accountData.status || "") : ""
         if (s === "active")  return qsTr("Активна")
         if (s === "trial")   return qsTr("Пробный доступ")
-        if (s === "expired") return qsTr("Истекла")
+        if (s === "expired") return qsTr("Активна")
         return ""
     }
     // дата истечения (expires_at, ISO) → локальная короткая дата; пусто = бессрочно/неизвестно.
@@ -518,27 +530,32 @@ PageType {
                 anchors.margins: Theme.space.lg
                 spacing: Theme.space.md
 
-                // заголовок = короткий ID аккаунта с бэка (а не маркетинговое имя плана);
-                // название подписки живёт в бейдже: Премиум / Пробный / Истекла
+                // заголовок = короткий ID аккаунта с бэка (первые 8 hex — тот же срез, что в шапке
+                // чата поддержки; полный ID копируется в саппорт-блоке ниже); название подписки
+                // живёт в бейдже: Премиум / Пробный / Истекла
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
                         Layout.fillWidth: true
-                        text: root.accountNumber() !== "" ? qsTr("ID: %1").arg(root.accountNumber()) : "Tribe VPN"
+                        text: root.accountNumber() !== "" ? qsTr("ID: %1").arg(root.accountNumber().substring(0, 8)) : "Tribe VPN"
                         color: Theme.color.text1
                         font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                         elide: Text.ElideMiddle
                     }
+                    // «Истекла» — только device-часы (subDeadNow, group-aware); account.status
+                    // даёт лишь оттенок живой подписки (active=Премиум, иначе Пробный).
                     TribeBadge {
-                        variant: (root.accountData && root.accountData.status === "active") ? "on"
-                               : (root.accountData && root.accountData.status === "expired") ? "off" : "warn"
-                        text: (root.accountData && root.accountData.status === "active") ? qsTr("Премиум")
-                            : (root.accountData && root.accountData.status === "expired") ? qsTr("Истекла")
+                        variant: root.subDeadNow ? "off"
+                               : (root.accountData && root.accountData.status === "active") ? "on" : "warn"
+                        text: root.subDeadNow ? qsTr("Истекла")
+                            : (root.accountData && root.accountData.status === "active") ? qsTr("Премиум")
                             : qsTr("Пробный")
                     }
                 }
 
-                // срок действия: остаток дней + дата окончания (бывшая отдельная строка статуса)
+                // срок действия: остаток дней + дата окончания (бывшая отдельная строка статуса).
+                // Дни И дата — из ОДНОГО источника (device-часы /v1/subscription, group-aware);
+                // раньше дата бралась из account.expires_at → оксюморон «361 дн. · до <прошлое>».
                 RowLayout {
                     Layout.fillWidth: true
                     Text { text: qsTr("Действует"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
@@ -546,7 +563,7 @@ PageType {
                         text: {
                             var parts = []
                             if (root.daysLeftN >= 0) parts.push(qsTr("%1 дн.").arg(root.daysLeftN))
-                            var d = root.fmtDate(root.accountData ? root.accountData.expires_at : "")
+                            var d = root.fmtDate(root.hasEngine ? TribeEngine.subExpiresAt : "")
                             if (d !== "") parts.push(qsTr("до ") + d)
                             return parts.length ? parts.join(" · ") : qsTr("Активен")
                         }
