@@ -23,6 +23,13 @@
 
 #include <QDateTime>                    // AVPN: посев handshake-epoch ≈ now на Connected (анти-ложный-DEAD)
 #include <QMetaObject>
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN (BUG-4 auto-heal): прямой fire-and-forget {"type":"rebind"} демону (паттерн BUG-6)
+    #include <QFile>
+    #include <QJsonDocument>
+    #include <QLocalSocket>
+    #include <QTimer>
+#endif
 
 namespace avpn {
 
@@ -229,6 +236,41 @@ TunnelResult VpnConnectionTunnelControl::applyPeer(const Subscription &sub, cons
 TunnelStats VpnConnectionTunnelControl::readStats()
 {
     return m_stats;
+}
+
+// AVPN (BUG-4 auto-heal): ребайнд сокета живого туннеля — новый эфемерный локальный порт
+// (UAPI listen_port=0 → BindUpdate awg-go) без рестарта туннеля. Детали в ITunnelControl.h.
+bool VpnConnectionTunnelControl::rebindSocket()
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    // NE: provider message живому extension'у (тот же канал, что checkStatus/getStatus).
+    return IosController::Instance()->rebindTunnel();
+#elif defined(Q_OS_MACOS)
+    // root-демон: fire-and-forget {"type":"rebind"} его локальным протоколом (паттерн
+    // daemonDirectDeactivate BUG-6, без nested loop — NetAwait-доктрина §1). Старый демон на
+    // неизвестную команду отвечает warning-логом и живёт дальше — раскатка безопасна в любом
+    // порядке; итог heal'а и так меряет HealthLoop (rx оживёт или DEAD вернётся).
+    auto *sock = new QLocalSocket(this);
+    auto *guard = new QTimer(sock);
+    guard->setSingleShot(true);
+    connect(guard, &QTimer::timeout, sock, &QObject::deleteLater);
+    connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("rebind") } })
+                        .toJson(QJsonDocument::Compact));
+        sock->write("\n");
+        sock->flush();
+        QTimer::singleShot(300, sock, &QObject::deleteLater); // байты ушли — сокет больше не нужен
+    });
+    connect(sock, &QLocalSocket::errorOccurred, sock, [sock](QLocalSocket::LocalSocketError) {
+        sock->deleteLater();
+    });
+    guard->start(3000);
+    const QString primary = QStringLiteral("/var/run/avpn/daemon.socket"); // путь LocalSocketController
+    sock->connectToServer(QFile::exists(primary) ? primary : QStringLiteral("/tmp/avpn.socket"));
+    return true;
+#else
+    return false; // Android (нет awgSetConfig в JNI) / Windows (wireguard-nt) — сразу failover
+#endif
 }
 
 void VpnConnectionTunnelControl::down()

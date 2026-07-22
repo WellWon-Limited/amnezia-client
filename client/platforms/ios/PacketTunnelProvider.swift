@@ -24,6 +24,7 @@ struct Constants {
   static let kActionStop = "stop"
   static let kActionGetTunnelId = "getTunnelId"
   static let kActionStatus = "status"
+  static let kActionRebind = "rebind" // AVPN BUG-4 auto-heal: listen_port=0 в живом awg-go
   static let kActionIsServerReachable = "isServerReachable"
   static let kMessageKeyAction = "action"
   static let kMessageKeyTunnelId = "tunnelId"
@@ -196,6 +197,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       if action == Constants.kActionStatus {
           handleStatusAppMessage(messageData,
                                  completionHandler: completionHandler)
+      }
+
+      // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля — новый локальный порт =
+      // новый 5-tuple flow (лечит сессионный блок ТСПУ). Только WireGuard/AWG-путь.
+      if action == Constants.kActionRebind {
+          handleRebindAppMessage(completionHandler: completionHandler)
       }
   }
 

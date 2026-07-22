@@ -1327,6 +1327,10 @@ QJsonObject AvpnEngineQml::benchExtra() const
         else if (!m_diagNetManual.isEmpty())
             extra.insert(QStringLiteral("net_type"), m_diagNetManual);
     }
+    // AVPN (BUG-4 auto-heal): сколько раз за запуск heal ребайндил сокет — в каждый отчёт
+    // (паттерн «оператор×нода×heal помог/нет» ищется по bench_reports без релиза).
+    if (m_engine.rebindHealTotal() > 0)
+        extra.insert(QStringLiteral("rebind_heals"), m_engine.rebindHealTotal());
     // AVPN (Доктор): оператор для паттернов «оператор X режет ноду Y». Приоритет — ручной выбор
     // пользователя (QSettings, единственный путь на iOS 16+, где API оператора закрыт), иначе
     // обезличенный авто-код MCC-MNC. Пусто → поле не пишем (Wi-Fi/десктоп/недоступно).

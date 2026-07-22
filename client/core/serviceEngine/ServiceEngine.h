@@ -139,6 +139,10 @@ public:
                    SecureAppSettingsRepository *store, QString &error);
 
     QStringList switchLog() const { return m_switchLog; }
+    // AVPN (BUG-4 auto-heal): счётчики ребайнд-попыток — текущей ноды-сессии и суммарно с запуска
+    // (телеметрия benchExtra: паттерн «оператор×нода×heal помог/нет» ищется по отчётам).
+    int rebindHealTries() const { return m_rebindHealTries; }
+    int rebindHealTotal() const { return m_rebindHealTotal; }
     TunnelStats currentStats() const { return m_tunnel ? m_tunnel->readStats() : TunnelStats{}; }
 
     // Ключи клиента (zero-knowledge) — фасад прокидывает их в туннель-адаптер до connect.
@@ -195,6 +199,8 @@ private:
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;
+    int           m_rebindHealTries = 0; // AVPN BUG-4: попытки heal на текущей ноде-сессии (кап tunable)
+    int           m_rebindHealTotal = 0; // AVPN BUG-4: суммарно с запуска (в benchExtra отчётов)
 };
 
 } // namespace avpn

@@ -1,4 +1,5 @@
 #include "ServiceEngine.h"
+#include "ConnectTunables.h" // AVPN (BUG-4 auto-heal): rebindHealMaxTriesTuned — кламп кап попыток
 #include "NodeRanking.h"  // AVPN (выбор по скорости): fastestMeasuredNodeId
 #include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
 #include "SubscriptionParser.h"
@@ -274,6 +275,7 @@ bool ServiceEngine::onTunnelConnected() // AVPN
         || m_state == EngineState::Selecting) {
         m_state = EngineState::Connected;
         m_health.reset();
+        m_rebindHealTries = 0; // AVPN BUG-4: свежий подъём = новый бюджет heal-попыток
         return true;
     }
     return false;
@@ -287,6 +289,7 @@ bool ServiceEngine::adoptTunnelConnected() // AVPN
         return false;
     m_state = EngineState::Connected;
     m_health.reset();
+    m_rebindHealTries = 0; // AVPN BUG-4: адопт = новая сессия наблюдения
     return true;
 }
 
@@ -329,10 +332,32 @@ void ServiceEngine::requestStop() // AVPN
     m_pendingSwitchNodeId.clear();
     m_pendingSwitchReason.clear();
     m_health.reset();
+    m_rebindHealTries = 0; // AVPN BUG-4
 }
 
 bool ServiceEngine::onDead(bool tunnelStillUp)
 {
+    // AVPN (BUG-4 auto-heal, 2026-07-22): сессионный блок ТСПУ вешается на 5-tuple/CGNAT-flow —
+    // «данные не проходят» на одном телефоне при живом втором на том же операторе, режим полёта
+    // (= новый flow) лечит. Перед failover пробуем то же самое БЕЗ участия юзера: ребайнд сокета
+    // (новый локальный порт) на ТЕКУЩЕЙ ноде. Только для health-DEAD при живом туннеле (реальный
+    // обрыв = туннель уже опущен, ребайндить нечего). Грейс не нужен: m_health.reset() очищает
+    // детект, повторный DEAD (не помогло) придёт через cyclesToDead плохих тиков (~8-12с) — как
+    // раз окно ре-хендшейка WG (REKEY_TIMEOUT 5с) с нового порта. Кап попыток на ноду-сессию —
+    // rebindHealMaxTriesTuned (кламп §17.2), kill-switch features.rebind_heal.
+    if (tunnelStillUp && m_tunnel
+        && TuningStore::flag(QStringLiteral("rebind_heal"), true)
+        && m_rebindHealTries < rebindHealMaxTriesTuned()
+        && m_tunnel->rebindSocket()) {
+        ++m_rebindHealTries;
+        ++m_rebindHealTotal;
+        m_switchLog.append(QStringLiteral("rebind-heal try %1 on %2 (dead data-plane)")
+                               .arg(m_rebindHealTries).arg(m_currentNodeId));
+        if (m_switchLog.size() > 20)
+            m_switchLog.removeFirst();
+        m_health.reset();
+        return false; // остаёмся Connected: либо оживёт (rx/handshake), либо DEAD вернётся → failover
+    }
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду. СТРОГО БЕЗ I/O (CONNECT-INVARIANTS §1):
     // onDead зовётся из health-tick/notifyConnectionLost на GUI-потоке БЕЗ гарда m_inSyncNetCall —

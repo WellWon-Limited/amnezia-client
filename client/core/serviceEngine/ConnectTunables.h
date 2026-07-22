@@ -46,6 +46,15 @@ inline int healthTickMsTuned()
     return qBound(1000, int(TuningStore::numberOr(QStringLiteral("health_tick_ms"), 4000)), 60000);
 }
 
+// BUG-4 auto-heal (2026-07-22): кап попыток ребайнда сокета (новый локальный порт = новый
+// 5-tuple flow, лечит сессионный блок ТСПУ) на ТЕКУЩЕЙ ноде перед failover. Пол 0 — «0 с бэка»
+// легитимно глушит heal числом (есть и kill-switch features.rebind_heal); потолок 5 — выше
+// начинается вечная борьба с реально мёртвой нодой вместо честной смены сервера.
+inline int rebindHealMaxTriesTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("rebind_heal_max_tries"), 2)), 5);
+}
+
 // macOS wake-рестарт (спека 2026-07-17): кап НАШИХ попыток переподнять туннель после пробуждения
 // (ретраи цепляются к reachabilityChanged). После капа — честный OFF («усталость = внешние
 // обстоятельства», дух §13). Пол 1 (0/минус с бэка = wake-фикс молча выключен — для этого есть

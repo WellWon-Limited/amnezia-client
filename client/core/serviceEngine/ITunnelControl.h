@@ -66,6 +66,14 @@ public:
     // Снять рантайм-статы (handshake age + rx/tx) для HealthLoop.
     virtual TunnelStats readStats() = 0;
 
+    // AVPN (BUG-4 auto-heal, 2026-07-22): пересоздать UDP-сокет туннеля с НОВЫМ эфемерным
+    // локальным портом (UAPI `listen_port=0` → BindUpdate в awg-go) БЕЗ рестарта туннеля.
+    // Новый 5-tuple flow — эквивалент режима полёта: лечит сессионный блок ТСПУ по flow/CGNAT
+    // (BUG-4: два телефона одного оператора, один жив, второй мёртв, режим полёта чинит).
+    // true = команда отправлена (асинхронно; итог виден HealthLoop'у — rx/handshake оживут
+    // или DEAD придёт снова); false = платформа примитива не имеет → сразу failover.
+    virtual bool rebindSocket() { return false; }
+
     virtual void down() = 0;
 };
 

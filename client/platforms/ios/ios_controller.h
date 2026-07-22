@@ -24,6 +24,7 @@ struct Action
     static const char *stop;
     static const char *getTunnelId;
     static const char *getStatus;
+    static const char *rebind; // AVPN BUG-4 auto-heal: wgSetConfig listen_port=0 в живом NE
 };
 
 struct MessageKey
@@ -58,6 +59,12 @@ public:
 
     void getBackendLogs(std::function<void(const QString &)> &&callback);
     void checkStatus();
+
+    // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета ЖИВОГО NE-туннеля — provider message
+    // {"action":"rebind"} (extension зовёт wgSetConfig listen_port=0 → BindUpdate → новый
+    // локальный порт = новый 5-tuple flow, лечит сессионный блок ТСПУ). Fire-and-forget:
+    // true = сообщение отправлено живому туннелю, итог меряет HealthLoop по rx/handshake.
+    bool rebindTunnel();
 
     bool shareText(const QStringList &filesToSend);
     QString openFile();

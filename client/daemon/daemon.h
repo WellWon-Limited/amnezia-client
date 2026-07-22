@@ -45,6 +45,12 @@ class Daemon : public QObject {
   QString logs();
   void cleanLogs();
 
+  // AVPN (BUG-4 auto-heal): публичный мост к WireguardUtils::rebindEndpointSocket (wgutils()
+  // protected) — команда {"type":"rebind"} локального протокола зовёт его из соединения.
+  bool rebindEndpointSocket() {
+    return wgutils() ? wgutils()->rebindEndpointSocket() : false;
+  }
+
  signals:
   void connected(const QString& pubkey);
   /**

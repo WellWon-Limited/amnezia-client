@@ -14,7 +14,9 @@ from conan.tools.scm import Git
 import os
 
 TRIBE_GIT_URL = "https://github.com/wellwon/amneziawg-apple.git"
-TRIBE_GIT_REF = "cbf9f72"  # tribe-dnsfwd: dnsfwd.go + wgSetSplitDns + handshake warmup
+# bfee9a2 = cbf9f72 + Swift-only rebindListenPort (BUG-4 auto-heal) — Go-ядро БАЙТ-В-БАЙТ то же,
+# поэтому версия пакета не бампается (пересборка .a не нужна; Swift собирается из submodule).
+TRIBE_GIT_REF = "bfee9a2"  # tribe-dnsfwd: dnsfwd.go + wgSetSplitDns + handshake warmup + rebind-heal
 
 class AwgAppleTribe(ConanFile):
     name = "awg-apple"
