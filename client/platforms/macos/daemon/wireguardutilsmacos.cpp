@@ -282,6 +282,28 @@ bool WireguardUtilsMacos::deletePeer(const InterfaceConfig& config) {
   return (err == 0);
 }
 
+// AVPN (BUG-4 auto-heal): пересоздать UDP-сокет живого awg-go с новым эфемерным локальным
+// портом. UAPI-строка listen_port=0 → device.BindUpdate(): сокет закрывается и открывается
+// заново, следующий handshake уходит с нового порта = новый 5-tuple flow (лечит сессионный
+// блок ТСПУ; эквивалент режима полёта). Пиры/ключи/маршруты не трогаются.
+bool WireguardUtilsMacos::rebindEndpointSocket() {
+  if (m_tunnel.state() != QProcess::Running) {
+    logger.warning() << "rebind: tunnel process is not running";
+    return false;
+  }
+  QString message;
+  QTextStream out(&message);
+  out << "set=1\n";
+  out << "listen_port=0\n";
+  int err = uapiErrno(uapiCommand(message));
+  if (err != 0) {
+    logger.error() << "rebind: listen_port rebind failed:" << strerror(err);
+  } else {
+    logger.debug() << "rebind: socket rebound to a new ephemeral port";
+  }
+  return (err == 0);
+}
+
 QList<WireguardUtils::PeerStatus> WireguardUtilsMacos::getPeerStatus() {
   QString reply = uapiCommand("get=1");
   PeerStatus status;

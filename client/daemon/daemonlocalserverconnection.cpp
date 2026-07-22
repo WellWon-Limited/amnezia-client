@@ -143,6 +143,19 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
     return;
   }
 
+  // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого интерфейса (новый локальный порт =
+  // новый 5-tuple flow, лечит сессионный блок ТСПУ). Реализация платформенная
+  // (WireguardUtils::rebindEndpointSocket, база no-op false). Ответ type=rebound — для лога
+  // GUI; старые GUI его молча игнорируют (свой warning на неизвестный тип).
+  if (type == "rebind") {
+    const bool ok = Daemon::instance() && Daemon::instance()->rebindEndpointSocket();
+    QJsonObject obj;
+    obj.insert("type", "rebound");
+    obj.insert("ok", ok);
+    write(obj);
+    return;
+  }
+
   logger.warning() << "Invalid command:" << type;
 }
 

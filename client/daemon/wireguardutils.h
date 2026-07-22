@@ -49,6 +49,12 @@ class WireguardUtils : public QObject {
   virtual bool addExclusionRoute(const IPAddress& prefix) = 0;
   virtual bool deleteExclusionRoute(const IPAddress& prefix) = 0;
 
+  // AVPN (BUG-4 auto-heal, 2026-07-22): пересоздать UDP-сокет живого интерфейса с НОВЫМ
+  // эфемерным локальным портом (UAPI listen_port=0 → BindUpdate) — новый 5-tuple flow лечит
+  // сессионный блок ТСПУ. База — no-op false: платформы без реализации просто не умеют heal
+  // (GUI это переживает — HealthLoop уйдёт в failover). Переопределяет WireguardUtilsMacos.
+  virtual bool rebindEndpointSocket() { return false; }
+
   // AVPN win-fix (2026-07-07): пакетное окно вокруг массового добавления exclusion-маршрутов
   // (RU-direct = ~8.6k префиксов). Базовая реализация — no-op: на не-Windows платформах поведение
   // НЕ меняется (маршруты добавляются как раньше). Только WireguardUtilsWindows переопределяет,

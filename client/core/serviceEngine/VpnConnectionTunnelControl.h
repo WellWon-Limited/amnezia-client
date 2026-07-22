@@ -41,6 +41,12 @@ public:
     //   desktop: handshake живёт в daemon (getPeerStatus), в наш адаптер не доходит → HealthLoop на rx/tx.
     TunnelStats readStats() override;
 
+    // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля (новый локальный порт = новый
+    // 5-tuple flow). iOS/MACOS_NE — provider message "rebind" в NE (wgSetConfig listen_port=0);
+    // macOS-демон — {"type":"rebind"} его локальным протоколом (fire-and-forget, старый демон
+    // молча игнорирует). Android/Win — примитива нет, false (движок сразу уходит в failover).
+    bool rebindSocket() override;
+
     void down() override;
 
     // AVPN bench v5 (tunnel.config): санитизированный снапшот ПОСЛЕДНЕГО реально ушедшего в

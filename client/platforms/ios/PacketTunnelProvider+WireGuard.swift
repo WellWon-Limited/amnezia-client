@@ -154,6 +154,23 @@ extension PacketTunnelProvider {
         }
     }
 
+    // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля. wgSetConfig("listen_port=0")
+    // -> IpcSet -> BindUpdate в awg-go: сокет закрывается и открывается на НОВОМ эфемерном
+    // порту (новый 5-tuple flow — лечит сессионный блок ТСПУ; эквивалент режима полёта).
+    // Туннель/handshake-стейт не трогаются, пиры не заменяются. Ответ {"ok":Bool} — для лога GUI.
+    func handleRebindAppMessage(completionHandler: ((Data?) -> Void)? = nil) {
+        guard let completionHandler = completionHandler else { return }
+        guard protoType == .wireguard, let wgAdapter = wgAdapter else {
+            completionHandler(try? JSONSerialization.data(withJSONObject: ["ok": false], options: []))
+            return
+        }
+        wgAdapter.rebindListenPort { error in
+            let ok = (error == nil)
+            wg_log(.info, message: "AVPN rebind-heal: listen_port rebind " + (ok ? "done" : "failed (adapter not started)"))
+            completionHandler(try? JSONSerialization.data(withJSONObject: ["ok": ok], options: []))
+        }
+    }
+
     func handleWireguardAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
         guard let completionHandler = completionHandler else { return }
         if messageData.count == 1 && messageData[0] == 0 {

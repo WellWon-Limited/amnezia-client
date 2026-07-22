@@ -53,6 +53,10 @@ struct FakeTunnel : ITunnelControl {
     }
     TunnelStats st;                       // управляемые stats для DEAD-теста (по умолчанию invalid)
     TunnelStats readStats() override { return st; }
+    // AVPN BUG-4 auto-heal: capable=false (дефолт) = платформа без ребайнда → сразу failover.
+    bool rebindCapable = false;
+    int  rebindCalls = 0;
+    bool rebindSocket() override { ++rebindCalls; return rebindCapable; }
     void down() override { ++downCalls; }
 };
 
@@ -192,6 +196,40 @@ int main(int argc, char **argv)
         eng.onTunnelDisconnected();                               // реальный Disconnected от down()
         CHECK(tun.upCalls == upsBefore);                          // pending отменён — up() не доигран
         CHECK(eng.debugSnapshot().state == QLatin1String("disconnected"));
+    }
+
+    // --- 3b) BUG-4 auto-heal: ребайнд сокета ПЕРЕД failover; кап исчерпан → честный свитч ---
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        tun.rebindCapable = true;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(bringUpOnCur(eng, tun, err));
+        const qint64 now = 1000000;
+        // один DEAD-раунд: 3 тика (посев prev + 2 плохих цикла: tx растёт, rx стоит, hs неизвестен)
+        auto feedDead = [&](qint64 txBase) {
+            tun.st = mkStats(0, 100, txBase + 100); eng.tick(now);
+            tun.st = mkStats(0, 100, txBase + 200); eng.tick(now);
+            tun.st = mkStats(0, 100, txBase + 300);
+            return eng.tick(now);
+        };
+        const int downs0 = tun.downCalls;
+        CHECK(!feedDead(0));                                      // DEAD №1 → heal-попытка 1, НЕ свитч
+        CHECK(tun.rebindCalls == 1);
+        CHECK(tun.downCalls == downs0);                           // туннель не трогали
+        CHECK(eng.rebindHealTries() == 1);
+        CHECK(eng.debugSnapshot().state == QLatin1String("connected"));
+        CHECK(!feedDead(1000));                                   // DEAD №2 → heal-попытка 2 (кап деф. 2)
+        CHECK(tun.rebindCalls == 2);
+        CHECK(eng.rebindHealTotal() == 2);
+        CHECK(feedDead(2000));                                    // DEAD №3 → кап исчерпан → failover
+        CHECK(tun.rebindCalls == 2);                              // третьей попытки НЕ было
+        CHECK(tun.downCalls > downs0);                            // двухфазный свитч начался (down)
+        // свежий подъём возвращает бюджет heal
+        eng.onTunnelDisconnected();                               // доиграть pending-свитч (up на цель)
+        eng.onTunnelConnected();
+        CHECK(eng.rebindHealTries() == 0);
     }
 
     // --- 4) IPv6-CIDR валидатор (фикс «v6-половина ru_prefixes молча выбрасывается») ---

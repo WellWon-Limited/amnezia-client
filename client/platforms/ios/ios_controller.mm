@@ -19,6 +19,7 @@ const char* Action::restart = "restart";
 const char* Action::stop = "stop";
 const char* Action::getTunnelId = "getTunnelId";
 const char* Action::getStatus = "status";
+const char* Action::rebind = "rebind"; // AVPN BUG-4 auto-heal
 
 const char* MessageKey::action = "action";
 const char* MessageKey::tunnelId = "tunnelId";
@@ -520,6 +521,35 @@ void IosController::checkStatus()
     });
     [tunnel release]; // парный к retainedCurrentTunnel() в checkStatus
     });
+}
+
+// AVPN (BUG-4 auto-heal): ребайнд сокета живого NE-туннеля. Тот же канал, что checkStatus
+// (retained-менеджер + provider message), но fire-and-forget: подтверждение heal'а — сам
+// data-plane (HealthLoop увидит оживший rx/handshake либо повторный DEAD → failover).
+bool IosController::rebindTunnel()
+{
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel)
+        return false;
+    if (tunnel.connection.status != NEVPNStatusConnected) {
+        [tunnel release];
+        return false;
+    }
+    NSString *actionKey = [NSString stringWithUTF8String:MessageKey::action];
+    NSString *actionValue = [NSString stringWithUTF8String:Action::rebind];
+    NSString *tunnelIdKey = [NSString stringWithUTF8String:MessageKey::tunnelId];
+    NSString *tunnelIdValue = !m_tunnelId.isEmpty() ? m_tunnelId.toNSString() : @"";
+    NSDictionary *message = @{actionKey : actionValue, tunnelIdKey : tunnelIdValue};
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // tunnel: наш retain отпускается в конце блока (паттерн checkStatus) — ответ-хендлер
+        // менеджер не трогает, только лог.
+        sendVpnExtensionMessage(tunnel, message, [](NSDictionary *response) {
+            const bool ok = response && [response[@"ok"] boolValue];
+            qInfo() << "IosController::rebindTunnel : extension replied" << (ok ? "ok" : "no/ignored");
+        });
+        [tunnel release];
+    });
+    return true;
 }
 
 void IosController::vpnStatusDidChange(void *pNotification)
