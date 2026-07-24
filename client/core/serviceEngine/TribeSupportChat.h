@@ -232,6 +232,7 @@ private:
     bool m_threadLoadedOnce = false;
     bool m_refreshInFlight = false;
     bool m_unreadInFlight = false;
+    bool m_diagAutoResent = false; // BUG-7: авто-досыл потерянной диагностики — 1 раз/запуск
     // Пока наш POST в полёте, тред НЕ перечитываем: поллинг мог привезти уже
     // закоммиченную серверную копию при ещё живом эхе → дубль на экране.
     // Отложенные запросы (поллинг/пуш во время долгого аплоада) копятся во флаг

@@ -261,13 +261,21 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         QTimer::singleShot(12000, this, [this] { crashFlushPending(); });
         QTimer::singleShot(120000, this, [this] { crashFlushPending(); });
     }
+    // BUG-7: недоставленные отчёты прошлых запусков — дослать, когда сеть скорее всего есть
+    QTimer::singleShot(25000, this, [this] { outboxFlush(); });
     // ── AVPN (Доктор D-3 п.26): RU-split-дозорный — сам замечает «сайт РФ не открывается»
     // и шлёт rusplit_fail (только на смене состояния, 1/сутки на target, kill-switch
     // rusplit_sentinel). Приватность: только наш вахт-лист, браузинг юзера не трогаем.
     m_ruSentinel = new RuSplitSentinel(
         m_nam,
         [this](const QJsonObject &o) {
-            uploadReport(QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)),
+            // S-5 (разбор 2026-07-24): без build отчёт не привязать к версии
+            // (ингест берёт app_ver из тела, тело его не несло).
+            QJsonObject withBuild = o;
+            withBuild.insert(QStringLiteral("build"),
+                             QCoreApplication::applicationVersion().section(QLatin1Char('.'), -1));
+            uploadReport(QString::fromUtf8(
+                             QJsonDocument(withBuild).toJson(QJsonDocument::Compact)),
                          /*quiet=*/true);
         },
         [this] { return benchExtra().value(QStringLiteral("net_type")).toString(); },
@@ -284,6 +292,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             CrashGuard::instance().setPhase(st == QLatin1String("connected") ? "connected"
                                             : st == QLatin1String("disconnected") ? "idle"
                                                                                   : "connecting");
+        // BUG-7: фронт connected = сеть вернулась → дослать outbox (10с на устаканивание)
+        const bool nowConnected = (st == QLatin1String("connected"));
+        if (nowConnected && !m_outboxWasConnected)
+            QTimer::singleShot(10000, this, [this] { outboxFlush(); });
+        m_outboxWasConnected = nowConnected;
     }, Qt::QueuedConnection);
 
     // прогресс-бар мастера: пересчитывать на каждом тике под-машин (v5.4)
@@ -2103,7 +2116,7 @@ void AvpnEngineQml::ccFinish()
 // construction — IP не пишутся ещё на сборке). Сервер копит по device_id — анализ с прода без
 // пересылки файлов руками. Бэк-эндпоинт — greenfield (handoff BENCH-REPORT-BACKEND-HANDOFF.md):
 // до его выката честно говорим «сервер ещё не принимает отчёты».
-void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
+void AvpnEngineQml::uploadReport(const QString &json, bool quiet, const QString &outboxFile)
 {
     if (json.isEmpty())
         return;
@@ -2117,6 +2130,9 @@ void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
     }
     const QString token = authToken();
     if (!m_nam || token.isEmpty()) {
+        // BUG-7: до enroll'а токена нет (холодный старт без сети) — отчёт в outbox, не в мусор.
+        if (outboxFile.isEmpty())
+            outboxEnqueue(json);
         if (!quiet)
             emit reportUploadDone(false, tr("Нет токена устройства — отправка недоступна"));
         return;
@@ -2126,30 +2142,93 @@ void AvpnEngineQml::uploadReport(const QString &json, bool quiet)
     req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
     QNetworkReply *reply = m_nam->post(req, json.toUtf8());
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, quiet]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, quiet, json, outboxFile]() {
         reply->deleteLater();
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code >= 200 && code < 300) {
+            if (!outboxFile.isEmpty())
+                QFile::remove(outboxFile); // отложенный отчёт доехал
             m_lastUploadStatus = tr("Отправлен на сервер ✓ (%1)")
                                      .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm")));
             emit ftChanged();
             emit reportUploadDone(true, tr("Отчёт отправлен разработчику ✓"));
         }
         else if (code == 404 || code == 405) {
-            // бэк ещё без эндпоинта: авто-отправка молчит (иначе ныла бы каждый прогон)
+            // бэк ещё без эндпоинта: авто-отправка молчит (иначе ныла бы каждый прогон);
+            // терминально — из outbox тоже убираем (ретрай бессмыслен до обновления бэка)
+            if (!outboxFile.isEmpty())
+                QFile::remove(outboxFile);
             m_lastUploadStatus = tr("Не отправлен: сервер не принимает — сохрани файлом");
             emit ftChanged();
             if (!quiet)
                 emit reportUploadDone(false, tr("Сервер ещё не принимает отчёты — сохрани файлом"));
-        } else if (code == 401 || code == 403)
+        } else if (code == 401 || code == 403) {
+            if (!outboxFile.isEmpty())
+                QFile::remove(outboxFile); // авторизация не появится сама — не копим
             emit reportUploadDone(false, tr("Нет авторизации для отправки (%1)").arg(code));
-        else {
+        } else {
+            // BUG-7: сеть (code 0) или 5xx — ретраибельно. Свежий отчёт кладём в outbox
+            // (доедет после восстановления/перезапуска); отложенный остаётся лежать.
+            if (outboxFile.isEmpty() && (code == 0 || code >= 500))
+                outboxEnqueue(json);
             m_lastUploadStatus = tr("Не отправлен (%1) — сохрани файлом").arg(code > 0 ? QString::number(code) : tr("сеть"));
             emit ftChanged();
             emit reportUploadDone(false, code > 0 ? tr("Сервер отклонил отчёт (%1)").arg(code)
-                                                  : tr("Сеть недоступна — отчёт не отправлен"));
+                                                  : tr("Сеть недоступна — отчёт будет дослан позже"));
         }
     });
+}
+
+// ── BUG-7 (2026-07-24): персистентный outbox отчётов ─────────────────────────────────────────
+// Диагностику чаще всего шлют В МОМЕНТ сетевой беды (control plane за мёртвым туннелем) —
+// fire-and-forget терял самые ценные отчёты. Файлы <AppData>/report-outbox/<msecs>.json;
+// flush: старт (+25с), фронт connected (+10с). Кап 20 файлов (старые вытесняются).
+// Kill-switch features.report_outbox (default ON).
+static QString reportOutboxDir()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                        + QStringLiteral("/report-outbox");
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void AvpnEngineQml::outboxEnqueue(const QString &json)
+{
+    if (!featureEnabled(QStringLiteral("report_outbox"), true))
+        return;
+    QDir d(reportOutboxDir());
+    QStringList old = d.entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    while (old.size() >= 20) // кап: свежее ценнее давнего
+        QFile::remove(d.filePath(old.takeFirst()));
+    QFile f(d.filePath(QStringLiteral("%1.json")
+                           .arg(QDateTime::currentMSecsSinceEpoch(), 15, 10, QLatin1Char('0'))));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(json.toUtf8());
+        f.close();
+    }
+}
+
+void AvpnEngineQml::outboxFlush()
+{
+    if (!featureEnabled(QStringLiteral("report_outbox"), true))
+        return;
+    QDir d(reportOutboxDir());
+    const QStringList files = d.entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const QString &name : files) {
+        const QString path = d.filePath(name);
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            QFile::remove(path);
+            continue;
+        }
+        const QString json = QString::fromUtf8(f.readAll());
+        f.close();
+        if (json.isEmpty()) {
+            QFile::remove(path);
+            continue;
+        }
+        uploadReport(json, /*quiet=*/true, /*outboxFile=*/path);
+    }
 }
 
 // ── AVPN bench v5.2: мастер «Полный тест» ─────────────────────────────────────────────────────

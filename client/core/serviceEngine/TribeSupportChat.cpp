@@ -17,6 +17,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSaveFile>
+#include <QSettings> // BUG-7: персист pendingDiag
 #include <QStandardPaths>
 #include <QUrl>
 
@@ -434,6 +435,20 @@ void TribeSupportChat::refresh()
                 m_unread = 0;
                 emit unreadChanged();
             }
+            // BUG-7: живой ответ бэка = сеть починилась → дошлём диагностику,
+            // потерянную прошлым запуском (персист в sendDiagReport). Один раз
+            // за запуск и только без живых log-эх (иначе задвоим ручной ретрай).
+            if (!m_diagAutoResent) {
+                const QString pending = QSettings()
+                        .value(QStringLiteral("AvpnSupport/pendingDiag")).toString();
+                bool logEchoAlive = false;
+                for (const auto &e : m_echoes)
+                    if (e.kind == QLatin1String("log")) { logEchoAlive = true; break; }
+                if (!pending.isEmpty() && !logEchoAlive && m_postsInFlight == 0) {
+                    m_diagAutoResent = true;
+                    sendDiagReport(pending);
+                }
+            }
         }
         if (m_loading) {
             m_loading = false;
@@ -844,6 +859,16 @@ void TribeSupportChat::sendDiagReport(const QString &reportText)
         return;
     }
 
+    // BUG-7 (2026-07-24): диагностику ЧАЩЕ ВСЕГО шлют в момент сетевой беды
+    // («connected, но данные не проходят» — control plane за мёртвым туннелем) —
+    // именно тогда fire-and-forget терял отчёт навсегда. Персистим текст ДО
+    // отправки; сносим на успехе (postEcho) или на терминальном 404/405/415.
+    // Авто-ресенд — в refresh() при первом живом ответе бэка (сеть починилась).
+    {
+        QSettings st;
+        st.setValue(QStringLiteral("AvpnSupport/pendingDiag"), reportText);
+        st.sync();
+    }
     Echo e;
     e.localId = -(++m_localSeq);
     e.atMs = QDateTime::currentMSecsSinceEpoch();
@@ -946,12 +971,19 @@ void TribeSupportChat::postEcho(Echo &echo)
             // локальное превью (фото/постер) ПЕРЕНОСИТСЯ на серверную копию
             // (handoff Занавеса §B: замена эха без превью = мигание пустой карточкой).
             QString echoLocalUrl;
+            QString echoKind;
             for (int i = 0; i < m_echoes.size(); ++i) {
                 if (m_echoes[i].localId == localId) {
                     echoLocalUrl = m_echoes[i].localUrl;
+                    echoKind = m_echoes[i].kind;
                     m_echoes.removeAt(i);
                     break;
                 }
+            }
+            if (echoKind == QLatin1String("log")) { // диагностика доехала — персист не нужен
+                QSettings st;
+                st.remove(QStringLiteral("AvpnSupport/pendingDiag"));
+                st.sync();
             }
             // Кладём серверную копию в историю СРАЗУ (иначе сообщение мигает:
             // эхо уже снято, а поллинг ещё не привёз строку) и перечитываем тред
@@ -992,6 +1024,11 @@ void TribeSupportChat::postEcho(Echo &echo)
             // (ретрай бессмысленен до обновления бэка; образец uploadReport AvpnEngineQml).
             if (e && e->kind == QLatin1String("log")
                 && (code == 404 || code == 405 || code == 415)) {
+                { // терминальный отказ — ретрай бессмыслен, персист снимаем (BUG-7)
+                    QSettings st;
+                    st.remove(QStringLiteral("AvpnSupport/pendingDiag"));
+                    st.sync();
+                }
                 discardMessage(localId); // убирает эхо + rebuildMessages
                 emit sendFailed(tr("Сервер ещё не принимает диагностику — обновление скоро"));
             } else {

@@ -181,7 +181,8 @@ Item {
                     font.family: Theme.font.display
                     font.pixelSize: Math.round(20 * sheet.ks)
                     font.weight: Theme.font.wExtra
-                    font.letterSpacing: Theme.font.trackTight * font.pixelSize
+                    // НЕ через font.pixelSize: ссылка внутри font-группы = binding loop
+                    font.letterSpacing: Theme.font.trackTight * Math.round(20 * sheet.ks)
                 }
             }
 
@@ -368,7 +369,8 @@ Item {
                             font.family: Theme.font.body
                             font.pixelSize: Math.max(9, Math.round(20 * sheet.kl))
                             font.weight: Theme.font.wBold
-                            font.letterSpacing: Theme.font.trackCaption * font.pixelSize
+                            font.letterSpacing: Theme.font.trackCaption
+                                                * Math.max(9, Math.round(20 * sheet.kl))
                             anchors.verticalCenter: parent.verticalCenter
                         }
                     }
@@ -411,7 +413,8 @@ Item {
                 font.family: Theme.font.display
                 font.pixelSize: Math.max(19, Math.round(46 * sheet.kl))
                 font.weight: Theme.font.wExtra
-                font.letterSpacing: Theme.font.trackTight * font.pixelSize
+                font.letterSpacing: Theme.font.trackTight
+                                    * Math.max(19, Math.round(46 * sheet.kl))
             }
 
             // Картинка-баннер (опционально): высота адаптивная (legacyCard.imgH) —
@@ -509,7 +512,7 @@ Item {
                 font.family: Theme.font.display
                 font.pixelSize: Math.round(34 * sheet.ks)
                 font.weight: Theme.font.wExtra
-                font.letterSpacing: Theme.font.trackTight * font.pixelSize
+                font.letterSpacing: Theme.font.trackTight * Math.round(34 * sheet.ks)
             }
             Text {
                 Layout.fillWidth: true
@@ -605,7 +608,8 @@ Item {
                 font.family: Theme.font.body
                 font.pixelSize: Math.max(9, Math.round(12 * sheet.ks))
                 font.weight: Theme.font.wBold
-                font.letterSpacing: Theme.font.trackCaption * font.pixelSize
+                font.letterSpacing: Theme.font.trackCaption
+                                    * Math.max(9, Math.round(12 * sheet.ks))
             }
             Row {
                 Layout.alignment: Qt.AlignHCenter
