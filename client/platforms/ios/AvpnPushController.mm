@@ -168,8 +168,10 @@ void AvpnPush_onRemoteNotification(const char *userInfoJson)
     NSDictionary *aps = [userInfo isKindOfClass:[NSDictionary class]] ? userInfo[@"aps"] : nil;
     id alert = [aps isKindOfClass:[NSDictionary class]] ? aps[@"alert"] : nil;
     if ([alert isKindOfClass:[NSDictionary class]]) {
-        if (alert[@"title"]) title = alert[@"title"];
-        if (alert[@"body"]) body = alert[@"body"];
+        // isKindOfClass-гарды (аудит 2026-07-24): не-строка (число/словарь) в title/body
+        // уходила бы в QString::fromNSString как мусор/краш.
+        if ([alert[@"title"] isKindOfClass:[NSString class]]) title = alert[@"title"];
+        if ([alert[@"body"] isKindOfClass:[NSString class]]) body = alert[@"body"];
     } else if ([alert isKindOfClass:[NSString class]]) {
         body = alert;
     }

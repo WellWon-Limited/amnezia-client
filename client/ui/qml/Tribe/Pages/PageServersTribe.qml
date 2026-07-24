@@ -98,6 +98,7 @@ PageType {
     onQueryChanged: rebuildCountries()
     Connections {
         target: root.hasEngine ? TribeEngine : null
+        ignoreUnknownSignals: true
         function onChanged() { root.rebuildCountries() }
     }
 

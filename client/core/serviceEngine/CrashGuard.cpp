@@ -294,6 +294,19 @@ void CrashGuard::install(const QString &dirPath, const QString &buildStr,
     g_sigDirFd = ::open(QFile::encodeName(dirPath).constData(), O_RDONLY | O_DIRECTORY);
     std::strncpy(g_sigFileName, "signal.bin", sizeof(g_sigFileName) - 1);
 
+    // Альт-стек для хендлера (аудит 2026-07-24): SA_ONSTACK без sigaltstack() — no-op,
+    // SIGSEGV от переполнения стека не мог выполнить хендлер → терялся именно этот
+    // класс крашей. Статический буфер: в момент краша malloc недоступен.
+    // 64 КиБ фиксированно (НЕ SIGSTKSZ: в glibc ≥2.34 он не compile-time) — с запасом
+    // больше минимума любой из наших платформ.
+    static char altStack[64 * 1024];
+    stack_t ss;
+    std::memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = altStack;
+    ss.ss_size = sizeof(altStack);
+    ss.ss_flags = 0;
+    ::sigaltstack(&ss, nullptr);
+
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = avpn_crash_signal_handler;

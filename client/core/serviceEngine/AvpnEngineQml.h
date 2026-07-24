@@ -399,7 +399,8 @@ public:
     // Итог — сигнал reportUploadDone(ok, message); 404/405 = «бэк ещё не принимает» (endpoint в
     // handoff BENCH-REPORT-BACKEND-HANDOFF.md). v5.4: зовётся АВТОМАТОМ по завершении мастера
     // (quiet=true: «сервер не принимает» не ноет тостом каждый прогон — только успех/сеть).
-    Q_INVOKABLE void uploadReport(const QString &json, bool quiet = false);
+    Q_INVOKABLE void uploadReport(const QString &json, bool quiet = false,
+                                  const QString &outboxFile = QString());
 
     // AVPN (bench v5.2): мастер «Полный тест». fullTestContinue — подтверждение ручного шага
     // (гейт: наш туннель disconnected), fullTestSkip — пропустить baseline-шаг.
@@ -1064,6 +1065,11 @@ private:
     void docStartConnect();           // вход фазы Connect (вынесен из startDoctor)
     void docDirectSpeed(double down, int idle, int loaded, bool collapsed); // A/B мимо туннеля
     void crashFlushPending();         // CR-1: отправка pending краш-отчётов (kill-switch crash_report)
+    // BUG-7: персистентный outbox /v1/bench/report — отчёт, не ушедший из-за сети
+    // (мёртвый туннель!), доезжает после восстановления/перезапуска.
+    void outboxEnqueue(const QString &json);
+    void outboxFlush();
+    bool m_outboxWasConnected = false; // фронт connected → отложенный flush
     void docStartRuSplit();           // пробы RU-корпуса (или сразу Speed при выкл. сплите)
     void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)
     void docAltNext();                // переключиться на следующую альтернативу
