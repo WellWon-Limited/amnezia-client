@@ -7,7 +7,7 @@ import QtQuick
 QtObject {
     id: theme
 
-    // ─── Color (night-sky + blue #3e80ed — основная палитра, 2026-06) ───────────
+    // ─── Color (night-sky #0A111D + blue #7CA2D0 — финальная палитра; #3e80ed — история) ───
     readonly property QtObject color: QtObject {
         // backgrounds (deepest → page)
         readonly property color bg900: "#050B14"   // самый глубокий (рамка)
