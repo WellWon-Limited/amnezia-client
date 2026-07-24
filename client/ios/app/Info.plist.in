@@ -72,9 +72,12 @@
 	<array/>
 	<key>UIRequiresFullScreen</key>
 	<false/>
+	<!-- AVPN (BUG-8, 2026-07-24): Portrait ПЕРВЫМ и без UpsideDown — iOS берёт первую
+	     ориентацию массива для первого кадра запуска; с UpsideDown первым холодный старт
+	     ~1с рисовал перевёрнутый статус-бар внизу экрана. Face-ID айфоны UpsideDown
+	     всё равно не поддерживают; у iPad свой массив ниже. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
