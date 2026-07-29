@@ -83,6 +83,10 @@ endif()
 
 include(CPackIFW)
 cpack_ifw_configure_component(AmneziaVPN
+    # AVPN: имя компонента AmneziaVPN load-bearing (install(... COMPONENT) по всему дереву),
+    # а видимое юзеру имя в визарде («Установка компонента …») задаём своё
+    DISPLAY_NAME "Tribe VPN"
+    DESCRIPTION "Tribe VPN"
     VERSION ${AMNEZIAVPN_VERSION}
     RELEASE_DATE ${RELEASE_DATE}
     REQUIRES_ADMIN_RIGHTS
