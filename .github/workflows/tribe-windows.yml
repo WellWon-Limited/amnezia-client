@@ -1,0 +1,80 @@
+name: 'Tribe Windows'
+
+# AVPN: наш workflow (BUILD-WINDOWS.md фаза W1, задействован 2026-07-29 после
+# отказа от Parallels-VM). Минимальная адаптация апстримовского Build-Windows
+# из deploy.yml: без апстрим-секретов и WiX, только IFW-инсталлер.
+# Версия — из tribe_version.cmake (единый источник).
+
+on:
+  push:
+    branches:
+      - ci-build
+    paths:
+      - '.github/workflows/tribe-windows.yml'
+      - 'tribe_version.cmake'
+
+env:
+  QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/
+
+jobs:
+  Build-Windows:
+    runs-on: windows-latest
+
+    env:
+      QT_VERSION: 6.10.1
+
+    steps:
+    - name: 'Get sources'
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true'
+        fetch-depth: 10
+
+    - name: 'Install Qt'
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: ${{ env.QT_VERSION }}
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2022_64'
+        modules: 'qtremoteobjects qt5compat qtshadertools'
+        dir: ${{ runner.temp }}
+        setup-python: 'true'
+        tools: 'tools_ifw'
+        set-env: 'true'
+        aqtversion: '==3.3.0'
+        py7zrversion: '==0.22.*'
+        extra: '--base ${{ env.QT_MIRROR }}'
+
+    - name: 'Setup msvc'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: 'x64'
+
+    - name: 'Setup python'
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.14
+
+    - name: 'Install conan'
+      run: pip install "conan==2.28.0"
+
+    - name: 'Materialize LICENSE symlink'
+      shell: cmd
+      run: |
+        del deploy\data\LICENSE.txt
+        copy /Y LICENSE deploy\data\LICENSE.txt
+
+    - name: 'Build project'
+      shell: cmd
+      env:
+        QT_INSTALL_DIR: ${{ runner.temp }}
+      run: deploy\build.bat --installer ifw
+
+    - name: 'Upload IFW installer artifact'
+      uses: actions/upload-artifact@v7
+      with:
+        name: tribe-windows-installer
+        path: deploy/build/*_windows_x64.exe
+        archive: false
+        retention-days: 7
