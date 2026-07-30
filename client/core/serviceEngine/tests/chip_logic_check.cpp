@@ -104,6 +104,42 @@ int main()
         CHECK(s.next.shown == 2 && s.changed && !s.wantConfirm, "первый raw=works -> принят сразу");
     }
     {
+        // BUG-13 (2026-07-30): красный «с чистого листа» — ТОЛЬКО по подтверждению.
+        // Сразу после коннекта маршруты/DNS свежего туннеля ещё оседают, и одиночная неудачная
+        // проба красила чип в красный (пользователь: «включаю VPN — все бейджи красные, потом
+        // зеленеют»). Красный = утверждение «не работает», оно обязано быть подтверждённым;
+        // до подтверждения чип остаётся нейтральным (shown == -1, в UI синий).
+        ChipHyst h;
+        auto s1 = chipHystStep(h, 0, N);
+        CHECK(s1.next.shown == -1 && !s1.changed && s1.wantConfirm,
+              "unknown, raw=blocked #1 -> чип НЕ краснеет, нужна пере-проба");
+        auto s2 = chipHystStep(s1.next, 0, N);
+        CHECK(s2.next.shown == 0 && s2.changed,
+              "unknown, raw=blocked #2 подряд -> красный принят (подтверждено)");
+    }
+    {
+        // Тот же холодный старт, но сеть на самом деле жива: блип не оставляет следа.
+        ChipHyst h;
+        auto s1 = chipHystStep(h, 0, N);
+        auto s2 = chipHystStep(s1.next, 2, N);
+        CHECK(s2.next.shown == 2 && s2.changed && s2.next.count == 0,
+              "blocked-блип на холодном старте + works -> сразу зелёный, красным не мигнули");
+    }
+    {
+        // Холодные slow/works по-прежнему принимаются с первого раза (быстрая первая отрисовка).
+        ChipHyst hs;
+        auto ss = chipHystStep(hs, 1, N);
+        CHECK(ss.next.shown == 1 && ss.changed && !ss.wantConfirm,
+              "первый raw=slow -> принят сразу (подтверждения требует только красный)");
+    }
+    {
+        // confirmN=1 (бэк отключил гистерезис) — красный принимается с первого прогона.
+        ChipHyst h;
+        auto s = chipHystStep(h, 0, 1);
+        CHECK(s.next.shown == 0 && s.changed,
+              "confirmN=1 -> холодный blocked принят сразу (настройка уважается)");
+    }
+    {
         // Ухудшение works->blocked: первый прогон удерживается, второй согласный — принимается.
         ChipHyst h; h.shown = 2;
         auto s1 = chipHystStep(h, 0, N);

@@ -62,6 +62,18 @@ class WireguardUtils : public QObject {
   virtual void beginBulkExclusion() {}
   virtual void endBulkExclusion() {}
 
+  // AVPN win-fix (BUG-12, 2026-07-30): порционное разрешение исключений в файрволе.
+  // На Windows kill-switch блокирует всё мимо туннеля, поэтому каждому исключению нужен ещё и
+  // WFP-фильтр; их создание для RU-direct (~8.6k) занимало ~16с ВНУТРИ activate и держало event
+  // loop демона — клиент не дожидался `connected` и слал deactivate (см. CONNECT-INVARIANTS §15).
+  // База — no-op true: на прочих платформах путь не меняется.
+  virtual bool allowExcludedTrafficChunk(const QStringList& addresses,
+                                         const QString& pubkey) {
+    Q_UNUSED(addresses);
+    Q_UNUSED(pubkey);
+    return true;
+  }
+
   virtual bool excludeLocalNetworks(const QList<IPAddress>& addresses) = 0;
 };
 

@@ -325,6 +325,15 @@ void WireguardUtilsWindows::endBulkExclusion() {
     m_routeMonitor->endBulkExclusion();
 }
 
+// AVPN win-fix (BUG-12): проброс порции WFP-разрешений (фоновый досев исключений)
+bool WireguardUtilsWindows::allowExcludedTrafficChunk(
+    const QStringList& addresses, const QString& pubkey) {
+  if (!m_firewall) {
+    return false;
+  }
+  return m_firewall->allowExcludedTrafficChunk(addresses, pubkey);
+}
+
 bool WireguardUtilsWindows::excludeLocalNetworks(
     const QList<IPAddress>& addresses) {
   // If the interface isn't up then something went horribly wrong.
