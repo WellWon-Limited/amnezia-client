@@ -21,6 +21,14 @@
 constexpr const char* JSON_ALLOWEDIPADDRESSRANGES = "allowedIPAddressRanges";
 constexpr int HANDSHAKE_POLL_MSEC = 250;
 
+#ifdef Q_OS_WIN
+// AVPN win-fix (BUG-12, 2026-07-30): размер порции фонового досева исключений.
+// Одна порция = 64 префикса ≈ 0.14с работы (маршруты ~3200/с, WFP-фильтры ~540/с по замеру
+// на живом стенде), то есть короче периода handshake-поллера (250мс) — поллер успевает
+// отдать клиенту `connected`, пока досев идёт фоном.
+constexpr int EXCLUSION_CHUNK_SIZE = 64;
+#endif
+
 namespace {
 
 Logger logger("Daemon");
@@ -39,6 +47,14 @@ Daemon::Daemon(QObject* parent) : QObject(parent) {
 
   m_handshakeTimer.setSingleShot(true);
   connect(&m_handshakeTimer, &QTimer::timeout, this, &Daemon::checkHandshake);
+
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12): тик фонового досева исключений (см. startDeferredExclusions)
+  m_exclusionSeedTimer.setSingleShot(true);
+  m_exclusionSeedTimer.setInterval(0);
+  connect(&m_exclusionSeedTimer, &QTimer::timeout, this,
+          &Daemon::seedExclusionChunk);
+#endif
 }
 
 Daemon::~Daemon() {
@@ -137,14 +153,28 @@ bool Daemon::activate(const InterfaceConfig& config) {
   // Configure routing for excluded addresses.
   // AVPN win-fix: bulk-окно — на Windows схлопывает O(N²) пересчёт таблицы (RU-direct ~8.6k
   // префиксов = «бесконечный коннект»); на прочих платформах begin/end — no-op, поведение как было.
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12, 2026-07-30): на Windows массовый список исключений НЕ сеем здесь —
+  // он уходит в фоновый досев после подъёма туннеля (startDeferredExclusions ниже). Иначе
+  // маршруты (~2.7с) плюс WFP-разрешения kill-switch (~16с, внутри updatePeer) держат event
+  // loop демона ~19с, handshake-поллер не тикает, клиент по своему сторожу шлёт deactivate —
+  // ровно в тот момент, когда туннель уже готов. Список исключений вырезаем и из конфига,
+  // который отдаём в updatePeer, чтобы enablePeerTraffic не крутил тот же цикл синхронно.
+  const QStringList deferredExclusions = config.m_excludedAddresses;
+  InterfaceConfig fastConfig = config;
+  fastConfig.m_excludedAddresses.clear();
+  const InterfaceConfig& peerConfig = fastConfig;
+#else
   wgutils()->beginBulkExclusion();
   for (const QString& i : config.m_excludedAddresses) {
     addExclusionRoute(IPAddress(i));
   }
   wgutils()->endBulkExclusion();
+  const InterfaceConfig& peerConfig = config;
+#endif
 
   // Add the peer to this interface.
-  if (!wgutils()->updatePeer(config)) {
+  if (!wgutils()->updatePeer(peerConfig)) {
     logger.error() << "Peer creation failed.";
     return false;
   }
@@ -166,11 +196,86 @@ bool Daemon::activate(const InterfaceConfig& config) {
   if (status) {
     m_connections[config.m_hopType] = ConnectionState(config);
     m_handshakeTimer.start(HANDSHAKE_POLL_MSEC);
+#ifdef Q_OS_WIN
+    // AVPN win-fix (BUG-12): туннель поднят и поллер взведён — теперь можно досеивать
+    // исключения фоном, не мешая клиенту получить `connected`.
+    startDeferredExclusions(deferredExclusions, config.m_serverPublicKey);
+#endif
     emit_failure_guard.dismiss();
     return true;
   }
   return false;
 }
+
+#ifdef Q_OS_WIN
+// AVPN win-fix (BUG-12, 2026-07-30) — фоновый досев исключений RU-direct.
+// Инвариант CONNECT-INVARIANTS §15 соблюдён: весь массовый посев по-прежнему идёт внутри
+// одного bulk-окна (оно открывается перед первой порцией и закрывается после последней),
+// метрика и протокол маршрутов не меняются, purge сирот на месте.
+// Безопасность: пока досев не закончен, ещё не разрешённые адреса идут ЧЕРЕЗ туннель —
+// kill-switch остаётся fail-closed, прямых утечек мимо VPN не возникает.
+void Daemon::startDeferredExclusions(const QStringList& addresses,
+                                     const QString& pubkey) {
+  cancelDeferredExclusions();
+  if (addresses.isEmpty()) {
+    return;
+  }
+
+  m_deferredExclusions = addresses;
+  m_deferredExclusionsPubkey = pubkey;
+  logger.debug() << "Deferred exclusion seeding scheduled for"
+                 << addresses.count() << "prefixes";
+
+  wgutils()->beginBulkExclusion();
+  m_exclusionBulkOpen = true;
+  m_exclusionSeedTimer.start();
+}
+
+void Daemon::seedExclusionChunk() {
+  // Туннель успели опустить (deactivate/switchServer) — досев больше не нужен.
+  if (m_connections.isEmpty() || m_deferredExclusions.isEmpty()) {
+    cancelDeferredExclusions();
+    return;
+  }
+
+  QStringList chunk;
+  const int take = qMin(EXCLUSION_CHUNK_SIZE, m_deferredExclusions.count());
+  chunk.reserve(take);
+  for (int i = 0; i < take; ++i) {
+    chunk.append(m_deferredExclusions.takeFirst());
+  }
+
+  // Сначала разрешение в файрволе, затем маршрут: обратный порядок на мгновение оставил бы
+  // адрес с маршрутом «напрямую», но без allow-фильтра — kill-switch дропал бы такой трафик.
+  if (!wgutils()->allowExcludedTrafficChunk(chunk, m_deferredExclusionsPubkey)) {
+    logger.warning() << "Exclusion chunk rejected by firewall; aborting seeding";
+    cancelDeferredExclusions();
+    return;
+  }
+  for (const QString& i : chunk) {
+    addExclusionRoute(IPAddress(i));
+  }
+
+  if (m_deferredExclusions.isEmpty()) {
+    logger.debug() << "Deferred exclusion seeding finished";
+    cancelDeferredExclusions();
+    return;
+  }
+  m_exclusionSeedTimer.start();
+}
+
+void Daemon::cancelDeferredExclusions() {
+  m_exclusionSeedTimer.stop();
+  m_deferredExclusions.clear();
+  m_deferredExclusionsPubkey.clear();
+  if (m_exclusionBulkOpen) {
+    // Окно обязано закрыться на ЛЮБОМ выходе (инвариант §15) — иначе кэш таблицы маршрутов
+    // останется висеть, а captured-routes не пересчитаются.
+    wgutils()->endBulkExclusion();
+    m_exclusionBulkOpen = false;
+  }
+}
+#endif
 
 bool Daemon::maybeUpdateResolvers(const InterfaceConfig& config) {
   if ((config.m_hopType == InterfaceConfig::MultiHopExit) ||
@@ -466,6 +571,12 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
 bool Daemon::deactivate(bool emitSignals) {
   Q_ASSERT(wgutils() != nullptr);
 
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12): фоновый досев исключений принадлежит уходящей сессии — снять до
+  // разбора туннеля, иначе тик обратится к уже опущенному интерфейсу.
+  cancelDeferredExclusions();
+#endif
+
   // Deactivate the main interface.
   if (!m_connections.isEmpty()) {
     const ConnectionState& state = m_connections.first();
@@ -541,14 +652,25 @@ bool Daemon::switchServer(const InterfaceConfig& config) {
 
   // Configure routing for new excluded addresses.
   // AVPN win-fix: bulk-окно (см. activate) — Windows-only оптимизация, на прочих no-op.
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12): при смене сервера действует то же правило, что и в activate —
+  // массовый список исключений не держит окно переключения, а досеивается фоном.
+  const QStringList deferredExclusions = config.m_excludedAddresses;
+  InterfaceConfig fastConfig = config;
+  fastConfig.m_excludedAddresses.clear();
+  const InterfaceConfig& peerConfig = fastConfig;
+  cancelDeferredExclusions();
+#else
   wgutils()->beginBulkExclusion();
   for (const QString& i : config.m_excludedAddresses) {
     addExclusionRoute(IPAddress(i));
   }
   wgutils()->endBulkExclusion();
+  const InterfaceConfig& peerConfig = config;
+#endif
 
   // Activate the new peer and its routes.
-  if (!wgutils()->updatePeer(config)) {
+  if (!wgutils()->updatePeer(peerConfig)) {
     logger.error() << "Server switch failed to update the wireguard interface";
     return false;
   }
@@ -577,6 +699,10 @@ bool Daemon::switchServer(const InterfaceConfig& config) {
   }
 
   m_connections[config.m_hopType] = ConnectionState(config);
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12): новый пир на месте — досеиваем его исключения фоном.
+  startDeferredExclusions(deferredExclusions, config.m_serverPublicKey);
+#endif
   return true;
 }
 

@@ -996,6 +996,33 @@ void AvpnEngineQml::rebuildServiceChips()
     }
 }
 
+// AVPN BUG-13 (2026-07-30): чипы → «не проверено» (синий), гистерезис и бюджеты серии — с нуля.
+// Зовётся на входе в connected: вердикты прошлой ноды/сессии к новому туннелю отношения не имеют,
+// а показывать их как текущие (особенно красный) — врать пользователю.
+void AvpnEngineQml::resetServiceChipsToUnknown()
+{
+    if (m_svcProbe)
+        m_svcProbe->invalidate(); // in-flight результаты прошлой серии не должны дописаться
+    m_chipHyst.clear();
+    m_chipConfirms.clear();
+
+    bool changed = false;
+    for (int i = 0; i < m_serviceStatus.size(); ++i) {
+        QVariantMap m = m_serviceStatus.at(i).toMap();
+        if (m.value(QStringLiteral("state"), -1).toInt() != -1
+            || m.value(QStringLiteral("rttMs"), -1).toInt() != -1
+            || m.value(QStringLiteral("stale"), false).toBool()) {
+            m[QStringLiteral("state")] = -1;
+            m[QStringLiteral("rttMs")] = -1;
+            m[QStringLiteral("stale")] = false;
+            m_serviceStatus[i] = m;
+            changed = true;
+        }
+    }
+    if (changed)
+        emit serviceStatusChanged();
+}
+
 QString AvpnEngineQml::state() const
 {
     // AVPN (Task 7): «paused» — наша надстройка над фазами движка (туннель реально down, ждём
@@ -2698,6 +2725,13 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // (~1.5с — DNS/маршруты через свежий туннель уже осели; раньше давало HostNotFound → ложный «заблок»).
         // Дальше — только по тапу «перепроверить» (см. UI), НЕ поллинг: goodput каждые N секунд = лишний трафик.
         // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
+        // AVPN BUG-13 (2026-07-30): на входе в connected обнуляем чипы в «не проверено» (синий).
+        // Раньше вердикты прошлой сессии оставались висеть (помеченные stale, но ТОГО ЖЕ цвета),
+        // и после подключения пользователь видел красные бейджи живых сервисов, пока не дойдёт
+        // первая проба — жалоба «включаю VPN, все бейджи красные, через полминуты зеленеют».
+        // Нейтральный синий честен: проверка ещё не проводилась. На транзиентах (обрыв без нового
+        // connected) поведение прежнее — stale-приглушение, чипы не мигают.
+        resetServiceChipsToUnknown();
         QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
         QTimer::singleShot(1800, this, [this]() {
             if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))

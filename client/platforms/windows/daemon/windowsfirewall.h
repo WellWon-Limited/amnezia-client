@@ -42,6 +42,11 @@ class WindowsFirewall final : public QObject {
   bool enableLanBypass(const QList<IPAddress>& ranges);
   bool enablePeerTraffic(const InterfaceConfig& config);
   bool disablePeerTraffic(const QString& pubkey);
+  // AVPN win-fix (BUG-12, 2026-07-30): одна порция разрешений для исключений RU-direct,
+  // своя короткая FWPM-транзакция. Массовый список досеивается тиками из Daemon уже ПОСЛЕ
+  // подъёма туннеля, чтобы не держать event loop демона (16с на ~8.6k фильтров).
+  bool allowExcludedTrafficChunk(const QStringList& addresses,
+                                 const QString& pubkey);
   bool disableKillSwitch();
   bool allowAllTraffic();
   bool allowTrafficRange(const QStringList& ranges);

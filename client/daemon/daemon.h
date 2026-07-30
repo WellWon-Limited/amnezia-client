@@ -66,6 +66,23 @@ class Daemon : public QObject {
   bool addExclusionRoute(const IPAddress& address);
   bool delExclusionRoute(const IPAddress& address);
 
+#ifdef Q_OS_WIN
+  // AVPN win-fix (BUG-12, 2026-07-30): фоновый досев исключений RU-direct.
+  // Синхронный посев ~8.6k исключений (маршруты + WFP-разрешения) держал event loop демона
+  // ~19с внутри activate(), из-за чего handshake-поллер не успевал выдать `connected` и клиент
+  // по своему сторожу слал deactivate. Теперь туннель поднимается сразу, а исключения
+  // досеиваются порциями по таймеру. Windows-only: на прочих платформах путь не изменён.
+  void startDeferredExclusions(const QStringList& addresses,
+                               const QString& pubkey);
+  void seedExclusionChunk();
+  void cancelDeferredExclusions();
+
+  QStringList m_deferredExclusions;
+  QString m_deferredExclusionsPubkey;
+  QTimer m_exclusionSeedTimer;
+  bool m_exclusionBulkOpen = false;
+#endif
+
  protected:
   virtual bool run(Op op, const InterfaceConfig& config) {
     Q_UNUSED(op);

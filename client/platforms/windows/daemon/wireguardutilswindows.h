@@ -48,6 +48,10 @@ class WireguardUtilsWindows final : public WireguardUtils {
   void beginBulkExclusion() override;
   void endBulkExclusion() override;
 
+  // AVPN win-fix (BUG-12, 2026-07-30): порция WFP-разрешений для исключений (фоновый досев)
+  bool allowExcludedTrafficChunk(const QStringList& addresses,
+                                 const QString& pubkey) override;
+
   bool WireguardUtilsWindows::excludeLocalNetworks(const QList<IPAddress>& addresses) override;
 
  signals:

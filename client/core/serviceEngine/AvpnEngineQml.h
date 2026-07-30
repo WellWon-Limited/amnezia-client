@@ -866,6 +866,9 @@ private:
     // Вызывается из ctor (сид), applyRemoteProbeTargets (сервер сменил цели) и probeServices() (каждый
     // прогон подхватывает свежий disabled-список — живой цикл без отдельного хука на configApplied).
     void rebuildServiceChips();
+    // AVPN BUG-13 (2026-07-30): сбросить все чипы в «не проверено» (state=-1, синий) — зовётся
+    // на входе в connected, чтобы вердикты прошлой сессии не выдавались за текущие.
+    void resetServiceChipsToUnknown();
 
     ServiceEngine               m_engine;
     VpnConnectionTunnelControl  m_tunnel;     // живёт здесь, отдаётся движку

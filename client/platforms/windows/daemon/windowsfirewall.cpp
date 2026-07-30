@@ -354,6 +354,43 @@ bool WindowsFirewall::enablePeerTraffic(const InterfaceConfig& config) {
   return true;
 }
 
+// AVPN win-fix (BUG-12, 2026-07-30): разрешить трафик к одной порции исключений.
+// Транзакция своя и короткая — между порциями event loop демона свободен, поэтому
+// handshake-поллер успевает выдать клиенту `connected` (раньше весь список крутился внутри
+// enablePeerTraffic и держал activate ~16с). Провал порции НЕ рушит kill-switch: туннель уже
+// поднят, недосеянные исключения просто идут через VPN (fail-closed, утечки нет).
+bool WindowsFirewall::allowExcludedTrafficChunk(const QStringList& addresses,
+                                                const QString& pubkey) {
+  if (addresses.isEmpty()) {
+    return true;
+  }
+
+  auto result = FwpmTransactionBegin(m_sessionHandle, NULL);
+  if (result != ERROR_SUCCESS) {
+    logger.error() << "FwpmTransactionBegin failed for exclusion chunk:"
+                   << result;
+    return false;
+  }
+  auto cleanup = qScopeGuard([&] { FwpmTransactionAbort0(m_sessionHandle); });
+
+  for (const QString& i : addresses) {
+    if (!allowTrafficTo(i, HIGH_WEIGHT, "Allow Ecxlude route", pubkey)) {
+      logger.error() << "Failed to allow exclusion range:" << i;
+      return false;
+    }
+  }
+
+  result = FwpmTransactionCommit0(m_sessionHandle);
+  if (result != ERROR_SUCCESS) {
+    logger.error() << "FwpmTransactionCommit0 failed for exclusion chunk:"
+                   << result;
+    return false;
+  }
+
+  cleanup.dismiss();
+  return true;
+}
+
 bool WindowsFirewall::disablePeerTraffic(const QString& pubkey) {
   auto result = FwpmTransactionBegin(m_sessionHandle, NULL);
   auto cleanup = qScopeGuard([&] {
