@@ -18,6 +18,22 @@ struct AwgParams {
     int H1 = 0, H2 = 0, H3 = 0, H4 = 0;
     QString I1, I2, I3, I4, I5;          // опц. hex-пакеты (пусто => не слать)
 
+    // AVPN AWG 3.0 (план awg3-migration §3 F7): 7 ключей v3, все строки (канон — диапазоны "a-b",
+    // HeaderProtectionKey — base64 32 байта). Пусто => не слать (паттерн апстрима «по непустоте»).
+    // Бандл v3-ноды — НАДМНОЖЕСТВО: 2.0-набор выше остаётся обязательным (§2.2 плана).
+    QString headerProtectionKey;
+    QString contentPaddingAddition;
+    QString rekeyAfterTime;
+    QString rekeyTimeout;
+    QString rejectAfterTime;
+    QString keepaliveTimeout;
+    QString maxHandshakeAttempts;
+
+    // AVPN generic-канал (ярус 2, §6.1 плана): незнакомые СТРОКОВЫЕ ключи awg_params как есть.
+    // Эмиссия в конфиг туннеля гейтится server-driven allowlist'ом awg_extra_keys_allowed
+    // (TuningStore lists, дефолт пуст) — см. AwgConfigBuilder.
+    QHash<QString, QString> extra;
+
     bool hasFullBundle() const { return Jc && Jmin && Jmax && S1 && S2 && H1 && H2 && H3 && H4; }
 };
 
