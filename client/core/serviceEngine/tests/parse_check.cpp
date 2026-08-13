@@ -816,8 +816,14 @@ int main(int argc, char **argv)
         const bool repOk = rep.value(QStringLiteral("awg")).toObject().value(QStringLiteral("v3")).toBool()
             && !repFlat.contains(a.headerProtectionKey);
 
-        printf("awg3: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d\n",
-               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk);
+        // protocolMajor: v3-нода → "3"; фикстура (только Jc..H4) → "1"; конфиг с S4/I1 → "2"
+        AwgParams v2probe; v2probe.S4 = 4; v2probe.I1 = QStringLiteral("<r 2>");
+        const bool verOk = a.protocolMajor() == QLatin1String("3")
+            && sub.nodes.first().awg.protocolMajor() == QLatin1String("1")
+            && v2probe.protocolMajor() == QLatin1String("2");
+        printf("awg3: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d ver=%d\n",
+               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk, verOk);
+        if (!verOk) { fprintf(stderr, "FAIL: protocolMajor mismatch\n"); return 15; }
         if (!(fieldsOk && extraOk && kaOk && emitOk && extraGateOk && parityOk && repOk)) {
             fprintf(stderr, "FAIL: awg3 v3-plumbing mismatch\n"); return 14;
         }
