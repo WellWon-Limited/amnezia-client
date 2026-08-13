@@ -382,9 +382,11 @@ if(LINUX)
         COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/set_openvpn_rpath.cmake
     )
 elseif(APPLE)
+    # AVPN: апстрим захардкодил имя таргета AmneziaVPN-service в bracket-литерале — у нас демон
+    # переименован (Tribe-service, строка 3); держим НАШЕ имя (§14 C.7: апстрим-дифф на наше имя).
     file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/set_openvpn_rpath.cmake CONTENT
 [=[
-set(ovpn "$<TARGET_FILE_DIR:AmneziaVPN-service>/openvpn")
+set(ovpn "$<TARGET_FILE_DIR:Tribe-service>/openvpn")
 set(dir "$<TARGET_FILE_DIR:OpenSSL::SSL>")
 execute_process(COMMAND install_name_tool -delete_rpath "${dir}" "${ovpn}" ERROR_QUIET)
 execute_process(COMMAND install_name_tool -add_rpath "${dir}" "${ovpn}")
