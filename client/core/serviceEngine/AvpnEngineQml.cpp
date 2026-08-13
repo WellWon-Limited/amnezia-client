@@ -4128,7 +4128,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         qInfo("[AVPN bypass] seed unchanged — skip (v=%d)", useRemote ? bl.version : -1);
         return;
     }
-    QMap<QString, QString> sites;
+    QMap<QString, QStringList> sites; // AVPN: формат значений апстрима f73697d3 (QStringList IP), CIDR = единственный элемент
     // AVPN Task 10 (per-group fallback): та же политика, что у парсера split_dns — "пусто =
     // нет override". Сервер может курировать любую из групп (ru_cidrs/bypass_extra/cn_liauto),
     // но если конкретная группа в валидном снапшоте пуста, это НЕ значит "выключить группу" —
@@ -4142,7 +4142,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         usedRemoteRu = useRemote;
         const QStringList ru = useRemote ? bl.ruCidrs : avpn::ruPrefixes();
         for (const QString &cidr : ru)
-            sites.insert(cidr, cidr);   // key=CIDR (checkIpSubnetFormat пройдёт), value=CIDR
+            sites.insert(cidr, {cidr});   // key=CIDR (checkIpSubnetFormat пройдёт), value=[CIDR]
 
         // AVPN RU-direct: foreign-эндпоинты, которые РФ-приложения дёргают для гео/анти-фрод проверок и которые
         // ПАЛЯТ загран-IP → гоним их тоже direct (residential РФ-IP), иначе приложение видит «VPN». Найдено
@@ -4165,7 +4165,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         usedRemoteExtra = useRemote && !bl.bypassExtra.isEmpty();
         const QStringList bypassExtra = usedRemoteExtra ? bl.bypassExtra : extraFallback;
         for (const QString &cidr : bypassExtra)
-            sites.insert(cidr, cidr);
+            sites.insert(cidr, {cidr});
     }
 
     // AVPN (китайские сервисы, 2026-07-03): узкие /24 серверов Li Auto (理想汽车, app com.chehejia.oc.m01) →
@@ -4196,7 +4196,7 @@ void AvpnEngineQml::applyRuBypassSplit()
         usedRemoteLiAuto = useRemote && !bl.cnLiAutoCidrs.isEmpty();
         const QStringList liAuto = usedRemoteLiAuto ? bl.cnLiAutoCidrs : liAutoFallback;
         for (const QString &cidr : liAuto)
-            sites.insert(cidr, cidr);
+            sites.insert(cidr, {cidr});
     }
 
     // AVPN carve-out (инцидент 2026-07-05, вынесено в T6 — rebuildApiCarveOut(sites) выше в файле):

@@ -56,7 +56,7 @@ Window  {
         }
     }
 
-    visible: true
+    visible: !GC.isDesktop()
     width: GC.screenWidth
     height: GC.screenHeight
     minimumWidth: GC.isDesktop() ? 380 : 0
