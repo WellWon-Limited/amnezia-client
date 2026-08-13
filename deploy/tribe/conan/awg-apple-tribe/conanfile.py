@@ -2,7 +2,7 @@
 # Апстрим-рецепт качает GitHub-архив amnezia-vpn/amneziawg-apple; наш — клонирует ФОРК
 # wellwon/amneziawg-apple (ветка tribe-dnsfwd, пин по коммиту ниже). Сборка идентична апстриму
 # (Makefile + go из conan tool_requires). Регистрация: `conan export deploy/tribe/conan/awg-apple-tribe`
-# → conanfile.py форка требует awg-apple/2.0.2-tribe.1 → cmake-conan строит из кэша (--build=missing).
+# → conanfile.py форка требует awg-apple/3.0.1-tribe.1 → cmake-conan строит из кэша (--build=missing).
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.layout import basic_layout
@@ -14,13 +14,14 @@ from conan.tools.scm import Git
 import os
 
 TRIBE_GIT_URL = "https://github.com/wellwon/amneziawg-apple.git"
-# bfee9a2 = cbf9f72 + Swift-only rebindListenPort (BUG-4 auto-heal) — Go-ядро БАЙТ-В-БАЙТ то же,
-# поэтому версия пакета не бампается (пересборка .a не нужна; Swift собирается из submodule).
-TRIBE_GIT_REF = "bfee9a2"  # tribe-dnsfwd: dnsfwd.go + wgSetSplitDns + handshake warmup + rebind-heal
+# de8b6ea = ветка tribe-awg3 (тег 3.0.1-tribe.1): merge апстрим-4bafa595 (AWG 3.0, awg-go/v3 3.0.1)
+# поверх tribe-dnsfwd (dnsfwd.go + wgSetSplitDns + warmup + rebind-heal) + log+skip неизвестных
+# wg-quick ключей (реш. владельца 2026-08-13, план awg3-migration §8 Q4).
+TRIBE_GIT_REF = "de8b6ea"  # tribe-awg3 / тег 3.0.1-tribe.1
 
 class AwgAppleTribe(ConanFile):
     name = "awg-apple"
-    version = "2.0.2-tribe.2"
+    version = "3.0.1-tribe.1"
     settings = "os", "arch", "compiler"
 
     @property
