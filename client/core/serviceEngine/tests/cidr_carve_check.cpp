@@ -58,9 +58,9 @@ int main(int argc, char **argv)
 
     // 2) carve по карте сева: реальный ru_prefixes + kBypassExtra-подобный ключ
     {
-        QMap<QString, QString> sites;
+        QMap<QString, QStringList> sites;
         for (const QString &cidr : avpn::ruPrefixes())
-            sites.insert(cidr, cidr);
+            sites.insert(cidr, {cidr});
         int coveredBefore = 0;
         for (auto it = sites.cbegin(); it != sites.cend(); ++it)
             if (cidrCovers(it.key(), api4))
@@ -77,10 +77,10 @@ int main(int argc, char **argv)
 
     // 3) не-накрывающие и v6/мусорные ключи не трогаются
     {
-        QMap<QString, QString> sites;
-        sites.insert(QStringLiteral("8.6.112.0/24"), QStringLiteral("8.6.112.0/24"));
-        sites.insert(QStringLiteral("2a00:1450::/32"), QStringLiteral("2a00:1450::/32"));
-        sites.insert(QStringLiteral("garbage"), QStringLiteral("garbage"));
+        QMap<QString, QStringList> sites;
+        sites.insert(QStringLiteral("8.6.112.0/24"), {QStringLiteral("8.6.112.0/24")});
+        sites.insert(QStringLiteral("2a00:1450::/32"), {QStringLiteral("2a00:1450::/32")});
+        sites.insert(QStringLiteral("garbage"), {QStringLiteral("garbage")});
         const auto before = sites;
         avpn::carveOutIpFromSites(sites, apiIp);
         CHECK(sites == before, "чужие/v6/мусорные ключи не изменены");
@@ -88,8 +88,8 @@ int main(int argc, char **argv)
 
     // 4) null/v6 ip — no-op
     {
-        QMap<QString, QString> sites;
-        sites.insert(QStringLiteral("159.194.208.0/20"), QStringLiteral("159.194.208.0/20"));
+        QMap<QString, QStringList> sites;
+        sites.insert(QStringLiteral("159.194.208.0/20"), {QStringLiteral("159.194.208.0/20")});
         const auto before = sites;
         avpn::carveOutIpFromSites(sites, QHostAddress());
         avpn::carveOutIpFromSites(sites, QHostAddress(QStringLiteral("::1")));

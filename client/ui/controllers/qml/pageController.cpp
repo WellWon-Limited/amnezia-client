@@ -260,6 +260,11 @@ void PageController::showOnStartup()
     }
 }
 
+bool PageController::shouldStartMinimized() const
+{
+    return m_settingsController->isStartMinimizedEnabled();
+}
+
 bool PageController::isTriggeredByConnectButton()
 {
     return m_isTriggeredByConnectButton;

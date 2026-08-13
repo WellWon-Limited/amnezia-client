@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QSet>
 
 namespace avpn {
 
@@ -28,6 +29,33 @@ static AwgParams parseAwg(const QJsonObject &o)
     a.I3 = o.value("I3").toString();
     a.I4 = o.value("I4").toString();
     a.I5 = o.value("I5").toString();
+
+    // AVPN AWG 3.0 (план awg3-migration §3 F7): 7 v3-ключей, имена — канон апстрима (configKeys.h).
+    a.headerProtectionKey = o.value("HeaderProtectionKey").toString();
+    a.contentPaddingAddition = o.value("ContentPaddingAddition").toString();
+    a.rekeyAfterTime = o.value("RekeyAfterTime").toString();
+    a.rekeyTimeout = o.value("RekeyTimeout").toString();
+    a.rejectAfterTime = o.value("RejectAfterTime").toString();
+    a.keepaliveTimeout = o.value("KeepaliveTimeout").toString();
+    a.maxHandshakeAttempts = o.value("MaxHandshakeAttempts").toString();
+
+    // AVPN generic-канал (§6.1): незнакомые строковые ключи — в extra (не терять молча).
+    // Не-строки пропускаем: канон awg-значений в конфиге туннеля — строки.
+    static const QSet<QString> known = {
+        QStringLiteral("Jc"), QStringLiteral("Jmin"), QStringLiteral("Jmax"),
+        QStringLiteral("S1"), QStringLiteral("S2"), QStringLiteral("S3"), QStringLiteral("S4"),
+        QStringLiteral("H1"), QStringLiteral("H2"), QStringLiteral("H3"), QStringLiteral("H4"),
+        QStringLiteral("I1"), QStringLiteral("I2"), QStringLiteral("I3"), QStringLiteral("I4"),
+        QStringLiteral("I5"),
+        QStringLiteral("HeaderProtectionKey"), QStringLiteral("ContentPaddingAddition"),
+        QStringLiteral("RekeyAfterTime"), QStringLiteral("RekeyTimeout"),
+        QStringLiteral("RejectAfterTime"), QStringLiteral("KeepaliveTimeout"),
+        QStringLiteral("MaxHandshakeAttempts"),
+    };
+    for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+        if (!known.contains(it.key()) && it.value().isString() && !it.value().toString().isEmpty())
+            a.extra.insert(it.key(), it.value().toString());
+    }
     return a;
 }
 
@@ -89,7 +117,11 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
             n.dns << d.toString();
 
         n.mtu = no.value("mtu").toInt();
+        // AVPN (план awg3 §3 F5-K): кламп <=0 → 25. Апстрим-фолбэки keepalive удалены (AWG3-волна),
+        // явный 0 из подписки или смена типа поля дали бы «keepalive выключен» молча.
         n.persistentKeepalive = no.value("persistent_keepalive").toInt(25);
+        if (n.persistentKeepalive <= 0)
+            n.persistentKeepalive = 25;
         n.presharedKey = no.value("preshared_key").toString();
         out.nodes << n;
     }

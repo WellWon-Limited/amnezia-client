@@ -16,7 +16,6 @@ extension PacketTunnelProvider {
         do {
             let wgConfig = try JSONDecoder().decode(WGConfig.self, from: wgConfigData)
             let wgConfigStr = wgConfig.str
-            wg_log(.info, title: "config: ", message: wgConfig.redux)
 
             // AVPN split-DNS форвардер: настроить Go-слой ДО старта адаптера (wgTurnOn читает
             // конфиг форвардера при создании устройства). Выключен → явный сброс (переподключения).

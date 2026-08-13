@@ -1,6 +1,6 @@
 from conan import ConanFile
 from conan.tools.cmake import cmake_layout, CMake, CMakeToolchain
-from conan.tools.files import copy, load, replace_in_file, save
+from conan.tools.files import copy, load, replace_in_file
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.scm import Git
 
@@ -9,7 +9,7 @@ import platform
 
 class AwgAndroid(ConanFile):
     name = "awg-android"
-    version = "2.0.1"
+    version = "3.0.1"
     settings = "os", "arch", "build_type", "compiler"
 
     def configure(self):
@@ -42,41 +42,30 @@ class AwgAndroid(ConanFile):
         tc.extra_cflags = ["-Wno-deprecated-declarations"]
         tc.generate()
 
-    # AVPN: явный пин amneziawg-go (S4 keepalive-паддинг чинится только >=0.2.18 —
-    # CONNECT-INVARIANTS §14.1; 0.2.19 = 0.2.18 + handle empty I1-I5, go.mod идентичен).
-    # Апстрим ПЕРЕДВИГАЛ тег обёртки v2.0.1 (2026-06-12: внутри 0.2.16 -> 0.2.18), а conan
-    # снапшотит источники — кеш от 2026-06-04 тихо собирал 0.2.16 во все APK. Поэтому версию
-    # движка фиксируем здесь явно и валидируем, а не доверяем содержимому тега.
-    _AWG_GO_PIN = "v0.2.19"
+    # AVPN: гвард версии amneziawg-go внутри обёртки. История: (1) S4 keepalive-паддинг чинится
+    # только >=0.2.18 — CONNECT-INVARIANTS §14.1; (2) апстрим ПЕРЕДВИГАЛ тег обёртки v2.0.1
+    # (2026-06-12: внутри 0.2.16 -> 0.2.18), а conan снапшотит источники — кеш тихо собирал
+    # старый движок во все APK. Поэтому содержимому тега не доверяем и валидируем go.mod явно.
+    # С awg-android 3.0.1 обёртка пинит amneziawg-go/v3 (module path сменился) — переписывать
+    # go.mod больше не нужно, гвард только проверяет, что снапшот тега не откатился на 2.0-эру.
+    _AWG_GO_V3_REQ = "github.com/amnezia-vpn/amneziawg-go/v3 v3."
 
-    def _pin_awg_go(self):
+    def _check_awg_go_v3(self):
         d = os.path.join(self.source_folder, "tunnel", "tools", "libwg-go")
-        gomod = os.path.join(d, "go.mod")
-        for old in ("v0.2.16", "v0.2.17", "v0.2.18"):
-            replace_in_file(self, gomod,
-                f"github.com/amnezia-vpn/amneziawg-go {old}",
-                f"github.com/amnezia-vpn/amneziawg-go {self._AWG_GO_PIN}",
-                strict=False)
-        if f"amneziawg-go {self._AWG_GO_PIN}" not in load(self, gomod):
+        gomod = load(self, os.path.join(d, "go.mod"))
+        if self._AWG_GO_V3_REQ not in gomod:
             raise ConanInvalidConfiguration(
-                f"awg-android: go.mod без пина amneziawg-go {self._AWG_GO_PIN} — апстрим сменил "
-                "раскладку libwg-go, пин надо перепроверить руками")
-        gosum = os.path.join(d, "go.sum")
-        sum_content = load(self, gosum)
-        # граф зависимостей 0.2.19 совпадает с 0.2.18 (go.mod идентичны) — go.sum обёртки
-        # с 0.2.18-эры полон; нужен только хеш самого модуля (sum.golang.org, /go.mod-хеш общий)
-        if "amneziawg-go v0.2.18" not in sum_content:
+                "awg-android: go.mod без amneziawg-go/v3 — conan затянул СТАРЫЙ снапшот тега "
+                "(2.0-эра, тег обёртки передвинут?). Очисти кеш: "
+                "conan remove 'awg-android/*' -c и пересобери; сверь go.mod тега на GitHub")
+        gosum = load(self, os.path.join(d, "go.sum"))
+        if "amneziawg-go/v3 v3." not in gosum:
             raise ConanInvalidConfiguration(
-                "awg-android: go.sum без строк v0.2.18 — conan затянул СТАРЫЙ снапшот тега "
-                "(0.2.16-эра, граф зависимостей не совпадает). Очисти кеш: "
-                "conan remove 'awg-android/*' -c и пересобери")
-        if f"amneziawg-go {self._AWG_GO_PIN} h1:" not in sum_content:
-            save(self, gosum, sum_content
-                + f"github.com/amnezia-vpn/amneziawg-go {self._AWG_GO_PIN} h1:l3rOmrA4o5z38kpgnA5iSk1yOm7Cv3AafIi4vxpSEV0=\n"
-                + f"github.com/amnezia-vpn/amneziawg-go {self._AWG_GO_PIN}/go.mod h1:aMgOk9MuX0xI7b5TKAYp8pLM54RlXcOPzDvYw3YEO5A=\n")
+                "awg-android: go.sum без строк amneziawg-go/v3 — снапшот источников "
+                "не соответствует go.mod, пересобери с чистым кешем")
 
     def _patch_sources(self):
-        self._pin_awg_go()
+        self._check_awg_go_v3()
         if platform.system() == 'Darwin':
             replace_in_file(self,
                 os.path.join(self.source_folder, "tunnel", "tools", "libwg-go", "Makefile"),

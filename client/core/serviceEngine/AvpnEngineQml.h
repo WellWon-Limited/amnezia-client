@@ -840,7 +840,7 @@ private:
     //    m_baseUrl) и передёргивает сплит через reapplyBypass(), чтобы следующий пересев (внутри
     //    applyRuBypassSplit → rebuildApiCarveOut(sites)) унёс с собой и свежий carve-out. Офлайн/ещё
     //    не резолвлено → применится на следующем Connect, как везде в RU-direct (см. reapplyBypass()).
-    void rebuildApiCarveOut(QMap<QString, QString> &sites) const;
+    void rebuildApiCarveOut(QMap<QString, QStringList> &sites) const;
     void rebuildApiCarveOut();
     // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
     // (bypassSeedStamp): один источник исключает дрейф «carve изменился, а стамп не заметил».
