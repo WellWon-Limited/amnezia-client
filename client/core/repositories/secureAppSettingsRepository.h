@@ -38,14 +38,18 @@ public:
 
     RouteMode routeMode() const;
     void setRouteMode(RouteMode mode);
-    bool addVpnSite(RouteMode mode, const QString &site, const QString &ip = "");
-    void addVpnSites(RouteMode mode, const QMap<QString, QString> &sites);
+    bool addVpnSite(RouteMode mode, const QString &site, const QStringList &ips = {});
+    void addVpnSites(RouteMode mode, const QMap<QString, QStringList> &sites);
     // AVPN (RU-direct, «apply = реконсиляция»): ПОЛНАЯ замена списка сайтов режима. addVpnSites —
     // merge-only (никогда не удаляет) → стейл-CIDR прошлых севов жили в сторе навсегда.
-    void replaceVpnSites(RouteMode mode, const QMap<QString, QString> &sites);
+    void replaceVpnSites(RouteMode mode, const QMap<QString, QStringList> &sites);
     void removeVpnSite(RouteMode mode, const QString &site);
     void removeAllVpnSites(RouteMode mode);
     QVariantMap vpnSites(RouteMode mode) const;
+
+    // Normalizes a stored vpn site value into a list of IPs.
+    // Supports both the legacy format (a single IP string) and the current one (a list of IPs).
+    static QStringList siteIpList(const QVariant &value);
     bool isSitesSplitTunnelingEnabled() const;
     void setSitesSplitTunnelingEnabled(bool enabled);
 
@@ -62,7 +66,9 @@ public:
     void setDevGatewayEndpoint();
     bool isDevGatewayEnv(bool isTestPurchase = false) const;
     void toggleDevGatewayEnv(bool enabled);
-    
+    QByteArray readGatewayProxyUrls(const QString &cacheKey) const;
+    void writeGatewayProxyUrls(const QString &cacheKey, const QByteArray &proxyUrlsEncrypted);
+
     bool isKillSwitchEnabled() const;
     void setKillSwitchEnabled(bool enabled);
     bool isStrictKillSwitchEnabled() const;

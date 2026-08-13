@@ -6,6 +6,20 @@ Menu {
 
     popupType: Popup.Native
 
+    // On Qt < 6.10 the ContextMenu attached type has no native backing on iOS
+    // and opens this Qt-drawn menu instead. In that case the native edit menu
+    // is presented through UIEditMenuInteraction (IosContextMenu is registered
+    // only in iOS builds; on Qt >= 6.10 isAvailable() returns false and the
+    // attached type shows the native menu itself).
+    readonly property bool useNativeEditMenu: typeof IosContextMenu !== "undefined" && IosContextMenu.isAvailable()
+
+    function requestNative(position) {
+        if (useNativeEditMenu && textObj) {
+            textObj.forceActiveFocus()
+            IosContextMenu.present(textObj, position.x, position.y)
+        }
+    }
+
     property Item inputBlocker: null
 
     Component {
@@ -49,8 +63,8 @@ Menu {
     }
     // AVPN: пункт «Вставить» УБРАН по требованию пользователя — на iOS любое чтение буфера обмена
     // (canPaste/paste) вызывает системный промпт «Разрешить вставку», который раздражал. Без пункта
-    // меню буфер не читается → промпт не появляется. (Если когда-то понадобится вставка ключа без
-    // промпта — отдельная нативная кнопка UIPasteControl, а не пункт меню.)
+    // меню буфер не читается → промпт не появляется. Апстрим 717323f1 вернул пункт с enabled-обходом —
+    // наш вариант строго сильнее, оставляем без пункта. (Нужна вставка без промпта — UIPasteControl.)
 
     MenuItem {
         text: qsTr("&SelectAll")

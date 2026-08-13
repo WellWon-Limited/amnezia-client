@@ -47,8 +47,20 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleIcons</key>
-        <dict/>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon</string>
+			</array>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
+		</dict>
+	</dict>
 	<!-- AVPN: диплинк переноса подписки tribe://transfer?t=… (+рефералка tribe://r/…) —
 	     доставка в приложение через QFileOpenEvent (AvpnDeepLinkBridge, фильтр на qApp) -->
 	<key>CFBundleURLTypes</key>

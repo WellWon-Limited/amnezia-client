@@ -31,9 +31,9 @@ inline QStringList splitCidrExcludingIp(quint32 net, int prefix, quint32 ip)
     return out;
 }
 
-// Убрать ip из карты сева (key=value=CIDR, формат applyRuBypassSplit): каждый v4-CIDR,
+// Убрать ip из карты сева (key=CIDR, value=[CIDR] — формат QStringList апстрима f73697d3): каждый v4-CIDR,
 // накрывающий ip, заменяется своим разбиением без /32. v6 и невалидные ключи не трогаем.
-inline void carveOutIpFromSites(QMap<QString, QString> &sites, const QHostAddress &ip)
+inline void carveOutIpFromSites(QMap<QString, QStringList> &sites, const QHostAddress &ip)
 {
     if (ip.isNull() || ip.protocol() != QAbstractSocket::IPv4Protocol)
         return;
@@ -56,7 +56,7 @@ inline void carveOutIpFromSites(QMap<QString, QString> &sites, const QHostAddres
         sites.remove(key);
         const QStringList parts = splitCidrExcludingIp(netAddr.toIPv4Address() & mask, prefix, ip4);
         for (const QString &part : parts)
-            sites.insert(part, part);
+            sites.insert(part, {part});
     }
 }
 

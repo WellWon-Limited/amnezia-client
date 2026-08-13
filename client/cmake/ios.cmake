@@ -43,6 +43,7 @@ set(HEADERS ${HEADERS}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosnotificationhandler.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ioscontextmenu.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate-C-Interface.h
@@ -54,12 +55,19 @@ set(SOURCES ${SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosnotificationhandler.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ioscontextmenu.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosglue.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QRCodeReaderBase.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/AmneziaSceneDelegateHooks.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/TribePasteMenuFix.mm
+)
+
+# The context menu helper uses ARC-only constructs (weak references); the
+# rest of the Objective-C++ sources build with manual reference counting.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ioscontextmenu.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
 )
 
 
@@ -82,7 +90,6 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_PRODUCT_NAME "AmneziaVPN"
     XCODE_ATTRIBUTE_BUNDLE_INFO_STRING "AmneziaVPN"
     XCODE_GENERATE_SCHEME TRUE
-    XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
     XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
@@ -95,6 +102,8 @@ set_target_properties(${PROJECT} PROPERTIES
     # XCODE_EMBED_EXTENSIONKIT_EXTENSIONS appintentsextension
 )
 
+# AVPN: подпись ВСЕГДА Automatic + team WellWon — амнезийные manual-профили (DEPLOY-ветка апстрима)
+# нам не подходят и ломают headless-архив. // AVPN
 set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
 )
@@ -128,6 +137,11 @@ target_sources(${PROJECT} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/StoreKit2Helper.swift
     # AVPN: AvpnAppIntents.swift ПЕРЕНЕСЁН в App Intents Extension (ios/appintentsextension) —
     # в основном таргете iOS поднимал всё Qt-приложение в фоне ради фоновой команды → краш. Тут НЕ компилируем.
+)
+
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/ios/app/Media.xcassets
+    PROPERTIES MACOSX_PACKAGE_LOCATION Resources
 )
 
 target_sources(${PROJECT} PRIVATE
