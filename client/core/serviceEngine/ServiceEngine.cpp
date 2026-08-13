@@ -470,6 +470,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         row.countryCode = n.countryCode; // AVPN: ISO-3166 alpha-2 → флаг-эмодзи в UI
         row.endpoint = n.endpoint; // AVPN: реальный host:port для UI
         row.proto = n.proto;       // AVPN (diag-report): протокол ноды
+        row.protoVersion = n.awg.protocolMajor(); // AVPN AWG 3.0: "1"/"2"/"3" → метка «Amnezia vN» в пикере
         row.manualOnly = isManualOnlyNode(n); // AVPN (Доктор): manual/RU — вне авто-очередей
         // AVPN (diag-report): измеренный off-tunnel ICMP RTT из кэша m_measuredRtt (probeNodeRtt);
         // нет замера → 0 (осталось легаси-значением scoreMs).

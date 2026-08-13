@@ -84,6 +84,7 @@ PageType {
                        rtt: best.measuredRttMs,
                        bars: best.measuredBars >= 0 ? best.measuredBars
                                                     : Math.round((best.health || 0) * 5),
+                       protoVersion: String(best.protoVersion || ""), // AVPN AWG 3.0: "1"/"2"/"3"
                        isCurrent: isCur })
         }
         out.sort(function(a, b) {
@@ -329,12 +330,39 @@ PageType {
                                 font.pixelSize: Theme.font.bodyS + 1
                                 font.weight: Theme.font.wBold
                             }
-                            Text {
-                                text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
-                                textFormat: Text.PlainText
-                                color: Theme.color.text3
-                                font.family: Theme.font.mono
-                                font.pixelSize: Theme.font.caption
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.space.xs
+                                Text {
+                                    text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                    textFormat: Text.PlainText
+                                    color: Theme.color.text3
+                                    font.family: Theme.font.mono
+                                    font.pixelSize: Theme.font.caption
+                                }
+                                // AVPN AWG 3.0: аккуратная метка версии протокола ноды. Версия — НЕ
+                                // статус подключения, поэтому нейтральная палитра (surface2 + accent),
+                                // не connected-зелёный. Показываем для awg-нод (v2/v3); v1/пусто скрыто.
+                                Rectangle {
+                                    id: protoPill
+                                    readonly property string major: row.modelData.protoVersion
+                                    visible: major === "2" || major === "3"
+                                    Layout.preferredHeight: 17
+                                    Layout.preferredWidth: protoLbl.implicitWidth + Theme.space.sm * 2
+                                    radius: Theme.radius.pill
+                                    color: Theme.color.surface2
+                                    Text {
+                                        id: protoLbl
+                                        anchors.centerIn: parent
+                                        text: qsTr("Amnezia v%1").arg(protoPill.major)
+                                        textFormat: Text.PlainText
+                                        color: Theme.color.accent
+                                        font.family: Theme.font.body
+                                        font.pixelSize: Theme.font.caption - 1
+                                        font.weight: Theme.font.wBold
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
                             }
                         }
 

@@ -35,6 +35,20 @@ struct AwgParams {
     QHash<QString, QString> extra;
 
     bool hasFullBundle() const { return Jc && Jmin && Jmax && S1 && S2 && H1 && H2 && H3 && H4; }
+
+    // AVPN AWG 3.0: версия протокола обфускации по факту наличия ключей (зеркало апстримного
+    // awgVersionOf) — для метки «Amnezia vN» в пикере серверов. Любой v3-ключ ⇒ "3"; иначе
+    // S3/S4/I1 (наш флот) ⇒ "2"; иначе "1". Возвращаем мажор строкой (для UI "v"+major).
+    QString protocolMajor() const
+    {
+        if (!headerProtectionKey.isEmpty() || !contentPaddingAddition.isEmpty()
+            || !rekeyAfterTime.isEmpty() || !rekeyTimeout.isEmpty() || !rejectAfterTime.isEmpty()
+            || !keepaliveTimeout.isEmpty() || !maxHandshakeAttempts.isEmpty())
+            return QStringLiteral("3");
+        if (S3.has_value() || S4.has_value() || !I1.isEmpty())
+            return QStringLiteral("2");
+        return QStringLiteral("1");
+    }
 };
 
 struct SubscriptionNode {

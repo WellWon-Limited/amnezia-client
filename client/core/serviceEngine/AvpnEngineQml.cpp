@@ -5177,6 +5177,7 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         // AVPN (Task 10 финал): протокол ноды — QML-пикер и админ-свип скипают неподдерживаемые
         // (xray, ...): коннект к ним невозможен, тап/свип упирался бы в сторожа. Пусто = awg.
         n["proto"] = r.proto;
+        n["protoVersion"] = r.protoVersion; // AVPN AWG 3.0: "1"/"2"/"3" → метка «Amnezia vN» в пикере
         n["manualOnly"] = r.manualOnly; // AVPN (Доктор): manual/RU скипаются в авто-очередях
         pool.append(n);
     }
