@@ -868,7 +868,7 @@ QStringList AvpnEngineQml::apiCarveIps() const
     return ips;
 }
 
-void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QString> &sites) const
+void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QStringList> &sites) const
 {
     // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
     // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
