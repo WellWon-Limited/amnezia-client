@@ -20,6 +20,7 @@ PageType {
     signal pickNode(string nodeId)
     signal pickAuto()
 
+
     // iOS: PageController.safeArea* только для Android → max с SafeArea (как PageNotificationsTribe)
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
 
@@ -319,7 +320,7 @@ PageType {
 
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            spacing: 3
                             Text {
                                 Layout.fillWidth: true
                                 text: row.modelData.name
@@ -330,47 +331,53 @@ PageType {
                                 font.pixelSize: Theme.font.bodyS + 1
                                 font.weight: Theme.font.wBold
                             }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Theme.space.xs
+                            // AVPN AWG 3.0: метка версии протокола ноды — под именем, от начала строки.
+                            // Версия — НЕ статус подключения, поэтому нейтральная палитра (surface2 +
+                            // accent), не connected-зелёный. Показываем для awg-нод (v2/v3); v1/пусто скрыто.
+                            Rectangle {
+                                id: protoPill
+                                readonly property string major: row.modelData.protoVersion
+                                visible: major === "2" || major === "3"
+                                Layout.alignment: Qt.AlignLeft
+                                Layout.preferredHeight: 17
+                                Layout.preferredWidth: protoLbl.implicitWidth + Theme.space.sm * 2
+                                radius: Theme.radius.pill
+                                color: Theme.color.surface2
                                 Text {
-                                    text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                    id: protoLbl
+                                    anchors.centerIn: parent
+                                    text: qsTr("Amnezia v%1").arg(protoPill.major)
                                     textFormat: Text.PlainText
-                                    color: Theme.color.text3
-                                    font.family: Theme.font.mono
-                                    font.pixelSize: Theme.font.caption
+                                    color: Theme.color.accent
+                                    font.family: Theme.font.body
+                                    font.pixelSize: Theme.font.caption - 1
+                                    font.weight: Theme.font.wBold
                                 }
-                                // AVPN AWG 3.0: аккуратная метка версии протокола ноды. Версия — НЕ
-                                // статус подключения, поэтому нейтральная палитра (surface2 + accent),
-                                // не connected-зелёный. Показываем для awg-нод (v2/v3); v1/пусто скрыто.
-                                Rectangle {
-                                    id: protoPill
-                                    readonly property string major: row.modelData.protoVersion
-                                    visible: major === "2" || major === "3"
-                                    Layout.preferredHeight: 17
-                                    Layout.preferredWidth: protoLbl.implicitWidth + Theme.space.sm * 2
-                                    radius: Theme.radius.pill
-                                    color: Theme.color.surface2
-                                    Text {
-                                        id: protoLbl
-                                        anchors.centerIn: parent
-                                        text: qsTr("Amnezia v%1").arg(protoPill.major)
-                                        textFormat: Text.PlainText
-                                        color: Theme.color.accent
-                                        font.family: Theme.font.body
-                                        font.pixelSize: Theme.font.caption - 1
-                                        font.weight: Theme.font.wBold
-                                    }
-                                }
-                                Item { Layout.fillWidth: true }
                             }
                         }
 
-                        LoadBars {
-                            // текущая страна при коннекте — живой замер через туннель
-                            level: (row.modelData.isCurrent && root.hasEngine
-                                    && TribeEngine.state === "connected")
-                                   ? TribeEngine.liveBars : row.modelData.bars
+                        // AVPN: справа — палочки сигнала, под ними скорость (RTT). Палочки чуть
+                        // уменьшены (scale) и подняты; скорость выровнена по их центру.
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: 3
+                            LoadBars {
+                                Layout.alignment: Qt.AlignHCenter
+                                scale: 0.9
+                                transformOrigin: Item.Bottom
+                                // текущая страна при коннекте — живой замер через туннель
+                                level: (row.modelData.isCurrent && root.hasEngine
+                                        && TribeEngine.state === "connected")
+                                       ? TribeEngine.liveBars : row.modelData.bars
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                textFormat: Text.PlainText
+                                color: Theme.color.text3
+                                font.family: Theme.font.mono
+                                font.pixelSize: Theme.font.caption
+                            }
                         }
                     }
 
