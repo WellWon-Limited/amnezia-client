@@ -480,13 +480,6 @@ void VpnConnection::appendSplitTunnelingConfig()
             for (auto i = m.constBegin(); i != m.constEnd(); ++i) {
                 if (NetworkUtilities::checkIpSubnetFormat(i.key())) {
                     sites.append(i.key());
-                } else {
-                    const QStringList siteIps = SecureAppSettingsRepository::siteIpList(i.value());
-                    for (const QString &ip : siteIps) {
-                        if (NetworkUtilities::checkIpSubnetFormat(ip)) {
-                            sites.append(ip);
-                        }
-                    }
                 }
 #if defined(Q_OS_IOS) || defined(Q_OS_ANDROID) || defined(MACOS_NE)
                 // AVPN (IPv6 split): checkIpSubnetFormat — IPv4-only и молча выбрасывал 2174 v6-префикса
@@ -495,12 +488,25 @@ void VpnConnection::appendSplitTunnelingConfig()
                 // ipv6ExcludedRoutes) и Android (InetNetwork/excludeRoute) v6 переваривают. Desktop-путь
                 // НЕ гейтим: localsocketcontroller хардкодит isIpv6:false — v6 туда слать нельзя,
                 // пока демон-тракт не научен (там остаётся прежнее v4-only поведение).
+                // Встроено в новую апстрим-структуру f73697d3 (siteIpList/QStringList): v6-ключ — сразу,
+                // v6-значения — из списка IP резолва ниже.
                 else if (avpn::isIpv6Cidr(i.key())) {
                     sites.append(i.key());
-                } else if (avpn::isIpv6Cidr(i.value().toString())) {
-                    sites.append(i.value().toString());
                 }
 #endif
+                else {
+                    const QStringList siteIps = SecureAppSettingsRepository::siteIpList(i.value());
+                    for (const QString &ip : siteIps) {
+                        if (NetworkUtilities::checkIpSubnetFormat(ip)) {
+                            sites.append(ip);
+                        }
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID) || defined(MACOS_NE)
+                        else if (avpn::isIpv6Cidr(ip)) {
+                            sites.append(ip);
+                        }
+#endif
+                    }
+                }
             }
             sites.removeDuplicates();
             for (const auto &site : sites) {
