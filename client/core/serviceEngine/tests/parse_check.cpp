@@ -748,6 +748,82 @@ int main(int argc, char **argv)
     // та же семантика RST-без-байта=HardFail, таймаут=SoftFail; TDD tests/build_chip_logic.sh),
     // HTML главной Instagram больше не парсим (гео-A/B вёрстка/бот-детект — источник флапа).
 
-    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube\n");
+    // --- AWG 3.0 (план awg3 §3 F7/F8): 7 v3-ключей + generic-канал extra + keepalive-кламп ---
+    {
+        const QByteArray v3json = R"({
+            "version": 1, "address": ["10.7.0.9/32"], "status": "active",
+            "nodes": [{
+                "node_id": "lab-v3", "region": "fi", "endpoint": "203.0.113.99:585",
+                "server_pubkey": "PUBKEY_V3", "proto": "awg",
+                "dns": ["1.1.1.1", "1.0.0.1"], "mtu": 1280, "persistent_keepalive": 0,
+                "awg_params": {
+                    "Jc": 4, "Jmin": 10, "Jmax": 50, "S1": 15, "S2": 17, "S3": 20, "S4": 12,
+                    "H1": 11, "H2": 12, "H3": 13, "H4": 14,
+                    "I1": "<r 2><b 0x11>",
+                    "HeaderProtectionKey": "aGVhZGVyLXByb3RlY3Rpb24ta2V5LTMyYnl0ZXM=",
+                    "ContentPaddingAddition": "10-100",
+                    "RekeyAfterTime": "100-120", "RekeyTimeout": "3-7",
+                    "RejectAfterTime": "150-180", "KeepaliveTimeout": "5-15",
+                    "MaxHandshakeAttempts": "15-20",
+                    "FutureKey42": "future-value", "FutureNumeric": 7
+                }
+            }]
+        })";
+        Subscription v3sub; QString v3err;
+        const bool parsed = SubscriptionParser::parse(v3json, v3sub, v3err);
+        if (!parsed) { fprintf(stderr, "FAIL: awg3 parse: %s\n", v3err.toUtf8().constData()); return 13; }
+        const SubscriptionNode &n = v3sub.nodes.first();
+        const AwgParams &a = n.awg;
+        const bool fieldsOk = a.hasFullBundle()
+            && a.headerProtectionKey == QLatin1String("aGVhZGVyLXByb3RlY3Rpb24ta2V5LTMyYnl0ZXM=")
+            && a.contentPaddingAddition == QLatin1String("10-100")
+            && a.rekeyAfterTime == QLatin1String("100-120")
+            && a.rekeyTimeout == QLatin1String("3-7")
+            && a.rejectAfterTime == QLatin1String("150-180")
+            && a.keepaliveTimeout == QLatin1String("5-15")
+            && a.maxHandshakeAttempts == QLatin1String("15-20");
+        // generic-канал: строковый незнакомый ключ пойман, числовой — отброшен (канон = строки)
+        const bool extraOk = a.extra.size() == 1
+            && a.extra.value(QStringLiteral("FutureKey42")) == QLatin1String("future-value");
+        // кламп: явный persistent_keepalive=0 не должен молча выключить keepalive
+        const bool kaOk = n.persistentKeepalive == 25;
+
+        ClientKeys keys;
+        keys.privateKey = QStringLiteral("PRIV"); keys.publicKey = QStringLiteral("PUB");
+        const QJsonObject cfg = AwgConfigBuilder::build(v3sub, n, keys);
+        const QJsonObject inner = cfg.value(QStringLiteral("awg_config_data")).toObject();
+        const QString quick = inner.value(QStringLiteral("config")).toString();
+        // 7 ключей доезжают и до inner-JSON (awgProtocolKeys-цикл платформ), и до wg-quick текста
+        const bool emitOk = inner.value(QStringLiteral("HeaderProtectionKey")).toString() == a.headerProtectionKey
+            && inner.value(QStringLiteral("ContentPaddingAddition")).toString() == QLatin1String("10-100")
+            && inner.value(QStringLiteral("MaxHandshakeAttempts")).toString() == QLatin1String("15-20")
+            && quick.contains(QLatin1String("HeaderProtectionKey = "))
+            && quick.contains(QLatin1String("RekeyTimeout = 3-7"))
+            && quick.contains(QLatin1String("PersistentKeepalive = 25"));
+        // extra БЕЗ allowlist'а (дефолт пуст) в конфиг НЕ эмитится — канал спит
+        const bool extraGateOk = !inner.contains(QStringLiteral("FutureKey42"))
+            && !quick.contains(QLatin1String("FutureKey42"));
+        // parity 2.0: у ноды без v3-ключей в конфиге не появляется ни одного нового ключа
+        const QJsonObject cfg20 = AwgConfigBuilder::build(sub, sub.nodes.first(), keys);
+        const QJsonObject inner20 = cfg20.value(QStringLiteral("awg_config_data")).toObject();
+        const bool parityOk = !inner20.contains(QStringLiteral("HeaderProtectionKey"))
+            && !inner20.contains(QStringLiteral("ContentPaddingAddition"))
+            && !inner20.contains(QStringLiteral("RekeyAfterTime"))
+            && !inner20.value(QStringLiteral("config")).toString().contains(QLatin1String("Rekey"));
+        // отчёт: флаг v3 есть, сам ключ HPK в отчёт НЕ течёт (секрет)
+        const QJsonObject rep = AwgConfigBuilder::reportSummary(v3sub, n);
+        const QString repFlat = QString::fromUtf8(QJsonDocument(rep).toJson());
+        const bool repOk = rep.value(QStringLiteral("awg")).toObject().value(QStringLiteral("v3")).toBool()
+            && !repFlat.contains(a.headerProtectionKey);
+
+        printf("awg3: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d\n",
+               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk);
+        if (!(fieldsOk && extraOk && kaOk && emitOk && extraGateOk && parityOk && repOk)) {
+            fprintf(stderr, "FAIL: awg3 v3-plumbing mismatch\n"); return 14;
+        }
+        printf("awg3: OK (7 ключей parse→build, extra-канал за allowlist-гейтом, кламп keepalive, parity 2.0, секрет не течёт)\n");
+    }
+
+    printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + awg3\n");
     return 0;
 }
