@@ -26,7 +26,7 @@ jobs:
 
     steps:
     - name: 'Install desktop Qt'
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61
       with:
         version: ${{ env.QT_VERSION }}
         host: 'linux'
@@ -39,7 +39,7 @@ jobs:
         extra: '--external 7z'
 
     - name: 'Install android Qt x86_64'
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61
       with:
         version: ${{ env.QT_VERSION }}
         host: 'linux'
@@ -52,7 +52,7 @@ jobs:
         extra: '--external 7z'
 
     - name: 'Install android Qt x86'
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61
       with:
         version: ${{ env.QT_VERSION }}
         host: 'linux'
@@ -65,7 +65,7 @@ jobs:
         extra: '--external 7z'
 
     - name: 'Install android Qt arm_v7'
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61
       with:
         version: ${{ env.QT_VERSION }}
         host: 'linux'
@@ -78,7 +78,7 @@ jobs:
         extra: '--external 7z'
 
     - name: 'Install android Qt arm_v8'
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61
       with:
         version: ${{ env.QT_VERSION }}
         host: 'linux'
@@ -91,7 +91,7 @@ jobs:
         extra: '--external 7z'
 
     - name: 'Get sources'
-      uses: actions/checkout@v3
+      uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26
       with:
         path: main
         submodules: 'true'
@@ -102,17 +102,17 @@ jobs:
         mkdir keystore
 
     - name: 'Getting keystore'
-      uses: actions/checkout@v3  
+      uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26  
       with:
         repository: amnezia-vpn/amnezia-android-certificates
         ssh-key: ${{ secrets.ANDROID_CERTS_SSH_PRIVATE_KEY }}
         path: keystore
 
     - name: 'Setup ccache'
-      uses: hendrikmuhs/ccache-action@v1.2
+      uses: hendrikmuhs/ccache-action@5ebbd400eff9e74630f759d94ddd7b6c26299639
 
     - name: 'Setup Java'
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@e9fbacdec3bb3b6036605a3e6f7995d66773a8c6
       with:
         distribution: 'temurin'
         java-version: '11'
@@ -144,7 +144,7 @@ jobs:
         ${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner sign --out AmneziaVPN-release-signed.apk --ks keystore/debug.keystore --ks-key-alias ${{ secrets.DEBUG_ANDROID_KEYSTORE_KEY_ALIAS }} --ks-pass pass:${{secrets.DEBUG_ANDROID_KEYSTOTE_KEY_PASS }} AmneziaVPN-release-aligned.apk
 
     - name: 'Upload'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
       with:
         name: Release APK
         path: ${{ runner.temp }}/main/AmneziaVPN-release-signed.apk
