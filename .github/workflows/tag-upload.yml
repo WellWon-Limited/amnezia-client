@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.RELEASE_VERSION }}
           sparse-checkout: |
@@ -33,7 +33,7 @@ jobs:
           fi
 
       - name: Setup Rclone
-        uses: AnimMouse/setup-rclone@v1
+        uses: AnimMouse/setup-rclone@26ef2133e09fd383329a1d4c1fbe6a71db1976c9
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
