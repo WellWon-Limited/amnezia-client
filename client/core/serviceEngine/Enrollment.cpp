@@ -9,6 +9,7 @@
 #include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
+#include "SubscriptionRequest.h" // AVPN: exact app-version cohort on every subscription path
 #include <QCoreApplication> // AVPN (i18n): translate() — пользовательские ошибки (класс не-QObject)
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -146,7 +147,14 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &ba
         if (outcome) *outcome = FetchOutcome::NetworkError;
         return false;
     }
-    QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/subscription"))};
+    // This synchronous path is still used by ServiceEngine::bootstrap()/refreshPool().  Keep it
+    // cohort-identical to AvpnEngineQml's asynchronous subscription requests: a rollout gate
+    // must never see a versionless request merely because the caller used the legacy/LKG path.
+    // main.cpp pins applicationVersion to APP_VERSION; the compile-time fallback keeps this
+    // invariant true in narrow host tests and before a QCoreApplication instance exists.
+    const QString applicationVersion = QCoreApplication::applicationVersion().isEmpty()
+        ? QStringLiteral(APP_VERSION) : QCoreApplication::applicationVersion();
+    QNetworkRequest req{versionedSubscriptionUrl(baseUrl, applicationVersion)};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 

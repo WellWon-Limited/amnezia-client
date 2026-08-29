@@ -23,16 +23,28 @@ execute_process(
 
 add_definitions(-DGIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
 
-add_definitions(-DPROD_AGW_PUBLIC_KEY="$ENV{PROD_AGW_PUBLIC_KEY}")
-add_definitions(-DPROD_S3_ENDPOINT="$ENV{PROD_S3_ENDPOINT}")
-add_definitions(-DFALLBACK_S3_ENDPOINT="$ENV{FALLBACK_S3_ENDPOINT}")
+# Capture endpoint/public-key inputs in the primary configure. Qt's additional
+# Android ABIs are configured later (sometimes by a separate build invocation),
+# so reading the environment independently there can produce a mixed universal
+# artifact. Cache values remain overrideable with canonical -D arguments and
+# are forwarded explicitly by client/cmake/android.cmake.
+set(PROD_AGW_PUBLIC_KEY "$ENV{PROD_AGW_PUBLIC_KEY}" CACHE STRING "Production API public key")
+set(PROD_S3_ENDPOINT "$ENV{PROD_S3_ENDPOINT}" CACHE STRING "Production catalog endpoint")
+set(FALLBACK_S3_ENDPOINT "$ENV{FALLBACK_S3_ENDPOINT}" CACHE STRING "Fallback catalog endpoint")
+set(DEV_AGW_PUBLIC_KEY "$ENV{DEV_AGW_PUBLIC_KEY}" CACHE STRING "Development API public key")
+set(DEV_AGW_ENDPOINT "$ENV{DEV_AGW_ENDPOINT}" CACHE STRING "Development API endpoint")
+set(DEV_S3_ENDPOINT "$ENV{DEV_S3_ENDPOINT}" CACHE STRING "Development catalog endpoint")
+set(FREE_V2_ENDPOINT "$ENV{FREE_V2_ENDPOINT}" CACHE STRING "Free subscription endpoint")
+set(PREM_V1_ENDPOINT "$ENV{PREM_V1_ENDPOINT}" CACHE STRING "Premium subscription endpoint")
 
-add_definitions(-DDEV_AGW_PUBLIC_KEY="$ENV{DEV_AGW_PUBLIC_KEY}")
-add_definitions(-DDEV_AGW_ENDPOINT="$ENV{DEV_AGW_ENDPOINT}")
-add_definitions(-DDEV_S3_ENDPOINT="$ENV{DEV_S3_ENDPOINT}")
-
-add_definitions(-DFREE_V2_ENDPOINT="$ENV{FREE_V2_ENDPOINT}")
-add_definitions(-DPREM_V1_ENDPOINT="$ENV{PREM_V1_ENDPOINT}")
+add_definitions(-DPROD_AGW_PUBLIC_KEY="${PROD_AGW_PUBLIC_KEY}")
+add_definitions(-DPROD_S3_ENDPOINT="${PROD_S3_ENDPOINT}")
+add_definitions(-DFALLBACK_S3_ENDPOINT="${FALLBACK_S3_ENDPOINT}")
+add_definitions(-DDEV_AGW_PUBLIC_KEY="${DEV_AGW_PUBLIC_KEY}")
+add_definitions(-DDEV_AGW_ENDPOINT="${DEV_AGW_ENDPOINT}")
+add_definitions(-DDEV_S3_ENDPOINT="${DEV_S3_ENDPOINT}")
+add_definitions(-DFREE_V2_ENDPOINT="${FREE_V2_ENDPOINT}")
+add_definitions(-DPREM_V1_ENDPOINT="${PREM_V1_ENDPOINT}")
 
 if(WIN32 OR (APPLE AND NOT IOS) OR (LINUX AND NOT ANDROID))
     set(PACKAGES ${PACKAGES} Widgets)
@@ -128,6 +140,11 @@ configure_file(${CMAKE_CURRENT_LIST_DIR}/../version.h.in ${CMAKE_CURRENT_BINARY_
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${PROJECT} PRIVATE "MZ_DEBUG")
 endif()
+
+target_compile_definitions(${PROJECT} PRIVATE
+    TRIBE_MAC_GUI_IDENTIFIER="hk.wellwon.vpn"
+    TRIBE_MAC_TEAM_IDENTIFIER="Q7DVH5MCWF"
+)
 
 if(WIN32)
     configure_file(
@@ -226,7 +243,9 @@ install(TARGETS ${PROJECT}
 )
 
 if(APPLE)
-    set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR}/AmneziaVPN.app/Contents/Frameworks)
+    # macos.cmake emits TribeVPN.app. Keeping the upstream AmneziaVPN.app path
+    # here silently split GUI and runtime dependencies into two app bundles.
+    set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR}/TribeVPN.app/Contents/Frameworks)
 else()
     set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -269,8 +288,32 @@ install(SCRIPT ${QT_DEPLOY_SCRIPT}
     COMPONENT AmneziaVPN
 )
 
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    # Qt's macdeployqt currently deploys qsqlmimer even though it links to the
+    # developer-only /usr/local/lib/libmimerapi.dylib. Sanitize and verify the
+    # staged app after Qt deployment, before CPack can sign or publish it.
+    install(CODE "
+        file(GLOB _tribe_staged_apps LIST_DIRECTORIES true
+            \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/*.app\")
+        list(LENGTH _tribe_staged_apps _tribe_staged_app_count)
+        if(NOT _tribe_staged_app_count EQUAL 1)
+            message(FATAL_ERROR
+                \"Expected exactly one staged macOS app, found \${_tribe_staged_app_count}\")
+        endif()
+        execute_process(
+            COMMAND /bin/bash \"${CMAKE_SOURCE_DIR}/deploy/tribe/sanitize-macos-app.sh\"
+                    \"\${_tribe_staged_apps}\"
+            RESULT_VARIABLE _tribe_runtime_result
+        )
+        if(NOT _tribe_runtime_result EQUAL 0)
+            message(FATAL_ERROR \"Staged macOS runtime closure verification failed\")
+        endif()
+    "
+        COMPONENT AmneziaVPN
+    )
+endif()
+
 if (APPLE AND NOT IOS AND NOT MACOS_NE)
-    list(APPEND OVPN_SCRIPTS "${CMAKE_SOURCE_DIR}/deploy/data/macos/update-resolv-conf.sh")
     set_target_properties(${PROJECT} PROPERTIES
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
         XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"

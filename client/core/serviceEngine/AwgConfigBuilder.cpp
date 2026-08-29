@@ -27,12 +27,21 @@ static void forEachV3Param(const AwgParams &a,
     for (const auto &kv : v3)
         if (!kv.val->isEmpty())
             emitFn(QLatin1String(kv.key), *kv.val);
+
+    // AVPN AWG 3.1: toggles are explicit typed fields, never generic passthrough. Native config models
+    // represent their values as strings; normalize bool → 1/0 in one place for every platform.
+    if (a.randomTrailers.has_value())
+        emitFn(QStringLiteral("RandomTrailers"), *a.randomTrailers ? QStringLiteral("1")
+                                                                   : QStringLiteral("0"));
+    if (a.disableCookies.has_value())
+        emitFn(QStringLiteral("DisableCookies"), *a.disableCookies ? QStringLiteral("1")
+                                                                   : QStringLiteral("0"));
 }
 
 // AVPN generic-канал (§6.1): незнакомые ключи из extra эмитим ТОЛЬКО по server-driven allowlist'у
-// awg_extra_keys_allowed (подписанный /v1/config, lists; дефолт ПУСТ ⇒ канал спит). Бэк включает
-// проброс ключа, только когда зашипанные движки его умеют (iOS wg-quick парсер до 3.0.1-tribe.1
-// валил туннель на незнакомом ключе).
+// awg_extra_keys_allowed (подписанный /v1/config, lists; дефолт ПУСТ ⇒ канал спит). Это только
+// legacy-v1 compatibility: v2 не использует passthrough даже с awg-apple 3.1.4-tribe.3, потому
+// что новый wire-format всегда требует typed profile/capability и согласованный engine release.
 static void forEachAllowedExtra(const AwgParams &a,
                                 const std::function<void(const QString &, const QString &)> &emitFn)
 {
@@ -172,6 +181,8 @@ QJsonObject AwgConfigBuilder::reportSummary(const Subscription &sub, const Subsc
     awg.insert(QStringLiteral("v3"), !a.headerProtectionKey.isEmpty()
                                      || !a.contentPaddingAddition.isEmpty()
                                      || !a.rekeyAfterTime.isEmpty());
+    awg.insert(QStringLiteral("v31"), a.randomTrailers.value_or(false)
+                                        && a.disableCookies.value_or(false));
     if (!a.extra.isEmpty())
         awg.insert(QStringLiteral("extra_keys"), int(a.extra.size()));
     o.insert(QStringLiteral("awg"), awg);

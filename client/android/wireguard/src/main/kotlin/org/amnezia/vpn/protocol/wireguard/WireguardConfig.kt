@@ -38,6 +38,8 @@ open class WireguardConfig protected constructor(
     val rejectAfterTime: String?,
     val keepaliveTimeout: String?,
     val maxHandshakeAttempts: String?,
+    val randomTrailers: String?, // AVPN: AWG 3.1
+    val disableCookies: String?,
 ) : ProtocolConfig(protocolConfigBuilder) {
 
     protected constructor(builder: Builder) : this(
@@ -71,6 +73,8 @@ open class WireguardConfig protected constructor(
         builder.rejectAfterTime,
         builder.keepaliveTimeout,
         builder.maxHandshakeAttempts,
+        builder.randomTrailers,
+        builder.disableCookies,
     )
 
     fun toWgUserspaceString(): String = with(StringBuilder()) {
@@ -108,6 +112,8 @@ open class WireguardConfig protected constructor(
         rejectAfterTime?.takeIf { it.isNotEmpty() }?.let { appendLine("reject_after_time=$it") }
         keepaliveTimeout?.takeIf { it.isNotEmpty() }?.let { appendLine("keepalive_timeout=$it") }
         maxHandshakeAttempts?.takeIf { it.isNotEmpty() }?.let { appendLine("max_handshake_attempts=$it") }
+        randomTrailers?.takeIf { it.isNotEmpty() }?.let { appendLine("random_trailers=${it.toAwgUapiBool()}") }
+        disableCookies?.takeIf { it.isNotEmpty() }?.let { appendLine("disable_cookies=${it.toAwgUapiBool()}") }
     }
 
     private fun validateProtocolExtensionParameters() {
@@ -177,6 +183,8 @@ open class WireguardConfig protected constructor(
         internal var rejectAfterTime: String? = null
         internal var keepaliveTimeout: String? = null
         internal var maxHandshakeAttempts: String? = null
+        internal var randomTrailers: String? = null
+        internal var disableCookies: String? = null
 
         fun setEndpoint(endpoint: InetEndpoint) = apply { this.endpoint = endpoint }
 
@@ -213,6 +221,8 @@ open class WireguardConfig protected constructor(
         fun setRejectAfterTime(rejectAfterTime: String) = apply { this.rejectAfterTime = rejectAfterTime }
         fun setKeepaliveTimeout(keepaliveTimeout: String) = apply { this.keepaliveTimeout = keepaliveTimeout }
         fun setMaxHandshakeAttempts(maxHandshakeAttempts: String) = apply { this.maxHandshakeAttempts = maxHandshakeAttempts }
+        fun setRandomTrailers(randomTrailers: String) = apply { this.randomTrailers = randomTrailers }
+        fun setDisableCookies(disableCookies: String) = apply { this.disableCookies = disableCookies }
 
         override fun build(): WireguardConfig = configBuild().run { WireguardConfig(this@Builder) }
     }
@@ -224,3 +234,10 @@ open class WireguardConfig protected constructor(
 
 @OptIn(ExperimentalStdlibApi::class)
 internal fun String.base64ToHex(): String = Base64.decode(this, Base64.DEFAULT).toHexString()
+
+/** AVPN: normalize AWG quick booleans to the only values accepted by UAPI. */
+internal fun String.toAwgUapiBool(): String = when (trim().lowercase()) {
+    "on", "1", "true", "t", "yes" -> "1"
+    "off", "0", "false", "f", "no" -> "0"
+    else -> throw BadConfigException("Invalid AWG boolean value")
+}

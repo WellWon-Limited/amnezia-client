@@ -2,6 +2,7 @@
 #define ANDROID_CONTROLLER_H
 
 #include <QJniObject>
+#include <QJsonObject>
 #include <QPixmap>
 
 #include "core/protocols/vpnProtocol.h"
@@ -17,6 +18,13 @@ public:
     static AndroidController *instance();
 
     bool initialize();
+    // AVPN: validated schema-v1 facts for both embedded engines. Empty means
+    // capability selection must fail closed.
+    QJsonObject engineManifest() const { return m_engineManifest; }
+    QJsonObject runtimeStatus() const { return m_runtimeStatus; }
+    QString runtimeSessionId() const { return m_runtimeSessionId; }
+    bool nativeGuardRecoveryPending() const { return m_guardRecoveryPending; }
+    QJsonObject nativeGuardRecoveryEvent() const { return m_guardRecoveryEvent; }
 
     // keep synchronized with org.amnezia.vpn.protocol.ProtocolState
     enum class ConnectionState
@@ -30,6 +38,31 @@ public:
     };
 
     ErrorCode start(const QJsonObject &vpnConfig);
+    bool renewRuntimeAuthority(const QJsonObject &vpnConfig, const QString &operation,
+                               const QString &session, const QString &outerSessionId,
+                               const QString &expectedRuntimeSessionId,
+                               const QString &renewalId,
+                               const QString &authorityCommitmentHex);
+    bool requestSessionGuardArm(const QJsonObject &vpnConfig, const QString &operation,
+                                const QString &session, const QString &policyHashHex,
+                                const QString &expectedRuntimeSessionId);
+    bool activateNativeSession(const QJsonObject &vpnConfig, const QString &operation,
+                               const QString &session, const QString &outerSessionId,
+                               const QString &expectedRuntimeSessionId);
+    bool stopNativeSession(const QString &outerSessionId,
+                           const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardRelease(const QString &operation, const QString &session,
+                                    const QString &outerSessionId);
+    bool requestSessionGuardReconcileArm(
+        const QString &operation, const QString &session, const QString &policyHashHex,
+        const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardReconcileRelease(
+        const QString &operation, const QString &session, const QString &policyHashHex,
+        const QString &outerSessionId, const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardRecoveryResolution(const QJsonObject &exactRecoveryEvent,
+                                               const QString &action,
+                                               const QJsonObject &validatedConfiguration);
+    void requestSessionGuardRecoveryStatus();
     void stop();
     void resetLastServer(int serverIndex);
     void saveFile(const QString &fileName, const QString &data);
@@ -84,9 +117,39 @@ signals:
     void systemBarsInsetsChanged(int navBarHeightDp, int statusBarHeightDp);
     void activityPaused();
     void activityResumed();
+    void engineManifestChanged(QJsonObject manifest);
+    void runtimeStatusChanged(QJsonObject status);
+    void sessionGuardEvent(QJsonObject event);
+    void sessionGuardRecoveryRequired(QJsonObject event);
+    void sessionGuardRecoveryResolved(QJsonObject receipt);
+    void runtimeAuthorityRenewalReceipt(QJsonObject receipt);
 
 private:
     bool isWaitingStatus = true;
+    QJsonObject m_engineManifest;
+    QJsonObject m_runtimeStatus;
+    QString m_runtimeSessionId;
+    QString m_runtimeServiceEpoch;
+    quint64 m_runtimeSessionGeneration = 0;
+    QString m_runtimeCounterEpoch;
+    quint64 m_runtimeRawRx = 0;
+    quint64 m_runtimeRawTx = 0;
+    quint64 m_runtimeNormalizedRx = 0;
+    quint64 m_runtimeNormalizedTx = 0;
+    bool m_runtimeHasRawCounters = false;
+    bool m_runtimeStopping = false;
+    bool m_runtimeTerminal = false;
+    // Catalog-v2 identity is allocated by the C++ reducer before PREPARE. Runtime status must
+    // byte-match it; unlike the legacy epoch:generation token it is never learned from a callback.
+    QString m_expectedCatalogRuntimeSessionId;
+    QJsonObject m_pendingGuardRequest;
+    QJsonObject m_armedGuardReceipt;
+    QJsonObject m_pendingGuardReleaseRequest;
+    QJsonObject m_pendingAuthorityRenewalRequest;
+    bool m_guardRecoveryPending = false;
+    bool m_guardRecoveryResolutionPending = false;
+    QJsonObject m_guardRecoveryEvent;
+    QString m_guardRecoveryAction;
 
     static jclass log;
     static jmethodID logDebug;
@@ -109,6 +172,11 @@ private:
     static void onVpnStateChanged(JNIEnv *env, jobject thiz, jint stateCode);
     static void onStatisticsUpdate(JNIEnv *env, jobject thiz, jlong rxBytes, jlong txBytes,
                                    jlong lastHandshakeSec); // AVPN: + handshake (JNI (JJJ)V)
+    static void onRuntimeStatus(JNIEnv *env, jobject thiz, jstring json); // AVPN: typed status v1.
+    static void onEngineManifest(JNIEnv *env, jobject thiz, jstring json); // AVPN
+    static void onSessionGuardEvent(JNIEnv *env, jobject thiz, jstring json);
+    static void onSessionGuardRecoveryReceipt(JNIEnv *env, jobject thiz, jstring json);
+    static void onRuntimeAuthorityRenewalReceipt(JNIEnv *env, jobject thiz, jstring json);
     static void onConfigImported(JNIEnv *env, jobject thiz, jstring data);
     static void onFileOpened(JNIEnv *env, jobject thiz, jstring uri);
     static void onAuthResult(JNIEnv *env, jobject thiz, jboolean result);
@@ -117,6 +185,8 @@ private:
     static void onSystemBarsInsetsChanged(JNIEnv *env, jobject thiz, jint navBarHeightDp, jint statusBarHeightDp);
     static void onActivityPaused(JNIEnv *env, jobject thiz);
     static void onActivityResumed(JNIEnv *env, jobject thiz);
+
+    void publishGuardChannelLoss();
 
     template <typename Ret, typename ...Args>
     static auto callActivityMethod(const char *methodName, const char *signature, Args &&...args);

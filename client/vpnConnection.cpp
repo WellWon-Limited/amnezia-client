@@ -1,15 +1,19 @@
 #include "vpnConnection.h"
+#include "version.h"
 
 #include <QDebug>
 #include <QEventLoop>
 #include <QFile>
 #include <QHostInfo>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QObject>
+#include <QRegularExpression>
 #include <QSharedPointer>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QUuid>
 
 #include <core/configurators/openVpnConfigurator.h>
 #include <core/configurators/wireguardConfigurator.h>
@@ -17,7 +21,15 @@
 #ifdef AMNEZIA_DESKTOP
     #include "core/utils/ipcClient.h"
     #include <core/protocols/wireGuardProtocol.h>
+    #include <core/protocols/xrayProtocol.h>
     #include <QRemoteObjectPendingCallWatcher>
+#endif
+
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    #include <QLocalSocket>
+    #include <QSet>
+    #include "ipc.h"
+    #include "ipcsecurity.h"
 #endif
 
 #ifdef Q_OS_ANDROID
@@ -38,6 +50,202 @@
 
 using namespace ProtocolUtils;
 
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+namespace {
+
+bool canonicalPositiveDecimal(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    if (text.isEmpty() || text.size() > 20 || text == QLatin1String("0")
+            || (text.size() > 1 && text.startsWith(QLatin1Char('0')))) return false;
+    for (const QChar ch : text) {
+        if (ch < QLatin1Char('0') || ch > QLatin1Char('9')) return false;
+    }
+    bool ok = false;
+    const quint64 parsed = text.toULongLong(&ok, 10);
+    return ok && parsed > 0 && QString::number(parsed) == text;
+}
+
+bool canonicalLowerSha256(const QJsonValue &value)
+{
+    if (!value.isString() || value.toString().size() != 64) return false;
+    for (const QChar ch : value.toString()) {
+        if (!((ch >= QLatin1Char('0') && ch <= QLatin1Char('9'))
+              || (ch >= QLatin1Char('a') && ch <= QLatin1Char('f')))) return false;
+    }
+    return true;
+}
+
+bool canonicalUuid(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    const QUuid uuid(value.toString());
+    return !uuid.isNull()
+            && uuid.toString(QUuid::WithoutBraces).toLower() == value.toString();
+}
+
+bool safeAsciiOpaque(const QJsonValue &value, bool allowEmpty)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    if (text.isEmpty()) return allowEmpty;
+    if (text.size() > 200) return false;
+    for (const QChar ch : text) {
+        const ushort c = ch.unicode();
+        const bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        const bool digit = c >= '0' && c <= '9';
+        if (!alpha && !digit && c != '-' && c != '_' && c != '.' && c != ':') return false;
+    }
+    return true;
+}
+
+bool safeAsciiReason(const QJsonValue &value)
+{
+    if (!value.isString() || value.toString().size() > 96) return false;
+    for (const QChar ch : value.toString()) {
+        if (ch.unicode() < 0x20 || ch.unicode() > 0x7e) return false;
+    }
+    return true;
+}
+
+bool exactGuardEvent(const QJsonObject &event)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("operation"),
+        QStringLiteral("session"), QStringLiteral("kind"),
+        QStringLiteral("policy_sha256"), QStringLiteral("outer_session_id"),
+        QStringLiteral("expected_runtime_session_id"), QStringLiteral("reason")};
+    const QStringList actual = event.keys();
+    const QString kind = event.value(QStringLiteral("kind")).toString();
+    const bool knownKind = kind == QLatin1String("armed")
+            || kind == QLatin1String("arm_rejected")
+            || kind == QLatin1String("released")
+            || kind == QLatin1String("release_rejected")
+            || kind == QLatin1String("lost");
+    return QSet<QString>(actual.cbegin(), actual.cend()) == keys
+            && event.value(QStringLiteral("type"))
+                   == QLatin1String("native_session_guard_v1")
+            && event.value(QStringLiteral("schema")).isDouble()
+            && event.value(QStringLiteral("schema")).toDouble() == 1.0
+            && canonicalPositiveDecimal(event.value(QStringLiteral("operation")))
+            && canonicalPositiveDecimal(event.value(QStringLiteral("session")))
+            && canonicalLowerSha256(event.value(QStringLiteral("policy_sha256")))
+            && canonicalUuid(event.value(QStringLiteral("expected_runtime_session_id")))
+            && safeAsciiOpaque(event.value(QStringLiteral("outer_session_id")),
+                               kind == QLatin1String("arm_rejected"))
+            && safeAsciiReason(event.value(QStringLiteral("reason")))
+            && knownKind;
+}
+
+bool sameGuardIdentity(const QJsonObject &lhs, const QJsonObject &rhs,
+                       bool includeOuter = true)
+{
+    return exactGuardEvent(lhs) && exactGuardEvent(rhs)
+            && lhs.value(QStringLiteral("operation")) == rhs.value(QStringLiteral("operation"))
+            && lhs.value(QStringLiteral("session")) == rhs.value(QStringLiteral("session"))
+            && lhs.value(QStringLiteral("policy_sha256"))
+                   == rhs.value(QStringLiteral("policy_sha256"))
+            && lhs.value(QStringLiteral("expected_runtime_session_id"))
+                   == rhs.value(QStringLiteral("expected_runtime_session_id"))
+            && (!includeOuter || lhs.value(QStringLiteral("outer_session_id"))
+                   == rhs.value(QStringLiteral("outer_session_id")));
+}
+
+QJsonObject guardIdentityRequest(const QString &type, const QJsonObject &event,
+                                 const QString &protocol = {})
+{
+    QJsonObject request{
+        {QStringLiteral("type"), type}, {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), event.value(QStringLiteral("operation"))},
+        {QStringLiteral("session"), event.value(QStringLiteral("session"))},
+        {QStringLiteral("policy_sha256"), event.value(QStringLiteral("policy_sha256"))},
+        {QStringLiteral("outer_session_id"),
+         event.value(QStringLiteral("outer_session_id"))},
+        {QStringLiteral("expected_runtime_session_id"),
+         event.value(QStringLiteral("expected_runtime_session_id"))},
+    };
+    if (!protocol.isEmpty()) request.insert(QStringLiteral("protocol"), protocol);
+    return request;
+}
+
+bool exactCommandReceipt(const QJsonObject &receipt, const QString &action,
+                         const QJsonObject &event)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("action"),
+        QStringLiteral("accepted"), QStringLiteral("operation"), QStringLiteral("session"),
+        QStringLiteral("policy_sha256"), QStringLiteral("outer_session_id"),
+        QStringLiteral("expected_runtime_session_id"), QStringLiteral("reason")};
+    const QStringList actual = receipt.keys();
+    QJsonObject projected{
+        {QStringLiteral("type"), QStringLiteral("native_session_guard_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), receipt.value(QStringLiteral("operation"))},
+        {QStringLiteral("session"), receipt.value(QStringLiteral("session"))},
+        {QStringLiteral("kind"), QStringLiteral("armed")},
+        {QStringLiteral("policy_sha256"), receipt.value(QStringLiteral("policy_sha256"))},
+        {QStringLiteral("outer_session_id"), receipt.value(QStringLiteral("outer_session_id"))},
+        {QStringLiteral("expected_runtime_session_id"),
+         receipt.value(QStringLiteral("expected_runtime_session_id"))},
+        {QStringLiteral("reason"), receipt.value(QStringLiteral("reason"))},
+    };
+    return QSet<QString>(actual.cbegin(), actual.cend()) == keys
+            && receipt.value(QStringLiteral("type"))
+                   == QLatin1String("native_session_guard_command_v1")
+            && receipt.value(QStringLiteral("schema")).isDouble()
+            && receipt.value(QStringLiteral("schema")).toDouble() == 1.0
+            && receipt.value(QStringLiteral("action")) == action
+            && receipt.value(QStringLiteral("accepted")).isBool()
+            && sameGuardIdentity(projected, event);
+}
+
+bool exactRecoveryReceipt(const QJsonObject &receipt, const QString &action,
+                          const QJsonObject &event)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("action"),
+        QStringLiteral("kind"), QStringLiteral("operation"), QStringLiteral("session"),
+        QStringLiteral("policy_sha256"), QStringLiteral("outer_session_id"),
+        QStringLiteral("expected_runtime_session_id"), QStringLiteral("reason")};
+    const QStringList actual = receipt.keys();
+    const QString kind = receipt.value(QStringLiteral("kind")).toString();
+    QJsonObject projected{
+        {QStringLiteral("type"), QStringLiteral("native_session_guard_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), receipt.value(QStringLiteral("operation"))},
+        {QStringLiteral("session"), receipt.value(QStringLiteral("session"))},
+        {QStringLiteral("kind"), QStringLiteral("armed")},
+        {QStringLiteral("policy_sha256"), receipt.value(QStringLiteral("policy_sha256"))},
+        {QStringLiteral("outer_session_id"), receipt.value(QStringLiteral("outer_session_id"))},
+        {QStringLiteral("expected_runtime_session_id"),
+         receipt.value(QStringLiteral("expected_runtime_session_id"))},
+        {QStringLiteral("reason"), receipt.value(QStringLiteral("reason"))},
+    };
+    return QSet<QString>(actual.cbegin(), actual.cend()) == keys
+            && receipt.value(QStringLiteral("type"))
+                   == QLatin1String("native_session_guard_recovery_v1")
+            && receipt.value(QStringLiteral("schema")).isDouble()
+            && receipt.value(QStringLiteral("schema")).toDouble() == 1.0
+            && receipt.value(QStringLiteral("action")) == action
+            && (kind == QLatin1String("adopted")
+                || kind == QLatin1String("stopped_released")
+                || kind == QLatin1String("rejected"))
+            && sameGuardIdentity(projected, event);
+}
+
+template <typename StartCall>
+QJsonObject waitGuardReply(StartCall &&start)
+{
+    return IpcClient::withInterface([&](QSharedPointer<IpcInterfaceReplica> iface) {
+        auto reply = start(iface);
+        return reply.waitForFinished(5000) ? reply.returnValue() : QJsonObject{};
+    });
+}
+
+} // namespace
+#endif
+
 VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository, QObject *parent)
     : QObject(parent), m_serversRepository(serversRepository), m_appSettingsRepository(appSettingsRepository), m_checkTimer(this)
 {
@@ -45,6 +253,41 @@ VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureA
     m_checkTimer.setInterval(qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000)); // AVPN: server-tunable
     connect(IosController::Instance(), &IosController::connectionStateChanged, this, &VpnConnection::setConnectionState);
     connect(IosController::Instance(), &IosController::bytesChanged, this, &VpnConnection::onBytesChanged);
+    // AVPN: preserve the validated opaque native session identity for the v2 reducer.
+    connect(IosController::Instance(), &IosController::runtimeStatusChanged,
+            this, &VpnConnection::nativeRuntimeStatusChanged);
+    connect(IosController::Instance(), &IosController::runtimeAuthorityRenewalReceipt,
+            this, &VpnConnection::nativeRuntimeAuthorityRenewalReceipt);
+    connect(IosController::Instance(), &IosController::sessionGuardEvent,
+            this, &VpnConnection::nativeSessionGuardEvent);
+    connect(IosController::Instance(), &IosController::engineManifestChanged,
+            this, &VpnConnection::nativeEngineManifestChanged);
+    connect(IosController::Instance(), &IosController::sessionGuardRecoveryRequired,
+            this, &VpnConnection::nativeSessionGuardRecoveryRequired);
+    connect(IosController::Instance(), &IosController::sessionGuardRecoveryResolved,
+            this, &VpnConnection::nativeSessionGuardRecoveryResolved);
+#elif defined(Q_OS_ANDROID)
+    connect(AndroidController::instance(), &AndroidController::runtimeStatusChanged,
+            this, &VpnConnection::nativeRuntimeStatusChanged);
+    connect(AndroidController::instance(), &AndroidController::runtimeAuthorityRenewalReceipt,
+            this, &VpnConnection::nativeRuntimeAuthorityRenewalReceipt);
+    connect(AndroidController::instance(), &AndroidController::sessionGuardEvent,
+            this, &VpnConnection::nativeSessionGuardEvent);
+    connect(AndroidController::instance(), &AndroidController::engineManifestChanged,
+            this, &VpnConnection::nativeEngineManifestChanged);
+    connect(AndroidController::instance(), &AndroidController::sessionGuardRecoveryRequired,
+            this, &VpnConnection::nativeSessionGuardRecoveryRequired);
+    connect(AndroidController::instance(), &AndroidController::sessionGuardRecoveryResolved,
+            this, &VpnConnection::nativeSessionGuardRecoveryResolved);
+    QTimer::singleShot(0, AndroidController::instance(),
+                       &AndroidController::requestSessionGuardRecoveryStatus);
+#endif
+
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // Inventory is queried independently of a VPN protocol instance so catalog resolve can run
+    // before the first connection. The authenticated daemon owns the compile-time lock facts.
+    QTimer::singleShot(0, this, &VpnConnection::requestDesktopEngineManifest);
+    QTimer::singleShot(0, this, &VpnConnection::requestDesktopNativeGuardRecoveryStatus);
 #endif
 }
 
@@ -79,8 +322,10 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
     }
 
     const QString defaultServerId = m_serversRepository->defaultServerId();
-    DockerContainer container = DockerContainer::None;
-    switch (m_serversRepository->serverKind(defaultServerId)) {
+    // AVPN v2: direct serviceEngine profiles are not repository records. Prefer the exact
+    // container passed to connectToVpn; retain repository lookup only for pre-v2 call sites.
+    DockerContainer container = m_activeContainer;
+    if (container == DockerContainer::None) switch (m_serversRepository->serverKind(defaultServerId)) {
     case serverConfigUtils::ConfigType::SelfHostedAdmin: {
         const auto cfg = m_serversRepository->selfHostedAdminConfig(defaultServerId);
         if (cfg.has_value()) {
@@ -130,24 +375,42 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
                 else
                     qWarning() << "VpnConnection::onConnectionStateChanged: Failed to flush DNS";
 
+                // AVPN v2: prepared policy is authoritative for this session. Never consult a
+                // subsequently changed repository while installing native routes.
+                const auto preparedRouteMode = static_cast<amnezia::RouteMode>(
+                    m_vpnConfiguration.value(configKey::splitTunnelType).toInt(
+                        amnezia::RouteMode::VpnAllSites));
+                const amnezia::RouteMode effectiveRouteMode = m_hasPreparedConnectionPolicy
+                    ? preparedRouteMode : m_appSettingsRepository->routeMode();
+                const bool effectiveSitesSplit = m_hasPreparedConnectionPolicy
+                    ? effectiveRouteMode != amnezia::RouteMode::VpnAllSites
+                      && !m_vpnConfiguration.value(configKey::splitTunnelSites).toArray().isEmpty()
+                    : m_appSettingsRepository->isSitesSplitTunnelingEnabled();
+
                 if (!ContainerUtils::isAwgContainer(container) && container != DockerContainer::WireGuard) {
                     QString dns1 = m_vpnConfiguration.value(configKey::dns1).toString();
                     QString dns2 = m_vpnConfiguration.value(configKey::dns2).toString();
 
 #ifdef Q_OS_MACOS
-                    if (!m_appSettingsRepository->isSitesSplitTunnelingEnabled() || m_appSettingsRepository->routeMode() != amnezia::RouteMode::VpnAllExceptSites) {
+                    if (!effectiveSitesSplit
+                        || effectiveRouteMode != amnezia::RouteMode::VpnAllExceptSites) {
                         iface->routeAddList(m_vpnProtocol->vpnGateway(), QStringList() << dns1 << dns2);
                     }
 #else
                     iface->routeAddList(m_vpnProtocol->vpnGateway(), QStringList() << dns1 << dns2);
 #endif
 
-                    if (m_appSettingsRepository->isSitesSplitTunnelingEnabled()) {
+                    if (effectiveSitesSplit) {
                         iface->routeDeleteList(m_vpnProtocol->vpnGateway(), QStringList() << "0.0.0.0");
-                        RouteMode routeMode = m_appSettingsRepository->routeMode();
+                        const RouteMode routeMode = effectiveRouteMode;
                         if (routeMode == amnezia::RouteMode::VpnOnlyForwardSites) {
                             QTimer::singleShot(1000, m_vpnProtocol.data(),
-                                               [this, routeMode]() { addSitesRoutes(m_vpnProtocol->vpnGateway(), routeMode); });
+                                               [this, routeMode]() {
+                                if (m_hasPreparedConnectionPolicy)
+                                    addPreparedSitesRoutes(m_vpnProtocol->vpnGateway());
+                                else
+                                    addSitesRoutes(m_vpnProtocol->vpnGateway(), routeMode);
+                            });
                         } else if (routeMode == amnezia::RouteMode::VpnAllExceptSites) {
                             iface->routeAddList(m_vpnProtocol->vpnGateway(), QStringList() << "0.0.0.0/1");
                             iface->routeAddList(m_vpnProtocol->vpnGateway(), QStringList() << "128.0.0.0/1");
@@ -156,7 +419,10 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
 #ifdef Q_OS_MACOS
                             iface->routeAddList(m_vpnProtocol->routeGateway(), QStringList() << dns1 << dns2);
 #endif
-                            addSitesRoutes(m_vpnProtocol->routeGateway(), routeMode);
+                            if (m_hasPreparedConnectionPolicy)
+                                addPreparedSitesRoutes(m_vpnProtocol->routeGateway());
+                            else
+                                addSitesRoutes(m_vpnProtocol->routeGateway(), routeMode);
                         }
                     }
                 }
@@ -198,6 +464,669 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
 const QString &VpnConnection::remoteAddress() const
 {
     return m_remoteAddress;
+}
+
+QJsonObject VpnConnection::nativeRuntimeStatus() const
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    return IosController::Instance()->runtimeStatus();
+#elif defined(Q_OS_ANDROID)
+    return AndroidController::instance()->runtimeStatus();
+#elif defined(AMNEZIA_DESKTOP)
+    if (const auto *xray = qobject_cast<XrayProtocol *>(m_vpnProtocol.data()))
+        return xray->runtimeStatus();
+    if (const auto *awg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()))
+        return awg->runtimeStatus();
+    return {};
+#else
+    return {};
+#endif
+}
+
+QJsonObject VpnConnection::nativeEngineManifest() const
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    return IosController::Instance()->engineManifest();
+#elif defined(Q_OS_ANDROID)
+    return AndroidController::instance()->engineManifest();
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    return m_nativeEngineManifest;
+#else
+    // Production desktop must obtain this from authenticated daemon IPC; no duplicated
+    // client-side pins are accepted as evidence.
+    return {};
+#endif
+}
+
+void VpnConnection::requestDesktopEngineManifest()
+{
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    auto *socket = new QLocalSocket(this);
+    auto buffer = QSharedPointer<QByteArray>::create();
+    auto *deadline = new QTimer(socket);
+    deadline->setSingleShot(true);
+    socket->setReadBufferSize(amnezia::ipcsecurity::kMaxDaemonCommandBytes);
+    connect(deadline, &QTimer::timeout, socket, [socket]() {
+        socket->abort();
+        socket->deleteLater();
+    });
+    connect(socket, &QLocalSocket::connected, socket, [socket]() {
+        QByteArray capability;
+        QString error;
+        if (!amnezia::ipcsecurity::performClientHandshake(
+                socket, {}, &capability, &error)) {
+            socket->abort();
+            socket->deleteLater();
+            return;
+        }
+        socket->write(QJsonDocument(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("engine_manifest_v1")}})
+                          .toJson(QJsonDocument::Compact));
+        socket->write("\n");
+        socket->flush();
+    });
+    connect(socket, &QLocalSocket::readyRead, socket, [this, socket, buffer]() {
+        const QByteArray chunk = socket->readAll();
+        if (chunk.size() > amnezia::ipcsecurity::kMaxDaemonCommandBytes
+            || buffer->size() > amnezia::ipcsecurity::kMaxDaemonCommandBytes - chunk.size()) {
+            socket->abort();
+            socket->deleteLater();
+            return;
+        }
+        buffer->append(chunk);
+        const qsizetype newline = buffer->indexOf('\n');
+        if (newline < 0) return;
+        const QByteArray frame = buffer->left(newline).trimmed();
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(frame, &parseError);
+        const QJsonObject manifest = document.object();
+        static const QSet<QString> rootKeys{
+            QStringLiteral("type"), QStringLiteral("schema"),
+            QStringLiteral("app"), QStringLiteral("engines")};
+        const QStringList keys = manifest.keys();
+        if (parseError.error == QJsonParseError::NoError && document.isObject()
+            && QSet<QString>(keys.cbegin(), keys.cend()) == rootKeys
+            && manifest.value(QStringLiteral("type")) == QLatin1String("engine_manifest_v1")
+            && manifest.value(QStringLiteral("schema")).isDouble()
+            && manifest.value(QStringLiteral("schema")).toDouble() == 1.0
+            && manifest.value(QStringLiteral("app")).isObject()
+            && manifest.value(QStringLiteral("engines")).isArray()) {
+            m_nativeEngineManifest = manifest;
+            emit nativeEngineManifestChanged(manifest);
+        }
+        socket->disconnectFromServer();
+        socket->deleteLater();
+    });
+    connect(socket, &QLocalSocket::errorOccurred, socket,
+            [socket](QLocalSocket::LocalSocketError) { socket->deleteLater(); });
+    deadline->start(3000);
+    socket->connectToServer(amnezia::getWireguardDaemonUrl());
+#endif
+}
+
+void VpnConnection::requestDesktopNativeGuardRecoveryStatus()
+{
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    const QJsonObject status = waitGuardReply(
+        [](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardStatusV1();
+        });
+    static const QSet<QString> keys{
+        QStringLiteral("type"), QStringLiteral("schema"),
+        QStringLiteral("state"), QStringLiteral("event")};
+    const QStringList actual = status.keys();
+    const bool envelopeValid = QSet<QString>(actual.cbegin(), actual.cend()) == keys
+            && status.value(QStringLiteral("type"))
+                   == QLatin1String("native_session_guard_status_v1")
+            && status.value(QStringLiteral("schema")).isDouble()
+            && status.value(QStringLiteral("schema")).toDouble() == 1.0;
+    if (!envelopeValid) {
+        // Empty/timeout cannot prove that PF and a native reader are absent.
+        m_desktopNativeGuardRecoveryPending = true;
+        return;
+    }
+    const QString state = status.value(QStringLiteral("state")).toString();
+    if (state == QLatin1String("idle") && status.value(QStringLiteral("event")).isNull()) {
+        m_desktopNativeGuardRecoveryPending = false;
+        m_desktopNativeGuardRecoveryEvent = {};
+        return;
+    }
+    if (state != QLatin1String("owned")
+            || !status.value(QStringLiteral("event")).isObject()) {
+        m_desktopNativeGuardRecoveryPending = true;
+        return;
+    }
+    const QJsonObject event = status.value(QStringLiteral("event")).toObject();
+    if (!exactGuardEvent(event)) {
+        m_desktopNativeGuardRecoveryPending = true;
+        return;
+    }
+    m_desktopNativeGuardRecoveryPending = true;
+    m_desktopNativeGuardRecoveryEvent = event;
+    emit nativeSessionGuardRecoveryRequired(event);
+#endif
+}
+
+void VpnConnection::consumeDesktopNativeRuntimeStatus(const QJsonObject &status)
+{
+#if defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!exactGuardEvent(m_desktopNativeGuardEvent)) return;
+    const QString expected = m_desktopNativeGuardEvent.value(
+        QStringLiteral("expected_runtime_session_id")).toString();
+    if (status.value(QStringLiteral("type"))
+            != QLatin1String("tunnel_runtime_status_v1")
+        || !status.value(QStringLiteral("schema")).isDouble()
+        || status.value(QStringLiteral("schema")).toDouble() != 1.0
+        || status.value(QStringLiteral("session_id")).toString() != expected) return;
+
+    const QString state = status.value(QStringLiteral("runtime_state")).toString();
+    if (state == QLatin1String("running")) {
+        const QJsonObject receipt = waitGuardReply(
+            [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+                return iface->nativeSessionGuardMarkRunningV1(guardIdentityRequest(
+                    QStringLiteral("native_session_guard_running_v1"),
+                    m_desktopNativeGuardEvent));
+            });
+        if (!exactCommandReceipt(receipt, QStringLiteral("running"),
+                                 m_desktopNativeGuardEvent)
+            || !receipt.value(QStringLiteral("accepted")).toBool()) {
+            QJsonObject failed = status;
+            failed.insert(QStringLiteral("runtime_state"), QStringLiteral("failed"));
+            failed.insert(QStringLiteral("failure_reason"),
+                          QStringLiteral("outer_guard_running_receipt_rejected"));
+            emit nativeRuntimeStatusChanged(failed);
+            return;
+        }
+    } else if (state == QLatin1String("stopped")) {
+        const QJsonObject receipt = waitGuardReply(
+            [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+                return iface->nativeSessionGuardMarkStoppedV1(guardIdentityRequest(
+                    QStringLiteral("native_session_guard_stopped_v1"),
+                    m_desktopNativeGuardEvent));
+            });
+        if (!exactCommandReceipt(receipt, QStringLiteral("stopped"),
+                                 m_desktopNativeGuardEvent)
+            || !receipt.value(QStringLiteral("accepted")).toBool()) {
+            QJsonObject failed = status;
+            failed.insert(QStringLiteral("runtime_state"), QStringLiteral("failed"));
+            failed.insert(QStringLiteral("failure_reason"),
+                          QStringLiteral("outer_guard_stopped_receipt_rejected"));
+            emit nativeRuntimeStatusChanged(failed);
+            return;
+        }
+    }
+    emit nativeRuntimeStatusChanged(status);
+#else
+    Q_UNUSED(status)
+#endif
+}
+
+bool VpnConnection::requestNativeSessionGuardArm(const QJsonObject &configuration,
+                                                 const QString &operation,
+                                                 const QString &session,
+                                                 const QString &policyHashHex,
+                                                 const QString &expectedRuntimeSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->requestSessionGuardArm(
+        configuration, operation, session, policyHashHex, expectedRuntimeSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->requestSessionGuardArm(
+        configuration, operation, session, policyHashHex, expectedRuntimeSessionId);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (m_desktopNativeGuardRecoveryPending) return false;
+    const QJsonObject request{
+        {QStringLiteral("type"), QStringLiteral("native_session_guard_prepare_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), operation},
+        {QStringLiteral("session"), session},
+        {QStringLiteral("policy_sha256"), policyHashHex},
+        {QStringLiteral("expected_runtime_session_id"), expectedRuntimeSessionId},
+        {QStringLiteral("configuration"), configuration},
+    };
+    const QJsonObject event = waitGuardReply(
+        [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardPrepareV1(request);
+        });
+    const bool identityMatches = exactGuardEvent(event)
+            && event.value(QStringLiteral("operation")) == operation
+            && event.value(QStringLiteral("session")) == session
+            && event.value(QStringLiteral("policy_sha256")) == policyHashHex
+            && event.value(QStringLiteral("expected_runtime_session_id"))
+                   == expectedRuntimeSessionId;
+    if (!identityMatches) {
+        // The call may have armed PF before a reply/channel loss. Resolve from
+        // the durable helper lease; never infer that dispatch failure means idle.
+        requestDesktopNativeGuardRecoveryStatus();
+        return false;
+    }
+    if (event.value(QStringLiteral("kind")) == QLatin1String("armed")) {
+        m_desktopNativeGuardEvent = event;
+        m_desktopNativeGuardConfiguration = configuration;
+    } else if (event.value(QStringLiteral("kind")) == QLatin1String("lost")) {
+        m_desktopNativeGuardRecoveryPending = true;
+        m_desktopNativeGuardRecoveryEvent = event;
+        emit nativeSessionGuardRecoveryRequired(event);
+    }
+    QTimer::singleShot(0, this, [this, event]() { emit nativeSessionGuardEvent(event); });
+    return true;
+#else
+    Q_UNUSED(configuration); Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::activateNativeSession(const QJsonObject &configuration,
+                                          const QString &operation,
+                                          const QString &session,
+                                          const QString &outerSessionId,
+                                          const QString &expectedRuntimeSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->activateNativeSession(
+        configuration, operation, session, outerSessionId, expectedRuntimeSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->activateNativeSession(
+        configuration, operation, session, outerSessionId, expectedRuntimeSessionId);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!exactGuardEvent(m_desktopNativeGuardEvent)
+        || m_desktopNativeGuardEvent.value(QStringLiteral("kind"))
+               != QLatin1String("armed")
+        || m_desktopNativeGuardEvent.value(QStringLiteral("operation")) != operation
+        || m_desktopNativeGuardEvent.value(QStringLiteral("session")) != session
+        || m_desktopNativeGuardEvent.value(QStringLiteral("outer_session_id")) != outerSessionId
+        || m_desktopNativeGuardEvent.value(QStringLiteral("expected_runtime_session_id"))
+               != expectedRuntimeSessionId
+        || configuration != m_desktopNativeGuardConfiguration) return false;
+    const QString protocol = configuration.value(QStringLiteral("protocol")).toString();
+    if (protocol != QLatin1String("awg") && protocol != QLatin1String("xray")) return false;
+    const QJsonObject claim = waitGuardReply(
+        [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardClaimInnerV1(guardIdentityRequest(
+                QStringLiteral("native_session_guard_claim_v1"),
+                m_desktopNativeGuardEvent, protocol));
+        });
+    if (!exactCommandReceipt(claim, QStringLiteral("claim"), m_desktopNativeGuardEvent)
+        || !claim.value(QStringLiteral("accepted")).toBool()) return false;
+
+    if (m_vpnProtocol) {
+        const QJsonObject previous = nativeRuntimeStatus();
+        if (previous.value(QStringLiteral("runtime_state")) != QLatin1String("stopped")) {
+            return false;
+        }
+        m_vpnProtocol.reset();
+    }
+    m_vpnConfiguration = configuration;
+    m_hasPreparedConnectionPolicy = true;
+    m_remoteAddress = configuration.value(configKey::hostName).toString();
+    m_activeContainer = protocol == QLatin1String("awg")
+            ? DockerContainer::Awg : DockerContainer::Xray;
+    if (protocol == QLatin1String("awg")) {
+        m_vpnProtocol.reset(new WireguardProtocol(configuration,
+                                                  expectedRuntimeSessionId));
+        connect(qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()),
+                &WireguardProtocol::runtimeStatusChanged, this,
+                &VpnConnection::consumeDesktopNativeRuntimeStatus);
+    } else {
+        m_vpnProtocol.reset(new XrayProtocol(configuration,
+                                             expectedRuntimeSessionId, true));
+        connect(qobject_cast<XrayProtocol *>(m_vpnProtocol.data()),
+                &XrayProtocol::runtimeStatusChanged, this,
+                &VpnConnection::consumeDesktopNativeRuntimeStatus);
+    }
+    createProtocolConnections();
+    setConnectionState(Vpn::ConnectionState::Connecting);
+    const ErrorCode result = m_vpnProtocol->start();
+    if (result != ErrorCode::NoError) {
+        QJsonObject failed{
+            {QStringLiteral("type"), QStringLiteral("tunnel_runtime_status_v1")},
+            {QStringLiteral("schema"), 1}, {QStringLiteral("protocol"), protocol},
+            {QStringLiteral("session_id"), expectedRuntimeSessionId},
+            {QStringLiteral("runtime_state"), QStringLiteral("failed")},
+            {QStringLiteral("failure_reason"), QStringLiteral("native_start_failed")},
+        };
+        QTimer::singleShot(0, this, [this, failed]() {
+            emit nativeRuntimeStatusChanged(failed);
+        });
+    }
+    // Once claim was accepted, failure is an exact native terminal/stop
+    // transaction, not a dispatch rejection which could release PF early.
+    return true;
+#else
+    Q_UNUSED(configuration); Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(outerSessionId);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::renewNativeRuntimeAuthority(
+    const QJsonObject &configuration, const QString &operation,
+    const QString &session, const QString &outerSessionId,
+    const QString &expectedRuntimeSessionId, const QString &renewalId,
+    const QString &authorityCommitmentHex)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->renewRuntimeAuthority(
+        configuration, operation, session, outerSessionId,
+        expectedRuntimeSessionId, renewalId, authorityCommitmentHex);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->renewRuntimeAuthority(
+        configuration, operation, session, outerSessionId,
+        expectedRuntimeSessionId, renewalId, authorityCommitmentHex);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!exactGuardEvent(m_desktopNativeGuardEvent)
+        || m_desktopNativeGuardEvent.value(QStringLiteral("kind"))
+               != QLatin1String("armed")
+        || m_desktopNativeGuardEvent.value(QStringLiteral("operation")) != operation
+        || m_desktopNativeGuardEvent.value(QStringLiteral("session")) != session
+        || m_desktopNativeGuardEvent.value(QStringLiteral("outer_session_id"))
+               != outerSessionId
+        || m_desktopNativeGuardEvent.value(
+               QStringLiteral("expected_runtime_session_id"))
+               != expectedRuntimeSessionId
+        || !canonicalUuid(QJsonValue(renewalId))
+        || !canonicalLowerSha256(QJsonValue(authorityCommitmentHex))) return false;
+    const QJsonObject request{
+        {QStringLiteral("type"), QStringLiteral("runtime_authority_renew_request_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), operation},
+        {QStringLiteral("session"), session},
+        {QStringLiteral("policy_sha256"),
+         m_desktopNativeGuardEvent.value(QStringLiteral("policy_sha256"))},
+        {QStringLiteral("outer_session_id"), outerSessionId},
+        {QStringLiteral("expected_runtime_session_id"), expectedRuntimeSessionId},
+        {QStringLiteral("renewal_id"), renewalId},
+        {QStringLiteral("authority_commitment_sha256"), authorityCommitmentHex},
+        {QStringLiteral("configuration"), configuration},
+    };
+    return IpcClient::withInterface(
+        [this, request](QSharedPointer<IpcInterfaceReplica> iface) -> bool {
+            QRemoteObjectPendingReply<QJsonObject> reply =
+                iface->nativeSessionGuardRenewAuthorityV1(request);
+            auto *watcher = new QRemoteObjectPendingCallWatcher(reply, this);
+            QObject::connect(
+                watcher, &QRemoteObjectPendingCallWatcher::finished, this,
+                [this](QRemoteObjectPendingCallWatcher *call) {
+                    if (call->error() == QRemoteObjectPendingCall::NoError) {
+                        const QJsonObject receipt = call->returnValue().toJsonObject();
+                        if (!receipt.isEmpty())
+                            emit nativeRuntimeAuthorityRenewalReceipt(receipt);
+                    }
+                    call->deleteLater();
+                });
+            return true;
+        }, []() { return false; });
+#else
+    Q_UNUSED(configuration); Q_UNUSED(operation); Q_UNUSED(session);
+    Q_UNUSED(outerSessionId); Q_UNUSED(expectedRuntimeSessionId);
+    Q_UNUSED(renewalId); Q_UNUSED(authorityCommitmentHex);
+    return false;
+#endif
+}
+
+bool VpnConnection::stopNativeSession(const QString &outerSessionId,
+                                      const QString &expectedRuntimeSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->stopNativeSession(
+        outerSessionId, expectedRuntimeSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->stopNativeSession(
+        outerSessionId, expectedRuntimeSessionId);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!exactGuardEvent(m_desktopNativeGuardEvent)
+        || m_desktopNativeGuardEvent.value(QStringLiteral("outer_session_id")) != outerSessionId
+        || m_desktopNativeGuardEvent.value(QStringLiteral("expected_runtime_session_id"))
+               != expectedRuntimeSessionId || !m_vpnProtocol) return false;
+    const QJsonObject begin = waitGuardReply(
+        [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardBeginStopV1(guardIdentityRequest(
+                QStringLiteral("native_session_guard_stop_begin_v1"),
+                m_desktopNativeGuardEvent));
+        });
+    if (!exactCommandReceipt(begin, QStringLiteral("stop_begin"),
+                             m_desktopNativeGuardEvent)
+        || !begin.value(QStringLiteral("accepted")).toBool()) return false;
+    m_vpnProtocol->stop();
+    return true;
+#else
+    Q_UNUSED(outerSessionId); Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::requestNativeSessionGuardRelease(const QString &operation,
+                                                     const QString &session,
+                                                     const QString &outerSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->requestSessionGuardRelease(
+        operation, session, outerSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->requestSessionGuardRelease(
+        operation, session, outerSessionId);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!exactGuardEvent(m_desktopNativeGuardEvent)
+        || m_desktopNativeGuardEvent.value(QStringLiteral("operation")) != operation
+        || m_desktopNativeGuardEvent.value(QStringLiteral("session")) != session
+        || m_desktopNativeGuardEvent.value(QStringLiteral("outer_session_id"))
+               != outerSessionId) return false;
+    const QJsonObject event = waitGuardReply(
+        [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardReleaseV1(guardIdentityRequest(
+                QStringLiteral("native_session_guard_release_v1"),
+                m_desktopNativeGuardEvent));
+        });
+    if (!exactGuardEvent(event)
+        || !sameGuardIdentity(event, m_desktopNativeGuardEvent)) return false;
+    if (event.value(QStringLiteral("kind")) == QLatin1String("released")) {
+        m_desktopNativeGuardEvent = {};
+        m_desktopNativeGuardConfiguration = {};
+        if (m_vpnProtocol
+            && nativeRuntimeStatus().value(QStringLiteral("runtime_state"))
+                   == QLatin1String("stopped")) m_vpnProtocol.reset();
+    }
+    QTimer::singleShot(0, this, [this, event]() { emit nativeSessionGuardEvent(event); });
+    return true;
+#else
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(outerSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::requestNativeSessionGuardReconcileArm(
+    const QString &operation, const QString &session, const QString &policyHashHex,
+    const QString &expectedRuntimeSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->requestSessionGuardReconcileArm(
+        operation, session, policyHashHex, expectedRuntimeSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->requestSessionGuardReconcileArm(
+        operation, session, policyHashHex, expectedRuntimeSessionId);
+#else
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::requestNativeSessionGuardReconcileRelease(
+    const QString &operation, const QString &session, const QString &policyHashHex,
+    const QString &outerSessionId, const QString &expectedRuntimeSessionId)
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->requestSessionGuardReconcileRelease(
+        operation, session, policyHashHex, outerSessionId, expectedRuntimeSessionId);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->requestSessionGuardReconcileRelease(
+        operation, session, policyHashHex, outerSessionId, expectedRuntimeSessionId);
+#else
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(outerSessionId); Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#endif
+}
+
+bool VpnConnection::nativeSessionGuardRecoveryPending() const
+{
+#if defined(Q_OS_ANDROID)
+    return AndroidController::instance()->nativeGuardRecoveryPending();
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->nativeGuardRecoveryPending();
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    return m_desktopNativeGuardRecoveryPending;
+#else
+    return false;
+#endif
+}
+
+QJsonObject VpnConnection::nativeSessionGuardRecoveryEvent() const
+{
+#if defined(Q_OS_ANDROID)
+    return AndroidController::instance()->nativeGuardRecoveryEvent();
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->nativeGuardRecoveryEvent();
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    return m_desktopNativeGuardRecoveryEvent;
+#else
+    return {};
+#endif
+}
+
+bool VpnConnection::requestNativeSessionGuardRecoveryResolution(
+    const QJsonObject &exactRecoveryEvent, const QString &action,
+    const QJsonObject &validatedPreparedConfiguration)
+{
+#if defined(Q_OS_ANDROID)
+    return AndroidController::instance()->requestSessionGuardRecoveryResolution(
+        exactRecoveryEvent, action, validatedPreparedConfiguration);
+#elif defined(Q_OS_IOS)
+    return IosController::Instance()->requestSessionGuardRecoveryResolution(
+        exactRecoveryEvent, action, validatedPreparedConfiguration);
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (!m_desktopNativeGuardRecoveryPending
+        || !sameGuardIdentity(exactRecoveryEvent,
+                              m_desktopNativeGuardRecoveryEvent)
+        || (action != QLatin1String("adopt") && action != QLatin1String("stop"))
+        || (action == QLatin1String("adopt")
+            && validatedPreparedConfiguration.isEmpty())
+        || (action == QLatin1String("stop")
+            && !validatedPreparedConfiguration.isEmpty())) return false;
+    const QJsonObject request{
+        {QStringLiteral("type"),
+         QStringLiteral("native_session_guard_recovery_resolve_v1")},
+        {QStringLiteral("schema"), 1}, {QStringLiteral("action"), action},
+        {QStringLiteral("event"), exactRecoveryEvent},
+        {QStringLiteral("configuration"), validatedPreparedConfiguration},
+    };
+    const QJsonObject receipt = waitGuardReply(
+        [&](const QSharedPointer<IpcInterfaceReplica> &iface) {
+            return iface->nativeSessionGuardRecoveryResolveV1(request);
+        });
+    if (!exactRecoveryReceipt(receipt, action, exactRecoveryEvent)) return false;
+    const QString kind = receipt.value(QStringLiteral("kind")).toString();
+    if (kind == QLatin1String("adopted")) {
+        if (validatedPreparedConfiguration.value(QStringLiteral("protocol"))
+                != QLatin1String("awg")) return false;
+        m_desktopNativeGuardEvent = exactRecoveryEvent;
+        m_desktopNativeGuardEvent.insert(QStringLiteral("kind"), QStringLiteral("armed"));
+        m_desktopNativeGuardEvent.insert(QStringLiteral("reason"), QString());
+        m_desktopNativeGuardConfiguration = validatedPreparedConfiguration;
+        const QString runtimeId = receipt.value(
+            QStringLiteral("expected_runtime_session_id")).toString();
+        m_vpnProtocol.reset(new WireguardProtocol(validatedPreparedConfiguration,
+                                                  runtimeId));
+        auto *awg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data());
+        connect(awg, &WireguardProtocol::runtimeStatusChanged, this,
+                &VpnConnection::consumeDesktopNativeRuntimeStatus);
+        createProtocolConnections();
+        if (!awg->adoptExactSession()) return false;
+        m_desktopNativeGuardRecoveryPending = false;
+        m_desktopNativeGuardRecoveryEvent = {};
+    } else if (kind == QLatin1String("stopped_released")) {
+        m_desktopNativeGuardEvent = {};
+        m_desktopNativeGuardConfiguration = {};
+        m_desktopNativeGuardRecoveryPending = false;
+        m_desktopNativeGuardRecoveryEvent = {};
+        m_vpnProtocol.reset();
+    }
+    QTimer::singleShot(0, this, [this, receipt]() {
+        emit nativeSessionGuardRecoveryResolved(receipt);
+    });
+    return true;
+#else
+    Q_UNUSED(exactRecoveryEvent); Q_UNUSED(action); Q_UNUSED(validatedPreparedConfiguration);
+    return false;
+#endif
+}
+
+QString VpnConnection::nativeRuntimeSessionId() const
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    return IosController::Instance()->runtimeSessionId();
+#elif defined(Q_OS_ANDROID)
+    return AndroidController::instance()->runtimeSessionId();
+#elif defined(AMNEZIA_DESKTOP)
+    if (const auto *xray = qobject_cast<XrayProtocol *>(m_vpnProtocol.data()))
+        return xray->runtimeSessionId();
+    if (const auto *awg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()))
+        return awg->runtimeSessionId();
+    return {};
+#else
+    return {};
+#endif
+}
+
+bool VpnConnection::nativeRuntimeIdentitySupported(Proto proto) const
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE) || defined(Q_OS_ANDROID)
+    return proto == Proto::Awg || proto == Proto::WireGuard
+            || proto == Proto::Xray || proto == Proto::SSXray;
+#elif defined(AMNEZIA_DESKTOP)
+    return proto == Proto::Awg || proto == Proto::WireGuard
+            || proto == Proto::Xray || proto == Proto::SSXray;
+#else
+    Q_UNUSED(proto);
+    return false;
+#endif
+}
+
+bool VpnConnection::nativeRuntimeIdentitySupported() const
+{
+    // The bundled registry promises both AWG and Xray. Do not register that
+    // bundle on a platform that can identify only one of its native sessions.
+    return nativeRuntimeIdentitySupported(Proto::Awg)
+            && nativeRuntimeIdentitySupported(Proto::Xray);
+}
+
+bool VpnConnection::nativeSessionGuardSupported(Proto proto) const
+{
+#if defined(Q_OS_ANDROID)
+    if (proto == Proto::Awg || proto == Proto::WireGuard)
+        return TRIBE_ANDROID_AWG_GUARD_RECEIPT == 1;
+    if (proto == Proto::Xray || proto == Proto::SSXray)
+        return TRIBE_ANDROID_XRAY_GUARD_RECEIPT == 1;
+#elif defined(Q_OS_IOS)
+    if (proto == Proto::Awg || proto == Proto::WireGuard)
+        return TRIBE_IOS_AWG_GUARD_RECEIPT == 1;
+    if (proto == Proto::Xray || proto == Proto::SSXray)
+        return TRIBE_IOS_XRAY_GUARD_RECEIPT == 1;
+#elif defined(MACOS_NE)
+    if (proto == Proto::Awg || proto == Proto::WireGuard)
+        return TRIBE_MACOS_NE_AWG_GUARD_RECEIPT == 1;
+    if (proto == Proto::Xray || proto == Proto::SSXray)
+        return TRIBE_MACOS_NE_XRAY_GUARD_RECEIPT == 1;
+#elif defined(AMNEZIA_DESKTOP) && defined(Q_OS_MACOS)
+    if (proto == Proto::Awg || proto == Proto::WireGuard)
+        return TRIBE_MACOS_DAEMON_AWG_GUARD_RECEIPT == 1;
+    if (proto == Proto::Xray || proto == Proto::SSXray)
+        return TRIBE_MACOS_DAEMON_XRAY_GUARD_RECEIPT == 1;
+#else
+    Q_UNUSED(proto);
+#endif
+    return false;
 }
 
 void VpnConnection::setRepositories(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository)
@@ -292,6 +1221,25 @@ void VpnConnection::addSitesRoutes(const QString &gw, amnezia::RouteMode mode)
 #endif
 }
 
+void VpnConnection::addPreparedSitesRoutes(const QString &gw)
+{
+#ifdef AMNEZIA_DESKTOP
+    // AVPN: v2 snapshots contain only already-resolved, bounded CIDR/IP entries. No repository
+    // lookup or asynchronous DNS mutation is permitted after the final envelope sanitizer.
+    QStringList routes;
+    const QJsonArray values = m_vpnConfiguration.value(configKey::splitTunnelSites).toArray();
+    routes.reserve(values.size());
+    for (const QJsonValue &value : values)
+        if (value.isString())
+            routes.append(value.toString());
+    IpcClient::withInterface([gw, routes](QSharedPointer<IpcInterfaceReplica> iface) {
+        iface->routeAddList(gw, routes);
+    });
+#else
+    Q_UNUSED(gw);
+#endif
+}
+
 QSharedPointer<VpnProtocol> VpnConnection::vpnProtocol() const
 {
     return m_vpnProtocol;
@@ -324,17 +1272,38 @@ Vpn::ConnectionState VpnConnection::connectionState() const
 
 void VpnConnection::connectToVpn(const QString &serverId, DockerContainer container, const QJsonObject &vpnConfiguration)
 {
+    connectToVpnImpl(serverId, container, vpnConfiguration, false);
+}
+
+void VpnConnection::connectToVpnWithPreparedPolicy(
+    const QString &serverId, DockerContainer container, const QJsonObject &vpnConfiguration)
+{
+    // AVPN: the serviceEngine policy compiler performs the final exact-envelope sanitizer before
+    // entering here. Legacy callers stay on connectToVpn() and retain repository compilation.
+    connectToVpnImpl(serverId, container, vpnConfiguration, true);
+}
+
+void VpnConnection::connectToVpnImpl(const QString &serverId, DockerContainer container,
+                                     const QJsonObject &vpnConfiguration,
+                                     bool hasPreparedPolicy)
+{
     if (!m_appSettingsRepository || !m_serversRepository) {
         qCritical() << "VpnConnection::connectToVpn: repositories not initialized";
         setConnectionState(Vpn::ConnectionState::Error);
         return;
     }
 
+    const amnezia::RouteMode dispatchRouteMode = hasPreparedPolicy
+        ? static_cast<amnezia::RouteMode>(vpnConfiguration.value(configKey::splitTunnelType)
+                                             .toInt(amnezia::RouteMode::VpnAllSites))
+        : m_appSettingsRepository->routeMode();
     qDebug() << QString("Trying to connect to VPN, server id is %1, container is %2, route mode is")
                         .arg(serverId)
                         .arg(ContainerUtils::containerToString(container))
-             << m_appSettingsRepository->routeMode();
+             << dispatchRouteMode;
 
+    m_activeContainer = container; // AVPN v2: preserve exact dispatch identity for routes/DNS.
+    m_hasPreparedConnectionPolicy = hasPreparedPolicy; // AVPN: immutable local-policy ownership.
     m_remoteAddress = NetworkUtilities::getIPAddress(vpnConfiguration.value(configKey::hostName).toString());
     setConnectionState(Vpn::ConnectionState::Connecting);
 
@@ -353,10 +1322,12 @@ void VpnConnection::connectToVpn(const QString &serverId, DockerContainer contai
         m_vpnProtocol.reset();
         m_swallowTransitionalDisconnected = false;
     }
-    appendKillSwitchConfig();
+    if (!m_hasPreparedConnectionPolicy)
+        appendKillSwitchConfig();
 #endif
 
-    appendSplitTunnelingConfig();
+    if (!m_hasPreparedConnectionPolicy)
+        appendSplitTunnelingConfig();
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && !defined(MACOS_NE)
     m_vpnProtocol.reset(VpnProtocol::factory(container, m_vpnConfiguration));
@@ -395,6 +1366,14 @@ void VpnConnection::createProtocolConnections()
     connect(m_vpnProtocol.data(), SIGNAL(bytesChanged(quint64, quint64)), this, SLOT(onBytesChanged(quint64, quint64)));
 
 #ifdef AMNEZIA_DESKTOP
+    if (auto *xray = qobject_cast<XrayProtocol *>(m_vpnProtocol.data())) {
+        // Catalog-v2 status first passes through the exact outer-guard
+        // running/stopped receipt bridge. Legacy Xray has no such lease.
+        if (m_desktopNativeGuardEvent.isEmpty()) {
+            connect(xray, &XrayProtocol::runtimeStatusChanged,
+                    this, &VpnConnection::nativeRuntimeStatusChanged);
+        }
+    }
     IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
         connect(rep.data(), &IpcInterfaceReplica::networkChanged, this, &VpnConnection::reconnectToVpn, Qt::QueuedConnection);
         connect(rep.data(), &IpcInterfaceReplica::wakeup, this, &VpnConnection::reconnectToVpn, Qt::QueuedConnection);

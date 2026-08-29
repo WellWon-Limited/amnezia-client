@@ -89,6 +89,14 @@ class Openvpn(ConanFile):
             elif self.settings.os == "Macos":
                 # reserve header space so consumers can rewrite rpaths via install_name_tool
                 tc.extra_ldflags.append("-Wl,-headerpad_max_install_names")
+                for build_root in (self.source_folder, self.build_folder):
+                    prefix_maps = [
+                        f"-ffile-prefix-map={build_root}=.",
+                        f"-fdebug-prefix-map={build_root}=.",
+                        f"-fmacro-prefix-map={build_root}=.",
+                    ]
+                    tc.extra_cflags.extend(prefix_maps)
+                    tc.extra_cxxflags.extend(prefix_maps)
             tc.generate()
             deps = AutotoolsDeps(self)
             deps.generate()

@@ -1,0 +1,41 @@
+{
+  "marketing_version": "5.1.68",
+  "release_version": "5.1.68.97",
+  "schema": 1,
+  "shipping_flavors": [
+    {
+      "adapter": "apple_network_extension",
+      "app_builds": [
+        97
+      ],
+      "architectures": [
+        "arm64"
+      ],
+      "platform": "ios"
+    },
+    {
+      "adapter": "android_vpn_service",
+      "app_builds": [
+        2158,
+        2159
+      ],
+      "architectures": [
+        "arm64",
+        "arm",
+        "x86",
+        "x86_64"
+      ],
+      "platform": "android"
+    },
+    {
+      "adapter": "macos_daemon_ipc",
+      "app_builds": [
+        97
+      ],
+      "architectures": [
+        "arm64"
+      ],
+      "platform": "macos"
+    }
+  ]
+}

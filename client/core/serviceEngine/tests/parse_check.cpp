@@ -82,7 +82,7 @@ int main(int argc, char **argv)
                inner.value(QStringLiteral("port")).toInt(),
                cfg.value(QStringLiteral("dns2")).toString().toUtf8().constData(),
                inner.value(QStringLiteral("isObfuscationEnabled")).toBool() ? 1 : 0,
-               inner.size());
+               int(inner.size()));
         const QString wg = inner.value(QStringLiteral("config")).toString();
         bool cfgOk = cfg.value(QStringLiteral("protocol")).toString() == QLatin1String("awg")
                      && inner.value(QStringLiteral("hostName")).toString() == QLatin1String("203.0.113.10")
@@ -765,6 +765,7 @@ int main(int argc, char **argv)
                     "RekeyAfterTime": "100-120", "RekeyTimeout": "3-7",
                     "RejectAfterTime": "150-180", "KeepaliveTimeout": "5-15",
                     "MaxHandshakeAttempts": "15-20",
+                    "RandomTrailers": true, "DisableCookies": true,
                     "FutureKey42": "future-value", "FutureNumeric": 7
                 }
             }]
@@ -781,7 +782,9 @@ int main(int argc, char **argv)
             && a.rekeyTimeout == QLatin1String("3-7")
             && a.rejectAfterTime == QLatin1String("150-180")
             && a.keepaliveTimeout == QLatin1String("5-15")
-            && a.maxHandshakeAttempts == QLatin1String("15-20");
+            && a.maxHandshakeAttempts == QLatin1String("15-20")
+            && a.randomTrailers.value_or(false)
+            && a.disableCookies.value_or(false);
         // generic-канал: строковый незнакомый ключ пойман, числовой — отброшен (канон = строки)
         const bool extraOk = a.extra.size() == 1
             && a.extra.value(QStringLiteral("FutureKey42")) == QLatin1String("future-value");
@@ -797,8 +800,12 @@ int main(int argc, char **argv)
         const bool emitOk = inner.value(QStringLiteral("HeaderProtectionKey")).toString() == a.headerProtectionKey
             && inner.value(QStringLiteral("ContentPaddingAddition")).toString() == QLatin1String("10-100")
             && inner.value(QStringLiteral("MaxHandshakeAttempts")).toString() == QLatin1String("15-20")
+            && inner.value(QStringLiteral("RandomTrailers")).toString() == QLatin1String("1")
+            && inner.value(QStringLiteral("DisableCookies")).toString() == QLatin1String("1")
             && quick.contains(QLatin1String("HeaderProtectionKey = "))
             && quick.contains(QLatin1String("RekeyTimeout = 3-7"))
+            && quick.contains(QLatin1String("RandomTrailers = 1"))
+            && quick.contains(QLatin1String("DisableCookies = 1"))
             && quick.contains(QLatin1String("PersistentKeepalive = 25"));
         // extra БЕЗ allowlist'а (дефолт пуст) в конфиг НЕ эмитится — канал спит
         const bool extraGateOk = !inner.contains(QStringLiteral("FutureKey42"))
@@ -814,20 +821,34 @@ int main(int argc, char **argv)
         const QJsonObject rep = AwgConfigBuilder::reportSummary(v3sub, n);
         const QString repFlat = QString::fromUtf8(QJsonDocument(rep).toJson());
         const bool repOk = rep.value(QStringLiteral("awg")).toObject().value(QStringLiteral("v3")).toBool()
+            && rep.value(QStringLiteral("awg")).toObject().value(QStringLiteral("v31")).toBool()
             && !repFlat.contains(a.headerProtectionKey);
 
-        // protocolMajor: v3-нода → "3"; фикстура (только Jc..H4) → "1"; конфиг с S4/I1 → "2"
+        // protocolMajor: v3.1-нода → "3.1"; фикстура (только Jc..H4) → "1"; S4/I1 → "2"
         AwgParams v2probe; v2probe.S4 = 4; v2probe.I1 = QStringLiteral("<r 2>");
-        const bool verOk = a.protocolMajor() == QLatin1String("3")
+        const bool verOk = a.protocolMajor() == QLatin1String("3.1")
             && sub.nodes.first().awg.protocolMajor() == QLatin1String("1")
             && v2probe.protocolMajor() == QLatin1String("2");
-        printf("awg3: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d ver=%d\n",
-               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk, verOk);
+        Subscription incomplete31 = v3sub;
+        incomplete31.nodes.first().awg.disableCookies.reset();
+        const bool bundleGateOk = !SubscriptionParser::validate(incomplete31).isEmpty();
+        QByteArray invalidToggleJson = v3json;
+        invalidToggleJson.replace("\"RandomTrailers\": true",
+                                  "\"RandomTrailers\": \"maybe\"");
+        Subscription invalidToggleSub; QString invalidToggleError;
+        const bool invalidToggleParsed = SubscriptionParser::parse(
+            invalidToggleJson, invalidToggleSub, invalidToggleError);
+        const bool encodingGateOk = invalidToggleParsed
+                                    && !SubscriptionParser::validate(invalidToggleSub).isEmpty();
+        printf("awg31: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d ver=%d bundle=%d encoding=%d\n",
+               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk, verOk,
+               bundleGateOk, encodingGateOk);
         if (!verOk) { fprintf(stderr, "FAIL: protocolMajor mismatch\n"); return 15; }
-        if (!(fieldsOk && extraOk && kaOk && emitOk && extraGateOk && parityOk && repOk)) {
-            fprintf(stderr, "FAIL: awg3 v3-plumbing mismatch\n"); return 14;
+        if (!(fieldsOk && extraOk && kaOk && emitOk && extraGateOk && parityOk && repOk
+              && bundleGateOk && encodingGateOk)) {
+            fprintf(stderr, "FAIL: awg3.1 plumbing mismatch\n"); return 14;
         }
-        printf("awg3: OK (7 ключей parse→build, extra-канал за allowlist-гейтом, кламп keepalive, parity 2.0, секрет не течёт)\n");
+        printf("awg31: OK (typed bool parse→build, v3 keys, legacy extra gate, parity 2.0, secret-safe report)\n");
     }
 
     printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + awg3\n");

@@ -41,7 +41,7 @@ class WireguardUtilsMacos final : public WireguardUtils {
   // AVPN (BUG-4 auto-heal): UAPI listen_port=0 живому awg-go → BindUpdate → новый локальный порт.
   bool rebindEndpointSocket() override;
 
-  void applyFirewallRules(FirewallParams& params);
+  bool applyFirewallRules(FirewallParams& params);
 
  signals:
   void backendFailure();

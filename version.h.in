@@ -9,6 +9,21 @@
 #define APP_MAJOR_VERSION "@APP_MAJOR_VERSION@"
 #endif
 
+// AVPN: monotonic store/build identifier, separate from the semantic app
+// version used for compatibility comparisons and API reporting.
+#ifndef APP_BUILD
+#define APP_BUILD @APP_BUILD_NUMBER@
+#endif
+
+#define TRIBE_ANDROID_AWG_GUARD_RECEIPT @TRIBE_ANDROID_AWG_GUARD_RECEIPT@
+#define TRIBE_ANDROID_XRAY_GUARD_RECEIPT @TRIBE_ANDROID_XRAY_GUARD_RECEIPT@
+#define TRIBE_IOS_AWG_GUARD_RECEIPT @TRIBE_IOS_AWG_GUARD_RECEIPT@
+#define TRIBE_IOS_XRAY_GUARD_RECEIPT @TRIBE_IOS_XRAY_GUARD_RECEIPT@
+#define TRIBE_MACOS_DAEMON_AWG_GUARD_RECEIPT @TRIBE_MACOS_DAEMON_AWG_GUARD_RECEIPT@
+#define TRIBE_MACOS_DAEMON_XRAY_GUARD_RECEIPT @TRIBE_MACOS_DAEMON_XRAY_GUARD_RECEIPT@
+#define TRIBE_MACOS_NE_AWG_GUARD_RECEIPT @TRIBE_MACOS_NE_AWG_GUARD_RECEIPT@
+#define TRIBE_MACOS_NE_XRAY_GUARD_RECEIPT @TRIBE_MACOS_NE_XRAY_GUARD_RECEIPT@
+
 #define APPLICATION_NAME    "AVPN"
 // AVPN: имя ДОЛЖНО совпадать с бинарём root-демона (target в service/server/CMakeLists):
 // isServiceReady() ищет процесс по этому имени (pgrep -f, case-sensitive) — расхождение

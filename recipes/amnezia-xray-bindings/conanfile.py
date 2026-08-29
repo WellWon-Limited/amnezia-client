@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.files import get, copy, collect_libs, chdir, rename
+from conan.tools.files import get, copy, collect_libs, chdir, rename, replace_in_file
 from conan.tools.layout import basic_layout
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.gnu import Autotools, AutotoolsToolchain
@@ -13,7 +13,7 @@ import shlex
 
 class AmneziaXrayBindings(ConanFile):
     name = "amnezia-xray-bindings"
-    version = "1.3.0"
+    version = "1.4.0"
     settings = "os", "arch", "compiler"
 
     _arch_map = {
@@ -77,7 +77,7 @@ class AmneziaXrayBindings(ConanFile):
 
     def source(self):
         get(self, f"https://github.com/amnezia-vpn/amnezia-xray-bindings/archive/refs/tags/v{self.version}.zip",
-            sha256="97233926c91e0bed61603fddb9909607b97a65f8ff0841a628f96268637ade5c", strip_root=True)
+            sha256="8977896bba99f1a3bad61d734b2929ec3d01c3ca0e206ee8ce5eb013d38ab118", strip_root=True)
 
     def generate(self):
         tc = AutotoolsToolchain(self)
@@ -94,6 +94,21 @@ class AmneziaXrayBindings(ConanFile):
         tc.generate(env)
 
     def build(self):
+        makefile = os.path.join(self.source_folder, "Makefile")
+        replace_in_file(
+            self,
+            makefile,
+            "go build -ldflags=-w -o $(BUILD_DIR)/$(LIB_ARC) -buildmode=c-archive",
+            'go build -trimpath -buildvcs=false -ldflags="-buildid=" '
+            "-o $(BUILD_DIR)/$(LIB_ARC) -buildmode=c-archive",
+        )
+        replace_in_file(
+            self,
+            makefile,
+            "go build -ldflags=-w -o $(BUILD_DIR)/$(LIB_DLL) -buildmode=c-shared",
+            'go build -trimpath -buildvcs=false -ldflags="-buildid=" '
+            "-o $(BUILD_DIR)/$(LIB_DLL) -buildmode=c-shared",
+        )
         with chdir(self, self.source_folder):
             for arch in self._archs:
                 build_dir = os.path.join(self.build_folder, arch) if self._is_multiarch else self.build_folder
@@ -104,6 +119,12 @@ class AmneziaXrayBindings(ConanFile):
                 if is_apple_os(self):
                     cflags.append(f"-arch {_to_apple_arch(arch)}")
                     ldflags.append(f"-arch {_to_apple_arch(arch)}")
+                    for build_root in (self.source_folder, self.build_folder):
+                        cflags.extend([
+                            f"-ffile-prefix-map={build_root}=.",
+                            f"-fdebug-prefix-map={build_root}=.",
+                            f"-fmacro-prefix-map={build_root}=.",
+                        ])
 
                 env = Environment()
                 env.define("ARCH", goarch)
@@ -144,3 +165,12 @@ class AmneziaXrayBindings(ConanFile):
     def package_info(self):
         self.cpp_info.set_property("cmake_target_name", "amnezia::xray-bindings")
         self.cpp_info.libs = collect_libs(self)
+        self.cpp_info.set_property("cmake_extra_variables", {
+            "XRAY_BINDINGS_VERSION": self.version,
+            "XRAY_BINDINGS_SOURCE_COMMIT": "f9871bb9344e69a61865b9a2efba029e125ec980",
+            "XRAY_CORE_VERSION": "1.260728.0",
+            "XRAY_BINDINGS_C_ABI": "amnezia-xray-c-v1",
+            # AVPN: this C ABI has no version symbol; never label the declared
+            # package/core version as a runtime probe.
+            "XRAY_BINDINGS_RUNTIME_VERSION_PROBE": False,
+        })
