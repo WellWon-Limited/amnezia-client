@@ -212,7 +212,8 @@ unsigned int ifscope;
 
 static const char *route_strerror(int);
 const char	*routename(), *netname();
-void	flushroutes(), newroute(), monitor(), sockaddr(), sodump(), bprintf();
+void	flushroutes(), monitor(), sockaddr(), sodump(), bprintf();
+int	newroute();
 void	print_getmsg(), print_rtmsg(), pmsg_common(), pmsg_addrs(), mask_addr();
 int	getaddr(), rtmsg(), x25_makemask();
 int	prefixlen();
@@ -253,12 +254,18 @@ mainRouteIface(argc, argv)
     locking = lockrest = debugonly = 0;
     rtm_inits = 0;
     ifscope = 0;
+    /* Embedded route(8) is invoked repeatedly in one daemon process. */
+    optind = 1;
+    optreset = 1;
     //
 
     int ch;
+    int result = -1;
 
-    if (argc < 2)
+    if (argc < 2) {
         usage((char *)NULL);
+        return EX_USAGE;
+    }
 
     while ((ch = getopt(argc, argv, "nqdtv")) != -1)
         switch(ch) {
@@ -290,8 +297,10 @@ mainRouteIface(argc, argv)
         s = open(_PATH_DEVNULL, O_WRONLY, 0);
     else
         s = socket(PF_ROUTE, SOCK_RAW, 0);
-    if (s < 0)
-        err(EX_OSERR, "socket");
+    if (s < 0) {
+        warn("route socket");
+        return EX_OSERR;
+    }
     setuid(uid);
     if (*argv)
         switch (keyword(*argv)) {
@@ -302,7 +311,7 @@ mainRouteIface(argc, argv)
         case K_CHANGE:
         case K_ADD:
         case K_DELETE:
-            newroute(argc, argv);
+            result = newroute(argc, argv);
             break;
             /* NOTREACHED */
 
@@ -318,7 +327,7 @@ mainRouteIface(argc, argv)
         }
     close(s);
     fflush(stdout);
-    return 0;
+    return result;
     //usage(*argv);
     /* NOTREACHED */
 }
@@ -661,18 +670,20 @@ set_metric(value, key)
 	*valp = atoi(value);
 }
 
-void
+int
 newroute(argc, argv)
 	int argc;
 	register char **argv;
 {
 	char *cmd, *dest = "", *gateway = "";
-	int ishost = 0, ret, attempts, oerrno, flags = RTF_STATIC;
+	int ishost = 0, ret = -1, attempts, oerrno, flags = RTF_STATIC;
 	int key;
 	struct hostent *hp = 0;
 
 	if (uid) {
-		errx(EX_NOPERM, "must be root to alter routing table");
+		warnx("must be root to alter routing table");
+        errno = EPERM;
+        return -1;
 	}
 	cmd = argv[0];
 	if (*cmd != 'g')
@@ -800,8 +811,11 @@ newroute(argc, argv)
 					usage((char *)NULL);
 				if ((ifscope = if_nametoindex(*++argv)) != 0)
 					flags |= RTF_IFSCOPE;
-				else
-					errx(1, "bad interface name");
+				else {
+                    warnx("bad interface name");
+                    errno = ENXIO;
+                    return -1;
+                }
 				break;
 			default:
 				usage(1+*argv);
@@ -841,8 +855,11 @@ newroute(argc, argv)
 			if (((so_mask.sin.sin_addr.s_addr) & ntohl((1 << i))) != 0)
 				break;
 		for (; i < 32; i++)
-			if (((so_mask.sin.sin_addr.s_addr) & ntohl((1 << i))) == 0)
-				errx(EX_NOHOST, "invalid mask: %s", inet_ntoa(so_mask.sin.sin_addr));
+			if (((so_mask.sin.sin_addr.s_addr) & ntohl((1 << i))) == 0) {
+                warnx("invalid mask: %s", inet_ntoa(so_mask.sin.sin_addr));
+                errno = EINVAL;
+                return -1;
+            }
 	}
 	for (attempts = 1; ; attempts++) {
 		errno = 0;
@@ -858,8 +875,11 @@ newroute(argc, argv)
 			break;
 	}
 	if (*cmd == 'g')
-        return;
+        return ret;
 	oerrno = errno;
+	/* Delete is an idempotent cleanup postcondition: ESRCH means absent. */
+	if (*cmd == 'd' && ret != 0 && oerrno == ESRCH)
+		ret = 0;
 //	(void) printf("%s %s %s", cmd, ishost? "host" : "net", dest);
 //	if (*gateway) {
 //		(void) printf(": gateway %s", gateway);
@@ -871,6 +891,8 @@ newroute(argc, argv)
 //	else {
 //		(void)printf(": %s\n", route_strerror(oerrno));
 //	}
+    errno = oerrno;
+    return ret;
 }
 
 static void

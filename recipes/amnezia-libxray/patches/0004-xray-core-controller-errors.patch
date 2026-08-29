@@ -1,0 +1,103 @@
+diff --git a/transport/internet/system_dialer.go b/transport/internet/system_dialer.go
+index 4321a6392..f7165a654 100644
+--- a/transport/internet/system_dialer.go
++++ b/transport/internet/system_dialer.go
+@@ -18,6 +18,18 @@ var (
+ 	effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
+ )
+ 
++// applyExternalControllers is deliberately fail-closed. A controller is the
++// platform's only opportunity to move a socket outside the VPN before the
++// socket starts carrying Xray traffic; logging and continuing can leak it.
++func applyExternalControllers(controllers []func(network, address string, c syscall.RawConn) error, network, address string, c syscall.RawConn) error {
++	for _, controller := range controllers {
++		if err := controller(network, address, c); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
+ type SystemDialer interface {
+ 	Dial(ctx context.Context, source net.Address, destination net.Destination, sockopt *SocketConfig) (net.Conn, error)
+ 	DestIpAddress() net.IP
+@@ -63,10 +75,8 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
+ 			return nil, err
+ 		}
+ 		lc.Control = func(network, address string, c syscall.RawConn) error {
+-			for _, ctl := range Controllers {
+-				if err := ctl(network, address, c); err != nil {
+-					errors.LogInfoInner(ctx, err, "failed to apply external controller")
+-				}
++			if err := applyExternalControllers(Controllers, network, address, c); err != nil {
++				return err
+ 			}
+ 			return c.Control(func(fd uintptr) {
+ 				if sockopt != nil {
+@@ -120,10 +130,8 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
+ 			dialer.SetMultipathTCP(true)
+ 		}
+ 		dialer.Control = func(network, address string, c syscall.RawConn) error {
+-			for _, ctl := range Controllers {
+-				if err := ctl(network, address, c); err != nil {
+-					errors.LogInfoInner(ctx, err, "failed to apply external controller")
+-				}
++			if err := applyExternalControllers(Controllers, network, address, c); err != nil {
++				return err
+ 			}
+ 			return c.Control(func(fd uintptr) {
+ 				if sockopt != nil {
+diff --git a/transport/internet/system_listener.go b/transport/internet/system_listener.go
+index 2534530c0..110415a94 100644
+--- a/transport/internet/system_listener.go
++++ b/transport/internet/system_listener.go
+@@ -22,13 +22,10 @@ type DefaultListener struct {
+ 
+ func getControlFunc(ctx context.Context, sockopt *SocketConfig, controllers []func(network, address string, c syscall.RawConn) error) func(network, address string, c syscall.RawConn) error {
+ 	return func(network, address string, c syscall.RawConn) error {
++		if err := applyExternalControllers(controllers, network, address, c); err != nil {
++			return err
++		}
+ 		return c.Control(func(fd uintptr) {
+-			for _, controller := range controllers {
+-				if err := controller(network, address, c); err != nil {
+-					errors.LogInfoInner(ctx, err, "failed to apply external controller")
+-				}
+-			}
+-
+ 			if sockopt != nil {
+ 				if err := applyInboundSocketOptions(network, fd, sockopt); err != nil {
+ 					errors.LogInfoInner(ctx, err, "failed to apply socket options to incoming connection")
+diff --git a/transport/internet/tribe_controller_test.go b/transport/internet/tribe_controller_test.go
+new file mode 100644
+index 000000000..f32878ac5
+--- /dev/null
++++ b/transport/internet/tribe_controller_test.go
+@@ -0,0 +1,27 @@
++package internet
++
++import (
++	"errors"
++	"syscall"
++	"testing"
++)
++
++type tribeTestRawConn struct{}
++
++func (tribeTestRawConn) Control(callback func(uintptr)) error { callback(7); return nil }
++func (tribeTestRawConn) Read(func(uintptr) bool) error        { return nil }
++func (tribeTestRawConn) Write(func(uintptr) bool) error       { return nil }
++
++func TestTribeExternalControllerErrorsArePropagated(t *testing.T) {
++	want := errors.New("protect rejected")
++	controllers := []func(string, string, syscall.RawConn) error{
++		func(string, string, syscall.RawConn) error { return want },
++	}
++	if got := applyExternalControllers(controllers, "tcp", "127.0.0.1:1", tribeTestRawConn{}); !errors.Is(got, want) {
++		t.Fatalf("dial controller error was not propagated: %v", got)
++	}
++	control := getControlFunc(nil, nil, controllers)
++	if got := control("tcp", "127.0.0.1:1", tribeTestRawConn{}); !errors.Is(got, want) {
++		t.Fatalf("listener controller error was not propagated: %v", got)
++	}
++}

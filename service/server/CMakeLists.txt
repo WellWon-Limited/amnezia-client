@@ -7,7 +7,10 @@ if (APPLE)
     # CMAKE_INSTALL_BINDIR must be called before find_package(Qt6) for
     # Qt to configure prefixes properly
     # FIXME: make Amnezia-service a bundle and remove this hack completely
-    set(CMAKE_INSTALL_BINDIR "AmneziaVPN.app/Contents/MacOS")
+    # The desktop GUI target is rebranded to TribeVPN.app. Installing the
+    # service into the upstream name creates a second, non-runnable app and
+    # leaves the shipping Tribe bundle without AWG/OpenVPN/Xray helpers.
+    set(CMAKE_INSTALL_BINDIR "TribeVPN.app/Contents/MacOS")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -24,6 +27,8 @@ set(HEADERS
     ${CMAKE_CURRENT_LIST_DIR}/../../client/secureQSettings.h
     ${CMAKE_CURRENT_LIST_DIR}/../../client/core/utils/networkUtilities.h
     ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipc.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcsecurity.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../ipc/openvpnconfigsecurity.h
     ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcserver.h
     ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcserverprocess.h
     ${CMAKE_CURRENT_LIST_DIR}/localserver.h
@@ -42,6 +47,8 @@ set(SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/../../client/core/utils/networkUtilities.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcserver.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcserverprocess.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipcsecurity.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../ipc/openvpnconfigsecurity.cpp
     ${CMAKE_CURRENT_LIST_DIR}/localserver.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../../common/logger/logger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main.cpp
@@ -191,11 +198,15 @@ if(APPLE)
     set(HEADERS ${HEADERS}
         ${CMAKE_CURRENT_LIST_DIR}/helper_route_mac.h
         ${CMAKE_CURRENT_LIST_DIR}/router_mac.h
+        ${CMAKE_CURRENT_LIST_DIR}/openvpndnssecurity.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/macosnativesessionguard.h
     )
 
     set(SOURCES ${SOURCES}
         ${CMAKE_CURRENT_LIST_DIR}/helper_route_mac.c
         ${CMAKE_CURRENT_LIST_DIR}/router_mac.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/openvpndnssecurity.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../client/platforms/macos/daemon/macosnativesessionguard.cpp
     )
 
     #Mozilla
@@ -296,12 +307,29 @@ target_compile_definitions(${PROJECT} PRIVATE "MZ_$<UPPER_CASE:${MZ_PLATFORM_NAM
 find_package(amnezia-xray-bindings REQUIRED)
 target_link_libraries(${PROJECT} PRIVATE amnezia::xray-bindings)
 
+foreach(_required XRAY_BINDINGS_VERSION XRAY_BINDINGS_SOURCE_COMMIT XRAY_CORE_VERSION XRAY_BINDINGS_C_ABI)
+    if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+        message(FATAL_ERROR "xray-bindings package did not export ${_required}") # AVPN
+    endif()
+endforeach()
+target_compile_definitions(${PROJECT} PRIVATE
+    TRIBE_XRAY_BINDINGS_VERSION="${XRAY_BINDINGS_VERSION}"
+    TRIBE_XRAY_BINDINGS_COMMIT="${XRAY_BINDINGS_SOURCE_COMMIT}"
+    TRIBE_XRAY_CORE_VERSION="${XRAY_CORE_VERSION}"
+    TRIBE_XRAY_BINDINGS_ABI="${XRAY_BINDINGS_C_ABI}"
+)
+
 find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${PROJECT} PRIVATE "MZ_DEBUG")
 endif()
+
+target_compile_definitions(${PROJECT} PRIVATE
+    TRIBE_MAC_GUI_IDENTIFIER="hk.wellwon.vpn"
+    TRIBE_MAC_TEAM_IDENTIFIER="Q7DVH5MCWF"
+)
 
 if(APPLE)
     set_target_properties(${PROJECT} PROPERTIES
@@ -335,11 +363,19 @@ if(APPLE)
         DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT AmneziaVPN
     )
+    # The identity-specific rule is generated per build. Keep it in the build/install
+    # tree; configuring Debug must never rewrite a tracked production PF rule.
+    install(FILES ${CMAKE_BINARY_DIR}/tribe.400.allowPIA.conf
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/pf
+        COMPONENT AmneziaVPN
+    )
     add_custom_command(TARGET ${PROJECT} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Debug>,copy_directory,true>
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/deploy/data/macos/pf
         "$<TARGET_FILE_DIR:${PROJECT}>/pf"
-        COMMAND_EXPAND_LISTS
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_BINARY_DIR}/tribe.400.allowPIA.conf
+        "$<TARGET_FILE_DIR:${PROJECT}>/pf/tribe.400.allowPIA.conf"
     )
 endif()
 
@@ -355,6 +391,20 @@ if(WIN32)
 else()
     find_package(awg-go REQUIRED)
     list(APPEND CONAN_EXECS $<TARGET_FILE:amnezia::awg-go>)
+    if(APPLE)
+        foreach(_required AWG_GO_ENGINE_VERSION AWG_GO_SOURCE_COMMIT AWG_GO_UAPI_ABI)
+            if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+                message(FATAL_ERROR "awg-go package did not export ${_required}") # AVPN
+            endif()
+        endforeach()
+        target_compile_definitions(${PROJECT} PRIVATE
+            TRIBE_ENGINE_MANIFEST_ENABLED=1
+            TRIBE_AWG_ENGINE_VERSION="${AWG_GO_ENGINE_VERSION}"
+            TRIBE_AWG_CORE_VERSION="${AWG_GO_ENGINE_VERSION}"
+            TRIBE_AWG_ENGINE_COMMIT="${AWG_GO_SOURCE_COMMIT}"
+            TRIBE_AWG_UAPI_ABI="${AWG_GO_UAPI_ABI}"
+        )
+    endif()
 endif()
 
 find_package(openvpn REQUIRED)

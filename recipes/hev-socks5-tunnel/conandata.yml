@@ -1,0 +1,5 @@
+patches:
+  "2.15.0":
+    - patch_file: "patches/0001-library-nonblocking-lifecycle.patch"
+      patch_description: "Expose readiness and non-blocking stop for async Apple lifecycle"
+      patch_type: "portability"

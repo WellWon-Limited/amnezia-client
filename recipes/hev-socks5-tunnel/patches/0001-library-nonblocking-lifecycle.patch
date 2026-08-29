@@ -1,0 +1,240 @@
+diff --git a/src/hev-socks5-tunnel.h b/src/hev-socks5-tunnel.h
+--- a/src/hev-socks5-tunnel.h
++++ b/src/hev-socks5-tunnel.h
+@@ -17,6 +17,9 @@
+ 
+ int hev_socks5_tunnel_run (void);
+ void hev_socks5_tunnel_stop (void);
++int hev_socks5_tunnel_is_ready (void);
++int hev_socks5_tunnel_try_quit (void);
++void hev_socks5_tunnel_reset_stop (void);
+ 
+ void hev_socks5_tunnel_stats (size_t *tx_packets, size_t *tx_bytes,
+                               size_t *rx_packets, size_t *rx_bytes);
+diff --git a/src/hev-socks5-tunnel.c b/src/hev-socks5-tunnel.c
+--- a/src/hev-socks5-tunnel.c
++++ b/src/hev-socks5-tunnel.c
+@@ -9,6 +9,7 @@
+ 
+ #include <errno.h>
+ #include <assert.h>
++#include <pthread.h>
+ #include <signal.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
+@@ -40,6 +41,8 @@
+ #include "hev-socks5-tunnel.h"
+ 
+ static int run;
++static int stop_requested;
++static pthread_mutex_t stop_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static int tun_fd = -1;
+ static int tun_fd_local;
+ static int session_count;
+@@ -497,6 +500,12 @@
+     res = ioctl (event_fds[0], FIONBIO, (char *)&nonblock);
+     if (res < 0) {
+         LOG_E ("socks5 tunnel event nonblock");
++        return -1;
++    }
++
++    res = ioctl (event_fds[1], FIONBIO, (char *)&nonblock);
++    if (res < 0) {
++        LOG_E ("socks5 tunnel event nonblock writer");
+         return -1;
+     }
+ 
+@@ -512,19 +521,29 @@
+ static void
+ event_task_fini (void)
+ {
++    int read_fd;
++    int write_fd;
++
+     if (task_event) {
+         hev_task_unref (task_event);
+         task_event = NULL;
+     }
+ 
+-    if (event_fds[0] >= 0) {
+-        close (event_fds[0]);
+-        event_fds[0] = -1;
+-    }
+-    if (event_fds[1] >= 0) {
+-        close (event_fds[1]);
+-        event_fds[1] = -1;
+-    }
++    /* Detach both descriptors while holding the same lock used by the
++     * non-blocking writer. This prevents a concurrent stop from writing to a
++     * descriptor that close() has already made available for reuse. */
++    pthread_mutex_lock (&stop_mutex);
++    WRITE_ONCE (run, 0);
++    read_fd = event_fds[0];
++    write_fd = event_fds[1];
++    event_fds[0] = -1;
++    event_fds[1] = -1;
++    pthread_mutex_unlock (&stop_mutex);
++
++    if (read_fd >= 0)
++        close (read_fd);
++    if (write_fd >= 0)
++        close (write_fd);
+ }
+ 
+ static int
+@@ -665,6 +684,8 @@
+     stat_rx_packets = 0;
+     stat_tx_bytes = 0;
+     stat_rx_bytes = 0;
++    WRITE_ONCE (run, 0);
++    WRITE_ONCE (stop_requested, 0);
+ }
+ 
+ int
+@@ -681,7 +702,10 @@
+     task_lwip_timer = hev_task_ref (task_lwip_timer);
+     hev_task_run (task_lwip_timer, lwip_timer_task_entry, NULL);
+ 
+-    run = 1;
++    WRITE_ONCE (run, 1);
++    if (READ_ONCE (stop_requested))
++        hev_socks5_tunnel_try_quit ();
++
+     hev_task_system_run ();
+ 
+     return 0;
+@@ -705,9 +729,63 @@
+ 
+     res = write (fd, &res, 1);
+     assert (res > 0 && "socks5 tunnel write event");
++}
++
++int
++hev_socks5_tunnel_is_ready (void)
++{
++    int ready;
++
++    pthread_mutex_lock (&stop_mutex);
++    ready = !READ_ONCE (stop_requested) && READ_ONCE (run) &&
++            event_fds[1] >= 0;
++    pthread_mutex_unlock (&stop_mutex);
++
++    return ready;
+ }
+ 
++int
++hev_socks5_tunnel_try_quit (void)
++{
++    unsigned char val = 0;
++    ssize_t res;
++    int fd;
++
++    /* Preserve a stop requested while async initialization is still in
++     * progress. hev_socks5_tunnel_run observes this flag before entering the
++     * task system, so the caller never needs the blocking stop API. */
++    WRITE_ONCE (stop_requested, 1);
++
++    pthread_mutex_lock (&stop_mutex);
++    if (!READ_ONCE (run)) {
++        pthread_mutex_unlock (&stop_mutex);
++        return -EAGAIN;
++    }
++
++    fd = event_fds[1];
++    if (fd < 0) {
++        pthread_mutex_unlock (&stop_mutex);
++        return -EAGAIN;
++    }
++
++    res = write (fd, &val, sizeof (val));
++    pthread_mutex_unlock (&stop_mutex);
++
++    if (res == sizeof (val))
++        return 0;
++    if (res < 0)
++        return -errno;
++
++    return -EIO;
++}
++
+ void
++hev_socks5_tunnel_reset_stop (void)
++{
++    WRITE_ONCE (stop_requested, 0);
++}
++
++void
+ hev_socks5_tunnel_stats (size_t *tx_packets, size_t *tx_bytes,
+                          size_t *rx_packets, size_t *rx_bytes)
+ {
+diff --git a/src/hev-main.c b/src/hev-main.c
+--- a/src/hev-main.c
++++ b/src/hev-main.c
+@@ -90,10 +90,15 @@
+ hev_socks5_tunnel_main_from_file (const char *config_path, int tun_fd)
+ {
+     int res = hev_config_init_from_file (config_path);
+-    if (res < 0)
++    if (res < 0) {
++        hev_socks5_tunnel_reset_stop ();
+         return -1;
++    }
+ 
+-    return hev_socks5_tunnel_main_inner (tun_fd);
++    res = hev_socks5_tunnel_main_inner (tun_fd);
++    if (res < 0)
++        hev_socks5_tunnel_reset_stop ();
++    return res;
+ }
+ 
+ int
+@@ -101,10 +106,15 @@
+                                  unsigned int config_len, int tun_fd)
+ {
+     int res = hev_config_init_from_str (config_str, config_len);
+-    if (res < 0)
++    if (res < 0) {
++        hev_socks5_tunnel_reset_stop ();
+         return -1;
++    }
+ 
+-    return hev_socks5_tunnel_main_inner (tun_fd);
++    res = hev_socks5_tunnel_main_inner (tun_fd);
++    if (res < 0)
++        hev_socks5_tunnel_reset_stop ();
++    return res;
+ }
+ 
+ int
+diff --git a/src/hev-main.h b/src/hev-main.h
+--- a/src/hev-main.h
++++ b/src/hev-main.h
+@@ -70,6 +70,28 @@
+ void hev_socks5_tunnel_quit (void);
+ 
+ /**
++ * hev_socks5_tunnel_is_ready:
++ *
++ * Check whether tunnel initialization has completed and its event loop can
++ * accept a non-blocking stop request.
++ *
++ * Returns: one when ready, zero otherwise.
++ */
++int hev_socks5_tunnel_is_ready (void);
++
++/**
++ * hev_socks5_tunnel_try_quit:
++ *
++ * Request tunnel shutdown without waiting for asynchronous initialization.
++ * This function never blocks. Callers may retry while initialization is in
++ * progress.
++ *
++ * Returns: zero when the request was queued, -EAGAIN when the tunnel is not
++ * ready, otherwise a negative errno value.
++ */
++int hev_socks5_tunnel_try_quit (void);
++
++/**
+  * hev_socks5_tunnel_stats:
+  * @tx_packets (out): transmitted packets
+  * @tx_bytes (out): transmitted bytes

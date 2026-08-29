@@ -16,6 +16,18 @@ inputs:
   cert-password:
     description: Certificate password
     required: true
+  expected-leaf-sha256:
+    description: Independently pinned lowercase SHA-256 of the imported Apple leaf DER
+    required: false
+    default: ""
+  expected-team-id:
+    description: Exact Apple developer team identifier in the imported leaf
+    required: false
+    default: ""
+  expected-certificate-kind:
+    description: Exact certificate class when independent pinning is enabled
+    required: false
+    default: apple-distribution
 
 runs:
   using: composite
@@ -27,12 +39,96 @@ runs:
         KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
         CERT_BASE64: ${{ inputs.cert-base64 }}
         CERT_PASSWORD: ${{ inputs.cert-password }}
+        EXPECTED_LEAF_SHA256: ${{ inputs.expected-leaf-sha256 }}
+        EXPECTED_TEAM_ID: ${{ inputs.expected-team-id }}
+        EXPECTED_CERTIFICATE_KIND: ${{ inputs.expected-certificate-kind }}
       run: |
-        CERT_PATH=$(mktemp /tmp/cert_XXXXXX.p12)
-        trap "rm -f '$CERT_PATH'" EXIT
-
-        echo -n "$CERT_BASE64" | base64 --decode -o "$CERT_PATH"
-
+        set -euo pipefail
+        umask 077
+        TEMP_DIR="$(mktemp -d "${RUNNER_TEMP}/tribe-cert.XXXXXX")"
+        trap '/bin/rm -rf "$TEMP_DIR"' EXIT
+        CERT_PATH="$TEMP_DIR/distribution.p12"
+        CERT_PEM="$TEMP_DIR/distribution.pem"
+        CERT_DER="$TEMP_DIR/distribution.der"
+        KEY_PEM="$TEMP_DIR/distribution-key.pem"
+        python3 - "$CERT_PATH" <<'PY'
+        import base64
+        import binascii
+        import os
+        import pathlib
+        import sys
+        try:
+            decoded = base64.b64decode(os.environ.get("CERT_BASE64", ""), validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise SystemExit("certificate secret is not canonical base64") from error
+        if not decoded or len(decoded) > 4 * 1024 * 1024:
+            raise SystemExit("certificate secret decoded to an unsafe size")
+        pathlib.Path(sys.argv[1]).write_bytes(decoded)
+        PY
+        STRICT_PINNED_IDENTITY=0
+        if [[ -n "$EXPECTED_LEAF_SHA256" || -n "$EXPECTED_TEAM_ID" ]]; then
+          [[ "$EXPECTED_LEAF_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Pinned certificate SHA-256 is malformed" >&2
+            exit 1
+          }
+          [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo "Pinned Apple team ID is malformed" >&2
+            exit 1
+          }
+          case "$EXPECTED_CERTIFICATE_KIND" in
+            apple-distribution)
+              EXPECTED_CN_PREFIX='Apple Distribution:'
+              IDENTITY_POLICY=codesigning
+              ;;
+            developer-id-application)
+              EXPECTED_CN_PREFIX='Developer ID Application:'
+              IDENTITY_POLICY=codesigning
+              ;;
+            developer-id-installer)
+              EXPECTED_CN_PREFIX='Developer ID Installer:'
+              IDENTITY_POLICY=basic
+              ;;
+            *)
+              echo "Unsupported pinned Apple certificate kind" >&2
+              exit 1
+              ;;
+          esac
+          openssl pkcs12 -in "$CERT_PATH" -clcerts -nokeys \
+            -passin env:CERT_PASSWORD -out "$CERT_PEM"
+          openssl pkcs12 -in "$CERT_PATH" -nocerts -nodes \
+            -passin env:CERT_PASSWORD -out "$KEY_PEM"
+          [[ "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$CERT_PEM")" == 1 ]] \
+            || { echo "Pinned PKCS#12 must contain exactly one leaf certificate" >&2; exit 1; }
+          [[ "$(grep -Ec '^-----BEGIN ([A-Z]+ )?PRIVATE KEY-----$' "$KEY_PEM")" == 1 ]] \
+            || { echo "Pinned PKCS#12 must contain exactly one private key" >&2; exit 1; }
+          CERT_PUBLIC_KEY_SHA="$(openssl x509 -in "$CERT_PEM" -pubkey -noout \
+            | openssl pkey -pubin -outform DER | shasum -a 256 | awk '{print $1}')"
+          PRIVATE_PUBLIC_KEY_SHA="$(openssl pkey -in "$KEY_PEM" -pubout -outform DER \
+            | shasum -a 256 | awk '{print $1}')"
+          [[ "$CERT_PUBLIC_KEY_SHA" == "$PRIVATE_PUBLIC_KEY_SHA" ]] \
+            || { echo "Pinned certificate/private key mismatch" >&2; exit 1; }
+          openssl x509 -in "$CERT_PEM" -outform DER -out "$CERT_DER"
+          ACTUAL_LEAF_SHA256="$(shasum -a 256 "$CERT_DER" | awk '{print $1}')"
+          [[ "$ACTUAL_LEAF_SHA256" == "$EXPECTED_LEAF_SHA256" ]] || {
+            echo "Pinned Apple certificate SHA-256 mismatch" >&2
+            exit 1
+          }
+          SUBJECT="$(openssl x509 -in "$CERT_PEM" -noout -subject -nameopt RFC2253)"
+          [[ "$SUBJECT" == *"CN=$EXPECTED_CN_PREFIX"* && "$SUBJECT" == *"OU=$EXPECTED_TEAM_ID"* ]] || {
+            echo "Certificate class/team does not match the independent pin" >&2
+            exit 1
+          }
+          LEAF_SHA1="$(openssl x509 -in "$CERT_PEM" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
+          STRICT_PINNED_IDENTITY=1
+        fi
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-        security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12
+        security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERT_PASSWORD" \
+          -T /usr/bin/codesign -T /usr/bin/security -t cert -f pkcs12
         security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        if [[ "$STRICT_PINNED_IDENTITY" == 1 ]]; then
+          IDENTITIES="$(security find-identity -v -p "$IDENTITY_POLICY" "$KEYCHAIN_PATH")"
+          [[ "$(grep -c "$LEAF_SHA1" <<< "$IDENTITIES")" == 1 ]] || {
+            echo "Pinned Apple identity/private key was not imported exactly once" >&2
+            exit 1
+          }
+        fi

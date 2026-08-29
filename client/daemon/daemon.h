@@ -36,6 +36,12 @@ class Daemon : public QObject {
   virtual bool deactivate(bool emitSignals = true);
   virtual QJsonObject getStatus();
 
+  // Normal-macOS catalog-v2 AWG lifecycle.  The runtime UUID is allocated by the GUI before
+  // PREPARE; daemon callbacks never adopt the first status they happen to observe.
+  bool activateExactSession(const InterfaceConfig& config, const QString& sessionId);
+  bool deactivateExactSession(const QString& sessionId);
+  QJsonObject runtimeStatusV1(const QString& sessionId);
+
   // Callback before any Activating measure is done
   virtual void prepareActivation(const InterfaceConfig& config, int inetAdapterIndex = 0) {
       Q_UNUSED(config)  };
@@ -111,6 +117,14 @@ class Daemon : public QObject {
   QMap<InterfaceConfig::HopType, ConnectionState> m_connections;
   QHash<IPAddress, int> m_excludedAddrSet;
   QTimer m_handshakeTimer;
+
+  QString m_nativeSessionId;
+  QString m_nativeRuntimeState{QStringLiteral("stopped")};
+  QString m_nativeFailureReason;
+  quint64 m_nativeLastRx = 0;
+  quint64 m_nativeLastTx = 0;
+  quint64 m_nativeResetCount = 0;
+  bool m_nativeHaveCounters = false;
 };
 
 #endif  // DAEMON_H

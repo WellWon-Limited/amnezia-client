@@ -1,6 +1,6 @@
 from conan import ConanFile
 from conan.tools.layout import basic_layout
-from conan.tools.files import get, copy, chdir
+from conan.tools.files import get, copy, chdir, replace_in_file
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.apple import XCRun
 from conan.tools.gnu import Autotools, AutotoolsToolchain
@@ -19,6 +19,7 @@ class Tun2Socks(ConanFile):
     settings = "os", "arch"
 
     _binary_name = "tun2socks"
+    _source_commit = "4127937ea7c450a5230b273f406c9410acec2be7"
 
     _arch_map = {
         "x86": "386",
@@ -90,6 +91,7 @@ class Tun2Socks(ConanFile):
         env.define("GOMODCACHE", os.path.join(self.build_folder, "gopath", "pkg", "mod"))
         env.define("GOCACHE", os.path.join(self.build_folder, "gocache"))
         env.define("GOTELEMETRY", "off")
+        env.define("GOFLAGS", "-trimpath -buildvcs=false -ldflags=-buildid=")
         env.define("LDFLAGS", "")
         env.define("GOOS", self._goos)
         self._ldflags = tc.ldflags
@@ -97,16 +99,30 @@ class Tun2Socks(ConanFile):
         tc.generate(env)
 
     def build(self):
+        # Upstream strips Go DWARF before the app can produce a UUID-matched
+        # dSYM. Release stripping belongs after dsymutil and before codesign.
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "Makefile"),
+            "LDFLAGS += -w -s -buildid=",
+            "LDFLAGS += -buildid=",
+        )
         with chdir(self, self.source_folder):
             for arch in self._archs:
                 build_dir = os.path.join(self.build_folder, arch) if self._is_multiarch else self.build_folder
                 goarch = self._arch_map.get(arch)
 
-                ldflags = self._ldflags
-                cflags = self._cflags
+                ldflags = list(self._ldflags)
+                cflags = list(self._cflags)
                 if is_apple_os(self):
                     ldflags.append(f"-arch {_to_apple_arch(arch)}")
                     cflags.append(f"-arch {_to_apple_arch(arch)}")
+                    for build_root in (self.source_folder, self.build_folder):
+                        cflags.extend([
+                            f"-ffile-prefix-map={build_root}=.",
+                            f"-fdebug-prefix-map={build_root}=.",
+                            f"-fmacro-prefix-map={build_root}=.",
+                        ])
 
                 env = Environment()
                 env.define("GOARCH", goarch)
@@ -115,7 +131,9 @@ class Tun2Socks(ConanFile):
                 with env.vars(self).apply():
                     at = Autotools(self)
                     at.make("tun2socks", args=[
-                        f"BUILD_DIR={build_dir.replace("\\", "/") if self._is_windows else build_dir}"
+                        f"BUILD_DIR={build_dir.replace("\\", "/") if self._is_windows else build_dir}",
+                        f"BUILD_VERSION=v{self.version}",
+                        f"BUILD_COMMIT={self._source_commit}",
                     ])
                     if self._is_windows:
                         os.rename(

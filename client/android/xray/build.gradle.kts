@@ -16,4 +16,7 @@ dependencies {
     compileOnly(project(":protocolApi"))
     implementation(project(":xray:libXray"))
     implementation(libs.kotlinx.coroutines)
+    testImplementation(project(":utils"))
+    testImplementation(project(":protocolApi"))
+    testImplementation(kotlin("test-junit"))
 }

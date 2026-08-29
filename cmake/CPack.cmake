@@ -1,15 +1,29 @@
 # AVPN: свои имена пакета/каталога установки — иначе инсталлятор встаёт поверх официальной Amnezia
 set(CPACK_PACKAGE_VENDOR            Tribe)
+set(CPACK_PACKAGE_NAME              TribeVPN)
 set(CPACK_PACKAGE_VERSION           ${AMNEZIAVPN_VERSION})
 if(WIN32)
     set(CPACK_PACKAGE_FILE_NAME "TribeVPN_${AMNEZIAVPN_VERSION}_windows_x64")
 elseif(APPLE AND NOT IOS AND NOT MACOS_NE)
-    set(CPACK_PACKAGE_FILE_NAME "TribeVPN_${AMNEZIAVPN_VERSION}_macos_x64")
+    # platform_settings.cmake deliberately ships the daemon flavor as arm64.
+    # Do not label an arm64-only package as x64.
+    set(CPACK_PACKAGE_FILE_NAME "TribeVPN_${AMNEZIAVPN_VERSION}_macos_arm64")
+    if(NOT "${AMNEZIAVPN_VERSION}" MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+\\.([0-9]+)$")
+        message(FATAL_ERROR
+            "macOS release version must have a monotonic fourth build component")
+    endif()
+    set(CPACK_TRIBE_INSTALL_EPOCH "${CMAKE_MATCH_1}")
 elseif(LINUX AND NOT ANDROID)
     set(CPACK_PACKAGE_FILE_NAME "TribeVPN_${AMNEZIAVPN_VERSION}_linux_x64")
 endif()
 set(CPACK_PACKAGE_INSTALL_DIRECTORY TribeVPN)
-set(CPACK_PACKAGE_EXECUTABLES       AmneziaVPN AmneziaVPN)
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    set(CPACK_PACKAGE_EXECUTABLES   TribeVPN "Tribe VPN")
+else()
+    # Linux/Windows targets retain their upstream executable name.  Do not
+    # point IFW/WIX shortcuts at a macOS-only OUTPUT_NAME.
+    set(CPACK_PACKAGE_EXECUTABLES   AmneziaVPN "Tribe VPN")
+endif()
 set(CPACK_PRE_BUILD_SCRIPTS         ${CMAKE_CURRENT_LIST_DIR}/sign_binaries.cmake)
 set(CPACK_POST_BUILD_SCRIPTS        ${CMAKE_CURRENT_LIST_DIR}/sign_packages.cmake)
 set(CPACK_PROJECT_CONFIG_FILE       ${CMAKE_CURRENT_LIST_DIR}/CPackOptions.cmake)
@@ -19,6 +33,27 @@ list(PREPEND CPACK_COMPONENTS_ALL AmneziaVPN)
 
 if(APPLE)
     set(CPACK_GENERATOR productbuild)
+    # The productbuild postflight and app self-updater both operate on the
+    # canonical application bundle. CPack otherwise defaults to /usr/local.
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications")
+    set(CPACK_PRODUCTBUILD_DOMAINS ON)
+    set(CPACK_PRODUCTBUILD_DOMAINS_ANYWHERE OFF)
+    set(CPACK_PRODUCTBUILD_DOMAINS_USER OFF)
+    set(CPACK_PRODUCTBUILD_DOMAINS_ROOT ON)
+    # The GUI does not link every daemon-only Qt module (notably QtDBus).
+    # Preserve the configured Qt lib root in CPackConfig so the pre-sign hook
+    # can materialize the complete helper closure in the staged app.
+    if(NOT Qt6Core_DIR)
+        message(FATAL_ERROR "Qt6Core_DIR is required for the macOS daemon package")
+    endif()
+    get_filename_component(_tribe_qt_cmake_dir "${Qt6Core_DIR}" DIRECTORY)
+    get_filename_component(CPACK_TRIBE_QT_LIB_DIR "${_tribe_qt_cmake_dir}" DIRECTORY)
+    get_filename_component(CPACK_TRIBE_SOURCE_DIR "${CMAKE_SOURCE_DIR}" REALPATH)
+    get_filename_component(CPACK_TRIBE_BUILD_DIR "${CMAKE_BINARY_DIR}" REALPATH)
+    if(NOT EXISTS "${CPACK_TRIBE_QT_LIB_DIR}/QtCore.framework")
+        message(FATAL_ERROR
+            "Configured Qt Framework root is invalid: ${CPACK_TRIBE_QT_LIB_DIR}")
+    endif()
 else()
     set(CPACK_GENERATOR IFW)
 endif()
@@ -49,9 +84,22 @@ list(APPEND CPACK_WIX_EXTENSIONS    "WixToolset.Util.wixext")
 
 # === CPack productbuild generator settings ===
 set(CPACK_PRODUCTBUILD_IDENTIFIER       org.antivpn.pkg) # AVPN: свой pkg-receipt, не org.amneziavpn
-set(CPACK_PREFLIGHT_AMNEZIAVPN_SCRIPT   ${CMAKE_SOURCE_DIR}/deploy/data/macos/post_uninstall.sh)
-set(CPACK_POSTFLIGHT_AMNEZIAVPN_SCRIPT  ${CMAKE_SOURCE_DIR}/deploy/data/macos/post_install.sh)
-set(CPACK_POSTFLIGHT_UNINSTALL_SCRIPT   ${CMAKE_SOURCE_DIR}/deploy/data/macos/post_uninstall.sh)
+# An upgrade preflight must not destroy the currently working app/service.
+# productbuild may still fail before postflight; destructive uninstall is a
+# separate operator action and is never selectable inside the shipping pkg.
+set(CPACK_PREFLIGHT_AMNEZIAVPN_SCRIPT   ${CMAKE_SOURCE_DIR}/deploy/data/macos/pre_install.sh)
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/deploy/data/macos/post_install.sh
+        ${CMAKE_BINARY_DIR}/deploy/data/macos/post_install.sh
+        @ONLY
+    )
+    set(CPACK_POSTFLIGHT_AMNEZIAVPN_SCRIPT
+        ${CMAKE_BINARY_DIR}/deploy/data/macos/post_install.sh)
+else()
+    set(CPACK_POSTFLIGHT_AMNEZIAVPN_SCRIPT
+        ${CMAKE_SOURCE_DIR}/deploy/data/macos/post_install.sh)
+endif()
 # provide custom CPack.distribution.dist.in
 list(APPEND CMAKE_MODULE_PATH           ${CMAKE_SOURCE_DIR}/deploy/data/macos)
 
@@ -88,8 +136,8 @@ if(WIN32)
 endif()
 
 # AVPN: апстримный блок install(FILES deploy/data/macos/AmneziaVPN.plist → AmneziaVPN.app/…) удалён.
-# Наш pkg-postflight (deploy/data/macos/post_install.sh) ставит root-демон через tribe-daemon.sh,
-# который САМ генерирует /Library/LaunchDaemons/Tribe-service.plist — статический плист не нужен,
+# Наш pkg-postflight ставит закрытый receipt-gated payload; его транзакционный
+# installer САМ генерирует /Library/LaunchDaemons/Tribe-service.plist — статический plist не нужен,
 # а под legacy-именем AntiVPN он создавал фантомный /Applications/AntiVPN.app в payload (аудит 2026-07-02).
 
 include(CPackIFW)
@@ -105,9 +153,12 @@ cpack_ifw_configure_component(AmneziaVPN
     SCRIPT ${CMAKE_SOURCE_DIR}/deploy/installer/qif/componentscript.js
 )
 
-include(CPack)
-cpack_add_component(Uninstall
-    DISPLAY_NAME "Uninstall TribeVPN"
-    REQUIRES_ADMIN_RIGHTS
-    DISABLED
+include(CPackComponent)
+cpack_add_component(AmneziaVPN
+    DISPLAY_NAME "Tribe VPN"
+    DESCRIPTION "Tribe VPN"
+    REQUIRED
+    PLIST ${CMAKE_SOURCE_DIR}/deploy/data/macos/TribeVPN-component.plist
 )
+
+include(CPack)

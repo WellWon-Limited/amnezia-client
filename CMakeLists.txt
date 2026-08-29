@@ -35,13 +35,36 @@ set(RELEASE_DATE "${CURRENT_DATE}")
 
 set(APP_MAJOR_VERSION ${CMAKE_PROJECT_VERSION_MAJOR}.${CMAKE_PROJECT_VERSION_MINOR}.${CMAKE_PROJECT_VERSION_PATCH})
 
-# bump by 2 on every release, because we're releasing two versions on the play store
-set(APP_ANDROID_VERSION_CODE 2144)
-if(DEFINED APP_ANDROID_VERSION_CODE_OFFSET)
-    math(EXPR APP_ANDROID_VERSION_CODE "${APP_ANDROID_VERSION_CODE} + ${APP_ANDROID_VERSION_CODE_OFFSET}")
-endif()
-# AVPN: Android versionCode — тоже из нашего tribe_version.cmake (перекрывает upstream, включая OFFSET). // AVPN
+# AVPN: Android versionCode starts at the monotonic Tribe value.  The Play
+# matrix publishes two mutually exclusive SDK tracks, so its non-negative
+# offset must be applied after selecting our base instead of being overwritten.
 set(APP_ANDROID_VERSION_CODE ${TRIBE_ANDROID_VERSION_CODE})
+if(DEFINED APP_ANDROID_VERSION_CODE_OFFSET
+   AND NOT "${APP_ANDROID_VERSION_CODE_OFFSET}" STREQUAL "")
+    if(NOT "${APP_ANDROID_VERSION_CODE_OFFSET}" MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "APP_ANDROID_VERSION_CODE_OFFSET must be a non-negative integer")
+    endif()
+    math(EXPR APP_ANDROID_VERSION_CODE
+         "${APP_ANDROID_VERSION_CODE} + ${APP_ANDROID_VERSION_CODE_OFFSET}")
+endif()
+# Export the computed, source-owned value for release automation. INTERNAL +
+# FORCE prevents a stale/user cache override while keeping CMakeCache evidence
+# for the mutually exclusive 2158/2159 Play tracks.
+set(APP_ANDROID_VERSION_CODE "${APP_ANDROID_VERSION_CODE}" CACHE INTERNAL
+    "Computed Tribe Android versionCode" FORCE)
+
+# AVPN: compatibility reporting needs a monotonic store/build number distinct
+# from APP_VERSION.  Android uses Play's versionCode; Apple/desktop use the
+# fourth CMake project component (CFBundleVersion on Apple).
+if(ANDROID)
+    set(APP_BUILD_NUMBER ${APP_ANDROID_VERSION_CODE})
+else()
+    set(APP_BUILD_NUMBER ${CMAKE_PROJECT_VERSION_TWEAK})
+endif()
+
+# Fail-closed platform runtime capability facts. A release CI receipt is source-commit and
+# device-evidence bound; absent receipts compile all transport guard capabilities false.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/platform_runtime_receipts.cmake)
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
     set(MZ_PLATFORM_NAME "linux")
@@ -72,12 +95,6 @@ if(APPLE AND NOT IOS)
         "${CMAKE_SOURCE_DIR}/deploy/data/pf-templates/tribe.400.allowPIA.conf.in"
         "${CMAKE_CURRENT_BINARY_DIR}/tribe.400.allowPIA.conf"
         @ONLY
-    )
-
-    file(COPY_FILE
-        "${CMAKE_CURRENT_BINARY_DIR}/tribe.400.allowPIA.conf"
-        "${CMAKE_SOURCE_DIR}/deploy/data/macos/pf/tribe.400.allowPIA.conf"
-        ONLY_IF_DIFFERENT
     )
 endif()
 

@@ -24,21 +24,23 @@ class AmneziaVPN(ConanFile):
                 self.requires("win-split-tunnel/1.2.5.0")
                 self.requires("wintun/0.14.1")
             else:
-                self.requires("awg-go/3.0.1")
+                self.requires("awg-go/3.1.20260814")
 
-            self.requires("amnezia-xray-bindings/1.3.0")
+            self.requires("amnezia-xray-bindings/1.4.0")
             self.requires("tun2socks/2.6.0")
             self.requires("openvpn/2.7.0")
             self.requires("v2ray-rules-dat/202603162227")
 
         if has_ne:
-            self.requires("awg-apple/3.0.1-tribe.1")  # AVPN split-DNS: наш форк с dnsfwd + warmup + rebind, ребейз на AWG3 (deploy/tribe/conan/awg-apple-tribe)
+            # AVPN: official parser-fixed v3.1.4 plus a local, immutable Tribe
+            # dnsfwd/warmup/rebind patch packaged by recipes/awg-apple.
+            self.requires("awg-apple/3.1.4-tribe.3")
             self.requires("hev-socks5-tunnel/2.15.0", options={"as_framework": True})
             self.requires("openvpnadapter/1.0.0")
 
         if os == "Android":
-            self.requires("amnezia-libxray/1.0.2")
-            self.requires("awg-android/3.0.1")
+            self.requires("amnezia-libxray/1.0.3-tribe.1")
+            self.requires("awg-android/3.1.20260814")
             self.requires("openvpn-pt-android/1.0.0")
 
         # expicitly use libssh@amnezia to prevent it from being downloaded from conan-center

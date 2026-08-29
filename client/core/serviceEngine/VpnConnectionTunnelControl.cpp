@@ -29,6 +29,8 @@
     #include <QJsonDocument>
     #include <QLocalSocket>
     #include <QTimer>
+    #include "ipc.h" // AVPN: per-user root-owned WireGuard daemon endpoint
+    #include "ipcsecurity.h" // AVPN: mandatory authenticated daemon session
 #endif
 
 namespace avpn {
@@ -45,7 +47,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         // считал живой туннель «протухшим» на фоне tx-бёрстов проб. Реальный отчёт (>0) уточнит.
         connect(m_conn, &VpnConnection::connectionStateChanged, this,
                 [this](Vpn::ConnectionState st) {
-                    if (st == Vpn::ConnectionState::Connected)
+                    if (st == Vpn::ConnectionState::Connected && activeIsAwg())
                         updateHandshakeEpoch(m_stats, QDateTime::currentSecsSinceEpoch());
                 },
                 Qt::QueuedConnection);
@@ -55,13 +57,17 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     // опирался только на rx/tx; теперь DEAD-детект учитывает и устаревший handshake, как на desktop).
     // updateHandshakeEpoch: 0 = «неизвестно», известное значение не затирается (ITunnelControl.h).
     connect(IosController::Instance(), &IosController::handshakeChanged, this,
-            [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
+            [this](qint64 hsEpochSec) {
+                if (activeIsAwg()) updateHandshakeEpoch(m_stats, hsEpochSec);
+            },
             Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_ANDROID)
     // AVPN: то же на Android (last_handshake_time_sec из GoBackend.awgGetConfig → Statistics → JNI).
     connect(AndroidController::instance(), &AndroidController::handshakeUpdated, this,
-            [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
+            [this](qint64 hsEpochSec) {
+                if (activeIsAwg()) updateHandshakeEpoch(m_stats, hsEpochSec);
+            },
             Qt::QueuedConnection);
 #endif
 }
@@ -74,18 +80,29 @@ void VpnConnectionTunnelControl::onBytesChanged(quint64 rx, quint64 tx)
     accumulateByteDelta(m_stats, rx, tx);
 }
 
-bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QString &serverId)
+bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QString &serverId,
+                                               amnezia::DockerContainer container)
 {
     if (!m_conn)
         return false;
     // VpnConnection живёт в своём QThread → только через очередь. // AVPN
-    // DockerContainer::Awg (containerEnum.h) и порядок аргументов connectToVpn
-    // (serverId, container, vpnConfiguration) сверены с форком — корректно. // AVPN
-    return QMetaObject::invokeMethod(
+    // AVPN v2: container is part of the compiled transport envelope; never substitute AWG here.
+    const bool queued = QMetaObject::invokeMethod(
         m_conn, "connectToVpn", Qt::QueuedConnection,
         Q_ARG(QString, serverId),
-        Q_ARG(DockerContainer, DockerContainer::Awg),
+        Q_ARG(DockerContainer, container),
         Q_ARG(QJsonObject, cfg));
+    if (queued) {
+        m_activeContainer = container;
+        m_stats = TunnelStats{}; // per-session baseline; prevents cross-transport counter reuse
+    }
+    return queued;
+}
+
+bool VpnConnectionTunnelControl::activeIsAwg() const
+{
+    return m_activeContainer == amnezia::DockerContainer::Awg
+           || m_activeContainer == amnezia::DockerContainer::Awg2;
 }
 
 TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const SubscriptionNode &node)
@@ -221,7 +238,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     m_lastConfigReport.insert(QStringLiteral("split_dns"), splitDns);
     m_lastConfigReport.insert(QStringLiteral("dns_fwd"), cfg.contains(QStringLiteral("dnsFwdOn")));
 
-    if (!invokeConnect(cfg, primary.nodeId))
+    if (!invokeConnect(cfg, primary.nodeId, amnezia::DockerContainer::Awg))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();
 }
@@ -242,6 +259,9 @@ TunnelStats VpnConnectionTunnelControl::readStats()
 // (UAPI listen_port=0 → BindUpdate awg-go) без рестарта туннеля. Детали в ITunnelControl.h.
 bool VpnConnectionTunnelControl::rebindSocket()
 {
+    // AVPN v2: rebind/UAPI is a WireGuard primitive. Never send it to Xray/tun2socks.
+    if (!activeIsAwg())
+        return false;
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // NE: provider message живому extension'у (тот же канал, что checkStatus/getStatus).
     return IosController::Instance()->rebindTunnel();
@@ -254,7 +274,16 @@ bool VpnConnectionTunnelControl::rebindSocket()
     auto *guard = new QTimer(sock);
     guard->setSingleShot(true);
     connect(guard, &QTimer::timeout, sock, &QObject::deleteLater);
+    sock->setReadBufferSize(amnezia::ipcsecurity::kMaxDaemonCommandBytes);
     connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        QByteArray sessionToken;
+        QString securityError;
+        if (!amnezia::ipcsecurity::performClientHandshake(
+                sock, {}, &sessionToken, &securityError)) {
+            sock->abort();
+            sock->deleteLater();
+            return;
+        }
         sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("rebind") } })
                         .toJson(QJsonDocument::Compact));
         sock->write("\n");
@@ -265,8 +294,7 @@ bool VpnConnectionTunnelControl::rebindSocket()
         sock->deleteLater();
     });
     guard->start(3000);
-    const QString primary = QStringLiteral("/var/run/avpn/daemon.socket"); // путь LocalSocketController
-    sock->connectToServer(QFile::exists(primary) ? primary : QStringLiteral("/tmp/avpn.socket"));
+    sock->connectToServer(amnezia::getWireguardDaemonUrl());
     return true;
 #else
     return false; // Android (нет awgSetConfig в JNI) / Windows (wireguard-nt) — сразу failover
@@ -278,6 +306,7 @@ void VpnConnectionTunnelControl::down()
     if (m_conn)
         QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
     m_stats = TunnelStats{};
+    m_activeContainer = amnezia::DockerContainer::None;
 }
 
 } // namespace avpn

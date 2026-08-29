@@ -17,6 +17,33 @@ message(STATUS "AVPN overlay: ENABLED")
 # Компайл-деф, по которому апстрим-точки (coreController) включают регистрацию AvpnEngine.
 add_compile_definitions(AVPN_ENGINE_ENABLED=1)
 
+# AVPN catalog v2: the standalone macOS GUI consumes an authenticated
+# engine_manifest_v1 from the privileged daemon.  Compile the independently exported Conan
+# receipt into the GUI as the comparison lock; never trust version strings supplied by IPC on
+# their own.  App-Store macOS-NE and iOS use the awg-apple/amnezia-libxray lock below instead.
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    find_package(awg-go REQUIRED)
+    find_package(amnezia-xray-bindings REQUIRED)
+    foreach(_required
+            AWG_GO_ENGINE_VERSION AWG_GO_SOURCE_COMMIT AWG_GO_UAPI_ABI
+            XRAY_BINDINGS_VERSION XRAY_BINDINGS_SOURCE_COMMIT XRAY_CORE_VERSION
+            XRAY_BINDINGS_C_ABI)
+        if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+            message(FATAL_ERROR
+                "macOS catalog-v2 engine package did not export ${_required}") # AVPN
+        endif()
+    endforeach()
+    add_compile_definitions(
+        TRIBE_MACOS_AWG_ADAPTER_VERSION="${AWG_GO_ENGINE_VERSION}"
+        TRIBE_MACOS_AWG_CORE_VERSION="${AWG_GO_ENGINE_VERSION}"
+        TRIBE_MACOS_AWG_SOURCE_COMMIT="${AWG_GO_SOURCE_COMMIT}"
+        TRIBE_MACOS_AWG_ABI="${AWG_GO_UAPI_ABI}"
+        TRIBE_MACOS_XRAY_ADAPTER_VERSION="${XRAY_BINDINGS_VERSION}"
+        TRIBE_MACOS_XRAY_CORE_VERSION="${XRAY_CORE_VERSION}"
+        TRIBE_MACOS_XRAY_SOURCE_COMMIT="${XRAY_BINDINGS_SOURCE_COMMIT}"
+        TRIBE_MACOS_XRAY_ABI="${XRAY_BINDINGS_C_ABI}")
+endif()
+
 # AVPN (store-flow, 2026-07-09): сборка для СТОРОВ (Google Play AAB / App Store). В store-билде
 # в приложении НЕТ прямых платёжных переходов (полиси Google Play Payments / Apple §3.1.1):
 # «Управлять подпиской» скрыта (бейдж-инфо остаётся), золотая CTA ведёт на карточку «Активировать
@@ -36,12 +63,76 @@ if(TRIBE_STORE_BUILD)
     message(STATUS "AVPN overlay: TRIBE_STORE_BUILD=ON (store flow, payment surfaces gated)")
 endif()
 
+# AVPN catalog v2 offline trust anchor. It is public material but must come from the audited
+# release pipeline; test fixtures, QSettings and online responses are never valid defaults.
+set(TRIBE_CATALOG_ROOT_KID "" CACHE STRING "Bundled catalog keyset root key id")
+set(TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX "" CACHE STRING
+    "Bundled Ed25519 catalog keyset root public key (64 lowercase hex chars)")
+if((TRIBE_CATALOG_ROOT_KID STREQUAL "" AND
+    NOT TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX STREQUAL "") OR
+   (NOT TRIBE_CATALOG_ROOT_KID STREQUAL "" AND
+    TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX STREQUAL ""))
+    message(FATAL_ERROR "Catalog v2 root kid/public key must be supplied together")
+endif()
+if(NOT TRIBE_CATALOG_ROOT_KID STREQUAL "")
+    string(LENGTH "${TRIBE_CATALOG_ROOT_KID}" _tribe_catalog_root_kid_length)
+    string(LENGTH "${TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX}"
+           _tribe_catalog_root_public_key_length)
+    if(_tribe_catalog_root_kid_length LESS 1
+       OR _tribe_catalog_root_kid_length GREATER 64
+       OR NOT TRIBE_CATALOG_ROOT_KID MATCHES "^[A-Za-z0-9][A-Za-z0-9.+_-]*$"
+       OR NOT _tribe_catalog_root_public_key_length EQUAL 64
+       OR NOT TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX MATCHES "^[0-9a-f]+$"
+       OR TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX STREQUAL
+          "0000000000000000000000000000000000000000000000000000000000000000")
+        message(FATAL_ERROR "Catalog v2 offline root compile definition is malformed")
+    endif()
+    add_compile_definitions(
+        TRIBE_CATALOG_ROOT_KID="${TRIBE_CATALOG_ROOT_KID}"
+        TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX="${TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX}")
+elseif(TRIBE_STORE_BUILD OR DEPLOY)
+    message(FATAL_ERROR
+        "Release/store build requires an audited compile-time catalog v2 offline root")
+else()
+    message(STATUS "Catalog v2 network runtime disabled: no compile-time offline root")
+endif()
+
 set(AVPN_SE ${CMAKE_CURRENT_LIST_DIR}/../core/serviceEngine)
 
 list(APPEND HEADERS
     ${AVPN_SE}/dto/Subscription.h
+    ${AVPN_SE}/dto/Catalog.h
     ${AVPN_SE}/SubscriptionParser.h
     ${AVPN_SE}/AwgConfigBuilder.h
+    ${AVPN_SE}/CatalogParser.h
+    ${AVPN_SE}/CatalogTrust.h
+    ${AVPN_SE}/CatalogCompatibility.h
+    ${AVPN_SE}/CatalogAcceptance.h
+    ${AVPN_SE}/CatalogResolve.h
+    ${AVPN_SE}/SignedEnvelope.h
+    ${AVPN_SE}/CatalogKeyset.h
+    ${AVPN_SE}/CatalogKeysetClient.h
+    ${AVPN_SE}/CatalogSecureStore.h
+    ${AVPN_SE}/CatalogResolveClient.h
+    ${AVPN_SE}/CatalogOutcomeClient.h
+    ${AVPN_SE}/CatalogRuntimeState.h
+    ${AVPN_SE}/CatalogTrustedClock.h
+    ${AVPN_SE}/CatalogConnectionFacade.h
+    ${AVPN_SE}/CatalogCoordinator.h
+    ${AVPN_SE}/CatalogProductRuntime.h
+    ${AVPN_SE}/RuntimeEngineManifest.h
+    ${AVPN_SE}/PostTunnelReceiptVerifier.h
+    ${AVPN_SE}/CandidateSelector.h
+    ${AVPN_SE}/LegacyCatalogFallback.h
+    ${AVPN_SE}/LegacyNativeOwnershipPolicy.h
+    ${AVPN_SE}/TransportAdapter.h
+    ${AVPN_SE}/NativeProfileCompiler.h
+    ${AVPN_SE}/NativeConnectionPolicy.h
+    ${AVPN_SE}/NativeDispatchPolicyDigest.h
+    ${AVPN_SE}/NativeRuntimeIdentity.h
+    ${AVPN_SE}/NativeSessionGuardEvent.h
+    ${AVPN_SE}/ConnectionReducer.h
+    ${AVPN_SE}/VpnConnectionTransportAdapter.h
     ${AVPN_SE}/ITunnelControl.h
     ${AVPN_SE}/VpnConnectionTunnelControl.h
     ${AVPN_SE}/Identity.h
@@ -94,6 +185,26 @@ list(APPEND HEADERS
 set(AVPN_ENGINE_SRC
     ${AVPN_SE}/SubscriptionParser.cpp
     ${AVPN_SE}/AwgConfigBuilder.cpp
+    ${AVPN_SE}/CatalogParser.cpp
+    ${AVPN_SE}/SignedEnvelope.cpp
+    ${AVPN_SE}/CatalogKeyset.cpp
+    ${AVPN_SE}/CatalogKeysetClient.cpp
+    ${AVPN_SE}/CatalogSecureStore.cpp
+    ${AVPN_SE}/CatalogResolveClient.cpp
+    ${AVPN_SE}/CatalogOutcomeClient.cpp
+    ${AVPN_SE}/CatalogRuntimeState.cpp
+    ${AVPN_SE}/CatalogTrustedClock.cpp
+    ${AVPN_SE}/CatalogConnectionFacade.cpp
+    ${AVPN_SE}/CatalogCoordinator.cpp
+    ${AVPN_SE}/CatalogProductRuntime.cpp
+    ${AVPN_SE}/RuntimeEngineManifest.cpp
+    ${AVPN_SE}/PostTunnelReceiptVerifier.cpp
+    ${AVPN_SE}/NativeProfileCompiler.cpp
+    ${AVPN_SE}/NativeConnectionPolicy.cpp
+    ${AVPN_SE}/NativeDispatchPolicyDigest.cpp
+    ${AVPN_SE}/NativeSessionGuardEvent.cpp
+    ${AVPN_SE}/ConnectionReducer.cpp
+    ${AVPN_SE}/VpnConnectionTransportAdapter.cpp
     ${AVPN_SE}/Prober.cpp
     ${AVPN_SE}/QualityProbe.cpp
     ${AVPN_SE}/ServiceProbe.cpp
@@ -130,6 +241,20 @@ if(APPLE AND NOT IOS AND NOT MACOS_NE)
     # AVPN (P-ANN): бейдж непрочитанных на иконке дока (NSApp.dockTile).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
+endif()
+
+# AVPN v2: app-only Keychain custody for the encrypted catalog LKG. The Network Extension never
+# reads this vault; it receives only a sanitized active native profile.
+if(APPLE)
+    list(APPEND HEADERS ${AVPN_SE}/AppleCatalogSecureStorage.h)
+    list(APPEND SOURCES ${AVPN_SE}/AppleCatalogSecureStorage.mm)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/AppleCatalogSecureStorage.mm)
+endif()
+
+if(ANDROID)
+    list(APPEND HEADERS ${AVPN_SE}/AndroidCatalogSecureStorage.h)
+    list(APPEND SOURCES ${AVPN_SE}/AndroidCatalogSecureStorage.cpp)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/AndroidCatalogSecureStorage.cpp)
 endif()
 
 # AVPN: нативные iOS-исходники — только для iOS-таргета.
