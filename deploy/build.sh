@@ -33,6 +33,8 @@ while [[ $# -gt 0 ]]; do
         --abi)              abis+=("$2");            shift 2 ;;
         --sign)             : ${SIGN:=true};         shift   ;;
         --aab)              : ${BUILD_AAB=true};     shift   ;;
+        --apk)              : ${BUILD_APK=true};     shift   ;;
+        --play)             : ${BUILD_PLAY=true};    shift   ;;
         --compile-only)     : ${COMPILE_ONLY=true};  shift   ;;
         --catalog-root-kid) TRIBE_CATALOG_ROOT_KID="$2"; shift 2 ;;
         --catalog-root-public-key-hex) TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX="$2"; shift 2 ;;
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --abi                     - specify Android ABIs for target to build for. all by default"
             echo "  --sign                    - whether to sign the resulting files. only appicable to Android"
             echo "  --aab                     - whether to build AAB. only applicable to Android"
+            echo "  --apk                     - whether to build APK. use with --play. only applicable to Android"
+            echo "  --play                    - build Play flavor (Google Play Billing). use with --aab or --apk. only applicable to Android"
             echo "  --compile-only            - unsigned, non-package macOS NE compile proof"
             echo "  --catalog-root-kid <id>   - audited catalog-v2 offline root key id"
             echo "  --catalog-root-public-key-hex <hex> - audited Ed25519 root public key"
@@ -305,6 +309,7 @@ args=()
 [[ -n "$QT_ANDROID_SIGN_AAB" ]]       && args+=("-DQT_ANDROID_SIGN_AAB=$QT_ANDROID_SIGN_AAB")
 [[ -n "$QT_ANDROID_ABIS" ]]           && args+=("-DQT_ANDROID_ABIS=$QT_ANDROID_ABIS")
 [[ -n "$QT_ANDROID_BUILD_ALL_ABIS" ]] && args+=("-DQT_ANDROID_BUILD_ALL_ABIS=$QT_ANDROID_BUILD_ALL_ABIS")
+[[ -n "$BUILD_PLAY" ]]                && args+=("-DANDROID_BUILD_PLAY=ON")
 [[ -n "${TRIBE_CATALOG_ROOT_KID:-}" ]] && args+=("-DTRIBE_CATALOG_ROOT_KID=$TRIBE_CATALOG_ROOT_KID")
 [[ -n "${TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX:-}" ]] && args+=("-DTRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX=$TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX")
 [[ -n "${TRIBE_PLATFORM_RUNTIME_RECEIPT_FILE:-}" ]] && args+=("-DTRIBE_PLATFORM_RUNTIME_RECEIPT_FILE=$TRIBE_PLATFORM_RUNTIME_RECEIPT_FILE")
@@ -327,7 +332,17 @@ if [[ "$TARGET" == "macos-ne" ]]; then
 fi
 run_traced cmake "${build_args[@]}"
 
-[[ -n "$BUILD_AAB" ]] && run_traced cmake --build "$BUILD_PATH" --config "$CMAKE_BUILD_TYPE" --parallel "$JOBS" -t "aab"
+if [[ -n "$BUILD_AAB" ]]; then
+    if [[ -n "$BUILD_PLAY" ]]; then
+        run_traced cmake --build "$BUILD_PATH" --config "$CMAKE_BUILD_TYPE" --parallel "$JOBS" -t "android_play_aab"
+    else
+        run_traced cmake --build "$BUILD_PATH" --config "$CMAKE_BUILD_TYPE" --parallel "$JOBS" -t "aab"
+    fi
+fi
+
+if [[ -n "$BUILD_APK" ]] && [[ -n "$BUILD_PLAY" ]]; then
+    run_traced cmake --build "$BUILD_PATH" --config "$CMAKE_BUILD_TYPE" -t "android_play_apk"
+fi
 
 if [ -z "$no_installers" ]; then
     for installer in $INSTALLERS; do

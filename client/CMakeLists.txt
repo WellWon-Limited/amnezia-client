@@ -1,5 +1,24 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
 
+# Keep upstream's configurable branding layer initialized for every platform.
+# The technical Swift/Qt target names intentionally stay upstream-compatible;
+# the public Tribe identifiers remain isolated from the Amnezia application.
+set(CLIENT_TARGET_NAME "AmneziaVPN" CACHE STRING "Client executable target name")
+set(CLIENT_APPLICATION_NAME "AmneziaVPN" CACHE STRING "Technical application name")
+set(CLIENT_SERVICE_NAME "Tribe-service" CACHE STRING "Privileged service executable name")
+set(CLIENT_ORGANIZATION_NAME "AVPN.ORG" CACHE STRING "QSettings organization name")
+set(CLIENT_APP_INSTANCE_NAME "AVPNInstance" CACHE STRING "Single-instance local server name")
+set(CLIENT_KEYCHAIN_NAME "AVPN-Keychain" CACHE STRING "Encrypted settings keychain name")
+set(CLIENT_IOS_BUNDLE_ID "hk.wellwon.vpn" CACHE STRING "iOS App Store bundle id")
+set(CLIENT_IOS_STORE_URL_FALLBACK "itms-apps://itunes.apple.com/app/id6778394015" CACHE STRING "Tribe App Store URL")
+set(CLIENT_ANDROID_PACKAGE "com.tribevpn.client" CACHE STRING "Tribe Play Store package")
+set(BUILD_OSX_APP_IDENTIFIER "hk.wellwon.vpn" CACHE STRING "macOS application identifier")
+set(BUILD_IOS_APP_IDENTIFIER "hk.wellwon.vpn" CACHE STRING "iOS application identifier")
+set(BUILD_IOS_GROUP_IDENTIFIER "group.hk.wellwon.tribe" CACHE STRING "Apple app group")
+set(BUILD_VPN_DEVELOPMENT_TEAM "Q7DVH5MCWF" CACHE STRING "Tribe development team")
+
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/clientBrandingDefaults.cmake)
+
 set(PROJECT AmneziaVPN)
 project(${PROJECT})
 
@@ -136,6 +155,17 @@ include_directories(mozilla/shared)
 include_directories(mozilla/models)
 
 configure_file(${CMAKE_CURRENT_LIST_DIR}/../version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/core/utils)
+configure_file(
+    ${CMAKE_CURRENT_LIST_DIR}/core/utils/appUiConfig.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/core/utils/appUiConfig.h
+    @ONLY
+)
+configure_file(
+    ${CMAKE_CURRENT_LIST_DIR}/core/utils/swiftBridgeConfig.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/core/utils/swiftBridgeConfig.h
+    @ONLY
+)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${PROJECT} PRIVATE "MZ_DEBUG")

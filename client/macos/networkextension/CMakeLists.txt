@@ -2,6 +2,14 @@ enable_language(Swift)
 message("Client message >> macos build >> AmneziaVPNNetworkExtension")
 set(CLIENT_ROOT_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 
+# Xcode does not expand CMake's ${...} placeholders when an .in file is used
+# directly as INFOPLIST_FILE. Materialize the template first so the extension
+# always carries its executable name and shared app-group identifiers.
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
+    ${CMAKE_CURRENT_BINARY_DIR}/Info.plist
+)
+
 add_executable(AmneziaVPNNetworkExtension)
 
 message("executable_path is: @executable_path/../../Frameworks")
@@ -13,10 +21,9 @@ set_target_properties(AmneziaVPNNetworkExtension PROPERTIES
     XCODE_ATTRIBUTE_MARKETING_VERSION "${APP_MAJOR_VERSION}"
     XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION "${CMAKE_PROJECT_VERSION_TWEAK}"
     XCODE_ATTRIBUTE_PRODUCT_NAME "AmneziaVPNNetworkExtension"
-
     XCODE_ATTRIBUTE_APPLICATION_EXTENSION_API_ONLY "YES"
 
-    XCODE_ATTRIBUTE_INFOPLIST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
+    XCODE_ATTRIBUTE_INFOPLIST_FILE ${CMAKE_CURRENT_BINARY_DIR}/Info.plist
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../../../Frameworks @loader_path/../../../../Frameworks"
 
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
@@ -46,7 +53,7 @@ set_target_properties(AmneziaVPNNetworkExtension PROPERTIES
 )
 
 set_target_properties("AmneziaVPNNetworkExtension" PROPERTIES
-    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
+    XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${BUILD_VPN_DEVELOPMENT_TEAM}"
 )
 
 find_library(FW_ASSETS_LIBRARY AssetsLibrary)

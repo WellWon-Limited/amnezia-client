@@ -64,7 +64,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import org.amnezia.vpn.protocol.getStatistics
 import org.amnezia.vpn.protocol.getEngineManifest
 import org.amnezia.vpn.protocol.getStatus
@@ -102,6 +101,7 @@ class AmneziaActivity : QtActivity() {
     private val clientProcessEpoch = UUID.randomUUID().toString().lowercase()
     private var pendingNativeGuardRecoveryResolution: Triple<String, String, String?>? = null
     private var pfd: ParcelFileDescriptor? = null
+    private lateinit var billingRepository: BillingRepository
 
     private val actionResultHandlers = mutableMapOf<Int, ActivityResultHandler>()
     private val permissionRequestHandlers = mutableMapOf<Int, PermissionRequestHandler>()
@@ -262,6 +262,7 @@ class AmneziaActivity : QtActivity() {
         registerBroadcastReceivers()
         intent?.let(::processIntent)
         runBlocking { vpnProto = proto.await() }
+        billingRepository = BillingPaymentRepository(applicationContext)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1495,15 +1496,9 @@ class AmneziaActivity : QtActivity() {
     @Suppress("unused")
     fun getAppList(): String {
         Log.v(TAG, "Get app list")
-        var appList = ""
-        runBlocking {
-            mainScope.launch {
-                withContext(Dispatchers.IO) {
-                    appList = AppListProvider.getAppList(packageManager, packageName)
-                }
-            }.join()
+        return blockingCall(Dispatchers.IO) {
+            AppListProvider.getAppList(packageManager, packageName)
         }
-        return appList
     }
 
     @Suppress("unused")
@@ -1672,11 +1667,48 @@ class AmneziaActivity : QtActivity() {
         return super.dispatchTrackballEvent(ev)
     }
 
+    @Suppress("unused")
+    fun isPlay(): Boolean = BuildConfig.FLAVOR == "play"
+
+    @Suppress("unused")
+    fun getCountryCode(): String {
+        return blockingCall { billingRepository.getCountryCode() }
+    }
+
+    @Suppress("unused")
+    fun getSubscriptionPlans(): String {
+        return blockingCall { billingRepository.getSubscriptionPlans() }
+    }
+
+    @Suppress("unused")
+    fun purchaseSubscription(offerToken: String): String {
+        return blockingCall { billingRepository.purchaseSubscription(this@AmneziaActivity, offerToken) }
+    }
+
+    @Suppress("unused")
+    fun upgradeSubscription(offerToken: String, oldPurchaseToken: String): String {
+        Log.v(TAG, "Upgrade subscription")
+        return blockingCall {
+            billingRepository.upgradeSubscription(this@AmneziaActivity, offerToken, oldPurchaseToken)
+        }
+    }
+
+    @Suppress("unused")
+    fun acknowledgePurchase(purchaseToken: String): String {
+        Log.v(TAG, "Acknowledge purchase")
+        return blockingCall { billingRepository.acknowledge(purchaseToken) }
+    }
+
+    @Suppress("unused")
+    fun queryPurchases(): String {
+        return blockingCall { billingRepository.queryPurchases() }
+    }
+
     /**
      * Utils methods
      */
     private fun <T> blockingCall(
-        context: CoroutineContext = Dispatchers.Main.immediate,
+        context: CoroutineContext = Dispatchers.Default,
         block: suspend () -> T
     ) = runBlocking {
         mainScope.async(context) { block() }.await()

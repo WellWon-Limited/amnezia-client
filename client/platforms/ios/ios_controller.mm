@@ -19,8 +19,7 @@
 #include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
-#import "StoreKitController.h"
-#import <AmneziaVPN-Swift.h>
+#import "core/utils/swiftBridge.h"
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
 #include "version.h"
 
@@ -527,9 +526,6 @@ IosController::IosController() : QObject()
 {
     s_instance = this;
     m_iosControllerWrapper = [[IosControllerWrapper alloc] initWithCppController:this];
-
-    // Initialize StoreKitController early to start observing the payment queue
-    [StoreKitController sharedInstance];
 
     [[NSNotificationCenter defaultCenter]
         removeObserver: (__bridge NSObject *)m_iosControllerWrapper];
@@ -2762,6 +2758,7 @@ QString IosController::openFile() {
     return filePath;
 }
 
+#if 0 // Replaced below by the upstream StoreKit2 bridge; kept out of the build during migration.
 void IosController::purchaseProduct(const QString &productId,
                                    std::function<void(bool success,
                                                       const QString &transactionId,
@@ -2900,6 +2897,165 @@ void IosController::fetchProducts(const QStringList &productIds,
         if (callback) {
             callback(QList<QVariantMap>(), QStringList(), "StoreKit 2 requires iOS 15.0 or later");
         }
+    }
+}
+
+#endif
+
+namespace {
+constexpr int storeKitErrorCodeCancelled = 1;
+constexpr int storeKitErrorCodePending = 2;
+
+IosController::StorePurchaseFailure storePurchaseFailureFromError(NSError *error)
+{
+    if (!error || ![error.domain isEqualToString:@"StoreKit2Helper"])
+        return IosController::StorePurchaseFailure::Other;
+    switch (error.code) {
+    case storeKitErrorCodeCancelled: return IosController::StorePurchaseFailure::Cancelled;
+    case storeKitErrorCodePending: return IosController::StorePurchaseFailure::Pending;
+    default: return IosController::StorePurchaseFailure::Other;
+    }
+}
+
+QVariantMap toTransactionMap(NSDictionary *dict)
+{
+    QVariantMap transaction;
+    for (NSString *key in @[@"transactionId", @"originalTransactionId", @"productId",
+                            @"environment"]) {
+        NSString *value = dict[key];
+        if (value)
+            transaction.insert(QString::fromUtf8(key.UTF8String),
+                               QString::fromUtf8(value.UTF8String));
+    }
+    return transaction;
+}
+
+QList<QVariantMap> toTransactionList(NSArray<NSDictionary *> *transactions)
+{
+    QList<QVariantMap> list;
+    for (NSDictionary *dict in transactions ?: @[])
+        list.push_back(toTransactionMap(dict));
+    return list;
+}
+}
+
+void IosController::purchaseProduct(
+    const QString &productId,
+    std::function<void(bool, const QString &, const QString &, const QString &, const QString &,
+                       const QString &, StorePurchaseFailure)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] purchaseProductWithProductIdentifier:productId.toNSString()
+            completion:^(BOOL success, NSString *transactionId, NSString *purchasedProductId,
+                         NSString *originalTransactionId, NSString *environment, NSError *error) {
+                const StorePurchaseFailure reason = success
+                    ? StorePurchaseFailure::Other : storePurchaseFailureFromError(error);
+                if (cb) {
+                    cb(success,
+                       QString::fromUtf8((transactionId ?: @"").UTF8String),
+                       QString::fromUtf8((purchasedProductId ?: @"").UTF8String),
+                       QString::fromUtf8((originalTransactionId ?: @"").UTF8String),
+                       QString::fromUtf8((environment ?: @"").UTF8String),
+                       QString::fromUtf8((error.localizedDescription ?: @"").UTF8String),
+                       reason);
+                }
+            }];
+    } else if (callback) {
+        callback(false, {}, {}, {}, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"),
+                 StorePurchaseFailure::Other);
+    }
+}
+
+void IosController::finishStoreTransaction(const QString &transactionId)
+{
+    if (transactionId.isEmpty()) return;
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        [[StoreKit2Helper shared] finishTransactionWithTransactionId:transactionId.toNSString()
+            completion:^(BOOL finished) {
+                if (!finished)
+                    qWarning() << "StoreKit transaction was not found in the unfinished queue";
+            }];
+    }
+}
+
+void IosController::startStoreTransactionObserver()
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        [[StoreKit2Helper shared] startTransactionUpdatesListenerWithHandler:
+            ^(NSDictionary *transaction) { emit storeTransactionUpdated(toTransactionMap(transaction)); }];
+    }
+}
+
+void IosController::restorePurchases(
+    std::function<void(bool, const QList<QVariantMap> &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchCurrentEntitlementsWithCompletion:
+            ^(BOOL success, NSArray<NSDictionary *> *transactions, NSError *error) {
+                if (cb) cb(success, toTransactionList(transactions),
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback(false, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
+    }
+}
+
+void IosController::fetchLocalEntitlements(
+    std::function<void(bool, const QList<QVariantMap> &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchLocalEntitlementsWithCompletion:
+            ^(BOOL success, NSArray<NSDictionary *> *transactions, NSError *error) {
+                if (cb) cb(success, toTransactionList(transactions),
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback(false, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
+    }
+}
+
+void IosController::fetchProducts(
+    const QStringList &productIds,
+    std::function<void(const QList<QVariantMap> &, const QStringList &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        NSMutableSet<NSString *> *ids = [NSMutableSet setWithCapacity:productIds.size()];
+        for (const QString &id : productIds) [ids addObject:id.toNSString()];
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchProductsWithIdentifiers:ids
+            completion:^(NSArray<NSDictionary *> *products, NSArray<NSString *> *invalidIds,
+                         NSError *error) {
+                QList<QVariantMap> result;
+                for (NSDictionary *info in products) {
+                    QVariantMap product;
+                    for (NSString *key in @[@"productId", @"title", @"description", @"price",
+                                            @"displayPrice", @"currencyCode",
+                                            @"displayPricePerMonth", @"introOfferDisplayPrice",
+                                            @"introOfferPaymentMode"]) {
+                        if (NSString *value = info[key])
+                            product[QString::fromUtf8(key.UTF8String)] =
+                                QString::fromUtf8(value.UTF8String);
+                    }
+                    for (NSString *key in @[@"priceAmount", @"subscriptionBillingMonths",
+                                            @"trialDays"]) {
+                        if (NSNumber *value = info[key])
+                            product[QString::fromUtf8(key.UTF8String)] = value.doubleValue;
+                    }
+                    if (NSNumber *value = info[@"hasFreeTrial"])
+                        product[QStringLiteral("hasFreeTrial")] = value.boolValue;
+                    result.push_back(product);
+                }
+                QStringList invalid;
+                for (NSString *id in invalidIds)
+                    invalid.push_back(QString::fromUtf8(id.UTF8String));
+                if (cb) cb(result, invalid,
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback({}, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
     }
 }
 
