@@ -1,0 +1,65 @@
+--- a/tunnel/tools/libwg-go/jni.c
++++ b/tunnel/tools/libwg-go/jni.c
+@@ -14,6 +14,12 @@ extern int awgGetSocketV4(int handle);
+ extern int awgGetSocketV6(int handle);
+ extern char *awgGetConfig(int handle);
+ extern char *awgVersion();
++extern int awgPrepareProtected(struct go_string ifname, int tun_fd, struct go_string settings);
++extern int awgResumeProtected(int handle);
++extern void awgProtectedTurnOff(int handle);
++extern int awgProtectedGetSocketV4(int handle);
++extern int awgProtectedGetSocketV6(int handle);
++extern char *awgProtectedGetConfig(int handle);
+ 
+ JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgTurnOn(JNIEnv *env, jclass c, jstring ifname, jint tun_fd, jstring settings)
+ {
+@@ -33,6 +39,49 @@ JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgTurnOn(JNIEnv *env, j
+ 	return ret;
+ }
+ 
++JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgPrepareProtected(JNIEnv *env, jclass c, jstring ifname, jint tun_fd, jstring settings)
++{
++	const char *ifname_str = (*env)->GetStringUTFChars(env, ifname, 0);
++	size_t ifname_len = (*env)->GetStringUTFLength(env, ifname);
++	const char *settings_str = (*env)->GetStringUTFChars(env, settings, 0);
++	size_t settings_len = (*env)->GetStringUTFLength(env, settings);
++	int ret = awgPrepareProtected((struct go_string){ ifname_str, ifname_len }, tun_fd,
++		(struct go_string){ settings_str, settings_len });
++	(*env)->ReleaseStringUTFChars(env, ifname, ifname_str);
++	(*env)->ReleaseStringUTFChars(env, settings, settings_str);
++	return ret;
++}
++
++JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgResumeProtected(JNIEnv *env, jclass c, jint handle)
++{
++	return awgResumeProtected(handle);
++}
++
++JNIEXPORT void JNICALL Java_org_amnezia_awg_GoBackend_awgProtectedTurnOff(JNIEnv *env, jclass c, jint handle)
++{
++	awgProtectedTurnOff(handle);
++}
++
++JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgProtectedGetSocketV4(JNIEnv *env, jclass c, jint handle)
++{
++	return awgProtectedGetSocketV4(handle);
++}
++
++JNIEXPORT jint JNICALL Java_org_amnezia_awg_GoBackend_awgProtectedGetSocketV6(JNIEnv *env, jclass c, jint handle)
++{
++	return awgProtectedGetSocketV6(handle);
++}
++
++JNIEXPORT jstring JNICALL Java_org_amnezia_awg_GoBackend_awgProtectedGetConfig(JNIEnv *env, jclass c, jint handle)
++{
++	char *config = awgProtectedGetConfig(handle);
++	if (!config)
++		return NULL;
++	jstring ret = (*env)->NewStringUTF(env, config);
++	free(config);
++	return ret;
++}
++
+ JNIEXPORT void JNICALL Java_org_amnezia_awg_GoBackend_awgTurnOff(JNIEnv *env, jclass c, jint handle)
+ {
+ 	awgTurnOff(handle);

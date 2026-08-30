@@ -9,8 +9,21 @@ enable_language(OBJCXX)
 enable_language(Swift)
 
 find_package(Qt6 REQUIRED COMPONENTS ShaderTools Widgets)
+find_package(awg-apple REQUIRED) # AVPN: exports the immutable patched source tree used below/NE.
+foreach(_required AWG_APPLE_ADAPTER_VERSION AWG_APPLE_SOURCE_COMMIT
+                  AWG_APPLE_AWG_CORE_VERSION AWG_APPLE_XRAY_ADAPTER_VERSION
+                  AWG_APPLE_XRAY_SOURCE_COMMIT AWG_APPLE_XRAY_CORE_VERSION
+                  AWG_APPLE_XRAY_SOCKET_ABI)
+    if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+        message(FATAL_ERROR "awg-apple package did not export ${_required}")
+    endif()
+endforeach()
 # Link Qt Widgets for QWidget, QMenu, QAction etc.
 set(LIBS ${LIBS} Qt6::ShaderTools Qt6::Widgets)
+get_target_property(AWG_APPLE_INCLUDE_DIRS amnezia::awg-apple INTERFACE_INCLUDE_DIRECTORIES)
+if(NOT AWG_APPLE_INCLUDE_DIRS)
+    message(FATAL_ERROR "awg-apple package did not export public C headers") # AVPN
+endif()
 
 find_library(FW_AUTHENTICATIONSERVICES AuthenticationServices)
 find_library(FW_AVFOUNDATION AVFoundation)
@@ -34,7 +47,6 @@ set(LIBS ${LIBS}
 set(HEADERS ${HEADERS}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate-C-Interface.h
 )
@@ -44,7 +56,6 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_contro
 set(SOURCES ${SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosglue.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QRCodeReaderBase.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.mm
@@ -53,6 +64,7 @@ set(SOURCES ${SOURCES}
 target_include_directories(${PROJECT} PRIVATE
     ${Qt6Gui_PRIVATE_INCLUDE_DIRS}
     ${Qt6Widgets_PRIVATE_INCLUDE_DIRS}
+    ${AWG_APPLE_INCLUDE_DIRS}
 )
 
 
@@ -106,15 +118,26 @@ set_target_properties(${PROJECT} PROPERTIES
     XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "X7UJ388FXK"
 )
 target_include_directories(${PROJECT} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
-target_compile_options(${PROJECT} PRIVATE
-    -DGROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\"
-    -DVPN_NE_BUNDLEID=\"${BUILD_IOS_APP_IDENTIFIER}.network-extension\"
+target_compile_definitions(${PROJECT} PRIVATE
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:GROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:VPN_NE_BUNDLEID=\"${BUILD_IOS_APP_IDENTIFIER}.network-extension\">
+)
+target_compile_definitions(${PROJECT} PRIVATE
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_AWG_ADAPTER_VERSION="${AWG_APPLE_ADAPTER_VERSION}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_AWG_SOURCE_COMMIT="${AWG_APPLE_SOURCE_COMMIT}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_AWG_CORE_VERSION="${AWG_APPLE_AWG_CORE_VERSION}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_XRAY_ADAPTER_VERSION="${AWG_APPLE_XRAY_ADAPTER_VERSION}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_XRAY_SOURCE_COMMIT="${AWG_APPLE_XRAY_SOURCE_COMMIT}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_XRAY_CORE_VERSION="${AWG_APPLE_XRAY_CORE_VERSION}">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:TRIBE_APPLE_XRAY_SOCKET_ABI="${AWG_APPLE_XRAY_SOCKET_ABI}">
 )
 
-set(WG_APPLE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd/amneziawg-apple/Sources)
+if(NOT DEFINED AWG_APPLE_SOURCE_DIR OR NOT EXISTS "${AWG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c")
+    message(FATAL_ERROR "awg-apple package did not export a valid AWG_APPLE_SOURCE_DIR") # AVPN
+endif()
 
 target_sources(${PROJECT} PRIVATE
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c
     ${CLIENT_ROOT_DIR}/platforms/ios/LogController.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/Log.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/LogRecord.swift
@@ -147,5 +170,10 @@ message(${QtCore_location})
 get_filename_component(QT_BIN_DIR_DETECTED "${QtCore_location}/../../../../../bin" ABSOLUTE)
 
 add_custom_command(TARGET ${PROJECT} POST_BUILD
-    COMMAND ${QT_BIN_DIR_DETECTED}/macdeployqt $<TARGET_BUNDLE_DIR:AmneziaVPN> -appstore-compliant -qmldir=${CMAKE_CURRENT_SOURCE_DIR} -no-codesign
+    COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/deploy/tribe/deploy-macos-app.sh
+            $<TARGET_BUNDLE_DIR:AmneziaVPN>
+            ${QT_BIN_DIR_DETECTED}/macdeployqt
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Deploy Qt and reject non-hermetic macOS plugins/runtime paths"
+    VERBATIM
 )

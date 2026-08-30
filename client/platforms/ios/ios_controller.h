@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QList>
 #include <QElapsedTimer>
+#include <QJsonObject>
 #include <atomic>
 
 #ifdef __OBJC__
@@ -69,15 +70,36 @@ public:
     bool shareText(const QStringList &filesToSend);
     QString openFile();
 
+    // Store-specific purchase failure reasons; values match StoreKit2Helper error codes
+    enum class StorePurchaseFailure {
+        Other,
+        Cancelled,
+        Pending
+    };
+
     void purchaseProduct(const QString &productId,
                          std::function<void(bool success,
                                             const QString &transactionId,
                                             const QString &purchasedProductId,
                                             const QString &originalTransactionId,
-                                            const QString &errorString)> &&callback);
+                                            const QString &storeEnvironment,
+                                            const QString &errorString,
+                                            StorePurchaseFailure failureReason)> &&callback);
+
+    // Finish a StoreKit transaction after the gateway has validated the purchase
+    void finishStoreTransaction(const QString &transactionId);
+
+    // Start listening to StoreKit transaction updates; each verified transaction is
+    // reported once per session via the storeTransactionUpdated signal
+    void startStoreTransactionObserver();
+
     void restorePurchases(std::function<void(bool success,
                                              const QList<QVariantMap> &transactions,
                                              const QString &errorString)> &&callback);
+
+    void fetchLocalEntitlements(std::function<void(bool success,
+                                                    const QList<QVariantMap> &transactions,
+                                                    const QString &errorString)> &&callback);
 
     // Fetch product info for given product identifiers and return basic fields for logging
     void fetchProducts(const QStringList &productIds,
@@ -87,6 +109,37 @@ public:
 
     void requestInetAccess();
     bool isTestFlight();
+    QJsonObject runtimeStatus() const { return m_runtimeStatus; }
+    QString runtimeSessionId() const { return m_runtimeSessionId; }
+    // Compile-time package-lock inventory is available before a provider session exists.
+    // Runtime version attestation remains a separate post-start NE receipt.
+    QJsonObject engineManifest() const;
+    bool nativeGuardRecoveryPending() const { return m_guardRecoveryUnresolved; }
+    QJsonObject nativeGuardRecoveryEvent() const { return m_guardRecoveryEvent; }
+    bool requestSessionGuardArm(const QJsonObject &vpnConfig, const QString &operation,
+                                const QString &session, const QString &policyHashHex,
+                                const QString &expectedRuntimeSessionId);
+    bool activateNativeSession(const QJsonObject &vpnConfig, const QString &operation,
+                               const QString &session, const QString &outerSessionId,
+                               const QString &expectedRuntimeSessionId);
+    bool stopNativeSession(const QString &outerSessionId,
+                           const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardRelease(const QString &operation, const QString &session,
+                                    const QString &outerSessionId);
+    bool requestSessionGuardReconcileArm(
+        const QString &operation, const QString &session, const QString &policyHashHex,
+        const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardReconcileRelease(
+        const QString &operation, const QString &session, const QString &policyHashHex,
+        const QString &outerSessionId, const QString &expectedRuntimeSessionId);
+    bool requestSessionGuardRecoveryResolution(const QJsonObject &exactRecoveryEvent,
+                                               const QString &action,
+                                               const QJsonObject &validatedConfiguration);
+    bool renewRuntimeAuthority(const QJsonObject &vpnConfig, const QString &operation,
+                               const QString &session, const QString &outerSessionId,
+                               const QString &expectedRuntimeSessionId,
+                               const QString &renewalId,
+                               const QString &authorityCommitmentHex);
 
     void showUpdateCover();
     void hideUpdateCover();
@@ -99,8 +152,15 @@ signals:
     // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
     // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
     void handshakeChanged(qint64 lastHandshakeEpochSec);
+    void runtimeStatusChanged(QJsonObject status);
+    void engineManifestChanged(QJsonObject manifest);
+    void sessionGuardEvent(QJsonObject event);
+    void sessionGuardRecoveryRequired(QJsonObject event);
+    void sessionGuardRecoveryResolved(QJsonObject receipt);
+    void runtimeAuthorityRenewalReceipt(QJsonObject receipt);
     void importConfigFromOutside(const QString);
     void importBackupFromOutside(const QString);
+    void storeTransactionUpdated(const QVariantMap &transaction);
 
     void finished();
 
@@ -120,6 +180,12 @@ private:
     bool startXray(const QString &jsonConfig);
 
     void startTunnel();
+#ifdef __OBJC__
+    void startTunnel(NSDictionary *options);
+    bool ensureTunnelManager();
+    void consumeNativeGuardResponse(NSDictionary *response);
+    void requestCurrentNativeGuardStatus();
+#endif
     void emitConnectionStateIfChanged(Vpn::ConnectionState state);
 
 private:
@@ -146,6 +212,10 @@ private:
     QString m_tunnelId;
     uint64_t m_txBytes = 0;
     uint64_t m_rxBytes = 0;
+    QString m_counterEpoch; // AVPN: provider session/counter reset epoch.
+    QJsonObject m_runtimeStatus;
+    QString m_runtimeSessionId;
+    QString m_expectedRuntimeSessionId; // App-issued nonce bound into vault AAD and NE status.
     bool m_handshakeAwaiting = false;
     bool m_handshakeConfirmed = false;
     QElapsedTimer m_handshakeTimer;
@@ -155,6 +225,21 @@ private:
     // AVPN (ревью 2026-07-11): поколение сессии — стейл-ответ checkStatus СТАРОЙ сессии,
     // долетевший после реконнекта, не должен трогать счётчики/статусы новой (underflow-дельта).
     std::atomic<uint64_t> m_statusGeneration { 0 };
+    QString m_guardOperation;
+    QString m_guardSession;
+    QString m_guardPolicySha256;
+    QString m_guardExpectedRuntimeSessionId;
+    QString m_guardOuterSessionId;
+    bool m_guardReceiptArmed = false;
+    bool m_guardRecoveryUnresolved = false;
+    bool m_guardRecoveryResolutionPending = false;
+    QJsonObject m_guardRecoveryEvent;
+    std::atomic_bool m_initializationResolved { false };
+    QString m_pendingGuardOperation;
+    QString m_pendingGuardSession;
+    QString m_pendingGuardPolicySha256;
+    QString m_pendingGuardExpectedRuntimeSessionId;
+    QJsonObject m_pendingAuthorityRenewalRequest;
 };
 
 #endif // IOS_CONTROLLER_H

@@ -49,11 +49,9 @@ static void avpnPushAuthRequesterTrampoline()
 static void avpnPushBadgeClearerTrampoline()
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (@available(iOS 17.0, *)) {
-            [[UNUserNotificationCenter currentNotificationCenter] setBadgeCount:0 withCompletionHandler:nil];
-        } else {
-            [UIApplication sharedApplication].applicationIconBadgeNumber = 0;
-        }
+        // Tribe's Qt 6.11.1 build target is iOS 17+, so the deprecated UIApplication
+        // fallback is both unreachable and a needless future App Store warning.
+        [[UNUserNotificationCenter currentNotificationCenter] setBadgeCount:0 withCompletionHandler:nil];
     });
 }
 
@@ -130,7 +128,9 @@ void AvpnPush_onDeviceToken(const unsigned char *bytes, unsigned long length)
     }
     NSString *hex = avpnHexFromTokenBytes(bytes, length);
     NSString *env = avpnPushEnvironment();
-    NSLog(@"[AVPN push] APNs device token (%@): %@", env, hex);
+    // APNs tokens are bearer-like device identifiers. Keep diagnostics useful without
+    // copying the credential into unified logs or crash reports.
+    NSLog(@"[AVPN push] APNs device token registered (%@, %lu bytes)", env, length);
 
     // Отправку на бэк делает движок (AvpnEngineQml::registerPushToken) — у него subscription_token
     // для Bearer-авторизации (POST /v1/devices/push-token). Натив лишь кладёт окружение + токен в мост;

@@ -1,7 +1,7 @@
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.layout import basic_layout
-from conan.tools.files import get, chdir
+from conan.tools.files import get, chdir, save
 from conan.tools.apple import XCRun
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.apple import is_apple_os
@@ -14,7 +14,7 @@ import shlex
 
 class AwgGo(ConanFile):
     name = "awg-go"
-    version = "3.0.1"
+    version = "3.1.20260814"
     package_type = "application"
     settings = "os", "arch"
 
@@ -61,7 +61,7 @@ class AwgGo(ConanFile):
 
     def source(self):
         get(self, f"https://github.com/amnezia-vpn/amneziawg-go/archive/refs/tags/v{self.version}.zip",
-            sha256="3ab9655b894c6fe43dfcba6d1e3cbfff20ca1f1928eae6242875541e82488247", strip_root=True
+            sha256="a95853baa25d438a3e92ea5207bd315e3a45143b5209488ebf7f0b44e2e2bcc3", strip_root=True
         )
 
     def generate(self):
@@ -72,21 +72,40 @@ class AwgGo(ConanFile):
         env.define("GOMODCACHE", os.path.join(self.build_folder, "gopath", "pkg", "mod"))
         env.define("GOCACHE", os.path.join(self.build_folder, "gocache"))
         env.define("GOTELEMETRY", "off")
+        # Reproducible release binaries must not retain Conan's per-user Go
+        # toolchain/module cache paths or a volatile linker build id.
+        env.define("GOFLAGS", "-trimpath -buildvcs=false -ldflags=-buildid=")
         env.define("GOOS", self._goos)
         self._ldflags = tc.ldflags
         self._cflags = tc.cflags
         tc.generate(env)
 
     def build(self):
+        # GitHub release archives intentionally contain no .git directory.  Upstream's
+        # Makefile therefore cannot derive the release tag with `git describe` and silently
+        # keeps the stale version.go shipped in the archive (v3.1.20260814 currently reports
+        # 0.0.20250522).  Runtime identity must describe the bytes we actually package, so make
+        # the immutable Conan version authoritative before invoking the upstream build.
+        save(
+            self,
+            os.path.join(self.source_folder, "version.go"),
+            f'package main\n\nconst Version = "{self.version}"\n',
+        )
         with chdir(self, self.source_folder):
             for arch in self._archs:
                 goarch = self._arch_map.get(arch)
 
-                ldflags = self._ldflags
-                cflags = self._cflags
+                ldflags = list(self._ldflags)
+                cflags = list(self._cflags)
                 if is_apple_os(self):
                     ldflags.append(f"-arch {_to_apple_arch(arch)}")
                     cflags.append(f"-arch {_to_apple_arch(arch)}")
+                    for build_root in (self.source_folder, self.build_folder):
+                        cflags.extend([
+                            f"-ffile-prefix-map={build_root}=.",
+                            f"-fdebug-prefix-map={build_root}=.",
+                            f"-fmacro-prefix-map={build_root}=.",
+                        ])
 
                 env = Environment()
                 env.define("GOARCH", goarch)
@@ -122,3 +141,8 @@ class AwgGo(ConanFile):
         self.cpp_info.exe = True
         self.cpp_info.location = os.path.join(self.package_folder, self._binary_name)
         self.cpp_info.set_property("cmake_target_name", "amnezia::awg-go")
+        self.cpp_info.set_property("cmake_extra_variables", {
+            "AWG_GO_ENGINE_VERSION": self.version,
+            "AWG_GO_SOURCE_COMMIT": "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1",
+            "AWG_GO_UAPI_ABI": "awg-uapi-v3.1",
+        })

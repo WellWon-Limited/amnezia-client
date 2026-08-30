@@ -332,7 +332,7 @@ class OpenSSLConan(ConanFile):
         return ancestor
 
     def _get_default_openssl_dir(self):
-        if self.settings.os == "Linux":
+        if self.settings.os in ("Linux", "Macos"):
             return "/etc/ssl"
         return os.path.join(self.package_folder, "res")
 
@@ -397,7 +397,21 @@ class OpenSSLConan(ConanFile):
                 zlib_lib_flag = "zlib1" if is_shared_zlib else lib_path
             else:
                 # Just path, GNU like compilers will find the right file
-                zlib_lib_flag = self._adjust_path(zlib_cpp_info.libdirs[0])
+                if self.settings.os == "Macos":
+                    # OpenSSL exposes its compiler flags at runtime. Stage the
+                    # dependency below a deterministic relative spelling so
+                    # OPENSSL_CFLAGS cannot leak Conan's user/cache path.
+                    staged_zlib = os.path.join(self.source_folder, ".tribe-zlib")
+                    staged_include = os.path.join(staged_zlib, "include")
+                    staged_lib = os.path.join(staged_zlib, "lib")
+                    os.makedirs(staged_include, exist_ok=True)
+                    os.makedirs(staged_lib, exist_ok=True)
+                    copy(self, "*", src=zlib_cpp_info.includedirs[0], dst=staged_include)
+                    copy(self, "*", src=zlib_cpp_info.libdirs[0], dst=staged_lib)
+                    include_path = ".tribe-zlib/include"
+                    zlib_lib_flag = ".tribe-zlib/lib"
+                else:
+                    zlib_lib_flag = self._adjust_path(zlib_cpp_info.libdirs[0])
 
             zlib_configure_arg = "zlib-dynamic" if is_shared_zlib else "zlib"
             args.append(zlib_configure_arg)

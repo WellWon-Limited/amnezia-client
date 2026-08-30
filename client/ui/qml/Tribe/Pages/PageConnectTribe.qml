@@ -27,29 +27,81 @@ PageType {
     property bool simConnected: false
     property bool simConnecting: false
 
+    // AVPN catalog-v2: facade presence only means that the binary is capable of v2. Existing
+    // installations remain on the proven v1 AWG path until a signed v2 catalog is accepted.
+    // Acceptance is persisted monotonically; from that point an unavailable catalog is a
+    // fail-closed v2 state and must never resurrect the legacy path.
+    readonly property bool hasCatalogConnection: (typeof TribeConnection !== "undefined")
+    readonly property bool useCatalog: hasCatalogConnection
+                                       && TribeConnection.v2Authoritative === true
+    readonly property string rawCatalogStage: useCatalog
+                                              ? String(TribeConnection.connectionStage || "idle")
+                                              : "idle"
+    readonly property string rawVerificationState: useCatalog
+                                                   ? String(TribeConnection.verificationState || "idle")
+                                                   : "idle"
+    // A reducer callback may be delayed while the app sleeps. The facade's monotonic deadline
+    // projection is the final green gate, so stale `verified` strings become yellow immediately.
+    readonly property bool receiptFresh: useCatalog && TribeConnection.verified === true
+    readonly property string catalogStage: rawCatalogStage === "verified" && !receiptFresh
+                                           ? "unknown" : rawCatalogStage
+    readonly property string verificationState: rawVerificationState === "verified" && !receiptFresh
+                                                ? "unknown" : rawVerificationState
+    readonly property string actualTransport: useCatalog
+                                                     ? String(TribeConnection.actualTransport || "none")
+                                                     : "none"
+    readonly property bool catalogVerified: useCatalog
+                                            && receiptFresh
+                                            && verificationState === "verified"
+    readonly property bool catalogStopping: useCatalog
+                                                   && catalogStage === "disconnecting"
+    readonly property bool catalogBusy: useCatalog
+                                               && ["resolving", "preparing", "renewing",
+                                                   "selecting", "starting",
+                                                   "tunnel_ready", "dns", "traffic",
+                                                   "fallback", "disconnecting"].indexOf(catalogStage) >= 0
+    readonly property bool catalogEngaged: useCatalog
+                                                  && (catalogBusy || catalogVerified
+                                                      || catalogStage === "unknown")
+    readonly property bool catalogUnknown: useCatalog
+                                                  && !catalogVerified
+                                                  && (catalogStage === "unknown"
+                                                      || verificationState === "unknown")
+
     // AVPN (фикс рассинхрона орба): состояние орба берём из TribeEngine (наша стейт-машина), а НЕ из
     // ванильного ConnectionController — иначе орб решал stop/start по чужому состоянию и расходился с
     // движком (повторный Connect делал stop, смена ноды «не коннектила»). Фолбэк на ConnectionController
     // только если движка нет (не наш кейс на проде).
     readonly property bool isOn:  previewSim ? simConnected
-                                  : (hasEngine ? (TribeEngine.state === "connected") : ConnectionController.isConnected)
+                                  : (useCatalog ? catalogVerified
+                                     : (hasEngine ? (TribeEngine.state === "connected")
+                                                  : ConnectionController.isConnected))
     readonly property bool isBusy: previewSim ? simConnecting
-                                  : (hasEngine ? TribeEngine.busy : ConnectionController.isConnectionInProgress)
+                                  : (useCatalog ? catalogBusy
+                                     : (hasEngine ? TribeEngine.busy
+                                                  : ConnectionController.isConnectionInProgress))
     // AVPN: «Connecting…»+спиннер — ТОЛЬКО на пути вверх. Движковый busy взводится и на stop(),
     // и при выключении орб мигал «Connecting…» (стоп быстрый — сбивало с толку, реш. 2026-07-03).
     // Направление — ИЗ ДВИЖКА (TribeEngine.stopping = busy && !wantConnected): переживает пересоздание
     // страницы (таб-свитч), покрывает отмену недоехавшего коннекта и teardown из шторки (selectAuto).
     // Гард на undefined — старый бинарь без свойства ведёт себя как раньше (busy = Connecting).
-    readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
+    readonly property bool engineStopping: useCatalog ? catalogStopping
+                                           : (hasEngine && TribeEngine.stopping === true)
     readonly property bool showBusy: isBusy && !engineStopping
 
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
     // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
     // если взведено действием пользователя и app активно (Haptic.playArmed) — автофейловер и
     // фоновые реконнекты беззвучны.
-    readonly property string hapticPhase: isOn ? "on" : (isBusy ? "busy" : "off")
+    readonly property string hapticPhase: isOn ? "on"
+                                           : (isBusy ? "busy"
+                                              : (useCatalog && catalogStage === "failed"
+                                                 ? "failed"
+                                                 : (useCatalog && catalogStage === "unknown"
+                                                    ? "unknown" : "off")))
     onHapticPhaseChanged: {
         if (hapticPhase === "on") Haptic.playArmed("success")
+        else if (hapticPhase === "failed") Haptic.playArmed("error")
         else if (hapticPhase === "off") Haptic.playArmed("light")
     }
 
@@ -137,6 +189,43 @@ PageType {
     readonly property var curNode: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode
                                              : ({ region: "", ip: "", hasNode: false })
 
+    function catalogLocationById(id) {
+        if (!root.useCatalog) return ({})
+        const rows = TribeConnection.catalogLocations || []
+        for (let i = 0; i < rows.length; ++i)
+            if (String(rows[i].id || "") === String(id || "")) return rows[i]
+        return ({})
+    }
+    // Reducer fact and persisted user intent must never collapse into one display value. A pinned
+    // location may be shown as the next choice, but it is not labelled as the current server until
+    // the reducer publishes currentLocationId for a real native session.
+    readonly property var currentCatalogLocation: useCatalog
+                                                  ? catalogLocationById(
+                                                        String(TribeConnection.currentLocationId || ""))
+                                                  : ({})
+    readonly property var selectedCatalogLocation: useCatalog
+                                                   && String(TribeConnection.selectedLocationMode || "auto") !== "auto"
+                                                   ? catalogLocationById(
+                                                        String(TribeConnection.selectedLocationMode || ""))
+                                                   : ({})
+    readonly property bool hasCurrentCatalogLocation:
+        String(currentCatalogLocation.id || "").length > 0
+    readonly property bool hasSelectedCatalogLocation:
+        String(selectedCatalogLocation.id || "").length > 0
+    readonly property var displayCatalogLocation: hasCurrentCatalogLocation
+                                                  ? currentCatalogLocation
+                                                  : selectedCatalogLocation
+    function catalogTransportSummary(location) {
+        if (!location || String(location.id || "").length === 0)
+            return qsTr("Доступные протоколы уточняются")
+        const awg = location.awg && location.awg.available === true
+        const xray = location.xray && location.xray.available === true
+        if (awg && xray) return qsTr("Доступны AWG и Xray")
+        if (awg) return qsTr("Доступен AWG")
+        if (xray) return qsTr("Доступен Xray")
+        return qsTr("Совместимый сервер подбирается")
+    }
+
     // iOS: PageController.safeArea* реализован только для Android → берём максимум с SafeArea
     // (Qt 6.9+, реактивный UIKit-инсет). БЕЗ этого на холодном старте iOS PageController=0 →
     // верх съезжает под чёлку, и «чинится» только после пересоздания страницы (смена вкладки).
@@ -167,6 +256,12 @@ PageType {
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
             simConnecting = true; simTimer.restart()
+        } else if (root.useCatalog) {
+            if (root.catalogStopping) {
+                if (!TribeConnection.connectV2()) root.showCatalogActionError()
+            }
+            else if (root.catalogEngaged) TribeConnection.disconnectV2()
+            else if (!TribeConnection.connectV2()) root.showCatalogActionError()
         } else if (typeof TribeEngine !== "undefined") {
             // AVPN (белые списки): тап по коннекту при активном режиме — вернуть попап-объяснение
             // (юзер мог забыть, почему не работает), саму попытку НЕ блокируем (§3.5 спеки:
@@ -187,6 +282,41 @@ PageType {
         } else {
             ConnectionController.connectButtonClicked()
         }
+    }
+
+    function showCatalogActionError() {
+        if (!root.useCatalog) return
+        Haptic.playArmed("error")
+        PageController.showNotificationMessage(
+                    catalogCaption.failureText(String(TribeConnection.errorCode || "")))
+    }
+
+    function openServerPicker() {
+        Haptic.play("selection")
+        root.requestServerPicker()
+    }
+
+    function activateDoctor() {
+        Haptic.play("light")
+        root.requestDoctor()
+    }
+
+    function activateRefresh() {
+        if (root.useCatalog) {
+            if (root.catalogBusy) return
+            if (!root.catalogEngaged) {
+                if (!TribeConnection.connectV2()) root.showCatalogActionError()
+            } else if (!TribeConnection.reselectV2()) {
+                root.showCatalogActionError()
+            }
+            return
+        }
+        if (!root.hasEngine || TribeEngine.busy) return
+        if (!root.isOn) {
+            TribeEngine.start()
+            return
+        }
+        TribeEngine.rotateNext()
     }
 
     // ошибки движка: тост показывает host-обработчик в PageStart (единая точка, работает
@@ -612,6 +742,22 @@ PageType {
     Item {
         id: orb
         width: 256; height: 256
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        // The visible centre is status copy; the accessibility name describes the action that a
+        // press will perform in this exact reducer state.
+        Accessible.name: (root.useCatalog
+                          ? root.catalogEngaged && !root.catalogStopping
+                          : (root.isOn || root.isBusy) && !root.engineStopping)
+                         ? qsTr("Отключить VPN") : qsTr("Подключить VPN")
+        Accessible.description: root.useCatalog ? catalogCaption.text : connectCaption.text
+        Accessible.onPressAction: root.onOrbClicked()
+        Keys.onEnterPressed: root.onOrbClicked()
+        Keys.onReturnPressed: root.onOrbClicked()
+        Keys.onSpacePressed: function(event) {
+            root.onOrbClicked()
+            event.accepted = true
+        }
         anchors.horizontalCenter: parent.horizontalCenter
         // якорь ПОД карточкой «АвтоVPN»: внешнее кольцо (r=160) выступает на 32px за Item орба
         // (256×256), поэтому марджин = 32 + видимый зазор lg от кольца до карточки.
@@ -634,10 +780,18 @@ PageType {
                 NumberAnimation { from: 0.6; to: 0.3; duration: 700 }
                 NumberAnimation { from: 0.3; to: 0.6; duration: 700 }
             }
-            opacity: root.isOn ? 0.5 : (root.showBusy ? 0.6 : 0.22)
+            opacity: root.isOn ? 0.5 : (root.showBusy ? 0.6
+                                                     : (root.catalogUnknown ? 0.42 : 0.22))
             gradient: Gradient {
-                GradientStop { position: 0.0;  color: root.isOn ? root.blueAccent : (root.showBusy ? root.blue400 : Qt.rgba(1,1,1,1)) }
-                GradientStop { position: 0.42; color: root.isOn ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.45) : Qt.rgba(1,1,1,0.22) }
+                GradientStop { position: 0.0;  color: root.isOn ? root.blueAccent
+                                                               : (root.showBusy ? root.blue400
+                                                                  : (root.catalogUnknown
+                                                                     ? Theme.color.warning
+                                                                     : Qt.rgba(1,1,1,1))) }
+                GradientStop { position: 0.42; color: root.isOn ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.45)
+                                                                : (root.catalogUnknown
+                                                                   ? Qt.rgba(0.96,0.62,0.12,0.28)
+                                                                   : Qt.rgba(1,1,1,0.22)) }
                 GradientStop { position: 0.72; color: "transparent" }
                 GradientStop { position: 1.0;  color: "transparent" }
             }
@@ -667,9 +821,17 @@ PageType {
             id: sphere
             anchors.centerIn: parent
             width: 240; height: 240; radius: 120
+            border.width: orb.activeFocus ? 3 : 0
+            border.color: root.isOn ? "white" : Theme.color.accent
             gradient: Gradient {
-                GradientStop { position: 0.0; color: root.isOn ? root.blue300 : "white" }
-                GradientStop { position: 1.0; color: root.isOn ? root.blue600 : "#F1F5F9" }
+                GradientStop { position: 0.0; color: root.isOn ? root.blue300
+                                                               : (root.catalogUnknown
+                                                                  ? Qt.lighter(Theme.color.warning, 1.18)
+                                                                  : "white") }
+                GradientStop { position: 1.0; color: root.isOn ? root.blue600
+                                                               : (root.catalogUnknown
+                                                                  ? Theme.color.warning
+                                                                  : "#F1F5F9") }
             }
             scale: orbMa.pressed ? 0.97 : 1.0
             Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
@@ -727,7 +889,11 @@ PageType {
 
         Text {
             anchors.centerIn: parent; z: 40
-            text: root.showBusy ? "Connecting…" : (root.isOn ? "Connected" : "Connect")
+            text: root.showBusy ? qsTr("Подключаем…")
+                                : (root.isOn ? qsTr("Защищено")
+                                             : (root.catalogUnknown
+                                                ? qsTr("Не проверено")
+                                                : qsTr("Подключить")))
             color: root.isOn ? "white" : root.slate900
             font.family: Theme.font.display; font.pixelSize: 26; font.weight: Theme.font.wBold
         }
@@ -785,6 +951,7 @@ PageType {
     // подпись под орбом (поверх гор)
     Text {
         id: connectCaption
+        visible: !root.useCatalog
         anchors.horizontalCenter: parent.horizontalCenter
         // мобайл: чуть ниже орба; десктоп: ровно на lg ВЫШЕ карточки — тот же зазор, что чипы↔карточка // AVPN
         anchors.top: root.isMobile ? orb.bottom : undefined
@@ -802,6 +969,26 @@ PageType {
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
         color: root.whitelistModeNow ? Theme.color.warning : root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
+    }
+
+    TribeConnectionStage {
+        id: catalogCaption
+        visible: root.useCatalog
+        width: Math.min(root.width - 2 * Theme.space.xl, 360)
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: root.isMobile ? orb.bottom : undefined
+        anchors.topMargin: 30
+        anchors.bottom: root.isMobile ? undefined : bottomBlock.top
+        anchors.bottomMargin: Theme.space.lg
+        z: 30
+        stage: root.catalogStage
+        transport: root.actualTransport
+        fallbackFrom: root.useCatalog
+                      ? String(TribeConnection.fallbackFrom || "none") : "none"
+        fallbackTo: root.useCatalog
+                    ? String(TribeConnection.fallbackTo || "none") : "none"
+        typedReason: root.useCatalog
+                     ? String(TribeConnection.errorCode || TribeConnection.fallbackReason || "") : ""
     }
 
     // ── низ: карточка сервера + кнопка обновить (z30 — выше основания гор) ──
@@ -822,7 +1009,20 @@ PageType {
             width: parent.width; implicitHeight: 80; height: 80
             radius: 24
             color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
-            border.width: 1; border.color: Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
+            border.width: activeFocus ? 2 : 1
+            border.color: activeFocus ? Theme.color.text1
+                                      : Qt.rgba(0x33/255, 0x41/255, 0x55/255, 0.5)
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: nodeName.text
+            Accessible.description: ipText.text
+            Accessible.onPressAction: root.openServerPicker()
+            Keys.onEnterPressed: root.openServerPicker()
+            Keys.onReturnPressed: root.openServerPicker()
+            Keys.onSpacePressed: function(event) {
+                root.openServerPicker()
+                event.accepted = true
+            }
             // press-scale (как у кнопок) — тактильный отклик при тапе по карточке
             scale: serverCardMa.pressed ? 0.985 : 1.0
             Behavior on scale { NumberAnimation { duration: Theme.motion.fast; easing.type: Easing.OutCubic } }
@@ -836,7 +1036,9 @@ PageType {
                     id: regionFlag
                     width: 52; height: 52
                     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                    code: root.curNode.hasNode ? (root.curNode.countryCode || "") : ""
+                    code: root.useCatalog
+                          ? String(root.displayCatalogLocation.country || "")
+                          : (root.curNode.hasNode ? (root.curNode.countryCode || "") : "")
                     fallback: Component {
                         Rectangle {
                             radius: width / 2
@@ -864,10 +1066,15 @@ PageType {
                     spacing: 3
 
                     // палочки/мс показываем ТОЛЬКО когда подключены к живому узлу. // AVPN
-                    readonly property bool sig: root.isOn && root.curNode.hasNode
-                    readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
+                    readonly property bool sig: root.useCatalog
+                                                ? root.catalogEngaged
+                                                : root.isOn && root.curNode.hasNode
+                    readonly property bool reachable: root.useCatalog
+                                                      ? root.catalogVerified
+                                                      : root.hasEngine && TribeEngine.liveReachable === true
                     // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд). // AVPN
-                    readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
+                    readonly property bool dead: !root.useCatalog
+                                                 && root.hasEngine && TribeEngine.liveDead === true
 
                     // ── верхняя строка: имя сервера (+бейдж auto) слева, палочки справа ──
                     Item {
@@ -877,12 +1084,23 @@ PageType {
                             id: nameRow
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.right: infoCol.sig ? topBars.left : parent.right
-                            anchors.rightMargin: infoCol.sig ? Theme.space.md : 0
+                            anchors.right: actualBadge.visible ? actualBadge.left
+                                           : (topBars.visible ? topBars.left : parent.right)
+                            anchors.rightMargin: actualBadge.visible || topBars.visible
+                                                 ? Theme.space.md : 0
                             spacing: Theme.space.sm
                             Text {
                                 id: nodeName
-                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
+                                text: root.useCatalog
+                                      ? (root.hasCurrentCatalogLocation
+                                         ? root.currentCatalogLocation.name
+                                         : (root.hasSelectedCatalogLocation
+                                            ? qsTr("Выбрано: %1").arg(
+                                                  root.selectedCatalogLocation.name)
+                                            : qsTr("Умный выбор локации")))
+                                      : (root.curNode.hasNode
+                                         ? (root.curNode.name || root.curNode.region)
+                                         : qsTr("Умный выбор сервера"))
                                 color: "white"; elide: Text.ElideRight
                                 // оставляем место под бейдж, чтобы имя не наезжало на него
                                 width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
@@ -891,7 +1109,9 @@ PageType {
                             // нежный blue-accent бейдж «auto» (виден ТОЛЬКО при auto-подключении). // AVPN
                             Rectangle {
                                 id: autoBadge
-                                visible: root.curNode.auto === true
+                                visible: root.useCatalog
+                                         ? String(TribeConnection.selectedLocationMode || "auto") === "auto"
+                                         : root.curNode.auto === true
                                 anchors.verticalCenter: nodeName.verticalCenter
                                 height: 20; width: autoLabel.implicitWidth + 2 * Theme.space.sm
                                 radius: Theme.radius.pill
@@ -908,12 +1128,21 @@ PageType {
                         }
                         LoadBars {
                             id: topBars
-                            visible: infoCol.sig
+                            visible: !root.useCatalog && infoCol.sig
                             anchors.right: parent.right
                             anchors.verticalCenter: nameRow.verticalCenter
                             // мёртвая связь → 0 зелёных + красные; иначе мин. 1 зелёная, reachable уточняет 1..5. // AVPN
                             failed: infoCol.dead
                             level: infoCol.dead ? 0 : (infoCol.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
+                        }
+                        TribeTransportBadge {
+                            id: actualBadge
+                            visible: root.useCatalog && root.actualTransport !== "none"
+                            compact: true
+                            anchors.right: parent.right
+                            anchors.verticalCenter: nameRow.verticalCenter
+                            transport: root.actualTransport
+                            verification: root.verificationState
                         }
                     }
 
@@ -928,7 +1157,15 @@ PageType {
                             anchors.right: msText.visible ? msText.left : parent.right
                             anchors.rightMargin: msText.visible ? Theme.space.md : 0
                             elide: Text.ElideRight
-                            text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
+                            text: root.useCatalog
+                                  ? (root.hasCurrentCatalogLocation
+                                     ? root.catalogTransportSummary(root.currentCatalogLocation)
+                                     : (root.hasSelectedCatalogLocation
+                                        ? qsTr("Для следующего подключения")
+                                        : qsTr("Локация будет выбрана автоматически")))
+                                  : (root.curNode.hasNode
+                                     ? ("IP: " + root.curNode.ip)
+                                     : qsTr("Сервис запускает узел"))
                             color: root.slate500
                             font.family: Theme.font.mono; font.pixelSize: 10
                         }
@@ -937,8 +1174,16 @@ PageType {
                             id: msText
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: infoCol.sig && infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
-                            text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                            visible: root.useCatalog
+                                     ? root.catalogVerified
+                                       && Number(TribeConnection.verificationAgeSeconds) >= 0
+                                     : infoCol.sig && infoCol.reachable
+                                       && Number(TribeEngine.liveRttMs) >= 0
+                            text: root.useCatalog
+                                  ? (Number(TribeConnection.verificationAgeSeconds) < 60
+                                     ? qsTr("сейчас")
+                                     : qsTr("%1 мин").arg(Math.floor(Number(TribeConnection.verificationAgeSeconds) / 60)))
+                                  : (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
                             color: root.slate500
                             font.family: Theme.font.mono; font.pixelSize: 10
                         }
@@ -951,7 +1196,7 @@ PageType {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.requestServerPicker()
+                onClicked: root.openServerPicker()
             }
         }
 
@@ -962,11 +1207,14 @@ PageType {
         // тап перепроверяет только когда подключены. // AVPN
         TribeServiceChips {
             width: parent.width
-            visible: root.hasEngine
+            // The legacy probe owner is tied to TribeEngine's AWG session. Reusing its cached
+            // values while catalog-v2 owns an AWG/Xray tunnel would label the wrong native session.
+            // Keep it hidden until the catalog facade exposes token-bound service-probe results.
+            visible: !root.useCatalog && root.hasEngine
                      && TribeEngine.serviceStatus !== undefined && TribeEngine.serviceStatus.length > 0
             opacity: root.isOn ? 1.0 : 0.4   // не подключены → серые/неактивные
-            model: root.hasEngine ? TribeEngine.serviceStatus : []
-            onRecheck: if (root.hasEngine && root.isOn) TribeEngine.probeServices()
+            model: !root.useCatalog && root.hasEngine ? TribeEngine.serviceStatus : []
+            onRecheck: if (!root.useCatalog && root.hasEngine && root.isOn) TribeEngine.probeServices()
         }
         // AVPN (девайс-фидбек 2026-07-10): на RU-ноде чипы меряют РФ-egress честно, но показания
         // контринтуитивны («YouTube зелёный, Telegram красный») — юзер читает их как поломку.
@@ -975,7 +1223,7 @@ PageType {
             width: parent.width
             // root.curNode (не сырой TribeEngine.currentNode): гард от undefined + карта уже
             // построена одним вызовом C++-геттера на changed(), а не вторым (ревью E2/D5).
-            visible: root.isOn && root.hasEngine
+            visible: !root.useCatalog && root.isOn && root.hasEngine
                      && String(root.curNode.countryCode || "").toUpperCase() === "RU"
             text: qsTr("Российский сервер: доступность сервисов — как внутри РФ")
             textFormat: Text.PlainText
@@ -994,8 +1242,8 @@ PageType {
             // через TribeEngine.probeServicesIntervalMs), фолбэк 180000мс (3 мин) без engine/офлайн.
             interval: root.hasEngine ? TribeEngine.probeServicesIntervalMs : 180000
             repeat: true
-            running: root.isOn && root.hasEngine
-            onTriggered: TribeEngine.probeServices()
+            running: !root.useCatalog && root.isOn && root.hasEngine
+            onTriggered: if (!root.useCatalog) TribeEngine.probeServices()
         }
 
         // ── нижний слот: два состояния одной геометрии (52/lg) ──────────────
@@ -1095,12 +1343,27 @@ PageType {
         // (прозрачный фон + бордер, hover-заливка, height 52). Гейт kill-switch features.diag_v2.
         Rectangle {
             id: doctorBtn
-            visible: !root.hasEngine || TribeEngine.featureEnabled("diag_v2", true)
+            // Catalog v2 owns its diagnostic re-verification.  A legacy feature flag must not
+            // hide it (or, conversely, make the v2 sheet call TribeEngine while v2 owns TUN).
+            visible: root.useCatalog || !root.hasEngine
+                     || TribeEngine.featureEnabled("diag_v2", true)
             width: visible ? Math.round((parent.width - Theme.space.md) * 0.38) : 0
             height: 49; radius: 16
             color: doctorMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
-            border.width: 1
-            border.color: doctorMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
+            border.width: activeFocus ? 2 : 1
+            border.color: activeFocus ? Theme.color.text1
+                         : (doctorMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5)
+                                                   : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8))
+            activeFocusOnTab: visible
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Доктор")
+            Accessible.onPressAction: root.activateDoctor()
+            Keys.onEnterPressed: root.activateDoctor()
+            Keys.onReturnPressed: root.activateDoctor()
+            Keys.onSpacePressed: function(event) {
+                root.activateDoctor()
+                event.accepted = true
+            }
             Behavior on color { ColorAnimation { duration: 160 } }
             Row {
                 anchors.centerIn: parent; spacing: 8
@@ -1124,7 +1387,7 @@ PageType {
             MouseArea {
                 id: doctorMa
                 anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                onClicked: { Haptic.play("light"); root.requestDoctor() }
+                onClicked: root.activateDoctor()
             }
         }
 
@@ -1137,8 +1400,20 @@ PageType {
             // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
             // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
             color: refreshMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
-            border.width: 1
-            border.color: refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5) : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8)
+            border.width: activeFocus ? 2 : 1
+            border.color: activeFocus ? Theme.color.text1
+                         : (refreshMa.containsMouse ? Qt.rgba(0x3E/255,0x80/255,0xED/255,0.5)
+                                                    : Qt.rgba(0x33/255,0x41/255,0x55/255,0.8))
+            activeFocusOnTab: visible
+            Accessible.role: Accessible.Button
+            Accessible.name: refreshLabel.text
+            Accessible.onPressAction: root.activateRefresh()
+            Keys.onEnterPressed: root.activateRefresh()
+            Keys.onReturnPressed: root.activateRefresh()
+            Keys.onSpacePressed: function(event) {
+                root.activateRefresh()
+                event.accepted = true
+            }
             Behavior on color { ColorAnimation { duration: 160 } }
             Row {
                 anchors.centerIn: parent; spacing: 10
@@ -1153,7 +1428,9 @@ PageType {
                     scale: 20/24; transformOrigin: Item.Center
                     preferredRendererType: Shape.CurveRenderer
                     RotationAnimation on rotation {
-                        running: root.hasEngine && TribeEngine.busy && !Theme.motion.reduceMotion
+                        running: (root.useCatalog ? root.catalogBusy
+                                                  : (root.hasEngine && TribeEngine.busy))
+                                 && !Theme.motion.reduceMotion
                         from: 0; to: 360; duration: 900; loops: Animation.Infinite
                     }
                     ShapePath { strokeColor: root.blueAccent; fillColor: "transparent"; strokeWidth: 2
@@ -1164,28 +1441,25 @@ PageType {
                         PathSvg { path: "M4 13 a8.1 8.1 0 0 0 15.5 2 M20 19 v-4 h-4" } }
                 }
                 Text {
+                    id: refreshLabel
                     anchors.verticalCenter: parent.verticalCenter
                     // AVPN: «Подбираем сервер…» ТОЛЬКО в авто-режиме (узел выбирает движок). При РУЧНОМ
                     // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
                     // macOS: на время фоновой установки root-демона — честный статус установки
                     // (=== true — гард на старый бинарь без свойства). // AVPN
-                    text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
-                          : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем…")
-                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…")))
+                    text: !(root.useCatalog ? root.catalogBusy
+                                             : (root.hasEngine && TribeEngine.busy))
+                          ? qsTr("Заменить сервер")
+                          : (!root.useCatalog && TribeEngine.svcInstalling === true
+                             ? qsTr("Устанавливаем…")
+                             : (!root.useCatalog && root.curNode.pinned === true
+                                ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…")))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
             }
             MouseArea {
                 id: refreshMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    if (!root.hasEngine) return
-                    if (TribeEngine.busy) return
-                    if (!root.isOn) {     // не подключены — обычный старт вместо ротации
-                        TribeEngine.start()
-                        return
-                    }
-                    TribeEngine.rotateNext()   // round-robin на следующую живую ноду (заворот) // AVPN
-                }
+                onClicked: root.activateRefresh()
             }
         }
         } // Row (Доктор + Сменить сервер)

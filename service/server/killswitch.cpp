@@ -103,6 +103,7 @@ bool KillSwitch::isStrictKillSwitchEnabled()
 }
 
 bool KillSwitch::disableKillSwitch() {
+    bool operationOk = true;
 #ifdef Q_OS_LINUX
     if (isStrictKillSwitchEnabled()) {
         LinuxFirewall::setAnchorEnabled(LinuxFirewall::Both, QStringLiteral("000.allowLoopback"), true);
@@ -135,19 +136,35 @@ bool KillSwitch::disableKillSwitch() {
 #endif
 
 #ifdef Q_OS_MACOS
+    if (m_nativeSessionGuardOwned) {
+        // Inner AWG/OpenVPN-era cleanup must not release the durable catalog-v2
+        // outer owner. The guard state machine is the sole release authority.
+        return MacOSFirewall::isInstalled();
+    }
     if (isStrictKillSwitchEnabled()) {
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), false);
-        MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), false);
+        if (!MacOSFirewall::isInstalled()) MacOSFirewall::install();
+        // Quarantine first; normal anchor transitions happen behind the final
+        // quick block and therefore cannot create a transient WAN opening.
+        operationOk = MacOSFirewall::setAnchorEnabled(
+                QStringLiteral("999.quarantine"), true);
+        operationOk = MacOSFirewall::ensureRootAnchorPriority() && operationOk;
+        operationOk = MacOSFirewall::flushAllStates() && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), false) && operationOk;
+        operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), false) && operationOk;
+        operationOk = MacOSFirewall::isInstalled()
+                && MacOSFirewall::isQuarantineEnabled()
+                && operationOk;
     } else {
         MacOSFirewall::uninstall();
+        operationOk = !MacOSFirewall::isInstalled();
     }
 #endif
 
@@ -159,10 +176,11 @@ bool KillSwitch::disableKillSwitch() {
 #endif
 
     m_allowedRanges.clear();
-    return true;
+    return operationOk;
 }
 
 bool KillSwitch::disableAllTraffic() {
+    bool operationOk = true;
 #ifdef Q_OS_WIN
     WindowsFirewall::create(this)->enableInterface(-1);
 #endif
@@ -180,13 +198,22 @@ bool KillSwitch::disableAllTraffic() {
     // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
     if (!MacOSFirewall::isInstalled())
         MacOSFirewall::install();
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
+    // Load the terminal quick quarantine before touching any normal anchor.
+    // A later normal pass cannot override it, and every command is proven by
+    // explicit PF readback before this method reports success.
+    operationOk = MacOSFirewall::setAnchorEnabled(
+            QStringLiteral("999.quarantine"), true);
+    operationOk = MacOSFirewall::ensureRootAnchorPriority() && operationOk;
+    operationOk = MacOSFirewall::flushAllStates() && operationOk;
+    operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), true) && operationOk;
+    operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true) && operationOk;
+    operationOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true) && operationOk;
+    operationOk = MacOSFirewall::isInstalled()
+            && MacOSFirewall::isQuarantineEnabled()
+            && operationOk;
 #endif
     m_allowedRanges.clear();
-    return true;
+    return operationOk;
 }
 
 bool KillSwitch::resetAllowedRange(const QStringList &ranges) {
@@ -203,8 +230,12 @@ bool KillSwitch::resetAllowedRange(const QStringList &ranges) {
 #endif
 
 #ifdef Q_OS_MACOS
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), true);
-    MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), true, QStringLiteral("allownets"), m_allowedRanges);
+    if (!MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), true)
+            || !MacOSFirewall::setAnchorTable(
+                    QStringLiteral("110.allowNets"), true,
+                    QStringLiteral("allownets"), m_allowedRanges)) {
+        return false;
+    }
 #endif
 
 #ifdef Q_OS_WIN
@@ -378,7 +409,7 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::Both, QStringLiteral("100.blockAll"), blockAll);
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv4, QStringLiteral("110.allowNets"), allowNets);
     LinuxFirewall::updateAllowNets(allownets);
-    LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv4, QStringLiteral("120.blockNets"), blockAll);
+    LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv4, QStringLiteral("120.blockNets"), blockNets);
     LinuxFirewall::updateBlockNets(blocknets);
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::Both, QStringLiteral("130.allowMarkedXray"), true);
     LinuxFirewall::setAnchorEnabled(LinuxFirewall::IPv4, QStringLiteral("200.allowVPN"), true);
@@ -408,18 +439,33 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
     if (!MacOSFirewall::isInstalled())
         MacOSFirewall::install();
 
-    MacOSFirewall::ensureRootAnchorPriority();
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), blockAll);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), allowNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), allowNets, QStringLiteral("allownets"), allownets);
+    // Every multi-anchor update is transactional behind the terminal quick
+    // block, including the legacy OpenVPN path that does not use the catalog
+    // native-session guard.
+    bool firewallOk = MacOSFirewall::setAnchorEnabled(
+            QStringLiteral("999.quarantine"), true);
+    firewallOk = MacOSFirewall::ensureRootAnchorPriority() && firewallOk;
+    firewallOk = MacOSFirewall::flushAllStates() && firewallOk;
+    firewallOk = MacOSFirewall::isQuarantineEnabled() && firewallOk;
+    firewallOk = MacOSFirewall::isInstalled() && firewallOk;
+    if (!firewallOk) {
+        return false;
+    }
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), blockAll) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), allowNets) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorTable(
+            QStringLiteral("110.allowNets"), allowNets,
+            QStringLiteral("allownets"), allownets) && firewallOk;
 
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), blockNets);
-    MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), blockNets, QStringLiteral("blocknets"), blocknets);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), blockNets) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorTable(
+            QStringLiteral("120.blockNets"), blockNets,
+            QStringLiteral("blocknets"), blocknets) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true) && firewallOk;
 
     QStringList dnsServers;
     if (!dns1.isEmpty())
@@ -429,9 +475,92 @@ bool KillSwitch::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterIn
 
     dnsServers.append(allowedDnsServers);
 
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
-    MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), dnsServers);
-    MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), true);
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorTable(
+            QStringLiteral("310.blockDNS"), true,
+            QStringLiteral("dnsaddr"), dnsServers) && firewallOk;
+    firewallOk = MacOSFirewall::setAnchorEnabled(QStringLiteral("400.allowPIA"), true) && firewallOk;
+    if (!firewallOk) {
+        return false; // The pre-existing quarantine intentionally remains armed.
+    }
+    // Commit the prepared policy by removing the terminal quarantine last.
+    if (!MacOSFirewall::setAnchorEnabled(QStringLiteral("999.quarantine"), false)
+            || MacOSFirewall::isAnchorEnabled(QStringLiteral("999.quarantine"))) {
+        return false;
+    }
 #endif
     return true;
+}
+
+bool KillSwitch::armNativeSessionGuard(const QJsonObject &configStr)
+{
+#ifdef Q_OS_MACOS
+    const int splitMode = configStr.value(QStringLiteral("splitTunnelType")).toInt(-1);
+    if (splitMode < 0 || splitMode > 2) {
+        return false;
+    }
+    // PREPARE may replace a stopped inner while the same outer PF owner remains armed. Enter a
+    // proven all-traffic blackhole before touching any allow/block table so a multi-anchor PF
+    // update can never transiently open WAN. A failed replacement deliberately remains blocked.
+    const bool blackholed = disableAllTraffic()
+        && MacOSFirewall::isInstalled()
+        && MacOSFirewall::isQuarantineEnabled();
+    if (!blackholed || !enableKillSwitch(configStr, 0)) {
+        disableAllTraffic();
+        return false;
+    }
+    const bool blockAll = splitMode == 0 || splitMode == 2;
+    const bool allowNets = blockAll;
+    const bool blockNets = splitMode == 1;
+    // Read back every anchor whose state defines the outer policy.  A pfctl command returning
+    // success without actually loading the expected anchor is not an Armed receipt.
+    const bool armed = MacOSFirewall::isInstalled()
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("000.allowLoopback"))
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("100.blockAll")) == blockAll
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("110.allowNets")) == allowNets
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("120.blockNets")) == blockNets
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("200.allowVPN"))
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("250.blockIPv6"))
+        && MacOSFirewall::isAnchorEnabled(QStringLiteral("310.blockDNS"))
+        && !MacOSFirewall::isAnchorEnabled(QStringLiteral("999.quarantine"));
+    if (!armed) disableAllTraffic();
+    if (armed) m_nativeSessionGuardOwned = true;
+    return armed;
+#else
+    Q_UNUSED(configStr)
+    return false;
+#endif
+}
+
+bool KillSwitch::quarantineNativeSessionGuard()
+{
+#ifdef Q_OS_MACOS
+    // Set ownership before the PF command so even a partial/error result cannot
+    // later be opened by a legacy inner cleanup path.
+    m_nativeSessionGuardOwned = true;
+    return disableAllTraffic();
+#else
+    return false;
+#endif
+}
+
+bool KillSwitch::releaseNativeSessionGuard()
+{
+#ifdef Q_OS_MACOS
+    m_nativeSessionGuardOwned = false;
+    if (!disableKillSwitch()) {
+        m_nativeSessionGuardOwned = true;
+        return false;
+    }
+    if (isStrictKillSwitchEnabled()) {
+        return MacOSFirewall::isInstalled()
+            && MacOSFirewall::isAnchorEnabled(QStringLiteral("100.blockAll"))
+            && MacOSFirewall::isAnchorEnabled(QStringLiteral("250.blockIPv6"))
+            && MacOSFirewall::isQuarantineEnabled()
+            && !MacOSFirewall::isAnchorEnabled(QStringLiteral("200.allowVPN"));
+    }
+    return !MacOSFirewall::isInstalled();
+#else
+    return false;
+#endif
 }

@@ -39,6 +39,29 @@ static AwgParams parseAwg(const QJsonObject &o)
     a.keepaliveTimeout = o.value("KeepaliveTimeout").toString();
     a.maxHandshakeAttempts = o.value("MaxHandshakeAttempts").toString();
 
+    const auto optionalBool = [&o](const char *key) -> std::optional<bool> {
+        const QJsonValue value = o.value(QLatin1String(key));
+        if (value.isBool())
+            return value.toBool();
+        // AVPN AWG 3.1 transitional tolerance for older JSON emitters; DTO/build output is typed
+        // and normalized to string 1/0 for native platform parsers.
+        if (value.isString()) {
+            const QString text = value.toString().trimmed().toLower();
+            if (text == QLatin1String("1") || text == QLatin1String("true")
+                || text == QLatin1String("on"))
+                return true;
+            if (text == QLatin1String("0") || text == QLatin1String("false")
+                || text == QLatin1String("off"))
+                return false;
+        }
+        return std::nullopt;
+    };
+    a.randomTrailers = optionalBool("RandomTrailers");
+    a.disableCookies = optionalBool("DisableCookies");
+    a.awg31ToggleEncodingValid =
+        (!o.contains(QStringLiteral("RandomTrailers")) || a.randomTrailers.has_value())
+        && (!o.contains(QStringLiteral("DisableCookies")) || a.disableCookies.has_value());
+
     // AVPN generic-канал (§6.1): незнакомые строковые ключи — в extra (не терять молча).
     // Не-строки пропускаем: канон awg-значений в конфиге туннеля — строки.
     static const QSet<QString> known = {
@@ -50,7 +73,8 @@ static AwgParams parseAwg(const QJsonObject &o)
         QStringLiteral("HeaderProtectionKey"), QStringLiteral("ContentPaddingAddition"),
         QStringLiteral("RekeyAfterTime"), QStringLiteral("RekeyTimeout"),
         QStringLiteral("RejectAfterTime"), QStringLiteral("KeepaliveTimeout"),
-        QStringLiteral("MaxHandshakeAttempts"),
+        QStringLiteral("MaxHandshakeAttempts"), QStringLiteral("RandomTrailers"),
+        QStringLiteral("DisableCookies"),
     };
     for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
         if (!known.contains(it.key()) && it.value().isString() && !it.value().toString().isEmpty())
@@ -154,6 +178,10 @@ QStringList SubscriptionParser::validate(const Subscription &sub)
             issues << QStringLiteral("node %1: dns is required (>=1)").arg(id);
         if (n.proto == QLatin1String("awg") && !n.awg.hasFullBundle())
             issues << QStringLiteral("node %1: incomplete AWG bundle (Jc..H4 must all be present)").arg(id);
+        if (n.awg.randomTrailers.has_value() != n.awg.disableCookies.has_value())
+            issues << QStringLiteral("node %1: incomplete AWG 3.1 toggle bundle").arg(id);
+        if (!n.awg.awg31ToggleEncodingValid)
+            issues << QStringLiteral("node %1: invalid AWG 3.1 toggle value").arg(id);
     }
     return issues;
 }

@@ -3,6 +3,10 @@
 
 #include <QObject>
 #include <QQmlContext>
+
+#ifdef AVPN_ENGINE_ENABLED
+namespace avpn { class AvpnEngineQml; class CatalogConnectionFacade; }
+#endif
 #include <QThread>
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
@@ -36,6 +40,7 @@
 #include "core/controllers/ipSplitTunnelingController.h"
 #include "core/controllers/allowedDnsController.h"
 #include "core/controllers/api/servicesCatalogController.h"
+#include "core/controllers/api/storePurchaseController.h"
 #include "core/controllers/api/subscriptionController.h"
 #include "core/controllers/api/newsController.h"
 #include "core/controllers/selfhosted/installController.h"
@@ -150,6 +155,10 @@ private:
     QSharedPointer<VpnConnection> m_vpnConnection;
     QTranslator* m_translator;
     QTranslator* m_tribeTranslator = nullptr; // AVPN (i18n): второй транслятор Tribe-слоя (tribe_*.qm)
+#ifdef AVPN_ENGINE_ENABLED
+    avpn::AvpnEngineQml *m_avpnEngine = nullptr; // AVPN v2 composition attaches post-platform-init
+    avpn::CatalogConnectionFacade *m_tribeConnection = nullptr; // AVPN v2: parent-owned QML facade
+#endif
 
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;
@@ -189,6 +198,7 @@ private:
     AllowedDnsController* m_allowedDnsController;
     ServicesCatalogController* m_servicesCatalogController;
     SubscriptionController* m_subscriptionController;
+    StorePurchaseController* m_storePurchaseController;
     NewsController* m_newsController;
     UpdateController* m_updateController;
     InstallController* m_installController;

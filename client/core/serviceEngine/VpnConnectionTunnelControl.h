@@ -5,6 +5,7 @@
 
 #include "AwgConfigBuilder.h"
 #include "ITunnelControl.h"
+#include "core/utils/containerEnum.h"
 
 #include <QObject>
 #include <QJsonObject>
@@ -59,13 +60,16 @@ private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
 
 private:
-    bool invokeConnect(const QJsonObject &cfg, const QString &serverId);
+    bool invokeConnect(const QJsonObject &cfg, const QString &serverId,
+                       amnezia::DockerContainer container);
+    bool activeIsAwg() const;
 
     VpnConnection *m_conn = nullptr;
     ClientKeys     m_keys;
     TunnelStats    m_stats;
     QJsonObject    m_lastConfigReport; // AVPN bench v5: снапшот конфига последнего up()
     ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде
+    amnezia::DockerContainer m_activeContainer = amnezia::DockerContainer::None; // AVPN v2
 };
 
 } // namespace avpn

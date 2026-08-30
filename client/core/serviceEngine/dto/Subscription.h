@@ -29,7 +29,16 @@ struct AwgParams {
     QString keepaliveTimeout;
     QString maxHandshakeAttempts;
 
-    // AVPN generic-канал (ярус 2, §6.1 плана): незнакомые СТРОКОВЫЕ ключи awg_params как есть.
+    // AVPN Tribe AWG 3.1: exact typed quick-config keys. Presence is distinct from false so a v1
+    // fallback response without 3.1 fields remains byte-compatible. The native adapters turn
+    // these into UAPI random_trailers/disable_cookies=1|0; they are never routed through extra.
+    std::optional<bool> randomTrailers;
+    std::optional<bool> disableCookies;
+    bool awg31ToggleEncodingValid = true;
+
+    // Legacy-only generic channel. Deprecated for catalog v2: v2 has a strict typed schema and
+    // rejects unknown keys because Apple/Windows parsers have version-specific allowlists.
+    // Kept here solely so the transitional /v1 AWG response remains backward-compatible.
     // Эмиссия в конфиг туннеля гейтится server-driven allowlist'ом awg_extra_keys_allowed
     // (TuningStore lists, дефолт пуст) — см. AwgConfigBuilder.
     QHash<QString, QString> extra;
@@ -41,6 +50,8 @@ struct AwgParams {
     // S3/S4/I1 (наш флот) ⇒ "2"; иначе "1". Возвращаем мажор строкой (для UI "v"+major).
     QString protocolMajor() const
     {
+        if (randomTrailers.has_value() || disableCookies.has_value())
+            return QStringLiteral("3.1");
         if (!headerProtectionKey.isEmpty() || !contentPaddingAddition.isEmpty()
             || !rekeyAfterTime.isEmpty() || !rekeyTimeout.isEmpty() || !rejectAfterTime.isEmpty()
             || !keepaliveTimeout.isEmpty() || !maxHandshakeAttempts.isEmpty())

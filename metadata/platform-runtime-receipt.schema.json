@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tribe:vpn:platform-runtime-receipt:1",
+  "title": "Tribe platform runtime release receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "source_commit", "platforms"],
+  "properties": {
+    "schema": {"const": 1},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "platforms": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "android": {"$ref": "#/$defs/platform"},
+        "ios": {"$ref": "#/$defs/platform"},
+        "macos_daemon": {"$ref": "#/$defs/platform"},
+        "macos_ne": {"$ref": "#/$defs/platform"}
+      }
+    }
+  },
+  "$defs": {
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["awg", "xray"],
+      "properties": {
+        "awg": {"$ref": "#/$defs/evidence"},
+        "xray": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_matrix",
+        "exact_lifecycle",
+        "route_leak_matrix",
+        "device_receipt_sha256"
+      ],
+      "properties": {
+        "artifact_matrix": {"const": "passed"},
+        "exact_lifecycle": {"const": "passed"},
+        "route_leak_matrix": {"const": "passed"},
+        "device_receipt_sha256": {
+          "type": "string",
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

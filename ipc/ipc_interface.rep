@@ -7,6 +7,7 @@
 class IpcInterface
 {
     SLOT( int createPrivilegedProcess() ); // return local pid
+    SLOT( QJsonObject createPrivilegedProcessV2(const QString &parentCapability) );
 
     // Route functions
     SLOT( int routeAddList(const QString &gw, const QStringList &ips) );
@@ -40,6 +41,23 @@ class IpcInterface
 
     SLOT(bool xrayStart(const QString &config));
     SLOT(bool xrayStop());
+    // AVPN: additive v1 native-session contract.  Legacy methods remain for
+    // rolling daemon/client upgrades, but new clients never use them.
+    SLOT(bool xrayStartSession(const QString &sessionId, const QString &config));
+    SLOT(bool xrayStopSession(const QString &sessionId));
+    SLOT(QJsonObject xrayRuntimeStatusV1(const QString &sessionId));
+
+    // Normal-macOS catalog-v2 outer PF/session guard.  Every command is closed-schema and the
+    // helper owns the durable lease; presence of these slots is not a release receipt.
+    SLOT(QJsonObject nativeSessionGuardPrepareV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardClaimInnerV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardBeginStopV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardMarkRunningV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardMarkStoppedV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardRenewAuthorityV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardReleaseV1(const QJsonObject &request));
+    SLOT(QJsonObject nativeSessionGuardStatusV1());
+    SLOT(QJsonObject nativeSessionGuardRecoveryResolveV1(const QJsonObject &request));
 
     SLOT( bool startNetworkCheck(const QString& serverIpv4Gateway, const QString& deviceIpv4Address) );
     SLOT( bool stopNetworkCheck() );

@@ -167,8 +167,51 @@ bool WireguardUtilsLinux::addInterface(const InterfaceConfig& config) {
     if (!config.m_maxHandshakeAttempts.isEmpty()) {
         out << "max_handshake_attempts=" << config.m_maxHandshakeAttempts << "\n";
     }
+    if (!config.m_randomTrailers.isEmpty()) {
+        QString normalized;
+        if (!InterfaceConfig::awgBoolToUapi(config.m_randomTrailers, normalized)) {
+            logger.error() << "Invalid RandomTrailers value"; // AVPN: fail closed before UAPI.
+            deleteInterface();
+            return false;
+        }
+        out << "random_trailers=" << normalized << "\n";
+    }
+    if (!config.m_disableCookies.isEmpty()) {
+        QString normalized;
+        if (!InterfaceConfig::awgBoolToUapi(config.m_disableCookies, normalized)) {
+            logger.error() << "Invalid DisableCookies value"; // AVPN
+            deleteInterface();
+            return false;
+        }
+        out << "disable_cookies=" << normalized << "\n";
+    }
 
     int err = uapiErrno(uapiCommand(message));
+    // AVPN: positive capability check; an old binary may otherwise accept a
+    // process start while silently lacking the 3.1 wire-format fields.
+    if (err == 0 && (!config.m_randomTrailers.isEmpty() ||
+                     !config.m_disableCookies.isEmpty())) {
+        const QString runtime = uapiCommand(QStringLiteral("get=1"));
+        auto hasUapiValue = [&runtime](const QString& key,
+                                       const QString& expected) {
+            return runtime.split(QLatin1Char('\n')).contains(key + QLatin1Char('=') + expected);
+        };
+        QString randomTrailers;
+        QString disableCookies;
+        const bool randomOk = config.m_randomTrailers.isEmpty() ||
+            (InterfaceConfig::awgBoolToUapi(config.m_randomTrailers, randomTrailers) &&
+             hasUapiValue(QStringLiteral("random_trailers"), randomTrailers));
+        const bool cookiesOk = config.m_disableCookies.isEmpty() ||
+            (InterfaceConfig::awgBoolToUapi(config.m_disableCookies, disableCookies) &&
+             hasUapiValue(QStringLiteral("disable_cookies"), disableCookies));
+        if (!randomOk || !cookiesOk) {
+            logger.error() << "AWG 3.1 UAPI capability mismatch; stopping interface";
+            err = EPROTONOSUPPORT;
+            deleteInterface();
+        } else {
+            logger.debug() << "AWG 3.1 UAPI capability verified";
+        }
+    }
     if (err != 0) {
         logger.error() << "Interface configuration failed:" << strerror(err);
     } else {

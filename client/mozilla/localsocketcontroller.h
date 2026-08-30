@@ -17,6 +17,7 @@
 class QJsonObject;
 
 class LocalSocketController final : public ControllerImpl {
+  Q_OBJECT
   Q_DISABLE_COPY_MOVE(LocalSocketController)
 
  public:
@@ -27,7 +28,12 @@ class LocalSocketController final : public ControllerImpl {
 
   void activate(const QJsonObject& rawConfig) override;
 
+  bool activateExactSession(const QJsonObject& rawConfig, const QString& sessionId);
+  bool adoptExactSession(const QString& sessionId);
+  bool isReady() const { return m_daemonState == eReady; }
+
   void deactivate() override;
+  bool deactivateExactSession(const QString& sessionId);
 
   void checkStatus() override;
 
@@ -37,6 +43,9 @@ class LocalSocketController final : public ControllerImpl {
 
   bool multihopSupported() override { return true; }
 
+ signals:
+  void runtimeStatusChanged(const QJsonObject& status);
+
  private:
   void initializeInternal();
   void disconnectInternal();
@@ -45,6 +54,8 @@ class LocalSocketController final : public ControllerImpl {
   void errorOccurred(QLocalSocket::LocalSocketError socketError);
   void readData();
   void parseCommand(const QByteArray& command);
+  void activateInternal(const QJsonObject& rawConfig, const QString& exactSessionId);
+  void checkExactStatus();
 
   void write(const QJsonObject& json);
 
@@ -70,7 +81,9 @@ class LocalSocketController final : public ControllerImpl {
   std::function<void(const QString&)> m_logCallback = nullptr;
 
   QTimer m_initializingTimer;
+  QTimer m_runtimeStatusTimer;
   uint32_t m_initializingRetry = 0;
+  QString m_exactSessionId;
 };
 
 #endif  // LOCALSOCKETCONTROLLER_H
