@@ -47,7 +47,6 @@ set(LIBS ${LIBS}
 set(HEADERS ${HEADERS}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate-C-Interface.h
 )
@@ -57,7 +56,6 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_contro
 set(SOURCES ${SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/ios_controller_wrapper.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/StoreKitController.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosglue.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QRCodeReaderBase.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/QtAppDelegate.mm
@@ -172,9 +170,10 @@ message(${QtCore_location})
 get_filename_component(QT_BIN_DIR_DETECTED "${QtCore_location}/../../../../../bin" ABSOLUTE)
 
 add_custom_command(TARGET ${PROJECT} POST_BUILD
-    COMMAND ${QT_BIN_DIR_DETECTED}/macdeployqt $<TARGET_BUNDLE_DIR:AmneziaVPN> -appstore-compliant -qmldir=${CMAKE_CURRENT_SOURCE_DIR} -no-codesign
-    COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/deploy/tribe/sanitize-macos-app.sh
+    COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/deploy/tribe/deploy-macos-app.sh
             $<TARGET_BUNDLE_DIR:AmneziaVPN>
+            ${QT_BIN_DIR_DETECTED}/macdeployqt
+            ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Deploy Qt and reject non-hermetic macOS plugins/runtime paths"
     VERBATIM
 )
