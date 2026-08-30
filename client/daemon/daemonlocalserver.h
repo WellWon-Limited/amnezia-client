@@ -6,6 +6,11 @@
 #define DAEMONLOCALSERVER_H
 
 #include <QLocalServer>
+#include <QPointer>
+
+#include "ipcsecurity.h"
+
+class QLocalSocket;
 
 class DaemonLocalServer final : public QObject {
   Q_DISABLE_COPY_MOVE(DaemonLocalServer)
@@ -21,6 +26,9 @@ class DaemonLocalServer final : public QObject {
 
  private:
   QLocalServer m_server;
+  QPointer<QLocalSocket> m_authenticatedSocket;
+  amnezia::ipcsecurity::PeerPolicy m_peerPolicy;
+  QString m_socketPath;
 };
 
 #endif  // DAEMONLOCALSERVER_H

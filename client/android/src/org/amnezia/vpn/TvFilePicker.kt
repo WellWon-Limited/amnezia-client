@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import org.amnezia.vpn.util.Log
 import java.io.File
@@ -50,17 +51,17 @@ class TvFilePicker : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                navigateBack()
+            }
+        })
         Log.v(TAG, "onCreate")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             launchSaf()
         } else {
             checkPermissionAndBrowse()
         }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        navigateBack()
     }
 
     private fun launchSaf() {

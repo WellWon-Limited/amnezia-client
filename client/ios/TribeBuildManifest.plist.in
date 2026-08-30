@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Schema</key>
+	<integer>1</integer>
+	<key>SourceCommit</key>
+	<string>@TRIBE_IOS_SOURCE_COMMIT@</string>
+	<key>Version</key>
+	<string>@CMAKE_PROJECT_VERSION@</string>
+	<key>MarketingVersion</key>
+	<string>@APPLE_PROJECT_VERSION@</string>
+	<key>Build</key>
+	<string>@CMAKE_PROJECT_VERSION_TWEAK@</string>
+	<key>QtVersion</key>
+	<string>@Qt6_VERSION@</string>
+	<key>StoreBuild</key>
+	@TRIBE_IOS_STORE_BUILD_XML@
+	<key>RuntimeReceiptSHA256</key>
+	<string>@TRIBE_IOS_RUNTIME_RECEIPT_SHA256@</string>
+	<key>EngineLockSHA256</key>
+	<string>@TRIBE_IOS_ENGINE_LOCK_SHA256@</string>
+	<key>GuardCapabilities</key>
+	<dict>
+		<key>AWG</key>
+		@TRIBE_IOS_AWG_GUARD_XML@
+		<key>Xray</key>
+		@TRIBE_IOS_XRAY_GUARD_XML@
+	</dict>
+	<key>Engines</key>
+	<dict>
+		<key>AWG</key>
+		<dict>
+			<key>Adapter</key>
+			<string>@AWG_APPLE_ADAPTER_VERSION@</string>
+			<key>SourceCommit</key>
+			<string>@AWG_APPLE_SOURCE_COMMIT@</string>
+			<key>Core</key>
+			<string>@AWG_APPLE_AWG_CORE_VERSION@</string>
+			<key>ABI</key>
+			<string>awg-apple-c-uapi-v3.1</string>
+		</dict>
+		<key>Xray</key>
+		<dict>
+			<key>Adapter</key>
+			<string>@AWG_APPLE_XRAY_ADAPTER_VERSION@</string>
+			<key>SourceCommit</key>
+			<string>@AWG_APPLE_XRAY_SOURCE_COMMIT@</string>
+			<key>Core</key>
+			<string>@AWG_APPLE_XRAY_CORE_VERSION@</string>
+			<key>ABI</key>
+			<string>@AWG_APPLE_XRAY_SOCKET_ABI@</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

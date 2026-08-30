@@ -1,0 +1,285 @@
+diff --git a/controller_android.go b/controller_android.go
+index 3df874e..857f06b 100644
+--- a/controller_android.go
++++ b/controller_android.go
+@@ -1,30 +1,31 @@
+ package libXray
+ 
+ import (
+-	"syscall"
+-
+ 	"github.com/amnezia-vpn/amnezia-libxray/nodep"
+-	xinternet "github.com/xtls/xray-core/transport/internet"
+ )
+ 
+-// Give a callback before connection beginning. Useful for Android development.
+-// It depends on xray:api:beta
++// RegisterSocketControllers atomically arms the one process-wide protect
++// callback used by both Xray dialers and listeners. Replacing it never appends
++// another callback to xray-core.
++func RegisterSocketControllers(controller DialerController) string {
++	return nodep.WrapError(armSocketControllers(controller))
++}
++
++// RegisterDialerController is retained for gomobile ABI compatibility. It now
++// atomically replaces both slots, so old callers cannot recreate append-only
++// process-lifetime callbacks.
+ func RegisterDialerController(controller DialerController) string {
+-	err := xinternet.RegisterDialerController(func(network, address string, conn syscall.RawConn) error {
+-		return conn.Control(func(fd uintptr) {
+-			controller.ProtectFd(int(fd))
+-		})
+-	})
+-	return nodep.WrapError(err)
++	return RegisterSocketControllers(controller)
+ }
+ 
+-// Give a callback before listener beginning. Useful for Android development.
+-// It depends on xray:api:beta
++// RegisterListenerController is retained for gomobile ABI compatibility and
++// has the same atomic replacement behavior as RegisterDialerController.
+ func RegisterListenerController(controller DialerController) string {
+-	err := xinternet.RegisterListenerController(func(network, address string, conn syscall.RawConn) error {
+-		return conn.Control(func(fd uintptr) {
+-			controller.ProtectFd(int(fd))
+-		})
+-	})
+-	return nodep.WrapError(err)
++	return RegisterSocketControllers(controller)
++}
++
++// ClearSocketControllers synchronously drains every in-flight ProtectFd call
++// and leaves both xray-core callbacks armed in a fail-closed state.
++func ClearSocketControllers() string {
++	return nodep.WrapError(clearSocketControllers())
+ }
+diff --git a/controller_slot.go b/controller_slot.go
+new file mode 100644
+index 0000000..854a4ee
+--- /dev/null
++++ b/controller_slot.go
+@@ -0,0 +1,86 @@
++package libXray
++
++import (
++	"errors"
++	"fmt"
++	"sync"
++	"syscall"
++
++	xinternet "github.com/xtls/xray-core/transport/internet"
++)
++
++var (
++	errSocketControllersCleared = errors.New("libxray socket controllers are cleared")
++	errSocketProtectionRejected = errors.New("libxray socket protection was rejected")
++
++	socketControllerOnce sync.Once
++	socketRegistrationErr error
++	socketControllerMu   sync.RWMutex
++	dialerController     DialerController
++	listenerController   DialerController
++	coreRegistrationCount uint32
++)
++
++func ensureSocketControllersRegistered() error {
++	socketControllerOnce.Do(func() {
++		dialErr := xinternet.RegisterDialerController(func(network, address string, conn syscall.RawConn) error {
++			return invokeSocketController(true, conn)
++		})
++		coreRegistrationCount++
++		listenerErr := xinternet.RegisterListenerController(func(network, address string, conn syscall.RawConn) error {
++			return invokeSocketController(false, conn)
++		})
++		coreRegistrationCount++
++		socketRegistrationErr = errors.Join(dialErr, listenerErr)
++	})
++	return socketRegistrationErr
++}
++
++func armSocketControllers(controller DialerController) error {
++	if controller == nil {
++		return errors.New("libxray nil socket controller")
++	}
++	if err := ensureSocketControllersRegistered(); err != nil {
++		return fmt.Errorf("register libxray socket controllers: %w", err)
++	}
++	socketControllerMu.Lock()
++	dialerController = controller
++	listenerController = controller
++	socketControllerMu.Unlock()
++	return nil
++}
++
++func clearSocketControllers() error {
++	if err := ensureSocketControllersRegistered(); err != nil {
++		return fmt.Errorf("register libxray socket controllers: %w", err)
++	}
++	socketControllerMu.Lock()
++	dialerController = nil
++	listenerController = nil
++	socketControllerMu.Unlock()
++	return nil
++}
++
++func invokeSocketController(dialer bool, conn syscall.RawConn) error {
++	// Hold the read lock through RawConn.Control and ProtectFd. Clear therefore
++	// provides a synchronous drain receipt, not merely a pointer replacement.
++	socketControllerMu.RLock()
++	defer socketControllerMu.RUnlock()
++	controller := listenerController
++	if dialer {
++		controller = dialerController
++	}
++	if controller == nil {
++		return errSocketControllersCleared
++	}
++	protected := false
++	if err := conn.Control(func(fd uintptr) {
++		protected = controller.ProtectFd(int(fd))
++	}); err != nil {
++		return fmt.Errorf("access libxray socket descriptor: %w", err)
++	}
++	if !protected {
++		return errSocketProtectionRejected
++	}
++	return nil
++}
+diff --git a/controller_slot_test.go b/controller_slot_test.go
+new file mode 100644
+index 0000000..733c56d
+--- /dev/null
++++ b/controller_slot_test.go
+@@ -0,0 +1,94 @@
++package libXray
++
++import (
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	xinternet "github.com/xtls/xray-core/transport/internet"
++)
++
++type tribeRawConn struct{}
++
++func (tribeRawConn) Control(callback func(uintptr)) error { callback(11); return nil }
++func (tribeRawConn) Read(func(uintptr) bool) error        { return nil }
++func (tribeRawConn) Write(func(uintptr) bool) error       { return nil }
++
++type tribeController struct {
++	result  bool
++	calls   atomic.Int32
++	entered chan struct{}
++	release chan struct{}
++}
++
++func (c *tribeController) ProtectFd(int) bool {
++	c.calls.Add(1)
++	if c.entered != nil {
++		select { case c.entered <- struct{}{}: default: }
++	}
++	if c.release != nil { <-c.release }
++	return c.result
++}
++
++func TestTribeAndroidControllerSlotSingletonReplaceDrainAndFailClosed(t *testing.T) {
++	beforeDialers := len(xinternet.Controllers)
++	stale := &tribeController{result: true}
++	for i := 0; i < 128; i++ {
++		if err := armSocketControllers(&tribeController{result: true}); err != nil {
++			t.Fatalf("replacement %d failed: %v", i, err)
++		}
++	}
++	if got := len(xinternet.Controllers); got != beforeDialers+1 {
++		t.Fatalf("dial controller count grew across replacements: %d -> %d", beforeDialers, got)
++	}
++	if coreRegistrationCount != 2 {
++		t.Fatalf("dial/listener registration must each happen once, got %d", coreRegistrationCount)
++	}
++	if err := armSocketControllers(stale); err != nil { t.Fatal(err) }
++	current := &tribeController{result: true}
++	if err := armSocketControllers(current); err != nil { t.Fatal(err) }
++	if err := invokeSocketController(true, tribeRawConn{}); err != nil { t.Fatal(err) }
++	if stale.calls.Load() != 0 || current.calls.Load() != 1 {
++		t.Fatalf("replacement invoked stale=%d current=%d", stale.calls.Load(), current.calls.Load())
++	}
++
++	blocking := &tribeController{
++		result: true, entered: make(chan struct{}, 1), release: make(chan struct{}),
++	}
++	if err := armSocketControllers(blocking); err != nil { t.Fatal(err) }
++	invokeDone := make(chan error, 1)
++	go func() { invokeDone <- invokeSocketController(true, tribeRawConn{}) }()
++	<-blocking.entered
++	clearDone := make(chan error, 1)
++	go func() { clearDone <- clearSocketControllers() }()
++	select {
++	case err := <-clearDone:
++		t.Fatalf("clear did not drain callback: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	close(blocking.release)
++	if err := <-invokeDone; err != nil { t.Fatal(err) }
++	if err := <-clearDone; err != nil { t.Fatal(err) }
++
++	for _, dialer := range []bool{true, false} {
++		if err := invokeSocketController(dialer, tribeRawConn{}); !errors.Is(err, errSocketControllersCleared) {
++			t.Fatalf("cleared dialer=%v was not rejected: %v", dialer, err)
++		}
++	}
++	rejected := &tribeController{result: false}
++	if err := armSocketControllers(rejected); err != nil { t.Fatal(err) }
++	for _, dialer := range []bool{true, false} {
++		if err := invokeSocketController(dialer, tribeRawConn{}); !errors.Is(err, errSocketProtectionRejected) {
++			t.Fatalf("ProtectFd=false dialer=%v was not rejected: %v", dialer, err)
++		}
++	}
++	allowed := &tribeController{result: true}
++	if err := armSocketControllers(allowed); err != nil { t.Fatal(err) }
++	for _, dialer := range []bool{true, false} {
++		if err := invokeSocketController(dialer, tribeRawConn{}); err != nil {
++			t.Fatalf("ProtectFd=true dialer=%v failed: %v", dialer, err)
++		}
++	}
++	if err := clearSocketControllers(); err != nil { t.Fatal(err) }
++}
+diff --git a/build.sh b/build.sh
+index 104cf4f..8d89430 100755
+--- a/build.sh
++++ b/build.sh
+@@ -3,15 +3,17 @@
+ set -e
+ 
+ prepare_go() {
+-    go mod tidy
++    if [ ! -f vendor/modules.txt ]; then
++        go mod tidy
++    fi
+ }
+ 
+ prepare_gomobile() {
+     mobile_version=$(go list -m -f '{{.Version}}' golang.org/x/mobile)
+-    go install golang.org/x/mobile/cmd/gomobile@"$mobile_version"
+-    go install golang.org/x/mobile/cmd/gobind@"$mobile_version"
+-    export PATH=~/go/bin:$PATH
++    GOFLAGS='' go install golang.org/x/mobile/cmd/gomobile@"$mobile_version"
++    GOFLAGS='' go install golang.org/x/mobile/cmd/gobind@"$mobile_version"
+     gopath=$(go env GOPATH)
++    export PATH="${gopath%%:*}/bin:$PATH"
+     mkdir -p "${gopath%%:*}/pkg/gomobile"
+ }
+ 
+@@ -28,9 +30,9 @@ build_android() {
+     rm -fr assets
+     mkdir -p assets/geo
+     mv dat/* assets/geo
+-    gomobile bind -target android -androidapi 24 -javapkg=org.amnezia.vpn.protocol.xray -o libxray.aar -ldflags="-w -s -buildid= -checklinkname=0 -X=runtime.modinfo= -extldflags=-Wl,-z,max-page-size=16384" -trimpath
++    GOFLAGS='-mod=mod -trimpath -buildvcs=false' gomobile bind -target android -androidapi 24 -javapkg=org.amnezia.vpn.protocol.xray -o libxray.aar -ldflags="-w -s -buildid= -checklinkname=0 -X=runtime.modinfo= -extldflags=-Wl,-z,max-page-size=16384" -trimpath
+ }
+ 
+ download_geo() {
+-    go run main/main.go
++    GOFLAGS='-mod=mod -trimpath -buildvcs=false' go run main/main.go
+ }

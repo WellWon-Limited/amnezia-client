@@ -8,9 +8,13 @@
 #include "core/utils/errorStrings.h" // AVPN: errorString(ErrorCode) → текст для error()
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
+#include "CatalogConnectionFacade.h" // AVPN catalog-v2: stable QML authority facade
+#include "CatalogProductRuntime.h" // AVPN catalog-v2: production composition root
 #include "SubscriptionParser.h" // AVPN (оплата): refreshSubscription() — device-часы для шапки/CTA
+#include "SubscriptionRequest.h" // AVPN: one versioned URL contract for every subscription path
 #include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
 #include "IdentityAnchor.h" // AVPN (анти-фрод): Keychain-якорь identity — restore на старте (переустановка)
+#include "LegacyNativeOwnershipPolicy.h"
 #include "DeviceFingerprint.h" // AVPN (anti-farm): якорь железа в async-enroll (паритет с Enrollment::enroll)
 #include "DeviceModel.h" // AVPN: нативные имя/ОС текущего устройства (раздел «Устройства»)
 #include "QualityProbe.h" // AVPN (реальные палочки): app-layer RTT-проба через туннель
@@ -74,6 +78,7 @@
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
 #include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
+#include <memory>
 // AVPN (Devices+Account): синхронные REST-вызовы к control plane, как fetchSubscription.
 #include "NetAwait.h" // AVPN: awaitReply() — ожидание с таймаутом (анти-фриз GUI)
 
@@ -94,6 +99,8 @@ extern "C" void AvpnDockBadge_install();
 #include "MacServiceInstaller.h" // AVPN (macOS desktop): авто-установка root-демона из вшитого pkg (ноль терминала)
 #include <QThread>
 #include "core/utils/ipcClient.h" // AVPN (wake-реконнект): подписка на wakeup/networkChanged реплики демона
+#include "ipc.h" // AVPN: per-user root-owned WireGuard daemon endpoint
+#include "ipcsecurity.h" // AVPN: mandatory challenge/response before daemon commands
 #endif
 
 namespace avpn {
@@ -102,6 +109,23 @@ namespace avpn {
 // апстрим-логгер работает как раньше). Ставится один раз из конструктора движка.
 namespace {
 QtMessageHandler g_crashPrevHandler = nullptr;
+
+CatalogNetworkClass currentCatalogNetworkClass()
+{
+    const QNetworkInformation *network = QNetworkInformation::instance();
+    if (!network) return CatalogNetworkClass::Unknown;
+    switch (network->transportMedium()) {
+    case QNetworkInformation::TransportMedium::WiFi:
+        return CatalogNetworkClass::Wifi;
+    case QNetworkInformation::TransportMedium::Cellular:
+        return CatalogNetworkClass::Cellular;
+    case QNetworkInformation::TransportMedium::Ethernet:
+        return CatalogNetworkClass::Wired;
+    default:
+        return CatalogNetworkClass::Unknown;
+    }
+}
+
 void crashLogTeeHandler(QtMsgType t, const QMessageLogContext &c, const QString &m)
 {
     CrashGuard::instance().appendLogLine(m);
@@ -722,8 +746,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     {
         const QByteArray lkg = Enrollment::loadLkgSubscription();
         QString lkgErr;
-        if (!lkg.isEmpty() && !m_engine.loadSubscriptionFromLkg(lkg, lkgErr))
+        if (lkg.isEmpty()) {
+            qInfo() << "avpn: legacy subscription LKG is empty";
+        } else if (!m_engine.loadSubscriptionFromLkg(lkg, lkgErr)) {
             qWarning() << "avpn: lkg subscription cache unusable:" << lkgErr; // не фатально: bootstrap догрузит
+        } else {
+            qInfo() << "avpn: legacy subscription LKG loaded; nodes:" << nodePool().size();
+        }
     }
 
     // AVPN (фикс «на сотовой ∞ навсегда»): единый member-таймер ретрая bootstrap (вместо
@@ -826,6 +855,223 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 &avpn::WhitelistDetector::noteControlPlaneOk);
     }
 #endif
+}
+
+void AvpnEngineQml::attachCatalogV2(CatalogConnectionFacade *facade)
+{
+    if (m_catalogRuntime || !facade || !m_conn || !m_store || !m_nam) return;
+    const auto offlineRoots = CatalogProductRuntime::compiledOfflineRootKeys();
+    qInfo() << "avpn: catalog-v2 attach; compiled-roots:"
+            << offlineRoots.size()
+            << "facade-authoritative-before:" << facade->v2Authoritative();
+
+    // A rootless build has no cryptographic path to an authoritative v2 catalog.  Do not even
+    // compose the v2 runtime in that configuration: its platform recovery gate is intentionally
+    // fail-closed and must not be mistaken for proof that v2 was previously accepted.  Keeping the
+    // facade non-authoritative preserves the signed-out/preview legacy catalog and makes this build
+    // useful for AWG UI and daemon validation without weakening production anti-downgrade.  Release
+    // builds with an offline root continue through the normal secure-store recovery path below.
+    if (offlineRoots.isEmpty()) {
+        facade->setCoordinatorStage(
+            QStringLiteral("idle"),
+            QStringLiteral("catalog_v2_build_trust_unavailable"));
+        qInfo() << "avpn: catalog-v2 composition skipped; offline root unavailable";
+        return;
+    }
+
+    // Catalog compatibility includes the device-owned AWG public key. Generate/load it locally
+    // before secure LKG validation; no enrollment or network request is performed here.
+    QString identityError;
+    m_engine.ensureIdentityKeys(m_store, identityError);
+    m_tunnel.setClientKeys(m_engine.clientKeys());
+
+    m_catalogRuntime = new CatalogProductRuntime(
+        m_conn, m_store, m_nam, facade, QUrl(m_baseUrl),
+        [this]() { return authToken().toUtf8(); },
+        [this]() { return m_engine.clientKeys(); }, this);
+    qInfo() << "avpn: catalog-v2 composed; facade-authoritative-after-compose:"
+            << facade->v2Authoritative();
+
+    // v2 authority is monotonic through ordinary failures. A completed secure logout is the only
+    // event that may reopen v1 in this process; the coordinator emits false only after exact native
+    // teardown and secure-record clearing.
+    connect(facade, &CatalogConnectionFacade::v2AuthorityChanged, this,
+            [this, facade]() {
+                if (facade->v2Authoritative()) {
+                    activateCatalogV2Authority();
+                } else if (m_catalogAuthorityWasAccepted) {
+                    m_catalogAuthorityWasAccepted = false;
+                    m_catalogV2NativeEverOwned = false;
+                    m_catalogLegacyTeardownPending = false;
+                    if (m_catalogRuntime)
+                        m_catalogRuntime->setLegacyNativeOwnershipBlocked(false);
+                    m_engine.unlockLegacyV1AfterSecureLogout();
+                }
+                emit changed();
+            });
+
+    connect(facade, &CatalogConnectionFacade::connectionStageChanged, this,
+            [this, facade]() {
+                if (facade->actualTransport() != QLatin1String("none"))
+                    m_catalogV2NativeEverOwned = true;
+                // Before the first authoritative response QML still renders the legacy shell,
+                // but a queued clean-install v2 connect may already own the user's intent. Surface
+                // a terminal discovery error and release that shell spinner without starting v1.
+                if (!facade->v2Authoritative()
+                    && m_catalogRuntime && m_catalogRuntime->ownsConnectionIntent()
+                    && facade->connectionStage() == QLatin1String("failed")) {
+                    m_busy = false;
+                    if (!facade->errorCode().isEmpty()) emit error(facade->errorCode());
+                    emit changed();
+                }
+            });
+
+    // Recovery/tombstone publication can occur synchronously inside CatalogProductRuntime's
+    // constructor, before the signal subscription above exists.
+    if (facade->v2Authoritative()) {
+        activateCatalogV2Authority();
+        emit changed();
+    }
+
+    connect(m_conn, &VpnConnection::nativeEngineManifestChanged, m_catalogRuntime,
+            [this](const QJsonObject &) {
+                if (!m_catalogRuntime || m_catalogRuntime->productionReady()) return;
+                QString ignored;
+                m_catalogRuntime->initialize(ignored);
+            });
+
+    QString initializeError;
+    const bool catalogInitialized = m_catalogRuntime->initialize(initializeError);
+    qInfo() << "avpn: catalog-v2 initialized:" << catalogInitialized
+            << "production-ready:" << m_catalogRuntime->productionReady()
+            << "facade-authoritative:" << facade->v2Authoritative()
+            << "legacy-v1-allowed:" << legacyBootstrapAllowed()
+            << "error:" << (initializeError.isEmpty()
+                                ? QStringLiteral("none") : initializeError);
+    // Android publishes its generated manifest after the controller/service handshake. The first
+    // synchronous pass above is still required to restore an authoritative tombstone before QML;
+    // the exact manifest signal plus one queued idempotent pass consume it without network I/O.
+    QTimer::singleShot(0, m_catalogRuntime, [this]() {
+        if (!m_catalogRuntime || m_catalogRuntime->productionReady()) return;
+        QString ignored;
+        m_catalogRuntime->initialize(ignored);
+    });
+
+    connect(this, &AvpnEngineQml::apiBaseChanged, m_catalogRuntime,
+            [this](const QString &base) {
+                if (!m_catalogRuntime) return;
+                QString ignored;
+                m_catalogRuntime->setApiBaseUrl(QUrl(base), ignored);
+            });
+    connect(m_store, &SecureAppSettingsRepository::settingsCleared, m_catalogRuntime,
+            &CatalogProductRuntime::clearAfterLogout);
+    if (auto *app = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        connect(app, &QGuiApplication::applicationStateChanged, m_catalogRuntime,
+                [this](Qt::ApplicationState state) {
+                    if (state == Qt::ApplicationActive && m_catalogRuntime)
+                        m_catalogRuntime->applicationResumed();
+                });
+    }
+    if (auto *network = QNetworkInformation::instance()) {
+        m_catalogNetworkOnline =
+            network->reachability() == QNetworkInformation::Reachability::Online;
+        if (m_catalogRuntime)
+            m_catalogRuntime->networkReachabilityChanged(m_catalogNetworkOnline);
+        const auto publishMaterialPath = [this](bool forceNewEpoch) {
+            if (!m_catalogRuntime) return;
+            const CatalogNetworkClass networkClass = currentCatalogNetworkClass();
+            if (!forceNewEpoch && m_catalogPathInitialized
+                && networkClass == m_catalogLastNetworkClass)
+                return; // duplicate Qt backend callback, same privacy-safe path observation
+            m_catalogPathInitialized = true;
+            m_catalogLastNetworkClass = networkClass;
+            const QString token = QStringLiteral("runtime-%1")
+                                      .arg(++m_catalogPathGeneration);
+            m_catalogRuntime->networkPathChanged(networkClass, token);
+        };
+        connect(network, &QNetworkInformation::transportMediumChanged, m_catalogRuntime,
+                [publishMaterialPath](QNetworkInformation::TransportMedium) {
+                    publishMaterialPath(false);
+                });
+        connect(network, &QNetworkInformation::reachabilityChanged, m_catalogRuntime,
+                [this, publishMaterialPath](QNetworkInformation::Reachability reachability) {
+                    const bool online =
+                        reachability == QNetworkInformation::Reachability::Online;
+                    const bool newlyOnline = online && !m_catalogNetworkOnline;
+                    m_catalogNetworkOnline = online;
+                    if (m_catalogRuntime)
+                        m_catalogRuntime->networkReachabilityChanged(online);
+                    // Offline→online is a material epoch even when the medium is still Wi-Fi:
+                    // DHCP/BSSID/routing may have changed. Duplicate Online is a no-op.
+                    if (newlyOnline) publishMaterialPath(true);
+                });
+        publishMaterialPath(true);
+    }
+}
+
+void AvpnEngineQml::beginCatalogLegacyTeardown()
+{
+    if (m_catalogLegacyTeardownPending) return;
+    m_catalogLegacyTeardownPending = true;
+    if (m_catalogRuntime)
+        m_catalogRuntime->setLegacyNativeOwnershipBlocked(true);
+    m_wantConnected = false;
+    m_needsRestart = false;
+    m_op = Op::Stopping;
+    m_opInFlight = true;
+    m_busy = true;
+    m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
+    m_watchdog.start();
+    m_healthTimer.stop();
+    m_engine.requestStop();
+    m_tunnel.down();
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (m_adoptedNoProto) {
+        m_adoptedNoProto = false;
+        daemonDirectDeactivate();
+    }
+#endif
+}
+
+void AvpnEngineQml::activateCatalogV2Authority()
+{
+    if (m_catalogAuthorityWasAccepted) return;
+    const CatalogCoordinator *coordinator = m_catalogRuntime
+        ? m_catalogRuntime->coordinator() : nullptr;
+    const bool nativeRecovery = coordinator
+        && coordinator->nativeSessionGuardRecoveryPending();
+    const bool v2RuntimeOwnsNative = m_catalogV2NativeEverOwned
+        || (coordinator && coordinator->ownsNativeRuntime());
+    const Vpn::ConnectionState nativeState = m_conn
+        ? m_conn->connectionState() : m_lastTunnelState;
+    const bool legacyMayOwnNative = authoritativeUnexpectedLegacyOwnerMustStop(
+        true, m_catalogLegacyTeardownPending, nativeRecovery, v2RuntimeOwnsNative,
+        nativeState == Vpn::Disconnected);
+    if (legacyMayOwnNative)
+        beginCatalogLegacyTeardown();
+    else if (m_catalogRuntime)
+        m_catalogRuntime->setLegacyNativeOwnershipBlocked(false);
+
+    m_catalogAuthorityWasAccepted = true;
+    m_engine.lockLegacyV1AfterAcceptedV2();
+    m_wantConnected = false;
+    m_needsRestart = false;
+    if (!m_catalogLegacyTeardownPending) {
+        m_op = Op::None;
+        m_opInFlight = false;
+        m_busy = false;
+        m_watchdog.stop();
+    }
+    m_healthTimer.stop();
+    m_bootstrapRetryTimer.stop();
+    m_bootstrapInFlight = false;
+    m_bootstrapRetries = 0;
+}
+
+bool AvpnEngineQml::legacyTunnelMutationsAllowed() const
+{
+    return legacyBootstrapAllowed()
+           && !(m_catalogRuntime && m_catalogRuntime->ownsConnectionIntent());
 }
 
 // AVPN remote-config (T6): фичефлаг/URL из последнего применённого /v1/config (LKG на старте,
@@ -1032,6 +1278,60 @@ QString AvpnEngineQml::state() const
     return debugSnapshot().value(QStringLiteral("state")).toString();
 }
 
+bool AvpnEngineQml::removeMacSystemService()
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    const bool tunnelActionable = (m_lastTunnelState == Vpn::Disconnected
+                                   || m_lastTunnelState == Vpn::Unknown
+                                   || m_lastTunnelState == Vpn::Error);
+    if (m_svcInstallInFlight || m_busy || m_wantConnected || !tunnelActionable) {
+        emit macSystemServiceRemovalFinished(
+            false, tr("Сначала отключите VPN и дождитесь завершения операции"));
+        return false;
+    }
+    if (!avpn::macServiceInstalled() && !avpn::macServiceRunning()) {
+        emit macSystemServiceRemovalFinished(
+            true, tr("Системная служба Tribe VPN уже удалена"));
+        return false;
+    }
+
+    QString confirmError;
+    if (!avpn::macUninstallServiceConfirm(&confirmError))
+        return false;
+
+    m_svcInstallInFlight = true;
+    m_svcInstalling = true;
+    m_busy = true;
+    emit changed();
+    struct RemovalResult {
+        bool ok = false;
+        QString error;
+    };
+    const auto result = std::make_shared<RemovalResult>();
+    QThread *worker = QThread::create([result]() {
+        result->ok = avpn::macUninstallServiceRun(&result->error);
+    });
+    connect(worker, &QThread::finished, this, [this, result]() {
+        m_svcInstallInFlight = false;
+        m_svcInstalling = false;
+        m_busy = false;
+        emit changed();
+        emit macSystemServiceRemovalFinished(
+            result->ok, result->ok ? tr("Системная служба Tribe VPN удалена")
+                                   : (result->error.isEmpty()
+                                          ? tr("Не удалось удалить системную службу Tribe VPN")
+                                          : result->error));
+    }, Qt::QueuedConnection);
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+    return true;
+#else
+    emit macSystemServiceRemovalFinished(
+        false, tr("Функция доступна только на macOS"));
+    return false;
+#endif
+}
+
 // AVPN (белые списки): активный РКН-режим whitelist (детектор жив только на iOS/Android).
 bool AvpnEngineQml::whitelistMode() const
 {
@@ -1221,6 +1521,7 @@ void AvpnEngineQml::probeNodeRtt()
 
 void AvpnEngineQml::onTick()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (m_engine.tick(QDateTime::currentSecsSinceEpoch()))
         emit changed(); // произошёл свитч
 
@@ -1261,6 +1562,7 @@ void AvpnEngineQml::onTick()
 // снапшот при op-in-flight звал бы stop() каждый тик). Сбрасывается явным start().
 void AvpnEngineQml::enforceSubscriptionGrace()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (!avpn::TuningStore::flag(QStringLiteral("subscription_grace_enforce")))
         return; // kill-switch: бэк выключил принудительное отключение целиком
     if (m_graceStopInFlight)
@@ -2678,6 +2980,48 @@ void AvpnEngineQml::clearBenchHistory()
 
 void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 {
+    // A delayed callback from a legacy start may arrive after the clean-install v2 intent was
+    // queued but before any signed v2 authority exists.  At this boundary the native owner is
+    // provably legacy; block catalog discovery/start first, then serialize its ordinary teardown.
+    // The exact Disconnected branch below is the only event that reopens the coordinator gate.
+    if (delayedLegacyOwnerMustBlockV2(
+            m_catalogAuthorityWasAccepted, m_catalogLegacyTeardownPending,
+            m_catalogRuntime && m_catalogRuntime->ownsConnectionIntent(),
+            s == Vpn::Disconnected)) {
+        m_lastTunnelState = s;
+        beginCatalogLegacyTeardown();
+        return;
+    }
+    const CatalogCoordinator *coordinator = m_catalogRuntime
+        ? m_catalogRuntime->coordinator() : nullptr;
+    if (authoritativeUnexpectedLegacyOwnerMustStop(
+            m_catalogAuthorityWasAccepted, m_catalogLegacyTeardownPending,
+            coordinator && coordinator->nativeSessionGuardRecoveryPending(),
+            m_catalogV2NativeEverOwned
+                || (coordinator && coordinator->ownsNativeRuntime()),
+            s == Vpn::Disconnected)) {
+        // A durable v2 tombstone may have been restored before the platform published the old
+        // legacy connection state. Serialize that owner to exact Disconnected before any v2
+        // discovery/start. Generic callbacks never stop a reducer-owned exact v2 session.
+        m_lastTunnelState = s;
+        beginCatalogLegacyTeardown();
+        return;
+    }
+    if (m_catalogLegacyTeardownPending) {
+        m_lastTunnelState = s;
+        if (s == Vpn::Disconnected) {
+            m_catalogLegacyTeardownPending = false;
+            m_op = Op::None;
+            m_opInFlight = false;
+            m_busy = false;
+            m_watchdog.stop();
+            if (m_catalogRuntime)
+                m_catalogRuntime->setLegacyNativeOwnershipBlocked(false);
+            emit changed();
+        }
+        return;
+    }
+    if (!legacyTunnelMutationsAllowed()) return;
     m_lastTunnelState = s; // AVPN: кэш реального состояния туннеля (для отложенного start() при смене узла)
     // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
@@ -2840,6 +3184,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 
 void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     // Протокол-уровневая ошибка раньше терялась (сигнал не был подключён). Surface наружу в error().
     // AVPN (анти-авто-коннект): больше НЕ зовём notifyConnectionLost() (реактивный failover/реконнект) —
     // фиксируем факт ошибки; подключение только вручную. См. onConnectionStateChanged выше.
@@ -2932,6 +3277,7 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reEnrolled]() {
         reply->deleteLater();
+        if (!legacyBootstrapAllowed()) { stopBootstrapTerminal(); return; }
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         const auto outcome = Enrollment::classifyFetch(code, netErr);
@@ -2949,6 +3295,9 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
         Enrollment::saveToken(tr.subscriptionToken);
         Enrollment::clearPendingReferral(); // реферал атрибутирован на бэке (first-touch)
         emit changed();                     // authToken появился → зависимые биндинги оживут
+        // A first Connect may be queued behind enrollment. Refresh the locally generated AWG
+        // identity and let the product runtime continue resolve; never fall through to legacy up().
+        if (m_catalogRuntime) m_catalogRuntime->refreshLocalKeys();
         // AVPN (Task 9): device token из APNs мог прийти ДО enroll — теперь authToken есть, флашим.
         flushPendingPushToken();
         bootstrapFetchAsync(tr.subscriptionToken, /*tokenFromStore=*/false, reEnrolled);
@@ -2960,7 +3309,8 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
 void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStore, bool reEnrolled)
 {
     if (!m_nam) { onBootstrapAttemptFailed(); return; }
-    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    QNetworkRequest req{versionedSubscriptionUrl(
+        m_baseUrl, QCoreApplication::applicationVersion())};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 
@@ -2968,9 +3318,16 @@ void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStor
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, tokenFromStore, reEnrolled]() {
         reply->deleteLater();
+        if (!legacyBootstrapAllowed()) {
+            qWarning() << "avpn: legacy subscription fetch discarded; v1 no longer authoritative";
+            stopBootstrapTerminal();
+            return;
+        }
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool netErr = (reply->error() != QNetworkReply::NoError);
         const auto outcome = Enrollment::classifyFetch(code, netErr);
+        qInfo() << "avpn: legacy subscription fetch finished; http:" << code
+                << "network-error:" << netErr << "outcome:" << int(outcome);
         // AVPN (белые списки): паритет с enroll-путём — HTTP-ответ гасит подозрение, транспортный
         // фейл копит стрик детектора.
         if (m_whitelistDetector) {
@@ -3003,8 +3360,15 @@ void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStor
 // AVPN: успех bootstrap-цепочки — единая точка (парс + LKG-персист + пробы + оживление UI).
 void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
 {
+    if (!legacyBootstrapAllowed()) {
+        stopBootstrapTerminal();
+        return;
+    }
     QString err;
     const bool parseOk = m_engine.loadSubscription(body, err);
+    qInfo() << "avpn: legacy subscription body parsed:" << parseOk
+            << "nodes:" << nodePool().size()
+            << "parse-error:" << (err.isEmpty() ? QStringLiteral("none") : err);
     // AVPN (баг 2026-07-10 «начисленный триал не подхватился без перезахода»): исход 200-тела
     // решает чистый decideBootstrapBody (BootstrapRetry.h, покрыт bootstrap_retry_check). Бэк для
     // устройства без подписки отдаёт 200 со status=degraded и nodes:[] — раньше такое тело
@@ -3044,6 +3408,7 @@ void AvpnEngineQml::finishBootstrapSuccess(const QByteArray &body)
     flushPendingPushToken(); // токен точно есть — дедуп внутри защитит от повтора
     refreshAnnouncements();  // AVPN (P-ANN): токен есть → подтянуть актуальные объявления
     flushWhitelistEpisodes(); // AVPN (белые списки): сеть жива — отдать накопленные эпизоды
+    if (m_catalogRuntime) m_catalogRuntime->refreshLocalKeys();
 }
 
 // AVPN (белые списки, спека §7): отправка очереди whitelist-эпизодов после восстановления
@@ -3089,6 +3454,10 @@ void AvpnEngineQml::flushWhitelistEpisodes()
 // AVPN: провал попытки — тихо переарм: быстрый бэкофф → вечный медленный цикл (никогда не сдаёмся).
 void AvpnEngineQml::onBootstrapAttemptFailed()
 {
+    if (!legacyBootstrapAllowed()) {
+        stopBootstrapTerminal();
+        return;
+    }
     int delayMs = nextBootstrapDelayMs(m_bootstrapRetries);
     // AVPN (белые списки): в активном режиме сеть мертва для нас ФИЗИЧЕСКИ — растянуть цикл
     // (60с -> ~240с), не жечь батарею/радио. Выход из режима зовёт kickBootstrap() ->
@@ -3133,6 +3502,42 @@ void AvpnEngineQml::kickBootstrap()
 
 void AvpnEngineQml::start()
 {
+    const bool catalogOwnsIntent = m_catalogRuntime
+        && m_catalogRuntime->ownsConnectionIntent();
+    const Vpn::ConnectionState actualNativeState = m_conn
+        ? m_conn->connectionState() : m_lastTunnelState;
+    if (catalogOwnsIntent
+        || (legacyBootstrapAllowed() && m_catalogRuntime
+            && m_catalogRuntime->canInterceptLegacyConnect())) {
+        if (m_catalogAuthorityWasAccepted) return;
+        // The v2 bridge is compile/runtime proved, but a clean install may still be waiting for its
+        // enrollment token or Android's asynchronously published engine manifest. Capture the
+        // first tap as v2 intent and keep the shared VpnConnection entirely untouched by v1.
+        if (!catalogOwnsIntent && (m_opInFlight
+            || actualNativeState != Vpn::Disconnected)) {
+            emit error(QStringLiteral("catalog_v2_waiting_for_legacy_teardown"));
+            return;
+        }
+        m_wantConnected = false;
+        m_needsRestart = false;
+        m_busy = true;
+        QString catalogError;
+        const bool accepted = m_catalogRuntime->requestConnectWhenReady(catalogError);
+        if (!accepted) {
+            m_busy = false;
+            emit error(catalogError.isEmpty()
+                           ? QStringLiteral("catalog_v2_connect_unavailable")
+                           : catalogError);
+        } else if (catalogError == QLatin1String("catalog_auth_not_ready")) {
+            // Bootstrap is async/idempotent and only obtains account/control-plane state; the
+            // continuation above calls refreshLocalKeys after token creation.
+            if (!m_bootstrapInFlight) bootstrap();
+            else kickBootstrap();
+        }
+        emit changed();
+        return;
+    }
+    if (!legacyTunnelMutationsAllowed()) return;
     // AVPN (Task 7): явный start() выходит из паузы (пользователь сам поднял VPN).
     m_pauseTimer.stop();
     m_paused = false;
@@ -3152,6 +3557,30 @@ void AvpnEngineQml::start()
 
 void AvpnEngineQml::stop()
 {
+    if (m_catalogRuntime && m_catalogRuntime->ownsConnectionIntent()) {
+        const bool v2AlreadyAuthoritative = m_catalogAuthorityWasAccepted;
+        const Vpn::ConnectionState actualNativeState = m_conn
+            ? m_conn->connectionState() : m_lastTunnelState;
+        m_catalogRuntime->cancelPendingConnect();
+        m_busy = false;
+        m_wantConnected = false;
+        m_needsRestart = false;
+        // Once v2 is authoritative, coordinator::requestDisconnect owns the exact reducer/guard
+        // teardown and legacy code must remain fenced. Before authority, however, an actual live
+        // or transitional native session can only be the old v1 owner; OFF must still tear it down
+        // instead of returning merely because a queued v2 intent existed.
+        if (queuedV2OffMustTearDownLegacy(
+                v2AlreadyAuthoritative, m_opInFlight,
+                actualNativeState == Vpn::Disconnected)) {
+            m_startAttempts = 0;
+            reconcile();
+            emit changed();
+            return;
+        }
+        emit changed();
+        return;
+    }
+    if (!legacyTunnelMutationsAllowed()) return;
     // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN).
     m_pauseTimer.stop();
     m_paused = false;
@@ -3173,6 +3602,7 @@ void AvpnEngineQml::stop()
 // из start/stop/switchToNode/rotateNext/selectAuto/reprobe и из onConnectionStateChanged/onWatchdog.
 void AvpnEngineQml::reconcile()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (m_paused)
         return;          // во время авто-паузы туннель ведёт pause-логика — не вмешиваемся
     if (m_opInFlight)
@@ -3222,6 +3652,7 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6): реальный старт создаст протокол — дальше stop идёт штатным путём.
     m_adoptedNoProto = false;
@@ -3258,35 +3689,35 @@ void AvpnEngineQml::guardedStart()
     // finishSvcInstall → reconcile(): намерение (m_wantConnected) всё это время взведено.
     if (m_svcInstallInFlight)
         return;                       // установка уже идёт — reconcile дождётся finishSvcInstall
-    const bool needInstall = !avpn::macServiceInstalled() || avpn::macServiceOutdated();
-    if (!avpn::macServiceRunning() || needInstall) {
-        if (needInstall) {
-            QString cerr;
-            if (!avpn::macInstallServiceConfirm(&cerr)) {
-                // Пользователь отменил — снимаем намерение (иначе ближайший reconcile переспросит).
-                m_wantConnected = false;
-                ++m_startAttempts;
-                emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
-                emit changed();
-                return;
-            }
+    const bool serviceRunning = avpn::macServiceRunning();
+    const bool serviceInstalled = avpn::macServiceInstalled();
+    const bool serviceOutdated = serviceInstalled && avpn::macServiceOutdated();
+    const bool needInstall = !serviceInstalled || serviceOutdated;
+    const bool needRepair = !serviceRunning;
+    if (needInstall || needRepair) {
+        const avpn::MacServiceInstallReason installReason = !serviceInstalled
+            ? avpn::MacServiceInstallReason::FirstInstall
+            : serviceOutdated ? avpn::MacServiceInstallReason::Update
+                              : avpn::MacServiceInstallReason::Repair;
+        QString cerr;
+        if (!avpn::macInstallServiceConfirm(installReason, &cerr)) {
+            // Пользователь отменил — снимаем намерение (иначе ближайший reconcile переспросит).
+            m_wantConnected = false;
+            ++m_startAttempts;
+            emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
+            emit changed();
+            return;
         }
         m_svcInstallInFlight = true;
         m_svcInstalling = true;
         m_busy = true;               // орб — спиннер; текст даёт svcInstalling
         emit changed();
-        QThread *worker = QThread::create([this, needInstall]() {
+        QThread *worker = QThread::create([this]() {
             QString ierr;
-            bool ok = true;
-            if (needInstall) {
-                ok = avpn::macInstallServiceRun(&ierr); // пароль + tarball + bootstrap + ожидание демона
-            } else {
-                // Демон установлен, но не бежит (рестарт/kill) — даём launchd до ~5с поднять его;
-                // старт продолжаем в любом случае (паритет с прежним поведением: up() сам упадёт
-                // честной ошибкой, если демона так и нет).
-                for (int i = 0; i < 16 && !avpn::macServiceRunning(); ++i)
-                    QThread::msleep(300);
-            }
+            // A same-version but stopped/missing launchd job is a repair, not a
+            // passive wait: the sealed installer re-authenticates the payload,
+            // replaces it transactionally and performs exact launchd health proof.
+            const bool ok = avpn::macInstallServiceRun(&ierr);
             QMetaObject::invokeMethod(this, [this, ok, ierr]() { finishSvcInstall(ok, ierr); },
                                       Qt::QueuedConnection);
         });
@@ -3403,6 +3834,7 @@ void AvpnEngineQml::onDaemonNetworkChanged() { daemonWakeEvent("networkChanged")
 
 void AvpnEngineQml::daemonWakeEvent(const char *why)
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     // Kill-switch мог флипнуться уже ПОСЛЕ среза ванильных подписок — честно возвращаем ваниль.
     if (!avpn::TuningStore::flag(QStringLiteral("wake_restart"))) {
         m_conn->reconnectToVpn();
@@ -3424,6 +3856,10 @@ void AvpnEngineQml::daemonWakeEvent(const char *why)
 
 void AvpnEngineQml::wakeLivenessProbe()
 {
+    if (!legacyTunnelMutationsAllowed()) {
+        m_wakeProbing = false;
+        return;
+    }
     if (!m_wantConnected || m_lastTunnelState != Vpn::Connected) {
         m_wakeProbing = false;                   // состояние уехало, пока ждали — не вмешиваемся
         return;
@@ -3461,6 +3897,7 @@ void AvpnEngineQml::wakeLivenessProbe()
 
 void AvpnEngineQml::wakeKick()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (!m_wakeRestartPending)
         return;
     if (m_lastTunnelState == Vpn::Connected) {   // уже поднялись (сами или предыдущим ретраем)
@@ -3486,8 +3923,8 @@ void AvpnEngineQml::wakeKick()
 // AVPN (BUG-6): путь к сокету демона — тот же, что у LocalSocketController (initializeInternal).
 static QString avpnDaemonSocketPath()
 {
-    const QString primary = QStringLiteral("/var/run/avpn/daemon.socket");
-    return QFile::exists(primary) ? primary : QStringLiteral("/tmp/avpn.socket");
+    // AVPN: never fall back to a predictable /tmp or system-wide legacy socket.
+    return amnezia::getWireguardDaemonUrl();
 }
 
 // AVPN (BUG-6, адопция при перезапуске GUI): демон переживает выход GUI и держит туннель, но
@@ -3497,6 +3934,7 @@ static QString avpnDaemonSocketPath()
 // choke-point onConnectionStateChanged(Connected) (там же встанет hookDaemonWakeSignals §18).
 void AvpnEngineQml::probeDaemonTunnelOnStartup()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (!avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel")))
         return;
     if (m_op != Op::None || m_lastTunnelState == Vpn::Connected)
@@ -3505,7 +3943,16 @@ void AvpnEngineQml::probeDaemonTunnelOnStartup()
     auto *guard = new QTimer(sock);
     guard->setSingleShot(true);
     connect(guard, &QTimer::timeout, sock, &QObject::deleteLater); // демона нет/молчит — тихо уходим
+    sock->setReadBufferSize(amnezia::ipcsecurity::kMaxDaemonCommandBytes);
     connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        QByteArray sessionToken;
+        QString securityError;
+        if (!amnezia::ipcsecurity::performClientHandshake(
+                sock, {}, &sessionToken, &securityError)) {
+            sock->abort();
+            sock->deleteLater();
+            return;
+        }
         sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("status") } })
                         .toJson(QJsonDocument::Compact));
         sock->write("\n");
@@ -3542,7 +3989,16 @@ void AvpnEngineQml::daemonDirectDeactivate()
     auto *guard = new QTimer(sock);
     guard->setSingleShot(true);
     connect(guard, &QTimer::timeout, sock, &QObject::deleteLater);
+    sock->setReadBufferSize(amnezia::ipcsecurity::kMaxDaemonCommandBytes);
     connect(sock, &QLocalSocket::connected, sock, [sock]() {
+        QByteArray sessionToken;
+        QString securityError;
+        if (!amnezia::ipcsecurity::performClientHandshake(
+                sock, {}, &sessionToken, &securityError)) {
+            sock->abort();
+            sock->deleteLater();
+            return;
+        }
         sock->write(QJsonDocument(QJsonObject{ { QStringLiteral("type"), QStringLiteral("deactivate") } })
                         .toJson(QJsonDocument::Compact));
         sock->write("\n");
@@ -3559,6 +4015,7 @@ void AvpnEngineQml::daemonDirectDeactivate()
 
 void AvpnEngineQml::guardedStop()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     m_op = Op::Stopping;
     m_opInFlight = true;
     m_busy = true;
@@ -3587,6 +4044,22 @@ void AvpnEngineQml::guardedStop()
 // teardown или connect завис). Разблокируем машину, чтобы не залипнуть навсегда.
 void AvpnEngineQml::onWatchdog()
 {
+    if (m_catalogLegacyTeardownPending) {
+        // A missing legacy terminal receipt is ambiguous native ownership.  Never infer
+        // Disconnected or let catalog-v2 start across that gap; platform/user recovery is needed.
+        m_watchdog.stop();
+        m_busy = true;
+        emit error(QStringLiteral("legacy_native_teardown_unconfirmed"));
+        emit changed();
+        return;
+    }
+    if (!legacyTunnelMutationsAllowed()) {
+        m_watchdog.stop();
+        m_op = Op::None;
+        m_opInFlight = false;
+        m_busy = false;
+        return;
+    }
     if (!m_opInFlight)
         return;
     const Op finished = m_op;
@@ -3618,6 +4091,7 @@ void AvpnEngineQml::onWatchdog()
 
 void AvpnEngineQml::reprobe()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     // AVPN: re-pick авто-ноды через единый reconcile (не дёргаем m_engine.connect() напрямую — это
     // обходило бы стейт-машину и давало back-to-back up()). Снимаем pin; если онлайн — перевыбираем.
     m_engine.clearPin();
@@ -3634,6 +4108,7 @@ void AvpnEngineQml::reprobe()
 
 void AvpnEngineQml::manualSwitch()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (m_engine.notifyConnectionLost())
         emit changed();
 }
@@ -3663,6 +4138,7 @@ static QString humanPinError(const QString &technical)
 // Шторка закрывается в QML (sheet.close()).
 void AvpnEngineQml::switchToNode(const QString &nodeId)
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
         emit error(humanPinError(err));
@@ -3685,6 +4161,7 @@ void AvpnEngineQml::switchToNode(const QString &nodeId)
 // на старую семантику switchToNode без релиза в стор (вкомпиленный фолбэк = true).
 void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (!featureEnabled(QStringLiteral("picker_instant_reconnect"), true)) {
         switchToNode(nodeId);
         return;
@@ -3717,6 +4194,7 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
 // Модель «выбор = задать цель, коннект — кнопкой»: НЕ реконнектим автоматически (без back-to-back up()).
 void AvpnEngineQml::selectAuto()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     m_engine.clearPin();
     m_wantConnected = false;
     m_needsRestart = false;
@@ -3731,6 +4209,7 @@ void AvpnEngineQml::selectAuto()
 // цель и просим переключиться: reconcile сделает stop→Disconnected→start на ней (iOS-safe).
 void AvpnEngineQml::rotateNext()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     const QString next = m_engine.nextLiveNodeId();
     if (next.isEmpty()) {
         emit error(tr("Недостаточно живых серверов для переключения"));
@@ -4345,6 +4824,7 @@ void AvpnEngineQml::resumeFromPause()
 // AVPN (Task 7): таймер паузы истёк → бездействие → возвращаемся (поднимаем туннель обратно).
 void AvpnEngineQml::onPauseTimeout()
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     resumeFromPause();
 }
 
@@ -4583,7 +5063,8 @@ void AvpnEngineQml::refreshSubscription()
     if (!m_nam || token.isEmpty())
         return;
 
-    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    QNetworkRequest req{versionedSubscriptionUrl(
+        m_baseUrl, QCoreApplication::applicationVersion())};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 
@@ -5279,6 +5760,7 @@ void AvpnEngineQml::legalDocFetch(const QString &doc, const QString &lang)
 
 void AvpnEngineQml::startDoctor(bool full)
 {
+    if (!legacyTunnelMutationsAllowed()) return;
     if (doctorRunning())
         return;
     if (!featureEnabled(QStringLiteral("diag_v2"), true))

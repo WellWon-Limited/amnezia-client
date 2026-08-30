@@ -287,6 +287,27 @@ int main(int argc, char **argv)
         CHECK(tun.lastUpNodeId == QLatin1String("cur")); // up() на xray не было
     }
 
+    // --- 10) monotonic v2 authority: после accepted v2 unsigned v1 не грузится/не стартует ---
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        const QByteArray legacy = subJson({ awgNodeJson("old", "FI", 1.0) });
+        CHECK(eng.loadSubscription(legacy, err));
+        CHECK(eng.setPinnedNode(QStringLiteral("old"), err));
+        CHECK(eng.legacyV1Allowed());
+        eng.lockLegacyV1AfterAcceptedV2();
+        CHECK(!eng.legacyV1Allowed());
+        eng.clearPin();
+        CHECK(eng.pinnedNodeId() == QLatin1String("old"));
+        CHECK(!eng.loadSubscription(legacy, err));
+        CHECK(!eng.connect(err));
+        CHECK(!eng.rotateNext(err));
+        CHECK(!eng.setPinnedNode(QStringLiteral("old"), err));
+        CHECK(tun.upCalls == 0);
+    }
+
     if (g_failed) {
         fprintf(stderr, "proto_forward_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

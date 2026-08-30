@@ -10,10 +10,12 @@
 #include "core/controllers/coreSignalHandlers.h"
 #include "logger.h"
 #include "secureQSettings.h"
+#include "core/utils/appUiConfig.h"
 
 #ifdef AVPN_ENGINE_ENABLED            // AVPN overlay
     #include "amneziaApplication.h"   // amnApp->networkManager()
     #include "core/serviceEngine/AvpnEngineQml.h"
+    #include "core/serviceEngine/CatalogConnectionFacade.h" // AVPN v2: secret-free QML facade
     #include "core/serviceEngine/AvpnPushBridge.h" // AVPN (Task 9): мост пушей → QML
     #include "core/serviceEngine/TribeSupportChat.h" // AVPN (Support): чат поддержки → QML
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
@@ -28,7 +30,7 @@
 
 #if defined(Q_OS_IOS)
     #include "platforms/ios/ios_controller.h"
-    #include <AmneziaVPN-Swift.h>
+    #include "core/utils/swiftBridge.h"
 #endif
 
 CoreController::CoreController(const QSharedPointer<VpnConnection> &vpnConnection, SecureQSettings* settings,
@@ -46,6 +48,12 @@ CoreController::CoreController(const QSharedPointer<VpnConnection> &vpnConnectio
         initAndroidController();
         initAppleController();
     }
+#ifdef AVPN_ENGINE_ENABLED
+    // AVPN v2: compose only after platform controllers have published their generated engine
+    // manifest/guard readiness, but still before CoreController returns and QML is loaded.
+    if (m_avpnEngine && m_tribeConnection)
+        m_avpnEngine->attachCatalogV2(m_tribeConnection);
+#endif
     initLogging();
 
     m_translator = new QTranslator(this);
@@ -166,6 +174,7 @@ void CoreController::initCoreControllers()
     m_allowedDnsController = new AllowedDnsController(m_appSettingsRepository);
     m_servicesCatalogController = new ServicesCatalogController(m_appSettingsRepository);
     m_subscriptionController = new SubscriptionController(m_serversRepository, m_appSettingsRepository);
+    m_storePurchaseController = new StorePurchaseController(m_serversRepository, m_appSettingsRepository);
     m_newsController = new NewsController(m_appSettingsRepository, m_serversRepository);
     m_updateController = new UpdateController(m_appSettingsRepository, this);
     
@@ -209,9 +218,17 @@ void CoreController::initControllers()
 
 #ifdef AVPN_ENGINE_ENABLED   // AVPN overlay: умный движок (пул/выбор/failover) + диагностика
     // Переиспользуем готовые объекты форка: VpnConnection, SecureAppSettingsRepository, networkManager.
-    auto *avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
-                                               amnApp->networkManager(), this);
-    setQmlContextProperty("TribeEngine", avpnEngine);
+    m_avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
+                                           amnApp->networkManager(), this);
+    setQmlContextProperty("TribeEngine", m_avpnEngine);
+
+    // AVPN v2: always publish the stable, secret-free facade before QML is loaded. Until the
+    // production coordinator restores an authoritative encrypted v2 state and installs its action
+    // owner, the facade stays non-authoritative/unavailable and the existing v1 AWG path remains
+    // active. QObject parenting guarantees the facade outlives the QQml context bindings.
+    m_tribeConnection = new avpn::CatalogConnectionFacade(this);
+    Q_ASSERT(m_tribeConnection);
+    setQmlContextProperty("TribeConnection", m_tribeConnection);
 
     // AVPN (haptics, спека 2026-07-11): семантический тактильный отклик для QML-слоя Tribe.
     setQmlContextProperty("TribeHaptics", new avpn::TribeHaptics(this));
@@ -229,14 +246,14 @@ void CoreController::initControllers()
                      tribeSupport, &avpn::TribeSupportChat::onSupportPush);
 
     // AVPN backend-first: чат поддержки живёт на том же активном edge, что и движок.
-    tribeSupport->setBaseUrl(avpnEngine->apiBase());
-    QObject::connect(avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
+    tribeSupport->setBaseUrl(m_avpnEngine->apiBase());
+    QObject::connect(m_avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
                      tribeSupport, &avpn::TribeSupportChat::setBaseUrl);
 
     // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный
     // рефреш /v1/subscription — бейдж и золотая CTA оживают сразу, на любой открытой вкладке.
     QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::paymentPushReceived,
-                     avpnEngine, &avpn::AvpnEngineQml::refreshSubscription);
+                     m_avpnEngine, &avpn::AvpnEngineQml::refreshSubscription);
 
     // AVPN (Task 13): мост обратного диплинка ПЕРЕНОСА (tribe://transfer / Universal Link) → QML.
     auto *avpnDeepLink = avpn::AvpnDeepLinkBridge::instance();
@@ -244,14 +261,14 @@ void CoreController::initControllers()
     // Извлечённый из ссылки токен переноса → движок (POST /v1/transfer/redeem + РОТАЦИЯ токена).
     // У моста нет base URL / Identity / NAM, поэтому redeem делает движок.
     QObject::connect(avpnDeepLink, &avpn::AvpnDeepLinkBridge::transferRequested,
-                     avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
+                     m_avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
     // AVPN: холодный старт по диплинку — ссылка могла прийти ДО этого connect (натив-слой iOS/
     // Android дёргает мост в своём темпе): сигнал ушёл в пустоту, токен остался в мосте. Забираем
     // его один раз и редимим сами (при busy движок сам отложит-ретраит — см. redeemTransfer).
     {
         const QString pendingTransfer = avpnDeepLink->takePendingTransferToken();
         if (!pendingTransfer.isEmpty())
-            avpnEngine->redeemTransfer(pendingTransfer);
+            m_avpnEngine->redeemTransfer(pendingTransfer);
     }
 
     // AVPN (Task E): мост-консьюмер «намерений» фонового App Intent авто-паузы (Task 8). Сам движок
@@ -287,6 +304,7 @@ void CoreController::initControllers()
     setQmlContextProperty("ServicesCatalogUiController", m_servicesCatalogUiController);
 
     m_subscriptionUiController = new SubscriptionUiController(m_serversController, m_apiServicesModel, m_servicesCatalogController, m_subscriptionController,
+                                                              m_storePurchaseController,
                                                               m_apiSubscriptionPlansModel, m_apiBenefitsModel, m_apiAccountInfoModel,
                                                               m_apiCountryModel, m_apiDevicesModel, m_settingsController,
                                                               m_connectionController, this);
@@ -322,7 +340,7 @@ void CoreController::initAppleController()
 {
 #ifdef Q_OS_IOS
     IosController::Instance()->initialize();
-    QTimer::singleShot(0, this, [this]() { AmneziaVPN::toggleScreenshots(m_appSettingsRepository->isScreenshotsEnabled()); });
+    QTimer::singleShot(0, this, [this]() { SWIFT_BRIDGE_NAMESPACE::toggleScreenshots(m_appSettingsRepository->isScreenshotsEnabled()); });
 #endif
 }
 
@@ -362,15 +380,15 @@ void CoreController::updateTranslator(const QLocale &locale)
     }
 
     QStringList availableTranslations;
-    QDirIterator it(":/translations", QStringList("amneziavpn_*.qm"), QDir::Files);
+    QDirIterator it(":/translations", QStringList(APP_TS_PREFIX "_*.qm"), QDir::Files);
     while (it.hasNext()) {
         availableTranslations << it.next();
     }
 
     // This code allow to load translation for the language only, without country code
     const QString lang = locale.name().split("_").first();
-    const QString translationFilePrefix = QString(":/translations/amneziavpn_") + lang;
-    QString strFileName = QString(":/translations/amneziavpn_%1.qm").arg(locale.name());
+    const QString translationFilePrefix = QString(":/translations/" APP_TS_PREFIX "_") + lang;
+    QString strFileName = QString(":/translations/" APP_TS_PREFIX "_%1.qm").arg(locale.name());
     for (const QString &translation : availableTranslations) {
         if (translation.contains(translationFilePrefix)) {
             strFileName = translation;
@@ -381,7 +399,7 @@ void CoreController::updateTranslator(const QLocale &locale)
     if (m_translator->load(strFileName)) {
         QCoreApplication::installTranslator(m_translator);
     } else {
-        if (m_translator->load(QString(":/translations/amneziavpn_en.qm"))) {
+        if (m_translator->load(QString(":/translations/" APP_TS_PREFIX "_en.qm"))) {
             QCoreApplication::installTranslator(m_translator);
         }
     }

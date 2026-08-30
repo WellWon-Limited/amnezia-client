@@ -5,14 +5,23 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QDateTime>
+#include <QSet>
+#include <QStringList>
 #include <QThread>
+#include <QUuid>
 #include <QEventLoop>
+
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 
 #include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
-#import "StoreKitController.h"
+#import "core/utils/swiftBridge.h"
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
+#include "version.h"
 
 const char* Action::start = "start";
 const char* Action::restart = "restart";
@@ -109,6 +118,10 @@ bool isWireGuardBasedProto(amnezia::Proto proto) {
     return proto == amnezia::Proto::WireGuard || proto == amnezia::Proto::Awg;
 }
 
+bool isXrayBasedProto(amnezia::Proto proto) {
+    return proto == amnezia::Proto::Xray || proto == amnezia::Proto::SSXray;
+}
+
 // AVPN backend-first (T20): handshake-пороги из rawConfig (numbers.handshake_timeout_ms /
 // numbers.handshake_max_timeouts, засеяны VpnConnectionTunnelControl::up), фолбэк — константы
 // выше. Пусто/не число → фолбэк (byte-for-byte старое поведение).
@@ -132,6 +145,359 @@ uint64_t uint64FromResponse(NSDictionary *response, NSString *key, uint64_t fall
         }
     }
     return fallback;
+}
+
+bool canonicalUint64FromResponse(NSDictionary *response, NSString *key, uint64_t *result) {
+    id value = response[key];
+    if (![value isKindOfClass:[NSString class]]) {
+        return false;
+    }
+    const char *str = [(NSString *)value UTF8String];
+    if (!str || !*str || (str[0] == '0' && str[1] != '\0')) {
+        return false;
+    }
+    for (const char *cursor = str; *cursor; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
+    }
+    errno = 0;
+    char *end = nullptr;
+    const unsigned long long parsed = strtoull(str, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0') {
+        return false;
+    }
+    if (result) {
+        *result = static_cast<uint64_t>(parsed);
+    }
+    return true;
+}
+
+bool canonicalTokenString(const QString &value)
+{
+    if (value.isEmpty() || value.size() > 20
+        || (value.size() > 1 && value.startsWith(QLatin1Char('0')))) return false;
+    bool ok = false;
+    const quint64 parsed = value.toULongLong(&ok, 10);
+    return ok && parsed > 0 && QString::number(parsed) == value;
+}
+
+bool canonicalRuntimeUuid(const QString &value)
+{
+    const QUuid uuid(value);
+    return !uuid.isNull() && uuid.toString(QUuid::WithoutBraces).toLower() == value;
+}
+
+bool lowerSha256(const QString &value)
+{
+    if (value.size() != 64) return false;
+    for (const QChar ch : value)
+        if (!((ch >= QLatin1Char('0') && ch <= QLatin1Char('9'))
+              || (ch >= QLatin1Char('a') && ch <= QLatin1Char('f')))) return false;
+    return true;
+}
+
+bool schemaOne(const QJsonValue &value)
+{
+    return value.isDouble() && value.toDouble() == 1.0;
+}
+
+bool objcSchemaOne(id value)
+{
+    return [value isKindOfClass:[NSNumber class]]
+            && [(NSNumber *)value doubleValue] == 1.0;
+}
+
+bool safeGuardOpaque(const QString &value, bool allowEmpty = false)
+{
+    if (value.isEmpty()) return allowEmpty;
+    if (value.size() > 200) return false;
+    for (const QChar ch : value) {
+        const ushort c = ch.unicode();
+        const bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        const bool digit = c >= '0' && c <= '9';
+        if (!alpha && !digit && c != '-' && c != '_' && c != ':' && c != '.')
+            return false;
+    }
+    return true;
+}
+
+bool safeAsciiReason(const QString &value)
+{
+    if (value.size() > 96) return false;
+    for (const QChar ch : value)
+        if (ch.unicode() < 0x20 || ch.unicode() > 0x7e) return false;
+    return true;
+}
+
+bool strictNativeGuardEvent(NSDictionary *response, QJsonObject &event)
+{
+    event = {};
+    if (![response isKindOfClass:[NSDictionary class]] || response.count != 9) return false;
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:&error];
+    if (!data || error) return false;
+    const QByteArray bytes(reinterpret_cast<const char *>(data.bytes), data.length);
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) return false;
+    const QJsonObject candidate = document.object();
+    static const QSet<QString> exactKeys = {
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("operation"),
+        QStringLiteral("session"), QStringLiteral("kind"), QStringLiteral("policy_sha256"),
+        QStringLiteral("outer_session_id"), QStringLiteral("expected_runtime_session_id"),
+        QStringLiteral("reason"),
+    };
+    const QStringList candidateKeys = candidate.keys();
+    if (QSet<QString>(candidateKeys.cbegin(), candidateKeys.cend()) != exactKeys
+        || candidate.value(QStringLiteral("type"))
+             != QLatin1String("native_session_guard_v1")
+        || !schemaOne(candidate.value(QStringLiteral("schema")))) return false;
+    const QString operation = candidate.value(QStringLiteral("operation")).toString();
+    const QString session = candidate.value(QStringLiteral("session")).toString();
+    const QString kind = candidate.value(QStringLiteral("kind")).toString();
+    const QString policy = candidate.value(QStringLiteral("policy_sha256")).toString();
+    const QString outer = candidate.value(QStringLiteral("outer_session_id")).toString();
+    const QString expected = candidate.value(
+        QStringLiteral("expected_runtime_session_id")).toString();
+    const QString reason = candidate.value(QStringLiteral("reason")).toString();
+    const bool validKind = kind == QLatin1String("armed")
+                           || kind == QLatin1String("arm_rejected")
+                           || kind == QLatin1String("released")
+                           || kind == QLatin1String("release_rejected")
+                           || kind == QLatin1String("lost");
+    const bool outerMayBeEmpty = kind == QLatin1String("arm_rejected");
+    if (!canonicalTokenString(operation) || !canonicalTokenString(session) || !validKind
+        || !lowerSha256(policy) || !canonicalRuntimeUuid(expected)
+        || !safeGuardOpaque(outer, outerMayBeEmpty) || reason.size() > 96) return false;
+    for (const QChar ch : reason)
+        if (ch.unicode() < 0x20 || ch.unicode() > 0x7e) return false;
+    event = candidate;
+    return true;
+}
+
+bool strictNativeGuardRecoveryReceipt(NSDictionary *response, QJsonObject &receipt)
+{
+    receipt = {};
+    if (![response isKindOfClass:[NSDictionary class]] || response.count != 10) return false;
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:&error];
+    if (!data || error) return false;
+    const QByteArray bytes(reinterpret_cast<const char *>(data.bytes), data.length);
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) return false;
+    const QJsonObject candidate = document.object();
+    static const QSet<QString> exactKeys = {
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("action"),
+        QStringLiteral("kind"), QStringLiteral("operation"), QStringLiteral("session"),
+        QStringLiteral("policy_sha256"), QStringLiteral("outer_session_id"),
+        QStringLiteral("expected_runtime_session_id"), QStringLiteral("reason"),
+    };
+    const QStringList candidateKeys = candidate.keys();
+    if (QSet<QString>(candidateKeys.cbegin(), candidateKeys.cend()) != exactKeys
+        || candidate.value(QStringLiteral("type"))
+             != QLatin1String("native_session_guard_recovery_v1")
+        || !schemaOne(candidate.value(QStringLiteral("schema")))) return false;
+    const QString action = candidate.value(QStringLiteral("action")).toString();
+    const QString kind = candidate.value(QStringLiteral("kind")).toString();
+    const bool validPair = (action == QLatin1String("adopt")
+                            && (kind == QLatin1String("adopted")
+                                || kind == QLatin1String("rejected")))
+                           || (action == QLatin1String("stop")
+                               && (kind == QLatin1String("stopped_released")
+                                   || kind == QLatin1String("rejected")));
+    const QString reason = candidate.value(QStringLiteral("reason")).toString();
+    if (!validPair
+        || !canonicalTokenString(candidate.value(QStringLiteral("operation")).toString())
+        || !canonicalTokenString(candidate.value(QStringLiteral("session")).toString())
+        || !lowerSha256(candidate.value(QStringLiteral("policy_sha256")).toString())
+        || !safeGuardOpaque(candidate.value(QStringLiteral("outer_session_id")).toString())
+        || !canonicalRuntimeUuid(candidate.value(
+            QStringLiteral("expected_runtime_session_id")).toString())
+        || reason.size() > 96) return false;
+    for (const QChar ch : reason)
+        if (ch.unicode() < 0x20 || ch.unicode() > 0x7e) return false;
+    receipt = candidate;
+    return true;
+}
+
+bool canonicalGeneration(const QString &value)
+{
+    if (value.isEmpty() || value.size() > 20
+        || (value.size() > 1 && value.startsWith(QLatin1Char('0')))) return false;
+    bool ok = false;
+    const quint64 parsed = value.toULongLong(&ok, 10);
+    return ok && QString::number(parsed) == value;
+}
+
+bool canonicalUtcMillis(const QString &value)
+{
+    if (value.size() != 24 || !value.endsWith(QLatin1Char('Z'))) return false;
+    const QDateTime parsed = QDateTime::fromString(value, Qt::ISODateWithMs);
+    return parsed.isValid() && parsed.offsetFromUtc() == 0
+            && parsed.toUTC().toString(Qt::ISODateWithMs) == value;
+}
+
+bool authorityHardDeadline(const QJsonObject &authority, QString &deadline)
+{
+    deadline.clear();
+    QList<QDateTime> values;
+    for (const char *key : {"native_profile_expires_at",
+                            "catalog_freshness_deadline", "entitlement_deadline"}) {
+        const QString text = authority.value(QLatin1String(key)).toString();
+        if (text.isEmpty() || !text.endsWith(QLatin1Char('Z'))) return false;
+        QDateTime parsed = QDateTime::fromString(text, Qt::ISODateWithMs);
+        if (!parsed.isValid()) parsed = QDateTime::fromString(text, Qt::ISODate);
+        if (!parsed.isValid() || parsed.offsetFromUtc() != 0) return false;
+        values.append(parsed.toUTC());
+    }
+    QDateTime hard = values.first();
+    for (const QDateTime &value : values)
+        if (value < hard) hard = value;
+    deadline = hard.toString(Qt::ISODateWithMs);
+    return canonicalUtcMillis(deadline);
+}
+
+bool buildAuthorityRenewalRequest(const QJsonObject &vpnConfig,
+                                  const QString &operation, const QString &session,
+                                  const QString &outerSessionId,
+                                  const QString &expectedRuntimeSessionId,
+                                  const QString &renewalId,
+                                  const QString &authorityCommitmentHex,
+                                  QJsonObject &request)
+{
+    request = {};
+    const QJsonObject authority = vpnConfig.value(
+        QStringLiteral("runtime_authority_v1")).toObject();
+    static const QSet<QString> authorityKeys{
+        QStringLiteral("schema_version"), QStringLiteral("device_audience"),
+        QStringLiteral("catalog_revision"), QStringLiteral("catalog_payload_sha256"),
+        QStringLiteral("catalog_signing_kid"), QStringLiteral("catalog_source"),
+        QStringLiteral("profile_id"), QStringLiteral("transport"),
+        QStringLiteral("config_generation"), QStringLiteral("binding_generation"),
+        QStringLiteral("native_profile_expires_at"),
+        QStringLiteral("catalog_freshness_deadline"),
+        QStringLiteral("entitlement_deadline"), QStringLiteral("catalog_issued_at"),
+        QStringLiteral("trusted_utc_at_dispatch"), QStringLiteral("policy_schema"),
+        QStringLiteral("policy_sha256"), QStringLiteral("protected_tunnel_ips"),
+        QStringLiteral("receiver_monotonic_policy"),
+    };
+    const QStringList actualKeys = authority.keys();
+    const QString policy = authority.value(QStringLiteral("policy_sha256")).toString();
+    const QString configGeneration = authority.value(
+        QStringLiteral("config_generation")).toString();
+    const QString bindingGeneration = authority.value(
+        QStringLiteral("binding_generation")).toString();
+    const QString revision = authority.value(QStringLiteral("catalog_revision")).toString();
+    const QString payload = authority.value(
+        QStringLiteral("catalog_payload_sha256")).toString();
+    QString deadline;
+    if (vpnConfig.value(QStringLiteral("native_envelope_schema"))
+            != QLatin1String("tribe_catalog_v2_native_v1")
+        || QSet<QString>(actualKeys.cbegin(), actualKeys.cend()) != authorityKeys
+        || !schemaOne(authority.value(QStringLiteral("schema_version")))
+        || !canonicalTokenString(operation) || !canonicalTokenString(session)
+        || !safeGuardOpaque(outerSessionId) || !canonicalRuntimeUuid(expectedRuntimeSessionId)
+        || !canonicalRuntimeUuid(renewalId) || !lowerSha256(policy)
+        || !canonicalGeneration(configGeneration) || !canonicalGeneration(bindingGeneration)
+        || !canonicalGeneration(revision) || !lowerSha256(payload)
+        || !lowerSha256(authorityCommitmentHex)
+        || !authorityHardDeadline(authority, deadline)) return false;
+    request = {
+        {QStringLiteral("type"), QStringLiteral("runtime_authority_renewal_request_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("operation"), operation},
+        {QStringLiteral("session"), session},
+        {QStringLiteral("renewal_id"), renewalId},
+        {QStringLiteral("policy_sha256"), policy},
+        {QStringLiteral("outer_session_id"), outerSessionId},
+        {QStringLiteral("expected_runtime_session_id"), expectedRuntimeSessionId},
+        {QStringLiteral("config_generation"), configGeneration},
+        {QStringLiteral("binding_generation"), bindingGeneration},
+        {QStringLiteral("catalog_revision"), revision},
+        {QStringLiteral("catalog_payload_sha256"), payload},
+        {QStringLiteral("authority_commitment_sha256"), authorityCommitmentHex},
+        {QStringLiteral("hard_deadline"), deadline},
+    };
+    return true;
+}
+
+bool strictAuthorityRenewalReceipt(NSDictionary *response, QJsonObject &receipt)
+{
+    receipt = {};
+    if (![response isKindOfClass:[NSDictionary class]] || response.count != 16) return false;
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:&error];
+    if (!data || error) return false;
+    const QByteArray bytes(reinterpret_cast<const char *>(data.bytes), data.length);
+    const QJsonDocument document = QJsonDocument::fromJson(bytes);
+    if (!document.isObject()) return false;
+    const QJsonObject candidate = document.object();
+    static const QSet<QString> exactKeys{
+        QStringLiteral("type"), QStringLiteral("schema"), QStringLiteral("kind"),
+        QStringLiteral("operation"), QStringLiteral("session"),
+        QStringLiteral("renewal_id"), QStringLiteral("policy_sha256"),
+        QStringLiteral("outer_session_id"), QStringLiteral("expected_runtime_session_id"),
+        QStringLiteral("config_generation"), QStringLiteral("binding_generation"),
+        QStringLiteral("catalog_revision"), QStringLiteral("catalog_payload_sha256"),
+        QStringLiteral("authority_commitment_sha256"),
+        QStringLiteral("hard_deadline"), QStringLiteral("reason"),
+    };
+    const QStringList keys = candidate.keys();
+    const QString kind = candidate.value(QStringLiteral("kind")).toString();
+    const QString deadline = candidate.value(QStringLiteral("hard_deadline")).toString();
+    const QString reason = candidate.value(QStringLiteral("reason")).toString();
+    if (QSet<QString>(keys.cbegin(), keys.cend()) != exactKeys
+        || candidate.value(QStringLiteral("type"))
+            != QLatin1String("runtime_authority_renewal_v1")
+        || !schemaOne(candidate.value(QStringLiteral("schema")))
+        || !canonicalTokenString(candidate.value(QStringLiteral("operation")).toString())
+        || !canonicalTokenString(candidate.value(QStringLiteral("session")).toString())
+        || !canonicalRuntimeUuid(candidate.value(QStringLiteral("renewal_id")).toString())
+        || !lowerSha256(candidate.value(QStringLiteral("policy_sha256")).toString())
+        || !safeGuardOpaque(candidate.value(QStringLiteral("outer_session_id")).toString())
+        || !canonicalRuntimeUuid(candidate.value(
+            QStringLiteral("expected_runtime_session_id")).toString())
+        || !canonicalGeneration(candidate.value(
+            QStringLiteral("config_generation")).toString())
+        || !canonicalGeneration(candidate.value(
+            QStringLiteral("binding_generation")).toString())
+        || !canonicalGeneration(candidate.value(QStringLiteral("catalog_revision")).toString())
+        || !lowerSha256(candidate.value(
+            QStringLiteral("catalog_payload_sha256")).toString())
+        || !lowerSha256(candidate.value(
+            QStringLiteral("authority_commitment_sha256")).toString())
+        || !safeAsciiReason(reason)
+        || !((kind == QLatin1String("applied") && reason.isEmpty()
+              && canonicalUtcMillis(deadline))
+             || (kind == QLatin1String("rejected") && !reason.isEmpty()
+                 && deadline.isEmpty()))) return false;
+    receipt = candidate;
+    return true;
+}
+
+bool renewalReceiptMatches(const QJsonObject &receipt, const QJsonObject &request)
+{
+    for (const char *key : {"operation", "session", "renewal_id", "policy_sha256",
+                            "outer_session_id", "expected_runtime_session_id",
+                            "config_generation", "binding_generation", "catalog_revision",
+                            "catalog_payload_sha256", "authority_commitment_sha256"}) {
+        if (receipt.value(QLatin1String(key)) != request.value(QLatin1String(key))) return false;
+    }
+    return receipt.value(QStringLiteral("kind")) == QLatin1String("rejected")
+        || receipt.value(QStringLiteral("hard_deadline"))
+            == request.value(QStringLiteral("hard_deadline"));
+}
+
+QJsonObject rejectedRenewalReceipt(const QJsonObject &request, const QString &reason)
+{
+    QJsonObject receipt = request;
+    receipt.insert(QStringLiteral("type"), QStringLiteral("runtime_authority_renewal_v1"));
+    receipt.insert(QStringLiteral("kind"), QStringLiteral("rejected"));
+    receipt.insert(QStringLiteral("hard_deadline"), QString());
+    receipt.insert(QStringLiteral("reason"), reason);
+    return receipt;
 }
 
 long long int64FromResponse(NSDictionary *response, NSString *key, long long fallback = 0) {
@@ -161,9 +527,6 @@ IosController::IosController() : QObject()
     s_instance = this;
     m_iosControllerWrapper = [[IosControllerWrapper alloc] initWithCppController:this];
 
-    // Initialize StoreKitController early to start observing the payment queue
-    [StoreKitController sharedInstance];
-
     [[NSNotificationCenter defaultCenter]
         removeObserver: (__bridge NSObject *)m_iosControllerWrapper];
     [[NSNotificationCenter defaultCenter]
@@ -188,6 +551,58 @@ IosController* IosController::Instance() {
     }
 
     return s_instance;
+}
+
+QJsonObject IosController::engineManifest() const
+{
+    auto compileOnlyEngine = [](const QString &protocol, const QString &adapter,
+                                const QString &adapterVersion,
+                                const QString &declaredCoreVersion,
+                                const QString &sourceCommit, const QString &abi,
+                                const QJsonArray &capabilities) {
+        QJsonObject engine;
+        engine.insert(QStringLiteral("protocol"), protocol);
+        engine.insert(QStringLiteral("adapter"), adapter);
+        engine.insert(QStringLiteral("adapterVersion"), adapterVersion);
+        engine.insert(QStringLiteral("declaredCoreVersion"), declaredCoreVersion);
+        engine.insert(QStringLiteral("sourceCommit"), sourceCommit);
+        engine.insert(QStringLiteral("abi"), abi);
+        engine.insert(QStringLiteral("capabilities"), capabilities);
+        engine.insert(QStringLiteral("runtimeCoreVersion"), QJsonValue::Null);
+        engine.insert(QStringLiteral("runtimeVersionProbed"), false);
+        engine.insert(QStringLiteral("versionEvidence"),
+                      QStringLiteral("compile_time_lock_only"));
+        return engine;
+    };
+    const QJsonObject awg = compileOnlyEngine(
+        QStringLiteral("awg"), QStringLiteral("awg-apple"),
+        QStringLiteral(TRIBE_APPLE_AWG_ADAPTER_VERSION),
+        QStringLiteral(TRIBE_APPLE_AWG_CORE_VERSION),
+        QStringLiteral(TRIBE_APPLE_AWG_SOURCE_COMMIT),
+        QStringLiteral("awg-apple-c-uapi-v3.1"),
+        QJsonArray{QStringLiteral("awg.random_trailers"),
+                   QStringLiteral("awg.disable_cookies"), QStringLiteral("uapi.readback"),
+                   QStringLiteral("tribe.split_dns"), QStringLiteral("tribe.warmup"),
+                   QStringLiteral("tribe.rebind"),
+                   QStringLiteral("tribe.guarded_settings_owner")});
+    const QJsonObject xray = compileOnlyEngine(
+        QStringLiteral("xray"), QStringLiteral("amnezia-libxray"),
+        QStringLiteral(TRIBE_APPLE_XRAY_ADAPTER_VERSION),
+        QStringLiteral(TRIBE_APPLE_XRAY_CORE_VERSION),
+        QStringLiteral(TRIBE_APPLE_XRAY_SOURCE_COMMIT),
+        QStringLiteral(TRIBE_APPLE_XRAY_SOCKET_ABI),
+        QJsonArray{QStringLiteral("xray.vless.reality.vision.tcp"),
+                   QStringLiteral("xray.embedded"), QStringLiteral("xray.runtime_version"),
+                   QStringLiteral("xray.socket_callback"),
+                   QStringLiteral("xray.socket_protection_result"),
+                   QStringLiteral("tribe.guarded_settings_owner")});
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("engine_manifest_v1")},
+        {QStringLiteral("schema"), 1},
+        {QStringLiteral("app"), QJsonObject{
+            {QStringLiteral("version"), QStringLiteral(APP_VERSION)},
+            {QStringLiteral("build"), APP_BUILD}}},
+        {QStringLiteral("engines"), QJsonArray{awg, xray}}};
 }
 
 // AVPN (краш-фикс UAF, 2026-07-06): единственная точка владения m_currentTunnel. Без retain
@@ -224,6 +639,10 @@ NETunnelProviderManager *IosController::retainedCurrentTunnel()
 
 bool IosController::initialize()
 {
+    m_initializationResolved = false;
+    m_guardRecoveryUnresolved = false;
+    m_guardRecoveryResolutionPending = false;
+    m_guardRecoveryEvent = {};
     __block bool ok = true;
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
         @try {
@@ -245,12 +664,23 @@ bool IosController::initialize()
                 if (manager.connection.status == NEVPNStatusConnected) {
                     setCurrentTunnel(manager); // AVPN: владеющее присвоение (retain)
                     qDebug() << "IosController::initialize : VPN already connected with" << manager.localizedDescription;
+                    NETunnelProviderProtocol *provider =
+                        (NETunnelProviderProtocol *)manager.protocolConfiguration;
+                    if ([provider.providerConfiguration[@"guarded_inner_switch"] boolValue]) {
+                        // A previous app process may have died while the NE still owns default
+                        // routes. Block all new dispatch until product recovery reconciles this
+                        // exact provider receipt against encrypted trusted state.
+                        m_guardRecoveryUnresolved = true;
+                        requestCurrentNativeGuardStatus();
+                    }
                     emit connectionStateChanged(Vpn::ConnectionState::Connected);
                     break;
 
                     // TODO: show connected state
                 }
             }
+            m_initializationResolved = true;
+            emit engineManifestChanged(engineManifest());
         }
         @catch (NSException *exception) {
             qDebug() << "IosController::setTunnel : exception" << QString::fromNSString(exception.reason);
@@ -261,8 +691,60 @@ bool IosController::initialize()
     return ok;
 }
 
+bool IosController::ensureTunnelManager()
+{
+    NETunnelProviderManager *existing = retainedCurrentTunnel();
+    if (existing) {
+        [[NSNotificationCenter defaultCenter]
+            removeObserver:(__bridge NSObject *)m_iosControllerWrapper];
+        [[NSNotificationCenter defaultCenter]
+            addObserver:(__bridge NSObject *)m_iosControllerWrapper
+               selector:@selector(vpnStatusDidChange:)
+                   name:NEVPNStatusDidChangeNotification
+                 object:existing.connection];
+        [existing release];
+        return true;
+    }
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block bool ok = true;
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(
+        NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+        @try {
+            if (error) {
+                ok = false;
+            } else {
+                for (NETunnelProviderManager *manager in managers) {
+                    if (isOurManager(manager)) {
+                        setCurrentTunnel(manager);
+                        break;
+                    }
+                }
+                if (!m_currentTunnel)
+                    setCurrentTunnel([[[NETunnelProviderManager alloc] init] autorelease]);
+                m_currentTunnel.localizedDescription = @"Tribe VPN";
+            }
+        } @catch (NSException *) {
+            ok = false;
+        } @finally {
+            dispatch_semaphore_signal(semaphore);
+        }
+    }];
+    if (dispatch_semaphore_wait(
+            semaphore, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) return false;
+    if (!ok || !m_currentTunnel) return false;
+    [[NSNotificationCenter defaultCenter]
+        removeObserver:(__bridge NSObject *)m_iosControllerWrapper];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:(__bridge NSObject *)m_iosControllerWrapper
+           selector:@selector(vpnStatusDidChange:)
+               name:NEVPNStatusDidChangeNotification
+             object:m_currentTunnel.connection];
+    return true;
+}
+
 bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configuration)
 {
+    if (!m_initializationResolved || m_guardRecoveryUnresolved) return false;
     m_proto = proto;
     m_rawConfig = configuration;
     m_serverAddress = configuration.value(configKey::hostName).toString().toNSString();
@@ -294,6 +776,10 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
     m_rxBytes = 0;
     m_txBytes = 0;
+    m_counterEpoch.clear();
+    m_runtimeStatus = {};
+    m_runtimeSessionId.clear();
+    m_expectedRuntimeSessionId.clear();
     ++m_statusGeneration; // AVPN: инвалидируем ответы checkStatus прошлой сессии (стейл-гонка)
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -386,6 +872,604 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     return false;
 }
 
+bool IosController::requestSessionGuardArm(const QJsonObject &vpnConfig,
+                                           const QString &operation,
+                                           const QString &session,
+                                           const QString &policyHashHex,
+                                           const QString &expectedRuntimeSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(vpnConfig); Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#else
+    if (!m_initializationResolved || m_guardRecoveryUnresolved) return false;
+    if (!canonicalTokenString(operation) || !canonicalTokenString(session)
+        || !lowerSha256(policyHashHex) || !canonicalRuntimeUuid(expectedRuntimeSessionId)
+        || vpnConfig.value(QStringLiteral("native_envelope_schema"))
+             != QLatin1String("tribe_catalog_v2_native_v1")) return false;
+    const QString protocolName = vpnConfig.value(QStringLiteral("protocol")).toString();
+    const bool awg = protocolName == QLatin1String("awg");
+    const bool xray = protocolName == QLatin1String("xray");
+    if (!awg && !xray) return false;
+    const QJsonObject authority = vpnConfig.value(
+        QStringLiteral("runtime_authority_v1")).toObject();
+    if (authority.value(QStringLiteral("policy_sha256")).toString() != policyHashHex)
+        return false;
+    if (!ensureTunnelManager()) return false;
+
+    const QByteArray bytes = QJsonDocument(vpnConfig).toJson(QJsonDocument::Compact);
+    NSData *configData = [NSData dataWithBytes:bytes.constData() length:bytes.size()];
+    NSString *reference = [TribeTunnelConfigVault
+        stageConfig:configData protocolName:protocolName.toNSString()
+        sessionId:expectedRuntimeSessionId.toNSString()];
+    if (!reference) return false;
+
+    if (!m_pendingGuardOperation.isEmpty()) {
+        [TribeTunnelConfigVault discardReference:reference];
+        return false;
+    }
+    m_pendingGuardOperation = operation;
+    m_pendingGuardSession = session;
+    m_pendingGuardPolicySha256 = policyHashHex;
+    m_pendingGuardExpectedRuntimeSessionId = expectedRuntimeSessionId;
+    m_expectedRuntimeSessionId = expectedRuntimeSessionId;
+    m_proto = awg ? amnezia::Proto::Awg : amnezia::Proto::Xray;
+    m_rawConfig = vpnConfig;
+    m_serverAddress = vpnConfig.value(configKey::hostName).toString().toNSString();
+
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel) {
+        [TribeTunnelConfigVault discardReference:reference];
+        m_pendingGuardOperation.clear();
+        m_pendingGuardSession.clear();
+        m_pendingGuardPolicySha256.clear();
+        m_pendingGuardExpectedRuntimeSessionId.clear();
+        return false;
+    }
+    if (tunnel.connection.status == NEVPNStatusConnected) {
+        NSString *ownedReference = [reference copy];
+        NSDictionary *message = @{
+            @"action": @"native_guard_prepare_v1",
+            @"operation": operation.toNSString(), @"session": session.toNSString(),
+            @"policy_sha256": policyHashHex.toNSString(),
+            @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+            @"tribe_config_ref": reference, @"tribe_protocol": protocolName.toNSString(),
+            @"tribe_session_id": expectedRuntimeSessionId.toNSString(),
+        };
+        sendVpnExtensionMessage(tunnel, message, [this, ownedReference](NSDictionary *response) {
+            if (!response) [TribeTunnelConfigVault discardReference:ownedReference];
+            consumeNativeGuardResponse(response);
+            [ownedReference release];
+        });
+        [tunnel release];
+        return true;
+    }
+
+    NETunnelProviderProtocol *protocol = [[NETunnelProviderProtocol alloc] init];
+    protocol.providerBundleIdentifier = [NSString stringWithUTF8String:VPN_NE_BUNDLEID];
+    protocol.providerConfiguration = @{
+        @"tribe_config_schema": @1, @"tribe_protocol": protocolName.toNSString(),
+        @"tribe_config_ref": reference, @"guarded_inner_switch": @YES,
+        @"tribe_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    protocol.serverAddress = m_serverAddress;
+    if (@available(iOS 14.0, *)) {
+        const bool fullTunnel = vpnConfig.value(configKey::splitTunnelType).toInt(0) == 0;
+        protocol.includeAllNetworks = fullTunnel;
+        protocol.excludeLocalNetworks = NO;
+        if (@available(iOS 14.2, *)) protocol.enforceRoutes = YES;
+    }
+    tunnel.protocolConfiguration = protocol;
+    [protocol release];
+    [tunnel release];
+    NSDictionary *options = @{
+        @"action": @"native_guard_prepare_v1",
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"policy_sha256": policyHashHex.toNSString(),
+        @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    startTunnel(options);
+    return true;
+#endif
+}
+
+bool IosController::renewRuntimeAuthority(const QJsonObject &vpnConfig,
+                                          const QString &operation,
+                                          const QString &session,
+                                          const QString &outerSessionId,
+                                          const QString &expectedRuntimeSessionId,
+                                          const QString &renewalId,
+                                          const QString &authorityCommitmentHex)
+{
+#if MACOS_NE
+    Q_UNUSED(vpnConfig); Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(outerSessionId);
+    Q_UNUSED(expectedRuntimeSessionId); Q_UNUSED(renewalId);
+    Q_UNUSED(authorityCommitmentHex);
+    return false;
+#else
+    QJsonObject request;
+    if (!m_initializationResolved || m_guardRecoveryUnresolved
+        || !m_pendingAuthorityRenewalRequest.isEmpty() || !m_guardReceiptArmed
+        || !buildAuthorityRenewalRequest(vpnConfig, operation, session, outerSessionId,
+                                         expectedRuntimeSessionId, renewalId,
+                                         authorityCommitmentHex, request)) return false;
+    const QJsonObject activeIdentity{
+        {QStringLiteral("operation"), m_guardOperation},
+        {QStringLiteral("session"), m_guardSession},
+        {QStringLiteral("policy_sha256"), m_guardPolicySha256},
+        {QStringLiteral("outer_session_id"), m_guardOuterSessionId},
+        {QStringLiteral("expected_runtime_session_id"), m_guardExpectedRuntimeSessionId},
+    };
+    for (const char *key : {"operation", "session", "policy_sha256", "outer_session_id",
+                            "expected_runtime_session_id"}) {
+        if (request.value(QLatin1String(key))
+                != activeIdentity.value(QLatin1String(key))) return false;
+    }
+    const QString protocolName = vpnConfig.value(QStringLiteral("protocol")).toString();
+    if (protocolName != QLatin1String("awg") && protocolName != QLatin1String("xray"))
+        return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    const QByteArray configBytes = QJsonDocument(vpnConfig).toJson(QJsonDocument::Compact);
+    NSData *configData = [NSData dataWithBytes:configBytes.constData()
+                                        length:configBytes.size()];
+    NSString *reference = [TribeTunnelConfigVault
+        stageConfig:configData protocolName:protocolName.toNSString()
+        sessionId:expectedRuntimeSessionId.toNSString()];
+    if (!reference) {
+        [tunnel release];
+        return false;
+    }
+    const QByteArray requestBytes = QJsonDocument(request).toJson(QJsonDocument::Compact);
+    NSData *requestData = [NSData dataWithBytes:requestBytes.constData()
+                                         length:requestBytes.size()];
+    NSError *jsonError = nil;
+    NSDictionary *requestDictionary = [NSJSONSerialization JSONObjectWithData:requestData
+        options:0 error:&jsonError];
+    if (jsonError || ![requestDictionary isKindOfClass:[NSDictionary class]]) {
+        [TribeTunnelConfigVault discardReference:reference];
+        [tunnel release];
+        return false;
+    }
+    NSString *ownedReference = [reference copy];
+    m_pendingAuthorityRenewalRequest = request;
+    NSDictionary *message = @{
+        @"action": @"runtime_authority_renew_v1",
+        @"renewal_request": requestDictionary,
+        @"tribe_config_ref": reference,
+        @"tribe_protocol": protocolName.toNSString(),
+        @"tribe_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    sendVpnExtensionMessage(tunnel, message, [this, ownedReference](NSDictionary *response) {
+        QJsonObject receipt;
+        if (!response || !strictAuthorityRenewalReceipt(response, receipt)) {
+            [TribeTunnelConfigVault discardReference:ownedReference];
+            if (!response && !m_pendingAuthorityRenewalRequest.isEmpty()) {
+                const QJsonObject rejected = rejectedRenewalReceipt(
+                    m_pendingAuthorityRenewalRequest,
+                    QStringLiteral("extension_no_receipt"));
+                m_pendingAuthorityRenewalRequest = {};
+                QMetaObject::invokeMethod(this, [this, rejected]() {
+                    emit runtimeAuthorityRenewalReceipt(rejected);
+                }, Qt::QueuedConnection);
+            }
+            [ownedReference release];
+            return;
+        }
+        if (!m_pendingAuthorityRenewalRequest.isEmpty()
+            && renewalReceiptMatches(receipt, m_pendingAuthorityRenewalRequest)) {
+            m_pendingAuthorityRenewalRequest = {};
+            QMetaObject::invokeMethod(this, [this, receipt]() {
+                emit runtimeAuthorityRenewalReceipt(receipt);
+            }, Qt::QueuedConnection);
+        }
+        [ownedReference release];
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::activateNativeSession(const QJsonObject &vpnConfig,
+                                          const QString &operation,
+                                          const QString &session,
+                                          const QString &outerSessionId,
+                                          const QString &expectedRuntimeSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(vpnConfig); Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(outerSessionId);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#else
+    if (!m_guardReceiptArmed || operation != m_guardOperation || session != m_guardSession
+        || outerSessionId != m_guardOuterSessionId
+        || expectedRuntimeSessionId != m_guardExpectedRuntimeSessionId
+        || !safeGuardOpaque(outerSessionId) || !canonicalRuntimeUuid(expectedRuntimeSessionId))
+        return false;
+    const QString protocolName = vpnConfig.value(QStringLiteral("protocol")).toString();
+    if (protocolName != QLatin1String("awg") && protocolName != QLatin1String("xray"))
+        return false;
+    const QJsonObject authority = vpnConfig.value(
+        QStringLiteral("runtime_authority_v1")).toObject();
+    if (authority.value(QStringLiteral("policy_sha256")).toString()
+        != m_guardPolicySha256) return false;
+    const QByteArray bytes = QJsonDocument(vpnConfig).toJson(QJsonDocument::Compact);
+    NSData *configData = [NSData dataWithBytes:bytes.constData() length:bytes.size()];
+    NSString *reference = [TribeTunnelConfigVault
+        stageConfig:configData protocolName:protocolName.toNSString()
+        sessionId:expectedRuntimeSessionId.toNSString()];
+    if (!reference) return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        [TribeTunnelConfigVault discardReference:reference];
+        return false;
+    }
+    NSString *ownedReference = [reference copy];
+    m_proto = protocolName == QLatin1String("awg") ? amnezia::Proto::Awg
+                                                     : amnezia::Proto::Xray;
+    m_rawConfig = vpnConfig;
+    m_expectedRuntimeSessionId = expectedRuntimeSessionId;
+    m_runtimeSessionId.clear();
+    m_runtimeStatus = {};
+    ++m_statusGeneration;
+    NSDictionary *message = @{
+        @"action": @"native_session_activate_v1",
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"policy_sha256": m_guardPolicySha256.toNSString(),
+        @"outer_session_id": outerSessionId.toNSString(),
+        @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+        @"tribe_config_ref": reference, @"tribe_protocol": protocolName.toNSString(),
+        @"tribe_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    sendVpnExtensionMessage(tunnel, message, [this, ownedReference](NSDictionary *response) {
+        if (!response) [TribeTunnelConfigVault discardReference:ownedReference];
+        NSDictionary *guardEvent = [response[@"guard_event"]
+            isKindOfClass:[NSDictionary class]] ? response[@"guard_event"] : nil;
+        if (guardEvent) consumeNativeGuardResponse(guardEvent);
+        if (response && [response[@"ok"] boolValue]) checkStatus();
+        [ownedReference release];
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::stopNativeSession(const QString &outerSessionId,
+                                      const QString &expectedRuntimeSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(outerSessionId); Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#else
+    if (!m_guardReceiptArmed || outerSessionId != m_guardOuterSessionId
+        || expectedRuntimeSessionId != m_guardExpectedRuntimeSessionId) return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    NSDictionary *message = @{
+        @"action": @"native_session_stop_v1",
+        @"outer_session_id": outerSessionId.toNSString(),
+        @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    sendVpnExtensionMessage(tunnel, message, [this](NSDictionary *response) {
+        NSDictionary *guardEvent = [response[@"guard_event"]
+            isKindOfClass:[NSDictionary class]] ? response[@"guard_event"] : nil;
+        if (guardEvent) consumeNativeGuardResponse(guardEvent);
+        checkStatus();
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::requestSessionGuardRelease(const QString &operation,
+                                               const QString &session,
+                                               const QString &outerSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(outerSessionId);
+    return false;
+#else
+    if (!m_guardReceiptArmed || operation != m_guardOperation || session != m_guardSession
+        || outerSessionId != m_guardOuterSessionId) return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    NSDictionary *message = @{
+        @"action": @"native_guard_release_v1",
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"outer_session_id": outerSessionId.toNSString(),
+    };
+    [tunnel retain];
+    sendVpnExtensionMessage(tunnel, message, [this, tunnel](NSDictionary *response) {
+        consumeNativeGuardResponse(response);
+        const bool released = [response[@"kind"] isEqualToString:@"released"];
+        QMetaObject::invokeMethod(this, [tunnel, released]() {
+            if (released && [tunnel.connection isKindOfClass:[NETunnelProviderSession class]])
+                [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+            [tunnel release];
+        }, Qt::QueuedConnection);
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::requestSessionGuardReconcileArm(
+    const QString &operation, const QString &session, const QString &policyHashHex,
+    const QString &expectedRuntimeSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#else
+    if (operation != m_pendingGuardOperation || session != m_pendingGuardSession
+        || policyHashHex != m_pendingGuardPolicySha256
+        || expectedRuntimeSessionId != m_pendingGuardExpectedRuntimeSessionId
+        || !canonicalTokenString(operation) || !canonicalTokenString(session)
+        || !lowerSha256(policyHashHex) || !canonicalRuntimeUuid(expectedRuntimeSessionId))
+        return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    NSDictionary *message = @{
+        @"action": @"native_guard_reconcile_v1", @"reconcile_kind": @"arm",
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"policy_sha256": policyHashHex.toNSString(),
+        @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    sendVpnExtensionMessage(tunnel, message, [this](NSDictionary *response) {
+        consumeNativeGuardResponse(response);
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::requestSessionGuardReconcileRelease(
+    const QString &operation, const QString &session, const QString &policyHashHex,
+    const QString &outerSessionId, const QString &expectedRuntimeSessionId)
+{
+#if MACOS_NE
+    Q_UNUSED(operation); Q_UNUSED(session); Q_UNUSED(policyHashHex);
+    Q_UNUSED(outerSessionId); Q_UNUSED(expectedRuntimeSessionId);
+    return false;
+#else
+    if (!m_guardReceiptArmed || operation != m_guardOperation || session != m_guardSession
+        || policyHashHex != m_guardPolicySha256 || outerSessionId != m_guardOuterSessionId
+        || expectedRuntimeSessionId != m_guardExpectedRuntimeSessionId
+        || !canonicalTokenString(operation) || !canonicalTokenString(session)
+        || !lowerSha256(policyHashHex) || !safeGuardOpaque(outerSessionId)
+        || !canonicalRuntimeUuid(expectedRuntimeSessionId)) return false;
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    NSDictionary *message = @{
+        @"action": @"native_guard_reconcile_v1", @"reconcile_kind": @"release",
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"policy_sha256": policyHashHex.toNSString(),
+        @"outer_session_id": outerSessionId.toNSString(),
+        @"expected_runtime_session_id": expectedRuntimeSessionId.toNSString(),
+    };
+    [tunnel retain];
+    sendVpnExtensionMessage(tunnel, message, [this, tunnel](NSDictionary *response) {
+        consumeNativeGuardResponse(response);
+        const bool released = [response[@"kind"] isEqualToString:@"released"];
+        QMetaObject::invokeMethod(this, [tunnel, released]() {
+            if (released && [tunnel.connection isKindOfClass:[NETunnelProviderSession class]])
+                [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+            [tunnel release];
+        }, Qt::QueuedConnection);
+    });
+    [tunnel release];
+    return true;
+#endif
+}
+
+bool IosController::requestSessionGuardRecoveryResolution(
+    const QJsonObject &exactRecoveryEvent, const QString &action,
+    const QJsonObject &validatedConfiguration)
+{
+#if MACOS_NE
+    Q_UNUSED(exactRecoveryEvent); Q_UNUSED(action); Q_UNUSED(validatedConfiguration);
+    return false;
+#else
+    if (!m_guardRecoveryUnresolved || m_guardRecoveryResolutionPending
+        || exactRecoveryEvent.isEmpty() || exactRecoveryEvent != m_guardRecoveryEvent
+        || (action != QLatin1String("adopt") && action != QLatin1String("stop"))) return false;
+    const QString operation = exactRecoveryEvent.value(QStringLiteral("operation")).toString();
+    const QString session = exactRecoveryEvent.value(QStringLiteral("session")).toString();
+    const QString policy = exactRecoveryEvent.value(QStringLiteral("policy_sha256")).toString();
+    const QString outer = exactRecoveryEvent.value(QStringLiteral("outer_session_id")).toString();
+    const QString expected = exactRecoveryEvent.value(
+        QStringLiteral("expected_runtime_session_id")).toString();
+    if (!canonicalTokenString(operation) || !canonicalTokenString(session)
+        || !lowerSha256(policy) || !safeGuardOpaque(outer)
+        || !canonicalRuntimeUuid(expected)) return false;
+
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return false;
+    }
+    NSMutableDictionary *message = [@{
+        @"action": @"native_guard_recovery_resolve_v1",
+        @"resolution_action": action.toNSString(),
+        @"operation": operation.toNSString(), @"session": session.toNSString(),
+        @"policy_sha256": policy.toNSString(), @"outer_session_id": outer.toNSString(),
+        @"expected_runtime_session_id": expected.toNSString(),
+    } mutableCopy];
+    NSString *ownedReference = nil;
+    QString protocolName;
+    if (action == QLatin1String("adopt")) {
+        if (validatedConfiguration.value(QStringLiteral("native_envelope_schema"))
+                != QLatin1String("tribe_catalog_v2_native_v1")) {
+            [message release]; [tunnel release]; return false;
+        }
+        protocolName = validatedConfiguration.value(QStringLiteral("protocol")).toString();
+        const QJsonObject authority = validatedConfiguration.value(
+            QStringLiteral("runtime_authority_v1")).toObject();
+        if ((protocolName != QLatin1String("awg") && protocolName != QLatin1String("xray"))
+            || authority.value(QStringLiteral("policy_sha256")).toString() != policy) {
+            [message release]; [tunnel release]; return false;
+        }
+        const QByteArray bytes = QJsonDocument(validatedConfiguration).toJson(
+            QJsonDocument::Compact);
+        NSData *data = [NSData dataWithBytes:bytes.constData() length:bytes.size()];
+        NSString *reference = [TribeTunnelConfigVault
+            stageConfig:data protocolName:protocolName.toNSString()
+            sessionId:expected.toNSString()];
+        if (!reference) { [message release]; [tunnel release]; return false; }
+        ownedReference = [reference copy];
+        message[@"tribe_config_ref"] = reference;
+        message[@"tribe_protocol"] = protocolName.toNSString();
+        message[@"tribe_session_id"] = expected.toNSString();
+    }
+
+    m_guardRecoveryResolutionPending = true;
+    NSDictionary *immutableMessage = [[message copy] autorelease];
+    [message release];
+    const QString requestedAction = action;
+    const QString requestedProtocol = protocolName;
+    const QJsonObject adoptedConfiguration = validatedConfiguration;
+    sendVpnExtensionMessage(tunnel, immutableMessage,
+        [this, requestedAction, requestedProtocol, adoptedConfiguration,
+         ownedReference](NSDictionary *response) {
+            NSDictionary *receiptDictionary = response;
+            NSDictionary *runtimeDictionary = nil;
+            NSDictionary *guardDictionary = nil;
+            if (requestedAction == QLatin1String("stop")
+                && [response isKindOfClass:[NSDictionary class]]
+                && response.count == 3
+                && [response[@"runtime_status"] isKindOfClass:[NSDictionary class]]
+                && [response[@"guard_event"] isKindOfClass:[NSDictionary class]]
+                && [response[@"recovery_receipt"] isKindOfClass:[NSDictionary class]]) {
+                runtimeDictionary = response[@"runtime_status"];
+                guardDictionary = response[@"guard_event"];
+                receiptDictionary = response[@"recovery_receipt"];
+            }
+            QJsonObject receipt;
+            QJsonObject guardEvent;
+            QJsonObject runtimeStatus;
+            bool valid = strictNativeGuardRecoveryReceipt(receiptDictionary, receipt)
+                && receipt.value(QStringLiteral("action")).toString() == requestedAction;
+            if (valid && receipt.value(QStringLiteral("kind"))
+                    == QLatin1String("stopped_released")) {
+                valid = strictNativeGuardEvent(guardDictionary, guardEvent)
+                    && guardEvent.value(QStringLiteral("kind")) == QLatin1String("released")
+                    && guardEvent.value(QStringLiteral("operation"))
+                        == receipt.value(QStringLiteral("operation"))
+                    && guardEvent.value(QStringLiteral("session"))
+                        == receipt.value(QStringLiteral("session"))
+                    && guardEvent.value(QStringLiteral("policy_sha256"))
+                        == receipt.value(QStringLiteral("policy_sha256"))
+                    && guardEvent.value(QStringLiteral("outer_session_id"))
+                        == receipt.value(QStringLiteral("outer_session_id"))
+                    && guardEvent.value(QStringLiteral("expected_runtime_session_id"))
+                        == receipt.value(QStringLiteral("expected_runtime_session_id"));
+                NSError *error = nil;
+                NSData *runtimeData = [NSJSONSerialization dataWithJSONObject:runtimeDictionary
+                    options:0 error:&error];
+                QJsonParseError parseError;
+                if (!runtimeData || error) {
+                    valid = false;
+                } else {
+                    runtimeStatus = QJsonDocument::fromJson(QByteArray(
+                        reinterpret_cast<const char *>(runtimeData.bytes), runtimeData.length),
+                        &parseError).object();
+                    valid = valid && parseError.error == QJsonParseError::NoError
+                        && runtimeStatus.value(QStringLiteral("type"))
+                            == QLatin1String("tunnel_runtime_status_v1")
+                        && schemaOne(runtimeStatus.value(QStringLiteral("schema")))
+                        && runtimeStatus.value(QStringLiteral("runtime_state"))
+                            == QLatin1String("stopped")
+                        && runtimeStatus.value(QStringLiteral("session_id"))
+                            == receipt.value(QStringLiteral("expected_runtime_session_id"))
+                        && (runtimeStatus.value(QStringLiteral("protocol"))
+                                == QLatin1String("awg")
+                            || runtimeStatus.value(QStringLiteral("protocol"))
+                                == QLatin1String("xray"));
+                }
+            }
+            if (ownedReference)
+                [TribeTunnelConfigVault discardReference:ownedReference];
+            [ownedReference release];
+            QMetaObject::invokeMethod(this,
+                [this, valid, receipt, guardEvent, runtimeStatus, requestedAction,
+                 requestedProtocol, adoptedConfiguration]() {
+                    if (!m_guardRecoveryResolutionPending) return;
+                    m_guardRecoveryResolutionPending = false;
+                    if (!valid || receipt.value(QStringLiteral("operation"))
+                            != m_guardRecoveryEvent.value(QStringLiteral("operation"))
+                        || receipt.value(QStringLiteral("session"))
+                            != m_guardRecoveryEvent.value(QStringLiteral("session"))
+                        || receipt.value(QStringLiteral("policy_sha256"))
+                            != m_guardRecoveryEvent.value(QStringLiteral("policy_sha256"))
+                        || receipt.value(QStringLiteral("outer_session_id"))
+                            != m_guardRecoveryEvent.value(QStringLiteral("outer_session_id"))
+                        || receipt.value(QStringLiteral("expected_runtime_session_id"))
+                            != m_guardRecoveryEvent.value(
+                                QStringLiteral("expected_runtime_session_id"))) return;
+                    const QString kind = receipt.value(QStringLiteral("kind")).toString();
+                    if (requestedAction == QLatin1String("adopt")
+                        && kind == QLatin1String("adopted")) {
+                        m_guardOperation = receipt.value(QStringLiteral("operation")).toString();
+                        m_guardSession = receipt.value(QStringLiteral("session")).toString();
+                        m_guardPolicySha256 = receipt.value(
+                            QStringLiteral("policy_sha256")).toString();
+                        m_guardOuterSessionId = receipt.value(
+                            QStringLiteral("outer_session_id")).toString();
+                        m_guardExpectedRuntimeSessionId = receipt.value(
+                            QStringLiteral("expected_runtime_session_id")).toString();
+                        m_expectedRuntimeSessionId = m_guardExpectedRuntimeSessionId;
+                        m_proto = requestedProtocol == QLatin1String("awg")
+                            ? amnezia::Proto::Awg : amnezia::Proto::Xray;
+                        m_rawConfig = adoptedConfiguration;
+                        m_guardReceiptArmed = true;
+                        m_guardRecoveryUnresolved = false;
+                        m_guardRecoveryEvent = {};
+                        emit sessionGuardRecoveryResolved(receipt);
+                        checkStatus();
+                    } else if (requestedAction == QLatin1String("stop")
+                               && kind == QLatin1String("stopped_released")) {
+                        m_runtimeStatus = runtimeStatus;
+                        m_runtimeSessionId = runtimeStatus.value(
+                            QStringLiteral("session_id")).toString();
+                        emit runtimeStatusChanged(runtimeStatus);
+                        emit sessionGuardEvent(guardEvent);
+                        m_guardRecoveryUnresolved = false;
+                        m_guardRecoveryEvent = {};
+                        emit sessionGuardRecoveryResolved(receipt);
+                        NETunnelProviderManager *activeTunnel = retainedCurrentTunnel();
+                        if (activeTunnel
+                            && [activeTunnel.connection isKindOfClass:
+                                [NETunnelProviderSession class]])
+                            [(NETunnelProviderSession *)activeTunnel.connection stopTunnel];
+                        [activeTunnel release];
+                    } else {
+                        emit sessionGuardRecoveryResolved(receipt);
+                    }
+                }, Qt::QueuedConnection);
+        });
+    [tunnel release];
+    return true;
+#endif
+}
+
 void IosController::disconnectVpn()
 {
     // AVPN: если гасить нечего (нет менеджера / нет сессии / уже опущен) — эмитим Disconnected СРАЗУ,
@@ -426,6 +1510,7 @@ void IosController::checkStatus()
         return;
     }
     const uint64_t gen = m_statusGeneration.load();
+    const QString expectedSessionId = m_expectedRuntimeSessionId;
 
     NSString *actionKey = [NSString stringWithUTF8String:MessageKey::action];
     NSString *actionValue = [NSString stringWithUTF8String:Action::getStatus];
@@ -437,7 +1522,7 @@ void IosController::checkStatus()
     // tunnel: наш retain (retainedCurrentTunnel) отпускается в КОНЦЕ блока — синхронно после
     // sendProviderMessage (ответ-хендлер менеджер не трогает; release в колбэке был бы двойным
     // при callback(nil)-ветках). Сам блок дополнительно держит tunnel как object-capture.
-    sendVpnExtensionMessage(tunnel, message, [this, gen](NSDictionary* response){
+    sendVpnExtensionMessage(tunnel, message, [this, gen, expectedSessionId](NSDictionary* response){
         if (!response) {
             QMetaObject::invokeMethod(this, [this, gen]() {
                 if (m_statusGeneration.load() == gen)
@@ -446,11 +1531,100 @@ void IosController::checkStatus()
             return;
         }
 
-        const uint64_t txBytes = uint64FromResponse(response, @"tx_bytes");
-        const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
-        const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
+        const bool expectsTypedRuntimeStatus = isXrayBasedProto(m_proto)
+                || isWireGuardBasedProto(m_proto);
+        const bool xrayRuntimeStateAuthoritative = isXrayBasedProto(m_proto);
+        const bool isTypedStatus = [response[@"type"] isEqual:@"tunnel_runtime_status_v1"]
+                && objcSchemaOne(response[@"schema"]);
+        NSDictionary *counterResponse = [response[@"counters"] isKindOfClass:[NSDictionary class]]
+                ? (NSDictionary *)response[@"counters"] : response;
+        NSDictionary *coreResponse = [response[@"core"] isKindOfClass:[NSDictionary class]]
+                ? (NSDictionary *)response[@"core"] : nil;
+        const QString responseProtocol = QString::fromNSString(
+                [response[@"protocol"] isKindOfClass:[NSString class]] ? response[@"protocol"] : @"");
+        const QString runtimeState = QString::fromNSString(
+                [response[@"runtime_state"] isKindOfClass:[NSString class]] ? response[@"runtime_state"] : @"");
+        const QString counterEpoch = QString::fromNSString(
+                [counterResponse[@"epoch"] isKindOfClass:[NSString class]] ? counterResponse[@"epoch"] : @"");
+        NSString *sessionIdValue = [response[@"session_id"] isKindOfClass:[NSString class]]
+                ? (NSString *)response[@"session_id"] : @"";
+        const QString responseSessionId = QString::fromNSString(sessionIdValue);
+        NSUUID *sessionUuid = sessionIdValue.length > 0
+                ? [[[NSUUID alloc] initWithUUIDString:sessionIdValue] autorelease] : nil;
+        const QString coreAbi = QString::fromNSString(
+                [coreResponse[@"abi"] isKindOfClass:[NSString class]] ? coreResponse[@"abi"] : @"");
+        const QString coreAdapter = QString::fromNSString(
+                [coreResponse[@"adapter"] isKindOfClass:[NSString class]] ? coreResponse[@"adapter"] : @"");
+        const bool countersAvailable = !isTypedStatus || [counterResponse[@"available"] boolValue];
+        uint64_t typedTxBytes = 0;
+        uint64_t typedRxBytes = 0;
+        uint64_t ignoredCounter = 0;
+        const bool typedCountersValid = !isTypedStatus || (
+                canonicalUint64FromResponse(counterResponse, @"tx_bytes", &typedTxBytes)
+                && canonicalUint64FromResponse(counterResponse, @"rx_bytes", &typedRxBytes)
+                && canonicalUint64FromResponse(counterResponse, @"tx_packets", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"rx_packets", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"tx_bytes_delta", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"rx_bytes_delta", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"tx_packets_delta", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"rx_packets_delta", &ignoredCounter)
+                && canonicalUint64FromResponse(counterResponse, @"reset_count", &ignoredCounter));
+        const bool typedEngineValid = (responseProtocol == QLatin1String("xray")
+                    && coreAdapter == QLatin1String("amnezia-libxray")
+                    && coreAbi == QLatin1String(TRIBE_APPLE_XRAY_SOCKET_ABI))
+                || (responseProtocol == QLatin1String("awg")
+                    && coreAdapter == QLatin1String("awg-apple")
+                    && coreAbi == QLatin1String("awg-apple-c-uapi-v3.1"));
+        const bool typedRuntimeStatusValid = isTypedStatus
+                && typedEngineValid
+                && sessionUuid != nil
+                && !expectedSessionId.isEmpty()
+                && responseSessionId == expectedSessionId
+                && !counterEpoch.isEmpty()
+                && typedCountersValid
+                && (runtimeState == QLatin1String("starting")
+                    || runtimeState == QLatin1String("running")
+                    || runtimeState == QLatin1String("stopping")
+                    || runtimeState == QLatin1String("stopped")
+                    || runtimeState == QLatin1String("reconnecting")
+                    || runtimeState == QLatin1String("failed"));
 
-        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec]() {
+        if (expectsTypedRuntimeStatus && !typedRuntimeStatusValid) {
+            qWarning() << "IosController::checkStatus : rejected incompatible tunnel runtime status";
+            QMetaObject::invokeMethod(this, [this, gen]() {
+                if (m_statusGeneration.load() != gen)
+                    return;
+                m_statusRequestInFlight = false;
+                emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        const uint64_t txBytes = isTypedStatus
+                ? typedTxBytes : uint64FromResponse(counterResponse, @"tx_bytes");
+        const uint64_t rxBytes = isTypedStatus
+                ? typedRxBytes : uint64FromResponse(counterResponse, @"rx_bytes");
+        uint64_t typedHandshake = 0;
+        const bool typedHandshakeValid = isTypedStatus && responseProtocol == QLatin1String("awg")
+                && canonicalUint64FromResponse(response, @"last_handshake_time_sec", &typedHandshake)
+                && typedHandshake <= static_cast<uint64_t>(std::numeric_limits<long long>::max());
+        const long long last_handshake_time_sec = isTypedStatus
+                ? (typedHandshakeValid ? static_cast<long long>(typedHandshake) : -2)
+                : int64FromResponse(response, @"last_handshake_time_sec");
+        QJsonObject typedRuntimeStatus;
+        if (expectsTypedRuntimeStatus) {
+            NSData *statusData = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+            if (statusData) {
+                typedRuntimeStatus = QJsonDocument::fromJson(
+                        QByteArray(reinterpret_cast<const char *>(statusData.bytes),
+                                   static_cast<int>(statusData.length))).object();
+            }
+        }
+
+        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec,
+                                         runtimeState, counterEpoch, expectsTypedRuntimeStatus,
+                                         xrayRuntimeStateAuthoritative,
+                                         countersAvailable, responseSessionId, typedRuntimeStatus]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
@@ -507,15 +1681,52 @@ void IosController::checkStatus()
                 }
             }
 
+            if (expectsTypedRuntimeStatus) {
+                m_runtimeSessionId = responseSessionId;
+                if (!typedRuntimeStatus.isEmpty()) {
+                    m_runtimeStatus = typedRuntimeStatus;
+                    emit runtimeStatusChanged(m_runtimeStatus);
+                }
+            }
+
+            if (xrayRuntimeStateAuthoritative) {
+                // Xray has no WireGuard handshake.  The engine/provider state
+                // is authoritative; zero counters are a valid idle tunnel and
+                // never evidence of failure.
+                if (runtimeState == QLatin1String("running")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
+                } else if (runtimeState == QLatin1String("starting")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Connecting);
+                } else if (runtimeState == QLatin1String("stopping")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnecting);
+                } else if (runtimeState == QLatin1String("reconnecting")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                } else if (runtimeState == QLatin1String("stopped")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnected);
+                } else if (runtimeState == QLatin1String("failed")) {
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                }
+            }
+
             // AVPN: счётчик «поехал назад» (рестарт NE-сессии/гонка) — пересев без эмиссии дельты,
             // иначе беззнаковое вычитание даёт «дельту» ~2^64 (второй рубеж — guard в accumulateByteDelta).
-            if (rxBytes >= m_rxBytes && txBytes >= m_txBytes)
-                emit bytesChanged(rxBytes - m_rxBytes, txBytes - m_txBytes);
+            if (countersAvailable) {
+                if (!counterEpoch.isEmpty() && counterEpoch != m_counterEpoch) {
+                    // New provider/counter epoch: seed only.  Traffic from a
+                    // previous Xray restart must not be emitted as a spike.
+                    m_counterEpoch = counterEpoch;
+                } else {
+                    const uint64_t rxDelta = rxBytes >= m_rxBytes ? rxBytes - m_rxBytes : 0;
+                    const uint64_t txDelta = txBytes >= m_txBytes ? txBytes - m_txBytes : 0;
+                    emit bytesChanged(rxDelta, txDelta);
+                }
+                m_rxBytes = rxBytes;
+                m_txBytes = txBytes;
+            }
             // AVPN: отдаём возраст хендшейка наружу (unix sec; <=0 → 0 «неизвестно») — serviceEngine
             // HealthLoop использует его для DEAD-детекта на iOS (раньше latestHandshakeEpoch был 0).
-            emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
-            m_rxBytes = rxBytes;
-            m_txBytes = txBytes;
+            if (isWireGuardBasedProto(m_proto))
+                emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
             m_statusRequestInFlight = false;
         }, Qt::QueuedConnection);
     });
@@ -550,6 +1761,86 @@ bool IosController::rebindTunnel()
         [tunnel release];
     });
     return true;
+}
+
+void IosController::consumeNativeGuardResponse(NSDictionary *response)
+{
+    QJsonObject event;
+    if (!strictNativeGuardEvent(response, event)) return;
+    const QString operation = event.value(QStringLiteral("operation")).toString();
+    const QString session = event.value(QStringLiteral("session")).toString();
+    const QString policy = event.value(QStringLiteral("policy_sha256")).toString();
+    const QString expected = event.value(
+        QStringLiteral("expected_runtime_session_id")).toString();
+    const QString kind = event.value(QStringLiteral("kind")).toString();
+    const QString outer = event.value(QStringLiteral("outer_session_id")).toString();
+    const bool pendingKind = kind == QLatin1String("armed")
+                             || kind == QLatin1String("arm_rejected");
+    const bool matchesPending = operation == m_pendingGuardOperation
+                                && session == m_pendingGuardSession
+                                && policy == m_pendingGuardPolicySha256
+                                && expected == m_pendingGuardExpectedRuntimeSessionId;
+    const bool matchesActive = operation == m_guardOperation && session == m_guardSession
+                               && policy == m_guardPolicySha256
+                               && expected == m_guardExpectedRuntimeSessionId;
+    if (!matchesPending && !matchesActive && m_guardRecoveryUnresolved
+        && m_pendingGuardOperation.isEmpty() && m_guardOperation.isEmpty()) {
+        QMetaObject::invokeMethod(this, [this, event]() {
+            m_guardRecoveryEvent = event;
+            emit sessionGuardRecoveryRequired(event);
+        }, Qt::QueuedConnection);
+        return;
+    }
+    if ((pendingKind && !matchesPending && !matchesActive)
+        || (!pendingKind && !matchesActive)) return;
+    QMetaObject::invokeMethod(this, [this, event, kind, outer]() {
+        if (kind == QLatin1String("armed")) {
+            if (!m_pendingGuardOperation.isEmpty()) {
+                m_guardOperation = m_pendingGuardOperation;
+                m_guardSession = m_pendingGuardSession;
+                m_guardPolicySha256 = m_pendingGuardPolicySha256;
+                m_guardExpectedRuntimeSessionId = m_pendingGuardExpectedRuntimeSessionId;
+                m_pendingGuardOperation.clear();
+                m_pendingGuardSession.clear();
+                m_pendingGuardPolicySha256.clear();
+                m_pendingGuardExpectedRuntimeSessionId.clear();
+            }
+            m_guardReceiptArmed = true;
+            m_guardOuterSessionId = outer;
+        } else if (kind == QLatin1String("arm_rejected")) {
+            m_pendingGuardOperation.clear();
+            m_pendingGuardSession.clear();
+            m_pendingGuardPolicySha256.clear();
+            m_pendingGuardExpectedRuntimeSessionId.clear();
+        } else if (kind == QLatin1String("released")
+                   || kind == QLatin1String("lost")) {
+            if (kind == QLatin1String("lost")) {
+                m_guardRecoveryUnresolved = true;
+                m_guardRecoveryEvent = event;
+            }
+            m_guardReceiptArmed = false;
+            m_guardOuterSessionId.clear();
+            m_guardOperation.clear();
+            m_guardSession.clear();
+            m_guardPolicySha256.clear();
+            m_guardExpectedRuntimeSessionId.clear();
+        }
+        emit sessionGuardEvent(event);
+        if (kind == QLatin1String("lost"))
+            emit sessionGuardRecoveryRequired(event);
+    }, Qt::QueuedConnection);
+}
+
+void IosController::requestCurrentNativeGuardStatus()
+{
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || tunnel.connection.status != NEVPNStatusConnected) {
+        if (tunnel) [tunnel release];
+        return;
+    }
+    sendVpnExtensionMessage(tunnel, @{@"action": @"native_guard_status_v1"},
+        [this](NSDictionary *response) { consumeNativeGuardResponse(response); });
+    [tunnel release];
 }
 
 void IosController::vpnStatusDidChange(void *pNotification)
@@ -661,6 +1952,73 @@ void IosController::vpnStatusDidChange(void *pNotification)
             }
         }
 
+        if (session.status == NEVPNStatusConnected
+            && (!m_pendingGuardOperation.isEmpty() || !m_guardOperation.isEmpty())) {
+            requestCurrentNativeGuardStatus();
+        }
+
+        if (session.status == NEVPNStatusDisconnected
+            && !m_pendingAuthorityRenewalRequest.isEmpty()) {
+            const QJsonObject rejected = rejectedRenewalReceipt(
+                m_pendingAuthorityRenewalRequest,
+                QStringLiteral("provider_disconnected"));
+            m_pendingAuthorityRenewalRequest = {};
+            emit runtimeAuthorityRenewalReceipt(rejected);
+        }
+
+        if (session.status == NEVPNStatusDisconnected
+            && (!m_pendingGuardOperation.isEmpty() || !m_guardOperation.isEmpty())) {
+            const bool active = m_guardReceiptArmed && !m_guardOperation.isEmpty();
+            QJsonObject terminal{
+                {QStringLiteral("type"), QStringLiteral("native_session_guard_v1")},
+                {QStringLiteral("schema"), 1},
+                {QStringLiteral("operation"), active ? m_guardOperation
+                                                       : m_pendingGuardOperation},
+                {QStringLiteral("session"), active ? m_guardSession
+                                                     : m_pendingGuardSession},
+                {QStringLiteral("kind"), active
+                    ? QStringLiteral("lost") : QStringLiteral("arm_rejected")},
+                {QStringLiteral("policy_sha256"), active ? m_guardPolicySha256
+                                                          : m_pendingGuardPolicySha256},
+                {QStringLiteral("outer_session_id"), active
+                    ? m_guardOuterSessionId : QString()},
+                {QStringLiteral("expected_runtime_session_id"),
+                    active ? m_guardExpectedRuntimeSessionId
+                           : m_pendingGuardExpectedRuntimeSessionId},
+                {QStringLiteral("reason"), QStringLiteral("provider_disconnected")},
+            };
+            m_guardReceiptArmed = false;
+            m_guardOuterSessionId.clear();
+            m_guardOperation.clear();
+            m_guardSession.clear();
+            m_guardPolicySha256.clear();
+            m_guardExpectedRuntimeSessionId.clear();
+            m_pendingGuardOperation.clear();
+            m_pendingGuardSession.clear();
+            m_pendingGuardPolicySha256.clear();
+            m_pendingGuardExpectedRuntimeSessionId.clear();
+            emit sessionGuardEvent(terminal);
+        }
+
+        // NEVPNStatusDisconnected is the OS-owned proof that this exact
+        // provider session no longer owns a TUN. Publish its terminal receipt
+        // before invalidating provider callbacks so a replacement cannot be
+        // blocked waiting for a final poll that will never run.
+        if (session.status == NEVPNStatusDisconnected
+                && !m_runtimeSessionId.isEmpty()
+                && m_runtimeStatus.value(QStringLiteral("type")).toString()
+                        == QLatin1String("tunnel_runtime_status_v1")
+                && schemaOne(m_runtimeStatus.value(QStringLiteral("schema")))
+                && m_runtimeStatus.value(QStringLiteral("session_id")).toString()
+                        == m_runtimeSessionId) {
+            QJsonObject terminal = m_runtimeStatus;
+            terminal.insert(QStringLiteral("runtime_state"), QStringLiteral("stopped"));
+            terminal.insert(QStringLiteral("teardown_state"),
+                            QStringLiteral("os_tunnel_disconnected"));
+            m_runtimeStatus = terminal;
+            emit runtimeStatusChanged(terminal);
+        }
+
         Vpn::ConnectionState nextState = iosStatusToState(session.status);
         if (session.status == NEVPNStatusConnected && isWireGuardBasedProto(m_proto)) {
             if (!m_handshakeConfirmed) {
@@ -672,11 +2030,13 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 }
             }
         } else if (session.status != NEVPNStatusConnected) {
+            ++m_statusGeneration; // invalidate provider replies from the session being stopped/switched.
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
             m_handshakeTimer.invalidate();
             m_handshakeTimeouts = 0;
             m_statusRequestInFlight = false;
+            m_counterEpoch.clear();
         }
         emitConnectionStateIfChanged(nextState);
 }
@@ -702,6 +2062,8 @@ void IosController::vpnConfigurationDidChange(void *pNotification)
             m_handshakeAwaiting = false;
             m_handshakeTimer.invalidate();
             m_statusRequestInFlight = false;
+            ++m_statusGeneration;
+            m_counterEpoch.clear();
             m_lastEmittedState = Vpn::ConnectionState::Unknown;
             emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
         }
@@ -752,6 +2114,11 @@ static void insertNonEmptyAwgParams(QJsonObject &wgConfig, const QJsonObject &co
 
 bool IosController::setupWireGuard()
 {
+    if (m_rawConfig.value(QStringLiteral("native_envelope_schema"))
+            == QLatin1String("tribe_catalog_v2_native_v1")) {
+        return startWireGuard(QString::fromUtf8(
+                QJsonDocument(m_rawConfig).toJson(QJsonDocument::Compact)));
+    }
     QJsonObject config = m_rawConfig[ProtocolUtils::key_proto_config_data(amnezia::Proto::WireGuard)].toObject();
 
     QJsonObject wgConfig {};
@@ -801,6 +2168,11 @@ bool IosController::setupWireGuard()
 
 bool IosController::setupXray()
 {
+    if (m_rawConfig.value(QStringLiteral("native_envelope_schema"))
+            == QLatin1String("tribe_catalog_v2_native_v1")) {
+        return startXray(QString::fromUtf8(
+                QJsonDocument(m_rawConfig).toJson(QJsonDocument::Compact)));
+    }
     QJsonObject config = m_rawConfig[ProtocolUtils::key_proto_config_data(amnezia::Proto::Xray)].toObject();
     QString xrayConfigStr = config.value(configKey::config).toString();
 
@@ -831,6 +2203,16 @@ bool IosController::setupXray()
                        qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
                        qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
+    // The embedded Go runtime must have a finite soft memory limit inside the
+    // Network Extension.  Prefer the already-resolved per-connection value,
+    // otherwise use the same backend-tunable 50 MiB default as Android.
+    const qint64 xrayMemoryDefault = 50LL * 1024 * 1024;
+    const qint64 xrayMemoryRequested = m_rawConfig.value(configKey::xrayMaxMemoryBytes).isDouble()
+            ? m_rawConfig.value(configKey::xrayMaxMemoryBytes).toInteger(xrayMemoryDefault)
+            : static_cast<qint64>(avpn::TuningStore::numberOr(QStringLiteral("xray_max_memory_bytes"),
+                                                              static_cast<double>(xrayMemoryDefault)));
+    finalConfig.insert(configKey::xrayMaxMemoryBytes,
+                       qBound(16LL * 1024 * 1024, xrayMemoryRequested, 512LL * 1024 * 1024));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -856,6 +2238,13 @@ bool IosController::setupSSXray()
                        qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
                        qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
+    const qint64 xrayMemoryDefault = 50LL * 1024 * 1024;
+    const qint64 xrayMemoryRequested = m_rawConfig.value(configKey::xrayMaxMemoryBytes).isDouble()
+            ? m_rawConfig.value(configKey::xrayMaxMemoryBytes).toInteger(xrayMemoryDefault)
+            : static_cast<qint64>(avpn::TuningStore::numberOr(QStringLiteral("xray_max_memory_bytes"),
+                                                              static_cast<double>(xrayMemoryDefault)));
+    finalConfig.insert(configKey::xrayMaxMemoryBytes,
+                       qBound(16LL * 1024 * 1024, xrayMemoryRequested, 512LL * 1024 * 1024));
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -865,6 +2254,11 @@ bool IosController::setupSSXray()
 
 bool IosController::setupAwg()
 {
+    if (m_rawConfig.value(QStringLiteral("native_envelope_schema"))
+            == QLatin1String("tribe_catalog_v2_native_v1")) {
+        return startWireGuard(QString::fromUtf8(
+                QJsonDocument(m_rawConfig).toJson(QJsonDocument::Compact)));
+    }
     QJsonObject config = m_rawConfig[ProtocolUtils::key_proto_config_data(amnezia::Proto::Awg)].toObject();
 
     QJsonObject wgConfig {};
@@ -963,21 +2357,12 @@ bool IosController::startOpenVPN(const QString &config)
 
     NETunnelProviderProtocol *appliedProtocol = (NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration;
     NSData *ovpnPayload = appliedProtocol.providerConfiguration[@"ovpn"];
-    NSString *payloadPreview = @"";
-    if (ovpnPayload != nil) {
-        NSString *decodedPayload = [[NSString alloc] initWithData:ovpnPayload encoding:NSUTF8StringEncoding];
-        if (decodedPayload != nil) {
-            payloadPreview = [decodedPayload substringToIndex:MIN((NSUInteger)512, decodedPayload.length)];
-        }
-    }
 
     qDebug().noquote() << "IosController::startOpenVPN protocolConfiguration"
                        << "bundleId=" << QString::fromNSString(appliedProtocol.providerBundleIdentifier ?: @"")
                        << "serverAddress=" << QString::fromNSString(appliedProtocol.serverAddress ?: @"")
                        << "providerKeys=" << QString::fromNSString([[appliedProtocol.providerConfiguration.allKeys description] copy])
                        << "ovpnBytes=" << (ovpnPayload != nil ? ovpnPayload.length : 0);
-    qDebug().noquote() << "IosController::startOpenVPN protocolConfiguration payloadPreview="
-                       << QString::fromNSString(payloadPreview);
 
     startTunnel();
     return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
@@ -987,37 +2372,150 @@ bool IosController::startWireGuard(const QString &config)
 {
     qDebug() << "IosController::startWireGuard";
 
+#if MACOS_NE
+    // The optional legacy macOS NE target has no production Tribe vault
+    // entitlement shared with the app. Never persist a bearer profile there;
+    // the shipping macOS path is the authenticated privileged daemon.
+    qWarning() << "IosController::startWireGuard : secure NE handoff unavailable on macOS";
+    emit connectionStateChanged(Vpn::ConnectionState::Error);
+    return false;
+#else
+    QJsonParseError parseError;
+    QJsonDocument configDocument = QJsonDocument::fromJson(config.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !configDocument.isObject()) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    QJsonObject envelope = configDocument.object();
+    const QString schema = envelope.value(QStringLiteral("native_envelope_schema")).toString();
+    if (schema.isEmpty()) {
+        envelope.insert(QStringLiteral("native_envelope_schema"),
+                        QStringLiteral("amnezia_legacy_native_v1"));
+        envelope.insert(QStringLiteral("protocol"), QStringLiteral("awg"));
+    } else if (schema != QLatin1String("tribe_catalog_v2_native_v1")
+               && schema != QLatin1String("amnezia_legacy_native_v1")) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    if (schema == QLatin1String("tribe_catalog_v2_native_v1")
+            && envelope.value(QStringLiteral("protocol")) != QLatin1String("awg")) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    const QByteArray configUtf8 = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
+    NSData *configData = [NSData dataWithBytes:configUtf8.constData() length:configUtf8.size()];
+    NSString *sessionId = [[[NSUUID UUID] UUIDString] lowercaseString];
+    NSString *reference = [TribeTunnelConfigVault stageConfig:configData
+                                                 protocolName:@"awg"
+                                                     sessionId:sessionId];
+    if (!reference) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+
     NETunnelProviderProtocol *tunnelProtocol = [[NETunnelProviderProtocol alloc] init];
     tunnelProtocol.providerBundleIdentifier = [NSString stringWithUTF8String:VPN_NE_BUNDLEID];
-    QByteArray configUtf8 = config.toUtf8();
-    NSData *wgConfigData = [NSData dataWithBytes:configUtf8.constData() length:configUtf8.size()];
-    tunnelProtocol.providerConfiguration = @{@"wireguard": wgConfigData};
+    tunnelProtocol.providerConfiguration = @{
+        @"tribe_config_schema": @1,
+        @"tribe_protocol": @"awg",
+        @"tribe_config_ref": reference,
+        @"guarded_inner_switch": @NO,
+        @"tribe_session_id": sessionId,
+    };
     tunnelProtocol.serverAddress = m_serverAddress;
+    if (@available(iOS 14.0, *)) {
+        const bool fullTunnel = envelope.value(configKey::splitTunnelType).toInt(0) == 0;
+        const bool catalogV2 = schema == QLatin1String("tribe_catalog_v2_native_v1");
+        tunnelProtocol.includeAllNetworks = fullTunnel;
+        tunnelProtocol.excludeLocalNetworks = NO;
+        // For signed include-split profiles the protected verifier/bootstrap host routes must
+        // outrank local routes too. Exclude-split remains rejected inside the provider until
+        // device readback proves disjoint CIDR semantics on the supported OS matrix.
+        if (@available(iOS 14.2, *)) tunnelProtocol.enforceRoutes = fullTunnel || catalogV2;
+    }
+    m_expectedRuntimeSessionId = QString::fromNSString(sessionId);
 
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
 
     startTunnel();
     return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
+#endif
 }
 
 bool IosController::startXray(const QString &config)
 {
     qDebug() << "IosController::startXray";
 
+#if MACOS_NE
+    qWarning() << "IosController::startXray : secure NE handoff unavailable on macOS";
+    emit connectionStateChanged(Vpn::ConnectionState::Error);
+    return false;
+#else
+    QJsonParseError parseError;
+    QJsonDocument configDocument = QJsonDocument::fromJson(config.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !configDocument.isObject()) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    QJsonObject envelope = configDocument.object();
+    const QString schema = envelope.value(QStringLiteral("native_envelope_schema")).toString();
+    if (schema.isEmpty()) {
+        envelope.insert(QStringLiteral("native_envelope_schema"),
+                        QStringLiteral("amnezia_legacy_native_v1"));
+        envelope.insert(QStringLiteral("protocol"), QStringLiteral("xray"));
+    } else if (schema != QLatin1String("tribe_catalog_v2_native_v1")
+               && schema != QLatin1String("amnezia_legacy_native_v1")) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    if (schema == QLatin1String("tribe_catalog_v2_native_v1")
+            && envelope.value(QStringLiteral("protocol")) != QLatin1String("xray")) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+    const QByteArray configUtf8 = QJsonDocument(envelope).toJson(QJsonDocument::Compact);
+    NSData *configData = [NSData dataWithBytes:configUtf8.constData() length:configUtf8.size()];
+    NSString *sessionId = [[[NSUUID UUID] UUIDString] lowercaseString];
+    NSString *reference = [TribeTunnelConfigVault stageConfig:configData
+                                                 protocolName:@"xray"
+                                                     sessionId:sessionId];
+    if (!reference) {
+        emit connectionStateChanged(Vpn::ConnectionState::Error);
+        return false;
+    }
+
     NETunnelProviderProtocol *tunnelProtocol = [[NETunnelProviderProtocol alloc] init];
     tunnelProtocol.providerBundleIdentifier = [NSString stringWithUTF8String:VPN_NE_BUNDLEID];
-    QByteArray configUtf8 = config.toUtf8();
-    NSData *xrayConfigData = [NSData dataWithBytes:configUtf8.constData() length:configUtf8.size()];
-    tunnelProtocol.providerConfiguration = @{@"xray": xrayConfigData};
+    tunnelProtocol.providerConfiguration = @{
+        @"tribe_config_schema": @1,
+        @"tribe_protocol": @"xray",
+        @"tribe_config_ref": reference,
+        @"guarded_inner_switch": @NO,
+        @"tribe_session_id": sessionId,
+    };
     tunnelProtocol.serverAddress = m_serverAddress;
+    if (@available(iOS 14.0, *)) {
+        const bool fullTunnel = envelope.value(configKey::splitTunnelType).toInt(0) == 0;
+        const bool catalogV2 = schema == QLatin1String("tribe_catalog_v2_native_v1");
+        tunnelProtocol.includeAllNetworks = fullTunnel;
+        tunnelProtocol.excludeLocalNetworks = NO;
+        if (@available(iOS 14.2, *)) tunnelProtocol.enforceRoutes = fullTunnel || catalogV2;
+    }
+    m_expectedRuntimeSessionId = QString::fromNSString(sessionId);
 
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
 
     startTunnel();
     return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
+#endif
 }
 
 void IosController::startTunnel()
+{
+    startTunnel(nil);
+}
+
+void IosController::startTunnel(NSDictionary *options)
 {
     // AVPN (фикс краша): без менеджера дальше идёт nil-разыменование (m_currentTunnel.protocolConfiguration
     // и т.д.). Бывает при teardown→reconnect (rotateNext) и при удалённом в Настройках iOS VPN-конфиге.
@@ -1029,8 +2527,14 @@ void IosController::startTunnel()
     NSString *protocolName = @"Unknown";
 
     NETunnelProviderProtocol *tunnelProtocol = (NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration;
-    if (tunnelProtocol.providerConfiguration[@"wireguard"] != nil) {
-        protocolName = @"WireGuard";
+    NSString *tribeProtocol = [tunnelProtocol.providerConfiguration[@"tribe_protocol"]
+            isKindOfClass:[NSString class]] ? tunnelProtocol.providerConfiguration[@"tribe_protocol"] : nil;
+    NSString *stagedReference = [tunnelProtocol.providerConfiguration[@"tribe_config_ref"]
+            isKindOfClass:[NSString class]] ? tunnelProtocol.providerConfiguration[@"tribe_config_ref"] : nil;
+    if ([tribeProtocol isEqualToString:@"awg"]) {
+        protocolName = @"AWG";
+    } else if ([tribeProtocol isEqualToString:@"xray"]) {
+        protocolName = @"Xray";
     } else if (tunnelProtocol.providerConfiguration[@"ovpn"] != nil) {
         protocolName = @"OpenVPN";
     }
@@ -1039,12 +2543,16 @@ void IosController::startTunnel()
     m_txBytes = 0;
 
     NETunnelProviderManager *tunnel = m_currentTunnel;
+    NSDictionary *startOptions = [[options copy] autorelease];
     [tunnel setEnabled:YES];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (saveError) {
+#if !MACOS_NE
+                    if (stagedReference) [TribeTunnelConfigVault discardReference:stagedReference];
+#endif
                     qDebug().nospace() << "IosController::startTunnel" << protocolName << ": Connect " << protocolName
                                        << " Tunnel Save Error" << saveError.localizedDescription.UTF8String << " domain:"
                                        << saveError.domain.UTF8String << " code:" << saveError.code;
@@ -1055,6 +2563,9 @@ void IosController::startTunnel()
                 [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (loadError) {
+#if !MACOS_NE
+                            if (stagedReference) [TribeTunnelConfigVault discardReference:stagedReference];
+#endif
                             qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
                                                << ": Connect " << protocolName << " Tunnel Load Error"
                                                << loadError.localizedDescription.UTF8String;
@@ -1067,8 +2578,12 @@ void IosController::startTunnel()
                         // «не стартовать поверх живого туннеля» даём РАНЬШЕ: ждём РЕАЛЬНОГО Disconnected
                         // перед connectVpn нового сервера (disconnectVpn + vpnConnection iOS-ветка).
                         NSError *startError = nil;
-                        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+                        BOOL started = [tunnel.connection
+                            startVPNTunnelWithOptions:startOptions andReturnError:&startError];
                         if (!started || startError) {
+#if !MACOS_NE
+                            if (stagedReference) [TribeTunnelConfigVault discardReference:stagedReference];
+#endif
                             qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
                                                << " : Tunnel Start Error"
                                                << (startError ? startError.localizedDescription.UTF8String : "");
@@ -1243,6 +2758,7 @@ QString IosController::openFile() {
     return filePath;
 }
 
+#if 0 // Replaced below by the upstream StoreKit2 bridge; kept out of the build during migration.
 void IosController::purchaseProduct(const QString &productId,
                                    std::function<void(bool success,
                                                       const QString &transactionId,
@@ -1381,6 +2897,165 @@ void IosController::fetchProducts(const QStringList &productIds,
         if (callback) {
             callback(QList<QVariantMap>(), QStringList(), "StoreKit 2 requires iOS 15.0 or later");
         }
+    }
+}
+
+#endif
+
+namespace {
+constexpr int storeKitErrorCodeCancelled = 1;
+constexpr int storeKitErrorCodePending = 2;
+
+IosController::StorePurchaseFailure storePurchaseFailureFromError(NSError *error)
+{
+    if (!error || ![error.domain isEqualToString:@"StoreKit2Helper"])
+        return IosController::StorePurchaseFailure::Other;
+    switch (error.code) {
+    case storeKitErrorCodeCancelled: return IosController::StorePurchaseFailure::Cancelled;
+    case storeKitErrorCodePending: return IosController::StorePurchaseFailure::Pending;
+    default: return IosController::StorePurchaseFailure::Other;
+    }
+}
+
+QVariantMap toTransactionMap(NSDictionary *dict)
+{
+    QVariantMap transaction;
+    for (NSString *key in @[@"transactionId", @"originalTransactionId", @"productId",
+                            @"environment"]) {
+        NSString *value = dict[key];
+        if (value)
+            transaction.insert(QString::fromUtf8(key.UTF8String),
+                               QString::fromUtf8(value.UTF8String));
+    }
+    return transaction;
+}
+
+QList<QVariantMap> toTransactionList(NSArray<NSDictionary *> *transactions)
+{
+    QList<QVariantMap> list;
+    for (NSDictionary *dict in transactions ?: @[])
+        list.push_back(toTransactionMap(dict));
+    return list;
+}
+}
+
+void IosController::purchaseProduct(
+    const QString &productId,
+    std::function<void(bool, const QString &, const QString &, const QString &, const QString &,
+                       const QString &, StorePurchaseFailure)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] purchaseProductWithProductIdentifier:productId.toNSString()
+            completion:^(BOOL success, NSString *transactionId, NSString *purchasedProductId,
+                         NSString *originalTransactionId, NSString *environment, NSError *error) {
+                const StorePurchaseFailure reason = success
+                    ? StorePurchaseFailure::Other : storePurchaseFailureFromError(error);
+                if (cb) {
+                    cb(success,
+                       QString::fromUtf8((transactionId ?: @"").UTF8String),
+                       QString::fromUtf8((purchasedProductId ?: @"").UTF8String),
+                       QString::fromUtf8((originalTransactionId ?: @"").UTF8String),
+                       QString::fromUtf8((environment ?: @"").UTF8String),
+                       QString::fromUtf8((error.localizedDescription ?: @"").UTF8String),
+                       reason);
+                }
+            }];
+    } else if (callback) {
+        callback(false, {}, {}, {}, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"),
+                 StorePurchaseFailure::Other);
+    }
+}
+
+void IosController::finishStoreTransaction(const QString &transactionId)
+{
+    if (transactionId.isEmpty()) return;
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        [[StoreKit2Helper shared] finishTransactionWithTransactionId:transactionId.toNSString()
+            completion:^(BOOL finished) {
+                if (!finished)
+                    qWarning() << "StoreKit transaction was not found in the unfinished queue";
+            }];
+    }
+}
+
+void IosController::startStoreTransactionObserver()
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        [[StoreKit2Helper shared] startTransactionUpdatesListenerWithHandler:
+            ^(NSDictionary *transaction) { emit storeTransactionUpdated(toTransactionMap(transaction)); }];
+    }
+}
+
+void IosController::restorePurchases(
+    std::function<void(bool, const QList<QVariantMap> &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchCurrentEntitlementsWithCompletion:
+            ^(BOOL success, NSArray<NSDictionary *> *transactions, NSError *error) {
+                if (cb) cb(success, toTransactionList(transactions),
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback(false, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
+    }
+}
+
+void IosController::fetchLocalEntitlements(
+    std::function<void(bool, const QList<QVariantMap> &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchLocalEntitlementsWithCompletion:
+            ^(BOOL success, NSArray<NSDictionary *> *transactions, NSError *error) {
+                if (cb) cb(success, toTransactionList(transactions),
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback(false, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
+    }
+}
+
+void IosController::fetchProducts(
+    const QStringList &productIds,
+    std::function<void(const QList<QVariantMap> &, const QStringList &, const QString &)> &&callback)
+{
+    if (@available(iOS 15.0, macOS 12.0, *)) {
+        NSMutableSet<NSString *> *ids = [NSMutableSet setWithCapacity:productIds.size()];
+        for (const QString &id : productIds) [ids addObject:id.toNSString()];
+        __block auto cb = std::move(callback);
+        [[StoreKit2Helper shared] fetchProductsWithIdentifiers:ids
+            completion:^(NSArray<NSDictionary *> *products, NSArray<NSString *> *invalidIds,
+                         NSError *error) {
+                QList<QVariantMap> result;
+                for (NSDictionary *info in products) {
+                    QVariantMap product;
+                    for (NSString *key in @[@"productId", @"title", @"description", @"price",
+                                            @"displayPrice", @"currencyCode",
+                                            @"displayPricePerMonth", @"introOfferDisplayPrice",
+                                            @"introOfferPaymentMode"]) {
+                        if (NSString *value = info[key])
+                            product[QString::fromUtf8(key.UTF8String)] =
+                                QString::fromUtf8(value.UTF8String);
+                    }
+                    for (NSString *key in @[@"priceAmount", @"subscriptionBillingMonths",
+                                            @"trialDays"]) {
+                        if (NSNumber *value = info[key])
+                            product[QString::fromUtf8(key.UTF8String)] = value.doubleValue;
+                    }
+                    if (NSNumber *value = info[@"hasFreeTrial"])
+                        product[QStringLiteral("hasFreeTrial")] = value.boolValue;
+                    result.push_back(product);
+                }
+                QStringList invalid;
+                for (NSString *id in invalidIds)
+                    invalid.push_back(QString::fromUtf8(id.UTF8String));
+                if (cb) cb(result, invalid,
+                           QString::fromUtf8((error.localizedDescription ?: @"").UTF8String));
+            }];
+    } else if (callback) {
+        callback({}, {}, QStringLiteral("StoreKit 2 requires iOS 15.0 or later"));
     }
 }
 

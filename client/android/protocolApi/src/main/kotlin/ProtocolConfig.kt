@@ -46,6 +46,7 @@ open class ProtocolConfig protected constructor(
         internal val excludedAddresses: MutableSet<InetNetwork> = hashSetOf()
         internal val includedApplications: MutableSet<String> = hashSetOf()
         internal val excludedApplications: MutableSet<String> = hashSetOf()
+        private val protectedAddresses: MutableSet<InetNetwork> = hashSetOf()
 
         internal var searchDomain: String? = null
             private set
@@ -60,6 +61,9 @@ open class ProtocolConfig protected constructor(
             private set
 
         internal var allowSplitTunneling: Boolean = true
+            private set
+
+        internal var strictIpv6Capture: Boolean = false
             private set
 
         open var mtu: Int = 0
@@ -96,6 +100,9 @@ open class ProtocolConfig protected constructor(
         fun excludeAddress(addr: InetNetwork) = apply { this.excludedAddresses += addr }
         fun excludeAddresses(addresses: Collection<InetNetwork>) = apply { this.excludedAddresses += addresses }
 
+        /** Host routes that must remain in the VPN even when server-authored split rules apply. */
+        fun protectAddress(addr: InetNetwork) = apply { this.protectedAddresses += addr }
+
         fun includeApplication(application: String) = apply { this.includedApplications += application }
         fun includeApplications(applications: Collection<String>) = apply { this.includedApplications += applications }
 
@@ -110,6 +117,8 @@ open class ProtocolConfig protected constructor(
         fun setBlockingMode(blockingMode: Boolean) = apply { this.blockingMode = blockingMode }
 
         fun disableSplitTunneling() = apply { this.allowSplitTunneling = false }
+
+        fun requireStrictIpv6Capture() = apply { this.strictIpv6Capture = true }
 
         fun setMtu(mtu: Int) = apply { this.mtu = mtu }
 
@@ -136,33 +145,10 @@ open class ProtocolConfig protected constructor(
         }
 
         private fun processRoutes() {
-            // replace ::/0 as it may cause LAN connection issues
-            val ipv6DefaultRoute = InetNetwork("::", 0)
-            if (routes.removeIf { it.include && it.inetNetwork == ipv6DefaultRoute }) {
-                prependRoutes {
-                    addRoute(InetNetwork("2000::", 3))
-                }
-            }
-            // for older versions of Android, build a list of subnets without excluded routes
-            // and add them to routes
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && routes.any { !it.include }) {
-                val ipRangeSet = IpRangeSet()
-                routes.forEach {
-                    if (it.include) ipRangeSet.add(IpRange(it.inetNetwork))
-                    else ipRangeSet.remove(IpRange(it.inetNetwork))
-                }
-                ipRangeSet.remove(IpRange("127.0.0.0", 8))
-                ipRangeSet.remove(IpRange("::1", 128))
-                routes.clear()
-                ipRangeSet.subnets().forEach(::addRoute)
-            }
-            // filter ipv4 and ipv6 loopback addresses
-            val ipv6Loopback = InetNetwork("::1", 128)
-            routes.removeIf {
-                it.include &&
-                    if (it.inetNetwork.isIpv4) it.inetNetwork.address.address[0] == 127.toByte()
-                    else it.inetNetwork == ipv6Loopback
-            }
+            val processed = processRoutesForPlatform(
+                routes, protectedAddresses, strictIpv6Capture, Build.VERSION.SDK_INT)
+            routes.clear()
+            routes.addAll(processed)
         }
 
         private fun validate() {
@@ -193,3 +179,45 @@ open class ProtocolConfig protected constructor(
 }
 
 data class Route(val inetNetwork: InetNetwork, val include: Boolean)
+
+/** Pure Android-version route reducer used by Builder and host tests. */
+internal fun processRoutesForPlatform(
+    input: Collection<Route>,
+    protectedAddresses: Collection<InetNetwork>,
+    strictIpv6Capture: Boolean,
+    sdkInt: Int,
+): Set<Route> {
+    val routes = input.toMutableSet()
+    val ipv6DefaultRoute = InetNetwork("::", 0)
+    if (!strictIpv6Capture && routes.removeIf { it.include && it.inetNetwork == ipv6DefaultRoute }) {
+        routes.add(Route(InetNetwork("2000::", 3), true))
+    }
+    if (sdkInt < Build.VERSION_CODES.TIRAMISU && routes.any { !it.include }) {
+        val ipRangeSet = IpRangeSet()
+        routes.filter { it.include }.forEach { ipRangeSet.add(IpRange(it.inetNetwork)) }
+        routes.filter { !it.include }.forEach { ipRangeSet.remove(IpRange(it.inetNetwork)) }
+        // Receipt/bootstrap hosts are explicit signed policy facts and override broader
+        // exclusions. Re-add them after subtracting every bypass range.
+        protectedAddresses.forEach { ipRangeSet.add(IpRange(it)) }
+        ipRangeSet.remove(IpRange("127.0.0.0", 8))
+        ipRangeSet.remove(IpRange("::1", 128))
+        routes.clear()
+        ipRangeSet.subnets().forEach { routes.add(Route(it, true)) }
+    } else {
+        // Android 13+ applies longest-prefix route selection; a protected /32 or /128 wins over
+        // every broader excluded subnet while preserving the explicit exclusion itself.
+        protectedAddresses.forEach { protected ->
+            routes.removeIf { it.inetNetwork == protected }
+            routes.add(Route(protected, true))
+        }
+    }
+    val ipv6Loopback = InetNetwork("::1", 128)
+    routes.removeIf {
+        it.include && if (it.inetNetwork.isIpv4) {
+            it.inetNetwork.address.address[0] == 127.toByte()
+        } else {
+            it.inetNetwork == ipv6Loopback
+        }
+    }
+    return routes
+}

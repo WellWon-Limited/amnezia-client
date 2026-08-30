@@ -83,6 +83,15 @@ class LibSSHRecipe(ConanFile):
             tc.cache_variables["USE_MSVC_RUNTIME_LIBRARY_DLL"] = not is_msvc_static_runtime(self)
         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0077"] = "NEW"
         tc.cache_variables["CMAKE_TRY_COMPILE_CONFIGURATION"] = str(self.settings.build_type)
+        if self.settings.os == "Macos":
+            for build_root in (self.source_folder, self.build_folder):
+                prefix_maps = [
+                    f"-ffile-prefix-map={build_root}=.",
+                    f"-fdebug-prefix-map={build_root}=.",
+                    f"-fmacro-prefix-map={build_root}=.",
+                ]
+                tc.extra_cflags.extend(prefix_maps)
+                tc.extra_cxxflags.extend(prefix_maps)
         if self.settings.os == "Android":
             if Version(self.settings.get_safe("os.api_level")) < 24:
                 tc.cache_variables["HAVE_IFADDRS_H"] = False

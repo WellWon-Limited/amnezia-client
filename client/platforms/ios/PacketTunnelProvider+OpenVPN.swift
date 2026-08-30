@@ -81,7 +81,7 @@ extension PacketTunnelProvider {
                                        completionHandler: @escaping (Error?) -> Void) {
         ovpnLog(.info, message: "Setup and launch")
 
-        var configString = String(decoding: ovpnConfiguration, as: UTF8.self)
+        let configString = String(decoding: ovpnConfiguration, as: UTF8.self)
 
         let digest = SHA256.hash(data: ovpnConfiguration)
         let digestString = digest.map { String(format: "%02x", $0) }.joined()

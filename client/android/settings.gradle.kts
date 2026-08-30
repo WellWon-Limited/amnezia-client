@@ -22,7 +22,7 @@ dependencyResolutionManagement {
 includeBuild("./gradle/plugins")
 
 plugins {
-    id("com.android.settings") version "8.5.2"
+    id("com.android.settings") version "8.11.1"
     id("settings-property-delegate")
 }
 
@@ -30,6 +30,7 @@ rootProject.buildFileName = "build.gradle.kts"
 
 include(":qt")
 include(":utils")
+include(":billing")
 include(":protocolApi")
 include(":wireguard")
 include(":awg")

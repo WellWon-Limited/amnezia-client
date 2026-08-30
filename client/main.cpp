@@ -68,6 +68,9 @@ int main(int argc, char *argv[])
 #endif
 
     AmneziaApplication app(argc, argv);
+    // AVPN: Qt otherwise exposes platform-specific defaults (for example
+    // only the Apple build number), breaking server-side compatibility gates.
+    QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
     OsSignalHandler::setup();
 
     anchorOpenSSL();

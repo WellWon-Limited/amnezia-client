@@ -49,46 +49,78 @@ find_library(FW_ASSETS_LIBRARY AssetsLibrary)
 find_library(FW_MOBILE_CORE MobileCoreServices)
 find_library(FW_UI_KIT UIKit)
 find_library(FW_LIBRESOLV libresolv.9.tbd)
+find_library(FW_CRYPTOKIT CryptoKit)
+find_library(FW_SECURITY Security)
 
 target_link_libraries(networkextension PRIVATE ${FW_ASSETS_LIBRARY})
 target_link_libraries(networkextension PRIVATE ${FW_MOBILE_CORE})
 target_link_libraries(networkextension PRIVATE ${FW_UI_KIT})
 target_link_libraries(networkextension PRIVATE ${FW_LIBRESOLV})
+target_link_libraries(networkextension PRIVATE ${FW_CRYPTOKIT} ${FW_SECURITY})
 
-target_compile_options(networkextension PRIVATE -DGROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\")
-target_compile_options(networkextension PRIVATE -DNETWORK_EXTENSION=1)
+target_compile_definitions(networkextension PRIVATE
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:GROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\">
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:NETWORK_EXTENSION=1>
+)
 
-set(WG_APPLE_SOURCE_DIR ${CLIENT_ROOT_DIR}/3rd/amneziawg-apple/Sources)
+if(NOT DEFINED AWG_APPLE_SOURCE_DIR OR NOT EXISTS "${AWG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift")
+    message(FATAL_ERROR "networkextension requires AWG_APPLE_SOURCE_DIR from awg-apple Conan package") # AVPN
+endif()
+
+foreach(_required AWG_APPLE_ADAPTER_VERSION AWG_APPLE_UPSTREAM_VERSION AWG_APPLE_SOURCE_COMMIT
+                  AWG_APPLE_AWG_CORE_VERSION AWG_APPLE_XRAY_ADAPTER_VERSION AWG_APPLE_XRAY_CORE_VERSION
+                  AWG_APPLE_XRAY_SOCKET_ABI)
+    if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
+        message(FATAL_ERROR "awg-apple package did not export ${_required}") # AVPN
+    endif()
+endforeach()
+configure_file(
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeEngineManifest.swift.in
+    ${CMAKE_CURRENT_BINARY_DIR}/TribeEngineManifest.swift
+    @ONLY
+) # AVPN: compile-time dependency manifest with optional native runtime probes.
 
 target_sources(networkextension PRIVATE
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardNetworkExtension/ErrorNotifier.swift
-    ${WG_APPLE_SOURCE_DIR}/Shared/Keychain.swift
-    ${WG_APPLE_SOURCE_DIR}/Shared/Model/TunnelConfiguration+WgQuickConfig.swift
-    ${WG_APPLE_SOURCE_DIR}/Shared/Model/NETunnelProviderProtocol+Extension.swift
-    ${WG_APPLE_SOURCE_DIR}/Shared/Model/String+ArrayConversion.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TunnelConfiguration.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/IPAddressRange.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/Endpoint.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSServer.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/InterfaceConfiguration.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PeerConfiguration.swift
-    ${WG_APPLE_SOURCE_DIR}/Shared/FileManager+Extension.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/Array+ConcurrentMap.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/IPAddress+AddrInfo.swift
-    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PrivateKey.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardNetworkExtension/ErrorNotifier.swift
+    ${AWG_APPLE_SOURCE_DIR}/Shared/Keychain.swift
+    ${AWG_APPLE_SOURCE_DIR}/Shared/Model/TunnelConfiguration+WgQuickConfig.swift
+    ${AWG_APPLE_SOURCE_DIR}/Shared/Model/NETunnelProviderProtocol+Extension.swift
+    ${AWG_APPLE_SOURCE_DIR}/Shared/Model/String+ArrayConversion.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/TunnelConfiguration.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/IPAddressRange.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/Endpoint.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/DNSServer.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/InterfaceConfiguration.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/PeerConfiguration.swift
+    ${AWG_APPLE_SOURCE_DIR}/Shared/FileManager+Extension.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/Array+ConcurrentMap.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/IPAddress+AddrInfo.swift
+    ${AWG_APPLE_SOURCE_DIR}/WireGuardKit/PrivateKey.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/HevSocksTunnel.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/Socks5TunnelLifecycle.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/NELogController.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/Log.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/LogRecord.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TunnelRuntimeStatus.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/NativeDispatchPolicy.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeNativeSessionGuard.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeRuntimeAuthorityLease.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeRuntimeAuthorityRenewal.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeRuntimeAuthorityWatchdog.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeProtectedSplitPolicy.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/XraySocketCallbackLifecycle.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+NativeGuard.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeTunnelConfigVault.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+WireGuard.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+OpenVPN.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+Xray.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/WGConfig.swift
+    ${CMAKE_CURRENT_BINARY_DIR}/TribeEngineManifest.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/XrayConfig.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/iosglue.mm
 )

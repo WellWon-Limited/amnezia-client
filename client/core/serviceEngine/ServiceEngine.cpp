@@ -99,6 +99,10 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
 
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
 {
+    if (m_legacyV1Locked) {
+        error = QStringLiteral("legacy v1 disabled after accepted catalog v2");
+        return false;
+    }
     Subscription sub;
     if (!SubscriptionParser::parse(json, sub, error))
         return false;
@@ -134,6 +138,11 @@ bool ServiceEngine::enroll(QNetworkAccessManager *nam, const QString &baseUrl,
 
 bool ServiceEngine::connect(QString &error)
 {
+    if (m_legacyV1Locked) {
+        error = QStringLiteral("legacy v1 connect disabled after accepted catalog v2");
+        m_state = EngineState::Error;
+        return false;
+    }
     if (!m_tunnel) {
         error = QStringLiteral("no tunnel adapter set");
         m_state = EngineState::Error;
@@ -337,6 +346,13 @@ void ServiceEngine::requestStop() // AVPN
 
 bool ServiceEngine::onDead(bool tunnelStillUp)
 {
+    if (m_legacyV1Locked) {
+        Q_UNUSED(tunnelStillUp)
+        // The already-running bootstrap tunnel may finish, but it cannot create another unsigned
+        // v1 session after the accepted v2 authority became monotonic.
+        m_state = EngineState::Error;
+        return false;
+    }
     // AVPN (BUG-4 auto-heal, 2026-07-22): сессионный блок ТСПУ вешается на 5-tuple/CGNAT-flow —
     // «данные не проходят» на одном телефоне при живом втором на том же операторе, режим полёта
     // (= новый flow) лечит. Перед failover пробуем то же самое БЕЗ участия юзера: ребайнд сокета
@@ -383,6 +399,8 @@ bool ServiceEngine::onDead(bool tunnelStillUp)
 // AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч — см. объявление в ServiceEngine.h.
 bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, const QString &reason)
 {
+    if (m_legacyV1Locked)
+        return false;
     if (!m_tunnel) { m_state = EngineState::Error; return false; }
     // Task 10: цель с неподдерживаемым proto = «нет такой ноды» — up() на неё заведомо мёртв
     // (страховка последнего рубежа: все выборные пути её уже отфильтровали).
@@ -499,6 +517,10 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 // смерти onDead() уведёт на лучшую живую и ОСТАНЕТСЯ там (назад вручную). Spec §23-26.
 bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
+    if (m_legacyV1Locked) {
+        error = QStringLiteral("legacy v1 pin disabled after accepted catalog v2");
+        return false;
+    }
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
@@ -528,6 +550,10 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 // без джиттера). Круговой индекс от текущей → следующая (заворот); 2 узла → пинг-понг.
 bool ServiceEngine::rotateNext(QString &error) // AVPN
 {
+    if (m_legacyV1Locked) {
+        error = QStringLiteral("legacy v1 rotation disabled after accepted catalog v2");
+        return false;
+    }
     // Ручная ротация ≠ «закрепить»: снимаем закрепление, иначе offline-ветка ниже (m_currentNodeId=target
     // → connect()) перебивается приоритетом m_pinnedNodeId в connect() и ротация молча no-op'ит на pin.
     m_pinnedNodeId.clear(); // AVPN
