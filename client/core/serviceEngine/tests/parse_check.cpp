@@ -759,7 +759,7 @@ int main(int argc, char **argv)
     // та же семантика RST-без-байта=HardFail, таймаут=SoftFail; TDD tests/build_chip_logic.sh),
     // HTML главной Instagram больше не парсим (гео-A/B вёрстка/бот-детект — источник флапа).
 
-    // --- AWG 3.0 (план awg3 §3 F7/F8): 7 v3-ключей + generic-канал extra + keepalive-кламп ---
+    // --- AWG 3.0/3.1: explicit typed keys only + keepalive clamp ---
     {
         const QByteArray v3json = R"({
             "version": 1, "address": ["10.7.0.9/32"], "status": "active",
@@ -796,9 +796,6 @@ int main(int argc, char **argv)
             && a.maxHandshakeAttempts == QLatin1String("15-20")
             && a.randomTrailers.value_or(false)
             && a.disableCookies.value_or(false);
-        // generic-канал: строковый незнакомый ключ пойман, числовой — отброшен (канон = строки)
-        const bool extraOk = a.extra.size() == 1
-            && a.extra.value(QStringLiteral("FutureKey42")) == QLatin1String("future-value");
         // кламп: явный persistent_keepalive=0 не должен молча выключить keepalive
         const bool kaOk = n.persistentKeepalive == 25;
 
@@ -818,8 +815,8 @@ int main(int argc, char **argv)
             && quick.contains(QLatin1String("RandomTrailers = 1"))
             && quick.contains(QLatin1String("DisableCookies = 1"))
             && quick.contains(QLatin1String("PersistentKeepalive = 25"));
-        // extra БЕЗ allowlist'а (дефолт пуст) в конфиг НЕ эмитится — канал спит
-        const bool extraGateOk = !inner.contains(QStringLiteral("FutureKey42"))
+        // Unknown keys are ignored and never reach version-strict native parsers.
+        const bool unknownKeyOk = !inner.contains(QStringLiteral("FutureKey42"))
             && !quick.contains(QLatin1String("FutureKey42"));
         // parity 2.0: у ноды без v3-ключей в конфиге не появляется ни одного нового ключа
         const QJsonObject cfg20 = AwgConfigBuilder::build(sub, sub.nodes.first(), keys);
@@ -851,15 +848,15 @@ int main(int argc, char **argv)
             invalidToggleJson, invalidToggleSub, invalidToggleError);
         const bool encodingGateOk = invalidToggleParsed
                                     && !SubscriptionParser::validate(invalidToggleSub).isEmpty();
-        printf("awg31: fields=%d extra=%d clamp=%d emit=%d gate=%d parity20=%d report=%d ver=%d bundle=%d encoding=%d\n",
-               fieldsOk, extraOk, kaOk, emitOk, extraGateOk, parityOk, repOk, verOk,
+        printf("awg31: fields=%d clamp=%d emit=%d unknown=%d parity20=%d report=%d ver=%d bundle=%d encoding=%d\n",
+               fieldsOk, kaOk, emitOk, unknownKeyOk, parityOk, repOk, verOk,
                bundleGateOk, encodingGateOk);
         if (!verOk) { fprintf(stderr, "FAIL: protocolMajor mismatch\n"); return 15; }
-        if (!(fieldsOk && extraOk && kaOk && emitOk && extraGateOk && parityOk && repOk
+        if (!(fieldsOk && kaOk && emitOk && unknownKeyOk && parityOk && repOk
               && bundleGateOk && encodingGateOk)) {
             fprintf(stderr, "FAIL: awg3.1 plumbing mismatch\n"); return 14;
         }
-        printf("awg31: OK (typed bool parse→build, v3 keys, legacy extra gate, parity 2.0, secret-safe report)\n");
+        printf("awg31: OK (typed bool parse→build, v3 keys, unknown-key drop, parity 2.0, secret-safe report)\n");
     }
 
     printf("OK: parsed + config + enrollment + selector + healthloop + signalquality + mtproto + goodput + youtube + awg3\n");
