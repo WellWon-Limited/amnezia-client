@@ -33,19 +33,11 @@ jobs:
         python-version: 3.14
 
     - name: 'Install Qt'
-      uses: jurplel/install-qt-action/action@b7840a6733f49e2a39c4355260d2375063d39b61 # v3
-      with:
-        version: ${{ env.QT_VERSION }}
-        host: 'windows'
-        target: 'desktop'
-        arch: 'win64_msvc2022_64'
-        modules: 'qtremoteobjects qt5compat qtshadertools'
-        dir: ${{ runner.temp }}
-        tools: 'tools_ifw'
-        set-env: 'true'
-        aqtversion: '==3.3.0'
-        py7zrversion: '==0.22.*'
-        extra: '--base ${{ env.QT_MIRROR }}'
+      shell: pwsh
+      run: |
+        python -m pip install setuptools wheel "py7zr==0.22.*" "aqtinstall==3.3.0"
+        python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir "${{ runner.temp }}/Qt" --modules qtremoteobjects qt5compat qtshadertools --base $env:QT_MIRROR
+        python -m aqt install-tool windows desktop tools_ifw --outputdir "${{ runner.temp }}/Qt" --base $env:QT_MIRROR
 
     - name: 'Setup msvc'
       uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
