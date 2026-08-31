@@ -27,8 +27,13 @@ jobs:
         submodules: 'true'
         fetch-depth: 10
 
+    - name: 'Setup python'
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: 3.14
+
     - name: 'Install Qt'
-      uses: jurplel/install-qt-action@b7840a6733f49e2a39c4355260d2375063d39b61 # v3
+      uses: jurplel/install-qt-action/action@b7840a6733f49e2a39c4355260d2375063d39b61 # v3
       with:
         version: ${{ env.QT_VERSION }}
         host: 'windows'
@@ -36,7 +41,6 @@ jobs:
         arch: 'win64_msvc2022_64'
         modules: 'qtremoteobjects qt5compat qtshadertools'
         dir: ${{ runner.temp }}
-        setup-python: 'true'
         tools: 'tools_ifw'
         set-env: 'true'
         aqtversion: '==3.3.0'
@@ -47,11 +51,6 @@ jobs:
       uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       with:
         arch: 'x64'
-
-    - name: 'Setup python'
-      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-      with:
-        python-version: 3.14
 
     - name: 'Install conan'
       run: pip install "conan==2.28.0"
