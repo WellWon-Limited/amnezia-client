@@ -27,38 +27,10 @@ Item {
     property string mode: "intro"
     property bool sentToSupport: false
     property int elapsedSec: 0
-    property string v2ActionMessage: ""
 
     readonly property bool hasEngine: typeof TribeEngine !== "undefined"
     readonly property bool hasChat: typeof TribeSupport !== "undefined"
-    readonly property bool hasCatalogConnection: typeof TribeConnection !== "undefined"
-    readonly property bool useCatalog: hasCatalogConnection
-                                       && TribeConnection.v2Authoritative === true
-    readonly property bool running: useCatalog ? mode === "running"
-                                               : (hasEngine && TribeEngine.doctorRunning === true)
-
-    function doctorTimelineTail() {
-        if (!root.useCatalog) return []
-        const values = TribeConnection.doctorTimeline || []
-        return values.slice(Math.max(0, values.length - 3))
-    }
-    function timelineLabel(value) {
-        if (typeof value === "string") return value
-        if (!value || typeof value !== "object") return ""
-        // Only explicitly redacted presentation fields are rendered. Internal ids/endpoints and
-        // native configuration are intentionally ignored even if a future producer adds them.
-        return String(value.label || value.stage || value.reason || "")
-    }
-    function engineLabel(value) {
-        if (!value || typeof value !== "object") return ""
-        const transport = String(value.transport || "").toLowerCase()
-        const name = transport === "awg" ? qsTr("AWG")
-                                          : (transport === "xray" ? qsTr("Xray") : "")
-        const version = String(value.version || "")
-        const adapter = String(value.adapter || "")
-        if (!name) return ""
-        return name + (version ? " · " + version : "") + (adapter ? " · " + adapter : "")
-    }
+    readonly property bool running: hasEngine && TribeEngine.doctorRunning === true
 
     // ── Интро-шаги (волна UX 07-22): тип сети → оператор (если сотовая) → режим → запуск ────
     // Авто-детект знает тип сети → вопросов нет (кейс владельца: на Wi-Fi спрашивало оператора).
@@ -68,8 +40,8 @@ Item {
     property bool fullMode: false    // false = быстрая (дефолт), true = полная (все серверы)
     property string carrierSel: ""   // выбранный оператор (код из diagOperators)
     property int nodeTab: 0          // активная вкладка финала «по серверам»
-    readonly property bool needNet: !useCatalog && autoNet === "" && netChoice === ""
-    readonly property bool needOp: !useCatalog && effNet === "cellular" && hasEngine
+    readonly property bool needNet: autoNet === "" && netChoice === ""
+    readonly property bool needOp: effNet === "cellular" && hasEngine
                                    && TribeEngine.diagCarrierAuto() === "" && carrierSel === ""
     readonly property bool canRun: !needNet && !needOp
 
@@ -133,17 +105,6 @@ Item {
             out.push(qsTr("Большие пакеты режутся — признак ограничений оператора"))
         return out
     }
-    function v2DoctorSummary() {
-        if (!root.useCatalog) return ""
-        const state = String(TribeConnection.verificationState || "idle")
-        if (state === "verified" && TribeConnection.verified === true)
-            return qsTr("Трафик через VPN подтверждён двумя независимыми проверками.")
-        if (state === "unknown" || state === "verified")
-            return qsTr("Туннель защищён, но свежую проверку выхода подтвердить не удалось.")
-        if (state === "failed")
-            return qsTr("Проверка обнаружила ошибку подключения.")
-        return qsTr("Проверяю реальный трафик через активный VPN-туннель.")
-    }
 
     // Фикс-порядок стадий (id движка -> подпись). Статусы доезжают в doctorStages.
     readonly property var stageDefs: [
@@ -166,39 +127,16 @@ Item {
         fullMode = false
         netChoice = ""
         nodeTab = 0
-        v2ActionMessage = ""
         // тип сети замеряем на момент открытия; выбранный ранее оператор — из настроек
-        autoNet = useCatalog ? "catalog" : (hasEngine ? TribeEngine.doctorNetType() : "wifi")
-        carrierSel = useCatalog ? "" : (hasEngine ? TribeEngine.diagCarrier() : "")
+        autoNet = hasEngine ? TribeEngine.doctorNetType() : "wifi"
+        carrierSel = hasEngine ? TribeEngine.diagCarrier() : ""
         opened = true
         depthIndex = PageController.incrementDrawerDepth()
-    }
-    function activatePrimaryAction() {
-        if (root.mode === "intro" && root.useCatalog) {
-            Haptic.play("light")
-            root.v2ActionMessage = ""
-            if (TribeConnection.startDoctorV2()) {
-                root.mode = "running"
-                root.elapsedSec = 0
-            } else {
-                root.v2ActionMessage = doctorErrorText.failureText(
-                            String(TribeConnection.errorCode || ""))
-                PageController.showNotificationMessage(root.v2ActionMessage)
-            }
-        } else if (root.mode === "intro" && root.hasEngine) {
-            if (!root.canRun) return
-            Haptic.play("light")
-            root.mode = "running"
-            root.elapsedSec = 0
-            TribeEngine.startDoctor(root.fullMode)
-        } else {
-            root.close()
-        }
     }
     function close() {
         if (!opened)
             return
-        if (root.running && !root.useCatalog && root.hasEngine)
+        if (root.running && root.hasEngine)
             TribeEngine.cancelDoctor()
         opened = false
         mode = "intro"
@@ -215,7 +153,7 @@ Item {
         function onCloseTopDrawer() {
             if (root.depthIndex !== PageController.getDrawerDepth())
                 return
-            if (root.running && !root.useCatalog && root.hasEngine)
+            if (root.running && root.hasEngine)
                 TribeEngine.cancelDoctor()
             root.opened = false
             root.mode = "intro"
@@ -239,7 +177,6 @@ Item {
 
     Connections {
         target: root.hasEngine ? TribeEngine : null
-        enabled: !root.useCatalog
         ignoreUnknownSignals: true
         function onDoctorFinished() {
             if (!root.opened)
@@ -255,25 +192,8 @@ Item {
             }
         }
     }
-    Connections {
-        target: root.hasCatalogConnection ? TribeConnection : null
-        enabled: root.useCatalog
-        ignoreUnknownSignals: true
-        function onChanged() {
-            if (!root.opened || root.mode !== "running") return
-            const state = String(TribeConnection.verificationState || "idle")
-            if (state === "verified" || state === "unknown" || state === "failed")
-                root.mode = "done"
-        }
-    }
 
     Rectangle { anchors.fill: parent; color: Qt.alpha(Theme.color.bg800, 0.85) }
-    TribeConnectionStage {
-        id: doctorErrorText
-        visible: false
-        stage: "failed"
-        typedReason: root.useCatalog ? String(TribeConnection.errorCode || "") : ""
-    }
     MouseArea {
         anchors.fill: parent
         onClicked: if (root.mode === "intro") root.close()   // в тесте/финале — есть кнопки
@@ -341,9 +261,7 @@ Item {
             Text {
                 visible: root.mode === "intro"
                 Layout.fillWidth: true
-                text: root.useCatalog
-                      ? qsTr("Диагностика проверит реальный выход трафика через активный VPN, свежесть подтверждений и версии встроенных движков.")
-                      : qsTr("Диагностика запустит процесс проверки состояния подключений, скорости, лучших серверов, наличия ошибок и др. (полностью анонимно)")
+                text: qsTr("Диагностика запустит процесс проверки состояния подключений, скорости, лучших серверов, наличия ошибок и др. (полностью анонимно)")
                 color: Theme.color.text2
                 font.family: Theme.font.body
                 font.pixelSize: Theme.font.bodyS
@@ -354,8 +272,7 @@ Item {
             Text {
                 visible: root.mode === "intro"
                 Layout.fillWidth: true
-                text: root.useCatalog ? qsTr("Проверка не переключает сервер и не раскрывает адреса или ключи.")
-                      : root.fullMode
+                text: root.fullMode
                       ? qsTr("Полная проверка переберёт все серверы — займёт 5–10 минут.")
                       : qsTr("Займёт 1–2 минуты — не закрывайте приложение.")
                 color: Theme.color.text3
@@ -364,26 +281,11 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
             }
-            Text {
-                visible: root.mode === "intro" && root.useCatalog
-                         && root.v2ActionMessage.length > 0
-                Layout.fillWidth: true
-                text: root.v2ActionMessage
-                textFormat: Text.PlainText
-                color: Theme.color.warning
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.caption
-                font.weight: Theme.font.wSemibold
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                Accessible.role: Accessible.StaticText
-                Accessible.name: text
-            }
 
             // ── ШАГ 1: тип интернета — ТОЛЬКО когда платформа сама не знает (иначе не спрашиваем;
             // жалоба владельца: на Wi-Fi предлагало выбрать оператора) ────────────────────────
             ColumnLayout {
-                visible: root.mode === "intro" && !root.useCatalog && root.autoNet === ""
+                visible: root.mode === "intro" && root.autoNet === ""
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
                 spacing: Theme.space.xs
@@ -441,8 +343,7 @@ Item {
             // запуска — паттерны «оператор X режет ноду Y» без него слепые; есть «Другой».
             ColumnLayout {
                 id: carrierPick
-                visible: root.mode === "intro" && !root.useCatalog && root.hasEngine
-                         && root.effNet === "cellular"
+                visible: root.mode === "intro" && root.hasEngine && root.effNet === "cellular"
                          && TribeEngine.diagCarrierAuto() === ""
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
@@ -500,7 +401,7 @@ Item {
 
             // ── ШАГ 3: режим — «Быстрая» (дефолт) / «Полная» (все серверы, кроме РФ) ─────────
             Rectangle {
-                visible: root.mode === "intro" && !root.useCatalog
+                visible: root.mode === "intro"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
                 implicitHeight: 36
@@ -553,7 +454,7 @@ Item {
                 spacing: Theme.space.sm
 
                 Repeater {
-                    model: root.useCatalog ? [] : root.stageDefs
+                    model: root.stageDefs
                     delegate: RowLayout {
                         id: stageRow
                         required property var modelData
@@ -663,7 +564,7 @@ Item {
 
                 // прогресс-бар + серый таймер справа над ним (ТОЛЬКО во время теста)
                 RowLayout {
-                    visible: root.mode === "running" && !root.useCatalog
+                    visible: root.mode === "running"
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.sm
                     spacing: Theme.space.sm
@@ -676,7 +577,7 @@ Item {
                     }
                 }
                 Rectangle {
-                    visible: root.mode === "running" && !root.useCatalog
+                    visible: root.mode === "running"
                     Layout.fillWidth: true
                     height: 6
                     radius: Theme.radius.pill
@@ -692,7 +593,7 @@ Item {
                     }
                 }
                 Text {
-                    visible: root.mode === "running" && !root.useCatalog
+                    visible: root.mode === "running"
                     Layout.fillWidth: true
                     text: qsTr("Не закрывайте приложение — идёт проверка")
                     color: Theme.color.text3
@@ -713,8 +614,7 @@ Item {
                     visible: root.mode === "done"
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xs
-                    text: root.useCatalog ? root.v2DoctorSummary()
-                                          : (root.hasEngine ? TribeEngine.doctorSummary : "")
+                    text: root.hasEngine ? TribeEngine.doctorSummary : ""
                     color: Theme.color.text1
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
@@ -722,79 +622,10 @@ Item {
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.WordWrap
                 }
-                Rectangle {
-                    visible: root.mode !== "intro" && root.useCatalog
-                    Layout.fillWidth: true
-                    implicitHeight: runtimeDetails.implicitHeight + Theme.space.md * 2
-                    radius: Theme.radius.md
-                    color: Theme.color.surface2
-                    border.width: 1
-                    border.color: Theme.color.border
-
-                    ColumnLayout {
-                        id: runtimeDetails
-                        anchors.left: parent.left; anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.leftMargin: Theme.space.md; anchors.rightMargin: Theme.space.md
-                        spacing: Theme.space.xs
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Text {
-                                Layout.fillWidth: true
-                                text: qsTr("Контур подключения")
-                                color: Theme.color.text1
-                                font.family: Theme.font.body
-                                font.pixelSize: Theme.font.caption
-                                font.weight: Theme.font.wBold
-                            }
-                            TribeTransportBadge {
-                                compact: true
-                                transport: root.useCatalog
-                                           ? String(TribeConnection.actualTransport || "none") : "none"
-                                verification: root.useCatalog
-                                              ? (String(TribeConnection.verificationState || "idle") === "verified"
-                                                 && TribeConnection.verified !== true
-                                                 ? "unknown"
-                                                 : String(TribeConnection.verificationState || "idle"))
-                                              : "idle"
-                            }
-                        }
-
-                        Repeater {
-                            model: root.useCatalog
-                                   ? (TribeConnection.engineVersions || []) : []
-                            delegate: Text {
-                                required property var modelData
-                                visible: text.length > 0
-                                Layout.fillWidth: true
-                                text: root.engineLabel(modelData)
-                                color: Theme.color.text2
-                                font.family: Theme.font.mono
-                                font.pixelSize: Theme.font.caption - 1
-                                elide: Text.ElideRight
-                            }
-                        }
-                        Repeater {
-                            model: root.doctorTimelineTail()
-                            delegate: Text {
-                                required property var modelData
-                                visible: text.length > 0
-                                Layout.fillWidth: true
-                                text: "• " + root.timelineLabel(modelData)
-                                color: Theme.color.text3
-                                font.family: Theme.font.body
-                                font.pixelSize: Theme.font.caption - 1
-                                elide: Text.ElideRight
-                            }
-                        }
-                    }
-                }
                 // ── ВКЛАДКИ ПО СЕРВЕРАМ (обзор альтернатив был): текущий + каждая проверенная
                 // нода; тап по чипу-флагу листает детали («инфа по всем нодам» — реш. владельца)
                 Flow {
-                    visible: root.mode === "done" && !root.useCatalog
-                             && root.nodeTabs.length > 0
+                    visible: root.mode === "done" && root.nodeTabs.length > 0
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.space.xs
                     spacing: Theme.space.xs
@@ -844,8 +675,7 @@ Item {
                     }
                 }
                 ColumnLayout {
-                    visible: root.mode === "done" && !root.useCatalog
-                             && root.nodeTabs.length > 0
+                    visible: root.mode === "done" && root.nodeTabs.length > 0
                     Layout.fillWidth: true
                     spacing: 2
                     Repeater {
@@ -864,7 +694,7 @@ Item {
                 }
 
                 Text {
-                    visible: root.mode === "done" && !root.useCatalog && root.sentToSupport
+                    visible: root.mode === "done" && root.sentToSupport
                     Layout.fillWidth: true
                     text: qsTr("Отчёт отправлен в тех. поддержку. Ожидайте ответа.")
                     color: Theme.color.text2
@@ -879,7 +709,6 @@ Item {
             // ── КНОПКА: интро = ЗОЛОТАЯ «Запустить диагностику»; running = серая «Отменить»;
             //    done = серая «Понятно» ────────────────────────────────────────────────────
             Rectangle {
-                id: primaryButton
                 readonly property bool isIntro: root.mode === "intro"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.space.sm
@@ -887,22 +716,12 @@ Item {
                 radius: Theme.radius.lg
                 color: isIntro ? "transparent"
                                : (goMa.pressed ? Theme.color.surface3 : Theme.color.surface2)
-                border.width: activeFocus ? 2 : (isIntro ? 0 : 1)
-                border.color: activeFocus ? Theme.color.text1 : Theme.color.border2
+                border.width: isIntro ? 0 : 1
+                border.color: Theme.color.border2
                 gradient: isIntro ? goGrad : null
                 // гейт шагов: пока не выбраны тип сети/оператор — кнопка приглушена и молчит
                 opacity: isIntro && !root.canRun ? 0.45 : 1.0
                 scale: goMa.pressed ? 0.985 : 1.0
-                activeFocusOnTab: root.opened
-                Accessible.role: Accessible.Button
-                Accessible.name: primaryLabel.text
-                Accessible.onPressAction: root.activatePrimaryAction()
-                Keys.onEnterPressed: root.activatePrimaryAction()
-                Keys.onReturnPressed: root.activatePrimaryAction()
-                Keys.onSpacePressed: function(event) {
-                    root.activatePrimaryAction()
-                    event.accepted = true
-                }
                 Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 Gradient {
                     id: goGrad
@@ -911,11 +730,9 @@ Item {
                 }
 
                 Text {
-                    id: primaryLabel
                     anchors.centerIn: parent
                     text: parent.isIntro ? qsTr("Запустить диагностику")
-                        : root.mode === "done" ? qsTr("Понятно")
-                        : root.useCatalog ? qsTr("Закрыть") : qsTr("Отменить")
+                        : root.mode === "done" ? qsTr("Понятно") : qsTr("Отменить")
                     color: parent.isIntro ? Theme.color.bg900 : Theme.color.text1
                     font.family: Theme.font.body
                     font.pixelSize: Theme.font.bodyM
@@ -925,7 +742,18 @@ Item {
                     id: goMa
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.activatePrimaryAction()
+                    onClicked: {
+                        if (root.mode === "intro" && root.hasEngine) {
+                            if (!root.canRun)
+                                return // шаги не пройдены (тип сети/оператор)
+                            Haptic.play("light")
+                            root.mode = "running"
+                            root.elapsedSec = 0
+                            TribeEngine.startDoctor(root.fullMode)
+                        } else {
+                            root.close()
+                        }
+                    }
                 }
             }
         }

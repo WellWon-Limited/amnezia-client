@@ -165,6 +165,5 @@ class AwgApple(ConanFile):
             "AWG_APPLE_XRAY_SOURCE_COMMIT": "e8cc06d7427251fa549093e7cc32c28b0f5fbafa",
             "AWG_APPLE_XRAY_CORE_VERSION": "1.260728.0",
             "AWG_APPLE_XRAY_SOCKET_ABI": "awg-apple-libxray-c-v2-protect-result",
-            "AWG_APPLE_ENGINE_CAPABILITIES":
-                "awg.random_trailers;awg.disable_cookies;tribe.guarded_settings_owner",
+            "AWG_APPLE_ENGINE_CAPABILITIES": "awg.random_trailers;awg.disable_cookies",
         })

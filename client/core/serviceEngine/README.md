@@ -31,18 +31,6 @@
 dto/Subscription.h            — структуры контракта (Subscription/Node/AwgParams)
 SubscriptionParser.{h,cpp}    — парсинг тела GET /v1/subscription (Qt JSON) + валидация граблей §6.4
 AwgConfigBuilder.{h,cpp}      — DTO → QJsonObject для VpnConnection::connectToVpn (+ wg-quick текст)  ✅ протестирован
-dto/Catalog.h                 — protocol-neutral DTO подписанного `/v2/catalog/resolve` (AWG/Xray)
-CatalogParser.{h,cpp}         — Ed25519 envelope, строгий JSON/UTF-8/base64url, typed profiles          ✅ pure tests
-CatalogTrust.h                — epoch/revision/generation anti-downgrade + encrypted atomic LKG API    ✅ pure tests
-CatalogCompatibility.h        — capability firewall и exact transport→native-container mapping         ✅ pure tests
-CatalogAcceptance.h           — единая fail-closed verify→parse→trust→compatibility граница              ✅ pure tests
-CatalogResolve.h              — strict app/adapter/engine/capability inventory → resolve request JSON     ✅ pure tests
-CandidateSelector.h           — immutable multi-transport ranking/fallback (real-tunnel history first)  ✅ pure tests
-TransportAdapter.h            — AWG/Xray sanitizer/compiler/runtime registry; незарегистрирован = deny   ✅ pure tests
-NativeProfileCompiler.{h,cpp} — typed AWG3.1/Xray → штатные native envelopes + strict post-sanitizer ✅
-ConnectionReducer.{h,cpp}     — единый async start→DNS→HTTPS/egress→fallback lifecycle, token/guard ✅
-VpnConnectionTransportAdapter.{h,cpp} — concrete AWG+Xray dispatch через VpnConnection/container ✅ syntax
-LegacyCatalogFallback.h       — v1 AWG только bootstrap; после принятого v2 downgrade запрещён           ✅ pure tests
 ITunnelControl.h              — граница с туннелем (up/applyPeer/readStats/down)
 VpnConnectionTunnelControl.{h,cpp} — УНИВЕРСАЛЬНАЯ реализация поверх VpnConnection (in-fork build)
 Identity.{h,cpp}              — ключи: REUSE WireguardConfigurator::genClientKeys + SecureAppSettingsRepository [in-fork]
@@ -96,11 +84,9 @@ tests/                        — фикстура + автономная про
 ## Интеграция с туннелем (C-2) — один адаптер на все платформы
 Подтверждено разведкой: единая кросс-платформенная точка — **`VpnConnection::connectToVpn(serverId,
 container, QJsonObject)`** / `disconnectFromVpn()` (внутри уже #ifdef desktop-daemon / iOS-NE / Android).
-Поэтому legacy-v1 `ITunnelControl` реализован классом `VpnConnectionTunnelControl` (AWG), а v2
-использует protocol-neutral `VpnConnectionTransportAdapter`: typed compiler выбирает exact
-`DockerContainer::Awg` либо `DockerContainer::Xray`, после чего вызывает тот же `connectToVpn`
-через очередь. Платформенную разницу по-прежнему держит `VpnConnection`; Xray не получает
-WG-handshake/rebind, а AWG не получает Xray JSON.
+Поэтому `ITunnelControl` реализован ОДНИМ классом `VpnConnectionTunnelControl` — он строит конфиг
+(`AwgConfigBuilder`) и зовёт `connectToVpn` через очередь (VpnConnection в своём QThread). Никаких
+трёх реализаций: платформенную разницу уже держит сам VpnConnection.
 
 **In-place peer swap (быстрее, чем reconnect) — стадированная оптимизация** (наружу VpnConnection
 switch не отдаёт; MVP `applyPeer` = down+up):
@@ -118,51 +104,8 @@ android `getLastHandshake` — подключим в C-5.
 ## Проверить парсер локально (без тяжёлой сборки форка)
 ```bash
 core/serviceEngine/tests/build_check.sh    # QtCore-only; парсит fixtures/subscription.example.json
-core/serviceEngine/tests/build_catalog_v2.sh # QtCore+QtNetwork+OpenSSL; v2 trust/compat/selector
-core/serviceEngine/tests/build_transport_runtime.sh # typed compilers/sanitizers + reducer/fallback
 ```
 Ожидаемо: `OK: subscription parsed & validated cleanly`.
-
-## `/v2/catalog/resolve`: hard non-ship gates
-
-Typed core runtime и concrete AWG/Xray adapters готовы, но намеренно **не изображают весь product
-runtime готовым**. До production rollout обязательны внешние production-слои:
-
-1. Сетевой catalog service: authenticated POST с `CatalogResolve.h`, новым случайным canonical
-   32-byte `request_nonce` на каждый resolve, cancellation/timeout, typed обработкой
-   `202/403/426/503`, `Cache-Control: no-store` и запретом body/credential logs. Online acceptance
-   сверяет signed nonce и pinned opaque `device_audience` до persist/use; только
-   `CatalogAcceptance.h` может передать ответ дальше.
-2. Реализация `ICatalogLkgStore`, которая одним atomic transaction AEAD-шифрует envelope **вместе** с
-   monotonic trust state и pinned audience. Обычный `QSettings`/plist/SharedPreferences запрещён:
-   payload содержит device-scoped Xray UUID. LKG повторно сверяет audience, но не требует совпадения
-   старого response nonce с новым запросом. При недоступном secure storage v2 fail-closed без LKG.
-3. Реальная реализация `IConnectionSessionGuard` на каждой платформе. Reducer требует arm **до**
-   первого start и держит guard через AWG↔Xray fallback; без platform-owned blocking routes он
-   fail-closed. Обычный kill-switch, создаваемый внутри нового core, не доказывает no-leak окно.
-4. Реальная `IPostTunnelVerifier`: отдельная DNS-стадия, HTTPS receipt без cache, signed/opaque
-   expected egress, cancellation/deadline. Tunnel-ready/handshake никогда не делают UI зелёным;
-   глобальная недоступность verifier оставляет guarded tunnel жёлтым и не портит fleet score.
-5. Async coordinator должен соединить acceptance/LKG/runtime и exact platform engine manifest,
-   сохранить generation-scoped outcome/cooldown, завести таймеры с immutable verification token,
-   разрешить auth/verifier endpoints для local route policy и записать durable v2-authority gate.
-   Runtime reducer уже сериализует `stop → typed native Stopped → start`, повторно ранжирует после
-   hard failure и отбрасывает stale operation/verification/opaque-native-session callbacks; nested
-   `QEventLoop` в нём отсутствует. Платформа без typed runtime session identity не регистрируется.
-6. Ротация catalog-ключей требует root-anchored signed keyset manifest (bounded kids/epochs/
-   validity/revocations) и monotonic secure trust state. Статический bundled current+next keyring —
-   только bootstrap fallback, не долгосрочный механизм ротации/compromise recovery.
-
-Concrete compilers уже принимают только typed `awg31`/`xray_vless_reality_vision_tcp`. AWG v2 не
-использует legacy `extra`. Xray собирается из bounded полей через штатный `XrayClientConfig` envelope
-и проходит exact post-sanitizer: один loopback SOCKS, один VLESS Reality/TCP/Vision outbound,
-совпадающие endpoint/SNI/binding; raw server JSON, routing/api/stats/file/access-log запрещены.
-Root `extensions[]` — единственная bounded evolution-зона: неизвестное non-critical значение
-игнорируется, неизвестное critical fail-closed; `value` никогда не попадает в native compiler.
-
-Legacy `/v1/subscription` и AWG builder сохранены для bootstrap/parity. Его `AwgParams::extra`
-deprecated и никогда не используется v2: новые protocol semantics требуют нового typed
-`profile_kind`/capability и уже встроенного adapter, иначе candidate отбрасывается.
 
 ## Дорожная карта (фазы плана)
 - **C-1:** структура + DTO + парсер + валидация. ✅ компилируется/парсит.

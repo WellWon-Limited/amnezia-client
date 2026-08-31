@@ -5,7 +5,6 @@
 #pragma once
 
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
-#include "CatalogRuntimeState.h" // AVPN v2: privacy-safe network-path class/epoch
 #include "ServiceEngine.h"
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
@@ -44,8 +43,6 @@ class BenchRunner;  // AVPN (панель администратора): in-app 
 class BypassListService; // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки (BypassListService.h)
 class WhitelistDetector; // AVPN (белые списки): детект РКН-режима «работает только whitelist» (WhitelistDetector.h)
 class RuSplitSentinel;   // AVPN (Доктор D-3 п.26): фоновый дозор RU-сайтов при вкл. сплите (RuSplitSentinel.h)
-class CatalogConnectionFacade;
-class CatalogProductRuntime;
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -305,10 +302,6 @@ public:
     // AVPN backend-first (2026-07-10): текущий активный edge-хост control plane — для сателлитов
     // вроде TribeSupportChat, которым нужен тот же хост, что у движка (см. apiBaseChanged).
     QString apiBase() const { return m_baseUrl; }
-
-    // AVPN catalog-v2 production composition. Called exactly once by CoreController after native
-    // platform controllers are initialized and before QML is loaded.
-    void attachCatalogV2(CatalogConnectionFacade *facade);
 
     // AVPN remote-config (T6, server-driven — без ребилда): фичефлаги/URL из /v1/config (ConfigService).
     // featureEnabled/configUrl читают ПОСЛЕДНИЙ применённый конфиг (LKG на старте, свежий после fetch).
@@ -689,14 +682,10 @@ public:
     // страница живёт на кэше/qrc-снапшоте. doc ∈ privacy|terms, lang ∈ ru|en.
     Q_INVOKABLE QString legalDocCached(const QString &doc, const QString &lang) const;
     Q_INVOKABLE void legalDocFetch(const QString &doc, const QString &lang);
-    // Shipped macOS cleanup route. It removes only the sealed privileged
-    // service; the GUI and account data remain and can reinstall it later.
-    Q_INVOKABLE bool removeMacSystemService();
 
 signals:
     void changed();
     void error(const QString &message);
-    void macSystemServiceRemovalFinished(bool ok, const QString &message);
     // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
     // конфликт маршрутов («крутится, не подключается»). UI показывает уведомление «отключите другой VPN».
     void vpnConflict(const QString &name);
@@ -779,13 +768,6 @@ private slots:
     void onWatchdog();
 
 private:
-    void activateCatalogV2Authority();
-    void beginCatalogLegacyTeardown();
-    // Once signed catalog-v2 authority is monotonic, the shared VpnConnection belongs exclusively
-    // to CatalogCoordinator. A stale legacy callback/timer must never stop or rotate that guard.
-    bool legacyTunnelMutationsAllowed() const;
-    bool legacyBootstrapAllowed() const
-    { return m_engine.legacyV1Allowed() && !m_catalogAuthorityWasAccepted; }
     // AVPN (reconcile-машина смены ноды): единый контур «намерение vs факт». ВСЕ подъёмы/опускания
     // туннеля идут ТОЛЬКО из терминального состояния (.connected/.disconnected/.error); смена ноды =
     // stop → дождаться Disconnected → start (никогда не up() поверх незакрытой iOS-NE-сессии). Это
@@ -893,14 +875,6 @@ private:
     SecureAppSettingsRepository *m_store = nullptr;
     QNetworkAccessManager       *m_nam = nullptr;
     VpnConnection               *m_conn = nullptr;
-    CatalogProductRuntime       *m_catalogRuntime = nullptr; // QObject-child, composition owner
-    bool                         m_catalogAuthorityWasAccepted = false;
-    bool                         m_catalogV2NativeEverOwned = false;
-    bool                         m_catalogLegacyTeardownPending = false;
-    quint64                      m_catalogPathGeneration = 0;
-    CatalogNetworkClass          m_catalogLastNetworkClass{};
-    bool                         m_catalogPathInitialized = false;
-    bool                         m_catalogNetworkOnline = false;
     QTimer                       m_healthTimer;
     // AVPN backend-first (H-3 бэклога): фоновый LKG-рефреш подписки по серверному интервалу
     // (numbers.subscription_refresh_interval_s из /v1/config). Периодический, не singleShot;

@@ -41,13 +41,6 @@ namespace
     {
         auto hasValue = [](const QString &value) { return !value.trimmed().isEmpty(); };
 
-        // AVPN: AWG 3.1 is a distinct wire-format capability.  Keep the
-        // existing AWG 3.0 version so a mixed fleet can negotiate N-1.
-        const QStringList awg31Params = { config.randomTrailers, config.disableCookies };
-        if (std::any_of(awg31Params.begin(), awg31Params.end(), hasValue)) {
-            return protocols::awg::awgV3_1;
-        }
-
         if (hasAwg3Markers(config)) {
             return protocols::awg::awgV3;
         }
@@ -440,8 +433,7 @@ bool AwgProtocolConfig::isToggleEnabled(const QString &value)
 
 QString AwgProtocolConfig::protocolVersionString(const QString &version)
 {
-    if (version == protocols::awg::awgV3_1) return QObject::tr(" (version 3.1)"); // AVPN
-    if (version == protocols::awg::awgV3) return QObject::tr(" (version 3)");
+    if (version == protocols::awg::awgV3) return QObject::tr(" (version 3.1)");
     if (version == protocols::awg::awgV2) return QObject::tr(" (version 2)");
     if (version == protocols::awg::awgV1_5) return QObject::tr(" (version 1.5)");
     return "";

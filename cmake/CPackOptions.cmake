@@ -1,5 +1,9 @@
 set(CPACK_COMPONENTS_ALL AmneziaVPN)
 
+if (CPACK_GENERATOR STREQUAL productbuild)
+    list(APPEND CPACK_COMPONENTS_ALL Uninstall)
+endif()
+
 if(NOT CODESIGN_INSTALLER_SIGNATURE)
     set(CODESIGN_INSTALLER_SIGNATURE    "$ENV{CODESIGN_INSTALLER_SIGNATURE}")
 endif()
@@ -11,12 +15,3 @@ if(NOT CODESIGN_INSTALLER_KEYCHAIN)
 endif()
 set(CPACK_PRODUCTBUILD_KEYCHAIN_PATH    "${CODESIGN_INSTALLER_KEYCHAIN}")
 set(CPACK_PKGBUILD_KEYCHAIN_PATH        "${CODESIGN_INSTALLER_KEYCHAIN}")
-
-if(CPACK_GENERATOR STREQUAL productbuild)
-    if(NOT CODESIGN_INSTALLER_SIGNATURE)
-        message(FATAL_ERROR "macOS productbuild requires a Developer ID Installer identity")
-    endif()
-    if(NOT CODESIGN_INSTALLER_KEYCHAIN OR NOT EXISTS "${CODESIGN_INSTALLER_KEYCHAIN}")
-        message(FATAL_ERROR "macOS productbuild requires the explicit installer signing keychain")
-    endif()
-endif()

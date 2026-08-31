@@ -13,8 +13,6 @@ import shutil
 class OpenVPNAdapter(ConanFile):
     name = "openvpnadapter"
     version = "1.0.0"
-    _source_commit = "20b82af890bdf946f82d6efaacb5acc07c61f8de"
-    _openvpn3_commit = "12563d7853384983de50f12ff7f679a95f547aaa"
     settings = "os", "build_type"
 
     @property
@@ -37,13 +35,9 @@ class OpenVPNAdapter(ConanFile):
         basic_layout(self)
 
     def validate(self):
-        if not is_apple_os(self) or self._platform is None:
+        if not is_apple_os(self):
             raise ConanInvalidConfiguration(
                 f"There is absolutely no point building Apple framework for {self.settings.os}"
-            )
-        if not self.settings.get_safe("os.version"):
-            raise ConanInvalidConfiguration(
-                f"{self.name} requires an explicit Apple deployment target"
             )
 
     def source(self):
@@ -53,30 +47,12 @@ class OpenVPNAdapter(ConanFile):
             target=".",
             args=["--recurse-submodules", "--branch", "master-amnezia"]
         )
-        actual_commit = git.get_commit().strip()
-        if actual_commit != self._source_commit:
-            raise ConanInvalidConfiguration(
-                f"OpenVPNAdapter branch resolved to {actual_commit}, expected {self._source_commit}"
-            )
-        openvpn3_commit = Git(
-            self, folder=os.path.join(self.source_folder, "Sources", "OpenVPN3")
-        ).get_commit().strip()
-        if openvpn3_commit != self._openvpn3_commit:
-            raise ConanInvalidConfiguration(
-                f"OpenVPN3 submodule resolved to {openvpn3_commit}, expected {self._openvpn3_commit}"
-            )
 
     def build(self):
         with chdir(self, self.source_folder):
             xcrun = XCRun(self)
 
             xcodebuild = xcrun.find("xcodebuild")
-            deployment_target = self.settings.get_safe("os.version")
-            deployment_setting = (
-                "MACOSX_DEPLOYMENT_TARGET"
-                if self._sdk == "macosx"
-                else "IPHONEOS_DEPLOYMENT_TARGET"
-            )
             self.run(f"{xcodebuild}"
                 " -project OpenVPNAdapter.xcodeproj"
                 " -scheme OpenVPNAdapter"
@@ -85,7 +61,6 @@ class OpenVPNAdapter(ConanFile):
                 f" -sdk {self._sdk}"
                 f' "CONFIGURATION_BUILD_DIR={self.build_folder}"'
                 f' "BUILT_PRODUCTS_DIR={self.build_folder}"'
-                f' "{deployment_setting}={deployment_target}"'
                 " MACH_O_TYPE=staticlib"
                 " BUILD_LIBRARY_FOR_DISTRIBUTION=YES"
                 " CODE_SIGNING_ALLOWED=NO"

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <WireGuardKitC.h> // AVPN: exact header comes from the pinned Conan package.
+#include "WireGuardKitC.h"
 
 #include <stdbool.h>
 #include <stdint.h>

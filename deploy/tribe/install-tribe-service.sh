@@ -53,22 +53,13 @@ install() {
     # кладём бинарь в root-овый /Library/PrivilegedHelperTools (см. TRIBE-iOS-DEV §15).
     local destdir="/Library/PrivilegedHelperTools/TribeVPN"
     local bin="$destdir/$LABEL"
-    local srcdir
-    srcdir="$(cd "$(dirname "$src")" && pwd)"
-    local pfsrc="$REPO_PF_DIR"
-    # CMake places the identity-specific rule beside the built daemon. Prefer that
-    # immutable build output; fall back to the tracked production rules for old builds.
-    [ -d "$srcdir/pf" ] && pfsrc="$srcdir/pf"
+    local srcdir="$(cd "$(dirname "$src")" && pwd)"
     mkdir -p "$destdir"
     cp -f "$src" "$bin"
 
-    # Privileged process allowlist: AWG, existing OpenVPN and Xray's tun2socks all execute
-    # from applicationDirPath(). A partial helper install is never considered successful.
-    for runtime_file in amneziawg-go openvpn tun2socks geoip.dat geosite.dat; do
-        [ -f "$srcdir/$runtime_file" ] \
-            || die "обязательный runtime-файл не найден: $srcdir/$runtime_file"
-        cp -f "$srcdir/$runtime_file" "$destdir/$runtime_file"
-    done
+    # amneziawg-go демон запускает из своего же каталога (applicationDirPath) — кладём рядом.
+    [ -x "$srcdir/amneziawg-go" ] && cp -f "$srcdir/amneziawg-go" "$destdir/amneziawg-go" \
+        || echo "  ⚠️ amneziawg-go не найден рядом с демоном — туннель не поднимется"
 
     # Вшитый Qt+openssl (bundle-daemon-qt.sh): демон ищет их по rpath @loader_path/Frameworks.
     # Без этого на машине без ~/Qt демон не стартует (dyld). Если каталога нет — демон рассчитывает
@@ -83,15 +74,13 @@ install() {
 
     # pf-правила демон читает из каталога pf рядом с бинарём (ResourceDir).
     mkdir -p "$destdir/pf"
-    cp -f "$pfsrc/${PF_ANCHOR}."*.conf "$pfsrc/${PF_ANCHOR}.conf" "$destdir/pf/" 2>/dev/null \
-        || die "в $pfsrc нет ${PF_ANCHOR}.*.conf (пересобери daemon target)"
-    # Dev marker covers every transport runtime. The production distributable uses the stricter
-    # signed manifest in macos-service-payload.sh; a later app install will replace this dev marker.
-    cat "$bin" "$destdir/amneziawg-go" "$destdir/openvpn" "$destdir/tun2socks" \
-        "$destdir/geoip.dat" "$destdir/geosite.dat" "$destdir/pf/"*.conf \
-        | shasum -a 256 | awk '{print $1}' > "$destdir/VERSION"
+    cp -f "$REPO_PF_DIR/${PF_ANCHOR}."*.conf "$REPO_PF_DIR/${PF_ANCHOR}.conf" "$destdir/pf/" 2>/dev/null \
+        || die "в $REPO_PF_DIR нет ${PF_ANCHOR}.*.conf (пересобери: cmake генерирует tribe.400.allowPIA.conf)"
+    # AVPN: маркер версии демона (хэш бинарей) — тот же расчёт, что в make-macos-dist.sh, чтобы
+    # приложение не считало ручную dev-установку устаревшей и не показывало лишний промпт.
+    cat "$bin" "$destdir/amneziawg-go" 2>/dev/null | shasum -a 256 | cut -c1-16 > "$destdir/VERSION"
     chown -R root:wheel "$destdir"
-    chmod 755 "$destdir" "$bin" "$destdir/amneziawg-go" "$destdir/openvpn" "$destdir/tun2socks"
+    chmod 755 "$destdir" "$bin"
 
     # Группа для xray-фильтрации (своя, не amnvpn).
     if ! dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then

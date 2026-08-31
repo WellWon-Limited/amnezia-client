@@ -43,9 +43,9 @@ get_filename_component(MACOSX_BUNDLE_ICON_FILE "${CLIENT_MACOS_APP_ICNS_PATH}" N
 set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 set(SOURCES ${SOURCES} ${ICON_FILE})
 
-target_compile_definitions(${PROJECT} PRIVATE
-    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:GROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\">
-    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:VPN_NE_BUNDLEID=\"${BUILD_IOS_APP_IDENTIFIER}.network-extension\">
+target_compile_options(${PROJECT} PRIVATE
+    -DGROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\"
+    -DVPN_NE_BUNDLEID=\"${BUILD_IOS_APP_IDENTIFIER}.network-extension\"
 )
 
 # Get SDK path
