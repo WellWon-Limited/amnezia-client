@@ -9,6 +9,7 @@ enum XrayErrors: Error {
     case cantParseListenAndPort
     case cantAcquireLocalPort
     case cantSaveHevSocksConfig
+    case cantRegisterSocketProtection
 }
 
 extension Constants {
@@ -215,15 +216,21 @@ extension PacketTunnelProvider {
     func stopXray(completionHandler: () -> Void) {
         Socks5Tunnel.quit()
         LibXrayStopXray()
+        if let clearError = LibXraySetSockCallback(nil, nil) {
+            free(clearError)
+            xrayLog(.error, message: "Can't clear Xray socket protection callback")
+        }
         completionHandler()
     }
 
-    func sockCallback(fd: uintptr_t) {
-        if activeIfaceIdx != 0 {
-            withUnsafePointer(to: activeIfaceIdx) { ptr in
-                setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, ptr, socklen_t(MemoryLayout<UInt32>.size))
-                setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, ptr, socklen_t(MemoryLayout<UInt32>.size))
-            }
+    func sockCallback(fd: uintptr_t) -> Int32 {
+        guard activeIfaceIdx != 0 else { return 0 }
+        return withUnsafePointer(to: activeIfaceIdx) { ptr in
+            let ipv4 = setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, ptr,
+                                  socklen_t(MemoryLayout<UInt32>.size))
+            let ipv6 = setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, ptr,
+                                  socklen_t(MemoryLayout<UInt32>.size))
+            return (ipv4 == 0 || ipv6 == 0) ? 1 : 0
         }
     }
 
@@ -296,12 +303,17 @@ extension PacketTunnelProvider {
 
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         let cb: libxray_sockcallback = { (fd, ctx) in
-            guard let ctx = ctx else { return }
+            guard let ctx = ctx else { return 0 }
             let instance = Unmanaged<PacketTunnelProvider>.fromOpaque(ctx).takeUnretainedValue()
 
-            instance.sockCallback(fd: fd)
+            return instance.sockCallback(fd: fd)
         }
-        LibXraySetSockCallback(cb, ctx)
+        if let registrationError = LibXraySetSockCallback(cb, ctx) {
+            free(registrationError)
+            xrayLog(.error, message: "Can't register Xray socket protection callback")
+            completionHandler(XrayErrors.cantRegisterSocketProtection)
+            return
+        }
 
         LibXrayRunXray(nil,
                        path,

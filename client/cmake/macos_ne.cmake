@@ -109,7 +109,12 @@ target_compile_options(${PROJECT} PRIVATE
     -DVPN_NE_BUNDLEID=\"${BUILD_IOS_APP_IDENTIFIER}.network-extension\"
 )
 
-set(WG_APPLE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd/amneziawg-apple/Sources)
+find_package(awg-apple REQUIRED)
+if(NOT IS_DIRECTORY "${AWG_APPLE_SOURCE_DIR}")
+    message(FATAL_ERROR "awg-apple package did not provide its patched Swift sources")
+endif()
+set(WG_APPLE_SOURCE_DIR "${AWG_APPLE_SOURCE_DIR}")
+target_link_libraries(${PROJECT} PRIVATE amnezia::awg-apple)
 
 target_sources(${PROJECT} PRIVATE
     ${WG_APPLE_SOURCE_DIR}/WireGuardKitC/x25519.c
