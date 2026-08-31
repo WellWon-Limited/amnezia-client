@@ -9,6 +9,7 @@
 #include "DeviceModel.h" // AVPN (приватность): нативная маркетинговая модель (iPhone 15 Pro / MacBook Pro) вместо hostname
 #include "IdentityAnchor.h" // AVPN (анти-фрод): освежение Keychain-якоря при ротации токена
 #include "NetAwait.h" // AVPN: awaitReply() — синхронное ожидание с таймаутом (анти-фриз)
+#include "SubscriptionRequest.h"
 #include <QCoreApplication> // AVPN (i18n): translate() — пользовательские ошибки (класс не-QObject)
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -146,7 +147,9 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *nam, const QString &ba
         if (outcome) *outcome = FetchOutcome::NetworkError;
         return false;
     }
-    QNetworkRequest req{QUrl(baseUrl + QStringLiteral("/v1/subscription"))};
+    const QString applicationVersion = QCoreApplication::applicationVersion().isEmpty()
+        ? QStringLiteral(APP_VERSION) : QCoreApplication::applicationVersion();
+    QNetworkRequest req{versionedSubscriptionUrl(baseUrl, applicationVersion)};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 

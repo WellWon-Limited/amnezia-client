@@ -1,0 +1,128 @@
+diff --git a/Sources/WireGuardKitGo/api-xray.go b/Sources/WireGuardKitGo/api-xray.go
+index a84c8bd..404bd82 100644
+--- a/Sources/WireGuardKitGo/api-xray.go
++++ b/Sources/WireGuardKitGo/api-xray.go
+@@ -4,10 +4,10 @@ package main
+ #include <stdint.h>
+ #include <stdlib.h>
+ 
+-typedef void (*libxray_sockcallback)(uintptr_t fd, void* ctx);
+-static inline void libxray_invokesockcallback(libxray_sockcallback cb, uintptr_t fd, void* ctx)
++typedef int32_t (*libxray_sockcallback)(uintptr_t fd, void* ctx);
++static inline int32_t libxray_invokesockcallback(libxray_sockcallback cb, uintptr_t fd, void* ctx)
+ {
+-	cb(fd, ctx);
++	return cb(fd, ctx);
+ }
+ 
+ */
+@@ -119,6 +119,7 @@ var (
+ // clear (nil, nil), Swift can release the old context without a late-callback UAF.
+ var (
+ 	errXraySockCallbackCleared       = errors.New("xray socket callback is cleared")
++	errXraySockCallbackRejected      = errors.New("xray socket protection callback rejected fd")
+ 	xraySockCallbackOnce            sync.Once
+ 	xraySockCallbackRegistrationErr error
+ 	xraySockCallbackMu              sync.RWMutex
+@@ -135,10 +136,18 @@ func ensureXraySockController() error {
+ 				if xraySockCallback == nil {
+ 					return errXraySockCallbackCleared
+ 				}
+-				return conn.Control(func(fd uintptr) {
+-					C.libxray_invokesockcallback(
+-						xraySockCallback, C.uintptr_t(fd), xraySockCallbackContext)
+-				})
++				protected := false
++				if err := conn.Control(func(fd uintptr) {
++					protected = C.libxray_invokesockcallback(
++						xraySockCallback, C.uintptr_t(fd),
++						xraySockCallbackContext) != 0
++				}); err != nil {
++					return err
++				}
++				if !protected {
++					return errXraySockCallbackRejected
++				}
++				return nil
+ 			})
+ 	})
+ 	return xraySockCallbackRegistrationErr
+diff --git a/Sources/WireGuardKitGo/api-xray_testhelper.go b/Sources/WireGuardKitGo/api-xray_testhelper.go
+index 183bc1b..05ea7c4 100644
+--- a/Sources/WireGuardKitGo/api-xray_testhelper.go
++++ b/Sources/WireGuardKitGo/api-xray_testhelper.go
+@@ -5,11 +5,17 @@ package main
+ /*
+ #include <stdint.h>
+ 
+-typedef void (*libxray_sockcallback)(uintptr_t fd, void* ctx);
++typedef int32_t (*libxray_sockcallback)(uintptr_t fd, void* ctx);
+ static int tribe_test_callback_context;
+-static void tribe_test_sockcallback(uintptr_t fd, void* ctx) {
++static int32_t tribe_test_sockcallback(uintptr_t fd, void* ctx) {
+ 	(void)fd;
+ 	(void)ctx;
++	return 1;
++}
++static int32_t tribe_test_rejecting_sockcallback(uintptr_t fd, void* ctx) {
++	(void)fd;
++	(void)ctx;
++	return 0;
+ }
+ static inline libxray_sockcallback tribe_test_sockcallback_ptr(void) {
+ 	return tribe_test_sockcallback;
+@@ -17,6 +23,9 @@ static inline libxray_sockcallback tribe_test_sockcallback_ptr(void) {
+ static inline void* tribe_test_sockcallback_context(void) {
+ 	return &tribe_test_callback_context;
+ }
++static inline libxray_sockcallback tribe_test_rejecting_sockcallback_ptr(void) {
++	return tribe_test_rejecting_sockcallback;
++}
+ */
+ import "C"
+ 
+@@ -24,3 +33,9 @@ func tribeArmXraySockCallbackForTest() bool {
+ 	return LibXraySetSockCallback(
+ 		C.tribe_test_sockcallback_ptr(), C.tribe_test_sockcallback_context()) == nil
+ }
++
++func tribeArmRejectingXraySockCallbackForTest() bool {
++	return LibXraySetSockCallback(
++		C.tribe_test_rejecting_sockcallback_ptr(),
++		C.tribe_test_sockcallback_context()) == nil
++}
+diff --git a/Sources/WireGuardKitGo/api-xray_callback_test.go b/Sources/WireGuardKitGo/api-xray_callback_test.go
+index 6d26d07..b825e3a 100644
+--- a/Sources/WireGuardKitGo/api-xray_callback_test.go
++++ b/Sources/WireGuardKitGo/api-xray_callback_test.go
+@@ -64,6 +64,18 @@ func TestTribeXraySockCallbackSlotSingleton(t *testing.T) {
+ 	if armedConn.controlCalls != 1 {
+ 		t.Fatalf("armed callback invocation count=%d", armedConn.controlCalls)
+ 	}
++
++	if !tribeArmRejectingXraySockCallbackForTest() {
++		t.Fatal("arm rejecting callback slot failed")
++	}
++	rejectedConn := &tribeTestRawConn{}
++	if err := controller("tcp", "203.0.113.1:443", rejectedConn);
++		!errors.Is(err, errXraySockCallbackRejected) {
++		t.Fatalf("protect=false callback was not rejected: %v", err)
++	}
++	if rejectedConn.controlCalls != 1 {
++		t.Fatalf("rejecting callback invocation count=%d", rejectedConn.controlCalls)
++	}
+ 	if result := LibXraySetSockCallback(nil, nil); result != nil {
+ 		t.Fatal("final callback clear failed")
+ 	}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index 31fd323..0a1d4e2 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -21,6 +21,6 @@ extern void wgDisableSomeRoamingForBrokenMobileSemantics(int handle);
+ extern const char *wgVersion();
+ 
+-typedef void (*libxray_sockcallback)(uintptr_t fd, void* ctx);
++typedef int32_t (*libxray_sockcallback)(uintptr_t fd, void* ctx);
+ extern char *LibXrayCutGeoData(const char *datDir, const char *dstDir, const char *cutCodePath);
+ extern char *LibXrayLoadGeoData(const char *datDir, const char *name, const char *geoType);
+ extern char *LibXrayPing(const char *datDir, const char *configPath, int timeout, const char *url, const char *proxy);
