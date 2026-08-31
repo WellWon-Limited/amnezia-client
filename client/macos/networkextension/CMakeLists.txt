@@ -68,7 +68,11 @@ target_link_libraries(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE ${FW_LIBRESOLV})
 target_compile_options(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE -DGROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\")
 target_compile_options(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE -DNETWORK_EXTENSION=1)
 
-set(WG_APPLE_SOURCE_DIR ${CLIENT_ROOT_DIR}/3rd/amneziawg-apple/Sources)
+find_package(awg-apple REQUIRED)
+if(NOT IS_DIRECTORY "${AWG_APPLE_SOURCE_DIR}")
+    message(FATAL_ERROR "awg-apple package did not provide its patched Swift sources")
+endif()
+set(WG_APPLE_SOURCE_DIR "${AWG_APPLE_SOURCE_DIR}")
 
 message("WG_APPLE_SOURCE_DIR is: ${WG_APPLE_SOURCE_DIR}")
 message("CLIENT_ROOT_DIR is: ${CLIENT_ROOT_DIR}")
@@ -126,7 +130,6 @@ set_property(TARGET amnezia::openvpnadapter APPEND PROPERTY IMPORTED_CONFIGURATI
 set_property(TARGET amnezia::openvpnadapter APPEND PROPERTY IMPORTED_CONFIGURATIONS RELWITHDEBINFO)
 target_link_libraries(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE amnezia::openvpnadapter)
 
-find_package(awg-apple REQUIRED)
 target_link_libraries(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE amnezia::awg-apple)
 
 find_package(hev-socks5-tunnel REQUIRED)
