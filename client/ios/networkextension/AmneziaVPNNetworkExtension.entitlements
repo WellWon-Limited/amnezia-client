@@ -12,7 +12,6 @@
 	</array>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)hk.wellwon.tribe</string>
 		<string>$(AppIdentifierPrefix)group.hk.wellwon.zanaves</string>
 	</array>
 </dict>

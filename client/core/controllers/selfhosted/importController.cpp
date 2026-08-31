@@ -196,7 +196,6 @@ ImportController::ImportResult ImportController::extractConfigFromData(const QSt
         result.errorCode = ErrorCode::ImportInvalidConfigError;
         return result;
     }
-    case ConfigTypes::ShadowSocks:
     case ConfigTypes::Xray: {
         result.config = extractXrayConfig(config, configType);
         if (!result.config.empty()) {

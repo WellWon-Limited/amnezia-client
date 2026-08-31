@@ -48,9 +48,6 @@ namespace {
 #include "macosfirewall.h"
 
 #include <QDir>
-#include <QHostAddress>
-#include <QRegularExpression>
-#include <QSet>
 #include <QStandardPaths>
 
 // Read-only rules bundled with the application.
@@ -161,19 +158,11 @@ bool MacOSFirewall::isPFEnabled()
     return 0 == execute(QStringLiteral("test -s '%1/pf.token' && pfctl -s References | grep -qFf '%1/pf.token'").arg(DaemonDataDir), true);
 }
 
-bool MacOSFirewall::ensureRootAnchorPriority()
+void MacOSFirewall::ensureRootAnchorPriority()
 {
     // We check whether our anchor appears last in the ruleset. If it does not, then remove it and re-add it last (this happens atomically).
-    // Appearing last ensures priority.  The second command is an explicit
-    // readback; callers must not treat a best-effort pfctl invocation as a
-    // fail-closed policy receipt.
-    const int update = execute(QStringLiteral(
-        "if ! pfctl -sr | tail -1 | grep -qF '%1'; then "
-        "echo -e \"$(pfctl -sr | grep -vF '%1')\\n\"'anchor \"%1\"' | pfctl -f -; fi")
-        .arg(kRootAnchor));
-    const int readback = execute(QStringLiteral(
-        "pfctl -sr | tail -1 | grep -qF '%1'").arg(kRootAnchor), true);
-    return update == 0 && readback == 0;
+    // Appearing last ensures priority.
+    execute(QStringLiteral("if ! pfctl -sr | tail -1 | grep -qF '%1'; then echo -e \"$(pfctl -sr | grep -vF '%1')\\n\"'anchor \"%1\"' | pfctl -f - ; fi").arg(kRootAnchor));
 }
 
 bool MacOSFirewall::isRootAnchorLoaded()
@@ -184,20 +173,14 @@ bool MacOSFirewall::isRootAnchorLoaded()
     return 0 == execute(QStringLiteral("pfctl -sr | grep -q '%1' && pfctl -q -a '%1' -s rules 2> /dev/null | grep -q .").arg(kRootAnchor), true);
 }
 
-bool MacOSFirewall::enableAnchor(const QString& anchor)
+void MacOSFirewall::enableAnchor(const QString& anchor)
 {
-    // Always reload the sealed resource. A non-empty anchor is not evidence
-    // that it contains the intended policy (it may be stale or partial).
-    const int result = execute(QStringLiteral(
-        "pfctl -q -a '%1/%2' -F all -f '%3/%1.%2.conf'")
-        .arg(kRootAnchor, anchor, ResourceDir));
-    return result == 0 && isAnchorEnabled(anchor);
+    execute(QStringLiteral("if pfctl -q -a '%1/%2' -s rules 2> /dev/null | grep -q . ; then echo '%2: ON' ; else echo '%2: OFF -> ON' ; pfctl -q -a '%1/%2' -F all -f '%3/%1.%2.conf' ; fi").arg(kRootAnchor, anchor, ResourceDir));
 }
 
-bool MacOSFirewall::disableAnchor(const QString& anchor)
+void MacOSFirewall::disableAnchor(const QString& anchor)
 {
-    const int result = execute(QStringLiteral("if ! pfctl -q -a '%1/%2' -s rules 2> /dev/null | grep -q . ; then echo '%2: OFF' ; else echo '%2: ON -> OFF' ; pfctl -q -a '%1/%2' -F all ; fi").arg(kRootAnchor, anchor));
-    return result == 0 && !isAnchorEnabled(anchor);
+    execute(QStringLiteral("if ! pfctl -q -a '%1/%2' -s rules 2> /dev/null | grep -q . ; then echo '%2: OFF' ; else echo '%2: ON -> OFF' ; pfctl -q -a '%1/%2' -F all ; fi").arg(kRootAnchor, anchor));
 }
 
 bool MacOSFirewall::isAnchorEnabled(const QString& anchor)
@@ -205,85 +188,20 @@ bool MacOSFirewall::isAnchorEnabled(const QString& anchor)
     return 0 == execute(QStringLiteral("pfctl -q -a '%1/%2' -s rules 2> /dev/null | grep -q .").arg(kRootAnchor, anchor), true);
 }
 
-bool MacOSFirewall::isQuarantineEnabled()
+void MacOSFirewall::setAnchorEnabled(const QString& anchor, bool enabled)
 {
-    // PF canonicalizes `flags any no state` away on current macOS releases,
-    // while older releases may retain either suffix.  Require exactly one
-    // semantically identical terminal quick block and reject a merely
-    // non-empty/stale anchor.  Keep this accepted set in sync with the
-    // dry-run contract in metadata/tests/test_macos_pf_contract.py.
-    return 0 == execute(QStringLiteral(
-        "rules=\"$(pfctl -q -a '%1/999.quarantine' -s rules 2>/dev/null)\"; "
-        "test \"$(printf '%%s\\n' \"$rules\" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')\" = 1 "
-        "&& printf '%%s\\n' \"$rules\" | grep -Eq "
-        "'^block drop quick all( flags any( no state)?)?$'")
-        .arg(kRootAnchor), true);
+    if (enabled)
+        enableAnchor(anchor);
+    else
+        disableAnchor(anchor);
 }
 
-bool MacOSFirewall::flushAllStates()
+void MacOSFirewall::setAnchorTable(const QString& anchor, bool enabled, const QString& table, const QStringList& items)
 {
-    // Existing PF states bypass filter evaluation. Emergency quarantine is
-    // not proven until every pre-quarantine state has been invalidated.
-    return execute(QStringLiteral("pfctl -q -F states")) == 0;
-}
-
-bool MacOSFirewall::setAnchorEnabled(const QString& anchor, bool enabled)
-{
-    return enabled ? enableAnchor(anchor) : disableAnchor(anchor);
-}
-
-bool MacOSFirewall::setAnchorTable(const QString& anchor, bool enabled,
-                                  const QString& table,
-                                  const QStringList& items)
-{
-    static const QRegularExpression anchorPattern(
-            QStringLiteral(R"(^[0-9]{3}\.[A-Za-z0-9]+$)"));
-    static const QRegularExpression tablePattern(
-            QStringLiteral(R"(^[a-z][a-z0-9]{0,31}$)"));
-    if (!anchorPattern.match(anchor).hasMatch()
-            || !tablePattern.match(table).hasMatch()
-            || items.size() > 4096) {
-        return false;
-    }
-    if (!enabled) {
-        execute(QStringLiteral("pfctl -q -a '%1/%2' -t '%3' -T kill")
-                        .arg(kRootAnchor, anchor, table), true);
-        return execute(QStringLiteral(
-                    "! pfctl -q -a '%1/%2' -t '%3' -T show >/dev/null 2>&1")
-                    .arg(kRootAnchor, anchor, table), true) == 0;
-    }
-
-    QStringList uniqueItems;
-    QSet<QString> seen;
-    for (const QString &item : items) {
-        const QHostAddress direct(item);
-        const auto subnet = QHostAddress::parseSubnet(item);
-        const bool valid = !direct.isNull()
-                || (!subnet.first.isNull() && subnet.second >= 0
-                    && subnet.second <= (subnet.first.protocol()
-                            == QAbstractSocket::IPv4Protocol ? 32 : 128));
-        if (!valid) return false;
-        if (!seen.contains(item)) {
-            seen.insert(item);
-            uniqueItems.append(item);
-        }
-    }
-    const int replaced = execute(QStringLiteral(
-            "pfctl -q -a '%1/%2' -t '%3' -T replace %4")
-            .arg(kRootAnchor, anchor, table, uniqueItems.join(' ')));
-    if (replaced != 0) return false;
-    for (const QString &item : uniqueItems) {
-        if (execute(QStringLiteral(
-                    "pfctl -q -a '%1/%2' -t '%3' -T test '%4' >/dev/null")
-                    .arg(kRootAnchor, anchor, table, item), true) != 0) {
-            return false;
-        }
-    }
-    return execute(QStringLiteral(
-            "test \"$(pfctl -q -a '%1/%2' -t '%3' -T show 2>/dev/null "
-            "| sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')\" -eq %4")
-            .arg(kRootAnchor, anchor, table)
-            .arg(uniqueItems.size()), true) == 0;
+    if (enabled)
+        execute(QStringLiteral("pfctl -q -a '%1/%2' -t '%3' -T replace %4").arg(kRootAnchor, anchor, table, items.join(' ')));
+    else
+        execute(QStringLiteral("pfctl -q -a '%1/%2' -t '%3' -T kill").arg(kRootAnchor, anchor, table), true);
 }
 
 void MacOSFirewall::setAnchorWithRules(const QString& anchor, bool enabled, const QStringList &ruleList)

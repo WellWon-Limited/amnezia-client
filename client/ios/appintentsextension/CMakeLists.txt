@@ -29,9 +29,9 @@ set_target_properties(appintentsextension PROPERTIES
     XCODE_ATTRIBUTE_APPLICATION_EXTENSION_API_ONLY "YES"
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
-    # AVPN: App Intents itself requires iOS 16+, while the official Qt 6.11.1 slices require
-    # iOS 17. Keep the extension identical to the containing app's honest deployment target.
-    XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "17.0"
+    # AVPN: App Intents Extension требует iOS 16+. При наследии 14.0 от app фреймворк App Intents НЕ
+    # эмитит entry-точку расширения (нет секции __swift5_entry) + валидатор Apple отвергает MinOS<16.
+    XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "16.0"
 
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/../../Frameworks"
     XCODE_LINK_BUILD_PHASE_MODE KNOWN_LOCATION
@@ -64,8 +64,8 @@ find_library(FW_NETWORK_EXTENSION NetworkExtension)
 target_link_libraries(appintentsextension PRIVATE ${FW_APP_INTENTS})
 target_link_libraries(appintentsextension PRIVATE ${FW_NETWORK_EXTENSION})
 
-# Swift conditional-compilation flags cannot carry string values. The current
-# App Intents bridge uses its audited App Group constant directly in Swift.
+# Общий App Group id — для UserDefaults(suiteName:) внутри интентов (мост к движку).
+target_compile_options(appintentsextension PRIVATE -DGROUP_ID=\"${BUILD_IOS_GROUP_IDENTIFIER}\")
 
 target_sources(appintentsextension PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/AvpnAppIntents.swift

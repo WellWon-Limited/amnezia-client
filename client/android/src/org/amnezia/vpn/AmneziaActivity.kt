@@ -51,7 +51,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.io.IOException
-import java.util.UUID
 import kotlin.LazyThreadSafetyMode.NONE
 import kotlin.coroutines.CoroutineContext
 import kotlin.text.RegexOption.IGNORE_CASE
@@ -65,9 +64,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.amnezia.vpn.protocol.getStatistics
-import org.amnezia.vpn.protocol.getEngineManifest
 import org.amnezia.vpn.protocol.getStatus
-import org.amnezia.vpn.protocol.getTunnelRuntimeStatusJson
 import org.amnezia.vpn.qt.QtAndroidController
 import org.amnezia.vpn.util.LibraryLoader.loadSharedLibrary
 import org.amnezia.vpn.util.Log
@@ -98,8 +95,6 @@ class AmneziaActivity : QtActivity() {
     private var isInBoundState = false
     private var notificationStateReceiver: BroadcastReceiver? = null
     private lateinit var vpnServiceMessenger: IpcMessenger
-    private val clientProcessEpoch = UUID.randomUUID().toString().lowercase()
-    private var pendingNativeGuardRecoveryResolution: Triple<String, String, String?>? = null
     private var pfd: ParcelFileDescriptor? = null
     private lateinit var billingRepository: BillingRepository
 
@@ -121,7 +116,6 @@ class AmneziaActivity : QtActivity() {
                 Log.d(TAG, "Handle event: $event")
                 when (event) {
                     ServiceEvent.STATUS_CHANGED -> {
-                        msg.data?.getTunnelRuntimeStatusJson()?.let(QtAndroidController::onRuntimeStatus)
                         msg.data?.getStatus()?.let { (state) ->
                             Log.d(TAG, "Handle protocol state: $state")
                             QtAndroidController.onVpnStateChanged(state.ordinal)
@@ -131,32 +125,14 @@ class AmneziaActivity : QtActivity() {
                     ServiceEvent.STATUS -> {
                         if (isWaitingStatus) {
                             isWaitingStatus = false
-                            // AVPN: retain a runtime audit trail without changing the existing JNI ABI.
-                            msg.data?.getEngineManifest()?.let {
-                                Log.i(TAG, "Engine manifest v${it.schema}: ${it.adapter} " +
-                                    "${it.adapterVersion}, core=${it.runtimeCoreVersion ?: "not-probed"}, " +
-                                    "caps=${it.capabilities.joinToString()}")
-                            }
-                            msg.data?.getTunnelRuntimeStatusJson()?.let(QtAndroidController::onRuntimeStatus)
                             msg.data?.getStatus()?.let { QtAndroidController.onStatus(it) }
                         }
                     }
 
                     ServiceEvent.STATISTICS_UPDATE -> {
-                        val runtimeStatus = msg.data?.getTunnelRuntimeStatusJson()
-                        if (runtimeStatus != null) {
-                            QtAndroidController.onRuntimeStatus(runtimeStatus)
-                        } else {
-                            // Backward compatibility with a pre-v1 service.
-                            msg.data?.getStatistics()?.let { statistics ->
-                                if (statistics.available) {
-                                    QtAndroidController.onStatisticsUpdate(
-                                        statistics.rxBytes,
-                                        statistics.txBytes,
-                                        statistics.lastHandshakeSec,
-                                    )
-                                }
-                            }
+                        // AVPN: + lastHandshakeSec (3-й компонент Statistics) → в C++ для DEAD-детекта.
+                        msg.data?.getStatistics()?.let { (rxBytes, txBytes, lastHandshakeSec) ->
+                            QtAndroidController.onStatisticsUpdate(rxBytes, txBytes, lastHandshakeSec)
                         }
                     }
 
@@ -166,23 +142,6 @@ class AmneziaActivity : QtActivity() {
                         }
                         // todo: add error reporting to Qt
                         QtAndroidController.onServiceError()
-                    }
-
-                    ServiceEvent.NATIVE_SESSION_GUARD -> {
-                        msg.data?.getString(NativeSessionGuardContract.MSG_EVENT_JSON)
-                            ?.let(QtAndroidController::onSessionGuardEvent)
-                    }
-
-                    ServiceEvent.NATIVE_SESSION_GUARD_RECOVERY -> {
-                        msg.data?.getString(
-                            NativeSessionGuardContract.MSG_RECOVERY_RECEIPT_JSON,
-                        )?.let(QtAndroidController::onSessionGuardRecoveryReceipt)
-                    }
-
-                    ServiceEvent.RUNTIME_AUTHORITY_RENEWAL -> {
-                        msg.data?.getString(
-                            RuntimeAuthorityRenewalContract.MSG_RECEIPT_JSON,
-                        )?.let(QtAndroidController::onRuntimeAuthorityRenewalReceipt)
                     }
                 }
             }
@@ -203,17 +162,12 @@ class AmneziaActivity : QtActivity() {
                 vpnServiceMessenger.send(
                     Action.REGISTER_CLIENT.packToMessage {
                         putString(MSG_CLIENT_NAME, ACTIVITY_MESSENGER_NAME)
-                        putString(MSG_CLIENT_PROCESS_EPOCH, clientProcessEpoch)
                     },
                     replyTo = activityMessenger
                 )
                 isServiceConnected = true
                 if (isWaitingStatus) {
                     vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
-                }
-                pendingNativeGuardRecoveryResolution?.let {
-                    pendingNativeGuardRecoveryResolution = null
-                    dispatchNativeGuardRecoveryResolution(it.first, it.second, it.third)
                 }
             }
 
@@ -702,7 +656,7 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Bind service")
         vpnProto?.let { proto ->
             Intent(this, proto.serviceClass).also {
-                bindService(it, serviceConnection, BIND_ABOVE_CLIENT or BIND_AUTO_CREATE)
+                bindService(it, serviceConnection, BIND_ABOVE_CLIENT and BIND_AUTO_CREATE)
             }
             isInBoundState = true
         }
@@ -817,8 +771,8 @@ class AmneziaActivity : QtActivity() {
     private fun getVpnProto(vpnConfig: String): VpnProto? = try {
         require(vpnConfig.isNotBlank()) { "Blank VPN config" }
         VpnProto.get(JSONObject(vpnConfig).getString("protocol"))
-    } catch (_: JSONException) {
-        Log.e(TAG, "Invalid VPN config json format")
+    } catch (e: JSONException) {
+        Log.e(TAG, "Invalid VPN config json format: ${e.message}")
         null
     } catch (e: IllegalArgumentException) {
         Log.e(TAG, "Protocol not found: ${e.message}")
@@ -829,12 +783,11 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Connect to VPN")
         vpnServiceMessenger.send {
             Action.CONNECT.packToMessage {
-                // Bearer profile data never crosses Binder.  The service gets
-                // a one-shot opaque reference to an AES-GCM Keystore record.
-                putString(
-                    TribeConfigFile.MSG_VPN_CONFIG_REF,
-                    TribeConfigFile.write(this@AmneziaActivity, vpnConfig),
-                )
+                // AVPN: большой конфиг (RU-direct CIDR-сев) — файлом, иначе TransactionTooLargeException
+                if (vpnConfig.length > TribeConfigFile.INLINE_LIMIT)
+                    putString(TribeConfigFile.MSG_VPN_CONFIG_FILE, TribeConfigFile.write(this@AmneziaActivity, vpnConfig))
+                else
+                    putString(MSG_VPN_CONFIG, vpnConfig)
             }
         }
     }
@@ -842,10 +795,11 @@ class AmneziaActivity : QtActivity() {
     private fun startVpnService(vpnConfig: String, proto: VpnProto) {
         Log.d(TAG, "Start VPN service: $proto")
         Intent(this, proto.serviceClass).apply {
-            putExtra(
-                TribeConfigFile.MSG_VPN_CONFIG_REF,
-                TribeConfigFile.write(this@AmneziaActivity, vpnConfig),
-            )
+            // AVPN: большой конфиг (RU-direct CIDR-сев) — файлом, иначе TransactionTooLargeException
+            if (vpnConfig.length > TribeConfigFile.INLINE_LIMIT)
+                putExtra(TribeConfigFile.MSG_VPN_CONFIG_FILE, TribeConfigFile.write(this@AmneziaActivity, vpnConfig))
+            else
+                putExtra(MSG_VPN_CONFIG, vpnConfig)
         }.also {
             try {
                 ContextCompat.startForegroundService(this, it)
@@ -868,13 +822,6 @@ class AmneziaActivity : QtActivity() {
     @Suppress("unused")
     fun qtAndroidControllerInitialized() {
         Log.v(TAG, "Qt Android controller initialized")
-        // AVPN: publish both embedded engines before releasing any coroutine
-        // waiting for Qt initialization (including connect/import paths).
-        // Native runtime probes are individually best-effort; malformed
-        // process/package state leaves C++ with an empty, fail-closed manifest.
-        runCatching { EngineManifestRegistry.json(applicationContext) }
-            .onSuccess(QtAndroidController::onEngineManifest)
-            .onFailure { Log.e(TAG, "Unable to build embedded engine manifest: $it") }
         qtInitialized.complete(Unit)
     }
 
@@ -886,317 +833,6 @@ class AmneziaActivity : QtActivity() {
                 checkNotificationPermission {
                     startVpn(vpnConfig)
                 }
-            }
-        }
-    }
-
-    /** Arms the service-owned outer TUN only; the inner AWG/Xray core is not started here. */
-    @Suppress("unused")
-    fun prepareNativeSessionGuard(
-        vpnConfig: String,
-        operation: String,
-        session: String,
-        policySha256: String,
-        expectedRuntimeSessionId: String,
-        requestedOuterSessionId: String,
-    ) {
-        mainScope.launch {
-            val proto = getVpnProto(vpnConfig)
-            if (proto == null || proto !in setOf(VpnProto.AWG, VpnProto.XRAY)) {
-                QtAndroidController.onServiceError()
-                return@launch
-            }
-            val exactProto = proto
-            checkVpnPermission {
-                runCatching { TribeConfigFile.write(this@AmneziaActivity, vpnConfig) }
-                    .onSuccess { reference ->
-                        dispatchNativeGuardAction(
-                            exactProto,
-                            Action.PREPARE_NATIVE_SESSION_GUARD,
-                            NativeSessionGuardContract.ACTION_PREPARE,
-                        ) { bundle ->
-                            bundle.putString(TribeConfigFile.MSG_VPN_CONFIG_REF, reference)
-                            bundle.putString(NativeSessionGuardContract.MSG_OPERATION, operation)
-                            bundle.putString(NativeSessionGuardContract.MSG_SESSION, session)
-                            bundle.putString(
-                                NativeSessionGuardContract.MSG_POLICY_SHA256, policySha256,
-                            )
-                            bundle.putString(
-                                NativeSessionGuardContract.MSG_EXPECTED_RUNTIME_SESSION_ID,
-                                expectedRuntimeSessionId,
-                            )
-                            bundle.putString(
-                                NativeSessionGuardContract.MSG_OUTER_SESSION_ID,
-                                requestedOuterSessionId,
-                            )
-                        }
-                    }
-                    .onFailure { QtAndroidController.onServiceError() }
-            }
-        }
-    }
-
-    /** Activates exactly the guard/session returned by the preceding Armed receipt. */
-    @Suppress("unused")
-    fun activateNativeSession(
-        vpnConfig: String,
-        operation: String,
-        session: String,
-        outerSessionId: String,
-        expectedRuntimeSessionId: String,
-    ) {
-        mainScope.launch {
-            val proto = getVpnProto(vpnConfig)
-            if (proto == null || proto !in setOf(VpnProto.AWG, VpnProto.XRAY)) {
-                QtAndroidController.onServiceError()
-                return@launch
-            }
-            val exactProto = proto
-            runCatching { TribeConfigFile.write(this@AmneziaActivity, vpnConfig) }
-                .onSuccess { reference ->
-                    dispatchNativeGuardAction(
-                        exactProto,
-                        Action.ACTIVATE_NATIVE_SESSION,
-                        NativeSessionGuardContract.ACTION_ACTIVATE,
-                    ) { bundle ->
-                        bundle.putString(TribeConfigFile.MSG_VPN_CONFIG_REF, reference)
-                        bundle.putString(NativeSessionGuardContract.MSG_OPERATION, operation)
-                        bundle.putString(NativeSessionGuardContract.MSG_SESSION, session)
-                        bundle.putString(
-                            NativeSessionGuardContract.MSG_OUTER_SESSION_ID, outerSessionId,
-                        )
-                        bundle.putString(
-                            NativeSessionGuardContract.MSG_EXPECTED_RUNTIME_SESSION_ID,
-                            expectedRuntimeSessionId,
-                        )
-                    }
-                }
-                .onFailure { QtAndroidController.onServiceError() }
-        }
-    }
-
-    /** Stops only the exact inner reader; the outer TUN remains a blocking blackhole. */
-    @Suppress("unused")
-    fun stopNativeSession(outerSessionId: String, expectedRuntimeSessionId: String) {
-        mainScope.launch {
-            dispatchNativeGuardAction(
-                vpnProto?.takeIf { it.serviceClass == TribeVpnService::class.java } ?: VpnProto.AWG,
-                Action.STOP_NATIVE_SESSION,
-                NativeSessionGuardContract.ACTION_STOP_INNER,
-            ) { bundle ->
-                bundle.putString(
-                    NativeSessionGuardContract.MSG_OUTER_SESSION_ID, outerSessionId,
-                )
-                bundle.putString(
-                    NativeSessionGuardContract.MSG_EXPECTED_RUNTIME_SESSION_ID,
-                    expectedRuntimeSessionId,
-                )
-            }
-        }
-    }
-
-    /** Disarms only after exact inner teardown; stale releases are native no-ops. */
-    @Suppress("unused")
-    fun releaseNativeSessionGuard(operation: String, session: String, outerSessionId: String) {
-        mainScope.launch {
-            dispatchNativeGuardAction(
-                vpnProto?.takeIf { it.serviceClass == TribeVpnService::class.java } ?: VpnProto.AWG,
-                Action.RELEASE_NATIVE_SESSION_GUARD,
-                NativeSessionGuardContract.ACTION_RELEASE,
-            ) { bundle ->
-                bundle.putString(NativeSessionGuardContract.MSG_OPERATION, operation)
-                bundle.putString(NativeSessionGuardContract.MSG_SESSION, session)
-                bundle.putString(
-                    NativeSessionGuardContract.MSG_OUTER_SESSION_ID, outerSessionId,
-                )
-            }
-        }
-    }
-
-    /** One-shot exact query after PREPARE timeout; response reuses native_session_guard_v1. */
-    @Suppress("unused")
-    fun reconcileNativeSessionGuardArm(
-        operation: String,
-        session: String,
-        policySha256: String,
-        outerSessionId: String,
-        expectedRuntimeSessionId: String,
-    ) {
-        mainScope.launch {
-            dispatchNativeGuardAction(
-                vpnProto?.takeIf { it.serviceClass == TribeVpnService::class.java } ?: VpnProto.AWG,
-                Action.RECONCILE_NATIVE_SESSION_GUARD_ARM,
-                NativeSessionGuardContract.ACTION_RECONCILE_ARM,
-            ) { bundle ->
-                bundle.putString(NativeSessionGuardContract.MSG_OPERATION, operation)
-                bundle.putString(NativeSessionGuardContract.MSG_SESSION, session)
-                bundle.putString(NativeSessionGuardContract.MSG_POLICY_SHA256, policySha256)
-                bundle.putString(NativeSessionGuardContract.MSG_OUTER_SESSION_ID, outerSessionId)
-                bundle.putString(
-                    NativeSessionGuardContract.MSG_EXPECTED_RUNTIME_SESSION_ID,
-                    expectedRuntimeSessionId,
-                )
-            }
-        }
-    }
-
-    /** One-shot exact query after RELEASE timeout; nil/mismatch yields no terminal event. */
-    @Suppress("unused")
-    fun reconcileNativeSessionGuardRelease(
-        operation: String,
-        session: String,
-        policySha256: String,
-        outerSessionId: String,
-        expectedRuntimeSessionId: String,
-    ) {
-        mainScope.launch {
-            dispatchNativeGuardAction(
-                vpnProto?.takeIf { it.serviceClass == TribeVpnService::class.java } ?: VpnProto.AWG,
-                Action.RECONCILE_NATIVE_SESSION_GUARD_RELEASE,
-                NativeSessionGuardContract.ACTION_RECONCILE_RELEASE,
-            ) { bundle ->
-                bundle.putString(NativeSessionGuardContract.MSG_OPERATION, operation)
-                bundle.putString(NativeSessionGuardContract.MSG_SESSION, session)
-                bundle.putString(NativeSessionGuardContract.MSG_POLICY_SHA256, policySha256)
-                bundle.putString(NativeSessionGuardContract.MSG_OUTER_SESSION_ID, outerSessionId)
-                bundle.putString(
-                    NativeSessionGuardContract.MSG_EXPECTED_RUNTIME_SESSION_ID,
-                    expectedRuntimeSessionId,
-                )
-            }
-        }
-    }
-
-    /** Level-triggered recovery query; REGISTER also returns the same snapshot. */
-    @Suppress("unused")
-    fun requestNativeSessionGuardRecoveryStatus() {
-        mainScope.launch {
-            if (!isServiceConnected) {
-                vpnProto = VpnProto.AWG
-                if (!isInBoundState) doBindService()
-                return@launch
-            }
-            vpnServiceMessenger.send(
-                Action.REQUEST_NATIVE_SESSION_GUARD_RECOVERY.packToMessage(),
-                replyTo = activityMessenger,
-            )
-        }
-    }
-
-    @Suppress("unused")
-    fun resolveNativeSessionGuardRecovery(
-        exactEventJson: String,
-        action: String,
-        validatedConfig: String,
-    ) {
-        mainScope.launch {
-            if (action !in setOf("adopt", "stop")) {
-                QtAndroidController.onServiceError()
-                return@launch
-            }
-            val reference = if (action == "adopt") {
-                runCatching { TribeConfigFile.write(this@AmneziaActivity, validatedConfig) }
-                    .getOrElse {
-                        QtAndroidController.onServiceError()
-                        return@launch
-                    }
-            } else {
-                require(validatedConfig.isEmpty()) { "Stop recovery must not carry a profile" }
-                null
-            }
-            if (!isServiceConnected) {
-                pendingNativeGuardRecoveryResolution = Triple(exactEventJson, action, reference)
-                vpnProto = VpnProto.AWG
-                if (!isInBoundState) doBindService()
-            } else {
-                dispatchNativeGuardRecoveryResolution(exactEventJson, action, reference)
-            }
-        }
-    }
-
-    @MainThread
-    private fun dispatchNativeGuardRecoveryResolution(
-        exactEventJson: String,
-        action: String,
-        reference: String?,
-    ) {
-        vpnServiceMessenger.send {
-            Action.RESOLVE_NATIVE_SESSION_GUARD_RECOVERY.packToMessage {
-                putString(NativeSessionGuardContract.MSG_EVENT_JSON, exactEventJson)
-                putString(NativeSessionGuardContract.MSG_RECOVERY_ACTION, action)
-                reference?.let { putString(TribeConfigFile.MSG_VPN_CONFIG_REF, it) }
-            }
-        }
-    }
-
-    @MainThread
-    private fun dispatchNativeGuardAction(
-        proto: VpnProto,
-        action: Action,
-        intentAction: String,
-        fill: (Bundle) -> Unit,
-    ) {
-        require(proto.serviceClass == TribeVpnService::class.java) {
-            "Native session guard requires the single Tribe VPN service"
-        }
-        val sameBoundService = isServiceConnected
-            && vpnProto?.serviceClass == proto.serviceClass
-        if (!sameBoundService && isInBoundState) doUnbindService()
-        vpnProto = proto
-        if (sameBoundService) {
-            vpnServiceMessenger.send {
-                action.packToMessage { fill(this) }
-            }
-            return
-        }
-        val extras = Bundle().also(fill)
-        Intent(this, TribeVpnService::class.java).apply {
-            this.action = intentAction
-            putExtras(extras)
-        }.also { ContextCompat.startForegroundService(this, it) }
-        doBindService()
-    }
-
-    /** Dispatches one exact authority-renewal request; completion is a dedicated receipt event. */
-    @Suppress("unused")
-    fun renewRuntimeAuthority(vpnConfig: String, requestJson: String) {
-        mainScope.launch {
-            val request = runCatching {
-                val parsed = RuntimeAuthorityRenewalContract.parseRequest(requestJson)
-                val recomputed = RuntimeAuthorityRenewalContract.requestFromConfig(
-                    JSONObject(vpnConfig), vpnConfig, parsed.operation, parsed.session,
-                    parsed.outerSessionId, parsed.expectedRuntimeSessionId,
-                    parsed.renewalId, parsed.authorityCommitmentSha256,
-                )
-                require(recomputed == parsed) { "Renewal request/config mismatch" }
-                parsed
-            }.getOrElse {
-                Log.e(TAG, "Invalid runtime authority renewal dispatch")
-                return@launch
-            }
-            if (!isServiceConnected) {
-                QtAndroidController.onRuntimeAuthorityRenewalReceipt(
-                    RuntimeAuthorityRenewalContract.rejected(
-                        request, "service_unavailable",
-                    ).json(),
-                )
-                return@launch
-            }
-            runCatching {
-                TribeConfigFile.write(this@AmneziaActivity, vpnConfig)
-            }.onSuccess { reference ->
-                vpnServiceMessenger.send {
-                    Action.RENEW_RUNTIME_AUTHORITY.packToMessage {
-                        putString(TribeConfigFile.MSG_VPN_CONFIG_REF, reference)
-                        putString(RuntimeAuthorityRenewalContract.MSG_REQUEST_JSON, requestJson)
-                    }
-                }
-            }.onFailure {
-                QtAndroidController.onRuntimeAuthorityRenewalReceipt(
-                    RuntimeAuthorityRenewalContract.rejected(
-                        request, "config_handoff_failed",
-                    ).json(),
-                )
             }
         }
     }

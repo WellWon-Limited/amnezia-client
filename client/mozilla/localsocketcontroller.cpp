@@ -20,7 +20,6 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
-#include <QUuid>
 
 #include "leakdetector.h"
 #include "logger.h"
@@ -30,8 +29,6 @@
 #include "core/protocols/protocolUtils.h"
 #include "core/utils/constants/configKeys.h"
 #include "core/utils/constants/protocolConstants.h"
-#include "ipc.h"
-#include "ipcsecurity.h"
 
 // How many times do we try to reconnect.
 constexpr int MAX_CONNECTION_RETRY = 10;
@@ -59,10 +56,6 @@ LocalSocketController::LocalSocketController() {
   m_initializingTimer.setSingleShot(true);
   connect(&m_initializingTimer, &QTimer::timeout, this,
           &LocalSocketController::initializeInternal);
-  m_runtimeStatusTimer.setInterval(500);
-  m_runtimeStatusTimer.setSingleShot(false);
-  connect(&m_runtimeStatusTimer, &QTimer::timeout, this,
-          &LocalSocketController::checkExactStatus);
 }
 
 LocalSocketController::~LocalSocketController() {
@@ -92,8 +85,6 @@ void LocalSocketController::disconnectInternal() {
   m_daemonState = eReady;
   m_initializingRetry = 0;
   m_initializingTimer.stop();
-  m_runtimeStatusTimer.stop();
-  m_exactSessionId.clear();
   m_pendingActivate = QJsonObject();  // AVPN (IPC-stall fix): недоставленный activate не переживает обрыв
   emit disconnected();
 }
@@ -116,8 +107,6 @@ void LocalSocketController::initializeInternal() {
 // AVPN: свой путь сокета демона (= daemonlocalserver.cpp) — изоляция от офиц. Amnezia
 #ifdef MZ_WINDOWS
   QString path = "\\\\.\\pipe\\avpn";
-#elif defined(MZ_MACOS)
-  QString path = amnezia::getWireguardDaemonUrl();
 #else
   QString path = "/var/run/avpn/daemon.socket";
   if (!QFileInfo::exists(path)) {
@@ -130,55 +119,12 @@ void LocalSocketController::initializeInternal() {
 }
 
 void LocalSocketController::daemonConnected() {
-#ifdef MZ_MACOS
-  QByteArray sessionCapability;
-  QString securityError;
-  if (!amnezia::ipcsecurity::performClientHandshake(
-          m_socket, {}, &sessionCapability, &securityError)) {
-    logger.error() << "Secure daemon IPC handshake failed:" << securityError;
-    m_socket->abort();
-    emit initialized(false, false, QDateTime());
-    return;
-  }
-#endif
   logger.debug() << "Daemon connected";
   Q_ASSERT(m_daemonState == eInitializing);
   checkStatus();
 }
 
 void LocalSocketController::activate(const QJsonObject &rawConfig) {
-  m_exactSessionId.clear();
-  m_runtimeStatusTimer.stop();
-  activateInternal(rawConfig, {});
-}
-
-bool LocalSocketController::activateExactSession(const QJsonObject &rawConfig,
-                                                 const QString &sessionId) {
-  const QUuid uuid(sessionId);
-  if (uuid.isNull()
-      || uuid.toString(QUuid::WithoutBraces).toLower() != sessionId
-      || (!m_exactSessionId.isEmpty() && m_exactSessionId != sessionId)) {
-    return false;
-  }
-  m_exactSessionId = sessionId;
-  m_runtimeStatusTimer.start();
-  activateInternal(rawConfig, sessionId);
-  return true;
-}
-
-bool LocalSocketController::adoptExactSession(const QString &sessionId) {
-  const QUuid uuid(sessionId);
-  if (uuid.isNull()
-      || uuid.toString(QUuid::WithoutBraces).toLower() != sessionId
-      || m_daemonState != eReady) return false;
-  m_exactSessionId = sessionId;
-  m_runtimeStatusTimer.start();
-  checkExactStatus();
-  return true;
-}
-
-void LocalSocketController::activateInternal(const QJsonObject &rawConfig,
-                                             const QString &exactSessionId) {
   QString protocolName = rawConfig.value("protocol").toString();
 
   int splitTunnelType = rawConfig.value("splitTunnelType").toInt();
@@ -191,12 +137,7 @@ void LocalSocketController::activateInternal(const QJsonObject &rawConfig,
   QJsonObject wgConfig = rawConfig.value(protocolName + "_config_data").toObject();
 
   QJsonObject json;
-  json.insert("type", exactSessionId.isEmpty() ? QStringLiteral("activate")
-                                                : QStringLiteral("activate_session_v1"));
-  if (!exactSessionId.isEmpty()) {
-    json.insert(QStringLiteral("schema"), 1);
-    json.insert(QStringLiteral("session_id"), exactSessionId);
-  }
+  json.insert("type", "activate");
   //  json.insert("hopindex", QJsonValue((double)hop.m_hopindex));
   json.insert("privateKey", wgConfig.value(amnezia::configKey::clientPrivKey));
   json.insert("deviceIpv4Address", wgConfig.value(amnezia::configKey::clientIp));
@@ -353,8 +294,6 @@ void LocalSocketController::deactivate() {
   logger.debug() << "Deactivating";
 
   m_pendingActivate = QJsonObject();  // AVPN (IPC-stall fix): отложенный activate отменён
-  m_runtimeStatusTimer.stop();
-  m_exactSessionId.clear();
 
   if (m_daemonState != eReady) {
     logger.debug() << "No disconnect, controller is not ready";
@@ -366,28 +305,6 @@ void LocalSocketController::deactivate() {
   json.insert("type", "deactivate");
   write(json);
   emit disconnected();
-}
-
-bool LocalSocketController::deactivateExactSession(const QString &sessionId) {
-  if (m_daemonState != eReady || sessionId.isEmpty()
-      || sessionId != m_exactSessionId) return false;
-  m_pendingActivate = QJsonObject();
-  write(QJsonObject{
-      {QStringLiteral("type"), QStringLiteral("deactivate_session_v1")},
-      {QStringLiteral("schema"), 1},
-      {QStringLiteral("session_id"), sessionId},
-  });
-  checkExactStatus();
-  return true;
-}
-
-void LocalSocketController::checkExactStatus() {
-  if (m_daemonState != eReady || m_exactSessionId.isEmpty()) return;
-  write(QJsonObject{
-      {QStringLiteral("type"), QStringLiteral("runtime_status_v1")},
-      {QStringLiteral("schema"), 1},
-      {QStringLiteral("session_id"), m_exactSessionId},
-  });
 }
 
 void LocalSocketController::checkStatus() {
@@ -525,31 +442,6 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
 
   if (m_daemonState != eReady) {
     logger.error() << "Unexpected command";
-    return;
-  }
-
-  if (type == QLatin1String("tunnel_runtime_status_v1")) {
-    const QString sessionId = obj.value(QStringLiteral("session_id")).toString();
-    const QString state = obj.value(QStringLiteral("runtime_state")).toString();
-    const QUuid uuid(sessionId);
-    const bool terminal = state == QLatin1String("stopped")
-            || state == QLatin1String("failed");
-    if (!obj.value(QStringLiteral("schema")).isDouble()
-        || obj.value(QStringLiteral("schema")).toDouble() != 1.0
-        || obj.value(QStringLiteral("protocol")) != QLatin1String("awg")
-        || sessionId != m_exactSessionId || uuid.isNull()
-        || uuid.toString(QUuid::WithoutBraces).toLower() != sessionId
-        || (state != QLatin1String("starting") && state != QLatin1String("running")
-            && state != QLatin1String("stopping") && !terminal)
-        || !obj.value(QStringLiteral("core")).isObject()
-        || !obj.value(QStringLiteral("counters")).isObject()
-        || (obj.contains(QStringLiteral("failure_reason"))
-            && !obj.value(QStringLiteral("failure_reason")).isString())) {
-      logger.warning() << "Rejected malformed/stale exact AWG runtime status";
-      return;
-    }
-    if (terminal) m_runtimeStatusTimer.stop();
-    emit runtimeStatusChanged(obj);
     return;
   }
 

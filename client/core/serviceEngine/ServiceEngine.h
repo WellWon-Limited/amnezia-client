@@ -46,15 +46,6 @@ public:
     // loadSubscription (ensureSubscription) перезаписывает данные и снимает флаг.
     bool loadSubscriptionFromLkg(const QByteArray &json, QString &error);
 
-    // AVPN v2 anti-downgrade bridge. The network/acceptance owner calls this only after a signed
-    // catalog has been accepted and its trust state is durably committed. Existing v1 traffic may
-    // finish, but no new v1 load/connect/failover/pin can start afterwards.
-    void lockLegacyV1AfterAcceptedV2() { m_legacyV1Locked = true; }
-    // Only the catalog coordinator's completed secure-logout transition may reopen legacy for a
-    // newly enrolled installation. Ordinary network/catalog errors never call this method.
-    void unlockLegacyV1AfterSecureLogout() { m_legacyV1Locked = false; }
-    bool legacyV1Allowed() const { return !m_legacyV1Locked; }
-
     // Список не-фатальных проблем текущей подписки (см. SubscriptionParser::validate).
     QStringList subscriptionIssues() const;
 
@@ -110,7 +101,7 @@ public:
     // AVPN: снять закрепление (вернуться в авто). «Авто (быстрейший)» (reprobe) и ручная ротация
     // (rotateNext) снимают pin — иначе connect() всегда отдаёт приоритет закреплённой ноде, и
     // возврат-в-авто / offline-ротация молча ломаются (reselect закреплённой).
-    void clearPin() { if (!m_legacyV1Locked) m_pinnedNodeId.clear(); } // AVPN v2 ownership gate
+    void clearPin() { m_pinnedNodeId.clear(); }               // AVPN
 
     // AVPN: правдивый статус. up() ставит туннель в очередь (async), поэтому connect() остаётся в
     // Connecting; реальные переходы прилетают из VpnConnection::connectionStateChanged через
@@ -160,10 +151,6 @@ public:
         return m_identity.ensureKeys(store, error);
     }
     ClientKeys clientKeys() const { return m_identity.keys(); }
-    // Catalog-v2 startup needs the same installation AWG identity before it can validate a cached
-    // compatibility tuple. This is local secure-store work only; it never enrolls or performs I/O.
-    bool ensureIdentityKeys(SecureAppSettingsRepository *store, QString &error)
-    { return m_identity.ensureKeys(store, error); }
     // AVPN: доступ к Identity для in-fork сетевых вызовов фасада (redeem по коду — Enrollment::redeemCode).
     Identity &identity() { return m_identity; }
 
@@ -200,7 +187,6 @@ private:
     NodePool      m_pool;
     Selector      m_selector;
     bool          m_lkgActive = false; // AVPN (LKG): пул наполнен из дискового кэша, свежего фетча ещё не было
-    bool          m_legacyV1Locked = false; // AVPN v2: monotonic in-memory downgrade gate
     Switcher      m_switcher;
     HealthLoop    m_health;
     ITunnelControl *m_tunnel = nullptr;

@@ -252,7 +252,7 @@
     </message>
     <message>
         <location filename="../ui/qml/Components/HomeSplitTunnelingDrawer.qml" line="46"/>
-        <source>Enabled 
+        <source>Enabled
 Can&apos;t be disabled for current server</source>
         <translation>فعال
 موجودہ سرور کے لیے غیر فعال نہیں کیا جا سکتا</translation>

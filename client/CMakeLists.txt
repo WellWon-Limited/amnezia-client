@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
 
-# Keep upstream's configurable branding layer initialized for every platform.
-# The technical Swift/Qt target names intentionally stay upstream-compatible;
-# the public Tribe identifiers remain isolated from the Amnezia application.
+# Tribe values for upstream's branding layer. Keep technical target names
+# upstream-compatible while isolating sockets, settings and store identities.
 set(CLIENT_TARGET_NAME "AmneziaVPN" CACHE STRING "Client executable target name")
 set(CLIENT_APPLICATION_NAME "AmneziaVPN" CACHE STRING "Technical application name")
 set(CLIENT_SERVICE_NAME "Tribe-service" CACHE STRING "Privileged service executable name")
@@ -19,7 +18,7 @@ set(BUILD_VPN_DEVELOPMENT_TEAM "Q7DVH5MCWF" CACHE STRING "Tribe development team
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/clientBrandingDefaults.cmake)
 
-set(PROJECT AmneziaVPN)
+set(PROJECT ${CLIENT_TARGET_NAME})
 project(${PROJECT})
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -42,28 +41,16 @@ execute_process(
 
 add_definitions(-DGIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
 
-# Capture endpoint/public-key inputs in the primary configure. Qt's additional
-# Android ABIs are configured later (sometimes by a separate build invocation),
-# so reading the environment independently there can produce a mixed universal
-# artifact. Cache values remain overrideable with canonical -D arguments and
-# are forwarded explicitly by client/cmake/android.cmake.
-set(PROD_AGW_PUBLIC_KEY "$ENV{PROD_AGW_PUBLIC_KEY}" CACHE STRING "Production API public key")
-set(PROD_S3_ENDPOINT "$ENV{PROD_S3_ENDPOINT}" CACHE STRING "Production catalog endpoint")
-set(FALLBACK_S3_ENDPOINT "$ENV{FALLBACK_S3_ENDPOINT}" CACHE STRING "Fallback catalog endpoint")
-set(DEV_AGW_PUBLIC_KEY "$ENV{DEV_AGW_PUBLIC_KEY}" CACHE STRING "Development API public key")
-set(DEV_AGW_ENDPOINT "$ENV{DEV_AGW_ENDPOINT}" CACHE STRING "Development API endpoint")
-set(DEV_S3_ENDPOINT "$ENV{DEV_S3_ENDPOINT}" CACHE STRING "Development catalog endpoint")
-set(FREE_V2_ENDPOINT "$ENV{FREE_V2_ENDPOINT}" CACHE STRING "Free subscription endpoint")
-set(PREM_V1_ENDPOINT "$ENV{PREM_V1_ENDPOINT}" CACHE STRING "Premium subscription endpoint")
+add_definitions(-DPROD_AGW_PUBLIC_KEY="$ENV{PROD_AGW_PUBLIC_KEY}")
+add_definitions(-DPROD_S3_ENDPOINT="$ENV{PROD_S3_ENDPOINT}")
+add_definitions(-DFALLBACK_S3_ENDPOINT="$ENV{FALLBACK_S3_ENDPOINT}")
 
-add_definitions(-DPROD_AGW_PUBLIC_KEY="${PROD_AGW_PUBLIC_KEY}")
-add_definitions(-DPROD_S3_ENDPOINT="${PROD_S3_ENDPOINT}")
-add_definitions(-DFALLBACK_S3_ENDPOINT="${FALLBACK_S3_ENDPOINT}")
-add_definitions(-DDEV_AGW_PUBLIC_KEY="${DEV_AGW_PUBLIC_KEY}")
-add_definitions(-DDEV_AGW_ENDPOINT="${DEV_AGW_ENDPOINT}")
-add_definitions(-DDEV_S3_ENDPOINT="${DEV_S3_ENDPOINT}")
-add_definitions(-DFREE_V2_ENDPOINT="${FREE_V2_ENDPOINT}")
-add_definitions(-DPREM_V1_ENDPOINT="${PREM_V1_ENDPOINT}")
+add_definitions(-DDEV_AGW_PUBLIC_KEY="$ENV{DEV_AGW_PUBLIC_KEY}")
+add_definitions(-DDEV_AGW_ENDPOINT="$ENV{DEV_AGW_ENDPOINT}")
+add_definitions(-DDEV_S3_ENDPOINT="$ENV{DEV_S3_ENDPOINT}")
+
+add_definitions(-DFREE_V2_ENDPOINT="$ENV{FREE_V2_ENDPOINT}")
+add_definitions(-DPREM_V1_ENDPOINT="$ENV{PREM_V1_ENDPOINT}")
 
 if(WIN32 OR (APPLE AND NOT IOS) OR (LINUX AND NOT ANDROID))
     set(PACKAGES ${PACKAGES} Widgets)
@@ -88,6 +75,9 @@ qt_add_executable(${PROJECT} MANUAL_FINALIZATION)
 target_include_directories(${PROJECT} PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
 )
+target_compile_definitions(${PROJECT} PRIVATE
+    CLIENT_KEYCHAIN_NAME_STR=\"${CLIENT_KEYCHAIN_NAME}\"
+)
 
 if(WIN32 OR (APPLE AND NOT IOS AND NOT MACOS_NE) OR (LINUX AND NOT ANDROID))
     qt_add_repc_replicas(${PROJECT} ${CMAKE_CURRENT_LIST_DIR}/../ipc/ipc_interface.rep)
@@ -98,24 +88,34 @@ qt6_add_resources(QRC ${QRC}
     ${CMAKE_CURRENT_LIST_DIR}/images/images.qrc
     ${CMAKE_CURRENT_LIST_DIR}/images/flagKit.qrc
     ${CMAKE_CURRENT_LIST_DIR}/client_scripts/clientScripts.qrc
-    ${CMAKE_CURRENT_LIST_DIR}/ui/qml/qml.qrc
+    ${CLIENT_QML_QRC_FILE}
     ${CMAKE_CURRENT_LIST_DIR}/server_scripts/serverScripts.qrc
+    ${CLIENT_EXTRA_QRC}
 )
 
 # -- i18n begin
-set(AMNEZIAVPN_TS_FILES
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_ru_RU.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_zh_CN.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_fa_IR.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_ar_EG.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_my_MM.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_uk_UA.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_ur_PK.ts
-    ${CMAKE_CURRENT_LIST_DIR}/translations/amneziavpn_hi_IN.ts
-)
+if(CLIENT_TS_FILES)
+    set(AMNEZIAVPN_TS_FILES ${CLIENT_TS_FILES})
+else()
+    set(AMNEZIAVPN_TS_FILES
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_ru_RU.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_zh_CN.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_fa_IR.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_ar_EG.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_my_MM.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_uk_UA.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_ur_PK.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_hi_IN.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_es_ES.ts
+        ${CMAKE_CURRENT_LIST_DIR}/translations/${CLIENT_TS_PREFIX}_ko_KR.ts
+    )
+endif()
+
+file(GLOB_RECURSE AMNEZIAVPN_QML_FILES ${CMAKE_CURRENT_LIST_DIR}/ui/qml/*.qml)
 
 qt6_add_translations(${PROJECT}
     TS_FILES ${AMNEZIAVPN_TS_FILES}
+    SOURCES ${AMNEZIAVPN_QML_FILES}
     RESOURCE_PREFIX "/translations"
 )
 # -- i18n end
@@ -133,13 +133,18 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/3rdparty.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/sources.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/avpn.cmake)   # AVPN overlay (serviceEngine; -DAVPN_ENGINE=OFF чтобы выключить)
 
-include_directories(
+set(_client_include_dirs
     ${CMAKE_CURRENT_LIST_DIR}/../ipc
     ${CMAKE_CURRENT_LIST_DIR}/../common/logger
     ${CMAKE_CURRENT_LIST_DIR}/../common/crypto
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+if(CLIENT_BRANDING_INCLUDE_DIR)
+    list(APPEND _client_include_dirs ${CLIENT_BRANDING_INCLUDE_DIR})
+endif()
+list(APPEND _client_include_dirs ${CMAKE_CURRENT_LIST_DIR})
+include_directories(${_client_include_dirs})
 
 if(MACOS_NE)
     message("MACOS_NE is ON")
@@ -166,15 +171,19 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/core/utils/swiftBridgeConfig.h
     @ONLY
 )
+# Swift can't consume a `-DGROUP_ID="value"` compile define (Swift -D flags are
+# presence-only), unlike the Objective-C++ sources that read GROUP_ID directly.
+# Generate a Swift constant instead so Log.swift can use the branded app group.
+set(CLIENT_GROUP_IDENTIFIER_SWIFT_FILE ${CMAKE_CURRENT_BINARY_DIR}/platforms/ios/GroupIdentifier.swift)
+configure_file(
+    ${CMAKE_CURRENT_LIST_DIR}/platforms/ios/GroupIdentifier.swift.in
+    ${CLIENT_GROUP_IDENTIFIER_SWIFT_FILE}
+    @ONLY
+)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(${PROJECT} PRIVATE "MZ_DEBUG")
 endif()
-
-target_compile_definitions(${PROJECT} PRIVATE
-    TRIBE_MAC_GUI_IDENTIFIER="hk.wellwon.vpn"
-    TRIBE_MAC_TEAM_IDENTIFIER="Q7DVH5MCWF"
-)
 
 if(WIN32)
     configure_file(
@@ -273,9 +282,7 @@ install(TARGETS ${PROJECT}
 )
 
 if(APPLE)
-    # macos.cmake emits TribeVPN.app. Keeping the upstream AmneziaVPN.app path
-    # here silently split GUI and runtime dependencies into two app bundles.
-    set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR}/TribeVPN.app/Contents/Frameworks)
+    set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR}/AmneziaVPN.app/Contents/Frameworks)
 else()
     set(RUNTIME_DEPS_DIR ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -318,32 +325,8 @@ install(SCRIPT ${QT_DEPLOY_SCRIPT}
     COMPONENT AmneziaVPN
 )
 
-if(APPLE AND NOT IOS AND NOT MACOS_NE)
-    # Qt's macdeployqt currently deploys qsqlmimer even though it links to the
-    # developer-only /usr/local/lib/libmimerapi.dylib. Sanitize and verify the
-    # staged app after Qt deployment, before CPack can sign or publish it.
-    install(CODE "
-        file(GLOB _tribe_staged_apps LIST_DIRECTORIES true
-            \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/*.app\")
-        list(LENGTH _tribe_staged_apps _tribe_staged_app_count)
-        if(NOT _tribe_staged_app_count EQUAL 1)
-            message(FATAL_ERROR
-                \"Expected exactly one staged macOS app, found \${_tribe_staged_app_count}\")
-        endif()
-        execute_process(
-            COMMAND /bin/bash \"${CMAKE_SOURCE_DIR}/deploy/tribe/sanitize-macos-app.sh\"
-                    \"\${_tribe_staged_apps}\"
-            RESULT_VARIABLE _tribe_runtime_result
-        )
-        if(NOT _tribe_runtime_result EQUAL 0)
-            message(FATAL_ERROR \"Staged macOS runtime closure verification failed\")
-        endif()
-    "
-        COMPONENT AmneziaVPN
-    )
-endif()
-
 if (APPLE AND NOT IOS AND NOT MACOS_NE)
+    list(APPEND OVPN_SCRIPTS "${CMAKE_SOURCE_DIR}/deploy/data/macos/update-resolv-conf.sh")
     set_target_properties(${PROJECT} PROPERTIES
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
         XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"

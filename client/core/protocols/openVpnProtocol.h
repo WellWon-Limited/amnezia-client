@@ -31,6 +31,7 @@ protected slots:
 private:
     void cleanupResources();
     QString configPath() const;
+    bool openVpnProcessIsRunning() const;
     bool sendTermSignal();
     void readOpenVpnConfiguration(const QJsonObject &configuration);
     void disconnectFromManagementServer();

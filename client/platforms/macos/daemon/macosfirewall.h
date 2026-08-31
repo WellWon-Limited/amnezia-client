@@ -77,16 +77,13 @@ public:
     static void install();
     static void uninstall();
     static bool isInstalled();
-    static bool enableAnchor(const QString &anchor);
-    static bool disableAnchor(const QString &anchor);
+    static void enableAnchor(const QString &anchor);
+    static void disableAnchor(const QString &anchor);
     static bool isAnchorEnabled(const QString &anchor);
-    static bool isQuarantineEnabled();
-    static bool flushAllStates();
-    static bool setAnchorEnabled(const QString &anchor, bool enable);
-    static bool setAnchorTable(const QString &anchor, bool enabled,
-                               const QString &table, const QStringList &items);
+    static void setAnchorEnabled(const QString &anchor, bool enable);
+    static void setAnchorTable(const QString &anchor, bool enabled, const QString &table, const QStringList &items);
     static void setAnchorWithRules(const QString &anchor, bool enabled, const QStringList &rules);
-    static bool ensureRootAnchorPriority();
+    static void ensureRootAnchorPriority();
     static void installRootAnchors();
 };
 

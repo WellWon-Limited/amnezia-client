@@ -7,130 +7,25 @@ inputs:
   provisioning_profile_base64:
     description: Base64-encoded provisioning profile
     required: true
-  expected-sha256:
-    description: Independently pinned lowercase SHA-256 of the profile bytes
-    required: true
-  expected-team-id:
-    description: Exact Apple developer team identifier
-    required: true
-  expected-bundle-id:
-    description: Exact executable bundle identifier authorized by the profile
-    required: true
-  expected-certificate-sha256:
-    description: Pinned DER SHA-256 of the only Apple Distribution leaf in the profile
-    required: true
-
-outputs:
-  uuid:
-    description: UUID from the cryptographically decoded and validated profile
-    value: ${{ steps.profile.outputs.uuid }}
-  name:
-    description: Name from the cryptographically decoded and validated profile
-    value: ${{ steps.profile.outputs.name }}
-  sha256:
-    description: Validated profile SHA-256
-    value: ${{ steps.profile.outputs.sha256 }}
 
 runs:
   using: composite
   steps:
     - name: Setup provisioning profile
-      id: profile
       shell: bash
-      env:
-        PROFILE_BASE64: ${{ inputs.provisioning_profile_base64 }}
-        EXPECTED_SHA256: ${{ inputs.expected-sha256 }}
-        EXPECTED_TEAM_ID: ${{ inputs.expected-team-id }}
-        EXPECTED_BUNDLE_ID: ${{ inputs.expected-bundle-id }}
-        EXPECTED_CERTIFICATE_SHA256: ${{ inputs.expected-certificate-sha256 }}
       run: |
-        set -euo pipefail
-        umask 077
         PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-        TEMP_DIR="$(mktemp -d "${RUNNER_TEMP}/tribe-profile.XXXXXX")"
-        trap '/bin/rm -rf "$TEMP_DIR"' EXIT
-        TEMP_FILE="$TEMP_DIR/profile.mobileprovision"
-        DECODED_FILE="$TEMP_DIR/profile.plist"
-        python3 - "$TEMP_FILE" <<'PY'
-        import base64
-        import binascii
-        import os
-        import pathlib
-        import sys
-        encoded = os.environ.get("PROFILE_BASE64", "")
-        try:
-            decoded = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError) as error:
-            raise SystemExit("profile secret is not canonical base64") from error
-        if not decoded or len(decoded) > 4 * 1024 * 1024:
-            raise SystemExit("profile secret decoded to an unsafe size")
-        pathlib.Path(sys.argv[1]).write_bytes(decoded)
-        PY
-        ACTUAL_SHA256="$(shasum -a 256 "$TEMP_FILE" | awk '{print $1}')"
-        [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ && "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] || {
-          echo "Provisioning profile SHA-256 mismatch" >&2
-          exit 1
-        }
-        /usr/bin/security cms -D -i "$TEMP_FILE" > "$DECODED_FILE"
-        python3 - "$DECODED_FILE" "$GITHUB_OUTPUT" <<'PY'
-        import datetime as dt
-        import hashlib
-        import os
-        import pathlib
-        import plistlib
-        import re
-        import sys
+        TEMP_FILE=$(mktemp)
 
-        profile = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
-        team = os.environ["EXPECTED_TEAM_ID"]
-        bundle = os.environ["EXPECTED_BUNDLE_ID"]
-        expected_certificate = os.environ["EXPECTED_CERTIFICATE_SHA256"]
-        if not re.fullmatch(r"[A-Z0-9]{10}", team):
-            raise SystemExit("expected team ID is malformed")
-        if not re.fullmatch(r"[A-Za-z0-9.-]{1,255}", bundle):
-            raise SystemExit("expected bundle ID is malformed")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_certificate):
-            raise SystemExit("expected distribution certificate SHA-256 is malformed")
-        uuid = profile.get("UUID")
-        name = profile.get("Name")
-        if not isinstance(uuid, str) or not re.fullmatch(
-                r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", uuid):
-            raise SystemExit("profile UUID is missing or malformed")
-        if not isinstance(name, str) or not re.fullmatch(r"[ A-Za-z0-9_.()\-]{1,128}", name):
-            raise SystemExit("profile name is missing or unsafe")
-        if profile.get("TeamIdentifier") != [team]:
-            raise SystemExit("profile team mismatch")
-        if profile.get("ApplicationIdentifierPrefix") != [team]:
-            raise SystemExit("profile application identifier prefix mismatch")
-        if profile.get("Platform") != ["iOS"]:
-            raise SystemExit("profile is not iOS-only")
-        if "ProvisionedDevices" in profile or profile.get("ProvisionsAllDevices") is True:
-            raise SystemExit("profile is not App Store distribution")
-        expiration = profile.get("ExpirationDate")
-        if not isinstance(expiration, dt.datetime) or expiration <= dt.datetime.now() + dt.timedelta(days=7):
-            raise SystemExit("profile expires within seven days")
-        entitlements = profile.get("Entitlements")
-        if not isinstance(entitlements, dict):
-            raise SystemExit("profile entitlements missing")
-        if entitlements.get("application-identifier") != f"{team}.{bundle}":
-            raise SystemExit("profile application identifier mismatch")
-        if entitlements.get("com.apple.developer.team-identifier") != team:
-            raise SystemExit("profile entitlement team mismatch")
-        if entitlements.get("get-task-allow", False) is not False:
-            raise SystemExit("profile permits debugging")
-        certificates = profile.get("DeveloperCertificates")
-        if not isinstance(certificates, list) or len(certificates) != 1:
-            raise SystemExit("profile must authorize exactly one distribution certificate")
-        certificate_digest = hashlib.sha256(certificates[0]).hexdigest()
-        if certificate_digest != expected_certificate:
-            raise SystemExit("profile distribution certificate SHA-256 mismatch")
-        with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as output:
-            output.write(f"uuid={uuid.upper()}\n")
-            output.write(f"name={name}\n")
-            output.write(f"sha256={os.environ['EXPECTED_SHA256']}\n")
-        PY
-        PROFILE_UUID="$(sed -n 's/^uuid=//p' "$GITHUB_OUTPUT" | tail -1)"
-        [[ -n "$PROFILE_UUID" ]] || { echo "Validated profile UUID missing" >&2; exit 1; }
+        echo "${{ inputs.provisioning_profile_base64 }}" | base64 --decode > "$TEMP_FILE"
+
+        PROFILE_UUID=$(grep UUID -A1 -a "$TEMP_FILE" | grep -io "[-A-F0-9]\{36\}")
+        if [[ -z "$PROFILE_UUID" ]]; then
+          echo "Failed to extract UUID from provisioning profile"
+          rm -f "$TEMP_FILE"
+          exit 1
+        fi
+
         mkdir -p "$PROFILES_DIR"
-        install -m 600 "$TEMP_FILE" "$PROFILES_DIR/$PROFILE_UUID.mobileprovision"
-        echo "Installed validated profile: $PROFILE_UUID"
+        mv "$TEMP_FILE" "$PROFILES_DIR/$PROFILE_UUID.mobileprovision"
+        echo "Installed profile: $PROFILE_UUID"

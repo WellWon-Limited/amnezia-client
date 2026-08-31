@@ -132,32 +132,6 @@ PageType {
             else
                 TribeEngine.selectAuto()
         }
-        // AVPN catalog-v2: навигация завершается ДО изменения intent, чтобы callbacks
-        // reducer не обращались к уже уничтоженному delegate списка локаций.
-        function onPickLocation(locationId) {
-            root.goAvpnTab(0)
-            if (typeof TribeConnection !== "undefined"
-                    && !TribeConnection.setLocationMode(locationId))
-                PageController.showNotificationMessage(
-                            catalogErrorTextProvider.failureText(
-                                String(TribeConnection.errorCode || "")))
-        }
-        function onPickLocationAuto() {
-            root.goAvpnTab(0)
-            if (typeof TribeConnection !== "undefined"
-                    && !TribeConnection.setLocationMode("auto"))
-                PageController.showNotificationMessage(
-                            catalogErrorTextProvider.failureText(
-                                String(TribeConnection.errorCode || "")))
-        }
-        function onRequestTransportMode(mode) {
-            root.goAvpnTab(0)
-            if (typeof TribeConnection !== "undefined"
-                    && !TribeConnection.requestConnectionMode(mode))
-                PageController.showNotificationMessage(
-                            catalogErrorTextProvider.failureText(
-                                String(TribeConnection.errorCode || "")))
-        }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN (Доктор v1): любая страница просит попап диагностики (главная/чат)
@@ -800,16 +774,6 @@ PageType {
     TribeDoctorSheet {
         id: doctorSheet
         z: 185   // под объявлениями/transferInResult; поверх вкладок и навигации
-    }
-
-    // Always-alive, invisible presenter for redacted catalog action failures. Picker pages are
-    // replaced before coordinator callbacks by design, so their host owns the notification.
-    TribeConnectionStage {
-        id: catalogErrorTextProvider
-        visible: false
-        stage: "failed"
-        typedReason: (typeof TribeConnection !== "undefined")
-                     ? String(TribeConnection.errorCode || "") : ""
     }
 
     function maybeShowAnnouncement() {
