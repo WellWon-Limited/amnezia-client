@@ -8,6 +8,7 @@
 #include "core/utils/containerEnum.h"
 #include "core/utils/containers/containerUtils.h"
 #include "core/utils/protocolEnum.h"
+#include "core/utils/protocolEnum.h"
 #include "core/protocols/protocolUtils.h"
 #include "core/utils/constants/configKeys.h"
 #include "core/utils/constants/protocolConstants.h"
@@ -28,7 +29,7 @@ ContainerConfig AwgInstaller::generateConfig(DockerContainer container, int port
     ContainerConfig config = createBaseConfig(container, port, transportProto);
     if (auto* awgConfig = config.getAwgProtocolConfig()) {
         generateAwgParameters(awgConfig->serverConfig);
-        awgConfig->serverConfig.protocolVersion = protocols::awg::awgV3_1; // AVPN
+        awgConfig->serverConfig.protocolVersion = protocols::awg::awgV3;
     }
     return config;
 }

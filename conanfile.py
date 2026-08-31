@@ -19,7 +19,7 @@ class AmneziaVPN(ConanFile):
 
         if has_service:
             if os == "Windows":
-                self.requires("awg-windows/3.0.2")
+                self.requires("awg-windows/3.1.20260814")
                 self.requires("tap-windows6/9.27.0")
                 self.requires("win-split-tunnel/1.2.5.0")
                 self.requires("wintun/0.14.1")
@@ -32,8 +32,8 @@ class AmneziaVPN(ConanFile):
             self.requires("v2ray-rules-dat/202603162227")
 
         if has_ne:
-            # AVPN: official parser-fixed v3.1.4 plus a local, immutable Tribe
-            # dnsfwd/warmup/rebind patch packaged by recipes/awg-apple.
+            # Official parser-fixed 3.1.4 plus the existing Tribe
+            # dnsfwd/warmup/rebind patch set.
             self.requires("awg-apple/3.1.4-tribe.3")
             self.requires("hev-socks5-tunnel/2.15.0", options={"as_framework": True})
             self.requires("openvpnadapter/1.0.0")

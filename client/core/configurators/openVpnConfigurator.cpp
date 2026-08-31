@@ -28,17 +28,6 @@
 
 using namespace amnezia;
 
-namespace {
-
-void removeBlockOutsideDnsLines(QString &config)
-{
-    static const QRegularExpression line(QStringLiteral(
-            R"((?m)^[\t ]*(?:(?:ignore-unknown-option|setenv[\t ]+opt)[\t ]+)?block-outside-dns[\t ]*(?:[#;].*)?\r?(?:\n|$))"));
-    config.remove(line);
-}
-
-} // namespace
-
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
@@ -141,7 +130,7 @@ ProtocolConfig OpenVpnConfigurator::createConfig(const ServerCredentials &creden
     }
 
 #ifndef MZ_WINDOWS
-    removeBlockOutsideDnsLines(config);
+    config.replace("block-outside-dns", "");
 #endif
 
     OpenVpnProtocolConfig protocolConfig;
@@ -189,10 +178,10 @@ ProtocolConfig OpenVpnConfigurator::processConfigWithLocalSettings(const Connect
     }
 
 #ifndef MZ_WINDOWS
-    removeBlockOutsideDnsLines(config);
+    config.replace("block-outside-dns", "");
 #endif
 
-#if defined(MZ_LINUX)
+#if (defined(MZ_MACOS) || defined(MZ_LINUX))
     config.append(QString("\nscript-security 2\n"
                          "up %1/update-resolv-conf.sh\n"
                          "down %1/update-resolv-conf.sh\n")
@@ -220,9 +209,7 @@ ProtocolConfig OpenVpnConfigurator::processConfigWithExportSettings(const Export
 
     config.append("\nredirect-gateway def1 ipv6 bypass-dhcp\n");
     config.append("block-ipv6\n");
-#ifndef MZ_WINDOWS
-    removeBlockOutsideDnsLines(config);
-#endif
+    config.replace("block-outside-dns", "");
 
     protocolConfig.setNativeConfig(config);
     return protocolConfig;

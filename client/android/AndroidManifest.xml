@@ -18,16 +18,6 @@
     of the application. Remove the comment if you do not require these default features. -->
     <!-- %%INSERT_FEATURES -->
 
-    <!-- Minimal package visibility for TvFilePicker's SAF capability check. This exposes only
-         activities handling OPEN_DOCUMENT; it must never be widened to QUERY_ALL_PACKAGES. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.OPEN_DOCUMENT" />
-            <category android:name="android.intent.category.OPENABLE" />
-            <data android:mimeType="*/*" />
-        </intent>
-    </queries>
-
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- To request network state -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
@@ -197,8 +187,8 @@
         </activity>
 
         <service
-            android:name=".TribeVpnService"
-            android:process=":tribeVpnService"
+            android:name=".AwgService"
+            android:process=":amneziaAwgService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="systemExempted"
             android:exported="false"
@@ -212,6 +202,19 @@
         <service
             android:name=".OpenVpnService"
             android:process=":amneziaOpenVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="systemExempted"
+            android:exported="false"
+            tools:ignore="ForegroundServicePermission">
+
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".XrayService"
+            android:process=":amneziaXrayService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="systemExempted"
             android:exported="false"

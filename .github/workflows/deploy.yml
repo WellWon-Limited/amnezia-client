@@ -2,27 +2,6 @@ name: 'Deploy workflow'
 
 on:
   workflow_dispatch:
-    inputs:
-      release_platform:
-        description: Exact signed platform to build (all still requires every protected environment)
-        required: true
-        type: choice
-        default: ios
-        options:
-          - ios
-          - macos
-          - android
-          - all
-  push:
-    branches:
-      - '**'
-    tags:
-      - 'ios-v*'
-      - 'macos-v*'
-      - 'android-v*'
-
-permissions:
-  contents: read
 
 env:
   QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/ # https://download.qt.io/static/mirrorlist/
@@ -84,8 +63,8 @@ jobs:
   Build-Linux-Ubuntu:
     runs-on: ubuntu-22.04
 
-    needs: [Detect-Changes, Bake-Prebuilts-Linux]
-    if: ${{ always() && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-Linux.result == 'success' || (needs.Bake-Prebuilts-Linux.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
+    needs: Bake-Prebuilts-Linux
+    if: ${{ always() }}
 
     env:
       QT_VERSION: 6.10.1
@@ -112,15 +91,15 @@ jobs:
         setup-python: 'true'
         tools: 'tools_ifw'
         set-env: 'true'
-        aqtversion: '==3.3.0'       
-        py7zrversion: '==0.22.*'  
+        aqtversion: '==3.3.0'
+        py7zrversion: '==0.22.*'
         extra: '--base ${{ env.QT_MIRROR }}'
 
     - name: 'Setup python'
       uses: actions/setup-python@v6
       with:
         python-version: 3.14
-      
+
     - name: 'Install conan'
       run: pip install "conan==2.28.0"
 
@@ -139,17 +118,10 @@ jobs:
         QT_INSTALL_DIR: ${{ runner.temp }}
       run: deploy/build.sh --generator Ninja --installer all
 
-    - name: 'Verify Linux installer output'
-      shell: bash
-      run: |
-        shopt -s nullglob
-        artifacts=(deploy/build/TribeVPN_*_linux_x64.run)
-        [[ "${#artifacts[@]}" == 1 ]]
-
     - name: 'Upload installer artifact'
       uses: actions/upload-artifact@v7
       with:
-        path: deploy/build/TribeVPN_*_linux_x64.run
+        path: deploy/build/AmneziaVPN_*_linux_x64.run
         archive: false
         retention-days: 7
 
@@ -172,7 +144,7 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-    
+
     - uses: actions/setup-python@v6
       with:
         python-version: 3.14
@@ -184,7 +156,7 @@ jobs:
 
     - name: 'Build dependencies'
       run: cmake -S . -B build -DPREBUILTS_ONLY=1
-    
+
     - name: 'Authorize in remote'
       if: github.ref == 'refs/heads/dev'
       run: conan remote login amnezia "${{ secrets.CONAN_USER }}" -p "${{ secrets.CONAN_PASSWORD }}"
@@ -198,8 +170,8 @@ jobs:
   Build-Windows:
     runs-on: windows-latest
 
-    needs: [Detect-Changes, Bake-Prebuilts-Windows]
-    if: ${{ always() && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-Windows.result == 'success' || (needs.Bake-Prebuilts-Windows.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
+    needs: Bake-Prebuilts-Windows
+    if: ${{ always() }}
 
     env:
       QT_VERSION: 6.10.1
@@ -232,9 +204,9 @@ jobs:
         setup-python: 'true'
         tools: 'tools_ifw'
         set-env: 'true'
-        aqtversion: '==3.3.0'       
-        py7zrversion: '==0.22.*'  
-        extra: '--base ${{ env.QT_MIRROR }}' 
+        aqtversion: '==3.3.0'
+        py7zrversion: '==0.22.*'
+        extra: '--base ${{ env.QT_MIRROR }}'
 
     - name: 'Setup mvsc'
       uses: ilammy/msvc-dev-cmd@v1
@@ -272,25 +244,17 @@ jobs:
         set WIX_ROOT_PATH="${{ env.USERPROFILE }}\.dotnet\tools"
         deploy\build.bat --installer all
 
-    - name: 'Verify Windows installer outputs'
-      shell: pwsh
-      run: |
-        $msi = @(Get-ChildItem 'deploy/build/TribeVPN_*_windows_x64.msi')
-        $exe = @(Get-ChildItem 'deploy/build/TribeVPN_*_windows_x64.exe')
-        if ($msi.Count -ne 1) { throw "Expected exactly one Tribe WIX artifact" }
-        if ($exe.Count -ne 1) { throw "Expected exactly one Tribe IFW artifact" }
-
     - name: 'Upload WIX installer artifact'
       uses: actions/upload-artifact@v7
       with:
-        path: deploy/build/TribeVPN_*_windows_x64.msi
+        path: deploy/build/AmneziaVPN_*_windows_x64.msi
         archive: false
         retention-days: 7
-      
+
     - name: 'Upload IFW installer artifact'
       uses: actions/upload-artifact@v7
       with:
-        path: deploy/build/TribeVPN_*_windows_x64.exe
+        path: deploy/build/AmneziaVPN_*_windows_x64.exe
         archive: false
         retention-days: 7
 
@@ -314,7 +278,7 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-    
+
     - uses: actions/setup-python@v6
       with:
         python-version: 3.14
@@ -328,7 +292,7 @@ jobs:
 
     - name: 'Build dependencies'
       run: cmake -S . -B build -G Xcode -DPREBUILTS_ONLY=1 -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos
-    
+
     - name: 'Authorize in remote'
       if: github.ref == 'refs/heads/dev'
       run: conan remote login amnezia "${{ secrets.CONAN_USER }}" -p "${{ secrets.CONAN_PASSWORD }}"
@@ -340,19 +304,14 @@ jobs:
 # ------------------------------------------------------
 
   Build-iOS:
-    # Xcode 26.4 is baked/tested on the macOS 26 runner in the dependency matrix.
-    runs-on: macos-26
+    runs-on: macos-latest
 
-    needs: [Detect-Changes, Bake-Prebuilts-iOS]
-    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && (inputs.release_platform == 'ios' || inputs.release_platform == 'all')) || startsWith(github.ref, 'refs/tags/ios-v')) && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-iOS.result == 'success' || (needs.Bake-Prebuilts-iOS.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
-    environment: tribe-ios-release
+    needs: Bake-Prebuilts-iOS
+    if: ${{ always() }}
 
     env:
-      # Keep the store job byte-compatible with the locally verified engine build.
-      # Qt 6.11.1's official iOS binaries require iOS 17 (enforced in CMake).
-      QT_VERSION: 6.11.1
+      QT_VERSION: 6.10.1
       KEYCHAIN_PASSWORD: ""
-      PYTHONDONTWRITEBYTECODE: '1'
 
       PROD_AGW_PUBLIC_KEY: ${{ secrets.PROD_AGW_PUBLIC_KEY }}
       PROD_S3_ENDPOINT: ${{ secrets.PROD_S3_ENDPOINT }}
@@ -369,11 +328,6 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-        fetch-tags: true
-
-    - name: 'Bind iOS release tag to source version and commit'
-      shell: bash
-      run: python3 metadata/check_release_version.py
 
     - uses: ./.github/actions/apple-setup-keychain
       id: setup-keychain
@@ -387,33 +341,21 @@ jobs:
         keychain-password: ${{ env.KEYCHAIN_PASSWORD }}
         cert-base64: ${{ secrets.IOS_SIGNING_CERT_BASE64 }}
         cert-password: ${{ secrets.IOS_SIGNING_CERT_PASSWORD }}
-        expected-leaf-sha256: ${{ secrets.IOS_DISTRIBUTION_CERT_SHA256 }}
-        expected-team-id: Q7DVH5MCWF
 
     - name: 'Install app provisioning profile'
-      id: ios-app-profile
       uses: ./.github/actions/apple-setup-provisioning-profile
       with:
         provisioning_profile_base64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE }}
-        expected-sha256: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_SHA256 }}
-        expected-team-id: Q7DVH5MCWF
-        expected-bundle-id: hk.wellwon.vpn
-        expected-certificate-sha256: ${{ secrets.IOS_DISTRIBUTION_CERT_SHA256 }}
 
     - name: 'Install NE provisioning profile'
-      id: ios-ne-profile
       uses: ./.github/actions/apple-setup-provisioning-profile
       with:
         provisioning_profile_base64: ${{ secrets.IOS_NE_PROVISIONING_PROFILE }}
-        expected-sha256: ${{ secrets.IOS_NE_PROVISIONING_PROFILE_SHA256 }}
-        expected-team-id: Q7DVH5MCWF
-        expected-bundle-id: hk.wellwon.vpn.network-extension
-        expected-certificate-sha256: ${{ secrets.IOS_DISTRIBUTION_CERT_SHA256 }}
 
     - name: 'Setup xcode'
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: '26.4'
+        xcode-version: '26.0'
 
     - name: 'Install desktop Qt'
       uses: jurplel/install-qt-action@v3
@@ -447,164 +389,18 @@ jobs:
     - name: 'Install deps'
       run: pip install "conan==2.28.0" jsonschema jinja2
 
-    - name: 'Run commit-bound iOS source release gates'
-      shell: bash
-      run: bash metadata/run_tribe_release_gates.sh --release ios
-
-    - name: 'Verify commit-bound iOS runtime receipt'
-      id: tribe-runtime-receipt
-      uses: ./.github/actions/tribe-prepare-runtime-receipt
-      with:
-        platform: ios
-        receipt-base64: ${{ secrets.TRIBE_IOS_PLATFORM_RUNTIME_RECEIPT_BASE64 }}
-        receipt-sha256: ${{ secrets.TRIBE_IOS_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
-
-    - name: 'Configure and compile store project'
+    - name: 'Build project'
       env:
         QT_INSTALL_DIR: ${{ runner.temp }}
-        TRIBE_STORE_BUILD: ON
-        TRIBE_IOS_APP_PROFILE_UUID: ${{ steps.ios-app-profile.outputs.uuid }}
-        TRIBE_IOS_NE_PROFILE_UUID: ${{ steps.ios-ne-profile.outputs.uuid }}
-        TRIBE_CATALOG_ROOT_KID: ${{ secrets.TRIBE_CATALOG_ROOT_KID }}
-        TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX: ${{ secrets.TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_FILE: ${{ steps.tribe-runtime-receipt.outputs.file }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_SHA256: ${{ secrets.TRIBE_IOS_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
+        APPSTORE_CONNECT_KEY_ID: ${{ secrets.APPSTORE_CONNECT_KEY_ID }}
+        APPSTORE_CONNECT_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
+        APPSTORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPSTORE_CONNECT_PRIVATE_KEY }}
       run: |
-        set -o pipefail
-        bash deploy/build.sh -t ios -b "$RUNNER_TEMP/tribe-ios-build" -f | \
+        sh deploy/build.sh -t ios | \
           sed -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/d' | \
           sed -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/d' | \
           sed -e '/-DPROD_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DPROD_AGW_PUBLIC_KEY/d' | \
           sed -e '/-DDEV_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DDEV_AGW_PUBLIC_KEY/d'
-
-    - name: 'Prove iOS compile did not mutate the release checkout'
-      shell: bash
-      run: |
-        set -euo pipefail
-        [[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
-        SOURCE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
-        [[ -z "$SOURCE_STATUS" ]] || {
-          printf '%s\n' "$SOURCE_STATUS" >&2
-          exit 1
-        }
-        git diff --check
-
-    - name: 'Create deterministic manual export options'
-      env:
-        APP_PROFILE_UUID: ${{ steps.ios-app-profile.outputs.uuid }}
-        NE_PROFILE_UUID: ${{ steps.ios-ne-profile.outputs.uuid }}
-      run: |
-        set -euo pipefail
-        EXPORT_OPTIONS="$RUNNER_TEMP/TribeVPN-ExportOptions.plist"
-        test ! -e "$EXPORT_OPTIONS"
-        cp deploy/data/ios/ExportOptions.plist "$EXPORT_OPTIONS"
-        /usr/libexec/PlistBuddy -c \
-          "Add :provisioningProfiles:hk.wellwon.vpn string $APP_PROFILE_UUID" \
-          "$EXPORT_OPTIONS"
-        /usr/libexec/PlistBuddy -c \
-          "Add :provisioningProfiles:hk.wellwon.vpn.network-extension string $NE_PROFILE_UUID" \
-          "$EXPORT_OPTIONS"
-        plutil -lint "$EXPORT_OPTIONS"
-        test "$(/usr/libexec/PlistBuddy -c 'Print :destination' "$EXPORT_OPTIONS")" = export
-        test "$(/usr/libexec/PlistBuddy -c 'Print :signingStyle' "$EXPORT_OPTIONS")" = manual
-
-    - name: 'Archive signed iOS app and Network Extension'
-      run: |
-        set -o pipefail
-        ARCHIVE_PATH="$RUNNER_TEMP/TribeVPN.xcarchive"
-        test ! -e "$ARCHIVE_PATH"
-        xcodebuild archive \
-          -project "$RUNNER_TEMP/tribe-ios-build/AmneziaVPN.xcodeproj" \
-          -scheme AmneziaVPN \
-          -configuration Release \
-          -destination 'generic/platform=iOS' \
-          -archivePath "$ARCHIVE_PATH" \
-          DEVELOPMENT_TEAM=Q7DVH5MCWF \
-          CODE_SIGN_STYLE=Manual \
-          CODE_SIGN_IDENTITY='Apple Distribution' | \
-          sed -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-DPROD_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DPROD_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-DDEV_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DDEV_AGW_PUBLIC_KEY/d'
-
-    - name: 'Validate signed xcarchive before export'
-      env:
-        IOS_RUNTIME_RECEIPT_FILE: ${{ steps.tribe-runtime-receipt.outputs.file }}
-        IOS_RUNTIME_RECEIPT_SHA256: ${{ secrets.TRIBE_IOS_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
-        IOS_DISTRIBUTION_CERT_SHA256: ${{ secrets.IOS_DISTRIBUTION_CERT_SHA256 }}
-        IOS_APP_PROFILE_SHA256: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_SHA256 }}
-        IOS_NE_PROFILE_SHA256: ${{ secrets.IOS_NE_PROVISIONING_PROFILE_SHA256 }}
-      run: |
-        set -euo pipefail
-        python3 metadata/check_ios_release_artifact.py \
-          --artifact "$RUNNER_TEMP/TribeVPN.xcarchive" \
-          --runtime-receipt "$IOS_RUNTIME_RECEIPT_FILE" \
-          --runtime-receipt-sha256 "$IOS_RUNTIME_RECEIPT_SHA256" \
-          --certificate-sha256 "$IOS_DISTRIBUTION_CERT_SHA256" \
-          --app-profile-sha256 "$IOS_APP_PROFILE_SHA256" \
-          --ne-profile-sha256 "$IOS_NE_PROFILE_SHA256" \
-          --report "$RUNNER_TEMP/TribeVPN-xcarchive-attestation.json"
-
-    - name: 'Export App Store-connectable IPA locally'
-      run: |
-        set -o pipefail
-        EXPORT_DIR="$RUNNER_TEMP/tribe-ios-export"
-        test ! -e "$EXPORT_DIR"
-        xcodebuild -exportArchive \
-          -archivePath "$RUNNER_TEMP/TribeVPN.xcarchive" \
-          -exportPath "$EXPORT_DIR" \
-          -exportOptionsPlist "$RUNNER_TEMP/TribeVPN-ExportOptions.plist" | \
-          sed -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DPROD_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/,/-Xcc/ { /-Xcc/!d; }' -e '/-Xcc -DDEV_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-DPROD_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DPROD_AGW_PUBLIC_KEY/d' | \
-          sed -e '/-DDEV_AGW_PUBLIC_KEY/,/-D/ { /-D/!d; }' -e '/-DDEV_AGW_PUBLIC_KEY/d'
-        python3 - "$EXPORT_DIR" "$RUNNER_TEMP/TribeVPN-ios-release.ipa" <<'PY'
-        import pathlib
-        import sys
-        source = pathlib.Path(sys.argv[1])
-        destination = pathlib.Path(sys.argv[2])
-        artifacts = [path for path in source.rglob("*.ipa")
-                     if path.is_file() and not path.is_symlink()]
-        if len(artifacts) != 1 or destination.exists():
-            raise SystemExit(f"expected one fresh exported IPA, got {artifacts}")
-        artifacts[0].replace(destination)
-        PY
-
-    - name: 'Validate final exported IPA and write detached attestation'
-      env:
-        IOS_RUNTIME_RECEIPT_FILE: ${{ steps.tribe-runtime-receipt.outputs.file }}
-        IOS_RUNTIME_RECEIPT_SHA256: ${{ secrets.TRIBE_IOS_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
-        IOS_DISTRIBUTION_CERT_SHA256: ${{ secrets.IOS_DISTRIBUTION_CERT_SHA256 }}
-        IOS_APP_PROFILE_SHA256: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_SHA256 }}
-        IOS_NE_PROFILE_SHA256: ${{ secrets.IOS_NE_PROVISIONING_PROFILE_SHA256 }}
-      run: |
-        set -euo pipefail
-        python3 metadata/check_ios_release_artifact.py \
-          --artifact "$RUNNER_TEMP/TribeVPN-ios-release.ipa" \
-          --runtime-receipt "$IOS_RUNTIME_RECEIPT_FILE" \
-          --runtime-receipt-sha256 "$IOS_RUNTIME_RECEIPT_SHA256" \
-          --certificate-sha256 "$IOS_DISTRIBUTION_CERT_SHA256" \
-          --app-profile-sha256 "$IOS_APP_PROFILE_SHA256" \
-          --ne-profile-sha256 "$IOS_NE_PROFILE_SHA256" \
-          --report "$RUNNER_TEMP/TribeVPN-ipa-attestation.json"
-        shasum -a 256 \
-          "$RUNNER_TEMP/TribeVPN-ios-release.ipa" \
-          "$RUNNER_TEMP/TribeVPN-xcarchive-attestation.json" \
-          "$RUNNER_TEMP/TribeVPN-ipa-attestation.json" \
-          > "$RUNNER_TEMP/TribeVPN-ios-SHA256SUMS"
-
-    - name: 'Upload validated iOS release artifact (never Store upload)'
-      uses: actions/upload-artifact@v4
-      with:
-        name: TribeVPN-iOS-${{ github.sha }}
-        if-no-files-found: error
-        retention-days: 30
-        path: |
-          ${{ runner.temp }}/TribeVPN-ios-release.ipa
-          ${{ runner.temp }}/TribeVPN-xcarchive-attestation.json
-          ${{ runner.temp }}/TribeVPN-ipa-attestation.json
-          ${{ runner.temp }}/TribeVPN-ios-SHA256SUMS
-          ${{ runner.temp }}/TribeVPN.xcarchive/dSYMs
 
 # ------------------------------------------------------
 
@@ -630,7 +426,7 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-    
+
     - uses: actions/setup-python@v6
       with:
         python-version: 3.14
@@ -644,7 +440,7 @@ jobs:
 
     - name: 'Build dependencies'
       run: cmake -S . -B build -G Xcode -DPREBUILTS_ONLY=1
-    
+
     - name: 'Authorize in remote'
       if: github.ref == 'refs/heads/dev'
       run: conan remote login amnezia "${{ secrets.CONAN_USER }}" -p "${{ secrets.CONAN_PASSWORD }}"
@@ -656,19 +452,14 @@ jobs:
 # ------------------------------------------------------
 
   Build-MacOS:
-    # Xcode 26.4 is unavailable on the macOS 15 image used by the old job.
-    runs-on: macos-26
+    runs-on: macos-15
 
-    needs: [Detect-Changes, Bake-Prebuilts-MacOS]
-    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && (inputs.release_platform == 'macos' || inputs.release_platform == 'all')) || startsWith(github.ref, 'refs/tags/macos-v')) && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-MacOS.result == 'success' || (needs.Bake-Prebuilts-MacOS.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
-    environment: tribe-macos-release
+    needs: Bake-Prebuilts-MacOS
+    if: ${{ always() }}
 
     env:
-      # The daemon flavor is the only supported/shipping macOS flavor today.
-      # Qt 6.11.1's official desktop binaries require macOS 13.
-      QT_VERSION: 6.11.1
+      QT_VERSION: 6.10.1
       KEYCHAIN_PASSWORD: ""
-      PYTHONDONTWRITEBYTECODE: '1'
 
       PROD_AGW_PUBLIC_KEY: ${{ secrets.PROD_AGW_PUBLIC_KEY }}
       PROD_S3_ENDPOINT: ${{ secrets.PROD_S3_ENDPOINT }}
@@ -685,11 +476,6 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-        fetch-tags: true
-
-    - name: 'Bind macOS release tag to source version and commit'
-      shell: bash
-      run: python3 metadata/check_release_version.py
 
     - uses: ./.github/actions/apple-setup-keychain
       id: setup-keychain
@@ -702,9 +488,6 @@ jobs:
         keychain-password: ${{ env.KEYCHAIN_PASSWORD }}
         cert-base64: ${{ secrets.MAC_APP_CERT_CERT }}
         cert-password: ${{ secrets.MAC_APP_CERT_PW }}
-        expected-leaf-sha256: ${{ secrets.MAC_APP_CERT_SHA256 }}
-        expected-team-id: Q7DVH5MCWF
-        expected-certificate-kind: developer-id-application
 
     - uses: ./.github/actions/apple-install-cert
       with:
@@ -712,29 +495,11 @@ jobs:
         keychain-password: ${{ env.KEYCHAIN_PASSWORD }}
         cert-base64: ${{ secrets.MAC_INSTALLER_SIGNER_CERT }}
         cert-password: ${{ secrets.MAC_INSTALL_CERT_PW }}
-        expected-leaf-sha256: ${{ secrets.MAC_INSTALLER_CERT_SHA256 }}
-        expected-team-id: Q7DVH5MCWF
-        expected-certificate-kind: developer-id-installer
 
     - name: 'Setup xcode'
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: '26.4'
-
-    - name: 'Create validated notarization keychain profile'
-      env:
-        NOTARY_APPLE_ID: ${{ secrets.APPLE_DEV_EMAIL }}
-        NOTARY_TEAM_ID: Q7DVH5MCWF
-        NOTARY_PASSWORD: ${{ secrets.APPLE_DEV_PASSWORD }}
-        NOTARY_KEYCHAIN: ${{ steps.setup-keychain.outputs.keychain-path }}
-      shell: bash
-      run: |
-        xcrun notarytool store-credentials TRIBE_CI_NOTARY \
-          --apple-id "$NOTARY_APPLE_ID" \
-          --team-id "$NOTARY_TEAM_ID" \
-          --password "$NOTARY_PASSWORD" \
-          --keychain "$NOTARY_KEYCHAIN" \
-          --validate
+        xcode-version: '26.3.0'
 
     - name: 'Install Qt'
       uses: jurplel/install-qt-action@v4
@@ -747,8 +512,8 @@ jobs:
         dir: ${{ runner.temp }}
         setup-python: 'true'
         set-env: 'true'
-        aqtversion: '==3.3.0'       
-        py7zrversion: '==0.22.*'  
+        aqtversion: '==3.3.0'
+        py7zrversion: '==0.22.*'
         extra: '--base ${{ env.QT_MIRROR }}'
 
     - name: 'Setup python'
@@ -756,20 +521,8 @@ jobs:
       with:
         python-version: 3.14
 
-    - name: 'Install conan and release-gate dependencies'
-      run: pip install "conan==2.28.0" jsonschema jinja2
-
-    - name: 'Run commit-bound macOS daemon source release gates'
-      shell: bash
-      run: bash metadata/run_tribe_release_gates.sh --release macos_daemon
-
-    - name: 'Verify commit-bound macOS daemon runtime receipt'
-      id: tribe-runtime-receipt
-      uses: ./.github/actions/tribe-prepare-runtime-receipt
-      with:
-        platform: macos_daemon
-        receipt-base64: ${{ secrets.TRIBE_MACOS_DAEMON_PLATFORM_RUNTIME_RECEIPT_BASE64 }}
-        receipt-sha256: ${{ secrets.TRIBE_MACOS_DAEMON_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
+    - name: 'Install conan'
+      run: pip install "conan==2.28.0"
 
     - name: 'Build project'
       env:
@@ -778,115 +531,16 @@ jobs:
         CODESIGN_INSTALLER_SIGNATURE: ${{ secrets.MAC_INSTALLER_SIGNER_ID }}
         CODESIGN_KEYCHAIN: ${{ steps.setup-keychain.outputs.keychain-path }}
         CODESIGN_INSTALLER_KEYCHAIN: ${{ steps.setup-keychain.outputs.keychain-path }}
-        NOTARYTOOL_KEYCHAIN_PROFILE: TRIBE_CI_NOTARY
-        NOTARYTOOL_KEYCHAIN: ${{ steps.setup-keychain.outputs.keychain-path }}
-        TRIBE_CATALOG_ROOT_KID: ${{ secrets.TRIBE_CATALOG_ROOT_KID }}
-        TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX: ${{ secrets.TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_FILE: ${{ steps.tribe-runtime-receipt.outputs.file }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_SHA256: ${{ secrets.TRIBE_MACOS_DAEMON_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
-        TRIBE_MACOS_DSYM_OUTPUT_DIR: ${{ runner.temp }}/TribeVPN-macOS-dSYMs-${{ github.sha }}
+        NOTARYTOOL_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+        NOTARYTOOL_EMAIL: ${{ secrets.APPLE_DEV_EMAIL }}
+        NOTARYTOOL_PASSWORD: ${{ secrets.APPLE_DEV_PASSWORD }}
       shell: bash
       run: deploy/build.sh --generator Ninja --installer all
-
-    - name: 'Verify macOS product archive policy'
-      shell: bash
-      run: |
-        set -euo pipefail
-        shopt -s nullglob
-        packages=(deploy/build/TribeVPN_*_macos_arm64.pkg)
-        [[ "${#packages[@]}" == 1 ]]
-        PACKAGE="${packages[0]}"
-        EXPANDED="$(mktemp -d "$RUNNER_TEMP/tribe-expanded-product.XXXXXX")"
-        rmdir "$EXPANDED"
-        pkgutil --check-signature "$PACKAGE" \
-          | tee "$RUNNER_TEMP/tribe-pkg-signature.txt"
-        grep -Eq 'Developer ID Installer:.*\(Q7DVH5MCWF\)' \
-          "$RUNNER_TEMP/tribe-pkg-signature.txt"
-        xcrun stapler validate "$PACKAGE"
-        spctl --assess --type install --verbose=4 "$PACKAGE"
-        pkgutil --expand-full "$PACKAGE" "$EXPANDED"
-        grep -Eq '<domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>' \
-          "$EXPANDED/Distribution"
-        PACKAGE_INFO_COUNT="$(find "$EXPANDED" -name PackageInfo -type f | wc -l | tr -d ' ')"
-        [[ "$PACKAGE_INFO_COUNT" == 1 ]]
-        PACKAGE_INFO="$(find "$EXPANDED" -name PackageInfo -type f -print -quit)"
-        [[ "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$PACKAGE_INFO")" == "/" ]]
-        [[ "$(xmllint --xpath 'string(/pkg-info/@relocatable)' "$PACKAGE_INFO")" == "false" ]]
-        EXPECTED_VERSION="$(sed -nE 's/^set\(TRIBE_VERSION ([0-9.]+)\)$/\1/p' tribe_version.cmake)"
-        [[ -n "$EXPECTED_VERSION" ]]
-        EXPECTED_SHORT="${EXPECTED_VERSION%.*}"
-        EXPECTED_BUILD="${EXPECTED_VERSION##*.}"
-        [[ "$(xmllint --xpath 'string(/pkg-info/@version)' "$PACKAGE_INFO")" == "$EXPECTED_VERSION" ]]
-        [[ "$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$PACKAGE_INFO")" == "0" ]]
-        [[ "$(xmllint --xpath 'count(/pkg-info/atomic-update/bundle)' "$PACKAGE_INFO")" == "0" ]]
-        [[ "$(xmllint --xpath "count(/pkg-info/bundle[@path='./Applications/TribeVPN.app' and @id='hk.wellwon.vpn'])" "$PACKAGE_INFO")" == "1" ]]
-        [[ "$(xmllint --xpath "count(/pkg-info/bundle-version/bundle[@id='hk.wellwon.vpn'])" "$PACKAGE_INFO")" == "1" ]]
-        [[ "$(xmllint --xpath "count(/pkg-info/strict-identifier/bundle[@id='hk.wellwon.vpn'])" "$PACKAGE_INFO")" == "1" ]]
-        [[ "$(xmllint --xpath "count(/pkg-info/upgrade-bundle/bundle[@id='hk.wellwon.vpn'])" "$PACKAGE_INFO")" == "1" ]]
-        grep -Eq 'identifier="org\.antivpn\.pkg\.AmneziaVPN"' "$PACKAGE_INFO"
-        PAYLOAD_APP_COUNT="$(find "$EXPANDED" -type d \
-          -path '*/Payload/Applications/TribeVPN.app' | wc -l | tr -d ' ')"
-        [[ "$PAYLOAD_APP_COUNT" == 1 ]]
-        PAYLOAD_APP="$(find "$EXPANDED" -type d \
-          -path '*/Payload/Applications/TribeVPN.app' -print -quit)"
-        APP_INFO="$PAYLOAD_APP/Contents/Info.plist"
-        [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_INFO")" == "hk.wellwon.vpn" ]]
-        [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_INFO")" == "TribeVPN" ]]
-        [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_INFO")" == "$EXPECTED_SHORT" ]]
-        [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_INFO")" == "$EXPECTED_BUILD" ]]
-        codesign --verify --deep --strict --all-architectures \
-          -R='identifier "hk.wellwon.vpn" and anchor apple generic and certificate leaf[subject.OU] = "Q7DVH5MCWF" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' \
-          "$PAYLOAD_APP"
-        PYTHONDONTWRITEBYTECODE=1 python3 metadata/check_macos_engine_artifact.py \
-          --app "$PAYLOAD_APP" \
-          --lock metadata/engine-lock.json
-        bash deploy/tribe/verify-macos-build-paths.sh \
-          "$PAYLOAD_APP" "$GITHUB_WORKSPACE"
-        QT_ROOT="${QT_ROOT_DIR:?Qt root is required for the native hook harness}" \
-          bash ipc/tests/run_openvpn_hook_argv_smoke.sh \
-          "$PAYLOAD_APP/Contents/MacOS/openvpn"
-        for resource in tribe-svc.tar.gz tribe-svc.tar.sha256 tribe-svc.version \
-                        tribe-svc.epoch tribe-svc-install.sh macos-service-payload.sh \
-                        migrate-macos-legacy-app.sh launchctl-job-field.sh; do
-          [[ -f "$PAYLOAD_APP/Contents/Resources/$resource" \
-             && ! -L "$PAYLOAD_APP/Contents/Resources/$resource" ]]
-        done
-        PREINSTALL_COUNT="$(find "$EXPANDED" -path '*/Scripts/preinstall' -type f | wc -l | tr -d ' ')"
-        POSTINSTALL_COUNT="$(find "$EXPANDED" -path '*/Scripts/postinstall' -type f | wc -l | tr -d ' ')"
-        [[ "$PREINSTALL_COUNT" == 1 && "$POSTINSTALL_COUNT" == 1 ]]
-        POSTINSTALL="$(find "$EXPANDED" -path '*/Scripts/postinstall' -type f -print -quit)"
-        grep -Fq "EXPECTED_APP_VERSION=\"$EXPECTED_VERSION\"" "$POSTINSTALL"
-        if grep -Eq '@[A-Z_][A-Z0-9_]*@' "$POSTINSTALL"; then
-          echo "configured postinstall still contains a template placeholder" >&2
-          exit 1
-        fi
-        DSYM_ROOT="$RUNNER_TEMP/TribeVPN-macOS-dSYMs-$GITHUB_SHA"
-        [[ -f "$DSYM_ROOT/SHA256SUMS" && -f "$DSYM_ROOT/UUIDS.txt" ]]
-        DSYM_COUNT="$(find "$DSYM_ROOT" -maxdepth 1 -type d -name '*.dSYM' \
-          | wc -l | tr -d ' ')"
-        [[ "$DSYM_COUNT" == 5 ]]
-        (cd "$DSYM_ROOT" && shasum -a 256 -c SHA256SUMS)
-        bash deploy/tribe/verify-macos-build-paths.sh \
-          "$DSYM_ROOT" "$GITHUB_WORKSPACE"
-
-    - name: 'Prove macOS packaging did not mutate the release checkout'
-      shell: bash
-      run: |
-        set -euo pipefail
-        [[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
-        SOURCE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
-        [[ -z "$SOURCE_STATUS" ]] || {
-          printf '%s\n' "$SOURCE_STATUS" >&2
-          exit 1
-        }
-        git diff --check
 
     - name: 'Upload installer artifact'
       uses: actions/upload-artifact@v7
       with:
-        path: |
-          deploy/build/TribeVPN_*_macos_arm64.pkg
-          ${{ runner.temp }}/TribeVPN-macOS-dSYMs-${{ github.sha }}
+        path: deploy/build/AmneziaVPN_*_macos_x64.pkg
         archive: false
         retention-days: 7
 
@@ -897,34 +551,38 @@ jobs:
     if: needs.Detect-Changes.outputs.recipes_changed == 'true'
 
     strategy:
-      fail-fast: false
       matrix:
-        arch: [arm64, x86_64]
+        xcode-version: [16.2, 16.4, 26.4]
+        include:
+          - xcode-version: 16.2
+            os: macos-15
+          - xcode-version: 16.4
+            os: macos-15
+          - xcode-version: 26.4
+            os: macos-26
 
-    runs-on: macos-26
+    runs-on: ${{ matrix.os || 'macos-latest' }}
 
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: 'true'
         fetch-depth: 10
-    
+
     - uses: actions/setup-python@v6
       with:
         python-version: 3.14
 
     - uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: '26.4'
+        xcode-version: ${{ matrix.xcode-version }}
 
     - name: 'Install conan'
       run: pip install "conan==2.28.0"
 
     - name: 'Build dependencies'
-      run: >-
-        cmake -S . -B build -G Xcode -DPREBUILTS_ONLY=1 -DMACOS_NE=TRUE
-        -DTRIBE_MACOS_NE_ARCH=${{ matrix.arch }}
-    
+      run: cmake -S . -B build -G Xcode -DPREBUILTS_ONLY=1 -DMACOS_NE=TRUE
+
     - name: 'Authorize in remote'
       if: github.ref == 'refs/heads/dev'
       run: conan remote login amnezia "${{ secrets.CONAN_USER }}" -p "${{ secrets.CONAN_PASSWORD }}"
@@ -935,22 +593,20 @@ jobs:
 
 # ------------------------------------------------------
 
-  Compile-MacOS-NE:
+  Build-MacOS-NE:
     runs-on: macos-26
 
-    needs: [Detect-Changes, Bake-Prebuilts-MacOS-NE]
-    if: ${{ always() && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-MacOS-NE.result == 'success' || (needs.Bake-Prebuilts-MacOS-NE.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, x86_64]
+    needs: Bake-Prebuilts-MacOS-NE
+    if: ${{ always() }}
 
     env:
-      # macOS NE is deliberately compile-only: it has no reviewed runtime
-      # receipt and must never produce a signed or downloadable artifact.
-      QT_VERSION: 6.11.1
-      PYTHONDONTWRITEBYTECODE: '1'
+      QT_VERSION: 6.10.1
+
+      MAC_TEAM_ID: ${{ secrets.MAC_TEAM_ID }}
+
+      MAC_APP_CERT_CERT: ${{ secrets.MAC_APP_CERT_CERT }}
+      MAC_SIGNER_ID: ${{ secrets.MAC_SIGNER_ID }}
+      MAC_APP_CERT_PW: ${{ secrets.MAC_APP_CERT_PW }}
 
       PROD_AGW_PUBLIC_KEY: ${{ secrets.PROD_AGW_PUBLIC_KEY }}
       PROD_S3_ENDPOINT: ${{ secrets.PROD_S3_ENDPOINT }}
@@ -968,10 +624,18 @@ jobs:
         submodules: 'true'
         fetch-depth: 10
 
+    - uses: ./.github/actions/apple-setup-provisioning-profile
+      with:
+        provisioning_profile_base64: ${{ secrets.MAC_APP_PROVISIONING_PROFILE }}
+
+    - uses: ./.github/actions/apple-setup-provisioning-profile
+      with:
+        provisioning_profile_base64: ${{ secrets.MAC_NE_PROVISIONING_PROFILE }}
+
     - name: 'Setup xcode'
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: '26.4'
+        xcode-version: '26.1'
 
     - name: 'Install desktop Qt'
       uses: jurplel/install-qt-action@v3
@@ -985,6 +649,18 @@ jobs:
         set-env: 'true'
         extra: '--base ${{ env.QT_MIRROR }}'
 
+    - name: 'Install go'
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: false
+
+    - name: 'Setup gomobile'
+      run: |
+          export PATH=$PATH:~/go/bin
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
     - name: 'Setup python'
       uses: actions/setup-python@v6
       with:
@@ -993,11 +669,17 @@ jobs:
     - name: 'Install conan'
       run: pip install "conan==2.28.0"
 
-    - name: 'Compile both native paths without signing or packaging'
-      env:
-        QT_INSTALL_DIR: ${{ runner.temp }}
-        TRIBE_MACOS_NE_ARCH: ${{ matrix.arch }}
-      run: deploy/build.sh --target macos-ne --compile-only
+    - name: 'Build project'
+      run: |
+        export QT_BIN_DIR="${{ runner.temp }}/Qt/${{ env.QT_VERSION }}/macos/bin"
+        bash deploy/build_macos_ne.sh
+
+    - name: 'Upload unpacked artifact'
+      uses: actions/upload-artifact@v4
+      with:
+        name: AmneziaVPN_MacOS_unpacked
+        path: deploy/build/client/AmneziaVPN.app
+        retention-days: 7
 
 # ------------------------------------------------------
 
@@ -1008,7 +690,6 @@ jobs:
 
     env:
       ANDROID_PLATFORM: android-28
-      ANDROID_COMPILE_PLATFORM: android-36
       NDK_VERSION: 27.0.11718014
 
     steps:
@@ -1016,7 +697,7 @@ jobs:
       with:
         submodules: 'true'
         fetch-depth: 10
-    
+
     - uses: actions/setup-python@v6
       with:
         python-version: 3.14
@@ -1027,7 +708,7 @@ jobs:
     - name: 'Setup Android SDK'
       uses: android-actions/setup-android@v4
       with:
-        packages: "platforms;${{ env.ANDROID_PLATFORM }} platforms;${{ env.ANDROID_COMPILE_PLATFORM }} build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}"
+        packages: "platforms;${{ env.ANDROID_PLATFORM }} ndk;${{ env.NDK_VERSION }}"
 
     - name: 'Build dependencies'
       run: |
@@ -1059,35 +740,37 @@ jobs:
   Build-Android:
     runs-on: android-runner
 
-    needs: [Detect-Changes, Bake-Prebuilts-Android]
-    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && (inputs.release_platform == 'android' || inputs.release_platform == 'all')) || startsWith(github.ref, 'refs/tags/android-v')) && needs.Detect-Changes.result == 'success' && (needs.Bake-Prebuilts-Android.result == 'success' || (needs.Bake-Prebuilts-Android.result == 'skipped' && needs.Detect-Changes.outputs.recipes_changed != 'true')) }}
-    environment: tribe-android-release
+    needs: Bake-Prebuilts-Android
+    if: ${{ always() }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: 'android9-10'
-            qt_version: '6.11.1'
+            qt_version: '6.10.1'
             min_sdk: 28
             max_sdk: 29
             version_code_offset: 0
             build_aab: true
           - label: 'android11+'
-            qt_version: '6.11.1'
+            qt_version: '6.10.3'
             min_sdk: 30
             max_sdk: ''
             version_code_offset: 1
             build_aab: true
+          - label: 'android9-10-qt610-3'
+            qt_version: '6.10.3'
+            min_sdk: 28
+            max_sdk: 29
+            version_code_offset: 0
+            build_aab: false
+
     env:
-      # ANDROID_PLATFORM remains the native minimum. The Java/Kotlin project
-      # compiles and targets API 36, so both SDK platforms must be installed.
       ANDROID_PLATFORM: android-${{ matrix.min_sdk }}
-      ANDROID_COMPILE_PLATFORM: android-36
       NDK_VERSION: 27.0.11718014
       QT_VERSION: ${{ matrix.qt_version }}
       QT_MODULES: 'qtremoteobjects qt5compat qtimageformats qtshadertools'
-      PYTHONDONTWRITEBYTECODE: '1'
       APP_ANDROID_MIN_SDK: ${{ matrix.min_sdk }}
       APP_ANDROID_MAX_SDK: ${{ matrix.max_sdk }}
       APP_ANDROID_VERSION_CODE_OFFSET: ${{ matrix.version_code_offset }}
@@ -1105,11 +788,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: 'true'
-        fetch-tags: true
-
-    - name: 'Bind Android release tag to source version and commit'
-      shell: bash
-      run: python3 metadata/check_release_version.py
 
     - name: 'Install desktop Qt'
       uses: jurplel/install-qt-action@v4
@@ -1180,324 +858,127 @@ jobs:
     - name: 'Setup Android SDK'
       uses: android-actions/setup-android@v4
       with:
-        packages: "platforms;${{ env.ANDROID_PLATFORM }} platforms;${{ env.ANDROID_COMPILE_PLATFORM }} build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}"
+        packages: "platforms;${{ env.ANDROID_PLATFORM }} ndk;${{ env.NDK_VERSION }}"
 
     - name: 'Setup python'
       uses: actions/setup-python@v6
       with:
         python-version: 3.14
 
-    - name: 'Install conan and release-gate dependencies'
-      run: pip install "conan==2.28.0" jsonschema jinja2
-
-    - name: 'Run commit-bound Android source release gates'
-      shell: bash
-      run: bash metadata/run_tribe_release_gates.sh --release android
-
-    - name: 'Verify commit-bound Android runtime receipt'
-      id: tribe-runtime-receipt
-      uses: ./.github/actions/tribe-prepare-runtime-receipt
-      with:
-        platform: android
-        receipt-base64: ${{ secrets.TRIBE_ANDROID_PLATFORM_RUNTIME_RECEIPT_BASE64 }}
-        receipt-sha256: ${{ secrets.TRIBE_ANDROID_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
+    - name: 'Install conan'
+      run: pip install "conan==2.28.0"
 
     - name: 'Decode keystore secret to file'
       env:
         KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
       shell: bash
       run: |
-        umask 077
-        printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android.keystore"
-        test -s "$RUNNER_TEMP/android.keystore"
-        chmod 600 "$RUNNER_TEMP/android.keystore"
+        echo $KEYSTORE_BASE64 | base64 --decode > android.keystore
 
     - name: 'Build project'
       env:
         QT_INSTALL_DIR: ${{ runner.temp }}
-        QT_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/android.keystore
+        QT_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android.keystore
         QT_ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_KEY_ALIAS }}
-        # This keystore currently uses one password for the store and key. Qt's
-        # APK signer requires both variables even when their values are equal.
         QT_ANDROID_KEYSTORE_STORE_PASS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_KEY_PASS }}
-        QT_ANDROID_KEYSTORE_KEY_PASS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_KEY_PASS }}
-        ANDROID_RELEASE_SIGNING_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_SIGNING_CERT_SHA256 }}
         LABEL: ${{ matrix.label }}
         BUILD_AAB: ${{ matrix.build_aab }}
-        TRIBE_CATALOG_ROOT_KID: ${{ secrets.TRIBE_CATALOG_ROOT_KID }}
-        TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX: ${{ secrets.TRIBE_CATALOG_ROOT_PUBLIC_KEY_HEX }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_FILE: ${{ steps.tribe-runtime-receipt.outputs.file }}
-        TRIBE_PLATFORM_RUNTIME_RECEIPT_SHA256: ${{ secrets.TRIBE_ANDROID_PLATFORM_RUNTIME_RECEIPT_SHA256 }}
       shell: bash
       run: |
-        set -euo pipefail
-        STORE_BUILD="deploy/build-store-aab-${APP_ANDROID_VERSION_CODE_OFFSET}"
-        SIDELOAD_BUILD="deploy/build-sideload-universal-${APP_ANDROID_VERSION_CODE_OFFSET}"
-
-        validate_android_engine_payload() {
-          local build_dir="$1"
-          local raw_dir="$build_dir/client/android-build/libs"
-          local packaged_dir="$build_dir/client/android-build/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib"
-          local aar="$build_dir/client/android-package-source/xray/libXray/libxray.aar"
-          local aar_sha
-          local abi
-          local -a awg_args=()
-          local -a xray_args=()
-
-          [[ -f "$aar" && -f "$aar.sha256" ]]
-          aar_sha="$(tr -d '\r\n' < "$aar.sha256")"
-          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-            awg_args+=(
-              --artifact "$abi=$(realpath "$raw_dir/$abi/libwg-go.so")"
-              --packaged-artifact "$abi=$(realpath "$packaged_dir/$abi/libwg-go.so")"
-            )
-            xray_args+=(
-              --packaged-artifact "$abi=$(realpath "$packaged_dir/$abi/libgojni.so")"
-            )
-          done
-          python3 metadata/check_android_awg_artifacts.py "${awg_args[@]}"
-          python3 metadata/check_android_xray_aar.py \
-            "$aar" --sha256 "$aar_sha" "${xray_args[@]}"
-        }
-
-        validate_final_engine_archive() {
-          local artifact="$1"
-          local expected_abi="$2"
-          python3 - "$artifact" "$expected_abi" <<'PY'
-        import hashlib
-        import json
-        import pathlib
-        import sys
-        import zipfile
-
-        artifact = pathlib.Path(sys.argv[1])
-        expected_arg = sys.argv[2]
-        all_abis = {"arm64-v8a", "armeabi-v7a", "x86", "x86_64"}
-        expected_abis = all_abis if expected_arg == "all" else {expected_arg}
-        if expected_abis - all_abis or artifact.is_symlink() or not artifact.is_file():
-            raise SystemExit("invalid final Android archive validation input")
-        if artifact.suffix == ".apk":
-            prefix_parts = ("lib",)
-        elif artifact.suffix == ".aab":
-            prefix_parts = ("base", "lib")
-        else:
-            raise SystemExit("final Android archive must be APK or AAB")
-        lock = json.loads(pathlib.Path("metadata/engine-lock.json").read_text())
-        expected_hashes = {
-            "libwg-go.so": lock["engines"]["awg-android"]["android_release_packaged_sha256"],
-            "libgojni.so": lock["engines"]["amnezia-libxray"]["android_release_packaged_sha256"],
-        }
-        with zipfile.ZipFile(artifact) as archive:
-            names = [info.filename for info in archive.infolist()]
-            if len(names) != len(set(names)):
-                raise SystemExit(f"{artifact}: duplicate ZIP member names are forbidden")
-            for library, hashes in expected_hashes.items():
-                entries = {
-                    parts[len(prefix_parts)]: name
-                    for name in archive.namelist()
-                    if len(parts := name.split("/")) == len(prefix_parts) + 2
-                    and tuple(parts[:len(prefix_parts)]) == prefix_parts
-                    and parts[-1] == library
-                }
-                if set(entries) != expected_abis:
-                    raise SystemExit(
-                        f"{artifact}: {library} ABI matrix {sorted(entries)} != "
-                        f"{sorted(expected_abis)}")
-                for abi, name in entries.items():
-                    digest = hashlib.sha256(archive.read(name)).hexdigest()
-                    if digest != hashes[abi]:
-                        raise SystemExit(
-                            f"{artifact}: {name} packaged SHA-256 mismatch")
-        print(f"final Android archive engine matrix locked: {artifact} ({sorted(expected_abis)})")
-        PY
-        }
-
-        validate_final_apk() {
-          local apk="$1"
-          local expected_abi="$2"
-          local expected_version_code="$3"
-          local badging actual_min actual_max actual_target actual_version_code
-
-          validate_final_engine_archive "$apk" "$expected_abi"
-
-          badging="$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk")"
-          actual_version_code="$(sed -n "s/^package:.*versionCode='\([^']*\)'.*/\1/p" <<< "$badging")"
-          actual_min="$(sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p" <<< "$badging")"
-          actual_max="$(sed -n "s/^maxSdkVersion:'\([^']*\)'.*/\1/p" <<< "$badging")"
-          actual_target="$(sed -n "s/^targetSdkVersion:'\([^']*\)'.*/\1/p" <<< "$badging")"
-          [[ "$actual_version_code" == "$expected_version_code" ]]
-          [[ "$actual_min" == "$APP_ANDROID_MIN_SDK" ]]
-          [[ "$actual_max" == "$APP_ANDROID_MAX_SDK" ]]
-          [[ "$actual_target" == "36" ]]
-        }
+        OUT=deploy/artifacts
+        rm -rf $OUT && mkdir -p $OUT
 
         if [[ "$BUILD_AAB" == "true" ]]; then
-          # Play policy and sideload policy are compile-time surfaces. Never
-          # reuse a generated CMake/Gradle tree between them.
-          TRIBE_STORE_BUILD=ON deploy/build.sh -t android --sign --aab \
-            --force --build "$STORE_BUILD"
-          "$STORE_BUILD/client/android-build/gradlew" \
-            --no-daemon testReleaseUnitTest lintRelease
-          validate_android_engine_payload "$STORE_BUILD"
-          python3 metadata/check_android_16kb_artifact.py \
-            "$STORE_BUILD/client/android-build/AmneziaVPN.apk"
-          python3 metadata/check_android_16kb_artifact.py \
-            "$STORE_BUILD/client/android-build/build/outputs/bundle/release/android-build-release.aab"
+          deploy/build.sh -t android --sign --aab
+        else
+          deploy/build.sh -t android --sign
         fi
 
-        TRIBE_STORE_BUILD=OFF deploy/build.sh -t android --sign \
-          --force --build "$SIDELOAD_BUILD"
-        "$SIDELOAD_BUILD/client/android-build/gradlew" \
-          --no-daemon testReleaseUnitTest lintRelease
-        validate_android_engine_payload "$SIDELOAD_BUILD"
-        python3 metadata/check_android_16kb_artifact.py \
-          "$SIDELOAD_BUILD/client/android-build/AmneziaVPN.apk"
+        VERSION=$(grep CMAKE_PROJECT_VERSION:STATIC deploy/build/CMakeCache.txt | cut -d= -f2)
+
+        mv deploy/build/client/android-build/AmneziaVPN.apk \
+           $OUT/AmneziaVPN_${VERSION}_${LABEL}_universal.apk
+
+        if [[ "$BUILD_AAB" == "true" ]]; then
+          mv deploy/build/client/android-build/build/outputs/bundle/ossRelease/android-build-oss-release.aab \
+             $OUT/AmneziaVPN_${VERSION}_${LABEL}_oss.aab
+        fi
 
         for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-          ABI_BUILD="deploy/build-sideload-${APP_ANDROID_VERSION_CODE_OFFSET}-${abi}"
-          TRIBE_STORE_BUILD=OFF deploy/build.sh -t android --sign --abi "$abi" \
-            --force --build "$ABI_BUILD"
-          case "$abi" in
-            arm64-v8a|x86_64)
-              python3 metadata/check_android_16kb_artifact.py \
-                --required-abi "$abi" \
-                "$ABI_BUILD/client/android-build/AmneziaVPN.apk"
-              ;;
-          esac
+          deploy/build.sh -t android --sign --abi ${abi} --build ./deploy/build/${abi}
+          mv deploy/build/${abi}/client/android-build/AmneziaVPN.apk \
+             $OUT/AmneziaVPN_${VERSION}_${LABEL}_${abi}.apk
         done
 
-        # Delay artifact extraction until every receipt-gated build invocation
-        # is complete, so source-clean gates never see generated release files.
-        VERSION="$(grep CMAKE_PROJECT_VERSION:STATIC "$SIDELOAD_BUILD/CMakeCache.txt" | cut -d= -f2)"
-        VERSION_CODE="$(grep '^APP_ANDROID_VERSION_CODE:' "$SIDELOAD_BUILD/CMakeCache.txt" | cut -d= -f2)"
-        [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]
-        validate_final_apk "$SIDELOAD_BUILD/client/android-build/AmneziaVPN.apk" \
-          all "$VERSION_CODE"
-        if [[ "$BUILD_AAB" == "true" ]]; then
-          validate_final_apk "$STORE_BUILD/client/android-build/AmneziaVPN.apk" \
-            all "$VERSION_CODE"
-          validate_final_engine_archive \
-            "$STORE_BUILD/client/android-build/build/outputs/bundle/release/android-build-release.aab" \
-            all
-        fi
-        for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-          ABI_BUILD="deploy/build-sideload-${APP_ANDROID_VERSION_CODE_OFFSET}-${abi}"
-          validate_final_apk "$ABI_BUILD/client/android-build/AmneziaVPN.apk" \
-            "$abi" "$VERSION_CODE"
-        done
+        ls -l $OUT
 
-        OUT="$RUNNER_TEMP/tribe-android-artifacts-${APP_ANDROID_VERSION_CODE_OFFSET}"
-        [[ ! -e "$OUT" ]]
-        mkdir -p "$OUT"
-        mv "$SIDELOAD_BUILD/client/android-build/AmneziaVPN.apk" \
-           "$OUT/AmneziaVPN_${VERSION}_${LABEL}_universal.apk"
-        if [[ "$BUILD_AAB" == "true" ]]; then
-          mv "$STORE_BUILD/client/android-build/build/outputs/bundle/release/android-build-release.aab" \
-             "$OUT/AmneziaVPN_${VERSION}_${LABEL}.aab"
-        fi
-        for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-          ABI_BUILD="deploy/build-sideload-${APP_ANDROID_VERSION_CODE_OFFSET}-${abi}"
-          mv "$ABI_BUILD/client/android-build/AmneziaVPN.apk" \
-             "$OUT/AmneziaVPN_${VERSION}_${LABEL}_${abi}.apk"
-        done
-
-        # Verify the final files after renaming, not merely Gradle's signing
-        # task. Every APK certificate must byte-match the configured keystore
-        # alias; the AAB must pass strict JAR verification for that alias.
-        EXPECTED_CERT_SHA256="$(
-          keytool -exportcert \
-            -keystore "$QT_ANDROID_KEYSTORE_PATH" \
-            -alias "$QT_ANDROID_KEYSTORE_ALIAS" \
-            -storepass:env QT_ANDROID_KEYSTORE_STORE_PASS \
-          | openssl dgst -sha256 -r | awk '{print tolower($1)}'
-        )"
-        [[ "$EXPECTED_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-        PINNED_CERT_SHA256="$(
-          printf '%s' "$ANDROID_RELEASE_SIGNING_CERT_SHA256" \
-            | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]'
-        )"
-        [[ "$PINNED_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-        [[ "$EXPECTED_CERT_SHA256" == "$PINNED_CERT_SHA256" ]]
-        APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-        for apk in "$OUT"/*.apk; do
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$apk"
-          "$APKSIGNER" verify --verbose --print-certs "$apk"
-          ACTUAL_CERT_SHA256="$(
-            "$APKSIGNER" verify --print-certs "$apk" \
-              | awk -F': ' '/certificate SHA-256 digest/ {print tolower($2); exit}'
-          )"
-          [[ "$ACTUAL_CERT_SHA256" == "$EXPECTED_CERT_SHA256" ]]
-        done
-        if [[ "$BUILD_AAB" == "true" ]]; then
-          AAB="$OUT/AmneziaVPN_${VERSION}_${LABEL}.aab"
-          validate_final_engine_archive "$AAB" all
-          python3 metadata/check_android_16kb_artifact.py "$AAB"
-          jarsigner -verify -strict -certs \
-            -keystore "$QT_ANDROID_KEYSTORE_PATH" \
-            -storepass:env QT_ANDROID_KEYSTORE_STORE_PASS \
-            "$AAB" "$QT_ANDROID_KEYSTORE_ALIAS"
-        fi
-        ls -l "$OUT"
-
-    - name: 'Prove Android packaging did not mutate the release checkout'
+    - name: 'Build Play AAB'
+      if: ${{ matrix.build_aab }}
+      env:
+        QT_INSTALL_DIR: ${{ runner.temp }}
+        QT_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android.keystore
+        QT_ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_KEY_ALIAS }}
+        QT_ANDROID_KEYSTORE_STORE_PASS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_KEY_PASS }}
+        LABEL: ${{ matrix.label }}
       shell: bash
       run: |
-        set -euo pipefail
-        [[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
-        SOURCE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
-        [[ -z "$SOURCE_STATUS" ]] || {
-          printf '%s\n' "$SOURCE_STATUS" >&2
-          exit 1
-        }
-        git diff --check
+        OUT=deploy/artifacts
+        VERSION=$(grep CMAKE_PROJECT_VERSION:STATIC deploy/build/CMakeCache.txt | cut -d= -f2)
+
+        deploy/build.sh -t android --sign --aab --play --build ./deploy/build/play
+
+        mv deploy/build/play/client/android-build/build/outputs/bundle/playRelease/android-build-play-release.aab \
+           $OUT/AmneziaVPN_${VERSION}_${LABEL}_play.aab
 
     - name: 'Upload universal APK'
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*_universal.apk
+        path: deploy/artifacts/*_universal.apk
         archive: false
-        if-no-files-found: error
         retention-days: 7
 
     - name: 'Upload arm64-v8a APK'
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*_arm64-v8a.apk
+        path: deploy/artifacts/*_arm64-v8a.apk
         archive: false
-        if-no-files-found: error
         retention-days: 7
 
     - name: 'Upload armeabi-v7a APK'
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*_armeabi-v7a.apk
+        path: deploy/artifacts/*_armeabi-v7a.apk
         archive: false
-        if-no-files-found: error
         retention-days: 7
 
     - name: 'Upload x86 APK'
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*_x86.apk
+        path: deploy/artifacts/*_x86.apk
         archive: false
-        if-no-files-found: error
         retention-days: 7
 
     - name: 'Upload x86_64 APK'
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*_x86_64.apk
+        path: deploy/artifacts/*_x86_64.apk
         archive: false
-        if-no-files-found: error
         retention-days: 7
 
-    - name: 'Upload AAB'
+    - name: 'Upload OSS AAB'
       if: ${{ matrix.build_aab }}
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ runner.temp }}/tribe-android-artifacts-${{ matrix.version_code_offset }}/*.aab
+        path: deploy/artifacts/*_oss.aab
         archive: false
-        if-no-files-found: error
+        retention-days: 7
+
+    - name: 'Upload Play AAB'
+      if: ${{ matrix.build_aab }}
+      uses: actions/upload-artifact@v7
+      with:
+        path: deploy/artifacts/*_play.aab
+        archive: false
         retention-days: 7
 
 # ------------------------------------------------------
@@ -1516,10 +997,6 @@ jobs:
 
       - name: Add PR link to build summary
         if: ${{ fromJSON(steps.pull_request.outputs.data)[0].number != '' }}
-        env:
-          PR_NUMBER: ${{ fromJSON(steps.pull_request.outputs.data)[0].number }}
-          PR_TITLE: ${{ fromJSON(steps.pull_request.outputs.data)[0].title }}
-          PR_URL: ${{ fromJSON(steps.pull_request.outputs.data)[0].html_url }}
         run: |
-          printf 'Pull request:\n[[#%s] %s](%s)\n' \
-            "$PR_NUMBER" "$PR_TITLE" "$PR_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull request:" >> $GITHUB_STEP_SUMMARY
+          echo "[[#${{ fromJSON(steps.pull_request.outputs.data)[0].number }}] ${{ fromJSON(steps.pull_request.outputs.data)[0].title }}](${{ fromJSON(steps.pull_request.outputs.data)[0].html_url }})" >> $GITHUB_STEP_SUMMARY

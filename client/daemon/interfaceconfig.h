@@ -68,16 +68,16 @@ class InterfaceConfig {
   QString m_rejectAfterTime;
   QString m_keepaliveTimeout;
   QString m_maxHandshakeAttempts;
-  QString m_randomTrailers; // AVPN: AWG 3.1, canonical UAPI 1/0 after parsing.
+  QString m_randomTrailers;
   QString m_disableCookies;
 
   QJsonObject toJson() const;
   QString toWgConf(
       const QMap<QString, QString>& extra = QMap<QString, QString>()) const;
 
-  // AVPN: fail closed on unknown AWG booleans; amneziawg-go UAPI accepts
-  // strconv.ParseBool values, while quick configs also commonly use on/off.
-  static bool awgBoolToUapi(const QString& value, QString& normalized);
+  // Converts awg-quick on/off (and 0/1/true/false) to UAPI 1/0.
+  // amneziawg-go uses strconv.ParseBool and rejects "on"/"off".
+  static QString awgBoolToUapi(const QString& value);
 };
 
 #endif  // INTERFACECONFIG_H

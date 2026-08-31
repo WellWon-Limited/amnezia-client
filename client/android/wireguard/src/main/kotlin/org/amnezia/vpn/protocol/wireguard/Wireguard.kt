@@ -1,24 +1,15 @@
 package org.amnezia.vpn.protocol.wireguard
 
 import android.net.VpnService.Builder
-import android.content.Context
-import android.os.ParcelFileDescriptor
-import java.net.InetAddress
-import java.net.UnknownHostException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import org.amnezia.awg.GoBackend
 import org.amnezia.vpn.protocol.Protocol
-import org.amnezia.vpn.protocol.EngineManifest
-import org.amnezia.vpn.protocol.EmbeddedEngineManifests
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
-import org.amnezia.vpn.protocol.ProtocolState.CONNECTING
 import org.amnezia.vpn.protocol.ProtocolState.DISCONNECTED
 import org.amnezia.vpn.protocol.Statistics
 import org.amnezia.vpn.protocol.VpnException
@@ -29,7 +20,6 @@ import org.amnezia.vpn.util.asSequence
 import org.amnezia.vpn.util.net.InetEndpoint
 import org.amnezia.vpn.util.net.InetNetwork
 import org.amnezia.vpn.util.net.parseInetAddress
-import org.amnezia.vpn.util.net.isPublicUnicastEndpoint
 import org.amnezia.vpn.util.optStringOrNull
 import org.json.JSONObject
 
@@ -37,19 +27,8 @@ private const val TAG = "Wireguard"
 
 open class Wireguard : Protocol() {
 
-    override val supportsSessionOwnedTun: Boolean = true
-
-    override val engineManifest: EngineManifest
-        get() {
-            val runtimeVersion = if (isInitialized) runCatching { GoBackend.awgVersion() }.getOrNull() else null
-            return EmbeddedEngineManifests.awg(runtimeVersion)
-        }
-
     private var tunnelHandle: Int = -1
     private var config: WireguardConfig? = null // save config for reconnect
-    private var activeSessionToken: String? = null
-    private enum class NativeStartStage { IDLE, CALLING_NATIVE, NATIVE_ACTIVE, READY, CLEAN }
-    private var nativeStartStage = NativeStartStage.IDLE
     protected open val ifName: String = "amn0"
     private lateinit var scope: CoroutineScope
     private var statusJob: Job? = null
@@ -57,9 +36,23 @@ open class Wireguard : Protocol() {
     override val statistics: Statistics
         get() {
             if (tunnelHandle == -1) return Statistics.EMPTY_STATISTICS
-            val config = GoBackend.awgProtectedGetConfig(tunnelHandle)
-                ?: return Statistics.EMPTY_STATISTICS
-            return parseAwgUapiStatistics(config)
+            val config = GoBackend.awgGetConfig(tunnelHandle) ?: return Statistics.EMPTY_STATISTICS
+            return Statistics.build {
+                var optsCount = 0
+                config.splitToSequence("\n").forEach { line ->
+                    with(line) {
+                        when {
+                            startsWith("rx_bytes=") -> setRxBytes(substring(9).toLong()).also { ++optsCount }
+                            startsWith("tx_bytes=") -> setTxBytes(substring(9).toLong()).also { ++optsCount }
+                            // AVPN: возраст хендшейка для DEAD-детекта serviceEngine (раньше шёл только в state-логику)
+                            startsWith("last_handshake_time_sec=") ->
+                                setLastHandshakeSec(substring(24).toLong()).also { ++optsCount }
+                            else -> {}
+                        }
+                    }
+                    if (optsCount == 3) return@forEach
+                }
+            }
         }
 
     override fun internalInit() {
@@ -70,34 +63,22 @@ open class Wireguard : Protocol() {
         scope = CoroutineScope(Dispatchers.IO)
     }
 
-    override suspend fun startVpn(config: JSONObject, vpnBuilder: Builder, protect: (Int) -> Boolean) =
-        throw VpnStartException("AWG requires the Tribe session-owned TUN service")
-
-    override suspend fun prepareVpn(config: JSONObject): PreparedVpnSession {
-        val configData = protocolConfigData(config)
-        val endpoint = resolveEndpoint(configData.getString("hostName").trim())
-        val wireguardConfig = parseConfig(config, endpoint)
-        return PreparedVpnSession(wireguardConfig, wireguardConfig)
+    override suspend fun startVpn(config: JSONObject, vpnBuilder: Builder, protect: (Int) -> Boolean) {
+        val wireguardConfig = parseConfig(config)
+        start(wireguardConfig, vpnBuilder, protect)
+        this.config = wireguardConfig
     }
 
-    protected open fun protocolConfigData(config: JSONObject): JSONObject =
-        config.getJSONObject("wireguard_config_data")
-
-    protected open fun parseConfig(config: JSONObject, endpointAddress: InetAddress): WireguardConfig {
-        val configData = protocolConfigData(config)
+    protected open fun parseConfig(config: JSONObject): WireguardConfig {
+        val configData = config.getJSONObject("wireguard_config_data")
         return WireguardConfig.build {
-            configWireguard(config, configData, endpointAddress)
+            configWireguard(config, configData)
             configSplitTunneling(config)
             configAppSplitTunneling(config)
-            configProtectedTunnelRoutes(config)
         }
     }
 
-    protected fun WireguardConfig.Builder.configWireguard(
-        config: JSONObject,
-        configData: JSONObject,
-        endpointAddress: InetAddress,
-    ) {
+    protected fun WireguardConfig.Builder.configWireguard(config: JSONObject, configData: JSONObject) {
         configData.getString("client_ip").split(",").map { address ->
             InetNetwork.parse(address.trim())
         }.forEach(::addAddress)
@@ -124,8 +105,9 @@ open class Wireguard : Protocol() {
 
         configData.optStringOrNull("mtu")?.let { setMtu(it.toInt()) }
 
+        val host = configData.getString("hostName").let { parseInetAddress(it.trim()) }
         val port = configData.getInt("port")
-        setEndpoint(InetEndpoint(endpointAddress, port))
+        setEndpoint(InetEndpoint(host, port))
 
         if (configData.optBoolean("isObfuscationEnabled")) {
             setUseProtocolExtension(true)
@@ -169,149 +151,61 @@ open class Wireguard : Protocol() {
             ?.let { setKeepaliveTimeout(it) }
         configData.optStringOrNull("MaxHandshakeAttempts")?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { setMaxHandshakeAttempts(it) }
-        // AVPN: AWG 3.1 quick-format keys; the builder validates and
-        // normalizes them before crossing the native UAPI boundary.
         configData.optStringOrNull("RandomTrailers")?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { setRandomTrailers(it) }
         configData.optStringOrNull("DisableCookies")?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { setDisableCookies(it) }
     }
 
-    override fun startWithTun(
-        prepared: PreparedVpnSession,
-        tunFd: Int,
-        exactSessionToken: String,
-        protect: (Int) -> Boolean,
-    ): NativeStartReceipt {
-        val ownedTun = ParcelFileDescriptor.adoptFd(tunFd)
-        try {
-            val config = prepared.nativeConfig as? WireguardConfig
-                ?: throw VpnStartException("Invalid AWG prepared session")
-            if (tunnelHandle != -1 || activeSessionToken != null) {
-                throw VpnStartException("AWG inner session is already active")
-            }
-            requireExactSessionToken(exactSessionToken)
-            activeSessionToken = exactSessionToken
-            nativeStartStage = NativeStartStage.CALLING_NATIVE
-            try {
-                start(config, ownedTun, protect)
-                this.config = config
-                nativeStartStage = NativeStartStage.READY
-                return NativeStartReceipt(exactSessionToken)
-            } catch (error: Throwable) {
-                if (nativeStartStage == NativeStartStage.CLEAN) activeSessionToken = null
-                throw error
-            }
-        } finally {
-            // Closes every pre-native path. After detachFd(), the pinned JNI/Go ABI owns and
-            // closes the raw descriptor on success and every returned-error path.
-            ownedTun.close()
-        }
-    }
-
     private fun start(
         config: WireguardConfig,
-        ownedTun: ParcelFileDescriptor,
+        vpnBuilder: Builder,
         protect: (Int) -> Boolean,
+        stopExistingVpn: Boolean = false
     ) {
-        Log.i(TAG, "awg-go backend ${GoBackend.awgVersion()}")
-        val interfaceName = ifName
-        val settings = config.toWgUserspaceString()
-        // No fallible Kotlin work may occur after this transfer and before the native call.
-        val tunFd = ownedTun.detachFd()
-        tunnelHandle = GoBackend.awgPrepareProtected(
-            interfaceName, tunFd, settings,
-        )
+        if (!stopExistingVpn && tunnelHandle != -1) {
+            Log.w(TAG, "Tunnel already up")
+            return
+        }
+
+        buildVpnInterface(config, vpnBuilder)
+
+        vpnBuilder.establish().use { tunFd ->
+            if (stopExistingVpn && tunnelHandle != -1) {
+                turnOffVpn()
+            }
+            if (tunFd == null) {
+                throw VpnStartException("Create VPN interface: permission not granted or revoked")
+            }
+            Log.i(TAG, "awg-go backend ${GoBackend.awgVersion()}")
+            tunnelHandle = GoBackend.awgTurnOn(ifName, tunFd.detachFd(), config.toWgUserspaceString())
+        }
 
         if (tunnelHandle < 0) {
             tunnelHandle = -1
-            nativeStartStage = NativeStartStage.CLEAN
             throw VpnStartException("Wireguard tunnel creation error")
         }
-        nativeStartStage = NativeStartStage.NATIVE_ACTIVE
 
-        // The Tribe-pinned JNI ABI opens both UDP sockets while Device.Up is blocked before
-        // receive routines and peers are started. Both descriptors must be protected before the
-        // explicit resume receipt; failure/timeout aborts and closes the exact prepared handle.
-        val socketV4 = GoBackend.awgProtectedGetSocketV4(tunnelHandle)
-        val socketV6 = GoBackend.awgProtectedGetSocketV6(tunnelHandle)
-        if (socketV4 < 0 || socketV6 < 0 || !protect(socketV4) || !protect(socketV6)) {
-            GoBackend.awgProtectedTurnOff(tunnelHandle)
+        if (!protect(GoBackend.awgGetSocketV4(tunnelHandle)) || !protect(GoBackend.awgGetSocketV6(tunnelHandle))) {
+            GoBackend.awgTurnOff(tunnelHandle)
             tunnelHandle = -1
-            nativeStartStage = NativeStartStage.CLEAN
             throw VpnStartException("Protect VPN interface: permission not granted or revoked")
         }
-        if (GoBackend.awgResumeProtected(tunnelHandle) != 0) {
-            GoBackend.awgProtectedTurnOff(tunnelHandle)
-            tunnelHandle = -1
-            nativeStartStage = NativeStartStage.CLEAN
-            throw VpnStartException("Protected AWG native start did not reach ready state")
-        }
-        try {
-            verifyAwg31Uapi(config) // AVPN: positive engine-capability check.
-        } catch (e: VpnStartException) {
-            GoBackend.awgProtectedTurnOff(tunnelHandle)
-            tunnelHandle = -1
-            nativeStartStage = NativeStartStage.CLEAN
-            throw e
-        }
-        state.value = CONNECTING
-        launchStatusJob(activeSessionToken!!, tunnelHandle)
+        launchStatusJob()
     }
 
-    override fun abortInnerStart(exactSessionToken: String): Boolean {
-        requireExactSessionToken(exactSessionToken)
-        if (activeSessionToken == null && tunnelHandle == -1
-            && nativeStartStage in setOf(NativeStartStage.IDLE, NativeStartStage.CLEAN)) return true
-        if (activeSessionToken != exactSessionToken) return false
-        if (nativeStartStage == NativeStartStage.CALLING_NATIVE) return false
-        return try {
-            if (tunnelHandle != -1) turnOffVpn()
-            activeSessionToken = null
-            nativeStartStage = NativeStartStage.CLEAN
-            true
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun verifyAwg31Uapi(config: WireguardConfig) {
-        val expected = buildMap {
-            config.randomTrailers?.takeIf { it.isNotBlank() }
-                ?.let { put("random_trailers", it.toAwgUapiBool()) }
-            config.disableCookies?.takeIf { it.isNotBlank() }
-                ?.let { put("disable_cookies", it.toAwgUapiBool()) }
-        }
-        if (expected.isEmpty()) return
-
-        val actual = GoBackend.awgProtectedGetConfig(tunnelHandle)
-            ?.lineSequence()
-            ?.mapNotNull { line ->
-                val separator = line.indexOf('=')
-                if (separator <= 0) null else line.substring(0, separator) to line.substring(separator + 1)
-            }
-            ?.toMap()
-            ?: throw VpnStartException("AWG 3.1 UAPI capability query failed")
-        if (expected.any { (key, value) -> actual[key] != value }) {
-            throw VpnStartException("AWG 3.1 UAPI capability mismatch")
-        }
-        Log.i(TAG, "AWG 3.1 UAPI capability verified: ${expected.keys.sorted().joinToString()}")
-    }
-
-    private fun launchStatusJob(exactSessionToken: String, exactHandle: Int) {
+    private fun launchStatusJob() {
         Log.d(TAG, "Launch status job")
         statusJob = scope.launch {
             while (true) {
                 val lastHandshake = getLastHandshake()
                 Log.v(TAG, "lastHandshake=$lastHandshake")
-                if (lastHandshake == 0L || lastHandshake == -2L) {
+                if (lastHandshake == 0L) {
                     delay(1000)
                     continue
                 }
-                if (activeSessionToken == exactSessionToken && tunnelHandle == exactHandle) {
-                    if (lastHandshake > 0L) state.value = CONNECTED
-                    else if (lastHandshake == -1L) state.value = DISCONNECTED
-                }
+                if (lastHandshake == -2L || lastHandshake > 0L) state.value = CONNECTED
+                else if (lastHandshake == -1L) state.value = DISCONNECTED
                 statusJob = null
                 break
             }
@@ -323,13 +217,12 @@ open class Wireguard : Protocol() {
             Log.e(TAG, "Trying to get config of a non-existent tunnel")
             return -1
         }
-        val config = GoBackend.awgProtectedGetConfig(tunnelHandle)
+        val config = GoBackend.awgGetConfig(tunnelHandle)
         if (config == null) {
             Log.e(TAG, "Failed to get tunnel config")
             return -2
         }
-        val values = parseCanonicalAwgUapi(config, setOf("last_handshake_time_sec"))
-        val lastHandshake = values?.get("last_handshake_time_sec")
+        val lastHandshake = config.lines().find { it.startsWith("last_handshake_time_sec=") }?.substring(24)?.toLong()
         if (lastHandshake == null) {
             Log.e(TAG, "Failed to get last_handshake_time_sec")
             return -2
@@ -341,12 +234,8 @@ open class Wireguard : Protocol() {
         statusJob?.cancel()
         statusJob = null
         val handleToClose = tunnelHandle
-        GoBackend.awgProtectedTurnOff(handleToClose)
-        // Do not advertise a reusable/stopped engine until the native call
-        // returned.  A JNI exception leaves the handle quarantined and the
-        // service-level stop_failed path kills the process fail-closed.
         tunnelHandle = -1
-        nativeStartStage = NativeStartStage.CLEAN
+        GoBackend.awgTurnOff(handleToClose)
     }
 
     override fun stopVpn() {
@@ -355,94 +244,11 @@ open class Wireguard : Protocol() {
             return
         }
         turnOffVpn()
-        activeSessionToken = null
-        nativeStartStage = NativeStartStage.IDLE
         state.value = DISCONNECTED
     }
 
-    override fun stopInner(exactSessionToken: String) {
-        requireExactSessionToken(exactSessionToken)
-        if (activeSessionToken != exactSessionToken || tunnelHandle == -1) {
-            throw VpnException("Stale or absent AWG inner session")
-        }
-        turnOffVpn()
-        activeSessionToken = null
-        nativeStartStage = NativeStartStage.IDLE
-    }
-
     override fun reconnectVpn(vpnBuilder: Builder, protect: (Int) -> Boolean) {
-        throw VpnException("AWG reconnect must be supervised by the session-owned TUN service")
+        val config = this.config ?: throw VpnException("Reconnect config is empty")
+        start(config, vpnBuilder, protect, true)
     }
-
-    private suspend fun resolveEndpoint(hostName: String): InetAddress = try {
-        withTimeout(5_000L) {
-            withContext(Dispatchers.IO) {
-                val addresses = InetAddress.getAllByName(hostName).toList()
-                if (addresses.isEmpty() || addresses.any { !it.isPublicUnicastEndpoint() }) {
-                    throw UnknownHostException("endpoint is not public unicast")
-                }
-                addresses.sortedBy { it.hostAddress }.first()
-            }
-        }
-    } catch (error: Exception) {
-        throw VpnStartException("Failed to resolve AWG endpoint")
-    }
-
-    private fun requireExactSessionToken(value: String) {
-        if (value.isBlank() || value.length > 160 || value.any {
-                !(it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' ||
-                    it == '-' || it == '_' || it == ':' || it == '.')
-            }) {
-            throw VpnException("Invalid AWG session token")
-        }
-    }
-
-    companion object {
-        /** AVPN: safe pre-connect probe used by the process-wide manifest. */
-        fun probeEngineManifest(context: Context): EngineManifest {
-            val runtimeVersion = runCatching {
-                loadSharedLibrary(context.applicationContext, "wg-go")
-                GoBackend.awgVersion()
-            }.getOrNull()
-            return EmbeddedEngineManifests.awg(runtimeVersion)
-        }
-    }
-}
-
-internal fun parseAwgUapiStatistics(config: String): Statistics {
-    val values = parseCanonicalAwgUapi(
-        config,
-        setOf("rx_bytes", "tx_bytes", "last_handshake_time_sec"),
-    ) ?: return Statistics.EMPTY_STATISTICS
-    val rx = values["rx_bytes"] ?: return Statistics.EMPTY_STATISTICS
-    val tx = values["tx_bytes"] ?: return Statistics.EMPTY_STATISTICS
-    val handshake = values["last_handshake_time_sec"] ?: return Statistics.EMPTY_STATISTICS
-    return Statistics.build {
-        setSource("awg_uapi")
-        setRxBytes(rx)
-        setTxBytes(tx)
-        setLastHandshakeSec(handshake)
-    }
-}
-
-internal fun parseCanonicalAwgUapi(
-    config: String,
-    expectedKeys: Set<String>,
-): Map<String, Long>? {
-    val result = mutableMapOf<String, Long>()
-    for (line in config.lineSequence()) {
-        val separator = line.indexOf('=')
-        if (separator <= 0) continue
-        val key = line.substring(0, separator)
-        if (key !in expectedKeys) continue
-        if (result.containsKey(key)) return null
-        val raw = line.substring(separator + 1)
-        if (raw.isEmpty() || (raw.length > 1 && raw.first() == '0') || raw.any { !it.isDigit() }) {
-            return null
-        }
-        val parsed = raw.toULongOrNull() ?: return null
-        if (parsed > Long.MAX_VALUE.toULong()) return null
-        result[key] = parsed.toLong()
-    }
-    return result
 }

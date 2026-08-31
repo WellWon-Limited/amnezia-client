@@ -252,7 +252,7 @@
     </message>
     <message>
         <location filename="../ui/qml/Components/HomeSplitTunnelingDrawer.qml" line="46"/>
-        <source>Enabled 
+        <source>Enabled
 Can&apos;t be disabled for current server</source>
         <translation>ဖွင့်ထားပါသည်။
 လက်ရှိဆာဗာအတွက် ပိတ်၍မရပါ။</translation>

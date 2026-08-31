@@ -51,8 +51,6 @@ signals:
 private:
     QRemoteObjectNode m_node;
     QSharedPointer<IpcInterfaceReplica> m_interface;
-    QLocalSocket *m_controlSocket = nullptr;
-    QByteArray m_sessionCapability;
 };
 
 #endif // IPCCLIENT_H

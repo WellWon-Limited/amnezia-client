@@ -75,7 +75,6 @@ PageType {
     readonly property bool mobilePlatform: Qt.platform.os === "ios" || Qt.platform.os === "android"
     readonly property bool manageSubEnabled: !root.storeBuild && !root.mobilePlatform
     property bool cabinetLinking: false   // loading кнопки; сбрасывается в onCabinetLinkReady (приходит всегда)
-    property bool removingSystemService: false
 
     // Язык приложения → веб-страницы (ЛК/legal) открываются на нём же (i18n сайта, 2026-07-07).
     // Биндинг живой: смена языка в настройках перечитывает ссылки (NOTIFY appLangChanged). // AVPN
@@ -238,13 +237,6 @@ PageType {
             if (!root.cabinetLinking) return
             root.cabinetLinking = false
             Qt.openUrlExternally(url)
-        }
-        function onMacSystemServiceRemovalFinished(ok, message) {
-            root.removingSystemService = false
-            if (ok)
-                PageController.showNotificationMessage(message)
-            else
-                PageController.showErrorMessage(message)
         }
     }
 
@@ -1046,25 +1038,6 @@ PageType {
                     }
                 }
                 onClicked: root.requestLegalDoc(modelData.doc)
-            }
-        }
-
-        // Explicit signed/notarized cleanup route for the privileged daemon.
-        // The GUI remains installed and can reinstall the service on next use.
-        TribeListRow {
-            Layout.fillWidth: true
-            visible: Qt.platform.os === "osx"
-            interactive: root.hasEngine && !root.removingSystemService
-            title: root.removingSystemService
-                   ? qsTr("Удаляем системную службу…")
-                   : qsTr("Удалить системную службу")
-            subtitle: qsTr("Приложение и данные аккаунта останутся")
-            onClicked: {
-                if (typeof TribeEngine.removeMacSystemService !== "function") {
-                    PageController.showErrorMessage(qsTr("Обновите приложение для удаления службы"))
-                    return
-                }
-                root.removingSystemService = TribeEngine.removeMacSystemService()
             }
         }
 

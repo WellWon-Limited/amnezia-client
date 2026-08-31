@@ -5,8 +5,6 @@ import org.amnezia.vpn.util.net.InetNetwork
 
 private const val XRAY_DEFAULT_MTU = 1500
 private const val XRAY_DEFAULT_MAX_MEMORY: Long = 50 shl 20 // 50 MB
-private const val XRAY_MIN_MEMORY: Long = 16L shl 20
-private const val XRAY_MAX_MEMORY: Long = 512L shl 20
 
 class XrayConfig protected constructor(
     protocolConfigBuilder: ProtocolConfig.Builder,
@@ -39,26 +37,19 @@ class XrayConfig protected constructor(
 
         override var mtu: Int = XRAY_DEFAULT_MTU
 
-        fun setSocksPort(port: Int) = apply {
-            require(port in 1024..65535) { "Invalid Xray SOCKS port" }
-            socksPort = port
-        }
+        fun setSocksPort(port: Int) = apply { socksPort = port }
 
         fun setSocksUser(user: String) = apply { socksUser = user }
 
         fun setSocksPass(pass: String) = apply { socksPass = pass }
 
-        fun setMaxMemory(maxMemory: Long) = apply {
-            require(maxMemory in XRAY_MIN_MEMORY..XRAY_MAX_MEMORY) { "Invalid Xray memory cap" }
-            this.maxMemory = maxMemory
-        }
+        fun setMaxMemory(maxMemory: Long) = apply { this.maxMemory = maxMemory }
 
         override fun build(): XrayConfig = configBuild().run { XrayConfig(this@Builder) }
     }
 
     companion object {
         internal val DEFAULT_IPV4_ADDRESS: InetNetwork = InetNetwork("10.0.42.2", 30)
-        internal val DEFAULT_IPV6_ADDRESS: InetNetwork = InetNetwork("fd42:42:42::2", 128)
 
         inline fun build(block: Builder.() -> Unit): XrayConfig = Builder().apply(block).build()
     }

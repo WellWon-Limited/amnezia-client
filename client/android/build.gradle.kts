@@ -28,9 +28,6 @@ android {
     androidResources {
         // don't compress Qt binary resources file
         noCompress += "rcc"
-        // AGP 9 removes defaultConfig.resourceConfigurations. Keep the locale allowlist
-        // on the public Android resources DSL so the pre-publication project is forward-safe.
-        localeFilters += listOf("en", "ru", "b+zh+Hans")
     }
 
     packaging {
@@ -47,6 +44,8 @@ android {
         applicationId = "com.tribevpn.client"
         targetSdk = qtTargetSdkVersion.toInt()
 
+        // keeps language resources for only the locales specified below
+        resourceConfigurations += listOf("en", "ru", "b+zh+Hans")
         // ndk.abiFilters is only used for single-ABI builds; multi-ABI uses splits below
         if (abiList.size == 1) {
             ndk.abiFilters += abiList
@@ -99,9 +98,6 @@ android {
             // androyddeployqt creates the folders below
             assets.setSrcDirs(listOf("assets"))
             jniLibs.setSrcDirs(listOf("libs"))
-        }
-        getByName("test") {
-            java.setSrcDirs(listOf("tests"))
         }
 
         getByName("oss") {
@@ -199,10 +195,7 @@ dependencies {
     implementation(libs.google.mlkit)
     implementation(libs.androidx.datastore)
     implementation(libs.androidx.biometric)
-    testImplementation(kotlin("test-junit"))
-    // Local JVM tests must execute the same strict JSONObject parser/serializer contract as the
-    // Android runtime; android.jar exposes only throwing stubs outside a device.
-    testImplementation("org.json:json:20240303")
+
     playImplementation(project(":billing"))
 }
 

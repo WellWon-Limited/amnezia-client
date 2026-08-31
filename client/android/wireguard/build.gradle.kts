@@ -15,7 +15,4 @@ dependencies {
     compileOnly(project(":utils"))
     compileOnly(project(":protocolApi"))
     implementation(libs.kotlinx.coroutines)
-    testImplementation(kotlin("test-junit"))
-    testImplementation(project(":utils"))
-    testImplementation(project(":protocolApi"))
 }

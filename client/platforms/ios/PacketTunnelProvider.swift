@@ -17,16 +17,6 @@ struct Constants {
   static let ovpnConfigKey = "ovpn"
   static let xrayConfigKey = "xray"
   static let wireGuardConfigKey = "wireguard"
-  static let tribeConfigSchemaKey = "tribe_config_schema"
-  static let tribeProtocolKey = "tribe_protocol"
-  static let tribeConfigReferenceKey = "tribe_config_ref"
-  static let tribeGuardedSwitchKey = "guarded_inner_switch"
-  static let tribeSessionIdKey = "tribe_session_id"
-  static let tribeGuardOperationKey = "operation"
-  static let tribeGuardSessionKey = "session"
-  static let tribeGuardPolicyKey = "policy_sha256"
-  static let tribeOuterSessionKey = "outer_session_id"
-  static let tribeExpectedRuntimeSessionKey = "expected_runtime_session_id"
   static let loggerTag = "NET"
   
   static let kActionStart = "start"
@@ -35,16 +25,6 @@ struct Constants {
   static let kActionGetTunnelId = "getTunnelId"
   static let kActionStatus = "status"
   static let kActionRebind = "rebind" // AVPN BUG-4 auto-heal: listen_port=0 в живом awg-go
-  static let kActionEngineManifestV1 = "engine_manifest_v1" // AVPN: additive/versioned IPC.
-  static let kActionNativeGuardStatus = "native_guard_status_v1"
-  static let kActionNativeGuardPrepare = "native_guard_prepare_v1"
-  static let kActionNativeSessionActivate = "native_session_activate_v1"
-  static let kActionNativeSessionStop = "native_session_stop_v1"
-  static let kActionNativeGuardRelease = "native_guard_release_v1"
-  static let kActionNativeGuardReconcile = "native_guard_reconcile_v1"
-  static let kActionRuntimeAuthorityRenew = "runtime_authority_renew_v1"
-  static let tribeAuthorityRenewalRequestKey = "renewal_request"
-  static let kActionNativeGuardRecoveryResolve = "native_guard_recovery_resolve_v1"
   static let kActionIsServerReachable = "isServerReachable"
   static let kMessageKeyAction = "action"
   static let kMessageKeyTunnelId = "tunnelId"
@@ -71,23 +51,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pendingNetworkChangeWorkItem: DispatchWorkItem?
     private var isApplyingNetworkChange = false
     private var lastOpenVPNReachabilityStatus: OpenVPNReachabilityStatus?
-    // Thread-safe lifecycle generation + reset-safe counters shared by iOS and
-    // macOS Network Extension targets.
-    let xrayRuntimeSession = TunnelRuntimeSession()
-    let wireguardRuntimeSession = TunnelRuntimeSession()
-    let tribeSessionGuard = TribeNativeSessionGuard()
-    let tribeGuardQueue = DispatchQueue(label: Constants.processQueueName + ".native-guard")
-    var tribePreparedSession: TribePreparedNativeSession?
-    var tribeRuntimeAuthorityLease: TribeRuntimeAuthorityLease?
-    var tribeAuthorityWatchdog: DispatchSourceTimer?
-    let tribeAuthorityWatchdogFence = TribeRuntimeAuthorityWatchdogFence()
-    let xraySocketProtectionLock = NSLock()
-    var xraySocketProtectionGeneration: UInt64 = 0
-    var xraySocketProtectionSessionId = ""
-    var xraySocketProtectionSucceeded = false
-    var xraySocketProtectionFailed = false
-    let xraySocketCallbackRegistry = XraySocketCallbackRegistry<XraySocketCallbackContext>()
-    let xrayNativeLifecycleGate = XrayNativeLifecycleGate()
 
     var splitTunnelType: Int?
     var splitTunnelSites: [String]?
@@ -106,8 +69,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     var stopHandler: (() -> Void)?
     var protoType: TunnelProtoType?
     
-    private let activeInterfaceLock = NSLock()
-    private var activeIfaceIdx: UInt32 = 0
+    var activeIfaceIdx: UInt32 = 0
 
     // AVPN backend-first (Task 6): network-change reconnect debounce for the xray tunnel, cached from
     // XrayConfig.networkChangeDebounceMs when startXray() decodes the NE provider configuration (see
@@ -135,8 +97,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             guard hasMeaningfulChange, let proto = self.protoType else { return }
 
-            // WireGuard/AWG manages network changes internally in its adapter.
-            if proto == .wireguard {
+            // WireGuard/AWG and OpenVPN manages network changes internally in its own adapter.
+            if proto == .wireguard || proto == .openvpn {
                 return
             }
 
@@ -160,7 +122,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     func updateActiveInterfaceIndex(for path: Network.NWPath?) {
         guard let path else {
-            setActiveInterfaceIndex(0)
+            activeIfaceIdx = 0
             return
         }
 
@@ -174,22 +136,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }.first ?? activeInterfaces.first ?? nonLoopbackInterfaces.first
 
         if let candidate {
-            setActiveInterfaceIndex(UInt32(candidate.index))
+            activeIfaceIdx = UInt32(candidate.index)
         } else {
-            setActiveInterfaceIndex(0)
+            activeIfaceIdx = 0
         }
-    }
-
-    func currentActiveInterfaceIndex() -> UInt32 {
-        activeInterfaceLock.lock()
-        defer { activeInterfaceLock.unlock() }
-        return activeIfaceIdx
-    }
-
-    private func setActiveInterfaceIndex(_ value: UInt32) {
-        activeInterfaceLock.lock()
-        activeIfaceIdx = value
-        activeInterfaceLock.unlock()
     }
 
     func updateActiveInterfaceIndexForCurrentPath() {
@@ -215,12 +165,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
           return
       }
 
-      guard String(data: messageData, encoding: .utf8) != nil else {
+      guard let message = String(data: messageData, encoding: .utf8) else {
           if let completionHandler {
               completionHandler(nil)
           }
           return
       }
+
+      neLog(.info, title: "App said: ", message: message)
 
       guard let message = try? JSONSerialization.jsonObject(with: messageData, options: []) as? [String: Any] else {
           if protoType == .wireguard {
@@ -242,34 +194,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
           return
       }
 
-      // Provider messages may contain private keys, Xray UUIDs and complete
-      // engine configs.  Log only the allowlisted action and payload size.
-      neLog(.info, title: "App message", message: "action=\(action) bytes=\(messageData.count)")
-
       if action == Constants.kActionStatus {
           handleStatusAppMessage(messageData,
                                  completionHandler: completionHandler)
-          return
-      }
-
-      if action == Constants.kActionEngineManifestV1 {
-          let payload = TribeEngineManifest.payload(activeProtocol: protoType)
-          completionHandler(try? JSONSerialization.data(withJSONObject: payload, options: []))
-          return
-      }
-
-      if handleNativeGuardMessage(message, completionHandler: completionHandler) {
-          return
       }
 
       // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля — новый локальный порт =
       // новый 5-tuple flow (лечит сессионный блок ТСПУ). Только WireGuard/AWG-путь.
       if action == Constants.kActionRebind {
           handleRebindAppMessage(completionHandler: completionHandler)
-          return
       }
-
-      completionHandler(nil)
   }
 
     override func startTunnel(options: [String : NSObject]? = nil,
@@ -278,13 +212,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let errorNotifier = ErrorNotifier(activationAttemptId: activationAttemptId)
 
         neLog(.info, message: "Start tunnel")
-        let vpnProto = protocolConfiguration
-        if #available(iOS 14.0, macOS 11.0, *) {
-            var details = "includeAllNetworks=\(vpnProto.includeAllNetworks)"
-            if #available(iOS 14.2, macOS 11.0, *) {
-                details += " excludeLocalNetworks=\(vpnProto.excludeLocalNetworks)"
+        if let vpnProto = protocolConfiguration as? NEVPNProtocol {
+            if #available(iOS 14.0, macOS 11.0, *) {
+                var details = "includeAllNetworks=\(vpnProto.includeAllNetworks)"
+                if #available(iOS 14.2, macOS 11.0, *) {
+                    details += " excludeLocalNetworks=\(vpnProto.excludeLocalNetworks)"
+                }
+                neLog(.info, title: "Protocol", message: details)
             }
-            neLog(.info, title: "Protocol", message: details)
         }
 
         if let protocolConfiguration = protocolConfiguration as? NETunnelProviderProtocol {
@@ -292,30 +227,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let providerKeys = providerConfiguration?.keys.sorted().joined(separator: ",") ?? ""
             var protocolDetails = "bundleId=\(protocolConfiguration.providerBundleIdentifier ?? "") keys=[\(providerKeys)]"
             if let ovpnData = providerConfiguration?[Constants.ovpnConfigKey] as? Data {
-                protocolDetails += " ovpnBytes=\(ovpnData.count)"
+                let preview = String(decoding: ovpnData.prefix(512), as: UTF8.self)
+                protocolDetails += " ovpnBytes=\(ovpnData.count) ovpnPreview=\(preview)"
             }
             neLog(.info, title: "Protocol", message: protocolDetails)
 
             if (providerConfiguration?[Constants.ovpnConfigKey] as? Data) != nil {
                 protoType = .openvpn
-            } else if let tribeProtocol = providerConfiguration?[Constants.tribeProtocolKey] as? String,
-                      tribeProtocol == "awg" || tribeProtocol == "wireguard" {
+            } else if (providerConfiguration?[Constants.wireGuardConfigKey] as? Data) != nil {
                 protoType = .wireguard
-            } else if let tribeProtocol = providerConfiguration?[Constants.tribeProtocolKey] as? String,
-                      tribeProtocol == "xray" || tribeProtocol == "ssxray" {
+            } else if (providerConfiguration?[Constants.xrayConfigKey] as? Data) != nil {
                 protoType = .xray
             }
-        }
-
-        if let protocolConfiguration = protocolConfiguration as? NETunnelProviderProtocol,
-           protocolConfiguration.providerConfiguration?[Constants.tribeGuardedSwitchKey]
-                as? Bool == true {
-            cancelPendingOpenVPNReconnect()
-            cancelPendingNetworkChangeHandling()
-            didReceiveInitialPathUpdate = false
-            updateActiveInterfaceIndexForCurrentPath()
-            startInitialNativeGuard(options: options, completionHandler: completionHandler)
-            return
         }
 
         guard let protoType else {
@@ -342,63 +265,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    func consumeTribeConfig(expectedProtocols: Set<String>) throws -> (data: Data, sessionId: String) {
-        guard let protocolConfiguration = protocolConfiguration as? NETunnelProviderProtocol,
-              let provider = protocolConfiguration.providerConfiguration,
-              provider.keys.count == 5,
-              provider[Constants.tribeConfigSchemaKey] as? Int == 1,
-              provider[Constants.tribeGuardedSwitchKey] as? Bool == false,
-              let protocolName = provider[Constants.tribeProtocolKey] as? String,
-              expectedProtocols.contains(protocolName),
-              let reference = provider[Constants.tribeConfigReferenceKey] as? String,
-              let sessionId = provider[Constants.tribeSessionIdKey] as? String,
-              sessionId == sessionId.lowercased(),
-              let uuid = UUID(uuidString: sessionId),
-              uuid.uuidString.lowercased() == sessionId else {
-            throw NSError(domain: "TribeTunnelConfig", code: 1)
-        }
-#if os(iOS)
-        let data = try TribeTunnelConfigVault.consumeConfig(
-            reference: reference,
-            protocolName: protocolName,
-            sessionId: sessionId
-        )
-        return (data, sessionId)
-#else
-        // The shipping macOS product uses the authenticated privileged daemon,
-        // not this optional NE target. Never silently fall back to a bearer
-        // providerConfiguration on macOS when the encrypted vault is absent.
-        throw NSError(domain: "TribeTunnelConfigUnsupported", code: 1)
-#endif
-    }
-
-    func consumeTribeConfig(reference: String, protocolName: String,
-                            sessionId: String) throws -> Data {
-        guard protocolName == "awg" || protocolName == "xray" else {
-            throw NSError(domain: "TribeTunnelConfig", code: 2)
-        }
-#if os(iOS)
-        return try TribeTunnelConfigVault.consumeConfig(
-            reference: reference, protocolName: protocolName, sessionId: sessionId)
-#else
-        throw NSError(domain: "TribeTunnelConfigUnsupported", code: 1)
-#endif
-    }
-
-    func retainXrayCallbackContext(_ context: XraySocketCallbackContext) -> Bool {
-        xraySocketCallbackRegistry.install(context, identity: context.identity)
-    }
-
-    @discardableResult
-    func retireXrayCallbackContext(identity: XraySocketCallbackIdentity) -> Bool {
-        guard let context = xraySocketCallbackRegistry.value(for: identity),
-              context.deactivate(expected: identity),
-              xraySocketCallbackRegistry.remove(identity: identity) === context else {
-            return false
-        }
-        return true
-    }
-
   
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         cancelPendingOpenVPNReconnect()
@@ -417,7 +283,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             stopOpenVPN(with: reason,
                         completionHandler: completionHandler)
         case .xray:
-            stopXray { _ in completionHandler() }
+            stopXray(completionHandler: completionHandler)
         }
     }
   
@@ -433,7 +299,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .openvpn:
             handleOpenVPNStatusMessage(messageData, completionHandler: completionHandler)
         case .xray:
-            handleXrayStatusMessage(completionHandler: completionHandler)
+            break;
         }
     }
   
@@ -454,19 +320,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        guard xrayRuntimeSession.snapshot().state == .running else {
-            xrayLog(.debug, message: "Ignoring network change for a non-running xray session")
-            completion(nil)
-            return
-        }
-
-        // The encrypted handoff is intentionally one-shot. Keep the existing
-        // NE/TUN and core session alive; newly-created Xray sockets are bound
-        // by the installed callback to this updated interface. Restarting here
-        // would consume no new authority and would tear down the kill guard.
         updateActiveInterfaceIndex(for: changePath)
-        xrayLog(.info, message: "Updated Xray protected interface for network change")
-        completion(nil)
+        reasserting = true
+        xrayLog(.info, message: "Applying network change to xray tunnel")
+        stopXray { }
+        startXray { [weak self] error in
+            self?.reasserting = false
+            completion(error)
+        }
     }
 
     private func scheduleNetworkChangeHandling(for proto: TunnelProtoType, path: Network.NWPath) {
@@ -477,11 +338,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingNetworkChangeWorkItem = nil
-
-            guard self.protoType == .xray,
-                  self.xrayRuntimeSession.snapshot().state == .running else {
-                return
-            }
 
             if self.isApplyingNetworkChange || self.reasserting {
                 xrayLog(.debug, message: "Skipping network change while restart is already in progress")
@@ -732,7 +588,7 @@ final class PacketTunnelFlowAdapter: NSObject, OpenVPNAdapterPacketFlow {
   }
 }
 
-extension NEPacketTunnelFlow: @retroactive OpenVPNAdapterPacketFlow {}
+extension NEPacketTunnelFlow: OpenVPNAdapterPacketFlow {}
 
 extension NEProviderStopReason {
   var amneziaDescription: String {

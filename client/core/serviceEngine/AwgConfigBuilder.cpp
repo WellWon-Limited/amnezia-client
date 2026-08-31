@@ -1,7 +1,5 @@
 #include "AwgConfigBuilder.h"
 
-#include "TuningStore.h" // AVPN awg3 (§6.1): allowlist awg_extra_keys_allowed для generic-канала extra
-
 #include "../utils/constants/protocolConstants.h"
 
 #include <QJsonArray>
@@ -36,23 +34,6 @@ static void forEachV3Param(const AwgParams &a,
     if (a.disableCookies.has_value())
         emitFn(QStringLiteral("DisableCookies"), *a.disableCookies ? QStringLiteral("1")
                                                                    : QStringLiteral("0"));
-}
-
-// AVPN generic-канал (§6.1): незнакомые ключи из extra эмитим ТОЛЬКО по server-driven allowlist'у
-// awg_extra_keys_allowed (подписанный /v1/config, lists; дефолт ПУСТ ⇒ канал спит). Это только
-// legacy-v1 compatibility: v2 не использует passthrough даже с awg-apple 3.1.4-tribe.3, потому
-// что новый wire-format всегда требует typed profile/capability и согласованный engine release.
-static void forEachAllowedExtra(const AwgParams &a,
-                                const std::function<void(const QString &, const QString &)> &emitFn)
-{
-    if (a.extra.isEmpty())
-        return;
-    const QStringList allowed = TuningStore::listOr(QStringLiteral("awg_extra_keys_allowed"), {});
-    for (const QString &key : allowed) {
-        const auto it = a.extra.constFind(key);
-        if (it != a.extra.constEnd() && !it.value().isEmpty())
-            emitFn(key, it.value());
-    }
 }
 
 // AVPN parity: наш service-путь (VpnConnectionTunnelControl::invokeConnect → connectToVpn напрямую)
@@ -128,12 +109,11 @@ QString AwgConfigBuilder::wgQuick(const Subscription &sub, const SubscriptionNod
     if (!a.I3.isEmpty()) l << QStringLiteral("I3 = %1").arg(a.I3);
     if (!a.I4.isEmpty()) l << QStringLiteral("I4 = %1").arg(a.I4);
     if (!a.I5.isEmpty()) l << QStringLiteral("I5 = %1").arg(a.I5);
-    // AWG 3.0 + generic-канал: только непустые / только по allowlist'у (см. хелперы выше)
+    // AWG 3.0/3.1: only explicit typed keys reach strict native parsers.
     const auto emitLine = [&l](const QString &k, const QString &v) {
         l << QStringLiteral("%1 = %2").arg(k, v);
     };
     forEachV3Param(a, emitLine);
-    forEachAllowedExtra(a, emitLine);
 
     appendPeerBlock(l, node);                 // единственный (загран) пир — full-tunnel
     return l.join(QLatin1Char('\n')) + QLatin1Char('\n');
@@ -183,8 +163,6 @@ QJsonObject AwgConfigBuilder::reportSummary(const Subscription &sub, const Subsc
                                      || !a.rekeyAfterTime.isEmpty());
     awg.insert(QStringLiteral("v31"), a.randomTrailers.value_or(false)
                                         && a.disableCookies.value_or(false));
-    if (!a.extra.isEmpty())
-        awg.insert(QStringLiteral("extra_keys"), int(a.extra.size()));
     o.insert(QStringLiteral("awg"), awg);
     return o;
 }
@@ -234,10 +212,9 @@ QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const Subscrip
     if (!a.I3.isEmpty()) o.insert(QStringLiteral("I3"), a.I3);
     if (!a.I4.isEmpty()) o.insert(QStringLiteral("I4"), a.I4);
     if (!a.I5.isEmpty()) o.insert(QStringLiteral("I5"), a.I5);
-    // AWG 3.0 + generic-канал: дальше несут штатные апстрим-циклы (awgProtocolKeys / parseConfig)
+    // AWG 3.0/3.1 typed keys continue through the upstream platform parsers.
     const auto emitJson = [&o](const QString &k, const QString &v) { o.insert(k, v); };
     forEachV3Param(a, emitJson);
-    forEachAllowedExtra(a, emitJson);
 
     o.insert(QStringLiteral("isObfuscationEnabled"), true); // AWG-ноды: иначе Android тихо обычный WG (§6.4)
     o.insert(QStringLiteral("config"), wgQuick(sub, node, keys));

@@ -5,16 +5,11 @@ import android.net.IpPrefix
 import android.net.VpnService
 import android.net.VpnService.Builder
 import android.os.Build
-import android.os.ParcelFileDescriptor
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import android.system.OsConstants
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.net.InetNetwork
-import org.amnezia.vpn.util.net.parsePublicEndpointLiteral
-import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "Protocol"
@@ -27,26 +22,11 @@ private const val SPLIT_TUNNEL_EXCLUDE = 2
 
 abstract class Protocol {
 
-    data class PreparedVpnSession(
-        val tunnelConfig: ProtocolConfig,
-        val nativeConfig: Any,
-        val policyHash: String = tunnelPolicyHash(tunnelConfig),
-    )
-
-    /** Returned only after the exact native reader owns its dup and is synchronously ready. */
-    data class NativeStartReceipt(val exactSessionToken: String)
-
     abstract val statistics: Statistics
     protected lateinit var context: Context
     protected lateinit var state: MutableStateFlow<ProtocolState>
     protected lateinit var onError: (String) -> Unit
     protected var isInitialized: Boolean = false
-
-    /** AVPN: compile/runtime engine facts for the versioned service IPC. */
-    open val engineManifest: EngineManifest? = null
-
-    /** True only when the engine consumes a dup of a service-owned master TUN. */
-    open val supportsSessionOwnedTun: Boolean = false
 
     fun initialize(context: Context, state: MutableStateFlow<ProtocolState>, onError: (String) -> Unit) {
         this.context = context
@@ -63,40 +43,6 @@ abstract class Protocol {
     abstract fun stopVpn()
 
     abstract fun reconnectVpn(vpnBuilder: Builder, protect: (Int) -> Boolean)
-
-    open suspend fun prepareVpn(config: JSONObject): PreparedVpnSession =
-        throw VpnStartException("Protocol does not support a session-owned TUN")
-
-    /**
-     * Ownership of [tunFd] transfers to the protocol at call entry. Implementations must close
-     * it on every pre-native failure and must transfer it exactly once to a native ABI that owns
-     * the descriptor on every returned-error/throw path. The caller must never close it again.
-     */
-    open fun startWithTun(
-        prepared: PreparedVpnSession,
-        tunFd: Int,
-        exactSessionToken: String,
-        protect: (Int) -> Boolean,
-    ): NativeStartReceipt {
-        return ParcelFileDescriptor.adoptFd(tunFd).use {
-            throw VpnStartException("Protocol does not support a session-owned TUN")
-        }
-    }
-
-    /**
-     * Rolls back a start that threw before a receipt. `true` is a positive native teardown proof;
-     * `false` means the outer TUN must remain armed/blackholed and the session quarantined.
-     */
-    open fun abortInnerStart(exactSessionToken: String): Boolean = false
-
-    open fun stopInner(exactSessionToken: String) {
-        throw VpnException("Protocol does not support exact inner teardown")
-    }
-
-    /** Applies the immutable outer policy; only AmneziaVpnService may call establish(). */
-    fun configureOuterTunnel(config: ProtocolConfig, vpnBuilder: Builder) {
-        buildVpnInterface(config, vpnBuilder)
-    }
 
     protected fun ProtocolConfig.Builder.configSplitTunneling(config: JSONObject) {
         if (!allowSplitTunneling) {
@@ -135,31 +81,6 @@ abstract class Protocol {
         for (i in 0 until splitTunnelApps.length()) {
             appHandlerFunc(splitTunnelApps.getString(i))
         }
-        if (config.optString("native_envelope_schema") == "tribe_catalog_v2_native_v1") {
-            val self = context.packageName
-            val containsSelf = (0 until splitTunnelApps.length())
-                .any { splitTunnelApps.opt(it) == self }
-            // The post-tunnel verifier runs in the Tribe UID. A signed v2 policy that bypasses
-            // that UID could produce a false receipt over WAN, so ambiguity is rejected.
-            if ((splitTunnelType == SPLIT_TUNNEL_INCLUDE && !containsSelf)
-                || (splitTunnelType == SPLIT_TUNNEL_EXCLUDE && containsSelf)) {
-                throw BadConfigException("Catalog-v2 app split would bypass the tunnel verifier")
-            }
-        }
-    }
-
-    protected fun ProtocolConfig.Builder.configProtectedTunnelRoutes(config: JSONObject) {
-        val schema = config.optString("native_envelope_schema")
-        if (schema != "tribe_catalog_v2_native_v1") return
-        val authority = config.optJSONObject("runtime_authority_v1")
-            ?: throw BadConfigException("Catalog-v2 runtime authority missing")
-        val values = authority.opt("protected_tunnel_ips")
-        if (values !is JSONArray || values.length() == 0 || values.length() > 64) {
-            throw BadConfigException("Catalog-v2 protected tunnel IPs missing")
-        }
-        protectedTunnelRoutesForEnvelope(
-            schema, (0 until values.length()).map(values::opt),
-        ).forEach(::protectAddress)
     }
 
     protected open fun buildVpnInterface(config: ProtocolConfig, vpnBuilder: Builder) {
@@ -233,45 +154,6 @@ abstract class Protocol {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             vpnBuilder.setMetered(false)
     }
-}
-
-/** Pure closed-boundary parser shared with route-policy unit tests. */
-internal fun protectedTunnelRoutesForEnvelope(
-    schema: String,
-    values: List<Any?>?,
-): Set<InetNetwork> {
-    if (schema != "tribe_catalog_v2_native_v1") return emptySet()
-    if (values.isNullOrEmpty() || values.size > 64) {
-        throw BadConfigException("Catalog-v2 protected tunnel IPs missing")
-    }
-    return values.mapTo(linkedSetOf()) { value ->
-        val text = value as? String
-            ?: throw BadConfigException("Protected tunnel IP is not a string")
-        val address = parsePublicEndpointLiteral(text)
-            ?: throw BadConfigException("Protected tunnel IP is not canonical public unicast")
-        InetNetwork(address)
-    }
-}
-
-fun tunnelPolicyHash(config: ProtocolConfig): String {
-    val canonical = buildList {
-        add("schema=1")
-        add("addresses=" + config.addresses.map { "${it.address.hostAddress}/${it.mask}" }.sorted().joinToString(","))
-        add("dns=" + config.dnsServers.mapNotNull { it.hostAddress }.sorted().joinToString(","))
-        add("search=${config.searchDomain.orEmpty()}")
-        add("routes=" + config.routes.map {
-            "${if (it.include) '+' else '-'}${it.inetNetwork.address.hostAddress}/${it.inetNetwork.mask}"
-        }.sorted().joinToString(","))
-        add("included_apps=" + config.includedApplications.sorted().joinToString(","))
-        add("excluded_apps=" + config.excludedApplications.sorted().joinToString(","))
-        add("proxy=${config.httpProxy?.toString().orEmpty()}")
-        add("all_af=${config.allowAllAF}")
-        add("blocking=${config.blockingMode}")
-        add("mtu=${config.mtu}")
-    }.joinToString("\n")
-    return MessageDigest.getInstance("SHA-256")
-        .digest(canonical.toByteArray(StandardCharsets.UTF_8))
-        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
 private fun VpnService.Builder.addAddress(addr: InetNetwork) = addAddress(addr.address, addr.mask)

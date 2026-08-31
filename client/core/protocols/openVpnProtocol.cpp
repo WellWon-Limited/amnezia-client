@@ -41,42 +41,19 @@ QString OpenVpnProtocol::defaultConfigPath()
 
 void OpenVpnProtocol::cleanupResources()
 {
-    bool exactChildStopped = true;
-    if (m_openVpnProcess) {
-        auto initialState = m_openVpnProcess->state();
-        const bool alreadyStopped = initialState.waitForFinished(1500)
-                && initialState.returnValue() == QProcess::NotRunning;
-        if (!alreadyStopped) {
-            if (!sendTermSignal()) {
-                m_openVpnProcess->terminate();
-            }
-            auto graceful = m_openVpnProcess->waitForFinished(5000);
-            exactChildStopped = graceful.waitForFinished(6000)
-                    && graceful.returnValue();
-            if (!exactChildStopped) {
-                killOpenVpnProcess();
-                auto killed = m_openVpnProcess->waitForFinished(5000);
-                exactChildStopped = killed.waitForFinished(6000)
-                        && killed.returnValue();
-            }
+    if (m_openVpnProcess || openVpnProcessIsRunning()) {
+        if (!sendTermSignal()) {
+            killOpenVpnProcess();
         }
-        if (alreadyStopped || exactChildStopped) {
-            auto finalState = m_openVpnProcess->state();
-            exactChildStopped = finalState.waitForFinished(1500)
-                    && finalState.returnValue() == QProcess::NotRunning;
-        }
-        m_openVpnProcess->close();
+        QThread::msleep(10);
     }
     m_managementServer.stop();
 
 #if defined(Q_OS_WIN) || defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
-    IpcClient::withInterface([exactChildStopped](
-            QSharedPointer<IpcInterfaceReplica> iface) {
-        QRemoteObjectPendingReply<bool> reply = exactChildStopped
-                ? iface->disableKillSwitch() : iface->disableAllTraffic();
-        if (!reply.waitForFinished(3000) || !reply.returnValue()) {
-            qWarning() << "OpenVpnProtocol::cleanupResources(): PF teardown"
-                       << "postcondition failed";
+    IpcClient::withInterface([](QSharedPointer<IpcInterfaceReplica> iface) {
+        QRemoteObjectPendingReply<bool> reply = iface->disableKillSwitch();
+        if (!reply.waitForFinished(1000) && !reply.returnValue()) {
+            qWarning() << "OpenVpnProtocol::cleanupResources(): Failed to disable killswitch";
         }
     });
 #endif
@@ -127,7 +104,7 @@ ErrorCode OpenVpnProtocol::prepare()
 void OpenVpnProtocol::killOpenVpnProcess()
 {
     if (m_openVpnProcess) {
-        m_openVpnProcess->kill();
+        m_openVpnProcess->close();
     }
 }
 
@@ -143,6 +120,11 @@ void OpenVpnProtocol::readOpenVpnConfiguration(const QJsonObject &configuration)
         m_configFileName = m_configFile.fileName();
         qDebug().noquote() << QString("Set config data") << m_configFileName;
     }
+}
+
+bool OpenVpnProtocol::openVpnProcessIsRunning() const
+{
+    return Utils::processIsRunning("openvpn");
 }
 
 void OpenVpnProtocol::disconnectFromManagementServer()

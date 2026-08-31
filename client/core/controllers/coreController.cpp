@@ -15,7 +15,6 @@
 #ifdef AVPN_ENGINE_ENABLED            // AVPN overlay
     #include "amneziaApplication.h"   // amnApp->networkManager()
     #include "core/serviceEngine/AvpnEngineQml.h"
-    #include "core/serviceEngine/CatalogConnectionFacade.h" // AVPN v2: secret-free QML facade
     #include "core/serviceEngine/AvpnPushBridge.h" // AVPN (Task 9): мост пушей → QML
     #include "core/serviceEngine/TribeSupportChat.h" // AVPN (Support): чат поддержки → QML
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
@@ -48,12 +47,6 @@ CoreController::CoreController(const QSharedPointer<VpnConnection> &vpnConnectio
         initAndroidController();
         initAppleController();
     }
-#ifdef AVPN_ENGINE_ENABLED
-    // AVPN v2: compose only after platform controllers have published their generated engine
-    // manifest/guard readiness, but still before CoreController returns and QML is loaded.
-    if (m_avpnEngine && m_tribeConnection)
-        m_avpnEngine->attachCatalogV2(m_tribeConnection);
-#endif
     initLogging();
 
     m_translator = new QTranslator(this);
@@ -218,17 +211,9 @@ void CoreController::initControllers()
 
 #ifdef AVPN_ENGINE_ENABLED   // AVPN overlay: умный движок (пул/выбор/failover) + диагностика
     // Переиспользуем готовые объекты форка: VpnConnection, SecureAppSettingsRepository, networkManager.
-    m_avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
-                                           amnApp->networkManager(), this);
-    setQmlContextProperty("TribeEngine", m_avpnEngine);
-
-    // AVPN v2: always publish the stable, secret-free facade before QML is loaded. Until the
-    // production coordinator restores an authoritative encrypted v2 state and installs its action
-    // owner, the facade stays non-authoritative/unavailable and the existing v1 AWG path remains
-    // active. QObject parenting guarantees the facade outlives the QQml context bindings.
-    m_tribeConnection = new avpn::CatalogConnectionFacade(this);
-    Q_ASSERT(m_tribeConnection);
-    setQmlContextProperty("TribeConnection", m_tribeConnection);
+    auto *avpnEngine = new avpn::AvpnEngineQml(m_vpnConnection.get(), m_appSettingsRepository,
+                                               amnApp->networkManager(), this);
+    setQmlContextProperty("TribeEngine", avpnEngine);
 
     // AVPN (haptics, спека 2026-07-11): семантический тактильный отклик для QML-слоя Tribe.
     setQmlContextProperty("TribeHaptics", new avpn::TribeHaptics(this));
@@ -246,14 +231,14 @@ void CoreController::initControllers()
                      tribeSupport, &avpn::TribeSupportChat::onSupportPush);
 
     // AVPN backend-first: чат поддержки живёт на том же активном edge, что и движок.
-    tribeSupport->setBaseUrl(m_avpnEngine->apiBase());
-    QObject::connect(m_avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
+    tribeSupport->setBaseUrl(avpnEngine->apiBase());
+    QObject::connect(avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
                      tribeSupport, &avpn::TribeSupportChat::setBaseUrl);
 
     // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный
     // рефреш /v1/subscription — бейдж и золотая CTA оживают сразу, на любой открытой вкладке.
     QObject::connect(avpn::AvpnPushBridge::instance(), &avpn::AvpnPushBridge::paymentPushReceived,
-                     m_avpnEngine, &avpn::AvpnEngineQml::refreshSubscription);
+                     avpnEngine, &avpn::AvpnEngineQml::refreshSubscription);
 
     // AVPN (Task 13): мост обратного диплинка ПЕРЕНОСА (tribe://transfer / Universal Link) → QML.
     auto *avpnDeepLink = avpn::AvpnDeepLinkBridge::instance();
@@ -261,14 +246,14 @@ void CoreController::initControllers()
     // Извлечённый из ссылки токен переноса → движок (POST /v1/transfer/redeem + РОТАЦИЯ токена).
     // У моста нет base URL / Identity / NAM, поэтому redeem делает движок.
     QObject::connect(avpnDeepLink, &avpn::AvpnDeepLinkBridge::transferRequested,
-                     m_avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
+                     avpnEngine, &avpn::AvpnEngineQml::redeemTransfer);
     // AVPN: холодный старт по диплинку — ссылка могла прийти ДО этого connect (натив-слой iOS/
     // Android дёргает мост в своём темпе): сигнал ушёл в пустоту, токен остался в мосте. Забираем
     // его один раз и редимим сами (при busy движок сам отложит-ретраит — см. redeemTransfer).
     {
         const QString pendingTransfer = avpnDeepLink->takePendingTransferToken();
         if (!pendingTransfer.isEmpty())
-            m_avpnEngine->redeemTransfer(pendingTransfer);
+            avpnEngine->redeemTransfer(pendingTransfer);
     }
 
     // AVPN (Task E): мост-консьюмер «намерений» фонового App Intent авто-паузы (Task 8). Сам движок

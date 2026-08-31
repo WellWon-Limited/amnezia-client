@@ -38,7 +38,7 @@ open class WireguardConfig protected constructor(
     val rejectAfterTime: String?,
     val keepaliveTimeout: String?,
     val maxHandshakeAttempts: String?,
-    val randomTrailers: String?, // AVPN: AWG 3.1
+    val randomTrailers: String?,
     val disableCookies: String?,
 ) : ProtocolConfig(protocolConfigBuilder) {
 
@@ -112,8 +112,8 @@ open class WireguardConfig protected constructor(
         rejectAfterTime?.takeIf { it.isNotEmpty() }?.let { appendLine("reject_after_time=$it") }
         keepaliveTimeout?.takeIf { it.isNotEmpty() }?.let { appendLine("keepalive_timeout=$it") }
         maxHandshakeAttempts?.takeIf { it.isNotEmpty() }?.let { appendLine("max_handshake_attempts=$it") }
-        randomTrailers?.takeIf { it.isNotEmpty() }?.let { appendLine("random_trailers=${it.toAwgUapiBool()}") }
-        disableCookies?.takeIf { it.isNotEmpty() }?.let { appendLine("disable_cookies=${it.toAwgUapiBool()}") }
+        randomTrailers?.takeIf { it.isNotEmpty() }?.let { appendLine("random_trailers=${it.toUapiBool()}") }
+        disableCookies?.takeIf { it.isNotEmpty() }?.let { appendLine("disable_cookies=${it.toUapiBool()}") }
     }
 
     private fun validateProtocolExtensionParameters() {
@@ -235,9 +235,8 @@ open class WireguardConfig protected constructor(
 @OptIn(ExperimentalStdlibApi::class)
 internal fun String.base64ToHex(): String = Base64.decode(this, Base64.DEFAULT).toHexString()
 
-/** AVPN: normalize AWG quick booleans to the only values accepted by UAPI. */
-internal fun String.toAwgUapiBool(): String = when (trim().lowercase()) {
+/** Converts awg-quick on/off (and 0/1/true/false) to UAPI 1/0 for amneziawg-go ParseBool. */
+internal fun String.toUapiBool(): String = when (trim().lowercase()) {
     "on", "1", "true", "t", "yes" -> "1"
-    "off", "0", "false", "f", "no" -> "0"
-    else -> throw BadConfigException("Invalid AWG boolean value")
+    else -> "0"
 }
