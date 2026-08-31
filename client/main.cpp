@@ -6,6 +6,7 @@
 #include "amneziaApplication.h"
 #include "core/utils/osSignalHandler.h"
 #include "core/utils/migrations.h"
+#include "core/utils/appUiConfig.h"
 #include "version.h"
 
 
@@ -29,7 +30,7 @@ bool isAnotherInstanceRunning()
     // AVPN: derive instance socket from APPLICATION_NAME (→"AVPNInstance"), was hardcoded
     // "AmneziaVPNInstance" — shared name cross-linked our fork with official Amnezia
     // (clicking either icon raised whichever instance already held the socket).
-    socket.connectToServer(QStringLiteral(APPLICATION_NAME "Instance"));
+    socket.connectToServer(APP_INSTANCE_NAME);
     if (socket.waitForConnected(500)) {
 #ifdef AVPN_ENGINE_ENABLED
         // AVPN (перенос по QR): Windows/Linux URL-протокол запускает ВТОРОЙ инстанс с диплинком
@@ -45,7 +46,7 @@ bool isAnotherInstanceRunning()
             }
         }
 #endif
-        qWarning() << "AmneziaVPN is already running";
+        qWarning() << APPLICATION_NAME << "is already running";
         return true;
     }
     return false;
@@ -68,6 +69,9 @@ int main(int argc, char *argv[])
 #endif
 
     AmneziaApplication app(argc, argv);
+    // One exact version on every platform; server-side cohorts must not see
+    // Qt's platform-specific default (for example a bare Apple build number).
+    QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
     OsSignalHandler::setup();
 
     anchorOpenSSL();

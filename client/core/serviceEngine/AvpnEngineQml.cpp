@@ -9,6 +9,7 @@
 #include "vpnConnection.h"
 #include "Enrollment.h" // AVPN: authToken() → Enrollment::loadToken()
 #include "SubscriptionParser.h" // AVPN (оплата): refreshSubscription() — device-часы для шапки/CTA
+#include "SubscriptionRequest.h"
 #include "Identity.h"   // AVPN: localDeviceId() → installation-UUID (раздел «Устройства» всегда показывает ID)
 #include "IdentityAnchor.h" // AVPN (анти-фрод): Keychain-якорь identity — restore на старте (переустановка)
 #include "DeviceFingerprint.h" // AVPN (anti-farm): якорь железа в async-enroll (паритет с Enrollment::enroll)
@@ -2960,7 +2961,8 @@ void AvpnEngineQml::bootstrapEnrollAsync(bool reEnrolled)
 void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStore, bool reEnrolled)
 {
     if (!m_nam) { onBootstrapAttemptFailed(); return; }
-    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    QNetworkRequest req{versionedSubscriptionUrl(
+        m_baseUrl, QCoreApplication::applicationVersion())};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 
@@ -4583,7 +4585,8 @@ void AvpnEngineQml::refreshSubscription()
     if (!m_nam || token.isEmpty())
         return;
 
-    QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/subscription"))};
+    QNetworkRequest req{versionedSubscriptionUrl(
+        m_baseUrl, QCoreApplication::applicationVersion())};
     req.setRawHeader(QByteArrayLiteral("Authorization"),
                      QByteArrayLiteral("Bearer ") + token.toUtf8());
 

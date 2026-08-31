@@ -9,6 +9,10 @@
 #define APP_MAJOR_VERSION "@APP_MAJOR_VERSION@"
 #endif
 
+#ifndef APP_BUILD
+#define APP_BUILD @APP_BUILD_NUMBER@
+#endif
+
 #define APPLICATION_NAME    "AVPN"
 // AVPN: имя ДОЛЖНО совпадать с бинарём root-демона (target в service/server/CMakeLists):
 // isServiceReady() ищет процесс по этому имени (pgrep -f, case-sensitive) — расхождение

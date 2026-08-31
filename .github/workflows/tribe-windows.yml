@@ -9,9 +9,6 @@ on:
   push:
     branches:
       - ci-build
-    paths:
-      - '.github/workflows/tribe-windows.yml'
-      - 'tribe_version.cmake'
 
 env:
   QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/
