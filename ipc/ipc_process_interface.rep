@@ -23,7 +23,6 @@ class IpcProcessInterface
     SLOT( bool waitForFinished(int msecs) );
     SLOT( bool waitForStarted() );
     SLOT( bool waitForStarted(int msecs) );
-    SLOT( QProcess::ProcessState state() );
 
 
     SIGNAL( errorOccurred(QProcess::ProcessError error) );

@@ -91,7 +91,9 @@ public:
                                          int toleranceMs = 75, quint32 jitterSeed = 0,
                                          int timeoutMs = 3000, const QString &excludeNodeId = QString()) const
     {
-        const QList<SubscriptionNode> &nodes = pool.nodes();
+        // Prober spins a bounded nested event loop. Queued callbacks may refresh
+        // NodePool while it is running, so never retain a reference into it.
+        const QList<SubscriptionNode> nodes = pool.nodes();
         if (nodes.isEmpty())
             return std::nullopt;
         const QList<PingResult> pings = Prober::tcpPingAll(nodes, timeoutMs);

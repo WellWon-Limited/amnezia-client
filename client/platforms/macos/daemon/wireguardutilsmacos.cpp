@@ -176,50 +176,13 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
     out << "max_handshake_attempts=" << config.m_maxHandshakeAttempts << "\n";
   }
   if (!config.m_randomTrailers.isEmpty()) {
-    QString normalized;
-    if (!InterfaceConfig::awgBoolToUapi(config.m_randomTrailers, normalized)) {
-      logger.error() << "Invalid RandomTrailers value"; // AVPN: fail closed before UAPI.
-      deleteInterface();
-      return false;
-    }
-    out << "random_trailers=" << normalized << "\n";
+    out << "random_trailers=" << InterfaceConfig::awgBoolToUapi(config.m_randomTrailers) << "\n";
   }
   if (!config.m_disableCookies.isEmpty()) {
-    QString normalized;
-    if (!InterfaceConfig::awgBoolToUapi(config.m_disableCookies, normalized)) {
-      logger.error() << "Invalid DisableCookies value"; // AVPN
-      deleteInterface();
-      return false;
-    }
-    out << "disable_cookies=" << normalized << "\n";
+    out << "disable_cookies=" << InterfaceConfig::awgBoolToUapi(config.m_disableCookies) << "\n";
   }
 
   int err = uapiErrno(uapiCommand(message));
-  // AVPN: positive capability check.  A successful set/handshake alone does
-  // not prove an old binary applied the AWG 3.1 wire-format fields.
-  if (err == 0 && (!config.m_randomTrailers.isEmpty() ||
-                   !config.m_disableCookies.isEmpty())) {
-    const QString runtime = uapiCommand(QStringLiteral("get=1"));
-    auto hasUapiValue = [&runtime](const QString& key,
-                                   const QString& expected) {
-      return runtime.split(QLatin1Char('\n')).contains(key + QLatin1Char('=') + expected);
-    };
-    QString randomTrailers;
-    QString disableCookies;
-    const bool randomOk = config.m_randomTrailers.isEmpty() ||
-        (InterfaceConfig::awgBoolToUapi(config.m_randomTrailers, randomTrailers) &&
-         hasUapiValue(QStringLiteral("random_trailers"), randomTrailers));
-    const bool cookiesOk = config.m_disableCookies.isEmpty() ||
-        (InterfaceConfig::awgBoolToUapi(config.m_disableCookies, disableCookies) &&
-         hasUapiValue(QStringLiteral("disable_cookies"), disableCookies));
-    if (!randomOk || !cookiesOk) {
-      logger.error() << "AWG 3.1 UAPI capability mismatch; stopping interface";
-      err = EPROTONOSUPPORT;
-      deleteInterface();
-    } else {
-      logger.debug() << "AWG 3.1 UAPI capability verified";
-    }
-  }
   if (err != 0) {
     logger.error() << "Interface configuration failed:" << strerror(err);
   } else {
@@ -244,11 +207,7 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
               params.blockAddrs.append(net.toString());
           }
       }
-      if (!applyFirewallRules(params)) {
-        logger.error() << "PF policy transaction failed; keeping quarantine";
-        err = EIO;
-        deleteInterface();
-      }
+      applyFirewallRules(params);
     }
   }
   return (err == 0);
@@ -260,20 +219,15 @@ bool WireguardUtilsMacos::deleteInterface() {
     m_rtmonitor = nullptr;
   }
 
-  bool stopped = m_tunnel.state() == QProcess::NotRunning;
-  if (!stopped) {
-    // Attempt to terminate gracefully, then prove exact child death before PF
-    // release. A timeout retains the emergency quarantine.
-    m_tunnel.terminate();
-    stopped = m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT);
-    if (!stopped) {
-      m_tunnel.kill();
-      stopped = m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT);
-    }
-  }
-  if (!stopped || m_tunnel.state() != QProcess::NotRunning) {
-    KillSwitch::instance()->disableAllTraffic();
+  if (m_tunnel.state() == QProcess::NotRunning) {
     return false;
+  }
+
+  // Attempt to terminate gracefully.
+  m_tunnel.terminate();
+  if (!m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT)) {
+    m_tunnel.kill();
+    m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT);
   }
 
   // Garbage collect.
@@ -281,7 +235,9 @@ bool WireguardUtilsMacos::deleteInterface() {
   QFile::remove(wgRuntimeDir.filePath(QString(WG_INTERFACE) + ".name"));
 
   // double-check + ensure our firewall is installed and enabled
-  return KillSwitch::instance()->disableKillSwitch();
+  KillSwitch::instance()->disableKillSwitch();
+
+  return true;
 }
 
 // dummy implementations for now
@@ -619,51 +575,27 @@ void WireguardUtilsMacos::displaceConflictingVpns(const QString& selfIfname) {
   }
 }
 
-bool WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
+void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
 {
   // double-check + ensure our firewall is installed and enabled. This is necessary as
   // other software may disable pfctl before re-enabling with their own rules (e.g other VPNs)
   if (!MacOSFirewall::isInstalled()) MacOSFirewall::install();
 
-  bool ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("999.quarantine"), true);
-  ok = MacOSFirewall::ensureRootAnchorPriority() && ok;
-  ok = MacOSFirewall::flushAllStates() && ok;
-  ok = MacOSFirewall::isInstalled() && ok;
-  ok = MacOSFirewall::isQuarantineEnabled() && ok;
-  if (!ok) return false;
+  MacOSFirewall::ensureRootAnchorPriority();
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("000.allowLoopback"), true);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("100.blockAll"), params.blockAll);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("110.allowNets"), params.allowNets);
+  MacOSFirewall::setAnchorTable(QStringLiteral("110.allowNets"), params.allowNets,
+                                QStringLiteral("allownets"), params.allowAddrs);
 
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("000.allowLoopback"), true) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("100.blockAll"), params.blockAll) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("110.allowNets"), params.allowNets) && ok;
-  ok = MacOSFirewall::setAnchorTable(
-      QStringLiteral("110.allowNets"), params.allowNets,
-      QStringLiteral("allownets"), params.allowAddrs) && ok;
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("120.blockNets"), params.blockNets);
+  MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), params.blockNets,
+                                QStringLiteral("blocknets"), params.blockAddrs);
 
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("120.blockNets"), params.blockNets) && ok;
-  ok = MacOSFirewall::setAnchorTable(
-      QStringLiteral("120.blockNets"), params.blockNets,
-      QStringLiteral("blocknets"), params.blockAddrs) && ok;
-
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("200.allowVPN"), true) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("250.blockIPv6"), true) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("290.allowDHCP"), true) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("300.allowLAN"), true) && ok;
-  ok = MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("310.blockDNS"), true) && ok;
-  ok = MacOSFirewall::setAnchorTable(
-      QStringLiteral("310.blockDNS"), true,
-      QStringLiteral("dnsaddr"), params.dnsServers) && ok;
-  if (!ok) return false;
-  return MacOSFirewall::setAnchorEnabled(
-      QStringLiteral("999.quarantine"), false)
-      && !MacOSFirewall::isAnchorEnabled(QStringLiteral("999.quarantine"));
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);
+  MacOSFirewall::setAnchorEnabled(QStringLiteral("310.blockDNS"), true);
+  MacOSFirewall::setAnchorTable(QStringLiteral("310.blockDNS"), true, QStringLiteral("dnsaddr"), params.dnsServers);
 }

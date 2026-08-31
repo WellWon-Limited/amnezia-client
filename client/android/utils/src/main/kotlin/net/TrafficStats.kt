@@ -4,8 +4,6 @@ import android.net.TrafficStats
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
-import java.net.NetworkInterface
-import java.util.Collections
 import kotlin.math.roundToLong
 
 private const val BYTE = 1L
@@ -19,53 +17,31 @@ class TrafficStats {
     private var lastTrafficData = TrafficData.ZERO
     private var lastTimestamp = 0L
 
-    private val uid = Process.myUid()
-
-    private val getTrafficDataCompat: () -> TrafficData = {
+    private val getTrafficDataCompat: () -> TrafficData =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android does not guarantee that the active VpnService interface
-            // remains tun0 across rapid reconnects.  Prefer any live tun
-            // interface and fall back to this service UID if OEM kernels hide
-            // per-interface counters.
-            val tunnelData = runCatching {
-                Collections.list(NetworkInterface.getNetworkInterfaces())
-                    .asSequence()
-                    .filter { it.name.startsWith("tun") && runCatching { it.isUp }.getOrDefault(false) }
-                    .sortedBy { it.name }
-                    .map {
-                        TrafficData(
-                            TrafficStats.getRxBytes(it.name),
-                            TrafficStats.getTxBytes(it.name),
-                        )
-                    }
-                    .firstOrNull { it.isSupported() }
-            }.getOrNull()
-            tunnelData ?: uidTrafficData()
+            val iface = "tun0"
+            fun(): TrafficData {
+                return TrafficData(TrafficStats.getRxBytes(iface), TrafficStats.getTxBytes(iface))
+            }
         } else {
-            uidTrafficData()
+            val uid = Process.myUid()
+            fun(): TrafficData {
+                return TrafficData(TrafficStats.getUidRxBytes(uid), TrafficStats.getUidTxBytes(uid))
+            }
         }
-    }
-
-    private fun uidTrafficData(): TrafficData = TrafficData(
-        TrafficStats.getUidRxBytes(uid),
-        TrafficStats.getUidTxBytes(uid),
-    )
 
     fun reset() {
-        lastTrafficData = snapshot()
+        lastTrafficData = getTrafficDataCompat()
         lastTimestamp = SystemClock.elapsedRealtime()
     }
 
-    /** Raw monotonic OS counters used by protocol session accumulators. */
-    fun snapshot(): TrafficData = getTrafficDataCompat()
-
     fun isSupported(): Boolean =
-        lastTrafficData.isSupported()
+        lastTrafficData.rx != TrafficStats.UNSUPPORTED.toLong() && lastTrafficData.tx != TrafficStats.UNSUPPORTED.toLong()
 
     fun getSpeed(): TrafficData {
         val timestamp = SystemClock.elapsedRealtime()
         val elapsedSeconds = (timestamp - lastTimestamp) / 1000.0
-        val trafficData = snapshot()
+        val trafficData = getTrafficDataCompat()
         val speed = trafficData.diff(lastTrafficData, elapsedSeconds)
         lastTrafficData = trafficData
         lastTimestamp = timestamp
@@ -73,9 +49,6 @@ class TrafficStats {
     }
 
     class TrafficData(val rx: Long, val tx: Long) {
-
-        fun isSupported(): Boolean =
-            rx != TrafficStats.UNSUPPORTED.toLong() && tx != TrafficStats.UNSUPPORTED.toLong()
 
         private var _rxString: String? = null
         val rxString: String

@@ -36,13 +36,6 @@ struct AwgParams {
     std::optional<bool> disableCookies;
     bool awg31ToggleEncodingValid = true;
 
-    // Legacy-only generic channel. Deprecated for catalog v2: v2 has a strict typed schema and
-    // rejects unknown keys because Apple/Windows parsers have version-specific allowlists.
-    // Kept here solely so the transitional /v1 AWG response remains backward-compatible.
-    // Эмиссия в конфиг туннеля гейтится server-driven allowlist'ом awg_extra_keys_allowed
-    // (TuningStore lists, дефолт пуст) — см. AwgConfigBuilder.
-    QHash<QString, QString> extra;
-
     bool hasFullBundle() const { return Jc && Jmin && Jmax && S1 && S2 && H1 && H2 && H3 && H4; }
 
     // AVPN AWG 3.0: версия протокола обфускации по факту наличия ключей (зеркало апстримного

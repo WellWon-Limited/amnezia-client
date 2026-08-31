@@ -1,6 +1,6 @@
 #include "wireguard-go-version.h"
-#include <wireguard.h> // AVPN: exact headers come from the pinned Conan package.
-#include <WireGuardKitC.h>
+#include "wireguard.h"
+#include "WireGuardKitC.h"
 
 #include <stdbool.h>
 #include <stdint.h>

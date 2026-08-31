@@ -1,4 +1,0 @@
-self-hosted-runner:
-  labels:
-    # Existing dedicated Android signing/build worker label.
-    - android-runner

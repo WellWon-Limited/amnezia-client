@@ -20,11 +20,6 @@ object QtAndroidController {
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake
-    external fun onRuntimeStatus(json: String) // AVPN: tunnel_runtime_status_v1.
-    external fun onEngineManifest(json: String) // AVPN: both embedded engines, schema v1.
-    external fun onSessionGuardEvent(json: String)
-    external fun onSessionGuardRecoveryReceipt(json: String)
-    external fun onRuntimeAuthorityRenewalReceipt(json: String)
 
     external fun onFileOpened(uri: String)
 

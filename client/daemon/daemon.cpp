@@ -11,7 +11,6 @@
 #include <QJsonValue>
 #include <QMetaEnum>
 #include <QTimer>
-#include <QUuid>
 
 #include "leakdetector.h"
 #include "logger.h"
@@ -21,16 +20,6 @@
 
 constexpr const char* JSON_ALLOWEDIPADDRESSRANGES = "allowedIPAddressRanges";
 constexpr int HANDSHAKE_POLL_MSEC = 250;
-
-#ifndef TRIBE_AWG_ENGINE_VERSION
-#define TRIBE_AWG_ENGINE_VERSION "unknown"
-#endif
-#ifndef TRIBE_AWG_CORE_VERSION
-#define TRIBE_AWG_CORE_VERSION TRIBE_AWG_ENGINE_VERSION
-#endif
-#ifndef TRIBE_AWG_UAPI_ABI
-#define TRIBE_AWG_UAPI_ABI "unknown"
-#endif
 
 #ifdef Q_OS_WIN
 // AVPN win-fix (BUG-12, 2026-07-30): размер порции фонового досева исключений.
@@ -81,129 +70,6 @@ Daemon::~Daemon() {
 Daemon* Daemon::instance() {
   Q_ASSERT(s_daemon);
   return s_daemon;
-}
-
-bool Daemon::activateExactSession(const InterfaceConfig& config,
-                                  const QString& sessionId) {
-  const QUuid uuid(sessionId);
-  if (uuid.isNull()
-      || uuid.toString(QUuid::WithoutBraces).toLower() != sessionId
-      || (!m_nativeSessionId.isEmpty()
-          && m_nativeRuntimeState != QLatin1String("stopped"))) {
-    return false;
-  }
-  m_nativeSessionId = sessionId;
-  m_nativeRuntimeState = QStringLiteral("starting");
-  m_nativeFailureReason.clear();
-  m_nativeLastRx = m_nativeLastTx = m_nativeResetCount = 0;
-  m_nativeHaveCounters = false;
-  if (!activate(config)) {
-    m_nativeRuntimeState = QStringLiteral("failed");
-    m_nativeFailureReason = QStringLiteral("awg_activate_failed");
-    return false;
-  }
-  return true;
-}
-
-bool Daemon::deactivateExactSession(const QString& sessionId) {
-  if (sessionId.isEmpty() || sessionId != m_nativeSessionId
-      || m_nativeRuntimeState == QLatin1String("stopped")) {
-    return false;
-  }
-  m_nativeRuntimeState = QStringLiteral("stopping");
-  const bool stopped = deactivate(true) && !wgutils()->interfaceExists()
-                       && m_connections.isEmpty() && m_excludedAddrSet.isEmpty();
-  m_nativeRuntimeState = stopped ? QStringLiteral("stopped")
-                                 : QStringLiteral("failed");
-  m_nativeFailureReason = stopped ? QString() : QStringLiteral("awg_teardown_failed");
-  return stopped;
-}
-
-QJsonObject Daemon::runtimeStatusV1(const QString& sessionId) {
-  const QUuid uuid(sessionId);
-  if (uuid.isNull()
-      || uuid.toString(QUuid::WithoutBraces).toLower() != sessionId
-      || sessionId != m_nativeSessionId) {
-    return {};
-  }
-
-  quint64 rx = m_nativeLastRx;
-  quint64 tx = m_nativeLastTx;
-  quint64 rxDelta = 0;
-  quint64 txDelta = 0;
-  quint64 handshakeSeconds = 0;
-  bool available = false;
-  if (wgutils()->interfaceExists() && !m_connections.isEmpty()) {
-    const QString publicKey = m_connections.first().m_config.m_serverPublicKey;
-    const QList<WireguardUtils::PeerStatus> peers = wgutils()->getPeerStatus();
-    for (const WireguardUtils::PeerStatus& peer : peers) {
-      if (peer.m_pubkey != publicKey) continue;
-      available = peer.m_rxBytes >= 0 && peer.m_txBytes >= 0;
-      if (available) {
-        rx = quint64(peer.m_rxBytes);
-        tx = quint64(peer.m_txBytes);
-        if (m_nativeHaveCounters) {
-          if (rx >= m_nativeLastRx && tx >= m_nativeLastTx) {
-            rxDelta = rx - m_nativeLastRx;
-            txDelta = tx - m_nativeLastTx;
-          } else {
-            ++m_nativeResetCount;
-          }
-        }
-        m_nativeHaveCounters = true;
-        m_nativeLastRx = rx;
-        m_nativeLastTx = tx;
-      }
-      if (peer.m_handshake > 0) {
-        handshakeSeconds = quint64(peer.m_handshake) / 1000;
-        if (m_nativeRuntimeState == QLatin1String("starting"))
-          m_nativeRuntimeState = QStringLiteral("running");
-      }
-      break;
-    }
-  }
-  if (m_nativeRuntimeState == QLatin1String("running") && !available) {
-    m_nativeRuntimeState = QStringLiteral("failed");
-    m_nativeFailureReason = QStringLiteral("awg_uapi_status_unavailable");
-  }
-
-  const QJsonObject core{
-      {QStringLiteral("adapter"), QStringLiteral("awg-go")},
-      {QStringLiteral("version"), QStringLiteral(TRIBE_AWG_CORE_VERSION)},
-      {QStringLiteral("runtime_version_probed"), false},
-      {QStringLiteral("abi"), QStringLiteral(TRIBE_AWG_UAPI_ABI)},
-  };
-  const QJsonObject counters{
-      {QStringLiteral("available"), available},
-      {QStringLiteral("source"), available ? QStringLiteral("awg_uapi_peer_status")
-                                            : QStringLiteral("unavailable")},
-      {QStringLiteral("epoch"), m_nativeSessionId},
-      {QStringLiteral("rx_bytes"), QString::number(rx)},
-      {QStringLiteral("tx_bytes"), QString::number(tx)},
-      {QStringLiteral("rx_packets"), QStringLiteral("0")},
-      {QStringLiteral("tx_packets"), QStringLiteral("0")},
-      {QStringLiteral("rx_bytes_delta"), QString::number(rxDelta)},
-      {QStringLiteral("tx_bytes_delta"), QString::number(txDelta)},
-      {QStringLiteral("rx_packets_delta"), QStringLiteral("0")},
-      {QStringLiteral("tx_packets_delta"), QStringLiteral("0")},
-      {QStringLiteral("reset_count"), QString::number(m_nativeResetCount)},
-  };
-  QJsonObject status{
-      {QStringLiteral("type"), QStringLiteral("tunnel_runtime_status_v1")},
-      {QStringLiteral("schema"), 1},
-      {QStringLiteral("session_id"), m_nativeSessionId},
-      {QStringLiteral("protocol"), QStringLiteral("awg")},
-      {QStringLiteral("runtime_state"), m_nativeRuntimeState},
-      {QStringLiteral("core"), core},
-      {QStringLiteral("counters"), counters},
-      {QStringLiteral("rx_bytes"), QString::number(rx)},
-      {QStringLiteral("tx_bytes"), QString::number(tx)},
-      {QStringLiteral("last_handshake_time_sec"), handshakeSeconds > 0
-           ? QJsonValue(QString::number(handshakeSeconds)) : QJsonValue::Null},
-  };
-  if (!m_nativeFailureReason.isEmpty())
-    status.insert(QStringLiteral("failure_reason"), m_nativeFailureReason);
-  return status;
 }
 
 bool Daemon::activate(const InterfaceConfig& config) {
@@ -722,21 +588,11 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
   if (const auto maxHandshakeAttempts = obj.value("MaxHandshakeAttempts"); !maxHandshakeAttempts.isUndefined()) {
     config.m_maxHandshakeAttempts = maxHandshakeAttempts.toString();
   }
-  // AVPN: these values alter the AWG 3.1 wire format.  Reject malformed
-  // JSON/types/values before touching the interface instead of coercing to 0.
   if (const auto randomTrailers = obj.value("RandomTrailers"); !randomTrailers.isUndefined()) {
-    if (!randomTrailers.isString() ||
-        !InterfaceConfig::awgBoolToUapi(randomTrailers.toString(), config.m_randomTrailers)) {
-      logger.error() << "RandomTrailers is not a supported AWG boolean";
-      return false;
-    }
+    config.m_randomTrailers = randomTrailers.toString();
   }
   if (const auto disableCookies = obj.value("DisableCookies"); !disableCookies.isUndefined()) {
-    if (!disableCookies.isString() ||
-        !InterfaceConfig::awgBoolToUapi(disableCookies.toString(), config.m_disableCookies)) {
-      logger.error() << "DisableCookies is not a supported AWG boolean";
-      return false;
-    }
+    config.m_disableCookies = disableCookies.toString();
   }
 
   return true;
@@ -744,7 +600,6 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
 
 bool Daemon::deactivate(bool emitSignals) {
   Q_ASSERT(wgutils() != nullptr);
-  bool success = true;
 
 #ifdef Q_OS_WIN
   // AVPN win-fix (BUG-12): фоновый досев исключений принадлежит уходящей сессии — снять до
@@ -767,7 +622,6 @@ bool Daemon::deactivate(bool emitSignals) {
   // Cleanup DNS
   if (!dnsutils()->restoreResolvers()) {
     logger.warning() << "Failed to restore DNS resolvers.";
-    success = false;
   }
 
 #ifdef Q_OS_MACOS
@@ -780,22 +634,21 @@ bool Daemon::deactivate(bool emitSignals) {
     const InterfaceConfig& config = state.m_config;
     logger.debug() << "Deleting routes for" << config.m_hopType;
     for (const IPAddress& ip : config.m_allowedIPAddressRanges) {
-      success = wgutils()->deleteRoutePrefix(ip) && success;
+      wgutils()->deleteRoutePrefix(ip);
     }
-    success = wgutils()->deletePeer(config) && success;
+    wgutils()->deletePeer(config);
   }
 
   // Cleanup routing for excluded addresses.
   for (auto iterator = m_excludedAddrSet.constBegin();
        iterator != m_excludedAddrSet.constEnd(); ++iterator) {
-    success = wgutils()->deleteExclusionRoute(iterator.key()) && success;
+    wgutils()->deleteExclusionRoute(iterator.key());
   }
   m_excludedAddrSet.clear();
 
   m_connections.clear();
   // Delete the interface
-  success = wgutils()->deleteInterface() && success;
-  return success;
+  return wgutils()->deleteInterface();
 }
 
 QString Daemon::logs() {

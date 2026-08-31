@@ -27,7 +27,6 @@ open class OpenVpn : Protocol() {
             openVpnClient?.let { client ->
                 val stats = client.transport_stats()
                 return Statistics.build {
-                    setSource("openvpn_transport")
                     setRxBytes(stats.bytesIn)
                     setTxBytes(stats.bytesOut)
                 }

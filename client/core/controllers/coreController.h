@@ -3,10 +3,6 @@
 
 #include <QObject>
 #include <QQmlContext>
-
-#ifdef AVPN_ENGINE_ENABLED
-namespace avpn { class AvpnEngineQml; class CatalogConnectionFacade; }
-#endif
 #include <QThread>
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
@@ -155,10 +151,6 @@ private:
     QSharedPointer<VpnConnection> m_vpnConnection;
     QTranslator* m_translator;
     QTranslator* m_tribeTranslator = nullptr; // AVPN (i18n): второй транслятор Tribe-слоя (tribe_*.qm)
-#ifdef AVPN_ENGINE_ENABLED
-    avpn::AvpnEngineQml *m_avpnEngine = nullptr; // AVPN v2 composition attaches post-platform-init
-    avpn::CatalogConnectionFacade *m_tribeConnection = nullptr; // AVPN v2: parent-owned QML facade
-#endif
 
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;
