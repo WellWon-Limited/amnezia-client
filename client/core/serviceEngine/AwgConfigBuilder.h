@@ -6,6 +6,7 @@
 
 #include "dto/Subscription.h"
 #include <QJsonObject>
+#include <QSet>
 #include <QString>
 
 namespace avpn {
@@ -37,6 +38,18 @@ public:
     static QString host(const QString &endpoint);
     // port из "host:port" (0 если нет).
     static int port(const QString &endpoint);
+
+    // AVPN awg31-xray-v1 (§2.3, инвариант волны «незнакомый ключ не доезжает до NE»): фильтр
+    // wg-quick текста — строки `Key = value`, чей ключ (без регистра) НЕ в allowlist, вырезаются;
+    // известные ключи, заголовки секций, комментарии и пустые строки сохраняют исходный порядок.
+    // allowlist — ключи в нижнем регистре. Применять ТОЛЬКО под гейтом Apple (awg-apple 3.1.4
+    // TunnelConfiguration+WgQuickConfig.swift бросает interfaceHasUnrecognizedKey/
+    // peerHasUnrecognizedKey; awg-go/android/windows мягче) — точку вызова добавляет этап интеграции.
+    static QString stripUnknownWgQuickKeys(const QString &nativeConfText, const QSet<QString> &allowlist);
+
+    // Ключи wg-quick, известные awg-apple 3.1.4 (interfaceSectionKeys ∪ peerSectionKeys того же
+    // файла, нижний регистр). Обновлять вместе с бампом рецепта recipes/awg-apple.
+    static const QSet<QString> &awgAppleWgQuickKeys();
 };
 
 } // namespace avpn

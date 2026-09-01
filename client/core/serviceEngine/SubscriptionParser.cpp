@@ -6,8 +6,91 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRegularExpression>
 
 namespace avpn {
+
+// AVPN awg31-xray-v1: строковое поле xray_params — только строка (число/bool/null = отсутствует).
+static QString xrayStr(const QJsonObject &o, const char *key)
+{
+    const QJsonValue v = o.value(QLatin1String(key));
+    return v.isString() ? v.toString().trimmed() : QString();
+}
+
+bool SubscriptionParser::parseXrayParams(const QJsonObject &o, XrayParams &out, QString &why)
+{
+    XrayParams p;
+    p.uuid = xrayStr(o, "uuid");
+    p.publicKey = xrayStr(o, "public_key");
+    p.shortId = xrayStr(o, "short_id");
+    p.serverName = xrayStr(o, "server_name");
+    p.fingerprint = xrayStr(o, "fingerprint").toLower();
+    p.flow = xrayStr(o, "flow");
+    p.network = xrayStr(o, "network").toLower();
+    p.security = xrayStr(o, "security").toLower();
+
+    // uuid — per-device credential VLESS: канонический 8-4-4-4-12 hex (xray-core принимает и
+    // «строка → uuid v5», но нам нужен именно серверный UUID из TransportBinding).
+    static const QRegularExpression uuidRe(
+        QStringLiteral("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
+    if (!uuidRe.match(p.uuid).hasMatch()) {
+        why = QStringLiteral("xray_params.uuid is not a canonical UUID");
+        return false;
+    }
+    // public_key — Reality x25519 (base64/base64url); в конфиг уходит как есть, но пробелы/мусор
+    // = кривая выдача → отбросить, а не дать xray-core упасть на старте.
+    static const QRegularExpression pubkeyRe(QStringLiteral("^[A-Za-z0-9+/_=-]{32,64}$"));
+    if (!pubkeyRe.match(p.publicKey).hasMatch()) {
+        why = QStringLiteral("xray_params.public_key is empty or malformed");
+        return false;
+    }
+    // short_id — hex чётной длины 2..16 (Reality: до 8 байт).
+    static const QRegularExpression shortIdRe(QStringLiteral("^(?:[0-9a-fA-F]{2}){1,8}$"));
+    if (!shortIdRe.match(p.shortId).hasMatch()) {
+        why = QStringLiteral("xray_params.short_id must be hex of even length 2..16");
+        return false;
+    }
+    if (p.serverName.isEmpty()) {
+        why = QStringLiteral("xray_params.server_name is empty");
+        return false;
+    }
+    // fingerprint — allowlist uTLS xray-core; пусто с бэка → дефолт апстрима "chrome".
+    static const QStringList fingerprints{
+        QStringLiteral("chrome"), QStringLiteral("firefox"), QStringLiteral("safari"),
+        QStringLiteral("ios"), QStringLiteral("android"), QStringLiteral("edge"),
+        QStringLiteral("360"), QStringLiteral("qq"), QStringLiteral("random"),
+        QStringLiteral("randomized")
+    };
+    if (p.fingerprint.isEmpty())
+        p.fingerprint = QStringLiteral("chrome");
+    if (!fingerprints.contains(p.fingerprint)) {
+        why = QStringLiteral("xray_params.fingerprint '%1' is not allowed").arg(p.fingerprint);
+        return false;
+    }
+    // flow — только Vision или пусто (без flow VLESS+Reality тоже валиден).
+    if (!p.flow.isEmpty() && p.flow != QLatin1String("xtls-rprx-vision")) {
+        why = QStringLiteral("xray_params.flow '%1' is not supported").arg(p.flow);
+        return false;
+    }
+    // network — только TCP ("raw" = новое имя того же транспорта в xray-core; апстримный
+    // xrayConfigurator пишет "tcp" — нормализуем к нему).
+    if (p.network.isEmpty() || p.network == QLatin1String("raw"))
+        p.network = QStringLiteral("tcp");
+    if (p.network != QLatin1String("tcp")) {
+        why = QStringLiteral("xray_params.network '%1' is not supported").arg(p.network);
+        return false;
+    }
+    // security — только Reality (tls/none в этой волне не выдаются и не поддерживаются билдером).
+    if (p.security.isEmpty())
+        p.security = QStringLiteral("reality");
+    if (p.security != QLatin1String("reality")) {
+        why = QStringLiteral("xray_params.security '%1' is not supported").arg(p.security);
+        return false;
+    }
+    out = p;
+    why.clear();
+    return true;
+}
 
 static AwgParams parseAwg(const QJsonObject &o)
 {
@@ -97,6 +180,10 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
     const QJsonObject tr = root.value("traffic").toObject();
     out.trafficUsed = static_cast<qint64>(tr.value("used").toDouble());
     out.trafficLimit = static_cast<qint64>(tr.value("limit").toDouble());
+    // AVPN awg31-xray-v1: pool_revision (число; отсутствует/не число → 0 = «нет ревизии»).
+    out.poolRevision = root.value("pool_revision").isDouble()
+        ? static_cast<qint64>(root.value("pool_revision").toDouble())
+        : 0;
 
     for (const QJsonValue &nv : root.value("nodes").toArray()) {
         const QJsonObject no = nv.toObject();
@@ -128,6 +215,26 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
         if (n.persistentKeepalive <= 0)
             n.persistentKeepalive = 25;
         n.presharedKey = no.value("preshared_key").toString();
+
+        // AVPN awg31-xray-v1 (§2.2): локация/ранг транспорта. host_id/transport_rank — только числа
+        // (строка/null → дефолт, НЕ 0: «ранг 0» ставил бы ноду выше всех по опечатке бэка).
+        n.hostId = no.value("host_id").isDouble() ? no.value("host_id").toInt() : 0;
+        n.location = no.value("location").toString();
+        const bool isXray = n.proto == QLatin1String("xray");
+        n.transportRank = no.value("transport_rank").isDouble()
+            ? no.value("transport_rank").toInt()
+            : (isXray ? kTransportRankXray : kTransportRankAwg);
+
+        // xray-нода обязана нести валидные xray_params; иначе она непригодна для коннекта и в пул не
+        // попадает — но ответ НЕ роняем (остальные ноды живут; инвариант волны §4.5 «незнакомый
+        // proto/ключ не роняет ответ и не доезжает до NE»). awg-ноды этот блок не трогает.
+        if (isXray) {
+            XrayParams xp;
+            QString why;
+            if (!parseXrayParams(no.value("xray_params").toObject(), xp, why))
+                continue;
+            n.xray = xp;
+        }
         out.nodes << n;
     }
     return true;
@@ -144,13 +251,22 @@ QStringList SubscriptionParser::validate(const Subscription &sub)
         issues << QStringLiteral("active subscription has no nodes");
 
     for (const SubscriptionNode &n : sub.nodes) {
-        // AVPN (Task 10, proto-форвард): нода с неизвестным протоколом (xray, ...) НЕ роняет
+        const QString id = n.nodeId.isEmpty() ? QStringLiteral("<no id>") : n.nodeId;
+        // AVPN awg31-xray-v1: xray-контракт — endpoint host:port + валидные xray_params (парсер
+        // гарантирует xray.has_value(); здесь — страховка для DTO, собранных мимо парсера).
+        if (n.proto == QLatin1String("xray")) {
+            if (n.endpoint.isEmpty() || !n.endpoint.contains(QLatin1Char(':')))
+                issues << QStringLiteral("node %1: endpoint must be host:port").arg(id);
+            if (!n.xray.has_value())
+                issues << QStringLiteral("node %1: xray node without xray_params").arg(id);
+            continue;
+        }
+        // AVPN (Task 10, proto-форвард): нода с неизвестным протоколом НЕ роняет
         // валидацию ответа и НЕ отбрасывается — awg-требования (endpoint host:port, pubkey, dns,
         // AWG-бандл) к ней неприменимы. Она остаётся в пуле для диагностики/будущей эскалации,
         // а из любого выбора её исключает isSupportedProtoNode (Selector/pick*/ротация/pin).
         if (!isSupportedProtoNode(n))
             continue;
-        const QString id = n.nodeId.isEmpty() ? QStringLiteral("<no id>") : n.nodeId;
         if (n.endpoint.isEmpty() || !n.endpoint.contains(QLatin1Char(':')))
             issues << QStringLiteral("node %1: endpoint must be host:port").arg(id);
         if (n.serverPubkey.isEmpty())

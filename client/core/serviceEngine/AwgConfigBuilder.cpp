@@ -221,6 +221,57 @@ QJsonObject AwgConfigBuilder::buildInner(const Subscription &sub, const Subscrip
     return o;
 }
 
+const QSet<QString> &AwgConfigBuilder::awgAppleWgQuickKeys()
+{
+    // Зеркало ~/.conan2/p/awg-a0513be2923d5e/s/Sources/Shared/Model/TunnelConfiguration+WgQuickConfig.swift
+    // (awg-apple 3.1.4-tribe.3): interfaceSectionKeys + peerSectionKeys.
+    static const QSet<QString> keys{
+        // [Interface]
+        QStringLiteral("privatekey"), QStringLiteral("listenport"), QStringLiteral("address"),
+        QStringLiteral("dns"), QStringLiteral("mtu"),
+        QStringLiteral("jc"), QStringLiteral("jmin"), QStringLiteral("jmax"),
+        QStringLiteral("s1"), QStringLiteral("s2"), QStringLiteral("s3"), QStringLiteral("s4"),
+        QStringLiteral("h1"), QStringLiteral("h2"), QStringLiteral("h3"), QStringLiteral("h4"),
+        QStringLiteral("i1"), QStringLiteral("i2"), QStringLiteral("i3"), QStringLiteral("i4"),
+        QStringLiteral("i5"),
+        QStringLiteral("headerprotectionkey"), QStringLiteral("contentpaddingaddition"),
+        QStringLiteral("rekeyaftertime"), QStringLiteral("rekeytimeout"),
+        QStringLiteral("rejectaftertime"), QStringLiteral("keepalivetimeout"),
+        QStringLiteral("maxhandshakeattempts"),
+        QStringLiteral("randomtrailers"), QStringLiteral("disablecookies"),
+        // [Peer]
+        QStringLiteral("publickey"), QStringLiteral("presharedkey"), QStringLiteral("allowedips"),
+        QStringLiteral("endpoint"), QStringLiteral("persistentkeepalive"),
+    };
+    return keys;
+}
+
+QString AwgConfigBuilder::stripUnknownWgQuickKeys(const QString &nativeConfText, const QSet<QString> &allowlist)
+{
+    if (nativeConfText.isEmpty())
+        return nativeConfText;
+    // Разбор строк как в awg-apple: до '#' — содержимое; строка с '=' — атрибут, ключ = до '='.
+    // Секции/комментарии/пустые строки и строки без '=' не трогаем (не наш класс проблемы).
+    const QStringList lines = nativeConfText.split(QLatin1Char('\n'));
+    QStringList kept;
+    kept.reserve(lines.size());
+    for (const QString &line : lines) {
+        QString body = line;
+        const int hash = body.indexOf(QLatin1Char('#'));
+        if (hash >= 0)
+            body = body.left(hash);
+        body = body.trimmed();
+        const int eq = body.indexOf(QLatin1Char('='));
+        if (eq > 0) {
+            const QString key = body.left(eq).trimmed().toLower();
+            if (!allowlist.contains(key))
+                continue;
+        }
+        kept << line;
+    }
+    return kept.join(QLatin1Char('\n'));
+}
+
 QJsonObject AwgConfigBuilder::build(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys)
 {
     QJsonObject root;

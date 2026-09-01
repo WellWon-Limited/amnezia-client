@@ -61,12 +61,19 @@ static QByteArray awgNodeJson(const char *id, const char *cc, double weight)
                         "H1": 1, "H2": 2, "H3": 3, "H4": 4 } })";
 }
 
-// Xray-узел будущего контракта: НЕТ server_pubkey/dns/awg_params (awg-поля к нему неприменимы).
+// Xray-узел контракта v1 (волна awg31-xray-v1 §2.2): НЕТ server_pubkey/awg_params (awg-поля к нему
+// неприменимы), но ЕСТЬ валидные xray_params — без них парсер ноду отбрасывает (этап D1,
+// tests/build_xray_config.sh), а здесь проверяется именно «в пуле, но не выбирается».
 static QByteArray xrayNodeJson(const char *id, double weight)
 {
     return QByteArray(R"({ "node_id": ")") + id + R"(", "region": "asia",
         "endpoint": "vision.example.com:443", "proto": "xray",
-        "weight": )" + QByteArray::number(weight) + R"(, "country_code": "NL" })";
+        "weight": )" + QByteArray::number(weight) + R"(, "country_code": "NL",
+        "xray_params": { "uuid": "8f14e45f-ceea-4a7c-9d6b-2a1b3c4d5e6f",
+                         "public_key": "SbVjZ9Yl3dR3QpG1v8k2Wx0aU7Hq4Nn6Tt5Bc8Jd1mE",
+                         "short_id": "a1b2c3d4", "server_name": "vision.example.com",
+                         "fingerprint": "chrome", "flow": "xtls-rprx-vision",
+                         "network": "tcp", "security": "reality" } })";
 }
 
 static QByteArray subJson(const QList<QByteArray> &nodes)
