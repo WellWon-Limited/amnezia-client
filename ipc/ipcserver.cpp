@@ -321,3 +321,9 @@ bool IpcServer::xrayStop()
 
     return Xray::getInstance().stopXray();
 }
+
+// AVPN
+QJsonObject IpcServer::xrayRuntimeStatus(const QString& iface)
+{
+    return Xray::getInstance().runtimeStatus(iface);
+}
