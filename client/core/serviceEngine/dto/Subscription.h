@@ -55,6 +55,28 @@ struct AwgParams {
     }
 };
 
+// AVPN Xray (волна awg31-xray-v1, спека 2026-09-01 §2.2): VLESS + Reality + xtls-rprx-vision по
+// схеме апстримного xrayConfigurator (vnext[]/realitySettings). Заполняется ТОЛЬКО парсером после
+// валидации (SubscriptionParser::parseXrayParams): uuid = per-device credential (секрет: в логи/
+// отчёты не писать), publicKey/shortId/serverName — Reality-параметры ноды, fingerprint из
+// allowlist xray-core (пусто с бэка → "chrome"), flow "xtls-rprx-vision" | "", network "tcp",
+// security "reality". Другие transport/security в этой волне не поддерживаются — нода отбрасывается.
+struct XrayParams {
+    QString uuid;
+    QString publicKey;
+    QString shortId;
+    QString serverName;
+    QString fingerprint = QStringLiteral("chrome");
+    QString flow;
+    QString network = QStringLiteral("tcp");
+    QString security = QStringLiteral("reality");
+};
+
+// AVPN: дефолтный серверный ранг транспорта внутри локации (transport_rank, меньше = раньше):
+// AWG выше Xray — решение владельца 2026-09-01 «по умолчанию Amnezia». Значение с бэка перекрывает.
+constexpr int kTransportRankAwg = 10;
+constexpr int kTransportRankXray = 20;
+
 struct SubscriptionNode {
     QString nodeId;
     QString region;
@@ -64,6 +86,14 @@ struct SubscriptionNode {
     QString serverPubkey;
     AwgParams awg;
     QString proto = QStringLiteral("awg");
+    // AVPN awg31-xray-v1 (§2.2): листенеры одного хоста группируются в «локацию» по host_id
+    // (0 = поле не пришло — старый бэк/LKG; тогда локация = сама нода). location — код локации
+    // с бэка ("ee"), пусто = нет. transportRank — порядок выбора транспорта внутри локации
+    // (Auto): дефолт по proto (awg 10 / xray 20), сервер может перекрыть.
+    int     hostId = 0;
+    QString location;
+    int     transportRank = kTransportRankAwg;
+    std::optional<XrayParams> xray;      // AVPN: только у proto=="xray" и только валидные (парсер)
     double  weight = 1.0;                 // score = url_rtt / weight
     bool    manualOnly = false;          // AVPN: manual_only (openapi 0.6.1) — только ручной pin, вне авто-выбора
     QHash<QString, double> health;       // target -> [0..1]
@@ -85,6 +115,10 @@ struct Subscription {
     QString     graceUntil;              // AVPN: expires_at + 24ч — не рвать туннель раньше (grace)
     qint64      trafficUsed = 0;
     qint64      trafficLimit = 0;        // 0 = безлимит
+    // AVPN awg31-xray-v1 (§2.2/§2.3): pool_revision монотонно растёт при любой смене выдачи —
+    // триггер reseed пула на живом приложении (ServiceEngine::reseedPool, kill-switch
+    // subscription_reseed_pool). 0 = поле не пришло (старый бэк/LKG) → reseed по ревизии не срабатывает.
+    qint64      poolRevision = 0;
     QList<SubscriptionNode> nodes;
 };
 
