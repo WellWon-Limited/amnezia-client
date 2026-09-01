@@ -40,6 +40,9 @@ class IpcInterface
 
     SLOT(bool xrayStart(const QString &config));
     SLOT(bool xrayStop());
+    // AVPN: статистика rx/tx xray-пути (utun tun2socks) для health-контура GUI; iface — имя
+    // интерфейса, известное клиенту (пусто = дефолт демона). Вне macOS — нули + unsupported=true.
+    SLOT( QJsonObject xrayRuntimeStatus(const QString &iface) );
 
     SLOT( bool startNetworkCheck(const QString& serverIpv4Gateway, const QString& deviceIpv4Address) );
     SLOT( bool stopNetworkCheck() );
