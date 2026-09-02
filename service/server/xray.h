@@ -40,16 +40,16 @@ struct XrayTrafficAccumulator
             lastTx = tx;
             return;
         }
-        const bool rolledBack = rx < lastRx || tx < lastTx;
-        if (rolledBack) {
-            ++resets;
-            // Откат любого из счётчиков = новая инкарнация интерфейса: оба стартовали с нуля.
-            totalRx += rx;
-            totalTx += tx;
-        } else {
-            totalRx += rx - lastRx;
-            totalTx += tx - lastTx;
-        }
+        // AVPN (независимое ревью волны awg31-xray-v1, MINOR-6): откат считаем ОТДЕЛЬНО по каждому
+        // счётчику. Раньше откат ОДНОГО прибавлял АБСОЛЮТНЫЕ значения обоих — «выживший» счётчик
+        // давал ложный скачок размером с аптайм интерфейса. Для xray это опасно вдвойне: DEAD-критерий
+        // = «tx растёт, rx стоит» (§22.5), и подложенный скачок rx маскирует мёртвый data-plane.
+        const bool rxRolledBack = rx < lastRx;
+        const bool txRolledBack = tx < lastTx;
+        if (rxRolledBack || txRolledBack)
+            ++resets; // сам факт отката (событие пересоздания интерфейса) считаем один раз
+        totalRx += rxRolledBack ? rx : (rx - lastRx);
+        totalTx += txRolledBack ? tx : (tx - lastTx);
         lastRx = rx;
         lastTx = tx;
     }

@@ -3566,6 +3566,9 @@ void AvpnEngineQml::probeDaemonTunnelOnStartup()
                 && m_op == Op::None && m_lastTunnelState != Vpn::Connected) {
                 qInfo() << "[adopt] daemon holds a live tunnel — adopting (GUI restart)";
                 m_adoptedNoProto = true;
+                // AVPN (независимое ревью волны, MINOR-4): если демон держит xray, статистику
+                // адоптированной сессии никто не поллит (m_lastUpProto пуст) — HealthLoop слеп.
+                m_tunnel.adoptXrayIfRunning();
                 onConnectionStateChanged(Vpn::Connected); // адопт внутри (BUG-6 ветка Connected)
             }
             sock->deleteLater();
