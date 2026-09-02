@@ -8,6 +8,7 @@
 #include "ServiceEngine.h"
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
+#include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
@@ -194,6 +195,10 @@ class AvpnEngineQml : public QObject {
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
     Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
+    // AVPN (реш. владельца 2026-09-02): на десктопном macOS кнопка «Обновить» ставит новую версию
+    // сама (скачивание нашего dmg + проверка подписи/нотаризации/версии). На остальных платформах
+    // false — UI открывает страницу загрузки/стор, как раньше.
+    Q_PROPERTY(bool canSelfUpdate READ canSelfUpdate CONSTANT)
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
     // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
     Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
@@ -325,6 +330,9 @@ public:
     Q_INVOKABLE QString configUrl(const QString &key, const QString &def) const;
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
+    bool canSelfUpdate() const { return avpn::SelfUpdate::isSupported(); }
+    // Запускает установку обновления (idempotent: повторный вызов во время установки — no-op).
+    Q_INVOKABLE void startSelfUpdate();
 
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов — см. Q_PROPERTY выше.
     int probeServicesIntervalMs() const
@@ -700,6 +708,9 @@ public:
     Q_INVOKABLE void legalDocFetch(const QString &doc, const QString &lang);
 
 signals:
+    // AVPN (2026-09-02): ход установки обновления — стадия для экрана обновления и причина отказа.
+    void selfUpdateProgress(const QString &text);
+    void selfUpdateFailed(const QString &reason);
     void changed();
     void error(const QString &message);
     // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
@@ -1142,6 +1153,7 @@ private:
     // см. ConfigService.h) + снапшот последнего применённого конфига (featureEnabled/configUrl/
     // storeUrl читают отсюда) + вердикт force-update (см. updateState()).
     avpn::ConfigService          *m_configSvc = nullptr;
+    avpn::SelfUpdate *m_selfUpdate = nullptr;  // AVPN: установка обновления (macOS desktop)
     // AVPN server-driven АнтиВПН (Task 10): оркестратор /v1/bypass-lists (подписанный fetch/LKG/
     // анти-downgrade). Kill-switch remote_bypass_lists — ВНУТРИ сервиса (onRemoteConfigApplied):
     // при флаге=false кладёт пустой invalid снапшот в BypassListStore и ставит фетч на паузу.
