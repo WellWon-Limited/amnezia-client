@@ -120,6 +120,9 @@ signals:
     // (HealthLoop). Значение уже парсится в checkStatus из UAPI last_handshake_time_sec; здесь лишь
     // отдаём его наружу (раньше использовалось только для подтверждения коннекта). См. VpnConnectionTunnelControl.
     void handshakeChanged(qint64 lastHandshakeEpochSec);
+    // AVPN (девайс-разбор 2026-09-02): текст причины, по которой ядро Xray не поднялось в NE.
+    // Слушает VpnConnectionTunnelControl → лог + диагностика; без него отказ был безымянным.
+    void xrayStartFailed(const QString &reason);
     void importConfigFromOutside(const QString);
     void importBackupFromOutside(const QString);
     void storeTransactionUpdated(const QVariantMap &transaction);

@@ -89,6 +89,8 @@ private:
     VpnConnection *m_conn = nullptr;
     ClientKeys     m_keys;
     TunnelStats    m_stats;
+    // AVPN (девайс-разбор 2026-09-02): текст причины, по которой ядро Xray не поднялось (iOS NE).
+    QString        m_lastXrayStartFailure;
     QJsonObject    m_lastConfigReport; // AVPN bench v5: снапшот конфига последнего up()
     QString        m_lastUpProto;      // AVPN awg31-xray-v1: proto последнего подъёма
     ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде

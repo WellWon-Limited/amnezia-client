@@ -83,6 +83,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     let xrayRuntimeSession = TunnelRuntimeSession()
     let xraySocketCallbackRegistry = XraySocketCallbackRegistry<XraySocketCallbackContext>()
     let xrayNativeLifecycleGate = XrayNativeLifecycleGate()
+    // Последняя причина отказа старта Xray (текст ядра): уходит в статус-ответ приложению,
+    // чтобы «вечное подключение» на устройстве имело внятную причину.
+    var lastXrayStartFailure: String?
 
     func openVPNPacketFlow() -> OpenVPNAdapterPacketFlow {
         openVPNPacketFlowAdapter

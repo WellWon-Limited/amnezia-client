@@ -534,7 +534,13 @@ void IosController::checkStatus()
             // по rx/tx + пробам. runtime_state != running — в лог (failed = NE сам гасит туннель).
             if (isXrayBasedProto(m_proto)) {
                 if (!runtimeState.isEmpty() && runtimeState != QLatin1String("running")) {
-                    qDebug() << "IosController::checkStatus : xray runtime_state" << runtimeState;
+                    // AVPN (девайс-разбор 2026-09-02): вместе со статусом тянем ПРИЧИНУ отказа
+                    // старта ядра — без неё «вечное подключение» на устройстве безымянно.
+                    const QString why = stringFromResponse(response, @"last_start_failure");
+                    qWarning() << "IosController::checkStatus : xray runtime_state" << runtimeState
+                               << "reason" << (why.isEmpty() ? QStringLiteral("(нет текста)") : why);
+                    if (!why.isEmpty())
+                        emit xrayStartFailed(why);
                 }
             } else {
                 emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
