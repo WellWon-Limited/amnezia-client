@@ -105,6 +105,9 @@ void ServiceEngine::noteDataPlaneFailure()
     recordTransportOutcome(false);
     if (!m_currentNodeId.isEmpty())
         m_failedThisSession.insert(m_currentNodeId);
+    // AVPN (независимое ревью волны, MAJOR-1): счётчик ПОДРЯД идущих провалов data-plane за
+    // сессию — кап против вечной карусели failover (см. onDead).
+    ++m_dataPlaneFailStreak;
 }
 
 // AVPN (live-node picker): выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB. Без I/O.
@@ -353,6 +356,13 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
+    // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном
+    // features.xray_client отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
+    normalizeTransportMode();
+    // AVPN (независимое ревью волны, MAJOR-1): явное действие пользователя = новая сессия
+    // наблюдения за data-plane (бюджет провалов возвращается).
+    m_dataPlaneFailStreak = 0;
+    m_dataPlaneExhausted = false;
     // AVPN awg31-xray-v1: kill-switch автоматики транспортов. Выключен → авто-пути = легаси-цепочка
     // «измеренный RTT → Selector::pick → weight» ТОЛЬКО по awg (xray — ручной режим/pin).
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
@@ -509,12 +519,20 @@ bool ServiceEngine::notifyConnectionLost()
 // AVPN awg31-xray-v1: живая проба через туннель (QualityProbe фасада) — xray-половина DEAD-критерия.
 bool ServiceEngine::feedProbeResult(bool ok)
 {
-    if (m_state != EngineState::Connected || !currentNodeIsXray())
+    if (m_state != EngineState::Connected)
         return false;
     if (ok) {
+        // AVPN (независимое ревью волны, MAJOR-1): удачная проба ЧЕРЕЗ туннель — доказательство
+        // живого data-plane, поэтому бюджет провалов возвращается ОБОИМ транспортам (у awg своей
+        // фазы verify нет; без этого редкие смерти нод за часы работы копились бы в ложное
+        // «сдаёмся»).
+        m_dataPlaneFailStreak = 0;
+        m_dataPlaneExhausted = false;
         m_probeFailStreak = 0;
         return false;
     }
+    if (!currentNodeIsXray())
+        return false; // у awg критерий DEAD — handshake/rx в HealthLoop, не проба
     if (++m_probeFailStreak < xrayProbeFailCyclesTuned())
         return false;
     m_probeFailStreak = 0;
@@ -546,6 +564,9 @@ bool ServiceEngine::verifySucceeded() // AVPN awg31-xray-v1
     m_state = EngineState::Connected;
     m_health.reset();
     m_probeFailStreak = 0;
+    // AVPN (независимое ревью волны, MAJOR-1): доказанный трафик через туннель = data-plane жив.
+    m_dataPlaneFailStreak = 0;
+    m_dataPlaneExhausted = false;
     recordTransportOutcome(true); // «реальный трафик» для xray = прошедшая проба
     return true;
 }
@@ -571,6 +592,8 @@ bool ServiceEngine::adoptTunnelConnected() // AVPN
     m_health.reset();
     m_rebindHealTries = 0; // AVPN BUG-4: адопт = новая сессия наблюдения
     m_probeFailStreak = 0;
+    m_dataPlaneFailStreak = 0; // AVPN (ревью волны, MAJOR-1): то же для бюджета провалов data-plane
+    m_dataPlaneExhausted = false;
     return true;
 }
 
@@ -617,6 +640,8 @@ void ServiceEngine::requestStop() // AVPN
     // AVPN awg31-xray-v1: новая сессия пользователя — сессионные провалы транспортов и стрик проб забыты.
     m_failedThisSession.clear();
     m_probeFailStreak = 0;
+    m_dataPlaneFailStreak = 0;  // AVPN (ревью волны, MAJOR-1): явный стоп = новая сессия наблюдения
+    m_dataPlaneExhausted = false;
 }
 
 bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
@@ -647,6 +672,20 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
     // AVPN awg31-xray-v1: провал data-plane текущей ноды — в историю транспортов и в сессионный
     // список (failover не ходит по кругу awg↔xray одной локации).
     noteDataPlaneFailure();
+    // AVPN (независимое ревью волны, MAJOR-1): кап подряд идущих провалов data-plane за сессию.
+    // Мёртвый data-plane (captive portal, ТСПУ, «интернета нет вообще») одинаково валит ЛЮБОГО
+    // кандидата, а третья ветка выбора ниже (withExclusions=false) осознанно игнорирует
+    // m_failedThisSession — без капа цикл up → verifying → verifyFailed → down → up крутится
+    // вечно и молча. Исчерпали — честный Error; намерение снимает фасад (§13).
+    if (m_dataPlaneFailStreak >= dataPlaneFailMaxTriesTuned()) {
+        m_dataPlaneExhausted = true;
+        appendSwitchLog(QStringLiteral("data-plane dead: %1 failures in a row — giving up")
+                            .arg(m_dataPlaneFailStreak));
+        m_state = EngineState::Error;
+        return false;
+    }
+    // AVPN (ревью волны, MAJOR-2): kill-switch xray_client мог погаснуть уже в этой сессии.
+    normalizeTransportMode();
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду. СТРОГО БЕЗ I/O (CONNECT-INVARIANTS §1):
     // onDead зовётся из health-tick/notifyConnectionLost на GUI-потоке БЕЗ гарда m_inSyncNetCall —

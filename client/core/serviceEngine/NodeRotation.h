@@ -129,6 +129,18 @@ inline bool isAutoEligibleNode(const SubscriptionNode &n)
     return true;
 }
 
+// AVPN awg31-xray-v1 (независимое ревью волны, MAJOR-2): эффективный ручной режим. Настройка
+// avpn/transportMode переживает kill-switch: если бэк погасил features.xray_client (или сборка —
+// Android/Windows), а у пользователя сохранён режим «Xray», то hard-filter отсекает ВСЕ кандидаты
+// и connect() честно возвращает no_transport — коннекта нет, пока человек сам не переключится на
+// «Авто». Поэтому недоступный Xray всегда читается как Auto (и в выборе, и в UI).
+inline TransportMode effectiveTransportMode(TransportMode m)
+{
+    if (m == TransportMode::Xray && !xrayClientSupported())
+        return TransportMode::Auto;
+    return m;
+}
+
 // Ручной режим транспорта: hard-filter по proto. Auto пропускает всё.
 inline bool transportAllowed(const SubscriptionNode &n, TransportMode mode)
 {

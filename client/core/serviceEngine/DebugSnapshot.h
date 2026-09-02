@@ -70,4 +70,16 @@ struct DebugSnapshot {
     // Секреты (токен/приватный ключ) сюда НЕ кладём — маскировка на уровне UI (план §7).
 };
 
+// AVPN awg31-xray-v1 (независимое ревью волны, MINOR-7): единый предикат «туннель поднят или
+// поднимается» по имени фазы из DebugSnapshot::state. Раньше этот список копировался в четыре
+// места фасада (reprobe / switchToNode / setTransportMode / pauseForShopping), и в четвёртом
+// забыли verifying — пауза для покупок считала xray-сессию «не поднятой» (m_wasConnected=false)
+// и после паузы туннель не возвращался. Один список — одна правда.
+inline bool isTunnelUpStateName(const QString &state)
+{
+    return state == QLatin1String("connected") || state == QLatin1String("connecting")
+        || state == QLatin1String("switching") || state == QLatin1String("selecting")
+        || state == QLatin1String("verifying");
+}
+
 } // namespace avpn

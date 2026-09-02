@@ -128,8 +128,12 @@ public:
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
     // всех путях выбора (connect/failover/ротация/pin); нет кандидатов → честная ошибка no_transport.
-    void setTransportMode(TransportMode m) { m_transportMode = m; }
-    TransportMode transportMode() const { return m_transportMode; }
+    // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
+    // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
+    // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
+    void setTransportMode(TransportMode m) { m_transportMode = effectiveTransportMode(m); }
+    TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
+    void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
 
     // AVPN awg31-xray-v1: локальная история транспортов (EWMA успеха/времени до трафика по паре
     // локация×proto, TransportPick.h). Персистит фасад (QSettings avpn/transportHistory):
@@ -219,6 +223,13 @@ public:
     // AVPN (BUG-4 auto-heal): счётчики ребайнд-попыток — текущей ноды-сессии и суммарно с запуска
     // (телеметрия benchExtra: паттерн «оператор×нода×heal помог/нет» ищется по отчётам).
     int rebindHealTries() const { return m_rebindHealTries; }
+
+    // AVPN (независимое ревью волны, MAJOR-1): подряд идущие провалы data-plane за сессию
+    // (health-DEAD / провал verify / провал живой пробы) и признак «кап исчерпан» — движок ушёл в
+    // Error вместо очередного круга failover. Сбрасываются успешной пробой через туннель
+    // (verifySucceeded / feedProbeResult(true)) и явным действием пользователя (connect/stop/адопт).
+    int dataPlaneFailStreak() const { return m_dataPlaneFailStreak; }
+    bool dataPlaneExhausted() const { return m_dataPlaneExhausted; }
     int rebindHealTotal() const { return m_rebindHealTotal; }
     TunnelStats currentStats() const { return m_tunnel ? m_tunnel->readStats() : TunnelStats{}; }
 
@@ -304,6 +315,8 @@ private:
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
+    int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
+    bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover
     qint64        m_upStartedMs = 0;     // момент последнего up() — время до «реального трафика» для истории
     bool          m_okRecorded = false;  // один успех / один провал на сессию подъёма
     bool          m_failRecorded = false;
