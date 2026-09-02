@@ -157,7 +157,12 @@ inline QString locationKeyOf(const SubscriptionNode &n)
     if (n.hostId > 0)
         return QStringLiteral("h:") + QString::number(n.hostId);
     if (!n.countryCode.isEmpty())
-        return QStringLiteral("cr:") + n.countryCode.toUpper() + QLatin1Char('/') + n.region.toLower();
+        // AVPN (независимое ревью волны, MINOR-5): без host_id nodeId ОБЯЗАТЕЛЕН в ключе — иначе
+        // две разные ноды одной страны схлопываются в одну «локацию», и «Сменить сервер» (кольцо
+        // по локациям) их не различает: пользователь жмёт кнопку и остаётся на том же сервере.
+        // Со старым бэком/стейл-LKG (host_id не пришёл) локация = сама нода, как и в ветке ниже.
+        return QStringLiteral("cr:") + n.countryCode.toUpper() + QLatin1Char('/') + n.region.toLower()
+               + QLatin1Char('/') + n.nodeId;
     return QStringLiteral("n:") + n.nodeId;
 }
 

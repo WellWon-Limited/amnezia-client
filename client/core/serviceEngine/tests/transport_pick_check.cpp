@@ -180,11 +180,21 @@ int main(int argc, char **argv)
         CHECK(nodes.size() == 4);
         CHECK(locationKeyOf(*byId(nodes, "9:awg")) == QLatin1String("h:9"));
         CHECK(locationKeyOf(*byId(nodes, "9:xray")) == QLatin1String("h:9"));
-        CHECK(locationKeyOf(*byId(nodes, "pl-old")) == QLatin1String("cr:PL/eu"));
+        // AVPN (ревью волны, MINOR-5): без host_id nodeId ОБЯЗАТЕЛЕН в ключе — иначе две ноды
+        // одной страны схлопываются в одну «локацию» и «Сменить сервер» их не различает.
+        CHECK(locationKeyOf(*byId(nodes, "pl-old")) == QLatin1String("cr:PL/eu/pl-old"));
         CHECK(locationKeyOf(*byId(nodes, "noloc")) == QLatin1String("n:noloc"));
         const QStringList tr = locationTransports(nodes, QStringLiteral("h:9"));
         CHECK(tr == QStringList({QStringLiteral("awg"), QStringLiteral("xray")}));
-        CHECK(locationTransports(nodes, QStringLiteral("cr:PL/eu")) == QStringList{QStringLiteral("awg")});
+        CHECK(locationTransports(nodes, QStringLiteral("cr:PL/eu/pl-old")) == QStringList{QStringLiteral("awg")});
+        // Две легаси-ноды одной страны без host_id — РАЗНЫЕ локации, ротация ходит между ними.
+        {
+            const QList<SubscriptionNode> legacy = parseNodes(subJson({
+                awgNodeJson("pl-a", 0, "PL", 1.0), awgNodeJson("pl-b", 0, "PL", 1.0) }));
+            CHECK(locationKeyOf(legacy[0]) != locationKeyOf(legacy[1]));
+            CHECK(nextLiveNodeId(legacy, QStringLiteral("pl-a")) == QLatin1String("pl-b"));
+            CHECK(nextLiveNodeId(legacy, QStringLiteral("pl-b")) == QLatin1String("pl-a"));
+        }
         CHECK(isSupportedProto(QStringLiteral("xray")));      // macOS + kill-switch ВКЛ
         CHECK(isSupportedProtoNode(*byId(nodes, "9:xray")));
         SubscriptionNode noParams = *byId(nodes, "9:xray");
