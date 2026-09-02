@@ -53,61 +53,46 @@ Item {
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
     MouseArea { anchors.fill: parent }   // глушим клики в страницу под блокером
 
-    ColumnLayout {
+    // AVPN (реш. владельца 2026-09-02): содержимое вынесено в TribeUpdateSheet — один экран
+    // обновления на все случаи (обязательное и мягкое), тексты и список пунктов server-driven.
+    TribeUpdateSheet {
+        id: sheet
         anchors.centerIn: parent
         width: parent.width - 2 * Theme.space.xl
-        spacing: Theme.space.lg
+        mode: "blocking"
+        busy: gate.installing
+        busyText: gate.installText
+        errorText: gate.installError
+        onUpdateRequested: gate.startUpdate()
+    }
 
-        // иконка обновления (Lucide "download", 24-grid → 40px) в круглой плашке — тот же язык
-        // иконок, что refreshBtn/ctaBtn на PageConnectTribe.
-        Rectangle {
-            Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 72; Layout.preferredHeight: 72
-            radius: Theme.radius.pill
-            color: Theme.color.surface1
-            border.width: 1; border.color: Theme.color.border2
-            Shape {
-                anchors.centerIn: parent
-                width: 32; height: 32
-                transform: Scale { xScale: 32 / 24; yScale: 32 / 24 }
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: Theme.color.accent; fillColor: "transparent"; strokeWidth: 1.8
-                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-                    PathSvg { path: "M21 15 v4 a2 2 0 0 1 -2 2 H5 a2 2 0 0 1 -2 -2 v-4 M7 10 L12 15 L17 10 M12 15 V3" }
-                }
-            }
-        }
+    // Установка внутри приложения есть только на десктопном macOS (там мы сами шипим .dmg).
+    // На остальных платформах кнопка ведёт в стор/на страницу загрузки, как раньше.
+    property bool installing: false
+    property string installText: ""
+    property string installError: ""
 
-        Text {
-            Layout.fillWidth: true
-            text: qsTr("Обновите приложение")
-            color: Theme.color.text1
-            font.family: Theme.font.display
-            font.pixelSize: Theme.font.h1
-            font.weight: Theme.font.wBold
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
+    function startUpdate() {
+        gate.installError = ""
+        if (typeof TribeEngine !== "undefined" && TribeEngine.canSelfUpdate === true) {
+            gate.installing = true
+            gate.installText = qsTr("Скачиваем и проверяем подпись…")
+            TribeEngine.startSelfUpdate()
+            return
         }
-        Text {
-            Layout.fillWidth: true
-            text: qsTr("Эта версия больше не поддерживается. Установите свежую версию, чтобы продолжить пользоваться Tribe VPN.")
-            color: Theme.color.text2
-            font.family: Theme.font.body
-            font.pixelSize: Theme.font.bodyM
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-        }
+        var url = (typeof TribeEngine !== "undefined") ? TribeEngine.storeUrl : ""
+        if (url) Qt.openUrlExternally(url)
+    }
 
-        TribeButton {
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.space.sm
-            variant: "primary"
-            text: qsTr("Обновить")
-            onClicked: {
-                var url = (typeof TribeEngine !== "undefined") ? TribeEngine.storeUrl : ""
-                if (url) Qt.openUrlExternally(url)
-            }
+    Connections {
+        target: (typeof TribeEngine !== "undefined") ? TribeEngine : null
+        ignoreUnknownSignals: true
+        function onSelfUpdateProgress(text) { gate.installText = text }
+        function onSelfUpdateFailed(reason) {
+            gate.installing = false
+            gate.installText = ""
+            gate.installError = reason && reason.length > 0
+                    ? reason : qsTr("Не удалось обновить. Попробуйте скачать вручную.")
         }
     }
 }
