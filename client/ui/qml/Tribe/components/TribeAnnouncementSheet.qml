@@ -31,6 +31,11 @@ Item {
     property bool opened: false
     property var  ann: null      // {id, kind, title, body, image_url, buttons:[...], slides:[{blocks:[...]}]}
     property int  depthIndex: 0
+    // AVPN (девайс-приёмка 2026-09-02): на части устройств PageController.safeAreaTopMargin
+    // возвращает 0, и слайд заезжал под вырез/статус-бар. Берём максимум из двух источников —
+    // тот же паттерн, что на главном экране (PageConnectTribe: safeTop).
+    readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
+    readonly property real safeBottom: Math.max(PageController.safeAreaBottomMargin, SafeArea.margins.bottom)
     readonly property bool hasEngine: typeof TribeEngine !== "undefined"
     readonly property var  knownActions: ["url", "weblink", "screen", "later"]
 
@@ -147,8 +152,8 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: Theme.space.lg
         anchors.rightMargin: Theme.space.lg
-        anchors.topMargin: PageController.safeAreaTopMargin + Theme.space.lg
-        anchors.bottomMargin: PageController.safeAreaBottomMargin + Theme.space.lg
+        anchors.topMargin: sheet.safeTop + Theme.space.lg
+        anchors.bottomMargin: sheet.safeBottom + Theme.space.lg
         radius: Theme.radius.xl
         color: Theme.color.surface1
         border.width: 1
@@ -287,7 +292,7 @@ Item {
         visible: !sheet.rich
         anchors.centerIn: parent
         width: Math.min(sheet.width - 2 * Theme.space.lg, 420)
-        readonly property real maxH: sheet.height - PageController.safeAreaTopMargin
+        readonly property real maxH: sheet.height - sheet.safeTop
                                      - PageController.safeAreaBottomMargin - 2 * Theme.space.xl
         // Раскладка высоты: фикс-части (шапка/заголовок/кнопки) + картинка + текст.
         readonly property int imgFull: banner.status === Image.Ready

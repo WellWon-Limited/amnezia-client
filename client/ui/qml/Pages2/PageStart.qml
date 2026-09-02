@@ -138,10 +138,10 @@ PageType {
         // локации режим отсеял. Отказ режима (нет транспорта / клиент не умеет) — тост из фасада.
         function onPickTransport(mode) {
             if (typeof TribeEngine === "undefined") return
-            const st = TribeEngine.state
-            const live = (st === "connected" || st === "connecting" || st === "switching"
-                          || st === "selecting" || st === "verifying")
-            if (live) root.goAvpnTab(0)
+            // AVPN (девайс-приёмка 2026-09-02): НЕ уводим с экрана выбора. Человек, который
+            // руками меняет режим соединения, остаётся в пикере — там сразу видно, какие локации
+            // режим отсеял, и можно тут же выбрать нужную. Переподъём туннеля движок делает сам
+            // (reconcile + needsRestart), экран для этого покидать не требуется.
             TribeEngine.setTransportMode(mode)
         }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
