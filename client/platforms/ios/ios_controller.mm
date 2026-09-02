@@ -465,8 +465,11 @@ void IosController::checkStatus()
         // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
         // только для лога; у WG-ответа ключа нет (пусто).
         const QString runtimeState = stringFromResponse(response, @"runtime_state");
+        // AVPN: причину отказа старта ядра снимаем ЗДЕСЬ — NSDictionary* response живёт только
+        // в этом хендлере; во внутреннюю (GUI-поток) лямбду уезжает уже готовая строка.
+        const QString startFailure = stringFromResponse(response, @"last_start_failure");
 
-        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState]() {
+        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState, startFailure]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
@@ -536,7 +539,7 @@ void IosController::checkStatus()
                 if (!runtimeState.isEmpty() && runtimeState != QLatin1String("running")) {
                     // AVPN (девайс-разбор 2026-09-02): вместе со статусом тянем ПРИЧИНУ отказа
                     // старта ядра — без неё «вечное подключение» на устройстве безымянно.
-                    const QString why = stringFromResponse(response, @"last_start_failure");
+                    const QString why = startFailure;
                     qWarning() << "IosController::checkStatus : xray runtime_state" << runtimeState
                                << "reason" << (why.isEmpty() ? QStringLiteral("(нет текста)") : why);
                     if (!why.isEmpty())
