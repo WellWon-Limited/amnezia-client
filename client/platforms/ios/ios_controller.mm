@@ -109,6 +109,22 @@ bool isWireGuardBasedProto(amnezia::Proto proto) {
     return proto == amnezia::Proto::WireGuard || proto == amnezia::Proto::Awg;
 }
 
+// AVPN (волна AWG 3.1 + Xray, этап D3): xray-пути NE (VLESS/Reality через libxray + tun2socks).
+// У них нет рукопожатия в смысле WG — handshakeChanged не эмитим (0 = «неизвестно», §17.1),
+// rx/tx приходят из tunnel_runtime_status_v1 (PacketTunnelProvider+Xray.swift, счётчики
+// tun-интерфейса hev-socks5-tunnel; строки, кумулятив).
+bool isXrayBasedProto(amnezia::Proto proto) {
+    return proto == amnezia::Proto::Xray || proto == amnezia::Proto::SSXray;
+}
+
+QString stringFromResponse(NSDictionary *response, NSString *key) {
+    id value = response[key];
+    if ([value isKindOfClass:[NSString class]]) {
+        return QString::fromNSString((NSString *)value);
+    }
+    return QString();
+}
+
 // AVPN backend-first (T20): handshake-пороги из rawConfig (numbers.handshake_timeout_ms /
 // numbers.handshake_max_timeouts, засеяны VpnConnectionTunnelControl::up), фолбэк — константы
 // выше. Пусто/не число → фолбэк (byte-for-byte старое поведение).
@@ -446,8 +462,11 @@ void IosController::checkStatus()
         const uint64_t txBytes = uint64FromResponse(response, @"tx_bytes");
         const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
+        // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
+        // только для лога; у WG-ответа ключа нет (пусто).
+        const QString runtimeState = stringFromResponse(response, @"runtime_state");
 
-        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec]() {
+        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
@@ -510,7 +529,16 @@ void IosController::checkStatus()
                 emit bytesChanged(rxBytes - m_rxBytes, txBytes - m_txBytes);
             // AVPN: отдаём возраст хендшейка наружу (unix sec; <=0 → 0 «неизвестно») — serviceEngine
             // HealthLoop использует его для DEAD-детекта на iOS (раньше latestHandshakeEpoch был 0).
-            emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
+            // AVPN (этап D3): для xray-путей рукопожатия нет по определению — сигнал не эмитим
+            // (0 = «неизвестно» по контракту stats, шум не нужен); живость xray HealthLoop меряет
+            // по rx/tx + пробам. runtime_state != running — в лог (failed = NE сам гасит туннель).
+            if (isXrayBasedProto(m_proto)) {
+                if (!runtimeState.isEmpty() && runtimeState != QLatin1String("running")) {
+                    qDebug() << "IosController::checkStatus : xray runtime_state" << runtimeState;
+                }
+            } else {
+                emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);
+            }
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;
             m_statusRequestInFlight = false;

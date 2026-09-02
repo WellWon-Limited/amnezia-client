@@ -76,6 +76,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // PacketTunnelProvider+Xray.swift). Default matches the pre-Task-6 literal (1.0s) byte-for-byte.
     var xrayNetworkChangeDebounceSeconds: TimeInterval = 1.0
 
+    // AVPN (волна AWG 3.1 + Xray, этап D3): runtime-статус и жизненный цикл xray-пути.
+    // Сессия (поколение + счётчики rx/tx tun-интерфейса hev), реестр сырого контекста
+    // protect-колбэка ядра и gate нативных старт/стоп — см. PacketTunnelProvider+Xray.swift,
+    // TunnelRuntimeStatus.swift, XraySocketCallbackLifecycle.swift. AWG/OpenVPN-пути не трогают.
+    let xrayRuntimeSession = TunnelRuntimeSession()
+    let xraySocketCallbackRegistry = XraySocketCallbackRegistry<XraySocketCallbackContext>()
+    let xrayNativeLifecycleGate = XrayNativeLifecycleGate()
+
     func openVPNPacketFlow() -> OpenVPNAdapterPacketFlow {
         openVPNPacketFlowAdapter
     }
@@ -299,7 +307,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .openvpn:
             handleOpenVPNStatusMessage(messageData, completionHandler: completionHandler)
         case .xray:
-            break;
+            // AVPN (этап D3): rx/tx xray-пути для IosController::checkStatus / HealthLoop.
+            handleXrayStatusMessage(completionHandler: completionHandler)
         }
     }
   
@@ -324,7 +333,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reasserting = true
         xrayLog(.info, message: "Applying network change to xray tunnel")
         stopXray { }
-        startXray { [weak self] error in
+        // AVPN (этап D3): рестарт внутри той же NE-сессии — кумулятив rx/tx сохраняем.
+        startXray(preservingCounters: true) { [weak self] error in
             self?.reasserting = false
             completion(error)
         }
