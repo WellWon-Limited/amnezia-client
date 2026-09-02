@@ -15,9 +15,18 @@ import Foundation
 /// ошибка. Потребитель освобождает каждый non-nil результат ровно один раз.
 enum XrayNativeCStringResult {
     static func consume(_ result: UnsafeMutablePointer<CChar>?) -> Bool {
-        guard let result else { return true }
+        message(result) == nil
+    }
+
+    /// Текст ошибки ядра (nil = успех). Конвенция libxray та же, что на Android
+    /// (`Xray.kt::isNotNullOrBlank`): непустая строка = отказ. Волна 2026-09-02: раньше
+    /// сообщение молча освобождалось, и «Xray не стартовал» приходило на устройство без
+    /// единой причины — диагностировать было нечем.
+    static func message(_ result: UnsafeMutablePointer<CChar>?) -> String? {
+        guard let result else { return nil }
         defer { free(result) }
-        return result.pointee == 0
+        let text = String(cString: result).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 }
 

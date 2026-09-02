@@ -78,6 +78,15 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
     connect(IosController::Instance(), &IosController::handshakeChanged, this,
             [this](qint64 hsEpochSec) { updateHandshakeEpoch(m_stats, hsEpochSec); },
             Qt::QueuedConnection);
+    // AVPN (девайс-разбор 2026-09-02): ядро Xray не поднялось в NE — текст причины наружу
+    // (лог + последний отчёт о конфигурации, который уходит в диагностику). Раньше отказ был
+    // безымянным, и «вечное подключение» нечем было объяснить.
+    connect(IosController::Instance(), &IosController::xrayStartFailed, this,
+            [this](const QString &reason) {
+                m_lastXrayStartFailure = reason;
+                qWarning() << "[avpn xray] core start failed on device:" << reason;
+            },
+            Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_ANDROID)
     // AVPN: то же на Android (last_handshake_time_sec из GoBackend.awgGetConfig → Statistics → JNI).

@@ -327,11 +327,16 @@ extension PacketTunnelProvider {
         if snapshot.state == .running {
             _ = xrayRuntimeSession.record(readHevTrafficSample(), generation: snapshot.generation)
         }
-        let core: [String: Any] = [
+        var core: [String: Any] = [
             "engine": "xray",
             "tun2socks": "hev-socks5-tunnel",
             "active_interface_index": activeIfaceIdx
         ]
+        // Причина последнего отказа старта ядра — в тот же статус-ответ: приложение кладёт её
+        // в лог и диагностику, поэтому «вечное подключение» перестаёт быть безымянным.
+        if let failure = lastXrayStartFailure {
+            core["last_start_failure"] = failure
+        }
         let response = xrayRuntimeSession.payload(core: core)
         completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
     }
@@ -479,17 +484,20 @@ extension PacketTunnelProvider {
                 guard let ctx = ctx else { return 0 }
                 return Unmanaged<XraySocketCallbackContext>.fromOpaque(ctx).takeUnretainedValue().invoke(fd: fd)
             }
-            guard XrayNativeCStringResult.consume(LibXraySetSockCallback(cb, ctx)) else {
+            if let reason = XrayNativeCStringResult.message(LibXraySetSockCallback(cb, ctx)) {
                 // Колбэк не взведён — контекст можно снять без drain'а.
                 _ = context.deactivate(expected: callbackIdentity)
                 _ = xraySocketCallbackRegistry.remove(identity: callbackIdentity)
-                xrayLog(.error, message: "Can't register Xray socket protection callback")
+                xrayLog(.error, message: "Can't register Xray socket protection callback: \(reason)")
+                lastXrayStartFailure = reason
                 return XrayErrors.cantRegisterSocketProtection
             }
-            guard XrayNativeCStringResult.consume(LibXrayRunXray(nil, path, Int64.max)) else {
+            if let reason = XrayNativeCStringResult.message(LibXrayRunXray(nil, path, Int64.max)) {
                 // Ядро не поднялось: слот очищаем через drain (колбэк был взведён), ядро не гасим.
+                // Текст ядра — единственная зацепка для разбора «вечного подключения», логируем его.
                 _ = retireXrayCallback(identity: callbackIdentity, stopCore: false)
-                xrayLog(.error, message: "Xray core failed to start")
+                xrayLog(.error, message: "Xray core failed to start: \(reason)")
+                lastXrayStartFailure = reason
                 return XrayErrors.xrayCoreStartFailed
             }
             return nil
