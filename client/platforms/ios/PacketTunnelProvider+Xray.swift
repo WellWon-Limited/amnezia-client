@@ -371,7 +371,17 @@ extension PacketTunnelProvider {
             protected = (ipv4 == 0 || ipv6 == 0)
         }
         if !protected {
-            xraySocketProtectionFailed(identity: identity)
+            if interfaceIndex == 0 {
+                // Индекс интерфейса ещё не известен (путь сети не обновился к моменту первого
+                // дозвона ядра). Апстрим в этом случае просто возвращает отказ и даёт ядру
+                // повторить — рушить туннель нельзя: на устройстве это давало «вечное
+                // подключение» вместо коннекта (девайс-разбор 2026-09-02).
+                xrayLog(.info, message: "Xray socket protection deferred: active interface is unknown yet")
+            } else {
+                // Индекс известен, а привязка не удалась — это настоящий отказ: незащищённый
+                // сокет ушёл бы в собственный туннель. Гасим ровно один раз.
+                xraySocketProtectionFailed(identity: identity)
+            }
         }
         return protected
     }
@@ -492,13 +502,17 @@ extension PacketTunnelProvider {
                 lastXrayStartFailure = reason
                 return XrayErrors.cantRegisterSocketProtection
             }
+            // ВАЖНО (девайс-разбор 2026-09-02): LibXrayRunXray возвращает строку и при УСПЕХЕ
+            // (C-экспорт Go-библиотеки отдаёт JSON-ответ, в отличие от Android-биндинга, где
+            // непустая строка = ошибка). Апстримный клиент этот результат игнорирует, а наш
+            // строгий guard считал любой ответ отказом — ядро не стартовало НИКОГДА, и на
+            // устройстве это выглядело как вечное «Подключение» без причины. Возвращаем
+            // апстримное поведение: текст только логируем и запоминаем, старт не валим.
+            // Реальный отказ ловит следующий слой: hev-tun2socks не поднимется и туннель
+            // честно упадёт с tun2socksExited.
             if let reason = XrayNativeCStringResult.message(LibXrayRunXray(nil, path, Int64.max)) {
-                // Ядро не поднялось: слот очищаем через drain (колбэк был взведён), ядро не гасим.
-                // Текст ядра — единственная зацепка для разбора «вечного подключения», логируем его.
-                _ = retireXrayCallback(identity: callbackIdentity, stopCore: false)
-                xrayLog(.error, message: "Xray core failed to start: \(reason)")
+                xrayLog(.info, message: "Xray core start returned: \(reason)")
                 lastXrayStartFailure = reason
-                return XrayErrors.xrayCoreStartFailed
             }
             return nil
         }
