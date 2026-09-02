@@ -304,6 +304,8 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_handshakeTimer.invalidate();
     m_handshakeTimeouts = 0;
     m_statusRequestInFlight = false;
+    m_lastXrayStartFailure.clear();
+    m_lastXrayCoreLogTail.clear();
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
     m_rxBytes = 0;
     m_txBytes = 0;
@@ -468,8 +470,14 @@ void IosController::checkStatus()
         // AVPN: причину отказа старта ядра снимаем ЗДЕСЬ — NSDictionary* response живёт только
         // в этом хендлере; во внутреннюю (GUI-поток) лямбду уезжает уже готовая строка.
         const QString startFailure = stringFromResponse(response, @"last_start_failure");
+        // AVPN (девайс-разбор 2026-09-02): имя интерфейса и хвост лога ядра — единственное, по чему
+        // «Подключено без трафика» отличается от здорового коннекта (индекс интерфейса не отличает
+        // Wi-Fi от нашего же utun).
+        const QString ifaceName = stringFromResponse(response, @"active_interface_name");
+        const QString coreLogTail = stringFromResponse(response, @"core_log_tail");
 
-        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState, startFailure]() {
+        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
+                                         startFailure, ifaceName, coreLogTail]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
@@ -536,14 +544,24 @@ void IosController::checkStatus()
             // (0 = «неизвестно» по контракту stats, шум не нужен); живость xray HealthLoop меряет
             // по rx/tx + пробам. runtime_state != running — в лог (failed = NE сам гасит туннель).
             if (isXrayBasedProto(m_proto)) {
+                // AVPN (девайс-разбор 2026-09-02): причина отказа ядра доезжает НЕЗАВИСИМО от
+                // runtime_state. Прежний гейт «только когда state != running» хоронил её ровно в
+                // том случае, ради которого и заводился: ядро отрапортовало running, а дозвоны
+                // отменялись — «вечное подключение» без единой строки в диагностике.
+                if (!startFailure.isEmpty() && startFailure != m_lastXrayStartFailure) {
+                    m_lastXrayStartFailure = startFailure;
+                    qWarning() << "IosController::checkStatus : xray start failure" << startFailure
+                               << "runtime_state" << runtimeState;
+                    emit xrayStartFailed(startFailure);
+                }
                 if (!runtimeState.isEmpty() && runtimeState != QLatin1String("running")) {
-                    // AVPN (девайс-разбор 2026-09-02): вместе со статусом тянем ПРИЧИНУ отказа
-                    // старта ядра — без неё «вечное подключение» на устройстве безымянно.
-                    const QString why = startFailure;
-                    qWarning() << "IosController::checkStatus : xray runtime_state" << runtimeState
-                               << "reason" << (why.isEmpty() ? QStringLiteral("(нет текста)") : why);
-                    if (!why.isEmpty())
-                        emit xrayStartFailed(why);
+                    qWarning() << "IosController::checkStatus : xray runtime_state" << runtimeState;
+                }
+                // Хвост лога ядра — в лог приложения (он же уезжает в диагностику).
+                if (!coreLogTail.isEmpty() && coreLogTail != m_lastXrayCoreLogTail) {
+                    m_lastXrayCoreLogTail = coreLogTail;
+                    qWarning() << "IosController::checkStatus : xray core log (iface" << ifaceName
+                               << "):" << coreLogTail;
                 }
             } else {
                 emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);

@@ -154,6 +154,9 @@ extension PacketTunnelProvider {
         // (setTunnelNetworkSettings, tun2socks) становятся стейл и игнорируются.
         let sessionGeneration = xrayRuntimeSession.beginSession(protocolName: "xray",
                                                                 preservingCounters: preservingCounters)
+        // Счётчики protect живут ровно одну сессию ядра — иначе «сколько дозвонов привязано»
+        // смешивает прошлый и текущий старт.
+        xrayProtectCounters.reset()
         guard let callbackIdentity = XraySocketCallbackIdentity(
             generation: sessionGeneration,
             sessionId: xrayRuntimeSession.snapshot().sessionId) else {
@@ -239,6 +242,11 @@ extension PacketTunnelProvider {
 
             // Extract existing SOCKS5 credentials or generate new ones per session.
             let socksCredentials = ensureInboundAuth(jsonDict: &jsonDict, port: port, address: address)
+
+            // AVPN (девайс-разбор 2026-09-02): без файла ядро пишет в stderr NE — то есть в никуда,
+            // и REALITY-ошибки/отказы дозвона не видит никто. Кладём лог рядом с конфигом и
+            // отдаём его хвост в статус (см. xrayCoreLogTail).
+            attachCoreLogSink(jsonDict: &jsonDict)
 
             let updatedData = try JSONSerialization.data(withJSONObject: jsonDict, options: [])
 
@@ -327,11 +335,22 @@ extension PacketTunnelProvider {
         if snapshot.state == .running {
             _ = xrayRuntimeSession.record(readHevTrafficSample(), generation: snapshot.generation)
         }
+        let protectStats = xrayProtectCounters.snapshot()
         var core: [String: Any] = [
             "engine": "xray",
             "tun2socks": "hev-socks5-tunnel",
-            "active_interface_index": activeIfaceIdx
+            "active_interface_index": activeIfaceIdx,
+            // Имя интерфейса отличает «привязались к Wi-Fi» от «привязались к своему utun» —
+            // по одному индексу это неразличимо (девайс-разбор 2026-09-02).
+            "active_interface_name": activeIfaceName,
+            "protect_bound": protectStats.bound,
+            "protect_unbound": protectStats.unbound,
+            "protect_rejected": protectStats.rejected
         ]
+        // Хвост лога самого ядра: REALITY-ошибки и отказы дозвона видны только там.
+        if let tail = xrayCoreLogTail(), !tail.isEmpty {
+            core["core_log_tail"] = tail
+        }
         // Причина последнего отказа старта ядра — в тот же статус-ответ: приложение кладёт её
         // в лог и диагностику, поэтому «вечное подключение» перестаёт быть безымянным.
         if let failure = lastXrayStartFailure {
@@ -361,29 +380,66 @@ extension PacketTunnelProvider {
     // (приложение увидит Disconnected/Error и уйдёт в failover по своим правилам).
     func protectXraySocket(fd: uintptr_t, identity: XraySocketCallbackIdentity) -> Bool {
         let interfaceIndex = activeIfaceIdx
-        var protected = false
-        if interfaceIndex != 0 {
-            var boundInterface = interfaceIndex
-            let ipv4 = setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, &boundInterface,
-                                  socklen_t(MemoryLayout<UInt32>.size))
-            let ipv6 = setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, &boundInterface,
-                                  socklen_t(MemoryLayout<UInt32>.size))
-            protected = (ipv4 == 0 || ipv6 == 0)
+        if interfaceIndex == 0 {
+            // Индекс физического интерфейса ещё не известен (путь сети не успел обновиться к
+            // первому дозвону ядра). ВАЖНО (девайс-разбор 2026-09-02): наш диалер сделан
+            // fail-closed (патч 0004 к xray-core: отказ колбэка ОТМЕНЯЕТ дозвон, апстрим же
+            // просто логирует и звонит дальше). Поэтому «не знаю интерфейс» = «навсегда ни
+            // одного TCP» = вечное «Подключение…». Разрешаем непривязанный дозвон: маршрут по
+            // умолчанию у NE-процесса и так идёт мимо своего туннеля.
+            xrayProtectCounters.countUnbound()
+            xrayLog(.info, message: "Xray socket dial allowed unbound: active interface is unknown yet")
+            return true
         }
-        if !protected {
-            if interfaceIndex == 0 {
-                // Индекс интерфейса ещё не известен (путь сети не обновился к моменту первого
-                // дозвона ядра). Апстрим в этом случае просто возвращает отказ и даёт ядру
-                // повторить — рушить туннель нельзя: на устройстве это давало «вечное
-                // подключение» вместо коннекта (девайс-разбор 2026-09-02).
-                xrayLog(.info, message: "Xray socket protection deferred: active interface is unknown yet")
-            } else {
-                // Индекс известен, а привязка не удалась — это настоящий отказ: незащищённый
-                // сокет ушёл бы в собственный туннель. Гасим ровно один раз.
-                xraySocketProtectionFailed(identity: identity)
-            }
+
+        var boundInterface = interfaceIndex
+        let ipv4 = setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, &boundInterface,
+                              socklen_t(MemoryLayout<UInt32>.size))
+        let ipv6 = setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, &boundInterface,
+                              socklen_t(MemoryLayout<UInt32>.size))
+        let protected = (ipv4 == 0 || ipv6 == 0)
+        if protected {
+            xrayProtectCounters.countBound()
+        } else {
+            // Индекс известен, а привязка не удалась — это настоящий отказ: незащищённый
+            // сокет ушёл бы в собственный туннель. Гасим ровно один раз.
+            xrayProtectCounters.countRejected()
+            xraySocketProtectionFailed(identity: identity)
         }
         return protected
+    }
+
+    /// Путь файла лога ядра Xray (внутри каталога кешей NE, рядом с config.json).
+    static var xrayCoreLogURL: URL {
+        Constants.cachesDirectory.appendingPathComponent("xray-core.log", isDirectory: false)
+    }
+
+    /// Подмешивает в конфиг ядра запись лога в файл. Уровень warning: ошибки дозвона и REALITY
+    /// видны, а болтовни на каждый пакет нет. Файл пересоздаётся на каждый старт — он живёт
+    /// ровно одну сессию и не растёт бесконечно.
+    func attachCoreLogSink(jsonDict: inout [String: Any]) {
+        let url = Self.xrayCoreLogURL
+        try? FileManager.default.removeItem(at: url)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        var log = (jsonDict["log"] as? [String: Any]) ?? [:]
+        log["loglevel"] = "warning"
+        log["error"] = url.path
+        jsonDict["log"] = log
+    }
+
+    /// Последние строки лога ядра для статус-ответа (ограничены, чтобы не раздувать IPC).
+    func xrayCoreLogTail(maxBytes: Int = 4096, maxLines: Int = 20) -> String? {
+        let url = Self.xrayCoreLogURL
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let offset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: offset)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true).suffix(maxLines)
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     private func xraySocketProtectionFailed(identity: XraySocketCallbackIdentity) {
@@ -502,17 +558,18 @@ extension PacketTunnelProvider {
                 lastXrayStartFailure = reason
                 return XrayErrors.cantRegisterSocketProtection
             }
-            // ВАЖНО (девайс-разбор 2026-09-02): LibXrayRunXray возвращает строку и при УСПЕХЕ
-            // (C-экспорт Go-библиотеки отдаёт JSON-ответ, в отличие от Android-биндинга, где
-            // непустая строка = ошибка). Апстримный клиент этот результат игнорирует, а наш
-            // строгий guard считал любой ответ отказом — ядро не стартовало НИКОГДА, и на
-            // устройстве это выглядело как вечное «Подключение» без причины. Возвращаем
-            // апстримное поведение: текст только логируем и запоминаем, старт не валим.
-            // Реальный отказ ловит следующий слой: hev-tun2socks не поднимется и туннель
-            // честно упадёт с tun2socksExited.
+            // Конвенция libxray (сверено с вендоренным nodep.WrapError и с Android-биндингом
+            // Xray.kt): при успехе возвращается ПУСТАЯ строка, любая непустая = ошибка старта.
+            // Поэтому guard строгий: мёртвое ядро не должно выглядеть «Подключено» — hev поднимется
+            // и поверх мёртвого socks, а tun2socksExited в этом случае не срабатывает.
+            // Причину запоминаем ДО возврата: она уезжает в статус-ответ (last_start_failure) и
+            // дальше в лог/диагностику приложения — «вечное подключение» больше не безымянно.
             if let reason = XrayNativeCStringResult.message(LibXrayRunXray(nil, path, Int64.max)) {
-                xrayLog(.info, message: "Xray core start returned: \(reason)")
+                xrayLog(.error, message: "Xray core start failed: \(reason)")
                 lastXrayStartFailure = reason
+                // Слот колбэка очищаем ТОЛЬКО через drain (колбэк уже взведён), ядро не гасим.
+                _ = retireXrayCallback(identity: callbackIdentity, stopCore: false)
+                return XrayErrors.xrayCoreStartFailed
             }
             return nil
         }

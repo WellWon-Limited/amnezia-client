@@ -30,6 +30,38 @@ enum XrayNativeCStringResult {
     }
 }
 
+/// Счётчики protect-колбэка. Колбэк зовётся из Go-потоков ядра, поэтому доступ под замком.
+/// bound — сокет привязан к физическому интерфейсу; unbound — интерфейс ещё неизвестен и дозвон
+/// разрешён без привязки (апстримная семантика); rejected — привязка провалилась (туннель гасим).
+final class XrayProtectCounters {
+    struct Snapshot: Equatable {
+        let bound: Int
+        let unbound: Int
+        let rejected: Int
+    }
+
+    private let lock = NSLock()
+    private var bound = 0
+    private var unbound = 0
+    private var rejected = 0
+
+    func countBound() { lock.lock(); bound += 1; lock.unlock() }
+    func countUnbound() { lock.lock(); unbound += 1; lock.unlock() }
+    func countRejected() { lock.lock(); rejected += 1; lock.unlock() }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        bound = 0; unbound = 0; rejected = 0
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(bound: bound, unbound: unbound, rejected: rejected)
+    }
+}
+
 struct XraySocketCallbackIdentity: Hashable {
     let generation: UInt64
     let sessionId: String

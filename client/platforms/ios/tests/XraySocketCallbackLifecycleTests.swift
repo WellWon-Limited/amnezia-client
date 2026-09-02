@@ -339,6 +339,27 @@ private struct XraySocketCallbackLifecycleTests {
                "deactivated callback stays fenced")
         _ = registry.remove(identity: current)
 
+        // AVPN (девайс-разбор 2026-09-02): счётчики protect считают из многих потоков ядра —
+        // терять инкременты нельзя, иначе «Подключено без трафика» снова станет безымянным.
+        let counters = XrayProtectCounters()
+        let counterGroup = DispatchGroup()
+        for i in 0..<300 {
+            DispatchQueue.global().async(group: counterGroup) {
+                switch i % 3 {
+                case 0: counters.countBound()
+                case 1: counters.countUnbound()
+                default: counters.countRejected()
+                }
+            }
+        }
+        expect(counterGroup.wait(timeout: .now() + 5) == .success, "protect counters finished")
+        let snapshot = counters.snapshot()
+        expect(snapshot == XrayProtectCounters.Snapshot(bound: 100, unbound: 100, rejected: 100),
+               "protect counters lose nothing under concurrency: \(snapshot)")
+        counters.reset()
+        expect(counters.snapshot() == XrayProtectCounters.Snapshot(bound: 0, unbound: 0, rejected: 0),
+               "reset clears the session counters")
+
         print("Apple Xray runtime status + callback lifecycle tests passed (128 sessions)")
     }
 }
