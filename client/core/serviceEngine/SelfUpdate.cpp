@@ -84,10 +84,21 @@ if [ "$got_bid" != "$bid" ]; then
   exit 1
 fi
 
-# Нотаризация: Gatekeeper должен принять бандл для запуска.
-if ! spctl -a -vv -t exec "$app_src" >/dev/null 2>&1; then
+# Нотаризация. Доказательство — вшитый (stapled) тикет Apple: он проверяется офлайн и не
+# зависит от локальной политики Gatekeeper. ВАЖНО: spctl тут НЕ годится — на живой машине
+# `spctl -a -t exec` отвечает "rejected" даже для установленного нотаризованного приложения
+# (проверено 2026-09-02 на нашем же билде), то есть таким гейтом мы бы отвергали собственное
+# обновление. Дополнительно, если система умеет syspolicy_check, требуем и его вердикт.
+if ! xcrun stapler validate "$app_src" >/dev/null 2>&1; then
   echo "fail:Обновление не заверено Apple"
   exit 1
+fi
+if command -v syspolicy_check >/dev/null 2>&1; then
+  # syspolicy_check печатает вердикт в stderr — иначе grep всегда пуст и мы отвергаем своё же.
+  if ! syspolicy_check distribution "$app_src" 2>&1 | grep -q "ready for distribution"; then
+    echo "fail:Обновление не прошло проверку системы"
+    exit 1
+  fi
 fi
 
 new_ver="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app_src/Contents/Info.plist" 2>/dev/null)"
