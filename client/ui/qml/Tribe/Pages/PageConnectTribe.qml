@@ -43,6 +43,13 @@ PageType {
     readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
     readonly property bool showBusy: isBusy && !engineStopping
 
+    // AVPN awg31-xray-v1: фаза «туннель поднят, но трафик ещё не подтверждён» (xray: «Подключено»
+    // только после DNS+HTTPS через туннель — инвариант волны). Гард `=== true` — старый бинарь без
+    // свойства ведёт себя как раньше. activeProtoNow/curProtoVersion — бейдж транспорта на карточке.
+    readonly property bool verifyingNow: hasEngine && TribeEngine.verifying === true
+    readonly property string activeProtoNow: hasEngine ? String(TribeEngine.activeProto || "") : ""
+    readonly property string curProtoVersion: String(root.curNode.protoVersion || "")
+
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
     // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
     // если взведено действием пользователя и app активно (Haptic.playArmed) — автофейловер и
@@ -796,7 +803,10 @@ PageType {
         // (CTA «Продлить доступ» уже есть ниже — subExpired ведёт на золотую кнопку).
         // AVPN (белые списки): в активном режиме подпись объясняет причину — экран не врёт
         // «Подключиться…», когда сеть зарезана оператором (попап мог быть уже закрыт).
-        text: root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
+        // AVPN awg31-xray-v1: фаза проверки трафика (xray поднят, «Подключено» ещё не объявлено) —
+        // подпись честно объясняет, чего ждём; иначе экран врал бы «Подключиться — нажмите кнопку».
+        text: root.verifyingNow ? qsTr("Проверяем трафик…")
+              : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
               : root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
@@ -917,16 +927,36 @@ PageType {
                         }
                     }
 
-                    // ── нижняя строка: IP слева, мс справа (тот же размер/линия) ──
+                    // ── нижняя строка: IP слева, бейдж транспорта и мс справа (одна линия) ──
                     Item {
                         width: parent.width
-                        height: ipText.implicitHeight
+                        // бейдж выше строки mono-10 → высота по самому высокому элементу
+                        height: Math.max(ipText.implicitHeight,
+                                         transportBadge.visible ? transportBadge.height : 0)
+                        // AVPN awg31-xray-v1: бейдж поднятого транспорта («Amnezia v3.1» / «Xray»).
+                        // Живёт на строке IP, а НЕ рядом с именем: в верхней строке уже бейдж «auto»
+                        // и палочки — имя схлопывалось бы в многоточие на узких экранах.
+                        // Виден только когда туннель реально поднят (вкл. фазу проверки трафика
+                        // xray — тогда бейдж жёлтый, а не акцентный).
+                        TribeTransportBadge {
+                            id: transportBadge
+                            visible: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
+                            anchors.right: msText.visible ? msText.left : parent.right
+                            anchors.rightMargin: msText.visible ? Theme.space.md : 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            compact: true
+                            transport: root.activeProtoNow
+                            version: root.curProtoVersion
+                            active: true
+                            verifying: root.verifyingNow
+                        }
                         Text {
                             id: ipText
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.right: msText.visible ? msText.left : parent.right
-                            anchors.rightMargin: msText.visible ? Theme.space.md : 0
+                            anchors.right: transportBadge.visible ? transportBadge.left
+                                           : (msText.visible ? msText.left : parent.right)
+                            anchors.rightMargin: (transportBadge.visible || msText.visible) ? Theme.space.md : 0
                             elide: Text.ElideRight
                             text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
                             color: root.slate500
@@ -1169,9 +1199,12 @@ PageType {
                     // выборе (curNode.pinned) сервер уже задан — показываем «Подключаемся…», не «подбираем».
                     // macOS: на время фоновой установки root-демона — честный статус установки
                     // (=== true — гард на старый бинарь без свойства). // AVPN
+                    // AVPN awg31-xray-v1: verifying — отдельная фаза («трафик ещё не подтверждён»),
+                    // она приходит УЖЕ после подъёма туннеля, поэтому проверяется первой.
                     text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
+                          : (root.verifyingNow ? qsTr("Проверяем трафик…")
                           : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем…")
-                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…")))
+                          : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))))
                     color: "#DBEAFE"; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
                 }
             }

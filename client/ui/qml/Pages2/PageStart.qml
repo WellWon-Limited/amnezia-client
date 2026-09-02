@@ -132,6 +132,18 @@ PageType {
             else
                 TribeEngine.selectAuto()
         }
+        // AVPN awg31-xray-v1: смена режима транспорта со страницы выбора. Если туннель поднят/
+        // поднимается, движок переподнимет его (reconcile + needsRestart) — значит СНАЧАЛА уходим
+        // на Connect (CONNECT-INVARIANTS §5), иначе остаёмся в пикере: там сразу видно, какие
+        // локации режим отсеял. Отказ режима (нет транспорта / клиент не умеет) — тост из фасада.
+        function onPickTransport(mode) {
+            if (typeof TribeEngine === "undefined") return
+            const st = TribeEngine.state
+            const live = (st === "connected" || st === "connecting" || st === "switching"
+                          || st === "selecting" || st === "verifying")
+            if (live) root.goAvpnTab(0)
+            TribeEngine.setTransportMode(mode)
+        }
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN (Доктор v1): любая страница просит попап диагностики (главная/чат)

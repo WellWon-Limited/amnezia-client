@@ -103,6 +103,8 @@
         <file>Tribe/components/TribeUpdateBanner.qml</file>
         <file>Tribe/components/TribeWhitelistSheet.qml</file>
         <file>Tribe/components/TribeIncidentBanner.qml</file>
+        <file>Tribe/components/TribeTransportSelector.qml</file>
+        <file>Tribe/components/TribeTransportBadge.qml</file>
         <file>Tribe/Pages/PageConnectTribe.qml</file>
         <file>Tribe/Pages/PageLocationsTribe.qml</file>
         <file>Tribe/Pages/PageAccountTribe.qml</file>

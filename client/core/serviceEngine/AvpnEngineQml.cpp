@@ -1171,6 +1171,11 @@ QVariantMap AvpnEngineQml::currentNode() const
     node["countryCode"] = pick ? pick->countryCode : QString(); // AVPN: для флага-эмодзи
     node["endpoint"]  = pick ? pick->endpoint : QString();
     node["ip"]        = pick ? pick->endpoint.section(QLatin1Char(':'), 0, 0) : QString();
+    // AVPN awg31-xray-v1: транспорт показанного узла — бейдж «Amnezia v3.1»/«Xray» на карточке
+    // Connect. Даём из currentNode (а не сканом nodePool в QML): nodePool пересобирает и ранжирует
+    // весь снапшот на КАЖДЫЙ changed() (тик ~4с) — биндинг главного экрана этого не стоит.
+    node["proto"]        = pick ? pick->proto : QString();
+    node["protoVersion"] = pick ? pick->protoVersion : QString(); // "2"/"3"/"3.1"; xray — пусто
     node["connected"] = (s.state == QLatin1String("connected"));
     node["hasNode"]   = (pick != nullptr);
     // AVPN: бейдж «auto» — показываем ТОЛЬКО когда подключены в авто-режиме (узел выбрал движок, pin
