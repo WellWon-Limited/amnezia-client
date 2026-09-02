@@ -70,6 +70,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     var protoType: TunnelProtoType?
     
     var activeIfaceIdx: UInt32 = 0
+    // Имя выбранного физического интерфейса — только для диагностики (en0/pdp_ip0/…).
+    var activeIfaceName: String = ""
 
     // AVPN backend-first (Task 6): network-change reconnect debounce for the xray tunnel, cached from
     // XrayConfig.networkChangeDebounceMs when startXray() decodes the NE provider configuration (see
@@ -81,6 +83,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // protect-колбэка ядра и gate нативных старт/стоп — см. PacketTunnelProvider+Xray.swift,
     // TunnelRuntimeStatus.swift, XraySocketCallbackLifecycle.swift. AWG/OpenVPN-пути не трогают.
     let xrayRuntimeSession = TunnelRuntimeSession()
+    // Счётчики защиты сокетов ядра Xray — чтобы «Подключено без трафика» перестало быть
+    // безымянным: видно, сколько дозвонов реально привязано к физическому интерфейсу.
+    let xrayProtectCounters = XrayProtectCounters()
     let xraySocketCallbackRegistry = XraySocketCallbackRegistry<XraySocketCallbackContext>()
     let xrayNativeLifecycleGate = XrayNativeLifecycleGate()
     // Последняя причина отказа старта Xray (текст ядра): уходит в статус-ответ приложению,
@@ -139,7 +144,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let preferredTypes: [NWInterface.InterfaceType] = [.wiredEthernet, .wifi, .cellular, .other]
 
-        let nonLoopbackInterfaces = path.availableInterfaces.filter { $0.type != .loopback }
+        // AVPN (девайс-разбор 2026-09-02): исключаем ВИРТУАЛЬНЫЕ интерфейсы — прежде всего наш
+        // собственный utun. После setTunnelNetworkSettings он появляется в availableInterfaces с
+        // типом .other, и привязка сокета ядра Xray к нему (IP_BOUND_IF) заворачивает дозвон в
+        // тот же туннель: наружу не уходит ни одного TCP, коннект «висит подключается» навсегда.
+        let nonLoopbackInterfaces = path.availableInterfaces.filter {
+            $0.type != .loopback && !Self.isVirtualInterfaceName($0.name)
+        }
         let activeInterfaces = nonLoopbackInterfaces.filter { path.usesInterfaceType($0.type) }
 
         let candidate = preferredTypes.compactMap { type in
@@ -148,9 +159,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if let candidate {
             activeIfaceIdx = UInt32(candidate.index)
+            activeIfaceName = candidate.name
         } else {
             activeIfaceIdx = 0
+            activeIfaceName = ""
         }
+    }
+
+    /// Имена интерфейсов, на которые физический трафик привязывать нельзя: свой NE-туннель
+    /// (utun*), IPSec/PPP-туннели сторонних VPN и мосты. Всё остальное считаем физикой.
+    static func isVirtualInterfaceName(_ name: String) -> Bool {
+        let virtualPrefixes = ["utun", "ipsec", "ppp", "tun", "tap", "bridge"]
+        return virtualPrefixes.contains { name.hasPrefix($0) }
     }
 
     func updateActiveInterfaceIndexForCurrentPath() {

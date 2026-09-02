@@ -177,6 +177,10 @@ private:
     int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;
     std::atomic_bool m_statusRequestInFlight { false };
+    // AVPN (девайс-разбор 2026-09-02): последняя доставленная причина отказа ядра Xray и хвост его
+    // лога — чтобы одну и ту же строку не эмитить/не писать в лог на каждом опросе статуса.
+    QString m_lastXrayStartFailure;
+    QString m_lastXrayCoreLogTail;
     // AVPN (ревью 2026-07-11): поколение сессии — стейл-ответ checkStatus СТАРОЙ сессии,
     // долетевший после реконнекта, не должен трогать счётчики/статусы новой (underflow-дельта).
     std::atomic<uint64_t> m_statusGeneration { 0 };
