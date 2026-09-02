@@ -1,6 +1,7 @@
 #include "XrayConfigBuilder.h"
 
 #include "../utils/constants/protocolConstants.h"
+#include "TuningStore.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,6 +21,21 @@ static int portOrDefault(const QString &endpoint)
 {
     const int p = AwgConfigBuilder::port(endpoint);
     return p > 0 ? p : QString::fromLatin1(amnezia::protocols::xray::defaultPort).toInt();
+}
+
+// Бюджет рукопожатия ядра (секунды). Клампы: ниже 3с рвём живые, но медленные мобильные сети;
+// выше 10с теряется смысл — движок всё равно уйдёт по бюджету верификации.
+int XrayConfigBuilder::handshakeSeconds()
+{
+    const int ms = int(TuningStore::numberOr(QStringLiteral("xray_policy_handshake_ms"), 5000));
+    return qBound(3, ms / 1000, 10);
+}
+
+// Простой соединения: дефолт xray 300с, ниже 60с рвёт долгие сессии (загрузки, стримы).
+int XrayConfigBuilder::connIdleSeconds()
+{
+    const int s = int(TuningStore::numberOr(QStringLiteral("xray_policy_conn_idle_s"), 300));
+    return qBound(60, s, 900);
 }
 
 QJsonObject XrayConfigBuilder::coreConfig(const SubscriptionNode &node)
@@ -75,6 +91,19 @@ QJsonObject XrayConfigBuilder::coreConfig(const SubscriptionNode &node)
                 QJsonObject{ { QStringLiteral("loglevel"), QStringLiteral("error") } });
     core.insert(QLatin1String(px::inbounds), QJsonArray{ inbound });
     core.insert(QLatin1String(px::outbounds), QJsonArray{ outbound });
+    // Бюджет рукопожатия/простоя (девайс-разбор 2026-09-02). Без него дозвон в МЁРТВЫЙ листенер
+    // висит на системном таймауте TCP — на устройстве это ~37 секунд «Подключение» на кандидата
+    // (замерено по флоу-логу iPhone на недоступном FI:8443). handshake ограничивает дозвон плюс
+    // TLS/Reality-рукопожатие, поэтому провал наступает за секунды и движок успевает уйти на
+    // следующего кандидата в пределах бюджета верификации. Значения server-driven: пересидеть
+    // релиз можно ключами numbers.xray_policy_* (клампы — на точке сева).
+    QJsonObject level0;
+    level0.insert(QStringLiteral("handshake"), handshakeSeconds());
+    level0.insert(QStringLiteral("connIdle"), connIdleSeconds());
+    level0.insert(QStringLiteral("uplinkOnly"), 2);
+    level0.insert(QStringLiteral("downlinkOnly"), 5);
+    core.insert(QStringLiteral("policy"),
+                QJsonObject{ { QStringLiteral("levels"), QJsonObject{ { QStringLiteral("0"), level0 } } } });
     return core;
 }
 

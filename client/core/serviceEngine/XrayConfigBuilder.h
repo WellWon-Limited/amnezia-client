@@ -32,6 +32,10 @@ public:
     static QJsonObject buildInner(const Subscription &sub, const SubscriptionNode &node, const ClientKeys &keys);
 
     // JSON xray-core (объект) / та же строка Compact — то, что уходит в libxray.
+    // Бюджеты ядра (server-driven, клампы внутри): рукопожатие и простой соединения.
+    static int handshakeSeconds();
+    static int connIdleSeconds();
+
     static QJsonObject coreConfig(const SubscriptionNode &node);
     static QString coreConfigText(const SubscriptionNode &node);
 
