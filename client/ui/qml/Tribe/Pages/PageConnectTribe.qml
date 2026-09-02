@@ -898,22 +898,17 @@ PageType {
                                 width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
                                 font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                             }
-                            // нежный blue-accent бейдж «auto» (виден ТОЛЬКО при auto-подключении). // AVPN
-                            Rectangle {
-                                id: autoBadge
-                                visible: root.curNode.auto === true
+                            // AVPN (реш. владельца 2026-09-02): у ИМЕНИ — бейдж транспорта
+                            // («Amnezia v3.1» / «Xray»), а режим «Авто» ушёл текстом на строку IP.
+                            // Транспорт — главное про соединение, режим выбора — второстепенное.
+                            TribeTransportBadge {
+                                id: autoBadge   // id сохранён: на него завязана ширина имени выше
+                                visible: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
                                 anchors.verticalCenter: nodeName.verticalCenter
-                                height: 20; width: autoLabel.implicitWidth + 2 * Theme.space.sm
-                                radius: Theme.radius.pill
-                                color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.16)
-                                border.width: 1; border.color: Qt.rgba(0x7C/255, 0xA2/255, 0xD0/255, 0.45)
-                                Text {
-                                    id: autoLabel
-                                    anchors.centerIn: parent
-                                    text: qsTr("auto")
-                                    color: Theme.color.accent
-                                    font.family: Theme.font.body; font.pixelSize: 11; font.weight: Theme.font.wBold
-                                }
+                                transport: root.activeProtoNow
+                                version: root.curProtoVersion
+                                active: true
+                                verifying: root.verifyingNow
                             }
                         }
                         LoadBars {
@@ -930,25 +925,22 @@ PageType {
                     // ── нижняя строка: IP слева, бейдж транспорта и мс справа (одна линия) ──
                     Item {
                         width: parent.width
-                        // бейдж выше строки mono-10 → высота по самому высокому элементу
+                        // обе части строки — mono-10; высота по самой высокой (страховка на будущее)
                         height: Math.max(ipText.implicitHeight,
-                                         transportBadge.visible ? transportBadge.height : 0)
-                        // AVPN awg31-xray-v1: бейдж поднятого транспорта («Amnezia v3.1» / «Xray»).
-                        // Живёт на строке IP, а НЕ рядом с именем: в верхней строке уже бейдж «auto»
-                        // и палочки — имя схлопывалось бы в многоточие на узких экранах.
-                        // Виден только когда туннель реально поднят (вкл. фазу проверки трафика
-                        // xray — тогда бейдж жёлтый, а не акцентный).
-                        TribeTransportBadge {
-                            id: transportBadge
-                            visible: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
+                                         transportBadge.visible ? transportBadge.implicitHeight : 0)
+                        // AVPN (реш. владельца 2026-09-02): режим выбора сервера — обычным
+                        // текстом на строке IP, тем же кеглем/цветом, что IP и мс. Бейджем
+                        // осталась только суть соединения (транспорт) — он у имени выше.
+                        Text {
+                            id: transportBadge   // id сохранён: на него завязаны якоря IP/мс
+                            visible: root.curNode.auto === true
                             anchors.right: msText.visible ? msText.left : parent.right
                             anchors.rightMargin: msText.visible ? Theme.space.md : 0
                             anchors.verticalCenter: parent.verticalCenter
-                            compact: true
-                            transport: root.activeProtoNow
-                            version: root.curProtoVersion
-                            active: true
-                            verifying: root.verifyingNow
+                            text: qsTr("Авто")
+                            textFormat: Text.PlainText
+                            color: root.slate500
+                            font.family: Theme.font.mono; font.pixelSize: 10
                         }
                         Text {
                             id: ipText
