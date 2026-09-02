@@ -10,7 +10,12 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+// QProcess есть не на всех наших платформах: в iOS-сборке Qt его нет вовсе, поэтому
+// реализация установки компилируется только под десктопным macOS (PLATFORM-SCOPING.md).
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#define AVPN_SELFUPDATE_IMPL 1
 #include <QProcess>
+#endif
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QUrl>
@@ -209,6 +214,7 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion)
                           QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     m_scriptPath = script.fileName();
 
+#ifdef AVPN_SELFUPDATE_IMPL
     m_proc = new QProcess(this);
     m_proc->setProcessChannelMode(QProcess::MergedChannels);
 
@@ -231,13 +237,18 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion)
     m_proc->start(QStringLiteral("/bin/bash"),
                   { m_scriptPath, url.toString(), currentVersion,
                     QString::fromLatin1(kTeamId), QString::fromLatin1(kBundleId) });
+#else
+    Q_UNUSED(currentVersion)
+#endif
 }
 
 void SelfUpdate::cancel()
 {
     if (!m_proc)
         return;
+#ifdef AVPN_SELFUPDATE_IMPL
     m_proc->kill();
+#endif
     finish(QString());
 }
 
@@ -248,8 +259,10 @@ void SelfUpdate::finish(const QString &reason)
         m_scriptPath.clear();
     }
     if (m_proc) {
+#ifdef AVPN_SELFUPDATE_IMPL
         m_proc->disconnect(this);
         m_proc->deleteLater();
+#endif
         m_proc = nullptr;
     }
     if (reason.isEmpty())
