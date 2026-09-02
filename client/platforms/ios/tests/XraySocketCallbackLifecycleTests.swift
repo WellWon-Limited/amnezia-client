@@ -168,11 +168,33 @@ private func testRuntimeSession() {
     expect(JSONSerialization.isValidJSONObject(payload), "payload is JSON-serializable")
 }
 
+private func testIPv4RouteSpec() {
+    let canonical = IPv4RouteSpec(cidr: "103.228.2.0/24")
+    expect(canonical?.destinationAddress == "103.228.2.0" &&
+           canonical?.subnetMask == "255.255.255.0",
+           "canonical IPv4 CIDR is preserved")
+    let hostBits = IPv4RouteSpec(cidr: "10.0.0.17/24")
+    expect(hostBits?.destinationAddress == "10.0.0.0" &&
+           hostBits?.subnetMask == "255.255.255.0",
+           "host bits are masked before creating NEIPv4Route")
+    let defaultRoute = IPv4RouteSpec(cidr: "0.0.0.0/0")
+    expect(defaultRoute?.destinationAddress == "0.0.0.0" &&
+           defaultRoute?.subnetMask == "0.0.0.0",
+           "default IPv4 route is valid")
+    expect(IPv4RouteSpec(cidr: "2a00:1450::/32") == nil,
+        "IPv6 CIDR is never passed to NEIPv4Route")
+    expect(IPv4RouteSpec(cidr: "10.0.0.1/33") == nil,
+        "out-of-range prefix is rejected")
+    expect(IPv4RouteSpec(cidr: "not-a-route") == nil,
+        "malformed CIDR is rejected")
+}
+
 @main
 private struct XraySocketCallbackLifecycleTests {
     static func main() throws {
         testTrafficAccumulator()
         testRuntimeSession()
+        testIPv4RouteSpec()
 
         expect(XrayNativeCStringResult.consume(nil), "nil callback result is success")
         expect(XrayNativeCStringResult.consume(strdup("")),
