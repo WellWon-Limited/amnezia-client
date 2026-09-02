@@ -109,6 +109,9 @@ target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/WGConfig.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/iosglue.mm
     ${CLIENT_ROOT_DIR}/platforms/ios/XrayConfig.swift
+    # AVPN (этап D3): runtime-статус + жизненный цикл protect-колбэка xray-пути (Foundation-only)
+    ${CLIENT_ROOT_DIR}/platforms/ios/TunnelRuntimeStatus.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/XraySocketCallbackLifecycle.swift
 )
 
 target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE

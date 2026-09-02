@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import HevSocks5Tunnel
 import NetworkExtension
 
 enum XrayErrors: Error {
@@ -10,6 +11,12 @@ enum XrayErrors: Error {
     case cantAcquireLocalPort
     case cantSaveHevSocksConfig
     case cantRegisterSocketProtection
+    // AVPN (этап D3): жизненный цикл xray-сессии — поколение/сессия TunnelRuntimeSession.
+    case supersededSession
+    case callbackSlotBusy
+    case xrayCoreStartFailed
+    case socketProtectionFailed
+    case tun2socksExited
 }
 
 extension Constants {
@@ -21,6 +28,36 @@ extension Constants {
             fatalError("Unable to retrieve caches directory.")
         }
     }()
+}
+
+// AVPN (этап D3): контекст protect-колбэка ядра Xray. Сырой указатель на этот объект уходит в C
+// (ctx у LibXraySetSockCallback); владеет им xraySocketCallbackRegistry провайдера, отпускается
+// только после LibXraySetSockCallback(nil, nil) (XraySocketCallbackTeardown). Забор (fence)
+// отсекает поздние колбэки вытесненной сессии: они не трогают сокет и не роняют новую сессию.
+final class XraySocketCallbackContext {
+    weak var provider: PacketTunnelProvider?
+    let identity: XraySocketCallbackIdentity
+    private let fence: XraySocketCallbackFence
+
+    init(provider: PacketTunnelProvider, identity: XraySocketCallbackIdentity) {
+        self.provider = provider
+        self.identity = identity
+        fence = XraySocketCallbackFence(identity: identity)
+    }
+
+    func invoke(fd: uintptr_t) -> Int32 {
+        guard let provider else { return 0 }
+        let runtime = provider.xrayRuntimeSession.snapshot()
+        guard fence.accepts(currentGeneration: runtime.generation,
+                            currentSessionId: runtime.sessionId) else { return 0 }
+        return provider.protectXraySocket(fd: fd, identity: identity) ? 1 : 0
+    }
+
+    func deactivate(expected: XraySocketCallbackIdentity) -> Bool {
+        guard fence.deactivate(expected: expected) else { return false }
+        provider = nil
+        return true
+    }
 }
 
 extension PacketTunnelProvider {
@@ -98,7 +135,11 @@ extension PacketTunnelProvider {
         }
     }
 
-    func startXray(completionHandler: @escaping (Error?) -> Void) {
+    // AVPN (этап D3): preservingCounters = true — рестарт по смене сети внутри той же NE-сессии
+    // (PacketTunnelProvider.handle(networkChange:)): кумулятив rx/tx сохраняется, поколение
+    // колбэков обновляется. Первый старт из startTunnel — false (свежая сессия).
+    func startXray(preservingCounters: Bool = false,
+                   completionHandler: @escaping (Error?) -> Void) {
 
         // Xray configuration
         guard let protocolConfiguration = self.protocolConfiguration as? NETunnelProviderProtocol,
@@ -107,6 +148,26 @@ extension PacketTunnelProvider {
             xrayLog(.error, message: "Can't get xray configuration")
             completionHandler(XrayErrors.noXrayConfig)
             return
+        }
+
+        // AVPN (этап D3): новое поколение runtime-сессии — все висящие колбэки прежнего старта
+        // (setTunnelNetworkSettings, tun2socks) становятся стейл и игнорируются.
+        let sessionGeneration = xrayRuntimeSession.beginSession(protocolName: "xray",
+                                                                preservingCounters: preservingCounters)
+        guard let callbackIdentity = XraySocketCallbackIdentity(
+            generation: sessionGeneration,
+            sessionId: xrayRuntimeSession.snapshot().sessionId) else {
+            completionHandler(XrayErrors.supersededSession)
+            return
+        }
+        // Стейл-счётчики прошлого запуска hev в этом же процессе NE не должны стать «трафиком»
+        // новой сессии: перебазируем аккумулятор на текущее сырое значение (сброс при старте
+        // движка аккумулятор переживёт как reset, дельта 0).
+        xrayRuntimeSession.rebase(readHevTrafficSample(), generation: sessionGeneration)
+
+        func fail(_ error: Error) {
+            _ = xrayRuntimeSession.fail(generation: sessionGeneration)
+            completionHandler(error)
         }
 
         // Tunnel settings
@@ -160,7 +221,7 @@ extension PacketTunnelProvider {
 
             guard let xrayConfigData else {
                 xrayLog(.error, message: "Can't encode config to data")
-                completionHandler(XrayErrors.xrayConfigIsWrong)
+                fail(XrayErrors.xrayConfigIsWrong)
                 return
             }
 
@@ -169,7 +230,7 @@ extension PacketTunnelProvider {
 
             guard var jsonDict else {
                 xrayLog(.error, message: "Can't parse address and port for hevSocks")
-                completionHandler(XrayErrors.cantParseListenAndPort)
+                fail(XrayErrors.cantParseListenAndPort)
                 return
             }
 
@@ -182,56 +243,155 @@ extension PacketTunnelProvider {
             let updatedData = try JSONSerialization.data(withJSONObject: jsonDict, options: [])
 
             setTunnelNetworkSettings(settings) { [weak self] error in
+                guard let self else {
+                    completionHandler(XrayErrors.supersededSession)
+                    return
+                }
+                // AVPN (этап D3): стоп/рестарт успел сменить поколение — этот старт стейл.
+                guard self.xrayRuntimeSession.isCurrent(generation: sessionGeneration) else {
+                    completionHandler(XrayErrors.supersededSession)
+                    return
+                }
                 if let error {
-                    completionHandler(error)
+                    fail(error)
                     return
                 }
 
-                self?.updateActiveInterfaceIndexForCurrentPath()
+                self.updateActiveInterfaceIndexForCurrentPath()
 
-                // Launch xray
-                self?.setupAndStartXray(configData: updatedData) { xrayError in
+                // Launch xray (protect-колбэк взводится ДО старта ядра — внутри setupAndStartXray)
+                self.setupAndStartXray(configData: updatedData,
+                                       callbackIdentity: callbackIdentity) { xrayError in
                     if let xrayError {
-                        completionHandler(xrayError)
+                        fail(xrayError)
                         return
                     }
 
                     // Launch hevSocks
-                    self?.setupAndRunTun2socks(configData: updatedData,
-                                               address: address,
-                                               port: port,
-                                               username: socksCredentials.username,
-                                               password: socksCredentials.password,
-                                               connectTimeoutMs: xrayConfig.connectTimeoutMs,
-                                               readWriteTimeoutMs: xrayConfig.readWriteTimeoutMs,
-                                               completionHandler: completionHandler)
+                    self.setupAndRunTun2socks(configData: updatedData,
+                                              address: address,
+                                              port: port,
+                                              username: socksCredentials.username,
+                                              password: socksCredentials.password,
+                                              connectTimeoutMs: xrayConfig.connectTimeoutMs,
+                                              readWriteTimeoutMs: xrayConfig.readWriteTimeoutMs,
+                                              callbackIdentity: callbackIdentity,
+                                              completionHandler: completionHandler)
                 }
             }
         } catch {
-            completionHandler(error)
+            fail(error)
             return
         }
     }
 
     func stopXray(completionHandler: () -> Void) {
-        Socks5Tunnel.quit()
-        LibXrayStopXray()
-        if let clearError = LibXraySetSockCallback(nil, nil) {
-            free(clearError)
+        // AVPN (этап D3): снапшот/инвалидация поколения и нативное закрытие — под тем же gate'ом,
+        // что оба плеча старта: поздний старт либо целиком успевает раньше и гасится здесь, либо
+        // видит новое поколение до того, как тронуть process-global движки.
+        let cleared: Bool = xrayNativeLifecycleGate.withExclusive {
+            let active = xrayRuntimeSession.snapshot()
+            let identity = XraySocketCallbackIdentity(generation: active.generation,
+                                                      sessionId: active.sessionId)
+            let stopGeneration = xrayRuntimeSession.beginStop()
+            Socks5Tunnel.quit()
+            let done: Bool
+            if let identity, xraySocketCallbackRegistry.value(for: identity) != nil {
+                done = retireXrayCallback(identity: identity, stopCore: true)
+            } else {
+                // Контекст не взведён (старт не дошёл до регистрации) — легаси-порядок:
+                // закрыть ядро, очистить слот. StopXray без запущенного ядра = успех.
+                let coreStopped = XrayNativeCStringResult.consume(LibXrayStopXray())
+                let drained = XrayNativeCStringResult.consume(LibXraySetSockCallback(nil, nil))
+                done = coreStopped && drained
+            }
+            _ = xrayRuntimeSession.transition(to: done ? .stopped : .failed,
+                                              generation: stopGeneration)
+            return done
+        }
+        if !cleared {
             xrayLog(.error, message: "Can't clear Xray socket protection callback")
         }
         completionHandler()
     }
 
-    func sockCallback(fd: uintptr_t) -> Int32 {
-        guard activeIfaceIdx != 0 else { return 0 }
-        return withUnsafePointer(to: activeIfaceIdx) { ptr in
-            let ipv4 = setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, ptr,
-                                  socklen_t(MemoryLayout<UInt32>.size))
-            let ipv6 = setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, ptr,
-                                  socklen_t(MemoryLayout<UInt32>.size))
-            return (ipv4 == 0 || ipv6 == 0) ? 1 : 0
+    // AVPN (этап D3): ответ на {"action":"status"} для xray-пути — раньше NE отвечал nil и
+    // приложение (IosController::checkStatus) не видело rx/tx, HealthLoop был слеп.
+    // Источник — счётчики tun-интерфейса hev-socks5-tunnel (hev_socks5_tunnel_stats, API 2.6.5+):
+    // hev rx = записано в tun (пришло от ноды, download) = rx_bytes контракта; hev tx = прочитано
+    // из tun (уходит к ноде, upload) = tx_bytes. Кумулятив с подъёма туннеля (§17.1), строки.
+    // last_handshake_time_sec = null: у xray нет рукопожатия, 0 = «неизвестно» по контракту.
+    func handleXrayStatusMessage(completionHandler: ((Data?) -> Void)? = nil) {
+        guard let completionHandler else { return }
+        let snapshot = xrayRuntimeSession.snapshot()
+        if snapshot.state == .running {
+            _ = xrayRuntimeSession.record(readHevTrafficSample(), generation: snapshot.generation)
         }
+        let core: [String: Any] = [
+            "engine": "xray",
+            "tun2socks": "hev-socks5-tunnel",
+            "active_interface_index": activeIfaceIdx
+        ]
+        let response = xrayRuntimeSession.payload(core: core)
+        completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
+    }
+
+    private func readHevTrafficSample() -> TunnelTrafficSample {
+        var txPackets = 0
+        var txBytes = 0
+        var rxPackets = 0
+        var rxBytes = 0
+        hev_socks5_tunnel_stats(&txPackets, &txBytes, &rxPackets, &rxBytes)
+        return TunnelTrafficSample(
+            rxBytes: UInt64(max(0, rxBytes)),
+            txBytes: UInt64(max(0, txBytes)),
+            rxPackets: UInt64(max(0, rxPackets)),
+            txPackets: UInt64(max(0, txPackets))
+        )
+    }
+
+    // AVPN (этап D3): защита сокета ядра Xray от петли через собственный utun — привязка к
+    // физическому интерфейсу (IP_BOUND_IF / IPV6_BOUND_IF). Первый провал ТЕРМИНАЛЕН:
+    // незащищённый dial ушёл бы в туннель и молча «завис» бы коннект — честнее уронить NE
+    // (приложение увидит Disconnected/Error и уйдёт в failover по своим правилам).
+    func protectXraySocket(fd: uintptr_t, identity: XraySocketCallbackIdentity) -> Bool {
+        let interfaceIndex = activeIfaceIdx
+        var protected = false
+        if interfaceIndex != 0 {
+            var boundInterface = interfaceIndex
+            let ipv4 = setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, &boundInterface,
+                                  socklen_t(MemoryLayout<UInt32>.size))
+            let ipv6 = setsockopt(Int32(fd), IPPROTO_IPV6, IPV6_BOUND_IF, &boundInterface,
+                                  socklen_t(MemoryLayout<UInt32>.size))
+            protected = (ipv4 == 0 || ipv6 == 0)
+        }
+        if !protected {
+            xraySocketProtectionFailed(identity: identity)
+        }
+        return protected
+    }
+
+    private func xraySocketProtectionFailed(identity: XraySocketCallbackIdentity) {
+        // fail(generation:) даёт true только первому провалу текущего поколения — гасим ровно раз.
+        guard xrayRuntimeSession.fail(generation: identity.generation) else { return }
+        xrayLog(.error, message: "Xray socket protection failed (iface=\(activeIfaceIdx)); cancelling tunnel")
+        DispatchQueue.global().async { [weak self] in
+            self?.cancelTunnelWithError(XrayErrors.socketProtectionFailed)
+        }
+    }
+
+    // Точный teardown колбэка: [stopCore] -> LibXraySetSockCallback(nil, nil) (синхронный
+    // drain) -> снять контекст из реестра. false = слот остаётся взведённым (fail-closed).
+    @discardableResult
+    private func retireXrayCallback(identity: XraySocketCallbackIdentity, stopCore: Bool) -> Bool {
+        XraySocketCallbackTeardown.execute(
+            stopCore: { stopCore ? XrayNativeCStringResult.consume(LibXrayStopXray()) : true },
+            drain: { XrayNativeCStringResult.consume(LibXraySetSockCallback(nil, nil)) },
+            retireContext: {
+                guard let context = xraySocketCallbackRegistry.value(for: identity),
+                      context.deactivate(expected: identity) else { return false }
+                return xraySocketCallbackRegistry.remove(identity: identity) === context
+            })
     }
 
     private struct SocksCredentials {
@@ -291,6 +451,7 @@ extension PacketTunnelProvider {
     }
 
     private func setupAndStartXray(configData: Data,
+                                   callbackIdentity: XraySocketCallbackIdentity,
                                    completionHandler: @escaping (Error?) -> Void) {
         let path = Constants.cachesDirectory.appendingPathComponent("config.json", isDirectory: false).path
         guard FileManager.default.createFile(atPath: path, contents: configData) else {
@@ -301,26 +462,45 @@ extension PacketTunnelProvider {
 
         updateActiveInterfaceIndexForCurrentPath()
 
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
-        let cb: libxray_sockcallback = { (fd, ctx) in
-            guard let ctx = ctx else { return 0 }
-            let instance = Unmanaged<PacketTunnelProvider>.fromOpaque(ctx).takeUnretainedValue()
-
-            return instance.sockCallback(fd: fd)
+        // AVPN (этап D3): порядок под gate'ом — контекст в реестр -> LibXraySetSockCallback ->
+        // LibXrayRunXray. Колбэк взведён ДО первого сокета ядра; провал любого шага откатывает
+        // предыдущие (слот не остаётся взведённым на мёртвую сессию).
+        let context = XraySocketCallbackContext(provider: self, identity: callbackIdentity)
+        let startError: Error? = xrayNativeLifecycleGate.withExclusive {
+            guard xrayRuntimeSession.isCurrent(generation: callbackIdentity.generation) else {
+                return XrayErrors.supersededSession
+            }
+            guard xraySocketCallbackRegistry.install(context, identity: callbackIdentity) else {
+                xrayLog(.error, message: "Xray socket protection slot is still held by a previous session")
+                return XrayErrors.callbackSlotBusy
+            }
+            let ctx = Unmanaged.passUnretained(context).toOpaque()
+            let cb: libxray_sockcallback = { (fd, ctx) in
+                guard let ctx = ctx else { return 0 }
+                return Unmanaged<XraySocketCallbackContext>.fromOpaque(ctx).takeUnretainedValue().invoke(fd: fd)
+            }
+            guard XrayNativeCStringResult.consume(LibXraySetSockCallback(cb, ctx)) else {
+                // Колбэк не взведён — контекст можно снять без drain'а.
+                _ = context.deactivate(expected: callbackIdentity)
+                _ = xraySocketCallbackRegistry.remove(identity: callbackIdentity)
+                xrayLog(.error, message: "Can't register Xray socket protection callback")
+                return XrayErrors.cantRegisterSocketProtection
+            }
+            guard XrayNativeCStringResult.consume(LibXrayRunXray(nil, path, Int64.max)) else {
+                // Ядро не поднялось: слот очищаем через drain (колбэк был взведён), ядро не гасим.
+                _ = retireXrayCallback(identity: callbackIdentity, stopCore: false)
+                xrayLog(.error, message: "Xray core failed to start")
+                return XrayErrors.xrayCoreStartFailed
+            }
+            return nil
         }
-        if let registrationError = LibXraySetSockCallback(cb, ctx) {
-            free(registrationError)
-            xrayLog(.error, message: "Can't register Xray socket protection callback")
-            completionHandler(XrayErrors.cantRegisterSocketProtection)
+
+        if let startError {
+            completionHandler(startError)
             return
         }
-
-        LibXrayRunXray(nil,
-                       path,
-                       Int64.max)
-
         completionHandler(nil)
-        xrayLog(.info, message: "Xray started")
+        xrayLog(.info, message: "Xray started; socket protection callback is armed")
     }
 
     private func setupAndRunTun2socks(configData: Data,
@@ -330,7 +510,9 @@ extension PacketTunnelProvider {
                                       password: String,
                                       connectTimeoutMs: Int?,
                                       readWriteTimeoutMs: Int?,
+                                      callbackIdentity: XraySocketCallbackIdentity,
                                       completionHandler: @escaping (Error?) -> Void) {
+        let sessionGeneration = callbackIdentity.generation
         // AVPN backend-first (Task 6): server-tunable via XrayConfig.connectTimeoutMs/readWriteTimeoutMs
         // (TuningStore numbers.xray_connect_timeout_ms/xray_rw_timeout_ms). Fallbacks are byte-for-byte
         // the pre-Task-6 literals. task-stack-size/limit-nofile intentionally left untouched.
@@ -357,14 +539,44 @@ extension PacketTunnelProvider {
         let configurationFilePath = Constants.cachesDirectory.appendingPathComponent("config.yml", isDirectory: false).path
         guard FileManager.default.createFile(atPath: configurationFilePath, contents: config.data(using: .utf8)!) else {
             xrayLog(.info, message: "Cant save hevSocks configuration")
+            // Откат под тем же gate'ом, что и старт: нативные LibXray-вызовы наружу из него не выходят.
+            xrayNativeLifecycleGate.withExclusive {
+                _ = retireXrayCallback(identity: callbackIdentity, stopCore: true)
+            }
             completionHandler(XrayErrors.cantSaveHevSocksConfig)
             return
         }
 
-        DispatchQueue.global().async {
-            xrayLog(.info, message: "Hev socks started")
-            completionHandler(nil)
-            Socks5Tunnel.run(withConfig: configurationFilePath)
+        // AVPN (этап D3): старт tun2socks — под gate'ом с перепроверкой поколения: стоп между
+        // готовностью ядра и стартом hev не может быть догнан поздним адаптером.
+        let accepted: Bool = xrayNativeLifecycleGate.withExclusive {
+            guard xrayRuntimeSession.isCurrent(generation: sessionGeneration),
+                  xrayRuntimeSession.transition(to: .running, generation: sessionGeneration) else {
+                return false
+            }
+            DispatchQueue.global().async { [weak self] in
+                xrayLog(.info, message: "Hev socks started")
+                completionHandler(nil)
+                let exitCode = Socks5Tunnel.run(withConfig: configurationFilePath)
+                self?.handleTun2socksExit(exitCode, generation: sessionGeneration)
+            }
+            return true
         }
+        guard accepted else {
+            xrayNativeLifecycleGate.withExclusive {
+                _ = retireXrayCallback(identity: callbackIdentity, stopCore: true)
+            }
+            completionHandler(XrayErrors.supersededSession)
+            return
+        }
+    }
+
+    // AVPN (этап D3): hev_socks5_tunnel_main вернулся. Штатный стоп уже сменил поколение
+    // (beginStop) — молча выходим; выход при живом поколении = мёртвый data-plane при
+    // «подключённом» NE — гасим туннель честно, а не ждём DEAD от HealthLoop.
+    private func handleTun2socksExit(_ exitCode: Int32, generation: UInt64) {
+        guard xrayRuntimeSession.fail(generation: generation) else { return }
+        xrayLog(.error, message: "Hev socks exited unexpectedly (rc=\(exitCode)); cancelling tunnel")
+        cancelTunnelWithError(XrayErrors.tun2socksExited)
     }
 }
