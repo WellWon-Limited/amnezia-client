@@ -132,7 +132,7 @@ android {
         }
     }
 
-    // androiddeployqt expects:
+    // AVPN: androiddeployqt expects:
     //   APK: build/outputs/apk/{base}-{buildType}[-unsigned].apk  (no flavor subdir)
     //   AAB: build/outputs/bundle/{buildType}/{base}-{buildType}.aab (no flavor subdir)
     // where {base} = outputBaseName (set by Qt Creator) or "android-build" (CI fallback).
@@ -140,35 +140,57 @@ android {
     // Copy only oss flavor to the flat output dir that androiddeployqt/Qt Creator expect.
     // Play flavor is built via android_play_apk/android_play_aab cmake targets and uses
     // its native Gradle output paths directly.
+    //
+    // The copy MUST be its own task with declared inputs/outputs, not a doLast on the
+    // package/bundle task: on an incremental build Gradle reports `packageOssRelease
+    // UP-TO-DATE` and skips every doLast attached to it, so the flat file is never
+    // (re)created and androiddeployqt dies with the opaque `FAILED: [code=20]`
+    // (CannotCopyApk). A dedicated task is re-run whenever its declared output is
+    // missing, and it is wired as a finalizer so it also runs for an up-to-date package.
     applicationVariants.all {
         val flavorName = productFlavors.firstOrNull()?.name ?: ""
         val buildTypeName = buildType.name
         if (flavorName == "oss") {
             val base = outputBaseName.ifEmpty { "android-build" }
             val unsignedSuffix = if (buildTypeName == "release") "-unsigned" else ""
-
-            packageApplicationProvider.configure {
-                doLast {
-                    val srcDir = layout.buildDirectory.dir("outputs/apk/oss/$buildTypeName").get().asFile
-                    val dstDir = layout.buildDirectory.dir("outputs/apk").get().asFile
-                    dstDir.mkdirs()
-                    srcDir.listFiles()?.filter { it.name.endsWith(".apk") }?.forEach { apk ->
-                        apk.copyTo(File(dstDir, "$base-$buildTypeName$unsignedSuffix.apk"), overwrite = true)
-                    }
-                }
-            }
-
             val variantName = name
-            tasks.named("bundle${variantName.replaceFirstChar { it.uppercase() }}") {
+            val variantCap = variantName.replaceFirstChar { it.uppercase() }
+
+            val flatApk = tasks.register("avpnFlatApk$variantCap") {
+                val srcDir = layout.buildDirectory.dir("outputs/apk/oss/$buildTypeName")
+                val dstFile =
+                    layout.buildDirectory.file("outputs/apk/$base-$buildTypeName$unsignedSuffix.apk")
+                inputs.dir(srcDir).withPropertyName("flavorApkDir")
+                outputs.file(dstFile).withPropertyName("flatApk")
                 doLast {
-                    val srcDir = layout.buildDirectory.dir("outputs/bundle/$variantName").get().asFile
-                    val dstDir = layout.buildDirectory.dir("outputs/bundle/$buildTypeName").get().asFile
-                    dstDir.mkdirs()
-                    srcDir.listFiles()?.filter { it.name.endsWith(".aab") }?.forEach { aab ->
-                        aab.copyTo(File(dstDir, "$base-$buildTypeName.aab"), overwrite = true)
-                    }
+                    val apks = srcDir.get().asFile.listFiles()
+                        ?.filter { it.name.endsWith(".apk") }?.sortedBy { it.name }.orEmpty()
+                    val src = apks.firstOrNull()
+                        ?: throw GradleException("no .apk in ${srcDir.get().asFile}")
+                    val dst = dstFile.get().asFile
+                    dst.parentFile.mkdirs()
+                    src.copyTo(dst, overwrite = true)
                 }
             }
+            packageApplicationProvider.configure { finalizedBy(flatApk) }
+
+            val flatAab = tasks.register("avpnFlatAab$variantCap") {
+                val srcDir = layout.buildDirectory.dir("outputs/bundle/$variantName")
+                val dstFile =
+                    layout.buildDirectory.file("outputs/bundle/$buildTypeName/$base-$buildTypeName.aab")
+                inputs.dir(srcDir).withPropertyName("flavorBundleDir")
+                outputs.file(dstFile).withPropertyName("flatAab")
+                doLast {
+                    val aabs = srcDir.get().asFile.listFiles()
+                        ?.filter { it.name.endsWith(".aab") }?.sortedBy { it.name }.orEmpty()
+                    val src = aabs.firstOrNull()
+                        ?: throw GradleException("no .aab in ${srcDir.get().asFile}")
+                    val dst = dstFile.get().asFile
+                    dst.parentFile.mkdirs()
+                    src.copyTo(dst, overwrite = true)
+                }
+            }
+            tasks.named("bundle$variantCap") { finalizedBy(flatAab) }
         }
     }
 
