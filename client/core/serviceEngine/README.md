@@ -67,7 +67,16 @@ TribeSupportChat.{h,cpp}      — чат поддержки (context property "T
                                 documents/SUPPORT-CHAT.md (+SUPPORT-CHAT-NATIVE-HANDOFF.md) ✅ E2E
 tests/                        — фикстура + автономная проверка (парсер + билдер + enrollment + selector + health
                                 + node_ranking_check + rtt_icmp_check[live ICMP]
+                                + build_xray_config.sh (DTO/парсер xray_params, XrayConfigBuilder, фильтр wg-quick)
+                                + build_transport_pick.sh (локации × транспорты, история, режимы, verifying, probe-DEAD)
+                                + build_reseed_pool.sh (reseed пула по pool_revision: терминал/pending/pin/RTT-кэш)
                                 + build_e2e_support.sh — ЖИВОЙ E2E чата против локального бэкенда)
+TransportPick.h               — AVPN awg31-xray-v1: выбор транспорта внутри локации (host_id): transport_rank +
+                                локальная история (TransportHistory, EWMA успеха/времени до трафика, QSettings
+                                avpn/transportHistory через фасад) + ручной режим Авто/Amnezia/Xray; failover
+                                «другой транспорт той же локации → соседняя». Kill-switch'и xray_client /
+                                transport_auto_pick — NodeRotation.h. Спека tribe-front
+                                docs/superpowers/specs/2026-09-01-awg31-xray-v1-fleet-wave.md §2.3
 
 ## Интеграция в приложение (C-7, выполнена)
 - **Сборка:** `client/cmake/avpn.cmake` подключён 1 строкой в `CMakeLists.txt` (`// AVPN`). Опция

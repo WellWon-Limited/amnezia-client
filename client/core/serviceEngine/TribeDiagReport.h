@@ -76,6 +76,12 @@ public:
         o.insert(QStringLiteral("bypassListVersion"), s.bypassListVersion);
         if (meta.configAppliedAgeSec >= 0)
             o.insert(QStringLiteral("configAppliedAgeSec"), double(meta.configAppliedAgeSec));
+        // AVPN awg31-xray-v1 (§2.3 «отчёт содержит proto»): транспорт текущей ноды, ручной режим,
+        // фаза verifying, ревизия пула — поддержка видит, каким транспортом шёл пользователь.
+        o.insert(QStringLiteral("activeProto"), s.activeProto);
+        o.insert(QStringLiteral("transportMode"), s.transportMode);
+        o.insert(QStringLiteral("verifying"), s.verifying);
+        o.insert(QStringLiteral("poolRevision"), double(s.poolRevision));
 
         QJsonArray pool;
         for (const NodeDebugRow &r : s.pool) {
@@ -85,6 +91,11 @@ public:
             n.insert(QStringLiteral("countryCode"), r.countryCode);
             n.insert(QStringLiteral("endpoint"), r.endpoint);
             n.insert(QStringLiteral("proto"), r.proto);
+            n.insert(QStringLiteral("protoVersion"), r.protoVersion);
+            n.insert(QStringLiteral("hostId"), r.hostId);              // AVPN awg31-xray-v1: локация
+            n.insert(QStringLiteral("location"), r.location);
+            n.insert(QStringLiteral("transportRank"), r.transportRank);
+            n.insert(QStringLiteral("transportSupported"), r.transportSupported);
             n.insert(QStringLiteral("weight"), r.weight);
             n.insert(QStringLiteral("healthAgg"), r.healthAgg);
             n.insert(QStringLiteral("rttMs"), r.scoreMs); // измеренный off-tunnel ICMP RTT (0 = нет замера)

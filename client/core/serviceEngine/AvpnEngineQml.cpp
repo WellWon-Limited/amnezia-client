@@ -68,6 +68,7 @@
 #include <QDateTime>
 #include <QLocale>
 #include <QJsonDocument> // AVPN (панель администратора): сериализация результата бенча
+
 #include <QNetworkInformation> // AVPN (авто-A/B): тип сети (Wi-Fi/сотовая) в extra{} бенча
 #include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
 #include <QTimeZone>     // AVPN (панель администратора): tz в extra{} — физлокация vs egress
@@ -98,6 +99,10 @@ extern "C" void AvpnDockBadge_install();
 #endif
 
 namespace avpn {
+
+// AVPN awg31-xray-v1: маппер технических ошибок движка (no_transport/unsupported_proto) в человеческий
+// текст — определён рядом с humanPinError ниже по файлу, нужен раньше (guardedStart).
+static QString humanEngineError(const QString &technical);
 
 // AVPN (CR-1): tee лог-строк в кольцо CrashGuard поверх текущего message-handler (chain —
 // апстрим-логгер работает как раньше). Ставится один раз из конструктора движка.
@@ -423,6 +428,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_liveDead = true;
         }
         emit liveQualityChanged();
+        // AVPN awg31-xray-v1: для xray та же живая проба — вторая половина DEAD-критерия (у xray нет
+        // handshake): N провалов подряд (xray_probe_fail_cycles) → движок уводит на другой транспорт
+        // той же локации (двухфазный свитч, как health-DEAD). awg — no-op внутри. Сигнал приходит с
+        // верха цикла событий (async-ответ QNetworkReply), не из-под Selector::pick.
+        if (m_engine.feedProbeResult(reachable)) {
+            persistTransportHistory();
+            emit changed();
+        }
     });
 
     // AVPN (чипы доступности): проба «работает ли сервис через ЭТУ ноду» — с устройства через туннель
@@ -725,6 +738,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         QString lkgErr;
         if (!lkg.isEmpty() && !m_engine.loadSubscriptionFromLkg(lkg, lkgErr))
             qWarning() << "avpn: lkg subscription cache unusable:" << lkgErr; // не фатально: bootstrap догрузит
+    }
+    // AVPN awg31-xray-v1 (спека §2.3): локальные настройки транспорта — ручной режим
+    // (avpn/transportMode: auto|awg|xray, незнакомое = auto) и история транспортов по парам
+    // локация×proto (avpn/transportHistory, JSON; клампы внутри TransportHistory::fromJson —
+    // битое/стейл значение не портит выбор). Без сети/QEventLoop — из конструктора безопасно.
+    {
+        QSettings s;
+        m_engine.setTransportMode(avpn::transportModeFromString(
+            s.value(QStringLiteral("avpn/transportMode"), QStringLiteral("auto")).toString()));
+        m_engine.loadTransportHistory(s.value(QStringLiteral("avpn/transportHistory")).toByteArray());
     }
 
     // AVPN (фикс «на сотовой ∞ навсегда»): единый member-таймер ретрая bootstrap (вместо
@@ -1129,7 +1152,8 @@ QVariantMap AvpnEngineQml::currentNode() const
     //  • авто-switching без pin → пока старый узел;
     //  • иначе → ничего (hasNode=false) → карточка «Умный выбор сервера».
     QString showId;
-    if (connectedNow && !s.currentNodeId.isEmpty())
+    // AVPN awg31-xray-v1: в verifying туннель поднят на реальной ноде — показываем её (как connected).
+    if ((connectedNow || s.state == QLatin1String("verifying")) && !s.currentNodeId.isEmpty())
         showId = s.currentNodeId;
     else if (!pinned.isEmpty())
         showId = pinned;
@@ -1191,7 +1215,8 @@ void AvpnEngineQml::probeNodeRtt()
     if (!m_rttProbe)
         return;
     // Через поднятый туннель замер к чужим нодам идёт ВНУТРИ туннеля (смазан) — держим кэш, не мерим.
-    if (state() == QLatin1String("connected")) {
+    // AVPN awg31-xray-v1: в verifying туннель тоже поднят (xray ждёт пробу) — тот же гейт.
+    if (state() == QLatin1String("connected") || state() == QLatin1String("verifying")) {
         m_rttProbe->cancel();
         return;
     }
@@ -1222,8 +1247,10 @@ void AvpnEngineQml::probeNodeRtt()
 
 void AvpnEngineQml::onTick()
 {
-    if (m_engine.tick(QDateTime::currentSecsSinceEpoch()))
+    if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {
+        persistTransportHistory(); // AVPN awg31-xray-v1: DEAD записан в историю транспорта
         emit changed(); // произошёл свитч
+    }
 
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
     // measure() сам игнорит повторный запуск, пока предыдущий в полёте. На не-connected — не мерим
@@ -1322,6 +1349,23 @@ QJsonObject AvpnEngineQml::benchExtra() const
     // bench v5 (tunnel.config): фактический конфиг НАШЕГО туннеля — только когда поднят именно он
     // (baseline/amnezia меряют чужой путь — наш последний конфиг там был бы враньём). Санитизирован
     // by construction (AwgConfigBuilder::reportSummary). Даёт A/B с ванилью diff mtu/dns/awg в отчёте.
+    // AVPN awg31-xray-v1 (§2.3 «отчёт содержит proto и результат probe»): транспорт текущей ноды,
+    // ручной режим, итог верификации xray (probe через туннель: ok/ms) и стрик провалов живой пробы.
+    {
+        QJsonObject tr;
+        tr.insert(QStringLiteral("proto"), m_engine.currentNodeProto());
+        tr.insert(QStringLiteral("mode"), avpn::transportModeToString(m_engine.transportMode()));
+        tr.insert(QStringLiteral("location"), m_engine.currentLocation());
+        tr.insert(QStringLiteral("verifying"), m_engine.isVerifying());
+        if (m_lastVerifyOk >= 0) {
+            tr.insert(QStringLiteral("verify_ok"), m_lastVerifyOk == 1);
+            tr.insert(QStringLiteral("verify_ms"), double(m_lastVerifyMs));
+            tr.insert(QStringLiteral("verify_attempts"), m_verifyAttempts);
+        }
+        tr.insert(QStringLiteral("probe_fail_streak"), m_liveFailStreak);
+        tr.insert(QStringLiteral("probe_reachable"), m_liveReachable);
+        extra.insert(QStringLiteral("transport"), tr);
+    }
     if (state() == QLatin1String("connected")) {
         const QJsonObject tc = m_tunnel.lastConfigReport();
         if (!tc.isEmpty())
@@ -2693,7 +2737,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // иначе reconcile погасит. §13 цел: это не авто-коннект из OFF, а факт живого СВОЕГО
         // туннеля (iOS-обсервер фильтрует чужие сессии; Android-путь сюда же — идемпотентен).
         // Kill-switch: features.adopt_live_tunnel (default ON).
+        // AVPN awg31-xray-v1: повторный Connected в фазе Verifying (iOS Reconnecting→Connected при
+        // смене сети) — НЕ адопт (движок и так знает свой туннель), а перезапуск верификации ниже.
         if (!m_engine.onTunnelConnected()
+            && !m_engine.isVerifying()
             && m_op == Op::None
             && avpn::TuningStore::flag(QStringLiteral("adopt_live_tunnel"))) {
             m_wantConnected = true;
@@ -2709,38 +2756,20 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 #endif
         if (m_rttProbe)
             m_rttProbe->cancel(); // подключились → off-tunnel ICMP больше не нужен (был бы внутри туннеля)
-        // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
-        // поднялся), а не на холодном старте. Один раз за установку (persist). Мост дёрнет натив
-        // (UNUserNotificationCenter + registerForRemoteNotifications); на desktop — no-op.
-        if (!m_pushPermissionAsked) {
-            m_pushPermissionAsked = true;
-            QSettings().setValue(QStringLiteral("AvpnPush/permissionAsked"), true);
-            avpn::AvpnPushBridge::instance()->requestAuthorization();
-        }
-        // AVPN (Task 9): к моменту Connected subscription_token уже создан (start/bootstrap → enroll).
-        // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
-        // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
-        flushPendingPushToken();
-        // AVPN: чипы доступности + скорость после поднятия. Чипы youtube/instagram теперь GOODPUT (качают
-        // ~128 КБ каждый) — дороже по трафику и дольше (до ~20с при троттле), поэтому ОДНА проба за коннект
-        // (~1.5с — DNS/маршруты через свежий туннель уже осели; раньше давало HostNotFound → ложный «заблок»).
-        // Дальше — только по тапу «перепроверить» (см. UI), НЕ поллинг: goodput каждые N секунд = лишний трафик.
-        // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
-        // AVPN BUG-13 (2026-07-30): на входе в connected обнуляем чипы в «не проверено» (синий).
-        // Раньше вердикты прошлой сессии оставались висеть (помеченные stale, но ТОГО ЖЕ цвета),
-        // и после подключения пользователь видел красные бейджи живых сервисов, пока не дойдёт
-        // первая проба — жалоба «включаю VPN, все бейджи красные, через полминуты зеленеют».
-        // Нейтральный синий честен: проверка ещё не проводилась. На транзиентах (обрыв без нового
-        // connected) поведение прежнее — stale-приглушение, чипы не мигают.
-        resetServiceChipsToUnknown();
-        QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
-        QTimer::singleShot(1800, this, [this]() {
-            if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))
-                && state() == QLatin1String("connected"))
-                m_probe->measure();
-        });
+        // AVPN awg31-xray-v1 (инвариант волны §4.3): xray поднят платформой → движок в Verifying —
+        // «Подключено» и все его эффекты (пуши/чипы/живой RTT/история) ТОЛЬКО после первой удачной
+        // пробы через туннель (startXrayVerification → finishVerify → onTunnelUpEffects). awg — сразу.
+        if (m_engine.isVerifying())
+            startXrayVerification();
+        else
+            onTunnelUpEffects();
         break;
     case Vpn::Error:
+        // AVPN awg31-xray-v1: провал подъёма (наш start в полёте) — в локальную историю транспорта
+        // (EWMA успеха по паре локация×proto: следующий выбор демоутит транспорт после 2+ провалов).
+        if (m_op == Op::Starting && m_engine.recordTransportOutcome(false))
+            persistTransportHistory();
+        ++m_verifyEpoch; // стейл-ответы верификации xray выбрасываются
         // AVPN (анти-авто-коннект): РАНЬШЕ обрыв из Connected → notifyConnectionLost() → реактивный
         // авто-failover (реконнект). Это давало НЕЖЕЛАТЕЛЬНЫЙ авто-коннект, когда туннель гасит ВНЕШНЕ
         // (другой VPN / iOS / пользователь снял VPN): приложение тут же переподнимало туннель, «воюя»
@@ -2752,6 +2781,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     case Vpn::Disconnected:
         // onTunnelDisconnected САМ продолжит НАМЕРЕННЫЙ свитч ноды (Switching+pendingSwitch → up());
         // если это не свитч — просто «отключено». БЕЗ реактивного failover на внешний обрыв (см. Error).
+        ++m_verifyEpoch; // AVPN awg31-xray-v1: верификация xray старой сессии отменена
         m_engine.onTunnelDisconnected();
         break;
     case Vpn::Reconnecting:
@@ -2793,7 +2823,16 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         } else {
             m_busy = true;                           // идёт переход — занято
         }
+        // AVPN awg31-xray-v1: xray поднят, но ещё не подтверждён пробой — орб остаётся «занят»
+        // (спиннер «Подключаемся…»/«Проверяем трафик…»), stopping=false (намерение = онлайн).
+        if (m_engine.isVerifying())
+            m_busy = true;
+        // AVPN awg31-xray-v1 (reseed, инвариант §4.4): терминал → отложенное тело пула применяем
+        // с верха цикла событий (никогда из стека колбэка туннеля / Selector::pick).
+        if (terminal && (s == Vpn::Disconnected || s == Vpn::Error) && m_engine.hasPendingReseed())
+            QTimer::singleShot(0, this, [this]() { applyPendingReseed(); });
     }
+    persistTransportHistory(); // AVPN awg31-xray-v1: no-op, если движок ничего не записал
 
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
@@ -3341,7 +3380,7 @@ void AvpnEngineQml::guardedStart()
         m_busy = false;
         m_watchdog.stop();
         ++m_startAttempts;
-        emit error(err);
+        emit error(humanEngineError(err)); // AVPN awg31-xray-v1: no_transport/unsupported_proto → человеческий текст
         emit changed();
         return;
     }
@@ -3561,6 +3600,7 @@ void AvpnEngineQml::daemonDirectDeactivate()
 
 void AvpnEngineQml::guardedStop()
 {
+    ++m_verifyEpoch; // AVPN awg31-xray-v1: стоп отменяет верификацию xray (стейл-ответ выбросится)
     m_op = Op::Stopping;
     m_opInFlight = true;
     m_busy = true;
@@ -3625,7 +3665,8 @@ void AvpnEngineQml::reprobe()
     m_engine.clearPin();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
     if (st == QLatin1String("connected") || st == QLatin1String("connecting")
-        || st == QLatin1String("switching") || st == QLatin1String("selecting")) {
+        || st == QLatin1String("switching") || st == QLatin1String("selecting")
+        || st == QLatin1String("verifying")) { // AVPN awg31-xray-v1: verifying = туннель поднят
         m_wantConnected = true;
         m_needsRestart = true;   // переподнять на свежевыбранной авто-ноде
         m_startAttempts = 0;
@@ -3654,7 +3695,21 @@ static QString humanPinError(const QString &technical)
     qWarning() << "avpn: setPinnedNode failed:" << technical;
     if (technical.startsWith(QLatin1String("unsupported_proto")))
         return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
+    // AVPN awg31-xray-v1: ручной режим транспорта отфильтровал локацию/пул.
+    if (technical.startsWith(QLatin1String("no_transport")))
+        return AvpnEngineQml::tr("У этого сервера нет выбранного транспорта — переключите режим на «Авто»");
     return AvpnEngineQml::tr("Не удалось выбрать сервер — обновите список серверов");
+}
+
+// AVPN awg31-xray-v1: тот же маппер для ошибок connect() (guardedStart): стабильные префиксы движка
+// → человеческий текст; всё прочее — как пришло (те же строки, что и раньше).
+static QString humanEngineError(const QString &technical)
+{
+    if (technical.startsWith(QLatin1String("no_transport")))
+        return AvpnEngineQml::tr("У этого сервера нет выбранного транспорта — переключите режим на «Авто»");
+    if (technical.startsWith(QLatin1String("unsupported_proto")))
+        return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
+    return technical;
 }
 
 // AVPN (live-node picker): «Выбрать» сервер из шторки. Модель «выбор = задать цель, коннект —
@@ -3698,7 +3753,8 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
     }
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
     if (st == QLatin1String("connected") || st == QLatin1String("connecting")
-        || st == QLatin1String("switching") || st == QLatin1String("selecting")) {
+        || st == QLatin1String("switching") || st == QLatin1String("selecting")
+        || st == QLatin1String("verifying")) { // AVPN awg31-xray-v1: verifying = туннель поднят
         m_wantConnected = true;
         m_needsRestart = true;   // reconcile: stop→Disconnected→start на закреплённой ноде
         m_startAttempts = 0;
@@ -3748,6 +3804,227 @@ void AvpnEngineQml::rotateNext()
     m_startAttempts = 0;
     emit changed();
     reconcile();
+}
+
+// ---- AVPN awg31-xray-v1 (спека 2026-09-01 §2.3): транспорты, verifying, история, reseed ----------
+
+QString AvpnEngineQml::transportMode() const
+{
+    return avpn::transportModeToString(m_engine.transportMode());
+}
+
+bool AvpnEngineQml::verifying() const
+{
+    return m_engine.isVerifying();
+}
+
+QString AvpnEngineQml::activeProto() const
+{
+    return m_engine.currentNodeProto();
+}
+
+void AvpnEngineQml::setTransportMode(const QString &mode)
+{
+    const avpn::TransportMode m = avpn::transportModeFromString(mode);
+    if (m == avpn::TransportMode::Xray && !avpn::isSupportedProto(QStringLiteral("xray"))) {
+        // Платформа/kill-switch xray_client: режим честно отклоняем, настройку не портим.
+        emit error(tr("Xray недоступен в этой версии приложения"));
+        return;
+    }
+    if (m == m_engine.transportMode())
+        return;
+    m_engine.setTransportMode(m);
+    QSettings s;
+    s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(m));
+    s.sync();
+    // Поднятый/поднимающийся туннель на транспорте, который новому режиму не соответствует, —
+    // переподнять ЧЕРЕЗ reconcile+m_needsRestart (stop→Disconnected→start), никогда прямой up()
+    // поверх teardown (CONNECT-INVARIANTS §2/§4). Авто: текущий транспорт всегда допустим — не трогаем.
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    const bool up = st == QLatin1String("connected") || st == QLatin1String("connecting")
+                    || st == QLatin1String("switching") || st == QLatin1String("selecting")
+                    || st == QLatin1String("verifying");
+    const QString cur = m_engine.currentNodeProto();
+    const bool mismatch = (m == avpn::TransportMode::Awg && avpn::isXrayProto(cur))
+                          || (m == avpn::TransportMode::Xray && !cur.isEmpty() && !avpn::isXrayProto(cur));
+    if (up && mismatch) {
+        m_wantConnected = true;
+        m_needsRestart = true;
+        m_startAttempts = 0;
+        reconcile();
+    }
+    emit changed();
+}
+
+void AvpnEngineQml::persistTransportHistory()
+{
+    if (!m_engine.transportHistoryDirty())
+        return;
+    QSettings s;
+    s.setValue(QStringLiteral("avpn/transportHistory"), m_engine.transportHistoryJson());
+    m_engine.clearTransportHistoryDirty();
+}
+
+// Побочные эффекты реального «Подключено» — единая точка для awg (Vpn::Connected) и xray (после verify).
+void AvpnEngineQml::onTunnelUpEffects()
+{
+    // AVPN awg31-xray-v1: исход подъёма в локальную историю транспорта (время до реального трафика);
+    // xray уже записал движок в verifySucceeded (повтор — no-op).
+    m_engine.recordTransportOutcome(true);
+    persistTransportHistory();
+    // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
+    // поднялся), а не на холодном старте. Один раз за установку (persist). Мост дёрнет натив
+    // (UNUserNotificationCenter + registerForRemoteNotifications); на desktop — no-op.
+    if (!m_pushPermissionAsked) {
+        m_pushPermissionAsked = true;
+        QSettings().setValue(QStringLiteral("AvpnPush/permissionAsked"), true);
+        avpn::AvpnPushBridge::instance()->requestAuthorization();
+    }
+    // AVPN (Task 9): к моменту Connected subscription_token уже создан (start/bootstrap → enroll).
+    // Если device token пришёл из APNs ДО enroll, registerPushToken его отложил (authToken был пуст) —
+    // флашим здесь. Дедуп по fingerprint пропустит повтор, если токен уже отправлен (redeem/bootstrap).
+    flushPendingPushToken();
+    // AVPN: чипы доступности + скорость после поднятия. Чипы youtube/instagram теперь GOODPUT (качают
+    // ~128 КБ каждый) — дороже по трафику и дольше (до ~20с при троттле), поэтому ОДНА проба за коннект
+    // (~1.5с — DNS/маршруты через свежий туннель уже осели; раньше давало HostNotFound → ложный «заблок»).
+    // Дальше — только по тапу «перепроверить» (см. UI), НЕ поллинг: goodput каждые N секунд = лишний трафик.
+    // Скорость (RTT-палочки) — через ~1.8с, дальше по каденсу onTick (4с, лёгкий generate_204).
+    // AVPN BUG-13 (2026-07-30): на входе в connected обнуляем чипы в «не проверено» (синий).
+    // Раньше вердикты прошлой сессии оставались висеть (помеченные stale, но ТОГО ЖЕ цвета),
+    // и после подключения пользователь видел красные бейджи живых сервисов, пока не дойдёт
+    // первая проба — жалоба «включаю VPN, все бейджи красные, через полминуты зеленеют».
+    // Нейтральный синий честен: проверка ещё не проводилась. На транзиентах (обрыв без нового
+    // connected) поведение прежнее — stale-приглушение, чипы не мигают.
+    resetServiceChipsToUnknown();
+    QTimer::singleShot(1500, this, &AvpnEngineQml::probeServices);
+    QTimer::singleShot(1800, this, [this]() {
+        if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))
+            && state() == QLatin1String("connected"))
+            m_probe->measure();
+    });
+}
+
+// Фаза Verifying (xray): «Подключено» — только после DNS+HTTPS через туннель (инвариант волны §4.3).
+void AvpnEngineQml::startXrayVerification()
+{
+    const int epoch = ++m_verifyEpoch;
+    m_verifyClock.start();
+    m_verifyAttempts = 0;
+    m_busy = true;
+    qInfo() << "[avpn xray] tunnel up on" << m_engine.currentNodeId() << "— verifying data-plane";
+    // Маршруты/DNS через свежий tun2socks оседают не мгновенно — первая попытка чуть отложенно.
+    QTimer::singleShot(800, this, [this, epoch]() { verifyAttempt(epoch); });
+}
+
+void AvpnEngineQml::verifyAttempt(int epoch)
+{
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)
+        return; // состояние уехало (стоп/обрыв/смена) — серия отменена
+    const int budget = avpn::xrayVerifyTimeoutMsTuned();
+    const qint64 elapsed = m_verifyClock.elapsed();
+    if (elapsed >= budget) {
+        finishVerify(epoch, false);
+        return;
+    }
+    ++m_verifyAttempts;
+    // Та же цель, что у живых палочек (urls.quality_probe_url, фолбэк generate_204). HEAD, без кэша.
+    // Async + transferTimeout — никакого nested QEventLoop (§1).
+    QNetworkRequest req{QUrl(configUrl(QStringLiteral("quality_probe_url"),
+                                       QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")))};
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    const qint64 remaining = budget - elapsed;
+    req.setTransferTimeout(int(remaining < 1500 ? 1500 : (remaining > 4000 ? 4000 : remaining)));
+    QNetworkReply *r = m_nam->head(req);
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch]() {
+        r->deleteLater();
+        if (epoch != m_verifyEpoch || !m_engine.isVerifying())
+            return;
+        const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = (r->error() == QNetworkReply::NoError && (code == 204 || code == 200));
+        if (ok) {
+            finishVerify(epoch, true);
+            return;
+        }
+        if (m_verifyClock.elapsed() >= avpn::xrayVerifyTimeoutMsTuned()) {
+            finishVerify(epoch, false);
+            return;
+        }
+        QTimer::singleShot(1200, this, [this, epoch]() { verifyAttempt(epoch); });
+    });
+}
+
+void AvpnEngineQml::finishVerify(int epoch, bool ok)
+{
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying())
+        return;
+    m_lastVerifyMs = m_verifyClock.elapsed();
+    m_lastVerifyOk = ok ? 1 : 0;
+    if (ok) {
+        qInfo() << "[avpn xray] data-plane verified in" << m_lastVerifyMs << "ms, attempts" << m_verifyAttempts;
+        m_engine.verifySucceeded();
+        m_busy = false;
+        onTunnelUpEffects();
+        emit changed();
+        return;
+    }
+    qWarning() << "[avpn xray] data-plane NOT verified after" << m_lastVerifyMs << "ms — failover";
+    // Движок: история (провал) + другой транспорт той же локации через двухфазный свитч
+    // (down → Disconnected → up), потом соседняя локация; кандидатов нет → Error при поднятом
+    // туннеле — гасим честно через reconcile (намерение OFF), как внешний провал.
+    m_engine.verifyFailed();
+    persistTransportHistory();
+    if (m_engine.state() == avpn::EngineState::Error) {
+        emit error(tr("Сервер не пропускает трафик — попробуйте другой сервер"));
+        m_wantConnected = false;
+        m_needsRestart = false;
+    }
+    m_busy = m_engine.state() == avpn::EngineState::Switching;
+    emit changed();
+    QTimer::singleShot(0, this, [this]() { reconcile(); });
+}
+
+// Reseed пула по pool_revision (см. refreshSubscription). Вызывается ТОЛЬКО с верха цикла событий.
+void AvpnEngineQml::applyReseed(const avpn::Subscription &sub)
+{
+    if (m_inSyncNetCall) {
+        // Внутри вложенного QEventLoop sync-вызова (redeem/startFlow → Selector::pick) — ещё раз позже.
+        QTimer::singleShot(50, this, [this, sub]() { applyReseed(sub); });
+        return;
+    }
+    if (!featureEnabled(QStringLiteral("subscription_reseed_pool"), false))
+        return; // kill-switch мог флипнуться, пока ждали
+    const avpn::ReseedResult r = m_engine.reseedPool(sub);
+    switch (r) {
+    case avpn::ReseedResult::Applied: {
+        // RTT-кэш фасада синхронизируем с движком (исчезнувшие узлы обрезаны там).
+        m_nodeRtt = m_engine.measuredRtt();
+        qInfo() << "[avpn reseed] pool revision" << m_engine.poolRevision() << "applied";
+        emit changed();     // nodePool/currentNode пересчитаются (пикер, карточка)
+        probeNodeRtt();     // новые узлы без замера — тёплый off-tunnel RTT (no-op при поднятом туннеле)
+        break;
+    }
+    case avpn::ReseedResult::Deferred:
+        qInfo() << "[avpn reseed] pool revision" << sub.poolRevision << "deferred until terminal";
+        break;
+    case avpn::ReseedResult::Rejected:
+        break;
+    }
+}
+
+void AvpnEngineQml::applyPendingReseed()
+{
+    if (m_inSyncNetCall) {
+        QTimer::singleShot(50, this, [this]() { applyPendingReseed(); });
+        return;
+    }
+    if (!m_engine.hasPendingReseed())
+        return;
+    if (!m_engine.applyPendingReseed())
+        return; // не терминал (уже снова поднимаемся) — применим на следующем терминале
+    m_nodeRtt = m_engine.measuredRtt();
+    qInfo() << "[avpn reseed] pending pool revision" << m_engine.poolRevision() << "applied";
+    emit changed();
+    probeNodeRtt();
 }
 
 // AVPN (live-node picker): пере-зачитать подписку/health и обновить nodePool. Тихий no-op при провале
@@ -4624,9 +4901,20 @@ void AvpnEngineQml::refreshSubscription()
         m_engine.updateSubscriptionTraffic(sub.trafficUsed, sub.trafficLimit, sub.expiresAt);
         // AVPN (LKG, HARDENING-BACKLOG H-3): каждый удачный фетч освежает дисковый кэш — после
         // долгой фоновой жизни холодный старт покажет свежие цифры, а не данные последнего bootstrap.
-        // Тело уже валидно (parse выше); НЕ трогаем m_pool (этот путь обновляет только счётчики).
+        // Тело уже валидно (parse выше); m_pool этот путь трогает ТОЛЬКО через reseed ниже.
         Enrollment::saveLkgSubscription(body);
         emit changed(); // daysLeft/traffic*/subExpired в QML пересчитаются
+        // AVPN awg31-xray-v1 (спека §2.3, инвариант §4.4): reseed пула на живом приложении по смене
+        // pool_revision. Три опоры: kill-switch features.subscription_reseed_pool (default ВЫКЛ —
+        // включает бэк), ревизия > 0 (старый бэк/LKG без поля — не трогаем), непустой пул (пустое/
+        // degraded-тело пул не затирает). Применение — с верха цикла событий (QTimer::singleShot(0)):
+        // этот колбэк может прийти изнутри вложенного QEventLoop sync-вызова (redeem/startFlow),
+        // а движок мог быть в Selector::pick. Терминал/неизменная текущая нода решает сам движок.
+        if (featureEnabled(QStringLiteral("subscription_reseed_pool"), false)
+            && sub.poolRevision > 0 && !sub.nodes.isEmpty()
+            && sub.poolRevision != m_engine.poolRevision()) {
+            QTimer::singleShot(0, this, [this, sub]() { applyReseed(sub); });
+        }
     });
 }
 
@@ -5158,6 +5446,12 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
     m["trafficUsed"] = static_cast<qlonglong>(s.trafficUsed);
     m["trafficLimit"] = static_cast<qlonglong>(s.trafficLimit);
     m["expiresAt"] = s.expiresAt; // AVPN: для daysLeft()
+    // AVPN awg31-xray-v1: транспорт текущей ноды / ручной режим / фаза verifying / ревизия пула.
+    m["activeProto"] = s.activeProto;
+    m["transportMode"] = s.transportMode;
+    m["verifying"] = s.verifying;
+    m["poolRevision"] = static_cast<qlonglong>(s.poolRevision);
+    m["reseedPending"] = s.reseedPending;
 
     QVariantList pool;
     for (const NodeDebugRow &r : s.pool) {
@@ -5180,8 +5474,19 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         // AVPN (Task 10 финал): протокол ноды — QML-пикер и админ-свип скипают неподдерживаемые
         // (xray, ...): коннект к ним невозможен, тап/свип упирался бы в сторожа. Пусто = awg.
         n["proto"] = r.proto;
-        n["protoVersion"] = r.protoVersion; // AVPN AWG 3.0: "1"/"2"/"3" → метка «Amnezia vN» в пикере
+        n["protoVersion"] = r.protoVersion; // AVPN AWG 3.0/3.1: "1"/"2"/"3"/"3.1" → метка «Amnezia vN» в пикере; xray — пусто
         n["manualOnly"] = r.manualOnly; // AVPN (Доктор): manual/RU скипаются в авто-очередях
+        // AVPN awg31-xray-v1 (§2.3, пикер «локации × транспорты»): группировка строк по location
+        // (host_id, фолбэк country_code+region), бейджи транспортов локации (transports: порядок =
+        // transport_rank), активный транспорт локации (activeProto = proto текущей ноды, если она из
+        // этой локации), серверный ранг ноды и поддерживается ли её proto этим клиентом
+        // (transportSupported=false → строка серая «недоступно в этой версии»).
+        n["hostId"] = r.hostId;
+        n["location"] = r.location;
+        n["transports"] = r.transports;
+        n["activeProto"] = r.activeProto;
+        n["transportRank"] = r.transportRank;
+        n["transportSupported"] = r.transportSupported;
         pool.append(n);
     }
     m["pool"] = pool;

@@ -5,11 +5,19 @@
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
 #include "core/repositories/secureAppSettingsRepository.h" // AVPN RU-direct: флаг сплита по факт-ноде
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): split-DNS из BypassListStore
+#include "NodeRotation.h"      // AVPN awg31-xray-v1: protoOf/isXrayProto — диспетчер по proto ноды
+#include "XrayConfigBuilder.h" // AVPN awg31-xray-v1: конфиг xray (VLESS+Reality) для DockerContainer::Xray
 
+#include <QDebug>                       // AVPN awg31-xray-v1: qWarning при фильтрации wg-quick ключей
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
 #include "TuningStore.h"                // AVPN backend-first (T20): server-tunable пороги
 #include "ConnectTunables.h"            // AVPN: клампованные handshake-пороги (ревью 2026-07-11)
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона через QtRO (xrayRuntimeStatus), async
+    #include "core/utils/ipcClient.h"
+    #include <QRemoteObjectPendingCall>
+#endif
 
 // AVPN: handshake age приходит из платформенного контроллера (iOS: UAPI last_handshake_time_sec
 // уже парсится в IosController::checkStatus). Подключаемся к нему НАПРЯМУЮ под платформенным гардом,
@@ -43,13 +51,26 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
         // handshake-epoch ≈ now — данные текут ⇒ рукопожатие только что состоялось (паритет с
         // desktop-UAPI). Иначе на iOS/Windows epoch=0 первые секунды, и hsStale в HealthLoop
         // считал живой туннель «протухшим» на фоне tx-бёрстов проб. Реальный отчёт (>0) уточнит.
+        // AVPN awg31-xray-v1: у xray handshake нет по определению — эпоху НЕ сеем (0 = «неизвестно»
+        // → hsStale в HealthLoop): DEAD для xray = tx растёт при стоящем rx (плюс провал живой
+        // пробы через туннель, ServiceEngine::feedProbeResult), а «Подключено» показывается только
+        // после первой удачной пробы (фаза Verifying), так что tx-бёрсты проб на старте не
+        // попадают в health-контур.
         connect(m_conn, &VpnConnection::connectionStateChanged, this,
                 [this](Vpn::ConnectionState st) {
-                    if (st == Vpn::ConnectionState::Connected)
+                    if (st == Vpn::ConnectionState::Connected && !isXrayProto(m_lastUpProto))
                         updateHandshakeEpoch(m_stats, QDateTime::currentSecsSinceEpoch());
                 },
                 Qt::QueuedConnection);
     }
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN awg31-xray-v1 (этап D2): демон отдаёт кумулятивы rx/tx utun tun2socks по IPC — поллим,
+    // пока поднят xray (старт в up(), стоп в down()). Интервал ~2с: чаще health-тика (4с), чтобы
+    // HealthLoop видел свежие соседние замеры.
+    m_xrayStatsTimer = new QTimer(this);
+    m_xrayStatsTimer->setInterval(2000);
+    connect(m_xrayStatsTimer, &QTimer::timeout, this, &VpnConnectionTunnelControl::pollXrayRuntimeStatus);
+#endif
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // AVPN: возраст хендшейка → m_stats.latestHandshakeEpoch (на iOS раньше был 0 ⇒ HealthLoop
     // опирался только на rx/tx; теперь DEAD-детект учитывает и устаревший handshake, как на desktop).
@@ -74,19 +95,64 @@ void VpnConnectionTunnelControl::onBytesChanged(quint64 rx, quint64 tx)
     accumulateByteDelta(m_stats, rx, tx);
 }
 
-bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QString &serverId)
+bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QString &serverId,
+                                                amnezia::DockerContainer container)
 {
     if (!m_conn)
         return false;
     // VpnConnection живёт в своём QThread → только через очередь. // AVPN
-    // DockerContainer::Awg (containerEnum.h) и порядок аргументов connectToVpn
+    // DockerContainer::Awg/Xray (containerEnum.h) и порядок аргументов connectToVpn
     // (serverId, container, vpnConfiguration) сверены с форком — корректно. // AVPN
+    // AVPN awg31-xray-v1: контейнер — по proto ноды (единственная точка ветвления протокола):
+    // Xray → десктоп XrayProtocol (демон Xray::startXray + tun2socks) / iOS setupXray (NE).
     return QMetaObject::invokeMethod(
         m_conn, "connectToVpn", Qt::QueuedConnection,
         Q_ARG(QString, serverId),
-        Q_ARG(DockerContainer, DockerContainer::Awg),
+        Q_ARG(DockerContainer, container),
         Q_ARG(QJsonObject, cfg));
 }
+
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+// AVPN awg31-xray-v1 (этап D2): один async-замер статистики xray-пути демона. Реплика на живом
+// xray-туннеле уже инициализирована (XrayProtocol::start ходил через неё) — withInterface не ждёт;
+// ответ — QRemoteObjectPendingCallWatcher (никакого waitForFinished на GUI-потоке, §1). Демон
+// отдаёт КУМУЛЯТИВЫ с подъёма сессии (reset-safe аккумулятор utun) — пишем напрямую, без
+// accumulateByteDelta (тот — для дельтовых источников bytesChanged; на xray-пути демона их нет).
+void VpnConnectionTunnelControl::pollXrayRuntimeStatus()
+{
+    if (!isXrayProto(m_lastUpProto))
+        return;
+    IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
+        if (rep.isNull() || !rep->isReplicaValid())
+            return;
+        // Пустой хинт = дефолт демона (utun22 — tunName из xrayProtocol.cpp на macOS).
+        QRemoteObjectPendingReply<QJsonObject> reply = rep->xrayRuntimeStatus(QString());
+        auto *watcher = new QRemoteObjectPendingCallWatcher(reply, this);
+        connect(watcher, &QRemoteObjectPendingCallWatcher::finished, this,
+                [this, watcher](QRemoteObjectPendingCallWatcher *) {
+                    watcher->deleteLater();
+                    if (watcher->error() != QRemoteObjectPendingCall::NoError)
+                        return;
+                    if (!isXrayProto(m_lastUpProto))
+                        return; // за время ответа туннель сменился — стейл
+                    const QJsonObject o = watcher->returnValue().toJsonObject();
+                    if (!o.value(QStringLiteral("running")).toBool()
+                        || o.value(QStringLiteral("unsupported")).toBool())
+                        return;
+                    const qint64 rx = qint64(o.value(QStringLiteral("rx_bytes")).toDouble());
+                    const qint64 tx = qint64(o.value(QStringLiteral("tx_bytes")).toDouble());
+                    if (rx < 0 || tx < 0)
+                        return;
+                    // Кумулятив только растёт (аккумулятор демона); откат = новая сессия демона —
+                    // не даём HealthLoop'у «rx стоит» из-за скачка вниз: принимаем как есть, ITunnelControl
+                    // §17.1 (0 = неизвестно) не нарушаем.
+                    m_stats.rxBytes = rx;
+                    m_stats.txBytes = tx;
+                    m_stats.valid = true;
+                });
+    });
+}
+#endif
 
 TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const SubscriptionNode &node)
 {
@@ -94,6 +160,11 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         return TunnelResult::fail(QStringLiteral("no VpnConnection"));
     if (m_keys.privateKey.isEmpty())
         return TunnelResult::fail(QStringLiteral("client keys not set"));
+    // AVPN awg31-xray-v1: диспетчер по proto ноды. xray без параметров непригодна (парсер такую
+    // отбрасывает; страховка для стейл-LKG) — честный отказ до туннеля.
+    const bool xrayNode = isXrayProto(protoOf(node));
+    if (xrayNode && !node.xray.has_value())
+        return TunnelResult::fail(QStringLiteral("xray node without xray_params"));
 
     // AVPN server-driven АнтиВПН (Task 10): снапшот серверного split_dns (подпись+LKG), один раз.
     // При невалидном снапшоте (офлайн/первый запуск/kill-switch) — прежние вкомпиленные литералы.
@@ -156,7 +227,15 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         // applyRuBypassSplit (объединяет оба набора по тем же тумблерам).
         if (m_appStore) {
             const bool liAutoOn = s.value(QStringLiteral("AvpnBypass/liAutoOn"), true).toBool();
-            const bool splitOn = (masterOn || liAutoOn) && !ruNode;
+            bool splitOn = (masterOn || liAutoOn) && !ruNode;
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID) && !defined(MACOS_NE)
+            // AVPN awg31-xray-v1: десктопный XrayProtocol::setupRouting умеет ТОЛЬКО VpnAllSites
+            // (VpnAllExceptSites для xray на десктопе апстримом не реализован — с ним маршруты в tun
+            // не ставятся вовсе = чёрная дыра). Для xray на macOS-демоне — строго full-tunnel;
+            // RU-байпас на xray-транспорте десктопа — следующая волна. iOS NE xray split держит.
+            if (xrayNode)
+                splitOn = false;
+#endif
             if (splitOn)
                 m_appStore->setRouteMode(amnezia::RouteMode::VpnAllExceptSites);
             m_appStore->setSitesSplitTunnelingEnabled(splitOn);
@@ -165,7 +244,54 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         ruNodeFact = ruNode;
     }
 
+    // AVPN awg31-xray-v1: xray — отдельный конверт (protocol=xray + xray_config_data.config = JSON
+    // xray-core + hostName/dns1/dns2/splitTunnelType); AWG-специфичные ключи (dnsFwd*, split-DNS
+    // демона, handshake-пороги NE) к нему не относятся — их читают только WG-пути (WGConfig.swift /
+    // localsocketcontroller). DNS-override (mask/Яндекс на iOS) применён к primary выше — общий.
+    if (xrayNode) {
+        QJsonObject xcfg = XrayConfigBuilder::build(sub, primary, m_keys);
+        if (xcfg.isEmpty())
+            return TunnelResult::fail(QStringLiteral("xray config build failed"));
+        m_lastConfigReport = XrayConfigBuilder::reportSummary(sub, primary);
+        m_lastConfigReport.insert(QStringLiteral("split_on"), splitOnFact);
+        m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
+        m_lastConfigReport.insert(QStringLiteral("split_dns"), false);
+        m_lastConfigReport.insert(QStringLiteral("dns_fwd"), false);
+        m_lastUpProto = QStringLiteral("xray");
+        // Свежая сессия: статистика xray-пути начинается с нуля (кумулятивы демона/NE — с подъёма).
+        m_stats = TunnelStats{};
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+        if (m_xrayStatsTimer)
+            m_xrayStatsTimer->start();
+#endif
+        if (!invokeConnect(xcfg, primary.nodeId, DockerContainer::Xray))
+            return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
+        return TunnelResult::success();
+    }
+    m_lastUpProto = QStringLiteral("awg");
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (m_xrayStatsTimer)
+        m_xrayStatsTimer->stop();
+#endif
+
     QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    // AVPN awg31-xray-v1 (инвариант волны §4.5 «незнакомый ключ не доезжает до NE»): awg-apple 3.1.4
+    // (TunnelConfiguration+WgQuickConfig.swift) бросает interfaceHasUnrecognizedKey на любом
+    // незнакомом ключе wg-quick → туннель молча не поднимается. Фильтруем нативный текст по
+    // allowlist ключей этого awg-apple (AwgConfigBuilder::awgAppleWgQuickKeys, зеркало рецепта).
+    // Только Apple: awg-go/android/windows к незнакомым ключам мягче, там текст не трогаем.
+    {
+        QJsonObject inner = cfg.value(QStringLiteral("awg_config_data")).toObject();
+        const QString native = inner.value(QStringLiteral("config")).toString();
+        const QString stripped = AwgConfigBuilder::stripUnknownWgQuickKeys(native, AwgConfigBuilder::awgAppleWgQuickKeys());
+        if (stripped != native) {
+            qWarning() << "avpn: wg-quick config had keys unknown to awg-apple — stripped before NE";
+            inner.insert(QStringLiteral("config"), stripped);
+            cfg.insert(QStringLiteral("awg_config_data"), inner);
+        }
+    }
+#endif
     // AVPN split-DNS форвардер (iOS): ключи в КОРЕНЬ cfg → ios_controller::setupAwg → WGConfig.swift
     // → wgSetSplitDns (Go dnsfwd.go). Значения СТРОКАМИ (JSONDecoder-грабля). Не на РФ-ноде
     // (там full-tunnel через РФ — резолвер и так российский).
@@ -221,7 +347,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     m_lastConfigReport.insert(QStringLiteral("split_dns"), splitDns);
     m_lastConfigReport.insert(QStringLiteral("dns_fwd"), cfg.contains(QStringLiteral("dnsFwdOn")));
 
-    if (!invokeConnect(cfg, primary.nodeId))
+    if (!invokeConnect(cfg, primary.nodeId, DockerContainer::Awg))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));
     return TunnelResult::success();
 }
@@ -278,6 +404,10 @@ void VpnConnectionTunnelControl::down()
     if (m_conn)
         QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
     m_stats = TunnelStats{};
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (m_xrayStatsTimer)
+        m_xrayStatsTimer->stop(); // AVPN awg31-xray-v1: сессия xray закрыта — поллинг демона не нужен
+#endif
 }
 
 } // namespace avpn
