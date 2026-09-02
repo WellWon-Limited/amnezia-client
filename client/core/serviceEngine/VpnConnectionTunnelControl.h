@@ -67,6 +67,13 @@ public:
     // AVPN awg31-xray-v1: proto последнего up() ("awg"/"xray"; пусто = ещё не поднимали).
     QString lastUpProto() const { return m_lastUpProto; }
 
+    // AVPN awg31-xray-v1 (независимое ревью волны, MINOR-4; §19 + §22.5): адопт ЖИВОГО xray-туннеля
+    // после перезапуска GUI. Эта GUI-сессия туннель не поднимала ⇒ m_lastUpProto пуст ⇒ поллинг
+    // статистики демона не стартовал бы, и HealthLoop остался бы слеп (rx/tx нули, «0 = неизвестно»
+    // навсегда). Спрашиваем демона один раз: running ⇒ считаем текущий путь xray и запускаем
+    // поллинг. macOS-демон; на прочих платформах — no-op (там адопт xray в этой волне не живёт).
+    void adoptXrayIfRunning();
+
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
 

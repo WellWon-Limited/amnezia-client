@@ -154,6 +154,39 @@ void VpnConnectionTunnelControl::pollXrayRuntimeStatus()
 }
 #endif
 
+// AVPN awg31-xray-v1 (независимое ревью волны, MINOR-4): см. объявление в заголовке. Async, без
+// nested QEventLoop (§1); идемпотентно (повторный вызов при уже известном xray — no-op).
+void VpnConnectionTunnelControl::adoptXrayIfRunning()
+{
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    if (isXrayProto(m_lastUpProto))
+        return; // путь уже опознан как xray — поллинг идёт
+    IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
+        if (rep.isNull() || !rep->isReplicaValid())
+            return;
+        QRemoteObjectPendingReply<QJsonObject> reply = rep->xrayRuntimeStatus(QString());
+        auto *watcher = new QRemoteObjectPendingCallWatcher(reply, this);
+        connect(watcher, &QRemoteObjectPendingCallWatcher::finished, this,
+                [this, watcher](QRemoteObjectPendingCallWatcher *) {
+                    watcher->deleteLater();
+                    if (watcher->error() != QRemoteObjectPendingCall::NoError)
+                        return;
+                    const QJsonObject o = watcher->returnValue().toJsonObject();
+                    if (!o.value(QStringLiteral("running")).toBool()
+                        || o.value(QStringLiteral("unsupported")).toBool())
+                        return; // демон держит не xray (или ответ от старого демона) — адоптить нечего
+                    if (isXrayProto(m_lastUpProto))
+                        return; // пока ждали ответ, туннель подняли сами
+                    m_lastUpProto = QStringLiteral("xray");
+                    m_stats = TunnelStats{}; // кумулятивы демона считаем с этого момента
+                    if (m_xrayStatsTimer)
+                        m_xrayStatsTimer->start();
+                    qInfo() << "avpn: adopted live xray tunnel — runtime stats polling started";
+                });
+    });
+#endif
+}
+
 TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!m_conn)
