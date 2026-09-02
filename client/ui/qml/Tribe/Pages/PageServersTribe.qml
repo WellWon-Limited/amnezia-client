@@ -337,7 +337,10 @@ PageType {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                    if (root.autoMode) { root.back(); return }  // уже авто — no-op
+                    // AVPN (девайс-приёмка 2026-09-02): уже в авто — НИЧЕГО не делаем и остаёмся
+                    // на экране. Раньше повторный тап уводил на главный, что читалось как
+                    // «кнопка выключила авто».
+                    if (root.autoMode) return
                     Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
                     root.pickAuto()
                 }
