@@ -100,6 +100,16 @@ int main(int argc, char **argv)
         CHECK(avpn::reconcileWatchdogMsTuned() >= 33000,
               "connecttunables: пол watchdog следует за timeout");
         avpn::TuningStore::reset();
+        // AVPN awg31-xray-v1: бюджет верификации xray и порог DEAD по пробам — клампы
+        CHECK(avpn::xrayVerifyTimeoutMsTuned() == 12000 && avpn::xrayProbeFailCyclesTuned() == 3,
+              "connecttunables: xray дефолты 12000 / 3");
+        avpn::TuningStore::set({{"xray_verify_timeout_ms", 0.0}, {"xray_probe_fail_cycles", 0.0}}, {}, {}, {});
+        CHECK(avpn::xrayVerifyTimeoutMsTuned() == 3000, "connecttunables: xray_verify_timeout_ms=0 => пол 3000");
+        CHECK(avpn::xrayProbeFailCyclesTuned() == 1, "connecttunables: xray_probe_fail_cycles=0 => пол 1");
+        avpn::TuningStore::set({{"xray_verify_timeout_ms", 9e9}, {"xray_probe_fail_cycles", 999.0}}, {}, {}, {});
+        CHECK(avpn::xrayVerifyTimeoutMsTuned() == 60000, "connecttunables: xray_verify_timeout_ms-гигант => потолок 60000");
+        CHECK(avpn::xrayProbeFailCyclesTuned() == 10, "connecttunables: xray_probe_fail_cycles-гигант => потолок 10");
+        avpn::TuningStore::reset();
     }
 
     // --- localizedOr (Task 3, 2026-07-12): язык-суффиксные строки с цепочкой фолбэков

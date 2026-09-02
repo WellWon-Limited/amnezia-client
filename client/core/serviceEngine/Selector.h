@@ -36,10 +36,12 @@ public:
     {
         // AVPN (Task 10, proto-форвард): неподдерживаемый протокол = коннект невозможен в принципе —
         // жёсткое отбрасывание БЕЗ фолбэка (в отличие от manual_only ниже): все неподдерживаемые →
-        // честный nullopt (штатная ветка «нет нод»).
+        // честный nullopt (штатная ветка «нет нод»). AVPN awg31-xray-v1: choose — АВТО-путь
+        // (легаси-цепочка TCP-пинга): isAutoEligibleNode — xray под kill-switch transport_auto_pick
+        // (TCP-пинг достукивается до xray:443, но не до awg UDP — иначе цепочка всегда брала бы xray).
         scored.erase(std::remove_if(scored.begin(), scored.end(),
                                     [&](const ScoredNodeS &s) {
-                                        return s.rttMs < 0 || !isSupportedProtoNode(s.node)
+                                        return s.rttMs < 0 || !isAutoEligibleNode(s.node)
                                                || (!excludeNodeId.isEmpty() && s.node.nodeId == excludeNodeId);
                                     }),
                      scored.end());

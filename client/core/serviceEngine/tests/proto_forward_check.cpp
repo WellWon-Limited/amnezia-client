@@ -4,11 +4,15 @@
 // (диагностика/будущая эскалация), но НИКОГДА не выбирается (auto-выбор, failover, ротация, pin).
 // Фолбэк ОБРАТНЫЙ manual_only: неподдерживаемая нода непригодна в принципе (коннект невозможен) —
 // если поддерживаемых нет, выбор честно пуст (штатная ветка «нет нод»), без падений.
+// AVPN awg31-xray-v1: с этой волны xray на macOS/iOS ПОДДЕРЖИВАЕТСЯ (tests/transport_pick_check.cpp);
+// этот чек фиксирует поведение при kill-switch features.xray_client=false (бэк гасит xray на
+// клиентах без релиза) — ровно «как до волны» — и для любого неизвестного proto (vless, ...).
 // Сборка/запуск: core/serviceEngine/tests/build_proto_forward.sh
 #include "../NodeRotation.h"
 #include "../Selector.h"
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
+#include "../TuningStore.h"
 
 #include <QCoreApplication>
 #include <cstdio>
@@ -99,14 +103,22 @@ static SubscriptionNode mkNode(const QString &id, const QString &proto)
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
+    // AVPN awg31-xray-v1: kill-switch xray_client=false — xray ведёт себя как неизвестный proto.
+    TuningStore::set({}, {{QStringLiteral("xray_client"), false}}, {}, {});
 
     // --- 1) хелпер: пустой proto = awg = поддерживается; неизвестный — нет ---
     {
         CHECK(isSupportedProtoNode(mkNode("a", QStringLiteral("awg"))));
         CHECK(isSupportedProtoNode(mkNode("b", QString())));      // легаси: поле не пришло
         CHECK(isSupportedProtoNode(mkNode("c", QStringLiteral("")))); // явная пустая строка
-        CHECK(!isSupportedProtoNode(mkNode("d", QStringLiteral("xray"))));
+        CHECK(!isSupportedProtoNode(mkNode("d", QStringLiteral("xray")))); // kill-switch выключен
         CHECK(!isSupportedProtoNode(mkNode("e", QStringLiteral("vless")))); // любой будущий proto
+        // xray без xray_params непригодна даже при включённом kill-switch (парсер такую отбросит,
+        // страховка для DTO мимо парсера)
+        TuningStore::set({}, {{QStringLiteral("xray_client"), true}}, {}, {});
+        CHECK(!isSupportedProtoNode(mkNode("f", QStringLiteral("xray"))));
+        CHECK(!isSupportedProtoNode(mkNode("g", QStringLiteral("vless"))));
+        TuningStore::set({}, {{QStringLiteral("xray_client"), false}}, {}, {});
     }
 
     // --- 2) парс/валидация: 2 awg + 1 xray → парс ок, пул = 3, поле proto сохранено,

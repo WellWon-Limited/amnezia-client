@@ -56,6 +56,13 @@ class AvpnEngineQml : public QObject {
     // поток, GUI живой) — QML показывает «Устанавливаем службу VPN…» вместо «Подбираем сервер…».
     // На остальных платформах всегда false.
     Q_PROPERTY(bool svcInstalling READ svcInstalling NOTIFY changed)
+    // AVPN awg31-xray-v1 (спека 2026-09-01 §2.3): ручной режим транспорта "auto"|"awg"|"xray"
+    // (локальная настройка QSettings avpn/transportMode; setTransportMode), фаза verifying
+    // (xray поднят, ждём первую удачную пробу через туннель — UI «Проверяем трафик…», орб ещё не
+    // «подключено») и транспорт текущей ноды ("awg"/"xray"; пусто = не подключены) для бейджа.
+    Q_PROPERTY(QString transportMode READ transportMode NOTIFY changed)
+    Q_PROPERTY(bool verifying READ verifying NOTIFY changed)
+    Q_PROPERTY(QString activeProto READ activeProto NOTIFY changed)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
     // AVPN (group-aware, 2026-07-21): ISO-дата конца подписки из /v1/subscription (device-часы,
@@ -244,6 +251,15 @@ public:
     bool stopping() const { return m_busy && !m_wantConnected; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
     bool svcInstalling() const { return m_svcInstalling; }
+    // AVPN awg31-xray-v1: см. Q_PROPERTY transportMode/verifying/activeProto выше.
+    QString transportMode() const;
+    bool verifying() const;
+    QString activeProto() const;
+    // Переключатель «Авто / Amnezia / Xray» пикера (mode: "auto"|"awg"|"xray"; kill-switch не
+    // нужен — локальная настройка). Режим "xray" при неподдерживаемом xray (платформа/kill-switch
+    // xray_client) отклоняется с тостом. На поднятом туннеле, чей транспорт новому режиму не
+    // соответствует, — реконнект ТОЛЬКО через reconcile+m_needsRestart (как pinAndReconnect).
+    Q_INVOKABLE void setTransportMode(const QString &mode);
 
     // AVPN: статус подписки (Task 3). daysLeft<0 = бессрочно/неизвестно; trafficLimit==0 = безлимит.
     int daysLeft() const;
@@ -775,6 +791,24 @@ private:
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
+    // AVPN awg31-xray-v1 (спека §2.3):
+    //  onTunnelUpEffects()     — побочные эффекты реального «Подключено» (пуши, чипы, живой RTT,
+    //                            история транспорта); awg — сразу на Vpn::Connected, xray — после verify.
+    //  startXrayVerification() — фаза Verifying: HEAD generate_204 ЧЕРЕЗ туннель, повторы каждые
+    //                            ~1.2с в бюджете xray_verify_timeout_ms (кламп ConnectTunables.h);
+    //                            async, без nested QEventLoop (§1). Успех → verifySucceeded →
+    //                            эффекты; провал → verifyFailed → движок уводит на другой транспорт
+    //                            той же локации (двухфазный свитч), нет кандидатов → честный OFF.
+    //  persistTransportHistory()— QSettings avpn/transportHistory, только когда движок пометил dirty.
+    //  applyReseed()/applyPendingReseed() — reseed пула по pool_revision (refreshSubscription →
+    //                            QTimer::singleShot(0), никогда из-под Selector::pick / sync-вызова).
+    void onTunnelUpEffects();
+    void startXrayVerification();
+    void verifyAttempt(int epoch);
+    void finishVerify(int epoch, bool ok);
+    void persistTransportHistory();
+    void applyReseed(const avpn::Subscription &sub);
+    void applyPendingReseed();
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (beachball-фикс): финиш фоновой установки root-демона (главный поток, queued из worker).
     // ok → reconcile() продолжает старт (намерение живо); fail → error + счёт попытки.
@@ -1142,6 +1176,14 @@ private:
     int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)
     bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
     bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
+    // AVPN awg31-xray-v1: верификация xray (см. startXrayVerification): epoch гейтит стейл-ответы
+    // (сменился туннель/стоп → ответ старой серии выбрасывается), clock — бюджет, ms/ok — факты
+    // последней верификации для отчётов бенча/диагностики (benchExtra.transport).
+    int                          m_verifyEpoch = 0;
+    QElapsedTimer                m_verifyClock;
+    int                          m_verifyAttempts = 0;
+    qint64                       m_lastVerifyMs = -1;
+    int                          m_lastVerifyOk = -1;              // -1 не было, 0 провал, 1 успех
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного

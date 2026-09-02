@@ -29,6 +29,18 @@ struct NodeDebugRow {
     // AVPN (Доктор): manual_only/RU — только ручной pin; авто-потребители снапшота (очередь
     // запасных нод) обязаны такие скипать, иначе Доктор пересадит пользователя на RU-ноду.
     bool    manualOnly = false;
+    // AVPN awg31-xray-v1 (§2.3, пикер «локации × транспорты»): host_id ноды (0 = не пришёл),
+    // ключ локации (NodeRotation.h::locationKeyOf — по нему группируются строки пикера),
+    // транспорты, доступные в локации среди живых нод (порядок = transport_rank), серверный
+    // ранг транспорта ноды, поддерживается ли её proto ЭТИМ клиентом (xray под kill-switch и
+    // платформенным гейтом — иначе строка серая «недоступно в этой версии»), и активный
+    // транспорт локации (proto текущей ноды, если текущая — из этой локации; иначе пусто).
+    int         hostId = 0;
+    QString     location;
+    QStringList transports;
+    int         transportRank = 0;
+    bool        transportSupported = true;
+    QString     activeProto;
 };
 
 struct DebugSnapshot {
@@ -44,6 +56,15 @@ struct DebugSnapshot {
     QString graceUntil;                  // AVPN: expires_at + 24ч из Subscription; "" = нет
     int     bypassListVersion = 0;       // AVPN: версия применённых серверных bypass-списков (0 = вкомпиленные);
                                          // сеет фасад из BypassListService::lkgVersion() (движок его не знает)
+    // AVPN awg31-xray-v1: proto текущей ноды ("awg"/"xray", пусто = не подключены), ручной режим
+    // транспорта ("auto"/"awg"/"xray"), verifying = xray-туннель поднят, ждём первую удачную пробу
+    // через него (фаза «Проверяем трафик…», «Подключено» ещё НЕ показываем — инвариант волны §4.3),
+    // ревизия пула подписки (pool_revision, 0 = не пришла) и есть ли отложенный reseed.
+    QString activeProto;
+    QString transportMode = QStringLiteral("auto");
+    bool    verifying = false;
+    qint64  poolRevision = 0;
+    bool    reseedPending = false;
     QList<NodeDebugRow> pool;
     QStringList switchLog;               // «switch A→B: причина»
     // Секреты (токен/приватный ключ) сюда НЕ кладём — маскировка на уровне UI (план §7).

@@ -64,4 +64,22 @@ inline int wakeRestartMaxTriesTuned()
     return qBound(1, int(TuningStore::numberOr(QStringLiteral("wake_restart_max_tries"), 5)), 10);
 }
 
+// AVPN awg31-xray-v1 (спека 2026-09-01 §2.3, инвариант волны §4.3): «Подключено» по xray — ТОЛЬКО
+// после первой удачной пробы (DNS+HTTPS generate_204) ЧЕРЕЗ туннель; handshake/порт/процесс — не
+// успех. Бюджет верификации (numbers.xray_verify_timeout_ms): пол 3с (ниже — ложные провалы на
+// любой сотовой: Reality-рукопожатие + маршруты), потолок 60с (выше — вечный «Проверяем трафик»).
+// По истечении — провал data-plane → другой транспорт той же локации (failover).
+inline int xrayVerifyTimeoutMsTuned()
+{
+    return qBound(3000, int(TuningStore::numberOr(QStringLiteral("xray_verify_timeout_ms"), 12000)), 60000);
+}
+
+// AVPN awg31-xray-v1: у xray нет handshake по определению — вторая половина DEAD-критерия =
+// провал живой пробы через туннель N тиков ПОДРЯД (numbers.xray_probe_fail_cycles). Пол 1
+// (0/минус = никогда не DEAD по пробе), потолок 10 (выше — мёртвый туннель висит минуту+).
+inline int xrayProbeFailCyclesTuned()
+{
+    return qBound(1, int(TuningStore::numberOr(QStringLiteral("xray_probe_fail_cycles"), 3)), 10);
+}
+
 } // namespace avpn

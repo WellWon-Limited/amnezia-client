@@ -6,11 +6,14 @@
 #include "AwgConfigBuilder.h"
 #include "ITunnelControl.h"
 
+#include "core/utils/containerEnum.h" // AVPN awg31-xray-v1: DockerContainer по proto ноды (unscoped enum — форвард невозможен)
+
 #include <QObject>
 #include <QJsonObject>
 
 class VpnConnection;               // forward (vpnConnection.h в форке)
 class SecureAppSettingsRepository; // forward (core/repositories) — RU-direct-гейт в up()
+class QTimer;
 
 namespace avpn {
 
@@ -28,6 +31,9 @@ public:
 
     // up: построить конфиг и вызвать connectToVpn (async; фактический исход — через connectionStateChanged,
     // его слушает ServiceEngine). Возвращает success(), если вызов поставлен в очередь.
+    // AVPN awg31-xray-v1: диспетчер по proto ноды — awg (AwgConfigBuilder, DockerContainer::Awg) /
+    // xray (XrayConfigBuilder, DockerContainer::Xray); на Apple перед NE незнакомые wg-quick ключи
+    // вырезаются (awg-apple 3.1.4 бросает invalidLine).
     TunnelResult up(const Subscription &sub, const SubscriptionNode &node) override;
 
     // applyPeer (MVP): «быстрый reconnect» = down + up с новым узлом. На стабильном /32 адрес tun не меняется.
@@ -39,6 +45,9 @@ public:
     //   iOS:     IosController::checkStatus парсит UAPI last_handshake_time_sec → handshakeChanged.
     //   Android: GoBackend.awgGetConfig → Statistics.lastHandshakeSec → JNI onStatisticsUpdate → handshakeUpdated.
     //   desktop: handshake живёт в daemon (getPeerStatus), в наш адаптер не доходит → HealthLoop на rx/tx.
+    //   AVPN awg31-xray-v1, xray: handshake не существует (эпоха 0 = «неизвестно», НЕ сеется на
+    //   Connected); rx/tx — iOS: bytesChanged NE (счётчики tun hev-socks5, этап D3); macOS-демон:
+    //   поллинг IPC xrayRuntimeStatus (кумулятивы utun tun2socks, этап D2).
     TunnelStats readStats() override;
 
     // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля (новый локальный порт = новый
@@ -55,16 +64,26 @@ public:
     // Пустой объект = туннель ещё не поднимали. Ключей/IP внутри нет by construction.
     QJsonObject lastConfigReport() const { return m_lastConfigReport; }
 
+    // AVPN awg31-xray-v1: proto последнего up() ("awg"/"xray"; пусто = ещё не поднимали).
+    QString lastUpProto() const { return m_lastUpProto; }
+
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
 
 private:
-    bool invokeConnect(const QJsonObject &cfg, const QString &serverId);
+    bool invokeConnect(const QJsonObject &cfg, const QString &serverId, amnezia::DockerContainer container);
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона — async QtRO-вызов xrayRuntimeStatus
+    // по таймеру, пока поднят xray (кумулятивы rx/tx с подъёма сессии, §17.1). Без nested QEventLoop.
+    void pollXrayRuntimeStatus();
+    QTimer *m_xrayStatsTimer = nullptr;
+#endif
 
     VpnConnection *m_conn = nullptr;
     ClientKeys     m_keys;
     TunnelStats    m_stats;
     QJsonObject    m_lastConfigReport; // AVPN bench v5: снапшот конфига последнего up()
+    QString        m_lastUpProto;      // AVPN awg31-xray-v1: proto последнего подъёма
     ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде
 };
 
