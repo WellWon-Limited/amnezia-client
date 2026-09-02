@@ -28,6 +28,16 @@ Item {
     readonly property string titleText:
         _hot["update_title"] ? _hot["update_title"] : qsTr("Доступна новая версия")
 
+    // «Было → стало»: без номеров человек не понимает, обновился он уже или экран показался зря
+    // (реш. владельца 2026-09-02). Пусто с сервера — строку не показываем вовсе.
+    readonly property string currentVersion:
+        (typeof TribeEngine !== "undefined" && TribeEngine.appVersion) ? TribeEngine.appVersion : ""
+    readonly property string newVersion:
+        (typeof TribeEngine !== "undefined" && TribeEngine.availableVersion) ? TribeEngine.availableVersion : ""
+    readonly property bool showVersions:
+        sheet.currentVersion.length > 0 && sheet.newVersion.length > 0
+        && sheet.newVersion !== sheet.currentVersion
+
     readonly property string bodyText:
         _hot["update_body"] ? _hot["update_body"]
                             : (sheet.mode === "blocking"
@@ -107,6 +117,18 @@ Item {
             font.pixelSize: Theme.font.bodyM
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
+        }
+
+        // «5.1.73 → 5.1.74» моноширинным, как номера в остальном интерфейсе
+        Text {
+            Layout.fillWidth: true
+            visible: sheet.showVersions
+            text: sheet.currentVersion + "  →  " + sheet.newVersion
+            textFormat: Text.PlainText
+            color: Theme.color.text3
+            font.family: Theme.font.mono
+            font.pixelSize: Theme.font.caption
+            horizontalAlignment: Text.AlignHCenter
         }
 
         // ── что нового: карточка со списком пунктов (пусто = карточки нет) ──
