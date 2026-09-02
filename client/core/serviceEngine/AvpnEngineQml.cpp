@@ -868,6 +868,32 @@ QString AvpnEngineQml::configUrl(const QString &key, const QString &def) const
 
 // AVPN remote-config (T6): магазинная ссылка для баннера апдейта/CTA — urls.store_ios/store_android
 // с сервера (можно поменять без ребилда, напр. сменить регион стора), фолбэк вшитый.
+// AVPN (реш. владельца 2026-09-02): «Обновить» на десктопном macOS ставит новую версию сама.
+// URL образа — server-driven (urls.macos_dmg_url) с вкомпиленным фолбэком; хост-гард и все проверки
+// подписи/нотаризации/версии — внутри SelfUpdate (там же причина отказа человеческим текстом).
+void AvpnEngineQml::startSelfUpdate()
+{
+    if (!avpn::SelfUpdate::isSupported()) {
+        emit selfUpdateFailed(tr("Обновление внутри приложения тут недоступно"));
+        return;
+    }
+    if (!m_selfUpdate) {
+        m_selfUpdate = new avpn::SelfUpdate(this);
+        connect(m_selfUpdate, &avpn::SelfUpdate::progress, this,
+                [this](const QString &t) { emit selfUpdateProgress(t); });
+        connect(m_selfUpdate, &avpn::SelfUpdate::failed, this,
+                [this](const QString &r) { emit selfUpdateFailed(r); });
+        // installed(): образ проверен и подменён, дочерний процесс перезапустит приложение —
+        // ничего гасить не нужно, просто держим экран обновления до выхода.
+    }
+    // Маркетинговая версия (первые три компонента APP_VERSION) — нижняя граница: образ со
+    // старой/равной версией скрипт не поставит.
+    const QStringList parts = QStringLiteral(APP_VERSION).split(QLatin1Char('.'));
+    const QString marketing = parts.mid(0, 3).join(QLatin1Char('.'));
+    m_selfUpdate->start(configUrl(QStringLiteral("macos_dmg_url"), avpn::SelfUpdate::defaultDmgUrl()),
+                        marketing);
+}
+
 QString AvpnEngineQml::storeUrl() const
 {
 #if defined(Q_OS_ANDROID)
