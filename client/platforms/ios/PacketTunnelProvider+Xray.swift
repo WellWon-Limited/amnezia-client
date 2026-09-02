@@ -112,10 +112,10 @@ extension PacketTunnelProvider {
             var ipv4IncludedRoutes = [NEIPv4Route]()
 
             for allowedIPString in splitTunnelSites {
-                if let allowedIP = IPAddressRange(from: allowedIPString) {
+                if let allowedIP = IPv4RouteSpec(cidr: allowedIPString) {
                     ipv4IncludedRoutes.append(NEIPv4Route(
-                        destinationAddress: "\(allowedIP.address)",
-                        subnetMask: "\(allowedIP.subnetMask())"))
+                        destinationAddress: allowedIP.destinationAddress,
+                        subnetMask: allowedIP.subnetMask))
                 }
             }
 
@@ -124,10 +124,10 @@ extension PacketTunnelProvider {
             var ipv4ExcludedRoutes = [NEIPv4Route]()
 
             for excludedIPString in splitTunnelSites {
-                if let excludedIP = IPAddressRange(from: excludedIPString) {
+                if let excludedIP = IPv4RouteSpec(cidr: excludedIPString) {
                     ipv4ExcludedRoutes.append(NEIPv4Route(
-                        destinationAddress: "\(excludedIP.address)",
-                        subnetMask: "\(excludedIP.subnetMask())"))
+                        destinationAddress: excludedIP.destinationAddress,
+                        subnetMask: excludedIP.subnetMask))
                 }
             }
 

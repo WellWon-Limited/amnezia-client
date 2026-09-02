@@ -365,10 +365,10 @@ extension PacketTunnelProvider: OpenVPNAdapterDelegate {
             }
 
             for allowedIPString in splitTunnelSites {
-                if let allowedIP = IPAddressRange(from: allowedIPString) {
+                if let allowedIP = IPv4RouteSpec(cidr: allowedIPString) {
                     ipv4IncludedRoutes.append(NEIPv4Route(
-                        destinationAddress: "\(allowedIP.address)",
-                        subnetMask: "\(allowedIP.subnetMask())"))
+                        destinationAddress: allowedIP.destinationAddress,
+                        subnetMask: allowedIP.subnetMask))
                 }
             }
 
@@ -384,10 +384,10 @@ extension PacketTunnelProvider: OpenVPNAdapterDelegate {
                 }
 
                 for excludeIPString in splitTunnelSites {
-                    if let excludeIP = IPAddressRange(from: excludeIPString) {
+                    if let excludeIP = IPv4RouteSpec(cidr: excludeIPString) {
                         ipv4ExcludedRoutes.append(NEIPv4Route(
-                            destinationAddress: "\(excludeIP.address)",
-                            subnetMask: "\(excludeIP.subnetMask())"))
+                            destinationAddress: excludeIP.destinationAddress,
+                            subnetMask: excludeIP.subnetMask))
                     }
                 }
 
