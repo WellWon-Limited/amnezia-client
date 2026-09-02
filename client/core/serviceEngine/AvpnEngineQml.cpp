@@ -435,6 +435,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (m_engine.feedProbeResult(reachable)) {
             persistTransportHistory();
             emit changed();
+        } else if (surrenderIfDataPlaneDead()) {
+            persistTransportHistory(); // AVPN (ревью волны, MAJOR-1): кап провалов исчерпан → честный OFF
         }
     });
 
@@ -1255,6 +1257,9 @@ void AvpnEngineQml::onTick()
     if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {
         persistTransportHistory(); // AVPN awg31-xray-v1: DEAD записан в историю транспорта
         emit changed(); // произошёл свитч
+    } else if (surrenderIfDataPlaneDead()) {
+        persistTransportHistory(); // AVPN (ревью волны, MAJOR-1): провал записан, дальше — честный OFF
+        return;
     }
 
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
@@ -1366,8 +1371,14 @@ QJsonObject AvpnEngineQml::benchExtra() const
             tr.insert(QStringLiteral("verify_ok"), m_lastVerifyOk == 1);
             tr.insert(QStringLiteral("verify_ms"), double(m_lastVerifyMs));
             tr.insert(QStringLiteral("verify_attempts"), m_verifyAttempts);
+            // AVPN (ревью волны, MAJOR-3): было ли доказательство rx ЧЕРЕЗ туннель (false =
+            // источник статистики молчал, верификацию приняли с оговоркой).
+            tr.insert(QStringLiteral("verify_rx_proof"), m_lastVerifyRxProof);
         }
         tr.insert(QStringLiteral("probe_fail_streak"), m_liveFailStreak);
+        // AVPN (ревью волны, MAJOR-1): подряд идущие провалы data-plane за сессию — паттерн
+        // «оператор × сеть × сколько кандидатов не пропустили трафик» ищется по bench_reports.
+        tr.insert(QStringLiteral("dataplane_fail_streak"), m_engine.dataPlaneFailStreak());
         tr.insert(QStringLiteral("probe_reachable"), m_liveReachable);
         extra.insert(QStringLiteral("transport"), tr);
     }
@@ -3672,9 +3683,7 @@ void AvpnEngineQml::reprobe()
     // обходило бы стейт-машину и давало back-to-back up()). Снимаем pin; если онлайн — перевыбираем.
     m_engine.clearPin();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    if (st == QLatin1String("connected") || st == QLatin1String("connecting")
-        || st == QLatin1String("switching") || st == QLatin1String("selecting")
-        || st == QLatin1String("verifying")) { // AVPN awg31-xray-v1: verifying = туннель поднят
+    if (avpn::isTunnelUpStateName(st)) { // AVPN awg31-xray-v1: verifying = туннель поднят
         m_wantConnected = true;
         m_needsRestart = true;   // переподнять на свежевыбранной авто-ноде
         m_startAttempts = 0;
@@ -3760,9 +3769,7 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
         return;
     }
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    if (st == QLatin1String("connected") || st == QLatin1String("connecting")
-        || st == QLatin1String("switching") || st == QLatin1String("selecting")
-        || st == QLatin1String("verifying")) { // AVPN awg31-xray-v1: verifying = туннель поднят
+    if (avpn::isTunnelUpStateName(st)) { // AVPN awg31-xray-v1: verifying = туннель поднят
         m_wantConnected = true;
         m_needsRestart = true;   // reconcile: stop→Disconnected→start на закреплённой ноде
         m_startAttempts = 0;
@@ -3849,9 +3856,7 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     // переподнять ЧЕРЕЗ reconcile+m_needsRestart (stop→Disconnected→start), никогда прямой up()
     // поверх teardown (CONNECT-INVARIANTS §2/§4). Авто: текущий транспорт всегда допустим — не трогаем.
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    const bool up = st == QLatin1String("connected") || st == QLatin1String("connecting")
-                    || st == QLatin1String("switching") || st == QLatin1String("selecting")
-                    || st == QLatin1String("verifying");
+    const bool up = avpn::isTunnelUpStateName(st);
     const QString cur = m_engine.currentNodeProto();
     const bool mismatch = (m == avpn::TransportMode::Awg && avpn::isXrayProto(cur))
                           || (m == avpn::TransportMode::Xray && !cur.isEmpty() && !avpn::isXrayProto(cur));
@@ -3918,6 +3923,7 @@ void AvpnEngineQml::startXrayVerification()
     const int epoch = ++m_verifyEpoch;
     m_verifyClock.start();
     m_verifyAttempts = 0;
+    m_lastVerifyRxProof = false;
     m_busy = true;
     qInfo() << "[avpn xray] tunnel up on" << m_engine.currentNodeId() << "— verifying data-plane";
     // Маршруты/DNS через свежий tun2socks оседают не мгновенно — первая попытка чуть отложенно.
@@ -3949,9 +3955,24 @@ void AvpnEngineQml::verifyAttempt(int epoch)
             return;
         const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool ok = (r->error() == QNetworkReply::NoError && (code == 204 || code == 200));
-        if (ok) {
+        // AVPN (независимое ревью волны, MAJOR-3; инвариант §22.5): 204/200 доказывает ИНТЕРНЕТ,
+        // а не туннель — если tun2socks/маршруты не встали, проба ушла НАПРЯМУЮ мимо xray. Второе
+        // условие — реальный rx через туннель (счётчики уже поллятся: macOS — IPC xrayRuntimeStatus,
+        // iOS — bytesChanged NE). rx==0 при живом источнике = «доказательства ещё нет» (§17.1:
+        // 0 = неизвестно) → ждём следующей попытки; источника нет вовсе → принимаем с оговоркой.
+        const avpn::TunnelStats st = m_tunnel.readStats();
+        switch (avpn::verifyStepFor(ok, st.valid, st.rxBytes)) {
+        case avpn::VerifyStep::Confirmed:
+            m_lastVerifyRxProof = true;
             finishVerify(epoch, true);
             return;
+        case avpn::VerifyStep::AcceptedWithoutStats:
+            qWarning() << "[avpn xray] probe ok, but tunnel stats are unavailable — accepting without rx proof";
+            m_lastVerifyRxProof = false;
+            finishVerify(epoch, true);
+            return;
+        case avpn::VerifyStep::KeepTrying:
+            break;
         }
         if (m_verifyClock.elapsed() >= avpn::xrayVerifyTimeoutMsTuned()) {
             finishVerify(epoch, false);
@@ -3968,7 +3989,8 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok)
     m_lastVerifyMs = m_verifyClock.elapsed();
     m_lastVerifyOk = ok ? 1 : 0;
     if (ok) {
-        qInfo() << "[avpn xray] data-plane verified in" << m_lastVerifyMs << "ms, attempts" << m_verifyAttempts;
+        qInfo() << "[avpn xray] data-plane verified in" << m_lastVerifyMs << "ms, attempts"
+                << m_verifyAttempts << "rx-proof" << m_lastVerifyRxProof;
         m_engine.verifySucceeded();
         m_busy = false;
         onTunnelUpEffects();
@@ -3981,7 +4003,9 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok)
     // туннеле — гасим честно через reconcile (намерение OFF), как внешний провал.
     m_engine.verifyFailed();
     persistTransportHistory();
-    if (m_engine.state() == avpn::EngineState::Error) {
+    // AVPN (независимое ревью волны, MAJOR-1): исчерпан кап подряд идущих провалов data-plane —
+    // отдельный текст (дело не в конкретном сервере, а в сети/ТСПУ), намерение снимается там же.
+    if (!surrenderIfDataPlaneDead() && m_engine.state() == avpn::EngineState::Error) {
         emit error(tr("Сервер не пропускает трафик — попробуйте другой сервер"));
         m_wantConnected = false;
         m_needsRestart = false;
@@ -3989,6 +4013,29 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok)
     m_busy = m_engine.state() == avpn::EngineState::Switching;
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
+}
+
+// AVPN (независимое ревью волны, MAJOR-1): движок сдался — data-plane мёртв на всех перепробованных
+// узлах подряд (captive portal, ТСПУ, сеть без интернета). До этой правки цикл up → verifying →
+// verifyFailed → down → up крутился вечно, и пользователь не видел ни ошибки, ни причины. Теперь:
+// честный текст + снятие намерения (§13 — поднимает туннель только пользователь) + гашение через
+// reconcile (§2, монополия на туннель). Идемпотентно: requestStop() внутри guardedStop() обнуляет
+// счётчик, так что второй раз ветка не сработает.
+bool AvpnEngineQml::surrenderIfDataPlaneDead()
+{
+    if (!m_engine.dataPlaneExhausted() || m_engine.state() != avpn::EngineState::Error)
+        return false;
+    if (!m_wantConnected)
+        return false; // намерение уже снято (стоп/пауза) — гасить и жаловаться нечего
+    qWarning() << "[avpn] data-plane dead on every candidate — giving up (streak"
+               << m_engine.dataPlaneFailStreak() << ")";
+    emit error(tr("Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова"));
+    m_wantConnected = false;
+    m_needsRestart = false;
+    m_busy = false;
+    emit changed();
+    QTimer::singleShot(0, this, [this]() { reconcile(); });
+    return true;
 }
 
 // Reseed пула по pool_revision (см. refreshSubscription). Вызывается ТОЛЬКО с верха цикла событий.
@@ -4600,9 +4647,11 @@ void AvpnEngineQml::pauseForShopping(int seconds)
 
     // Запоминаем, был ли активный туннель: только тогда есть смысл поднимать его обратно по таймауту.
     // Если VPN и так не был поднят — пауза вырождается в no-op подъёма (просто ничего не роняем).
+    // AVPN (независимое ревью волны, MINOR-7): фаза verifying — туннель ПОДНЯТ (xray ждёт первой
+    // пробы). Без неё пауза для покупок считала xray-сессию «не поднятой» и после паузы туннель
+    // не возвращался. Единый предикат — avpn::isTunnelUpStateName (DebugSnapshot.h).
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    m_wasConnected = (st == QLatin1String("connected") || st == QLatin1String("connecting")
-                      || st == QLatin1String("switching") || st == QLatin1String("selecting"));
+    m_wasConnected = avpn::isTunnelUpStateName(st);
 
     m_paused = true;
     // Реально опускаем туннель: на паузе utun-детект ДОЛЖЕН показывать туннель опущенным (трафик

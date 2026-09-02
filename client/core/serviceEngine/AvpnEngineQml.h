@@ -806,6 +806,10 @@ private:
     void startXrayVerification();
     void verifyAttempt(int epoch);
     void finishVerify(int epoch, bool ok);
+    // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
+    // data-plane (ServiceEngine::dataPlaneExhausted) — показать честную ошибку, снять намерение
+    // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
+    bool surrenderIfDataPlaneDead();
     void persistTransportHistory();
     void applyReseed(const avpn::Subscription &sub);
     void applyPendingReseed();
@@ -1184,6 +1188,9 @@ private:
     int                          m_verifyAttempts = 0;
     qint64                       m_lastVerifyMs = -1;
     int                          m_lastVerifyOk = -1;              // -1 не было, 0 провал, 1 успех
+    // AVPN (независимое ревью волны, MAJOR-3): было ли у последней успешной верификации
+    // доказательство rx ЧЕРЕЗ туннель (false = источник статистики молчал, приняли с оговоркой).
+    bool                         m_lastVerifyRxProof = false;
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного
