@@ -9,16 +9,21 @@ import "../components"
 import "../../Controls2" // PageType
 
 // AVPN (server picker 2026-07-10): полноэкранный выбор сервера — замена шторки TribeNodeSheet.
-// Поиск по странам, «Авто (быстрейший)», строки стран (флаг + RTT + бары). Одна строка = одна
-// страна: пинится ЛУЧШАЯ нода страны на момент тапа. Переключение — сигналами через PageStart
-// (уход со страницы СНАЧАЛА, движок ПОТОМ — CONNECT-INVARIANTS §5); реконнект-семантика — в
-// TribeEngine.pinAndReconnect (kill-switch features.picker_instant_reconnect).
+// Поиск, «Авто (быстрейший)», строки локаций (флаг + бейджи транспортов + RTT + бары). Одна
+// строка = одна ЛОКАЦИЯ: пинится ЛУЧШАЯ нода локации на момент тапа. Переключение — сигналами
+// через PageStart (уход со страницы СНАЧАЛА, движок ПОТОМ — CONNECT-INVARIANTS §5);
+// реконнект-семантика — в TribeEngine.pinAndReconnect (kill-switch features.picker_instant_reconnect).
+// AVPN awg31-xray-v1 (спека 2026-09-01 §2.3): у локации может быть несколько транспортов
+// (Amnezia/Xray) — бейджи в строке + селектор режима «Авто / Amnezia / Xray» над списком.
 PageType {
     id: root
 
     signal back()
     signal pickNode(string nodeId)
     signal pickAuto()
+    // AVPN awg31-xray-v1: смена режима транспорта — тоже через PageStart (движок может
+    // переподнять туннель ⇒ инвариант §5 «уход с UI выбора сначала» действует и здесь).
+    signal pickTransport(string mode)
 
 
     // iOS: PageController.safeArea* только для Android → max с SafeArea (как PageNotificationsTribe)
@@ -31,8 +36,29 @@ PageType {
     readonly property bool autoMode: !cur.pinned
     property string query: ""
 
-    // Группировка alive-нод по странам + фильтр + сортировка «быстрые СВЕРХУ» (страница читается
-    // сверху вниз — осознанная инверсия шторочного rankFastestAtBottom). Лучшая нода страны:
+    // AVPN awg31-xray-v1: режим транспорта — факт из движка (=== undefined на старом бинаре ⇒ "auto").
+    readonly property string transportMode: (hasEngine && TribeEngine.transportMode)
+                                            ? TribeEngine.transportMode : "auto"
+    // Транспорты, реально представленные в пуле (живые ноды) и умеемые клиентом. Селектор
+    // прячем, пока транспорт один — он нужен только там, где есть из чего выбирать (или когда
+    // ручной режим уже включён и из него надо уметь выйти).
+    readonly property bool xrayInPool: hasEnginePool("xray")
+    readonly property bool awgInPool: hasEnginePool("awg")
+    readonly property bool showTransportSelector: xrayInPool || root.transportMode !== "auto"
+
+    function hasEnginePool(proto) {
+        for (let i = 0; i < pool.length; ++i) {
+            const n = pool[i]
+            if (!n || n.alive !== true || n.transportSupported === false)
+                continue
+            if (String(n.proto || "awg") === proto)
+                return true
+        }
+        return false
+    }
+
+    // Группировка alive-нод по ЛОКАЦИЯМ + фильтр + сортировка «быстрые СВЕРХУ» (страница читается
+    // сверху вниз — осознанная инверсия шторочного rankFastestAtBottom). Лучшая нода локации:
     // min measuredRttMs; без замера — max health, потом max weight.
     // МЕМОИЗАЦИЯ (ревью 2026-07-10): движок эмитит общий changed() часто (тик ~4с, RTT-ответы по
     // одной ноде), а реассайн model новым JS-массивом = полный reset ListView (пересоздание
@@ -48,32 +74,58 @@ PageType {
         root.countries = next
     }
 
+    // AVPN awg31-xray-v1: ключ строки — движковый `location` (host_id, фолбэк country_code+region);
+    // старый бинарь поля не отдаёт ⇒ фолбэк на страну, поведение как раньше.
+    function locationKeyOf(n) {
+        const loc = String(n.location || "")
+        return loc.length > 0 ? loc : ("cc:" + String(n.countryCode || "??").toUpperCase())
+    }
+
+    // Лучшая нода из списка: min measuredRttMs; без замера — max health, потом max weight.
+    function bestOf(nodes) {
+        let best = nodes[0]
+        for (let j = 1; j < nodes.length; ++j) {
+            const a = nodes[j], b = best
+            const am = a.measuredRttMs >= 0, bm = b.measuredRttMs >= 0
+            if (am && (!bm || a.measuredRttMs < b.measuredRttMs)) { best = a; continue }
+            if (!am && !bm && ((a.health || 0) > (b.health || 0)
+                    || ((a.health || 0) === (b.health || 0) && (a.weight || 0) > (b.weight || 0))))
+                best = a
+        }
+        return best
+    }
+
     function computeCountries() {
-        const byCc = {}
+        const byLoc = {}
         for (let i = 0; i < pool.length; ++i) {
             const n = pool[i]
             if (!n || n.alive !== true) continue
-            // Task 10 (форвард-совместимость proto): ноды неподдерживаемых протоколов (xray, ...)
-            // непригодны для pin — скипаем, чтобы не стать «best» строки страны (тап = фейл).
-            // Страна, где ВСЕ ноды такие, честно не показывается вовсе (byCc[cc] не создаётся).
-            if (n.proto && n.proto !== "awg") continue
-            const cc = String(n.countryCode || "??").toUpperCase()
-            if (!byCc[cc]) byCc[cc] = []
-            byCc[cc].push(n)
+            const key = root.locationKeyOf(n)
+            if (!byLoc[key]) byLoc[key] = []
+            byLoc[key].push(n)
         }
         const q = query.trim().toLowerCase()
+        const mode = root.transportMode
         const out = []
-        for (const cc in byCc) {
-            const nodes = byCc[cc]
-            let best = nodes[0]
-            for (let j = 1; j < nodes.length; ++j) {
-                const a = nodes[j], b = best
-                const am = a.measuredRttMs >= 0, bm = b.measuredRttMs >= 0
-                if (am && (!bm || a.measuredRttMs < b.measuredRttMs)) { best = a; continue }
-                if (!am && !bm && ((a.health || 0) > (b.health || 0)
-                        || ((a.health || 0) === (b.health || 0) && (a.weight || 0) > (b.weight || 0))))
-                    best = a
+        for (const key in byLoc) {
+            const nodes = byLoc[key]
+            // Пригодные для пина: клиент умеет протокол (transportSupported) И ручной режим его
+            // разрешает. Task 10 остаётся в силе: неподдерживаемая нода «best» не становится —
+            // тап по ней упирался бы в сторожа движка.
+            const usable = []
+            let anySupported = false
+            for (let j = 0; j < nodes.length; ++j) {
+                const n = nodes[j]
+                const proto = String(n.proto || "awg")
+                if (n.transportSupported === false) continue
+                anySupported = true
+                if (mode === "awg" && proto === "xray") continue
+                if (mode === "xray" && proto !== "xray") continue
+                usable.push(n)
             }
+            const disabled = usable.length === 0
+            const best = root.bestOf(disabled ? nodes : usable)
+            const cc = String(best.countryCode || "??").toUpperCase()
             const name = best.name || best.region || cc
             if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
                        || String(best.region || "").toLowerCase().includes(q)))
@@ -81,14 +133,41 @@ PageType {
             let isCur = false
             for (let k = 0; k < nodes.length; ++k)
                 if (cur.nodeId && nodes[k].nodeId === cur.nodeId) { isCur = true; break }
-            out.push({ cc: cc, name: name, nodeId: best.nodeId,
+            // Бейджи транспортов локации: порядок — из движкового `transports` (== transport_rank),
+            // версия/поддержка — из представителя каждого протокола. Активный (поднятый) транспорт
+            // движок кладёт в activeProto строк ЭТОЙ локации (пусто, если туннель не здесь).
+            const byProto = {}
+            for (let m = 0; m < nodes.length; ++m) {
+                const p = String(nodes[m].proto || "awg")
+                if (!byProto[p]) byProto[p] = nodes[m]
+            }
+            const order = (best.transports && best.transports.length > 0)
+                          ? best.transports : Object.keys(byProto)
+            const activeProto = String(nodes[0].activeProto || "")
+            const badges = []
+            for (let t = 0; t < order.length; ++t) {
+                const p = String(order[t])
+                const bn = byProto[p]
+                if (!bn) continue
+                badges.push({ proto: p,
+                              version: String(bn.protoVersion || ""), // "2"/"3"/"3.1"; xray — пусто
+                              supported: bn.transportSupported !== false,
+                              active: activeProto.length > 0 && activeProto === p })
+            }
+            out.push({ key: key, cc: cc, name: name, nodeId: best.nodeId,
                        rtt: best.measuredRttMs,
                        bars: best.measuredBars >= 0 ? best.measuredBars
                                                     : Math.round((best.health || 0) * 5),
-                       protoVersion: String(best.protoVersion || ""), // AVPN AWG 3.0: "1"/"2"/"3"
+                       badges: badges,
+                       disabled: disabled,
+                       // причина серой строки: транспорт есть, но не тот режим — или клиент его не умеет
+                       reason: !disabled ? ""
+                               : (anySupported ? qsTr("недоступно для этого режима")
+                                               : qsTr("недоступно в этой версии")),
                        isCurrent: isCur })
         }
         out.sort(function(a, b) {
+            if (a.disabled !== b.disabled) return a.disabled ? 1 : -1   // серые — вниз
             const am = a.rtt >= 0, bm = b.rtt >= 0
             if (am !== bm) return am ? -1 : 1
             if (am) return a.rtt - b.rtt
@@ -98,6 +177,7 @@ PageType {
     }
 
     onQueryChanged: rebuildCountries()
+    onTransportModeChanged: rebuildCountries()   // AVPN awg31-xray-v1: смена режима меняет серые строки
     Connections {
         target: root.hasEngine ? TribeEngine : null
         ignoreUnknownSignals: true
@@ -264,6 +344,53 @@ PageType {
             }
         }
 
+        // ── AVPN awg31-xray-v1: режим транспорта («Авто / Amnezia / Xray») ──
+        // Видим только когда есть из чего выбирать (в пуле больше одного транспорта) или когда
+        // ручной режим уже включён — из него надо уметь выйти. Движок — авторитет: он может
+        // отклонить режим (тост от фасада) и сам решает, переподнимать ли туннель.
+        Text {
+            visible: root.showTransportSelector
+            Layout.leftMargin: Theme.space.xl
+            Layout.topMargin: Theme.space.lg
+            text: qsTr("РЕЖИМ СОЕДИНЕНИЯ")
+            color: Theme.color.text3
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.caption
+            font.weight: Theme.font.wSemibold
+            font.letterSpacing: Theme.font.trackCaption * Theme.font.caption
+        }
+
+        TribeTransportSelector {
+            visible: root.showTransportSelector
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.space.xl
+            Layout.rightMargin: Theme.space.xl
+            Layout.topMargin: Theme.space.sm
+            mode: root.transportMode
+            awgAvailable: root.awgInPool
+            xrayAvailable: root.xrayInPool
+            // §5: страница движок не зовёт — сигнал уходит в PageStart
+            onModeRequested: (m) => root.pickTransport(m)
+        }
+
+        Text {
+            visible: root.showTransportSelector
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.space.xl
+            Layout.rightMargin: Theme.space.xl
+            Layout.topMargin: Theme.space.sm
+            text: root.transportMode === "awg"
+                      ? qsTr("Только транспорт Amnezia (AmneziaWG)")
+                      : (root.transportMode === "xray"
+                             ? qsTr("Только транспорт Xray (VLESS Reality)")
+                             : qsTr("Сервис выберет лучший транспорт"))
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: Theme.color.text3
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.caption
+        }
+
         // ── заголовок секции ── (bottomMargin нет: воздух под лейблом — контент-инсет списка,
         // скроллится с ним; рамочный зазор давал мёртвую полосу при прокрутке — паттерн 2026-07-10) // AVPN
         Text {
@@ -298,8 +425,10 @@ PageType {
                     id: row
                     required property var modelData
                     width: ListView.view.width
-                    implicitHeight: 62
+                    implicitHeight: 66
                     radius: Theme.radius.lg
+                    // AVPN awg31-xray-v1: локация без транспорта под текущий режим — серая
+                    opacity: row.modelData.disabled ? 0.5 : 1.0
                     color: row.modelData.isCurrent ? Theme.color.chipSelected : Theme.color.surface1
                     border.width: 1
                     border.color: row.modelData.isCurrent ? Theme.color.accent : Theme.color.border
@@ -331,28 +460,40 @@ PageType {
                                 font.pixelSize: Theme.font.bodyS + 1
                                 font.weight: Theme.font.wBold
                             }
-                            // AVPN AWG 3.0: метка версии протокола ноды — под именем, от начала строки.
-                            // Версия — НЕ статус подключения, поэтому нейтральная палитра (surface2 +
-                            // accent), не connected-зелёный. Показываем для awg-нод (v2/v3); v1/пусто скрыто.
-                            Rectangle {
-                                id: protoPill
-                                readonly property string major: row.modelData.protoVersion
-                                visible: major === "2" || major === "3"
+                            // AVPN awg31-xray-v1: бейджи ТРАНСПОРТОВ локации — под именем, от начала
+                            // строки, порядок = серверный transport_rank. Активный (поднятый)
+                            // подсвечен акцентом; неподдерживаемый клиентом — приглушён.
+                            // (Заменило одиночную пилюлю версии AWG; заодно чинит «3.1» — версия
+                            // теперь приходит строкой, а не сравнивается с "2"/"3".)
+                            RowLayout {
                                 Layout.alignment: Qt.AlignLeft
-                                Layout.preferredHeight: 17
-                                Layout.preferredWidth: protoLbl.implicitWidth + Theme.space.sm * 2
-                                radius: Theme.radius.pill
-                                color: Theme.color.surface2
-                                Text {
-                                    id: protoLbl
-                                    anchors.centerIn: parent
-                                    text: qsTr("Amnezia v%1").arg(protoPill.major)
-                                    textFormat: Text.PlainText
-                                    color: Theme.color.accent
-                                    font.family: Theme.font.body
-                                    font.pixelSize: Theme.font.caption - 1
-                                    font.weight: Theme.font.wBold
+                                spacing: Theme.space.xs
+                                visible: row.modelData.badges.length > 0
+                                Repeater {
+                                    model: row.modelData.badges
+                                    delegate: TribeTransportBadge {
+                                        required property var modelData
+                                        transport: modelData.proto
+                                        version: modelData.version
+                                        active: modelData.active
+                                        supported: modelData.supported
+                                        // xray «Подключено» только после пробы — пока идёт проверка,
+                                        // бейдж честно жёлтый, а не зелёный/акцентный
+                                        verifying: root.hasEngine && TribeEngine.verifying === true
+                                    }
                                 }
+                            }
+
+                            // серая строка: транспорта под текущий режим тут нет (или клиент его не умеет)
+                            Text {
+                                visible: row.modelData.disabled
+                                Layout.fillWidth: true
+                                text: row.modelData.reason
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                color: Theme.color.text3
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.caption - 1
                             }
                         }
 
@@ -385,6 +526,12 @@ PageType {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
+                            // AVPN awg31-xray-v1: серая локация — честный тост, пин не трогаем
+                            if (row.modelData.disabled) {
+                                if (typeof PageController !== "undefined")
+                                    PageController.showNotificationMessage(row.modelData.reason)
+                                return
+                            }
                             // уже выбрана вручную — no-op (не дёргаем реконнект)
                             if (row.modelData.isCurrent && !root.autoMode) { root.back(); return }
                             Haptic.play("selection"); Haptic.arm() // AVPN (haptics): итог реконнекта отыграет PageConnectTribe
