@@ -12,6 +12,11 @@ Item {
     id: root
 
     property bool dismissed: false
+
+    // Тап по «Обновить»: на десктопном macOS приложение ставит новую версию САМО (SelfUpdate) —
+    // хост открывает экран обновления. Там, где установки внутри приложения нет (iOS/Android/
+    // Windows), поведение прежнее: открыть страницу загрузки/стор.
+    signal updateRequested()
     readonly property bool shouldShow: (typeof TribeEngine !== "undefined")
                                         && TribeEngine.updateState === 1 && !dismissed
 
@@ -41,7 +46,10 @@ Item {
 
             Text {
                 Layout.fillWidth: true
-                text: qsTr("Доступна новая версия Tribe VPN")
+                // Номер в баннере: «доступна версия 5.1.74» проверяемо, «доступна новая версия» — нет.
+                text: (typeof TribeEngine !== "undefined" && TribeEngine.availableVersion)
+                      ? qsTr("Доступна версия %1").arg(TribeEngine.availableVersion)
+                      : qsTr("Доступна новая версия Tribe VPN")
                 color: Theme.color.text1
                 font.family: Theme.font.body
                 font.pixelSize: Theme.font.bodyS
@@ -60,6 +68,10 @@ Item {
                     anchors.margins: -Theme.space.sm   // увеличенная зона тапа для мелкого текста
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
+                        if (typeof TribeEngine !== "undefined" && TribeEngine.canSelfUpdate === true) {
+                            root.updateRequested()
+                            return
+                        }
                         var url = (typeof TribeEngine !== "undefined") ? TribeEngine.storeUrl : ""
                         if (url) Qt.openUrlExternally(url)
                     }

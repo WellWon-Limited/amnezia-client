@@ -12,10 +12,27 @@ import ".."   // Theme
 Item {
     id: gate
     anchors.fill: parent
-    visible: (typeof TribeEngine !== "undefined") && TribeEngine.updateState === 2
+    // AVPN (реш. владельца 2026-09-02): один и тот же экран обслуживает ДВА случая — обязательное
+    // обновление (updateState === 2, закрыть нельзя) и мягкое по кнопке баннера (openSoft()).
+    // Без этого «Обновить» на баннере уводила в браузер за .dmg, хотя установка внутри приложения
+    // на macOS уже реализована — ради неё всё и делалось.
+    readonly property bool blocking: (typeof TribeEngine !== "undefined") && TribeEngine.updateState === 2
+    property bool softOpen: false
+
+    visible: blocking || softOpen
     z: 9999
 
     property int depthIndex: 0
+
+    function openSoft() {
+        gate.installError = ""
+        gate.softOpen = true
+    }
+
+    function closeSoft() {
+        gate.softOpen = false
+        gate.installText = ""
+    }
 
     onVisibleChanged: {
         if (visible)
@@ -31,6 +48,11 @@ Item {
         target: PageController
         enabled: gate.visible
         function onCloseTopDrawer() {
+            // Мягкий показ закрывается «назад»/Escape штатно: пин глубины — только для блокера.
+            if (!gate.blocking) {
+                gate.closeSoft()
+                return
+            }
             // Back/Escape while the block is up: PageController::keyPressEvent does
             //     if (m_drawerDepth) { emit closeTopDrawer(); decrementDrawerDepth(); }
             // — this slot runs SYNCHRONOUSLY inside `emit`, BEFORE the pending decrement. So at
@@ -59,11 +81,12 @@ Item {
         id: sheet
         anchors.centerIn: parent
         width: parent.width - 2 * Theme.space.xl
-        mode: "blocking"
+        mode: gate.blocking ? "blocking" : "soft"
         busy: gate.installing
         busyText: gate.installText
         errorText: gate.installError
         onUpdateRequested: gate.startUpdate()
+        onLaterRequested: gate.closeSoft()
     }
 
     // Установка внутри приложения есть только на десктопном macOS (там мы сами шипим .dmg).
@@ -88,6 +111,10 @@ Item {
         target: (typeof TribeEngine !== "undefined") ? TribeEngine : null
         ignoreUnknownSignals: true
         function onSelfUpdateProgress(text) { gate.installText = text }
+        function onSelfUpdateInstalled() {
+            // Приложение сейчас перезапустится — кнопку держим погашенной, экран не закрываем.
+            gate.installText = qsTr("Готово, перезапускаем приложение…")
+        }
         function onSelfUpdateFailed(reason) {
             gate.installing = false
             gate.installText = ""

@@ -531,6 +531,7 @@ PageType {
         // (dismissed-биндинг вернёт баннер после выхода из режима; клик по крестику, как и
         // раньше, перезаписывает биндинг статическим true до перезапуска — поведение сохранено).
         dismissed: root.whitelistModeNow
+        onUpdateRequested: updateGate.openSoft()
         anchors.top: header.bottom
         anchors.topMargin: visible ? Theme.space.md : 0
         anchors.left: parent.left; anchors.right: parent.right

@@ -96,9 +96,14 @@ extern "C" void AvpnDockBadge_install();
 #include "MacServiceInstaller.h" // AVPN (macOS desktop): авто-установка root-демона из вшитого pkg (ноль терминала)
 #include <QThread>
 #include "core/utils/ipcClient.h" // AVPN (wake-реконнект): подписка на wakeup/networkChanged реплики демона
+
 #endif
 
 namespace avpn {
+
+// Ключ платформы для карт версий (определение — ниже, рядом с self-update).
+static QString avpnPlatformKey();
+
 
 // AVPN awg31-xray-v1: маппер технических ошибок движка (no_transport/unsupported_proto) в человеческий
 // текст — определён рядом с humanPinError ниже по файлу, нужен раньше (guardedStart).
@@ -558,17 +563,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 // force-update вердикт: платформенная ветка — ЕДИНСТВЕННОЕ платформо-специфичное
                 // место здесь (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
                 const QString appVer = QStringLiteral(APP_VERSION);
-#if defined(Q_OS_IOS)
-                const QString plat = QStringLiteral("ios");
-#elif defined(Q_OS_ANDROID)
-                const QString plat = QStringLiteral("android");
-#elif defined(Q_OS_MACOS)
-                const QString plat = QStringLiteral("macos");
-#elif defined(Q_OS_WIN)
-                const QString plat = QStringLiteral("windows");
-#else
-                const QString plat = QStringLiteral("linux");
-#endif
+                const QString plat = avpnPlatformKey();
                 const avpn::UpdateVerdict v = avpn::compareVersions(
                     appVer, c.minAppVersion.value(plat), c.recommendedVersion.value(plat));
                 m_updateState = (v == avpn::UpdateVerdict::Block) ? 2
@@ -871,6 +866,36 @@ QString AvpnEngineQml::configUrl(const QString &key, const QString &def) const
 // AVPN (реш. владельца 2026-09-02): «Обновить» на десктопном macOS ставит новую версию сама.
 // URL образа — server-driven (urls.macos_dmg_url) с вкомпиленным фолбэком; хост-гард и все проверки
 // подписи/нотаризации/версии — внутри SelfUpdate (там же причина отказа человеческим текстом).
+// Ключ платформы для карт min_app_version/recommended_version. ЕДИНСТВЕННОЕ платформо-специфичное
+// место в этом файле (PLATFORM-SCOPING: serviceEngine общий, ветка строго под #ifdef Q_OS_*).
+static QString avpnPlatformKey()
+{
+#if defined(Q_OS_IOS)
+    return QStringLiteral("ios");
+#elif defined(Q_OS_ANDROID)
+    return QStringLiteral("android");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("windows");
+#else
+    return QStringLiteral("linux");
+#endif
+}
+
+QString AvpnEngineQml::appVersion() const
+{
+    const QStringList parts = QStringLiteral(APP_VERSION).split(QLatin1Char('.'));
+    return parts.mid(0, 3).join(QLatin1Char('.'));
+}
+
+QString AvpnEngineQml::availableVersion() const
+{
+    const QString plat = avpnPlatformKey();
+    const QString rec = m_remoteCfg.recommendedVersion.value(plat);
+    return rec.isEmpty() ? m_remoteCfg.minAppVersion.value(plat) : rec;
+}
+
 void AvpnEngineQml::startSelfUpdate()
 {
     if (!avpn::SelfUpdate::isSupported()) {
@@ -885,6 +910,8 @@ void AvpnEngineQml::startSelfUpdate()
                 [this](const QString &r) { emit selfUpdateFailed(r); });
         // installed(): образ проверен и подменён, дочерний процесс перезапустит приложение —
         // ничего гасить не нужно, просто держим экран обновления до выхода.
+        connect(m_selfUpdate, &avpn::SelfUpdate::installed, this,
+                [this]() { emit selfUpdateInstalled(); });
     }
     // Маркетинговая версия (первые три компонента APP_VERSION) — нижняя граница: образ со
     // старой/равной версией скрипт не поставит.

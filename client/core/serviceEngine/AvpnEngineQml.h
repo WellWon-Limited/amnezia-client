@@ -194,6 +194,11 @@ class AvpnEngineQml : public QObject {
     // AVPN remote-config (T6): вердикт force-update (0 Ok/1 Recommend/2 Block, из ConfigService::configApplied)
     // + магазинная ссылка (urls.store_ios/store_android с сервера, фолбэк вшитый) — баннер апдейта/CTA.
     Q_PROPERTY(int updateState READ updateState NOTIFY changed)
+    // AVPN (реш. владельца 2026-09-02): экран обновления обязан называть ОБЕ версии — «было → стало».
+    // Без них сообщение «доступна новая версия» неотличимо от старого/ошибочного, и человек не
+    // понимает, обновился он уже или нет.
+    Q_PROPERTY(QString appVersion READ appVersion CONSTANT)
+    Q_PROPERTY(QString availableVersion READ availableVersion NOTIFY changed)
     Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
     // AVPN (реш. владельца 2026-09-02): на десктопном macOS кнопка «Обновить» ставит новую версию
     // сама (скачивание нашего dmg + проверка подписи/нотаризации/версии). На остальных платформах
@@ -331,6 +336,11 @@ public:
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
     bool canSelfUpdate() const { return avpn::SelfUpdate::isSupported(); }
+    // Маркетинговая версия приложения (первые три компонента APP_VERSION, без номера сборки).
+    QString appVersion() const;
+    // Версия, которую предлагает control plane для ЭТОЙ платформы (recommended_version, при его
+    // отсутствии — min_app_version). Пусто = сервер ничего не предлагает.
+    QString availableVersion() const;
     // Запускает установку обновления (idempotent: повторный вызов во время установки — no-op).
     Q_INVOKABLE void startSelfUpdate();
 
@@ -711,6 +721,7 @@ signals:
     // AVPN (2026-09-02): ход установки обновления — стадия для экрана обновления и причина отказа.
     void selfUpdateProgress(const QString &text);
     void selfUpdateFailed(const QString &reason);
+    void selfUpdateInstalled();
     void changed();
     void error(const QString &message);
     // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
