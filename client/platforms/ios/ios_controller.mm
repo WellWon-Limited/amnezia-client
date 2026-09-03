@@ -487,7 +487,10 @@ void IosController::checkStatus()
         if (NSDictionary *roam = [response[@"roam"] isKindOfClass:[NSDictionary class]] ? response[@"roam"] : nil) {
             QStringList parts;
             for (NSString *k in [[roam allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-                parts << QString::fromNSString(k) + QLatin1Char('=') + QString::number([roam[k] longLongValue]);
+                id v = roam[k];
+                if (![k isKindOfClass:[NSString class]] || ![v respondsToSelector:@selector(longLongValue)])
+                    continue; // чужой/битый ответ — не наш JSON; молча пропускаем
+                parts << QString::fromNSString(k) + QLatin1Char('=') + QString::number([v longLongValue]);
             }
             roamSummary = parts.join(QLatin1Char(' '));
         }

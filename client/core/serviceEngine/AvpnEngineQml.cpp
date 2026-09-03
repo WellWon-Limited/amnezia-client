@@ -3540,6 +3540,7 @@ void AvpnEngineQml::daemonWakeEvent(const char *why)
     if (m_wakeProbing)
         return;                                  // wakeup+networkChanged летят пачкой — одна проба
     m_wakeProbing = true;
+    m_wakeProbeAttempt = 0;                      // новый цикл проб — счётчик повторов с нуля
     qInfo() << "[wake]" << why << "— probing tunnel liveness";
     // Сети после сна нужно время (реассоциация Wi-Fi, DHCP) — пробуем чуть отложенно.
     QTimer::singleShot(2500, this, [this]() { wakeLivenessProbe(); });
@@ -3549,6 +3550,7 @@ void AvpnEngineQml::wakeLivenessProbe()
 {
     if (!m_wantConnected || m_lastTunnelState != Vpn::Connected) {
         m_wakeProbing = false;                   // состояние уехало, пока ждали — не вмешиваемся
+        m_wakeProbeAttempt = 0;
         return;
     }
     // Сначала проверка живости, потом рестарт (спека §2.1 шаг 2): HEAD generate_204 ЧЕРЕЗ туннель
