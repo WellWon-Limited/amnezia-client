@@ -27,6 +27,13 @@ struct WGConfig: Decodable {
   let dnsFwdSuffixes: String?
   let dnsFwdServer: String?
   let dnsFwdWarmup: String?
+  // AVPN seamless roaming (awg-apple tribe.4, TribeRoaming.swift): политика адаптера на потерю
+  // пути — СТРОКИ (та же JSONDecoder-грабля). Нет ключа = вкомпиленный дефолт seamless;
+  // roamKeepBackend "0" = поведение апстрима (пауза устройства + рестарт на возврате).
+  let roamKeepBackend: String?
+  let roamPauseAfterS: String?
+  let roamStallProbeS: String?
+  let roamStallRebindS: String?
 
   enum CodingKeys: String, CodingKey {
     case initPacketMagicHeader = "H1", responsePacketMagicHeader = "H2"
@@ -57,6 +64,17 @@ struct WGConfig: Decodable {
     case dnsFwdSuffixes
     case dnsFwdServer
     case dnsFwdWarmup
+    case roamKeepBackend
+    case roamPauseAfterS
+    case roamStallProbeS
+    case roamStallRebindS
+  }
+
+  var roamingPolicy: TribeRoamingPolicy {
+    TribeRoamingPolicy.fromConfig(keepBackend: roamKeepBackend,
+                                  pauseAfterS: roamPauseAfterS,
+                                  stallProbeS: roamStallProbeS,
+                                  stallRebindS: roamStallRebindS)
   }
 
   // AVPN split-DNS: форвардер включён → система получает виртуальный резолвер (100.100.100.53),

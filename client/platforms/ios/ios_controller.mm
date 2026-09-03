@@ -883,6 +883,9 @@ bool IosController::setupXray()
                        qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
                        qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
+    // AVPN seamless roaming: рестарт ядра только при смене аплинка; 1 = старое поведение.
+    finalConfig.insert(configKey::xrayRestartOnPathLoss,
+                       avpn::TuningStore::flag(QStringLiteral("xray_restart_on_path_loss"), false) ? 1 : 0);
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -908,6 +911,9 @@ bool IosController::setupSSXray()
                        qBound(1000, int(avpn::TuningStore::numberOr(QStringLiteral("xray_rw_timeout_ms"), 60000)), 600000));
     finalConfig.insert(configKey::networkChangeDebounceMs,
                        qBound(200, int(avpn::TuningStore::numberOr(QStringLiteral("network_change_debounce_ms"), 1000)), 30000));
+    // AVPN seamless roaming: рестарт ядра только при смене аплинка; 1 = старое поведение.
+    finalConfig.insert(configKey::xrayRestartOnPathLoss,
+                       avpn::TuningStore::flag(QStringLiteral("xray_restart_on_path_loss"), false) ? 1 : 0);
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -951,6 +957,15 @@ bool IosController::setupAwg()
         wgConfig.insert(QLatin1String("dnsFwdOn"), m_rawConfig[QLatin1String("dnsFwdOn")]);
         wgConfig.insert(QLatin1String("dnsFwdSuffixes"), m_rawConfig[QLatin1String("dnsFwdSuffixes")]);
         wgConfig.insert(QLatin1String("dnsFwdServer"), m_rawConfig[QLatin1String("dnsFwdServer")]);
+    }
+
+    // AVPN seamless roaming (awg-apple tribe.4): политика адаптера на потерю пути — корневые
+    // ключи cfg (VpnConnectionTunnelControl::up) -> WGConfig.swift. Отсутствуют = дефолт seamless.
+    for (const QLatin1String &key : { configKey::roamKeepBackend, configKey::roamPauseAfterS,
+                                      configKey::roamStallProbeS, configKey::roamStallRebindS }) {
+        if (m_rawConfig.contains(key)) {
+            wgConfig.insert(key, m_rawConfig[key]);
+        }
     }
 
     if (config.contains(configKey::allowedIps) && config[configKey::allowedIps].isArray()) {

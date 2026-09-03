@@ -15,6 +15,10 @@ struct XrayConfig: Decodable {
     let connectTimeoutMs: Int?
     let readWriteTimeoutMs: Int?
     let networkChangeDebounceMs: Int?
+    // AVPN seamless roaming (2026-09-03): 1 = старое поведение (рестарт ядра на любую значимую
+    // смену пути, включая «пропал и вернулся тот же Wi-Fi»); 0/nil = рестарт ТОЛЬКО при смене
+    // физического аплинка (Wi-Fi <-> сотовая), потеря и возврат того же интерфейса ядро не трогают.
+    let restartOnPathLoss: Int?
 
     private enum CodingKeys: String, CodingKey {
         case dns1
@@ -25,5 +29,6 @@ struct XrayConfig: Decodable {
         case connectTimeoutMs = "xray_connect_timeout_ms"
         case readWriteTimeoutMs = "xray_rw_timeout_ms"
         case networkChangeDebounceMs = "network_change_debounce_ms"
+        case restartOnPathLoss = "xray_restart_on_path_loss"
     }
 }

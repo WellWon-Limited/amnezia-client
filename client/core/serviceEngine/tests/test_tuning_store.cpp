@@ -91,6 +91,18 @@ int main(int argc, char **argv)
         avpn::TuningStore::set({{"handshake_timeout_ms", 999999.0}, {"handshake_max_timeouts", 999.0}}, {}, {}, {});
         CHECK(avpn::handshakeTimeoutMsTuned() <= 60000, "connecttunables: timeout-гигант => потолок");
         CHECK(avpn::handshakeMaxTimeoutsTuned() <= 10, "connecttunables: maxTimeouts-гигант => потолок");
+        // --- seamless roaming (2026-09-03, §23): дефолты = «никогда не паузить, сторож 4/+10 с» ---
+        avpn::TuningStore::reset();
+        CHECK(avpn::roamPauseAfterSTuned() == 0 && avpn::roamStallProbeSTuned() == 4
+                  && avpn::roamStallRebindSTuned() == 10,
+              "connecttunables: roaming — пустой store => 0/4/10");
+        avpn::TuningStore::set({{"ios_roam_pause_after_s", -1.0}, {"ios_roam_stall_probe_s", 999.0},
+                                {"ios_roam_stall_rebind_s", -7.0}}, {}, {}, {});
+        CHECK(avpn::roamPauseAfterSTuned() == 0, "connecttunables: roaming pause<0 => 0 (никогда)");
+        CHECK(avpn::roamStallProbeSTuned() == 60, "connecttunables: roaming probe-гигант => потолок 60");
+        CHECK(avpn::roamStallRebindSTuned() == 0, "connecttunables: roaming rebind<0 => 0 (только bump)");
+        avpn::TuningStore::set({{"ios_roam_pause_after_s", 30.0}}, {}, {}, {});
+        CHECK(avpn::roamPauseAfterSTuned() == 30, "connecttunables: roaming pause=30 проходит как есть");
         // ИНВАРИАНТ (CONNECT-INVARIANTS, коммент у m_watchdog): watchdog ВСЕГДА > handshake_timeout —
         // оператор ставит watchdog=5000 при timeout=12000 => пол поднимает до timeout+запас
         avpn::TuningStore::set({{"reconcile_watchdog_ms", 5000.0}}, {}, {}, {});
