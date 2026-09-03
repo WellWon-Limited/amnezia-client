@@ -20,13 +20,20 @@ class AwgApple(ConanFile):
     # AVPN: official v3.1.4 contains the AWG 3.1 parser fix.  The package
     # suffix is deliberate: it also carries the small, reviewable Tribe
     # split-DNS/warmup/rebind patch from the old fork.
-    version = "3.1.4-tribe.3"
+    version = "3.1.4-tribe.4"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
 
     def export_sources(self):
         export_conandata_patches(self)
+        # Tribe seamless roaming: pure policy/watchdog logic + its executable unit test travel
+        # with the recipe (tribe.4). The .swift is copied next to WireGuardAdapter.swift in
+        # build(); the test is a build gate (see build()).
+        copy(self, "*.swift", src=os.path.join(self.recipe_folder, "tribe"),
+             dst=os.path.join(self.export_sources_folder, "tribe"))
+        copy(self, "*", src=os.path.join(self.recipe_folder, "tests"),
+             dst=os.path.join(self.export_sources_folder, "tests"))
         # Both mobile adapters bind the same pinned Xray core. Reuse its reviewed error-
         # propagation delta, but copy it into this recipe's immutable exported sources.
         copy(
@@ -98,6 +105,12 @@ class AwgApple(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
+        # Tribe seamless roaming (tribe.4): the adapter patch 0003 references TribeRoaming.swift;
+        # gate the package on its unit test first (plain swiftc, host toolchain), then ship the
+        # file alongside the adapter so the NE target compiles it from AWG_APPLE_SOURCE_DIR.
+        self.run("sh " + os.path.join(self.source_folder, "tests", "run_tribe_roaming_tests.sh"))
+        copy(self, "TribeRoaming.swift", src=os.path.join(self.source_folder, "tribe"),
+             dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"))
         go_path = os.path.join(self.build_folder, ".tribe-go-path")
         go_cache = os.path.join(self.build_folder, ".tribe-go-cache")
         prep_env = Environment()
@@ -166,4 +179,7 @@ class AwgApple(ConanFile):
             "AWG_APPLE_XRAY_CORE_VERSION": "1.260728.0",
             "AWG_APPLE_XRAY_SOCKET_ABI": "awg-apple-libxray-c-v2-protect-result",
             "AWG_APPLE_ENGINE_CAPABILITIES": "awg.random_trailers;awg.disable_cookies",
+            # Tribe seamless roaming (patch 0003 + TribeRoaming.swift): the NE CMake target
+            # compiles TribeRoaming.swift only when the package declares it.
+            "AWG_APPLE_TRIBE_ROAMING": "1",
         })

@@ -1,0 +1,263 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index 9c2af38..5875c11 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -51,6 +51,18 @@ public class WireGuardAdapter {
+     /// Tracks whether the tunnel has ever had a successful handshake during the lifetime of this adapter instance.
+     private var everHadHandshake = false
+ 
++    // Tribe seamless roaming (TribeRoaming.swift): a short path loss (mesh Wi-Fi handoff,
++    // Wi-Fi <-> cellular) must NOT turn the device off. Set `roamingPolicy` before start();
++    // everything below is touched on workQueue only.
++    public var roamingPolicy = TribeRoamingPolicy.seamless
++    private var roamCounters = TribeRoamingCounters()
++    private var lastPathSatisfiable = true
++    private var pathLostAt: Date?
++    private var pendingPauseWork: DispatchWorkItem?
++    private var roamRebindPending = false
++    private var stallTracker: TribeStallTracker?
++    private var stallTimer: DispatchSourceTimer?
++
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+ 
+@@ -211,6 +223,7 @@ public class WireGuardAdapter {
+                     settingsGenerator
+                 )
+                 self.networkMonitor = networkMonitor
++                self.startStallWatchdog()
+                 completionHandler(nil)
+             } catch let error as WireGuardAdapterError {
+                 networkMonitor.cancel()
+@@ -240,6 +253,9 @@ public class WireGuardAdapter {
+ 
+             self.networkMonitor?.cancel()
+             self.networkMonitor = nil
++            self.stopStallWatchdog()
++            self.cancelPendingPause()
++            self.pathLostAt = nil
+ 
+             self.state = .stopped
+ 
+@@ -323,6 +339,13 @@ public class WireGuardAdapter {
+         }
+     }
+ 
++    /// Tribe: roaming/stall counters for the app's stats reply and the diagnostics report.
++    public func roamingCounters(completionHandler: @escaping (TribeRoamingCounters) -> Void) {
++        workQueue.async {
++            completionHandler(self.roamCounters)
++        }
++    }
++
+     // MARK: - Private methods
+ 
+     /// Setup WireGuard log handler.
+@@ -485,25 +508,45 @@ public class WireGuardAdapter {
+         case .started(let handle, let settingsGenerator):
+             self.updateEverHadHandshake(handle: handle)
+             if path.status.isSatisfiable {
+-                let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
+-                self.logEndpointResolutionResults(resolutionResults)
+-
+-                wgSetConfig(handle, wgConfig)
+-                wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-                wgBumpSockets(handle)
++                // Tribe seamless roaming: the device, keys, endpoint and TUN are untouched;
++                // the only reaction to a (re)appearing path is ONE coalesced socket rebind
++                // (BindUpdate keeps the local port) + keepalive burst. WireGuard roams on its own:
++                // the server updates our endpoint on the first authenticated packet, no handshake.
++                self.lastPathSatisfiable = true
++                self.cancelPendingPause()
++                if let lostAt = self.pathLostAt {
++                    self.pathLostAt = nil
++                    self.roamCounters.pathRestored += 1
++                    let outage = Int((Date().timeIntervalSince(lostAt) * 1000).rounded())
++                    self.logHandler(.verbose, "Tribe roaming: path restored after \(outage) ms, rebinding socket on the live device (\(self.roamCounters.summary))")
++                }
++                self.scheduleRoamRebind()
+             } else {
+-                if self.shouldPauseBackendOnUnsatisfiedPath() {
++                self.lastPathSatisfiable = false
++                let legacyWouldPause = self.shouldPauseBackendOnUnsatisfiedPath()
++                switch TribeRoaming.pathLossDecision(policy: self.roamingPolicy, legacyWouldPause: legacyWouldPause) {
++                case .pauseNow:
++                    // Upstream behaviour (kill-switch `roamKeepBackend=0`): pause, restart on return.
+                     self.logHandler(.verbose, "Connectivity offline, pausing backend.")
++                    self.pauseBackend(handle: handle, settingsGenerator: settingsGenerator)
+ 
+-                    self.state = .temporaryShutdown(settingsGenerator)
+-                    wgTurnOff(handle)
+-                } else {
+-                    let remaining = self.remainingUnsatisfiedGraceSeconds()
+-                    if remaining > 0 {
+-                        self.logHandler(.verbose, "Connectivity unsatisfied right after applying routes, not pausing backend for ~\(Int(ceil(remaining)))s.")
++                case .keepBackend:
++                    self.notePathLost()
++                    if self.roamingPolicy.keepBackendOnPathLoss {
++                        self.logHandler(.verbose, "Tribe roaming: path lost, keeping backend alive (device, keys, endpoint and TUN untouched).")
+                     } else {
+-                        self.logHandler(.verbose, "Connectivity unsatisfied right after applying routes, not pausing backend.")
++                        let remaining = self.remainingUnsatisfiedGraceSeconds()
++                        if remaining > 0 {
++                            self.logHandler(.verbose, "Connectivity unsatisfied right after applying routes, not pausing backend for ~\(Int(ceil(remaining)))s.")
++                        } else {
++                            self.logHandler(.verbose, "Connectivity unsatisfied right after applying routes, not pausing backend.")
++                        }
+                     }
++
++                case .pauseAfter(let seconds):
++                    self.notePathLost()
++                    self.logHandler(.verbose, "Tribe roaming: path lost, keeping backend; pausing only if still offline after \(Int(seconds))s.")
++                    self.schedulePause(after: seconds)
+                 }
+             }
+ 
+@@ -524,6 +567,10 @@ public class WireGuardAdapter {
+                     try self.startWireGuardBackend(wgConfig: wgConfig),
+                     settingsGenerator
+                 )
++                self.roamCounters.resumes += 1
++                self.pathLostAt = nil
++                self.lastPathSatisfiable = true
++                self.startStallWatchdog()
+             } catch {
+                 self.logHandler(.error, "Failed to restart backend: \(error.localizedDescription)")
+             }
+@@ -537,6 +584,136 @@ public class WireGuardAdapter {
+         #endif
+     }
+ 
++    // MARK: - Tribe seamless roaming helpers (workQueue only)
++
++    private func notePathLost() {
++        guard self.pathLostAt == nil else { return }
++        self.pathLostAt = Date()
++        self.roamCounters.pathLost += 1
++    }
++
++    /// One coalesced rebind per burst of path events (Proton: 100 ms). Keeps the device handle,
++    /// keys and endpoint; `BindUpdate` reopens the UDP socket on the SAME local port and sends a
++    /// keepalive with the current keypair, so the server learns the new outer address without a
++    /// handshake. Also re-arms the stall watchdog so it does not double-bump the fresh socket.
++    private func scheduleRoamRebind() {
++        guard !self.roamRebindPending else { return }
++        self.roamRebindPending = true
++        let delay = max(0, self.roamingPolicy.rebindCoalesceSeconds)
++        self.workQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
++            guard let self = self else { return }
++            self.roamRebindPending = false
++            guard case .started(let handle, let settingsGenerator) = self.state else { return }
++            let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
++            self.logEndpointResolutionResults(resolutionResults)
++
++            wgSetConfig(handle, wgConfig)
++            wgDisableSomeRoamingForBrokenMobileSemantics(handle)
++            wgBumpSockets(handle)
++            self.roamCounters.roamBumps += 1
++            self.rearmStallTracker(handle: handle)
++        }
++    }
++
++    private func schedulePause(after seconds: TimeInterval) {
++        guard self.pendingPauseWork == nil else { return }
++        let work = DispatchWorkItem { [weak self] in
++            guard let self = self else { return }
++            self.pendingPauseWork = nil
++            guard case .started(let handle, let settingsGenerator) = self.state, !self.lastPathSatisfiable else { return }
++            self.logHandler(.verbose, "Tribe roaming: still offline after \(Int(seconds))s, pausing backend (long-offline fallback).")
++            self.pauseBackend(handle: handle, settingsGenerator: settingsGenerator)
++        }
++        self.pendingPauseWork = work
++        self.workQueue.asyncAfter(deadline: .now() + seconds, execute: work)
++    }
++
++    private func cancelPendingPause() {
++        self.pendingPauseWork?.cancel()
++        self.pendingPauseWork = nil
++    }
++
++    private func pauseBackend(handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) {
++        self.stopStallWatchdog()
++        self.cancelPendingPause()
++        self.roamCounters.pauses += 1
++        self.state = .temporaryShutdown(settingsGenerator)
++        wgTurnOff(handle)
++    }
++
++    // Stall watchdog: same-SSID roams sometimes produce NO path event at all, and a NAT/AP switch
++    // can leave outbound flowing into a black hole. Every second we read the device's own
++    // counters; outbound growing while inbound (rx bytes, handshake) is frozen on a satisfied path
++    // escalates: bump (same port) -> listen_port=0 (new 5-tuple) -> hand over to the app engine.
++    private func startStallWatchdog() {
++        self.stopStallWatchdog()
++        guard self.roamingPolicy.stallProbeSeconds > 0 else { return }
++        let timer = DispatchSource.makeTimerSource(queue: self.workQueue)
++        timer.schedule(deadline: .now() + 1, repeating: 1.0, leeway: .milliseconds(200))
++        timer.setEventHandler { [weak self] in
++            self?.stallTick()
++        }
++        self.stallTimer = timer
++        self.stallTracker = nil
++        timer.resume()
++    }
++
++    private func stopStallWatchdog() {
++        self.stallTimer?.cancel()
++        self.stallTimer = nil
++        self.stallTracker = nil
++    }
++
++    private func currentStallSample(handle: Int32) -> TribeStallSample? {
++        guard let settings = wgGetConfig(handle) else { return nil }
++        let config = String(cString: settings)
++        free(settings)
++        // systemUptime does not advance while the device sleeps: sleep is not a stall.
++        return TribeRoaming.parseSample(uapi: config, at: ProcessInfo.processInfo.systemUptime)
++    }
++
++    private func rearmStallTracker(handle: Int32) {
++        guard self.stallTimer != nil, let sample = self.currentStallSample(handle: handle) else { return }
++        if self.stallTracker == nil {
++            self.stallTracker = TribeStallTracker(first: sample)
++        } else {
++            self.stallTracker?.rearm(sample)
++        }
++    }
++
++    private func stallTick() {
++        guard case .started(let handle, _) = self.state,
++              let sample = self.currentStallSample(handle: handle) else { return }
++        if !self.everHadHandshake && sample.lastHandshakeSec > 0 {
++            self.everHadHandshake = true
++            self.logHandler(.verbose, "Observed first handshake at last_handshake_time_sec=\(sample.lastHandshakeSec)")
++        }
++        // Bootstrap (no handshake yet) belongs to the app's handshake watchdog, not to us.
++        guard self.everHadHandshake else {
++            self.stallTracker = nil
++            return
++        }
++        guard var tracker = self.stallTracker else {
++            self.stallTracker = TribeStallTracker(first: sample)
++            return
++        }
++        let action = tracker.observe(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
++        self.stallTracker = tracker
++        switch action {
++        case .none:
++            break
++        case .bumpSockets:
++            self.roamCounters.stallBumps += 1
++            self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
++            wgBumpSockets(handle)
++        case .rebindPort:
++            self.roamCounters.stallRebinds += 1
++            self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
++            wgSetConfig(handle, "listen_port=0\n")
++            wgDisableSomeRoamingForBrokenMobileSemantics(handle)
++        }
++    }
++
+     // MARK: - iOS offline detection helpers
+ 
+     private var unsatisfiedGracePeriodAfterNetworkSettings: TimeInterval {

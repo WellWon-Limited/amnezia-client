@@ -251,6 +251,17 @@ namespace amnezia
         constexpr QLatin1String xrayConnectTimeoutMs("xray_connect_timeout_ms");
         constexpr QLatin1String xrayRwTimeoutMs("xray_rw_timeout_ms");
         constexpr QLatin1String networkChangeDebounceMs("network_change_debounce_ms");
+        // AVPN seamless roaming (2026-09-03, iOS NE): 1 = рестарт ядра Xray на любую значимую
+        // смену пути (старое поведение); 0 = только при смене физического аплинка.
+        // features.xray_restart_on_path_loss -> setupXray()/setupSSXray() -> XrayConfig.restartOnPathLoss.
+        constexpr QLatin1String xrayRestartOnPathLoss("xray_restart_on_path_loss");
+        // AVPN seamless roaming (2026-09-03, iOS NE, awg-apple tribe.4): политика адаптера AWG на
+        // потерю пути — корневые ключи cfg (VpnConnectionTunnelControl::up) -> ios_controller ->
+        // WGConfig.swift -> TribeRoamingPolicy.fromConfig. Значения СТРОКАМИ (JSONDecoder-грабля).
+        constexpr QLatin1String roamKeepBackend("roamKeepBackend");
+        constexpr QLatin1String roamPauseAfterS("roamPauseAfterS");
+        constexpr QLatin1String roamStallProbeS("roamStallProbeS");
+        constexpr QLatin1String roamStallRebindS("roamStallRebindS");
 
         // AVPN backend-first (Task 7): server-tunable Xray engine memory limit (LibXray.runXray
         // maxMemory param on Android). Seeded into the shared vpnConfiguration in

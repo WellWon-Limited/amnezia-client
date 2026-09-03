@@ -219,6 +219,11 @@ extension PacketTunnelProvider {
             // session (used by scheduleNetworkChangeHandling in PacketTunnelProvider.swift). Fallback
             // 1.0s matches the pre-Task-6 literal byte-for-byte when the key is absent.
             xrayNetworkChangeDebounceSeconds = xrayConfig.networkChangeDebounceMs.map { Double($0) / 1000.0 } ?? 1.0
+            // AVPN seamless roaming: рестарт ядра только при смене аплинка (kill-switch
+            // xray_restart_on_path_loss=1 возвращает рестарт на любую смену пути).
+            xrayRestartOnPathLoss = (xrayConfig.restartOnPathLoss ?? 0) != 0
+            xrayAppliedUplinkSignature = currentUplinkSignature()
+            xrayLog(.info, message: "Tribe roaming (xray): restartOnPathLoss=\(xrayRestartOnPathLoss) uplink=\(xrayAppliedUplinkSignature ?? "-")")
 
             let xrayConfigData = xrayConfig.config.data(using: .utf8)
 

@@ -55,6 +55,28 @@ inline int rebindHealMaxTriesTuned()
     return qBound(0, int(TuningStore::numberOr(QStringLiteral("rebind_heal_max_tries"), 2)), 5);
 }
 
+// AVPN seamless roaming (2026-09-03, CONNECT-INVARIANTS §23): числа политики адаптера AWG в iOS NE.
+// Пауза устройства при ДОЛГОЙ потере пути (numbers.ios_roam_pause_after_s): 0 = никогда (дефолт,
+// консенсус Tailscale/Proton/sing-box), потолок 600 (выше — бессмысленно, WG сам переживает часы).
+inline int roamPauseAfterSTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("ios_roam_pause_after_s"), 0)), 600);
+}
+
+// Сторож застоя в NE (numbers.ios_roam_stall_probe_s): исходящее растёт, входящее/handshake стоят
+// столько секунд на живом пути -> bump сокета (тот же порт). 0 = сторож выключен; потолок 60.
+inline int roamStallProbeSTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("ios_roam_stall_probe_s"), 4)), 60);
+}
+
+// Вторая ступень сторожа (numbers.ios_roam_stall_rebind_s): застой продолжается ещё столько секунд
+// ПОСЛЕ bump -> listen_port=0 (новый 5-tuple). 0 = только bump; потолок 120.
+inline int roamStallRebindSTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("ios_roam_stall_rebind_s"), 10)), 120);
+}
+
 // macOS wake-рестарт (спека 2026-07-17): кап НАШИХ попыток переподнять туннель после пробуждения
 // (ретраи цепляются к reachabilityChanged). После капа — честный OFF («усталость = внешние
 // обстоятельства», дух §13). Пол 1 (0/минус с бэка = wake-фикс молча выключен — для этого есть

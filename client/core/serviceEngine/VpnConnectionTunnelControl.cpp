@@ -13,6 +13,7 @@
 #include <QSettings>                    // AVPN RU-direct: чтение тумблера AvpnBypass/masterOn для DNS-override
 #include "TuningStore.h"                // AVPN backend-first (T20): server-tunable пороги
 #include "ConnectTunables.h"            // AVPN: клампованные handshake-пороги (ревью 2026-07-11)
+#include "core/utils/constants/configKeys.h" // AVPN seamless roaming: ключи roam* в корень cfg
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона через QtRO (xrayRuntimeStatus), async
     #include "core/utils/ipcClient.h"
@@ -358,6 +359,26 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
                            ? QStringLiteral("1") : QStringLiteral("0"));
         }
     }
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    // AVPN seamless roaming (2026-09-03, CONNECT-INVARIANTS §23): политика адаптера AWG на потерю
+    // пути (mesh-роуминг, Wi-Fi <-> сотовая). Ключи в КОРЕНЬ cfg -> ios_controller::setupWireGuard
+    // -> WGConfig.swift -> TribeRoamingPolicy. Значения СТРОКАМИ (JSONDecoder-грабля iOS).
+    // kill-switch features.ios_awg_seamless_roaming (default ВКЛ): false = поведение апстрима
+    // (устройство гасится на первом же unsatisfied, рестарт с новым handshake на возврате).
+    {
+        const bool seamless = avpn::TuningStore::flag(QStringLiteral("ios_awg_seamless_roaming"), true);
+        cfg.insert(configKey::roamKeepBackend, seamless ? QStringLiteral("1") : QStringLiteral("0"));
+        cfg.insert(configKey::roamPauseAfterS, QString::number(avpn::roamPauseAfterSTuned()));
+        cfg.insert(configKey::roamStallProbeS, QString::number(avpn::roamStallProbeSTuned()));
+        cfg.insert(configKey::roamStallRebindS, QString::number(avpn::roamStallRebindSTuned()));
+        m_lastConfigReport.insert(QStringLiteral("roaming"),
+                                  QStringLiteral("keep=%1 pause=%2 probe=%3 rebind=%4")
+                                      .arg(seamless ? 1 : 0)
+                                      .arg(avpn::roamPauseAfterSTuned())
+                                      .arg(avpn::roamStallProbeSTuned())
+                                      .arg(avpn::roamStallRebindSTuned()));
+    }
+#endif
     // AVPN backend-first: пороги «нода мертва» для iOS NE (numbers.*; фолбэк = константы NE).
     // Клампы ОБЯЗАТЕЛЬНЫ (ревью 2026-07-11): timeout=0 с бэка = каждый iOS-коннект умирает
     // на первом тике checkStatus; связка с watchdog — ConnectTunables.h.

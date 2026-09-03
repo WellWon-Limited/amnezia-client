@@ -77,6 +77,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // XrayConfig.networkChangeDebounceMs when startXray() decodes the NE provider configuration (see
     // PacketTunnelProvider+Xray.swift). Default matches the pre-Task-6 literal (1.0s) byte-for-byte.
     var xrayNetworkChangeDebounceSeconds: TimeInterval = 1.0
+    // AVPN seamless roaming (2026-09-03): ядро Xray перезапускается ТОЛЬКО при смене физического
+    // аплинка (подпись интерфейсов без статуса пути). Потеря и возврат того же Wi-Fi (mesh-роуминг)
+    // ядро не трогают: его TCP-сессии переживают паузу радио, а рестарт рвал бы их гарантированно.
+    // kill-switch: XrayConfig.restartOnPathLoss=1 -> прежнее поведение (рестарт на любую смену).
+    var xrayRestartOnPathLoss = false
+    var xrayAppliedUplinkSignature: String?
 
     // AVPN (волна AWG 3.1 + Xray, этап D3): runtime-статус и жизненный цикл xray-пути.
     // Сессия (поколение + счётчики rx/tx tun-интерфейса hev), реестр сырого контекста
@@ -126,6 +132,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if self.isApplyingNetworkChange || self.reasserting {
                 xrayLog(.debug, message: "Ignoring path change while xray restart is in progress")
                 return
+            }
+
+            if proto == .xray && !self.xrayRestartOnPathLoss {
+                let uplink = self.uplinkSignature(for: path)
+                let satisfiable = path.status == .satisfied || path.status == .requiresConnection
+                guard satisfiable else {
+                    xrayLog(.info, message: "Tribe roaming (xray): path lost, keeping core and TUN (uplink=\(uplink))")
+                    return
+                }
+                if uplink == self.xrayAppliedUplinkSignature {
+                    xrayLog(.info, message: "Tribe roaming (xray): path back on the same uplink, no restart (uplink=\(uplink))")
+                    return
+                }
+                xrayLog(.info, message: "Tribe roaming (xray): uplink changed \(self.xrayAppliedUplinkSignature ?? "-") -> \(uplink), restarting core")
+                self.xrayAppliedUplinkSignature = uplink
             }
 
             self.scheduleNetworkChangeHandling(for: proto, path: path)
@@ -454,6 +475,34 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         pendingNetworkChangeWorkItem?.cancel()
         pendingNetworkChangeWorkItem = nil
         isApplyingNetworkChange = false
+    }
+}
+
+// AVPN seamless roaming: internal (не private) — нужны из PacketTunnelProvider+Xray.swift.
+extension PacketTunnelProvider {
+    // AVPN seamless roaming: подпись аплинка текущего пути (private-поля монитора — только отсюда).
+    func currentUplinkSignature() -> String {
+        uplinkSignature(for: currentPath ?? pathMonitor.currentPath)
+    }
+
+    // AVPN seamless roaming: идентичность физического аплинка БЕЗ статуса/дороговизны пути —
+    // «тот же Wi-Fi пропал и вернулся» даёт ту же подпись, «Wi-Fi -> сотовая» — другую.
+    func uplinkSignature(for path: Network.NWPath) -> String {
+        let external = path.availableInterfaces.filter {
+            $0.type == .wiredEthernet || $0.type == .wifi || $0.type == .cellular
+        }
+        let parts = external.map { interface -> String in
+            let typeName: String
+            switch interface.type {
+            case .wiredEthernet: typeName = "ethernet"
+            case .wifi: typeName = "wifi"
+            case .cellular: typeName = "cellular"
+            default: typeName = "other"
+            }
+            return "\(typeName):\(interface.name):\(interface.index)"
+        }
+        // Первый интерфейс в availableInterfaces = предпочтительный маршрут; порядок значим.
+        return parts.isEmpty ? "none" : parts.joined(separator: ",")
     }
 }
 

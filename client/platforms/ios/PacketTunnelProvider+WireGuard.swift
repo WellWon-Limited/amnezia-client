@@ -72,6 +72,11 @@ extension PacketTunnelProvider {
                 wg_log(logLevel.osLogLevel, message: message)
             }
 
+            // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
+            let roaming = wgConfig.roamingPolicy
+            wgAdapter?.roamingPolicy = roaming
+            wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
+
             wgAdapter?.start(tunnelConfiguration: tunnelConfiguration) { [weak self] adapterError in
                 guard let adapterError else {
                     let interfaceName = self?.wgAdapter?.interfaceName ?? "unknown"
@@ -143,13 +148,18 @@ extension PacketTunnelProvider {
                 lastHandshake = -2  // Return an error if there is no value for `last_handshake_time_sec`
             }
 
-            let response: [String: Any] = [
-                "rx_bytes": settingsDictionary["rx_bytes"] ?? "0",
-                "tx_bytes": settingsDictionary["tx_bytes"] ?? "0",
-                "last_handshake_time_sec": lastHandshake
-            ]
+            // AVPN seamless roaming: счётчики адаптера (path_lost/restored, bumps, rebinds,
+            // pauses) — в тот же статус-ответ; движок и диагностика видят, что делал роуминг.
+            wgAdapter.roamingCounters { counters in
+                let response: [String: Any] = [
+                    "rx_bytes": settingsDictionary["rx_bytes"] ?? "0",
+                    "tx_bytes": settingsDictionary["tx_bytes"] ?? "0",
+                    "last_handshake_time_sec": lastHandshake,
+                    "roam": counters.asDictionary
+                ]
 
-            completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
+                completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
+            }
         }
     }
 
