@@ -475,12 +475,27 @@ void IosController::checkStatus()
         // Wi-Fi от нашего же utun).
         const QString ifaceName = stringFromResponse(response, @"active_interface_name");
         const QString coreLogTail = stringFromResponse(response, @"core_log_tail");
+        // AVPN seamless roaming (§23.6): счётчики адаптера (path_lost/restored, bumps, rebinds,
+        // pauses) — в Qt-лог приложения при изменении, чтобы диагностика видела роуминг даже
+        // при выключенном файловом логе NE (ne.log пишется только при isLoggingEnabled).
+        QString roamSummary;
+        if (NSDictionary *roam = [response[@"roam"] isKindOfClass:[NSDictionary class]] ? response[@"roam"] : nil) {
+            QStringList parts;
+            for (NSString *k in [[roam allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+                parts << QString::fromNSString(k) + QLatin1Char('=') + QString::number([roam[k] longLongValue]);
+            }
+            roamSummary = parts.join(QLatin1Char(' '));
+        }
 
         QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
-                                         startFailure, ifaceName, coreLogTail]() {
+                                         startFailure, ifaceName, coreLogTail, roamSummary]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
+            if (!roamSummary.isEmpty() && roamSummary != m_lastRoamSummary) {
+                m_lastRoamSummary = roamSummary;
+                qInfo() << "[roam] NE counters:" << roamSummary;
+            }
             // AVPN backend-first (T20): пороги — из m_rawConfig (засеяны VpnConnectionTunnelControl::up
             // ключами awg_handshake_timeout_ms/awg_handshake_max_timeouts), пусто/офлайн → constexpr-фолбэк.
             const int handshakeTimeoutMs =
@@ -562,6 +577,22 @@ void IosController::checkStatus()
                     m_lastXrayCoreLogTail = coreLogTail;
                     qWarning() << "IosController::checkStatus : xray core log (iface" << ifaceName
                                << "):" << coreLogTail;
+                }
+                // AVPN (diag 2026-09-03): здоровье data-plane xray в лог приложения — привязка
+                // сокетов ядра (bound/unbound/rejected) и кумулятивный rx/tx туннеля. По этим
+                // числам «Подключено без трафика» перестаёт быть безымянным: rejected>0 =
+                // дозвоны отменяются fail-closed; rx==0 при tx>0 = уходит, но не возвращается.
+                {
+                    const long long pBound = (long long)[response[@"protect_bound"] longLongValue];
+                    const long long pUnbound = (long long)[response[@"protect_unbound"] longLongValue];
+                    const long long pRejected = (long long)[response[@"protect_rejected"] longLongValue];
+                    const QString diag = QStringLiteral("bound=%1 unbound=%2 rejected=%3 rx=%4 tx=%5 iface=%6")
+                        .arg(pBound).arg(pUnbound).arg(pRejected)
+                        .arg((long long)rxBytes).arg((long long)txBytes).arg(ifaceName);
+                    if (diag != m_lastXrayDataPlaneDiag) {
+                        m_lastXrayDataPlaneDiag = diag;
+                        qWarning() << "IosController::checkStatus : xray data-plane" << diag;
+                    }
                 }
             } else {
                 emit handshakeChanged(last_handshake_time_sec > 0 ? (qint64) last_handshake_time_sec : 0);

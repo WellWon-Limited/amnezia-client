@@ -103,6 +103,12 @@ int main(int argc, char **argv)
         CHECK(avpn::roamStallRebindSTuned() == 0, "connecttunables: roaming rebind<0 => 0 (только bump)");
         avpn::TuningStore::set({{"ios_roam_pause_after_s", 30.0}}, {}, {}, {});
         CHECK(avpn::roamPauseAfterSTuned() == 30, "connecttunables: roaming pause=30 проходит как есть");
+        avpn::TuningStore::reset();
+        CHECK(avpn::wakeProbeRetriesTuned() == 2, "connecttunables: wake_probe_retries дефолт 2");
+        avpn::TuningStore::set({{"wake_probe_retries", 99.0}}, {}, {}, {});
+        CHECK(avpn::wakeProbeRetriesTuned() == 5, "connecttunables: wake_probe_retries гигант => потолок 5");
+        avpn::TuningStore::set({{"wake_probe_retries", -3.0}}, {}, {}, {});
+        CHECK(avpn::wakeProbeRetriesTuned() == 0, "connecttunables: wake_probe_retries<0 => 0 (одна проба)");
         // ИНВАРИАНТ (CONNECT-INVARIANTS, коммент у m_watchdog): watchdog ВСЕГДА > handshake_timeout —
         // оператор ставит watchdog=5000 при timeout=12000 => пол поднимает до timeout+запас
         avpn::TuningStore::set({{"reconcile_watchdog_ms", 5000.0}}, {}, {}, {});

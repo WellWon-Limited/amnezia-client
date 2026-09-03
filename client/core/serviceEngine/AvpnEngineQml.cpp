@@ -1307,6 +1307,19 @@ void AvpnEngineQml::probeNodeRtt()
 
 void AvpnEngineQml::onTick()
 {
+    // AVPN seamless roaming (CONNECT-INVARIANTS §23.8): с awg-apple tribe.4 iOS-движок при потере
+    // пути НЕ гасится, поэтому в офлайне tx растёт (ретраи handshake), rx стоит, handshake стареет —
+    // через 180 с это выглядело бы как DEAD → failover на другую ноду ещё ДО возврата сети (раньше
+    // апстрим паузил устройство и статистики просто не было). Пока ОС говорит «сети нет» — health
+    // не кормим и обнуляем выборку: DEAD = вердикт о туннеле при живой сети, не об офлайне.
+    // kill-switch features.health_pause_offline (default ВКЛ).
+    if (avpn::TuningStore::flag(QStringLiteral("health_pause_offline"), true)) {
+        if (auto *ni = QNetworkInformation::instance();
+            ni && ni->reachability() == QNetworkInformation::Reachability::Disconnected) {
+            m_engine.resetHealthSampling();
+            return;
+        }
+    }
     if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {
         persistTransportHistory(); // AVPN awg31-xray-v1: DEAD записан в историю транспорта
         emit changed(); // произошёл свитч
@@ -3552,12 +3565,24 @@ void AvpnEngineQml::wakeLivenessProbe()
         if (alive) {
             m_wakeRestartPending = false;
             m_wakeTries = 0;
+            m_wakeProbeAttempt = 0;
             qInfo() << "[wake] tunnel alive — nothing to do";
             return;
         }
         if (!m_wantConnected || m_lastTunnelState != Vpn::Connected)
             return;                              // за время пробы состояние уехало
-        // Мёртв → штатный рестарт ЧЕРЕЗ reconcile (спека §2.1 шаг 3, паттерн pinAndReconnect):
+        // AVPN seamless roaming (§23.9): смена BSSID на mesh — секундный провал радио; одна
+        // неудачная проба через 2.5 с = ещё не «мёртв». Повторяем пробу (кап
+        // numbers.wake_probe_retries, 0 = как раньше) с шагом 4 с и только потом рестарт.
+        if (m_wakeProbeAttempt < avpn::wakeProbeRetriesTuned()) {
+            ++m_wakeProbeAttempt;
+            m_wakeProbing = true;
+            qInfo() << "[wake] probe failed — retry" << m_wakeProbeAttempt << "before restart";
+            QTimer::singleShot(4000, this, [this]() { wakeLivenessProbe(); });
+            return;
+        }
+        m_wakeProbeAttempt = 0;
+        // Мёртв → штатный рестарт ЧЕРЕЗ reconcile (спека §2.1 шаг 3, паттерн pinAndReconcile):
         // m_needsRestart → guardedStop→Disconnected→guardedStart; m_op взведён → §13-гард
         // weAreOperating держит намерение; сторож — движковый клампованный, не жёсткие 20с.
         qInfo() << "[wake] tunnel dead after sleep — restarting (our operation)";

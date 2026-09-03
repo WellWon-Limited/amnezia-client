@@ -427,13 +427,15 @@ extension PacketTunnelProvider {
         try? FileManager.default.removeItem(at: url)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         var log = (jsonDict["log"] as? [String: Any]) ?? [:]
-        log["loglevel"] = "warning"
+        // AVPN (diag 2026-09-03): ошибки дозвона/Reality Xray пишет на уровне info — при warning
+        // core_log_tail приходил пустым и «нет трафика» было безымянным. info ловит причину.
+        log["loglevel"] = "info"
         log["error"] = url.path
         jsonDict["log"] = log
     }
 
     /// Последние строки лога ядра для статус-ответа (ограничены, чтобы не раздувать IPC).
-    func xrayCoreLogTail(maxBytes: Int = 4096, maxLines: Int = 20) -> String? {
+    func xrayCoreLogTail(maxBytes: Int = 16384, maxLines: Int = 80) -> String? {
         let url = Self.xrayCoreLogURL
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
