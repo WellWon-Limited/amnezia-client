@@ -163,20 +163,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let preferredTypes: [NWInterface.InterfaceType] = [.wiredEthernet, .wifi, .cellular, .other]
-
         // AVPN (девайс-разбор 2026-09-02): исключаем ВИРТУАЛЬНЫЕ интерфейсы — прежде всего наш
         // собственный utun. После setTunnelNetworkSettings он появляется в availableInterfaces с
         // типом .other, и привязка сокета ядра Xray к нему (IP_BOUND_IF) заворачивает дозвон в
         // тот же туннель: наружу не уходит ни одного TCP, коннект «висит подключается» навсегда.
-        let nonLoopbackInterfaces = path.availableInterfaces.filter {
-            $0.type != .loopback && !Self.isVirtualInterfaceName($0.name)
-        }
-        let activeInterfaces = nonLoopbackInterfaces.filter { path.usesInterfaceType($0.type) }
-
-        let candidate = preferredTypes.compactMap { type in
-            activeInterfaces.first { $0.type == type }
-        }.first ?? activeInterfaces.first ?? nonLoopbackInterfaces.first
+        // Выбор вынесен в primaryPhysicalInterface (общий с подписью аплинка seamless roaming).
+        let candidate = primaryPhysicalInterface(for: path)
 
         if let candidate {
             activeIfaceIdx = UInt32(candidate.index)
@@ -486,23 +478,32 @@ extension PacketTunnelProvider {
     }
 
     // AVPN seamless roaming: идентичность физического аплинка БЕЗ статуса/дороговизны пути —
-    // «тот же Wi-Fi пропал и вернулся» даёт ту же подпись, «Wi-Fi -> сотовая» — другую.
+    // ТОТ ЖЕ выбор интерфейса, что и updateActiveInterfaceIndex (к нему привязаны сокеты ядра):
+    // «тот же Wi-Fi пропал и вернулся» даёт ту же подпись, «Wi-Fi -> сотовая» — другую, а
+    // появление сотовой ВТОРЫМ интерфейсом при живом Wi-Fi подпись не меняет.
     func uplinkSignature(for path: Network.NWPath) -> String {
-        let external = path.availableInterfaces.filter {
-            $0.type == .wiredEthernet || $0.type == .wifi || $0.type == .cellular
+        guard let iface = primaryPhysicalInterface(for: path) else { return "none" }
+        let typeName: String
+        switch iface.type {
+        case .wiredEthernet: typeName = "ethernet"
+        case .wifi: typeName = "wifi"
+        case .cellular: typeName = "cellular"
+        default: typeName = "other"
         }
-        let parts = external.map { interface -> String in
-            let typeName: String
-            switch interface.type {
-            case .wiredEthernet: typeName = "ethernet"
-            case .wifi: typeName = "wifi"
-            case .cellular: typeName = "cellular"
-            default: typeName = "other"
-            }
-            return "\(typeName):\(interface.name):\(interface.index)"
+        return "\(typeName):\(iface.name):\(iface.index)"
+    }
+
+    /// Предпочтительный ФИЗИЧЕСКИЙ интерфейс пути (без loopback и виртуальных utun/ipsec/…):
+    /// единый источник для привязки сокетов Xray и для подписи аплинка.
+    func primaryPhysicalInterface(for path: Network.NWPath) -> NWInterface? {
+        let preferredTypes: [NWInterface.InterfaceType] = [.wiredEthernet, .wifi, .cellular, .other]
+        let nonLoopbackInterfaces = path.availableInterfaces.filter {
+            $0.type != .loopback && !Self.isVirtualInterfaceName($0.name)
         }
-        // Первый интерфейс в availableInterfaces = предпочтительный маршрут; порядок значим.
-        return parts.isEmpty ? "none" : parts.joined(separator: ",")
+        let activeInterfaces = nonLoopbackInterfaces.filter { path.usesInterfaceType($0.type) }
+        return preferredTypes.compactMap { type in
+            activeInterfaces.first { $0.type == type }
+        }.first ?? activeInterfaces.first ?? nonLoopbackInterfaces.first
     }
 }
 

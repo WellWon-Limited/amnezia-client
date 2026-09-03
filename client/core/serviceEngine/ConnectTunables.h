@@ -77,6 +77,14 @@ inline int roamStallRebindSTuned()
     return qBound(0, int(TuningStore::numberOr(QStringLiteral("ios_roam_stall_rebind_s"), 10)), 120);
 }
 
+// AVPN seamless roaming (§23.9, macOS демон): сколько раз ПОВТОРИТЬ пробу живости после смены
+// BSSID/пробуждения, прежде чем считать туннель мёртвым и рестартовать (numbers.wake_probe_retries).
+// 0 = одна проба (поведение до 2026-09-03); потолок 5 (шаг 4 с → до 20 с терпения).
+inline int wakeProbeRetriesTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("wake_probe_retries"), 2)), 5);
+}
+
 // macOS wake-рестарт (спека 2026-07-17): кап НАШИХ попыток переподнять туннель после пробуждения
 // (ретраи цепляются к reachabilityChanged). После капа — честный OFF («усталость = внешние
 // обстоятельства», дух §13). Пол 1 (0/минус с бэка = wake-фикс молча выключен — для этого есть

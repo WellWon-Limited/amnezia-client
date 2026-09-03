@@ -79,6 +79,7 @@ message("CLIENT_ROOT_DIR is: ${CLIENT_ROOT_DIR}")
 
 target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
+    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeRoaming.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardNetworkExtension/ErrorNotifier.swift

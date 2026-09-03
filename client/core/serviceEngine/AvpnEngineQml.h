@@ -1192,6 +1192,7 @@ private:
     // reachabilityChanged восстанавливают намерение (это НЕ авто-коннект §13 — операция наша);
     // wakeTries — счётчик против капа wakeRestartMaxTriesTuned. Не-macOS: не используются.
     bool                         m_wakeProbing = false;
+    int                          m_wakeProbeAttempt = 0;   // AVPN seamless roaming: повторы пробы до рестарта
     bool                         m_wakeRestartPending = false;
     int                          m_wakeTries = 0;
     bool                         m_transferredAway = false; // AVPN: 410 transferred (подписка уехала на другое устройство)

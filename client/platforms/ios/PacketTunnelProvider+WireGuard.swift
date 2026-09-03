@@ -155,7 +155,7 @@ extension PacketTunnelProvider {
                     "rx_bytes": settingsDictionary["rx_bytes"] ?? "0",
                     "tx_bytes": settingsDictionary["tx_bytes"] ?? "0",
                     "last_handshake_time_sec": lastHandshake,
-                    "roam": counters.asDictionary
+                    "roam": counters.asDictionary.mapValues { Int(clamping: $0) }
                 ]
 
                 completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
