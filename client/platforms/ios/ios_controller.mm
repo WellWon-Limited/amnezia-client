@@ -475,6 +475,11 @@ void IosController::checkStatus()
         // Wi-Fi от нашего же utun).
         const QString ifaceName = stringFromResponse(response, @"active_interface_name");
         const QString coreLogTail = stringFromResponse(response, @"core_log_tail");
+        // AVPN (diag 2026-09-03): счётчики привязки сокетов ядра — извлекаем ЗДЕСЬ (response
+        // живёт только в этом хендлере), в GUI-лямбду уходят готовые числа.
+        const long long xrayProtectBound = (long long)[response[@"protect_bound"] longLongValue];
+        const long long xrayProtectUnbound = (long long)[response[@"protect_unbound"] longLongValue];
+        const long long xrayProtectRejected = (long long)[response[@"protect_rejected"] longLongValue];
         // AVPN seamless roaming (§23.6): счётчики адаптера (path_lost/restored, bumps, rebinds,
         // pauses) — в Qt-лог приложения при изменении, чтобы диагностика видела роуминг даже
         // при выключенном файловом логе NE (ne.log пишется только при isLoggingEnabled).
@@ -488,7 +493,8 @@ void IosController::checkStatus()
         }
 
         QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
-                                         startFailure, ifaceName, coreLogTail, roamSummary]() {
+                                         startFailure, ifaceName, coreLogTail, roamSummary,
+                                         xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             if (m_statusGeneration.load() != gen)
                 return;
@@ -583,11 +589,8 @@ void IosController::checkStatus()
                 // числам «Подключено без трафика» перестаёт быть безымянным: rejected>0 =
                 // дозвоны отменяются fail-closed; rx==0 при tx>0 = уходит, но не возвращается.
                 {
-                    const long long pBound = (long long)[response[@"protect_bound"] longLongValue];
-                    const long long pUnbound = (long long)[response[@"protect_unbound"] longLongValue];
-                    const long long pRejected = (long long)[response[@"protect_rejected"] longLongValue];
                     const QString diag = QStringLiteral("bound=%1 unbound=%2 rejected=%3 rx=%4 tx=%5 iface=%6")
-                        .arg(pBound).arg(pUnbound).arg(pRejected)
+                        .arg(xrayProtectBound).arg(xrayProtectUnbound).arg(xrayProtectRejected)
                         .arg((long long)rxBytes).arg((long long)txBytes).arg(ifaceName);
                     if (diag != m_lastXrayDataPlaneDiag) {
                         m_lastXrayDataPlaneDiag = diag;
