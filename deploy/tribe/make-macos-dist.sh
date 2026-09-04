@@ -57,7 +57,15 @@ mkdir -p "$ST/pf"; cp -f "$REPO/deploy/data/macos/pf/tribe."*.conf "$REPO/deploy
 # AVPN: маркер версии демона = хэш бинарей (меняется ⟺ меняется демон). Кладём В tarball (установщик
 # перенесёт в /Library/.../VERSION) И в ресурс app (приложение сверяет с установленным → авто-
 # переустановка при апдейте, ноль терминала). См. MacServiceInstaller::macServiceOutdated.
-DVER="$(cat "$SRV/Tribe-service" "$SRV/amneziawg-go" | shasum -a 256 | cut -c1-16)"
+# AVPN 2026-09-04: хэш считаем по бинарям БЕЗ подписи. Подпись (шаг 3) несёт timestamp-токен,
+# из-за чего маркер менялся КАЖДУЮ сборку при неизменённом демоне, и каждое обновление приложения
+# спрашивало пароль на переустановку службы (MAC-23/24). Снятая подпись даёт одинаковые байты
+# и для Developer-ID-, и для ad-hoc-подписанного бинаря (проверено 2026-09-04).
+HT="$(mktemp -d)"
+cp -f "$SRV/Tribe-service" "$HT/Tribe-service"; cp -f "$SRV/amneziawg-go" "$HT/amneziawg-go"
+codesign --remove-signature "$HT/Tribe-service"; codesign --remove-signature "$HT/amneziawg-go"
+DVER="$(cat "$HT/Tribe-service" "$HT/amneziawg-go" | shasum -a 256 | cut -c1-16)"
+rm -rf "$HT"
 echo "$DVER" > "$ST/VERSION"
 echo "$DVER" > "$APP/Contents/Resources/tribe-svc.version"
 echo "  daemon version: $DVER"
