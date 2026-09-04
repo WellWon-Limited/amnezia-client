@@ -908,10 +908,18 @@ void AvpnEngineQml::startSelfUpdate()
                 [this](const QString &t) { emit selfUpdateProgress(t); });
         connect(m_selfUpdate, &avpn::SelfUpdate::failed, this,
                 [this](const QString &r) { emit selfUpdateFailed(r); });
-        // installed(): образ проверен и подменён, дочерний процесс перезапустит приложение —
-        // ничего гасить не нужно, просто держим экран обновления до выхода.
-        connect(m_selfUpdate, &avpn::SelfUpdate::installed, this,
-                [this]() { emit selfUpdateInstalled(); });
+        // installed(): образ проверен и подготовлен; финишер (nohup, скрипт SelfUpdate) ЖДЁТ
+        // выхода нашего процесса (до 30 с), затем подменяет бандл и запускает новую версию.
+        // Выйти обязаны МЫ: под живым процессом подмена + `open -a` новую копию не запускают —
+        // LaunchServices лишь активирует старый инстанс (проверено 2026-09-04, MAC-29), и человек
+        // оставался на старой версии до ручного перезапуска. Экрану даём показать «Готово,
+        // перезапускаем…», затем штатный quit (aboutToQuit флашит настройки; живой туннель
+        // остаётся у демона и адоптируется новой копией, §19).
+        connect(m_selfUpdate, &avpn::SelfUpdate::installed, this, [this]() {
+            emit selfUpdateInstalled();
+            qInfo() << "[selfupdate] installed — quitting so the finisher can relaunch the new version";
+            QTimer::singleShot(1500, qApp, &QCoreApplication::quit);
+        });
     }
     // Маркетинговая версия (первые три компонента APP_VERSION) — нижняя граница: образ со
     // старой/равной версией скрипт не поставит.
