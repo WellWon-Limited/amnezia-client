@@ -10,8 +10,7 @@ jobs:
 
   Build-Android-Release:
     name: 'Build-Android-Release'
-    runs-on: ubuntu-latest
-
+    runs-on: [self-hosted, linux, x64]
     env:
       QT_VERSION: 6.4.1
       QIF_VERSION: 4.5
