@@ -256,6 +256,10 @@ class AvpnEngineQml : public QObject {
     // цепочку updateBanner → incidentBanner → autoVpnCard. Пересчёт: configApplied и setAppLang
     // эмитят changed().
     Q_PROPERTY(QString incidentText READ incidentText NOTIFY changed)
+    // AVPN (фикс-волна 2026-09-22, A11): последний авто-выбор узла сделан по свежему замеру RTT
+    // (true) или по весам оператора (false — замеров не было). Карточка «быстрейший узел» обещает
+    // скорость только при true.
+    Q_PROPERTY(bool lastSelectionMeasured READ lastSelectionMeasured NOTIFY changed)
     Q_PROPERTY(QString incidentUrl READ incidentUrl NOTIFY changed)
     // AVPN backend-first-3 (Task 7): server-driven CTA-тексты оплаты — map по ключам
     // cta_renew_traffic/cta_renew_access/cta_how_traffic/cta_how_access (localizedOr; пустые НЕ
@@ -275,6 +279,7 @@ public:
     bool busy() const { return m_busy; }
     // busy при намерении «офлайн» = идёт teardown (вкл. отмену недоехавшего коннекта). // AVPN
     bool stopping() const { return m_busy && !m_wantConnected; }
+    bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
     bool svcInstalling() const { return m_svcInstalling; }
     // AVPN awg31-xray-v1: см. Q_PROPERTY transportMode/verifying/activeProto выше.
@@ -845,15 +850,42 @@ private:
     // убирает «подбираем сервер»→«Network Error» и залипания. См. memory tribe-server-switch-fix.
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
-    void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
+    // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
+    // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик
+    // data-plane движка сохраняются (без requestStop).
+    void guardedStop(const char *why, bool keepEngineSwitch = false);
     void beginStartPreparation();
     void finishStartPreparation(const QString &reason);
     void cancelStartPreparation();
     void invalidateNetworkMeasurements();
     void persistPin();
-    void restorePin();
+    // AVPN (фикс-волна 2026-09-22, A7): pinBefore — pin движка ДО применения тела подписки/reseed
+    // (перенос явного pin на соседа сохраняется, неявный pin в памяти не персистится).
+    void restorePin(const QString &pinBefore);
+    void restorePin() { restorePin(m_engine.pinnedNodeId()); }
     void reliabilityEvent(const QString &event);
     void adoptNativeIdentity();
+    // AVPN (фикс-волна 2026-09-22, A1/A4/A5/K3) — см. AvpnEngineQml.cpp.
+    bool tryAdoptObservedTunnel(const char *why);
+    void identifyAdoptedSession();
+    bool awaitNativeStatus();
+    void onStopRetryTimer();
+    void resolveUnconfirmedStop();
+    // Ревью CL-A r2: стоп не подтверждён, а его никто не ведёт (терминал Connected/Error снял op и
+    // сторож) — взвести ограниченный повтор или разрешить честно (DebugSnapshot::decideUnconfirmedStop).
+    void driveUnconfirmedStop(const char *why);
+    // Сторож старта: на время системного диалога «Разрешить VPN» (C4) — потолок натива + обычный бюджет.
+    int startWatchdogMs() const;
+    void onLiveSessionTimeout();
+    void onSwitchDeadline();
+    void onSelectionBudget(quint64 epoch, bool ceiling);
+    void notePreparationPoolSettled(bool poolWillBeProbed);
+    void saveLkgSubscriptionGuarded(const QByteArray &body, bool bodyHasNodes);
+    // A6: pin из списка — персистентный; «Заменить сервер»/Доктор/свип — только в памяти.
+    void switchToNodeImpl(const QString &nodeId, bool persist);
+    void pinAndReconnectImpl(const QString &nodeId, bool persist);
+    void selectAutoImpl(bool persist);
+    void docRestoreSelection(); // Доктор: вернуть исходный выбор (pin или авто), не гася VPN
     // AVPN awg31-xray-v1 (спека §2.3):
     //  onTunnelUpEffects()     — побочные эффекты реального «Подключено» (пуши, чипы, живой RTT,
     //                            история транспорта); awg — сразу на Vpn::Connected, xray — после verify.
@@ -1014,10 +1046,31 @@ private:
     quint64                     m_subscriptionSequence = 0;
     quint64                     m_bootstrapSequence = 0;
     QString                     m_savedPin;
-    QStringList                 m_reliabilityLog;
     QElapsedTimer               m_reliabilityClock;
     QTimer                      m_transitionTimer;
-    bool                        m_requireConfirmedDown = false;
+    // AVPN (фикс-волна 2026-09-22, A1): бывший m_requireConfirmedDown разделён на два смысла —
+    // m_latch.awaitingStopConfirm (МЫ просили стоп) и m_latch.needStatusBeforeStart (после Error на
+    // iOS/MACOS_NE; адопт и health не блокирует). См. DebugSnapshot.h::TeardownLatch.
+    TeardownLatch               m_latch;
+    SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)
+    int                         m_statusRequestAttempts = 0; // запросы статуса в текущем ожидании
+    QTimer                      m_statusRetryTimer;      // backoff запросов статуса (1/2/4 с)
+    int                         m_stopRetries = 0;       // повторы стопа после дедлайна (≤2)
+    QTimer                      m_stopRetryTimer;        // backoff повторов стопа (2/4 с)
+    // Ревью CL-A r2 (K3/C4): системный диалог «Разрешить VPN» в пути — сторож старта не рвёт коннект.
+    bool                        m_permissionPromptPending = false;
+    // K3: после liveSessionFound ждём реальный статус профиля ограниченно (без вечного m_busy);
+    // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
+    bool                        m_liveSessionPending = false;
+    QTimer                      m_liveSessionTimer;
+    // A10/A11: подготовка старта — пул освежён (или refresh провалился) / раунд RTT завершён.
+    bool                        m_prepPoolSettled = false;
+    bool                        m_prepRoundDone = false;
+    bool                        m_lastSelectionMeasured = false;
+    // A12: момент последней пересылки outbox по фронту Connected (троттл 10 мин).
+    qint64                      m_lastOutboxConnectedFlushMs = -1;
+    // A16: схлопывание повторов в кольце reliability-лога.
+    ReliabilityRing             m_reliabilityRing;
     bool                        m_userIntentKnown = false;
     QString                     m_lastIntentGeneration;
     // AVPN (панель администратора): in-app бенч (создаётся в конструкторе, владелец — this).
@@ -1155,6 +1208,10 @@ private:
     QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
     bool        m_docFull = false;    // «Полная диагностика»: обзор всех нод (кроме RU/manual_only)
     bool        m_docAltHadProblem = false; // была ли проблема ДО обзора альтернатив (решает пересадку)
+    // Критик полноты (U1): проблема только «далеко» (data-plane цел) — пересадка лишь на ноду с
+    // RTT лучше текущего на 30 %+ (doctorAltRttBetterEnough); m_docAltCurRtt — RTT текущей.
+    bool        m_docAltFarOnly = false;
+    int         m_docAltCurRtt = -1;
     QString     m_diagNetManual;      // ручной тип сети из интро (не персистится)
     void docEnter(DoctorPhase ph);    // фаза + сторож + процент + doctorChanged
     QStringList m_docRuNames;         // RU-корпус: имена проверяемых сайтов
