@@ -41,7 +41,9 @@ PageType {
         // Авто — реальный режим (движок выбирает быстрейший узел); тап = пере-подбор
         TribeListRow {
             Layout.fillWidth: true
-            title: qsTr("Авто (быстрейший)")
+            // AVPN (A11): «быстрейший» — только если последний авто-выбор был по замеру RTT
+            title: (root.hasEngine && TribeEngine.lastSelectionMeasured)
+                   ? qsTr("Авто (быстрейший)") : qsTr("Авто")
             subtitle: qsTr("Сервис подбирает узел автоматически")
             onClicked: if (root.hasEngine) TribeEngine.reprobe()
             rightItem: Text {

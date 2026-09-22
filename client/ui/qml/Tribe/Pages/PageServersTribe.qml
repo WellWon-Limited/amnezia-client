@@ -293,7 +293,9 @@ PageType {
                     spacing: 2
                     Text {
                         Layout.fillWidth: true
-                        text: qsTr("Авто (быстрейший)")
+                        // AVPN (A11): «быстрейший» — только если последний авто-выбор был по замеру RTT
+                        text: (root.hasEngine && TribeEngine.lastSelectionMeasured)
+                              ? qsTr("Авто (быстрейший)") : qsTr("Авто")
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         color: Theme.color.text1
@@ -303,7 +305,9 @@ PageType {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: qsTr("Сервис подберёт быстрейший узел")
+                        text: (root.hasEngine && TribeEngine.lastSelectionMeasured)
+                              ? qsTr("Сервис подберёт быстрейший узел")
+                              : qsTr("Сервис подберёт узел автоматически")
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         color: Theme.color.text2
