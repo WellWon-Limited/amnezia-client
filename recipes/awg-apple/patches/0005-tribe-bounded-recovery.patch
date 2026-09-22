@@ -1,0 +1,168 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -60,8 +60,12 @@ public class WireGuardAdapter {
+     private var pathLostAt: Date?
+     private var pendingPauseWork: DispatchWorkItem?
+     private var roamRebindPending = false
+-    private var stallTracker: TribeStallTracker?
+     private var stallTimer: DispatchSourceTimer?
++    // tribe.7: stall tracker + shared GUI/NE recovery budget under one owner (TribeRecoveryArbiter):
++    // the budget is asked BEFORE the escalation stage moves, so a refusal is retried, not burned.
++    private var recovery = TribeRecoveryArbiter(jitter: Double.random(in: 0...2))
++    private var previousWatchdogSample: TribeStallSample?
++    private var lastLoggedDenial: TribeRecoveryDenial?
+ 
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+@@ -324,24 +328,39 @@ public class WireGuardAdapter {
+     /// untouched -- this is NOT a reconfiguration.
+     /// - Parameter completionHandler: completion handler; nil error on success.
+     public func rebindListenPort(completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
++        rebindListenPortResult { result in
++            completionHandler(result == .performed ? nil : .invalidState)
++        }
++    }
++
++    /// Tribe (tribe.7, contract K4): same as `rebindListenPort`, but tells the caller WHY nothing
++    /// was done: adapter not started, path unsatisfied, or the shared recovery budget refused.
++    public func rebindListenPortResult(completionHandler: @escaping (TribeRebindResult) -> Void) {
+         workQueue.async {
+             guard case .started(let handle, _) = self.state else {
+                 self.logHandler(.error, "rebindListenPort: adapter not started (state=\(self.state))")
+-                completionHandler(.invalidState)
++                completionHandler(.notStarted)
+                 return
+             }
+-            wgSetConfig(handle, "listen_port=0\n")
+-            #if os(iOS)
+-            wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-            #endif
+-            self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port")
+-            completionHandler(nil)
++            let result = self.recovery.requestFreshPort(self.currentStallSample(handle: handle),
++                                                        pathSatisfied: self.lastPathSatisfiable)
++            guard result == .performed else {
++                self.logHandler(.verbose, "rebindListenPort: \(result.logDescription)")
++                completionHandler(result)
++                return
++            }
++            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle)
++            self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port, keepalive sent")
++            completionHandler(.performed)
+         }
+     }
+ 
+     /// Tribe: roaming/stall counters for the app's stats reply and the diagnostics report.
+     public func roamingCounters(completionHandler: @escaping (TribeRoamingCounters) -> Void) {
+         workQueue.async {
++            self.roamCounters.recoveryUsed = UInt64(self.recovery.budget.episodeUsed)
++            self.roamCounters.recoveryDenied = self.recovery.budget.denied
++            self.roamCounters.recoveryInterventions = self.recovery.budget.interventions
+             completionHandler(self.roamCounters)
+         }
+     }
+@@ -654,14 +673,15 @@ public class WireGuardAdapter {
+             self?.stallTick()
+         }
+         self.stallTimer = timer
+-        self.stallTracker = nil
++        self.recovery.resetTracker()
++        self.previousWatchdogSample = nil
+         timer.resume()
+     }
+ 
+     private func stopStallWatchdog() {
+         self.stallTimer?.cancel()
+         self.stallTimer = nil
+-        self.stallTracker = nil
++        self.recovery.resetTracker()
+     }
+ 
+     private func currentStallSample(handle: Int32) -> TribeStallSample? {
+@@ -674,10 +694,23 @@ public class WireGuardAdapter {
+ 
+     private func rearmStallTracker(handle: Int32) {
+         guard self.stallTimer != nil, let sample = self.currentStallSample(handle: handle) else { return }
+-        if self.stallTracker == nil {
+-            self.stallTracker = TribeStallTracker(first: sample)
+-        } else {
+-            self.stallTracker?.rearm(sample)
++        self.recovery.rearmAfterRoam(sample)
++    }
++
++    /// Socket operations for a stall step (TribeRoaming.socketOps). Every step ends with a
++    /// keepalive so the server learns the new outer address/port at once; otherwise inbound
++    /// traffic (a VoIP call) keeps going to the old address until our next data packet.
++    private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32) {
++        for op in ops {
++            switch op {
++            case .freshListenPort:
++                wgSetConfig(handle, "listen_port=0\n")
++                #if os(iOS)
++                wgDisableSomeRoamingForBrokenMobileSemantics(handle)
++                #endif
++            case .bumpWithKeepalive:
++                wgBumpSockets(handle)
++            }
+         }
+     }
+ 
+@@ -688,29 +721,35 @@ public class WireGuardAdapter {
+             self.everHadHandshake = true
+             self.logHandler(.verbose, "Observed first handshake at last_handshake_time_sec=\(sample.lastHandshakeSec)")
+         }
+-        // Bootstrap (no handshake yet) belongs to the app's handshake watchdog, not to us.
+-        guard self.everHadHandshake else {
+-            self.stallTracker = nil
+-            return
+-        }
+-        guard var tracker = self.stallTracker else {
+-            self.stallTracker = TribeStallTracker(first: sample)
+-            return
+-        }
+-        let action = tracker.observe(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
+-        self.stallTracker = tracker
+-        switch action {
++        // The NE owns bounded no-first-handshake recovery even while the GUI is suspended.
++        let idle = self.previousWatchdogSample.map { $0.txBytes == sample.txBytes && $0.rxBytes == sample.rxBytes } ?? false
++        self.previousWatchdogSample = sample
++        let interval: Double = (!self.lastPathSatisfiable || idle) ? 5 : 1
++        self.stallTimer?.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(300))
++        let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
++        switch outcome {
+         case .none:
+-            break
+-        case .bumpSockets:
+-            self.roamCounters.stallBumps += 1
+-            self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
+-            wgBumpSockets(handle)
+-        case .rebindPort:
+-            self.roamCounters.stallRebinds += 1
+-            self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
+-            wgSetConfig(handle, "listen_port=0\n")
+-            wgDisableSomeRoamingForBrokenMobileSemantics(handle)
++            self.lastLoggedDenial = nil
++        case .denied(let action, let reason):
++            // The stage did not move: a rolling-cap/cooldown refusal is retried on the next tick,
++            // an already-spent step waits for inbound progress. Logged once per streak.
++            guard self.lastLoggedDenial != reason else { return }
++            self.lastLoggedDenial = reason
++            let step = action == .rebindPort ? "fresh port" : "bump"
++            self.logHandler(.verbose, "Tribe roaming: stall recovery denied by budget (step=\(step) reason=\(reason.rawValue)) (\(self.roamCounters.summary))")
++        case .perform(let action):
++            self.lastLoggedDenial = nil
++            switch action {
++            case .none:
++                break
++            case .bumpSockets:
++                self.roamCounters.stallBumps += 1
++                self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
++            case .rebindPort:
++                self.roamCounters.stallRebinds += 1
++                self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
++            }
++            self.performSocketOps(TribeRoaming.socketOps(for: action), handle: handle)
+         }
+     }
+ 

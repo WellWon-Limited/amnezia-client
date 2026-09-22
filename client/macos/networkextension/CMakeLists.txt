@@ -101,6 +101,9 @@ target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/HevSocksTunnel.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/NELogController.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/Log.swift
+    # AVPN (H11): shared NE journal/last-stop records. TribeSharedState.appGroup is nil on macOS
+    # (the macOS NE has another App Group): records are a deliberate no-op.
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeSharedState.swift
     ${CLIENT_GROUP_IDENTIFIER_SWIFT_FILE}
     ${CLIENT_ROOT_DIR}/platforms/ios/LogRecord.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider.swift

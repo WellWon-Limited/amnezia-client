@@ -25,6 +25,9 @@ struct Constants {
   static let kActionGetTunnelId = "getTunnelId"
   static let kActionStatus = "status"
   static let kActionRebind = "rebind" // AVPN BUG-4 auto-heal: listen_port=0 в живом awg-go
+  // AVPN (U6, awg-apple tribe.8): мягкий рестарт бэкенда — wgTurnOff+wgTurnOn на том же TUN-fd
+  // без setTunnelNetworkSettings; utun и потоки приложений (звонки) живут.
+  static let kActionSoftRestart = "soft_restart"
   static let kActionIsServerReachable = "isServerReachable"
   static let kMessageKeyAction = "action"
   static let kMessageKeyTunnelId = "tunnelId"
@@ -41,7 +44,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     var tribeLastRecoverySummary = ""
     var tribeRuntimeGeneration = UUID().uuidString
 
-    var wgAdapter: WireGuardAdapter?
+    // AVPN (D5): the adapter reference is cleared from the adapter's own workQueue (stop
+    // completion) and read from the provider's message queue; guard every access with a lock.
+    private let wgAdapterLock = NSLock()
+    private var wgAdapterStorage: WireGuardAdapter?
+    var wgAdapter: WireGuardAdapter? {
+        get { wgAdapterLock.lock(); defer { wgAdapterLock.unlock() }; return wgAdapterStorage }
+        set { wgAdapterLock.lock(); wgAdapterStorage = newValue; wgAdapterLock.unlock() }
+    }
+
+    /// Clears the adapter only if it is still `adapter` (a newer start may already have replaced it).
+    func clearWgAdapter(ifIdenticalTo adapter: WireGuardAdapter) {
+        wgAdapterLock.lock()
+        if wgAdapterStorage === adapter { wgAdapterStorage = nil }
+        wgAdapterLock.unlock()
+    }
     var ovpnAdapter: OpenVPNAdapter?
     private lazy var openVPNPacketFlowAdapter = PacketTunnelFlowAdapter(flow: packetFlow)
     private let pathMonitorQueue = DispatchQueue(label: Constants.processQueueName + ".path-monitor")
@@ -251,6 +268,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       if action == Constants.kActionRebind {
           handleRebindAppMessage(completionHandler: completionHandler)
       }
+
+      // AVPN (U6): шаг 2a лестницы движка перед полным переподъёмом той же ноды — новый сокет и
+      // handshake без нового utun. Ответ: {"soft_restart":"performed"} | {"soft_restart":"denied",
+      // "reason":"budget"|"not_started"|"offline"|"failed"}.
+      if action == Constants.kActionSoftRestart {
+          handleSoftRestartAppMessage(completionHandler: completionHandler)
+      }
   }
 
     override func startTunnel(options: [String : NSObject]? = nil,
@@ -323,7 +347,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                    "intentional": reason == .userInitiated || reason == .configurationDisabled || reason == .configurationRemoved || reason == .superceded,
                                    "utc_ms": Int64(Date().timeIntervalSince1970 * 1000)]
         if let store = TribeSharedState.appGroup {
-            try? store.locked { try store.write(stop, "TribeLastStop.json") }
+            // The NE is the only writer of TribeLastStop.json and write() replaces it atomically, so a
+            // busy lock (peer frozen inside its critical section) must not cost the GUI its K2
+            // intentional/reason attribution: fall back to the lock-free atomic write.
+            do {
+                try store.locked { try store.write(stop, "TribeLastStop.json") }
+            } catch TribeSharedStateError.lockBusy {
+                try? store.write(stop, "TribeLastStop.json")
+            } catch {}
             store.record(source: "ne", event: "stop", fields: stop)
         }
 

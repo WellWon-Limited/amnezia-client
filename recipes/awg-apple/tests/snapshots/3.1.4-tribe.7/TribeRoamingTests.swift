@@ -214,14 +214,10 @@ for rate in [300.0, 450, 600, 750, 1000, 2000, 5000, 20000, 50000] {
         let run = runStall(rate: rate, jitter: jitter)
         let kinds = run.performed.map { $0.1 }
         if jitter == 2.0 { print("  matrix rate=\(Int(rate)) B/s: \(run.performed.map { "\($0.1)@\(Int($0.0))s" }.joined(separator: " "))") }
-        check(Array(kinds.prefix(2)) == [.bumpSockets, .rebindPort], "rate \(Int(rate)) jitter \(jitter): bump then fresh port, got \(run.performed)")
+        check(kinds == [.bumpSockets, .rebindPort], "rate \(Int(rate)) jitter \(jitter): bump then fresh port, got \(run.performed)")
         if let fresh = run.performed.first(where: { $0.1 == .rebindPort }) {
             check(fresh.0 <= 30, "rate \(Int(rate)) jitter \(jitter): fresh port by 30 s, got \(fresh.0)")
             if rate >= 1000 { check(fresh.0 <= 16, "rate \(Int(rate)) jitter \(jitter): VoIP-rate heal <= ~15 s, got \(fresh.0)") }
-            // tribe.8 (U9): stage 3 continues 30 s after the fresh port (horizon 90 s: one step).
-            let persistent = run.performed.dropFirst(2)
-            check(persistent.map { $0.1 } == [.bumpSockets] && persistent.first?.0 == fresh.0 + 30,
-                  "rate \(Int(rate)) jitter \(jitter): stage-3 bump 30 s after the fresh port, got \(run.performed)")
         }
         check(run.arbiter.budget.denied == 0, "rate \(Int(rate)) jitter \(jitter): no refusal on the normal path")
     }
@@ -236,9 +232,9 @@ do {
             check(arbiter.requestFreshPort(s(0, UInt64(1000 + at), 100, at), pathSatisfied: true) == .performed, "GUI fresh port at \(at)")
         }
     }
-    check(run.performed.prefix(2).map { $0.1 } == [.bumpSockets, .rebindPort], "cap refusal retried, both steps run: \(run.performed)")
+    check(run.performed.map { $0.1 } == [.bumpSockets, .rebindPort], "cap refusal retried, both steps run: \(run.performed)")
     check(run.performed.first?.0 == 120, "bump as soon as the t=0 intervention leaves the window: \(run.performed)")
-    check(run.performed.count > 1 && run.performed[1].0 == 130, "fresh port as soon as the t=10 intervention leaves the window: \(run.performed)")
+    check(run.performed.last?.0 == 130, "fresh port as soon as the t=10 intervention leaves the window: \(run.performed)")
     check(run.arbiter.budget.denied == 2, "two denial streaks, not one per tick: \(run.arbiter.budget.denied)")
 }
 
@@ -266,8 +262,7 @@ do {
         if outcome != .none { outcomes.append(outcome) }
         if tick == 8 { check(arbiter.requestFreshPort(sample, pathSatisfied: true) == .performed, "GUI escalation 3 s after NE bump") }
     }
-    // tribe.8: no refusal spam; the only later step is stage 3, 30 s after the GUI fresh port.
-    check(outcomes == [.perform(.bumpSockets), .perform(.bumpSockets)], "watchdog quiet after the GUI fresh port until stage 3: \(outcomes)")
+    check(outcomes == [.perform(.bumpSockets)], "watchdog quiet after the GUI fresh port (no refusal spam): \(outcomes)")
     check(arbiter.requestFreshPort(s(300000, 5000, 100, 60), pathSatisfied: true) == .budget(.episode), "second GUI fresh port in the same episode refused")
     check(arbiter.requestFreshPort(s(300000, 5000, 100, 61), pathSatisfied: false) == .offline, "offline refusal")
     check(arbiter.requestFreshPort(nil, pathSatisfied: true) == .notStarted, "unreadable counters = not started")
@@ -302,9 +297,7 @@ do {
 
 // --- D7: every recovery step ends with a keepalive (server learns the new endpoint at once) ---
 check(TribeRoaming.socketOps(for: .bumpSockets) == [.bumpWithKeepalive], "bump = BindUpdate + keepalive")
-// tribe.8 (REV-3): keepalive only after the fresh port, no second BindUpdate of the new socket.
-check(TribeRoaming.socketOps(for: .rebindPort) == [.freshListenPort, .sendKeepalive], "fresh port followed by keepalive only")
-check(TribeRoaming.socketOps(for: .softRestart) == [.restartBackend], "soft restart = backend restart on the same TUN")
+check(TribeRoaming.socketOps(for: .rebindPort) == [.freshListenPort, .bumpWithKeepalive], "fresh port followed by keepalive")
 check(TribeRoaming.socketOps(for: .none).isEmpty, "no-op")
 
 // --- D7: a short flap never pauses the device ---
@@ -318,189 +311,5 @@ check(TribeRebindResult.performed.responsePayload == ["rebind": "performed"], "p
 check(TribeRebindResult.budget(.rollingCap).responsePayload == ["rebind": "denied", "reason": "budget"], "budget payload")
 check(TribeRebindResult.notStarted.responsePayload == ["rebind": "denied", "reason": "not_started"], "not started payload")
 check(TribeRebindResult.offline.responsePayload == ["rebind": "denied", "reason": "offline"], "offline payload")
-
-// --- tribe.8 U9: stage 3 keeps healing while the GUI sleeps (backoff 30/60/120 s, capped) ---
-// Simulated device: outbound grows `rate` B/s, inbound frozen unless listed; a soft restart gives a
-// new device whose counters start from zero (the adapter rebases the arbiter with its first sample).
-func runPersistent(rate: UInt64, horizon: Int, progressAt: Set<Int> = [], idle: ClosedRange<Int>? = nil,
-                   offline: ClosedRange<Int>? = nil, persistentHeal: Bool = true,
-                   onTick: ((Int, inout TribeRecoveryArbiter, TribeStallSample) -> Void)? = nil)
-    -> (performed: [(Double, TribeStallAction)], outcomes: [(Double, TribeWatchdogOutcome)], arbiter: TribeRecoveryArbiter) {
-    var arbiter = TribeRecoveryArbiter(jitter: 2, persistentHeal: persistentHeal)
-    var tx: UInt64 = 0
-    var rx: UInt64 = 5000
-    var hs: Int64 = 100
-    var performed: [(Double, TribeStallAction)] = []
-    var outcomes: [(Double, TribeWatchdogOutcome)] = []
-    for tick in 1...horizon {
-        let at = Double(tick)
-        if !(idle?.contains(tick) ?? false) { tx += rate }
-        if progressAt.contains(tick) { rx += 1000 }
-        let sample = s(tx, rx, hs, at)
-        let outcome = arbiter.tick(sample, pathSatisfied: !(offline?.contains(tick) ?? false), policy: seamless)
-        if outcome != .none { outcomes.append((at, outcome)) }
-        if case .perform(let action) = outcome {
-            performed.append((at, action))
-            if action == .softRestart {
-                tx = 0; rx = 0; hs = 0
-                arbiter.rebaseAfterBackendRestart(s(tx, rx, hs, at))
-            }
-        }
-        onTick?(tick, &arbiter, sample)
-    }
-    return (performed, outcomes, arbiter)
-}
-func gaps(_ performed: [(Double, TribeStallAction)]) -> [Double] {
-    zip(performed.dropFirst(), performed).map { $0.0 - $1.0 }
-}
-
-// 1 KB/s, rx frozen, path satisfied: bump, fresh port at ~15 s, then +30 bump, +60 fresh port,
-// +120 soft restart, +120 bump ... (tribe.7: nothing after the fresh port, GUI asleep = dead tunnel).
-do {
-    let run = runPersistent(rate: 1000, horizon: 600)
-    print("  persistent 1 KB/s: \(run.performed.map { "\($0.1)@\(Int($0.0))s" }.joined(separator: " "))")
-    check(run.performed.map { $0.1 } == [.bumpSockets, .rebindPort, .bumpSockets, .rebindPort, .softRestart,
-                                         .bumpSockets, .rebindPort, .softRestart],
-          "stage-3 sequence bump -> fresh port -> soft restart, repeated: \(run.performed)")
-    check(run.performed.count > 1 && run.performed[1].0 == 15, "fresh port at 15 s: \(run.performed)")
-    check(Array(gaps(run.performed).dropFirst()) == [30, 60, 120, 120, 120, 120], "backoff 30/60/120 s, capped at 120 s: \(gaps(run.performed))")
-    check(run.arbiter.budget.denied == 0, "stage-3 pacing stays inside the rolling cap: denied=\(run.arbiter.budget.denied)")
-    check(run.arbiter.tracker?.stage == 3 && run.arbiter.tracker?.persistentSteps == 6, "stage 3 with 6 persistent steps")
-}
-
-// tribe.7 mode (persistentHeal=false) = exhausted at stage 2: the regression U9 closes.
-do {
-    let run = runPersistent(rate: 1000, horizon: 600, persistentHeal: false)
-    check(run.performed.map { $0.1 } == [.bumpSockets, .rebindPort], "tribe.7 mode: nothing after the fresh port: \(run.performed)")
-}
-
-// Inbound progress at any point resets the stage AND the backoff: after progress the episode starts
-// again (probe, fresh port) and the next stage-3 step is 30 s after that fresh port, not 120 s.
-do {
-    let run = runPersistent(rate: 1000, horizon: 180, progressAt: [130])
-    let after = run.performed.filter { $0.0 > 130 }
-    check(run.performed.filter { $0.0 <= 130 }.map { $0.1 } == [.bumpSockets, .rebindPort, .bumpSockets, .rebindPort], "before progress: \(run.performed)")
-    check(after.map { $0.1 } == [.bumpSockets, .rebindPort, .bumpSockets], "after progress: bump, fresh port, stage-3 bump: \(after)")
-    check(after.first.map { $0.0 - 130 <= 6 } ?? false, "fresh episode starts at the probe window: \(after)")
-    check(gaps(after).last == 30, "backoff restarted at 30 s: \(after)")
-    var progressed = runPersistent(rate: 1000, horizon: 232, progressAt: [230]).arbiter
-    check(progressed.tracker?.stage == 0 && progressed.tracker?.persistentSteps == 0, "progress: stage 0, backoff reset")
-    _ = progressed.tick(s(1, 1, 1, 251), pathSatisfied: true, policy: seamless) // counters reset tolerated
-}
-
-// Stage 3 needs demand and a path: idle outbound or an unsatisfied path never triggers it; the step
-// fires as soon as demand returns (the backoff has already elapsed).
-do {
-    let idleRun = runPersistent(rate: 1000, horizon: 200, idle: 16...150)
-    check(idleRun.performed.map { $0.1 } == [.bumpSockets, .rebindPort, .bumpSockets], "idle: no stage-3 step: \(idleRun.performed)")
-    check(idleRun.performed.last.map { $0.0 >= 151 && $0.0 <= 156 } ?? false, "step as soon as outbound grows again: \(idleRun.performed)")
-    let offlineRun = runPersistent(rate: 1000, horizon: 200, offline: 16...150)
-    check(offlineRun.performed.map { $0.1 } == [.bumpSockets, .rebindPort, .bumpSockets], "offline: no stage-3 step: \(offlineRun.performed)")
-    check(offlineRun.performed.last?.0 == 151, "step on the first satisfied tick: \(offlineRun.performed)")
-}
-
-// A rolling-cap refusal of a stage-3 step is retried every tick and fires once the window frees;
-// the refusal does not advance the sequence or the backoff (rule D1).
-do {
-    var guiRefusedAt: [Double] = []
-    let run = runPersistent(rate: 5000, horizon: 200, progressAt: Set(1...13)) { tick, arbiter, sample in
-        // Two GUI fresh ports after inbound progress: with the watchdog's bump and fresh port the
-        // rolling window holds 4 interventions until t=121 (inbound until t=13, stall from there).
-        if tick == 1 || tick == 12 {
-            if arbiter.requestFreshPort(sample, pathSatisfied: true) != .performed { guiRefusedAt.append(sample.at) }
-        }
-        if tick == 119 {
-            check(arbiter.tracker?.persistentSteps == 0 && arbiter.tracker?.stage == 2, "refusals did not burn the stage-3 step")
-        }
-    }
-    check(guiRefusedAt.isEmpty, "GUI fresh ports performed: \(guiRefusedAt)")
-    let persistent = run.performed.filter { $0.0 > 30 }
-    check(run.performed.prefix(2).map { $0.1 } == [.bumpSockets, .rebindPort], "episode: \(run.performed)")
-    check(persistent.first.map { $0.0 == 121 && $0.1 == .bumpSockets } ?? false, "stage-3 bump as soon as the t=1 intervention leaves the window: \(run.performed)")
-    check(persistent.count > 1 && persistent[1].0 == 181 && persistent[1].1 == .rebindPort, "next step 60 s after the late one: \(run.performed)")
-    let capDenials = run.outcomes.filter { if case .denied(_, .rollingCap) = $0.1 { return true } else { return false } }
-    check(capDenials.first.map { $0.0 == 57 && $0.1 == .denied(.bumpSockets, .rollingCap) } ?? false, "cap refusal reported when the step fell due: \(capDenials.first.map { "\($0)" } ?? "none")")
-    check(run.arbiter.budget.denied == 1, "one denial streak: \(run.arbiter.budget.denied)")
-}
-
-// Tracker level: whatever refuses the step (budget), the step fires later and the backoff counts
-// from the late step.
-do {
-    var t = TribeStallTracker(first: s(0, 0, 100, 0))
-    var fired: [(Double, TribeStallAction)] = []
-    for i in 1...200 {
-        let at = Double(i)
-        let persistentPhase = t.stage >= 2
-        let a = t.observe(s(UInt64(i * 5000), 0, 100, at), pathSatisfied: true, policy: seamless, persistent: true) { _ in
-            !(persistentPhase && at < 80)
-        }
-        if a != .none { fired.append((at, a)) }
-    }
-    check(fired.map { $0.0 } == [4, 14, 80, 140], "late stage-3 step at 80 s, next +60 s: \(fired)")
-}
-
-// --- tribe.8 U6: soft restart of the backend (provider message `soft_restart`) ---
-do {
-    var arbiter = TribeRecoveryArbiter()
-    _ = arbiter.tick(s(0, 5000, 100, 0), pathSatisfied: true, policy: seamless)
-    check(arbiter.requestSoftRestart(s(1000, 5000, 100, 1), pathSatisfied: false) == .offline, "offline refusal")
-    check(arbiter.requestSoftRestart(nil, pathSatisfied: true) == .notStarted, "unreadable counters = not started")
-    check(arbiter.requestSoftRestart(s(1000, 5000, 100, 2), pathSatisfied: true) == .performed, "GUI soft restart performed")
-    check(arbiter.tracker?.stage == 2, "GUI soft restart counts as an external step (stage >= 2)")
-    arbiter.rebaseAfterBackendRestart(s(0, 0, 0, 2))
-    check(arbiter.requestSoftRestart(s(500, 0, 0, 20), pathSatisfied: true) == .budget(.episode), "one GUI soft restart per episode")
-    check(arbiter.requestFreshPort(s(500, 0, 0, 21), pathSatisfied: true) == .budget(.episode), "a soft restart consumes the fresh port too")
-    // A counter drop is not progress; the new device's first inbound bytes are (tribe.7 missed them
-    // until rx exceeded the OLD device's total).
-    _ = arbiter.tick(s(600, 0, 0, 22), pathSatisfied: true, policy: seamless)
-    check(arbiter.tracker?.stage == 2, "rebased counters: no false progress")
-    _ = arbiter.tick(s(700, 40, 1_700_000_000, 23), pathSatisfied: true, policy: seamless)
-    check(arbiter.tracker?.stage == 0 && arbiter.budget.episodeUsed == 0, "new device's handshake/rx = progress, episode re-armed")
-    check(arbiter.requestSoftRestart(s(800, 40, 1_700_000_000, 40), pathSatisfied: true) == .performed, "re-armed after progress (cooldown elapsed)")
-}
-do {
-    // Soft restart after the counters reset: stage and backoff survive the rebase.
-    var t = TribeStallTracker(first: s(0, 0, 100, 0))
-    for i in 1...14 { _ = t.observe(s(UInt64(i * 5000), 0, 100, Double(i)), pathSatisfied: true, policy: seamless, persistent: true) { _ in true } }
-    check(t.stage == 2, "fresh port done")
-    t.rebaseCounters(s(0, 0, 0, 15))
-    check(t.observe(s(100, 0, 0, 16), pathSatisfied: true, policy: seamless, persistent: true) { _ in true } == .none && t.stage == 2,
-          "rebase keeps the stage (a counter drop is not progress)")
-}
-do {
-    // Budget: rebase on a counter drop; resume re-arms the episode (review note on tribe.7).
-    var budget = TribeRecoveryBudget()
-    budget.observe(s(100000, 90000, 100, 0))
-    check(budget.request(at: 1, kind: .freshPort) == nil, "fresh port")
-    budget.observe(s(10, 0, 0, 2))
-    check(budget.episodeUsed == 2, "counter drop alone does not re-arm")
-    budget.observe(s(20, 5, 0, 3))
-    check(budget.episodeUsed == 0, "first inbound bytes of the new device re-arm the episode")
-    check(budget.request(at: 20, kind: .freshPort) == nil, "fresh port after re-arm (cooldown elapsed)")
-    budget.resetEpisode()
-    check(budget.request(at: 21, kind: .bump) == nil, "resume re-arms the episode: bootstrap bump permitted")
-    check(budget.request(at: 22, kind: .softRestart, persistent: true) == nil, "persistent step ignores the episode")
-    var paced = TribeRecoveryBudget(jitter: 0)
-    check(paced.request(at: 0, kind: .softRestart, persistent: true) == nil, "persistent soft restart")
-    check(paced.request(at: 5, kind: .softRestart, persistent: true) == .cooldown, "same-kind cooldown applies to persistent steps")
-    check(paced.request(at: 8, kind: .softRestart, persistent: true) == nil, "after the cooldown")
-}
-do {
-    var arbiter = TribeRecoveryArbiter()
-    let run = runPersistent(rate: 1000, horizon: 20).arbiter
-    arbiter = run
-    check(arbiter.budget.freshPortSpent, "episode spent")
-    arbiter.noteBackendResumed()
-    check(arbiter.tracker == nil && arbiter.budget.episodeUsed == 0, "resume: fresh tracker, episode re-armed")
-    _ = arbiter.tick(s(0, 0, 0, 30), pathSatisfied: true, policy: seamless)
-    var bootstrap: [TribeWatchdogOutcome] = []
-    for i in 31...60 { let o = arbiter.tick(s(UInt64((i - 30) * 1000), 0, 0, Double(i)), pathSatisfied: true, policy: seamless); if o != .none { bootstrap.append(o) } }
-    check(bootstrap.first == .perform(.bumpSockets), "bootstrap bump permitted after resume: \(bootstrap)")
-}
-check(TribeSoftRestartResult.performed.responsePayload == ["soft_restart": "performed"], "soft restart payload")
-check(TribeSoftRestartResult.budget(.episode).responsePayload == ["soft_restart": "denied", "reason": "budget"], "soft restart budget payload")
-check(TribeSoftRestartResult.notStarted.responsePayload == ["soft_restart": "denied", "reason": "not_started"], "soft restart not started payload")
-check(TribeSoftRestartResult.offline.responsePayload == ["soft_restart": "denied", "reason": "offline"], "soft restart offline payload")
-check(TribeSoftRestartResult.failed.responsePayload == ["soft_restart": "denied", "reason": "failed"], "soft restart failure payload")
 
 if failures == 0 { print("TribeRoamingTests: OK") } else { print("TribeRoamingTests: \(failures) failure(s)"); exit(1) }

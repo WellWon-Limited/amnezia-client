@@ -1,9 +1,29 @@
 patches:
-  "3.1.4-tribe.6":
-    # Bounded autonomous AWG recovery, shared GUI/NE budget and adaptive watchdog.
+  "3.1.4-tribe.8":
+    # tribe.7 (0001+0002+0003+0005, all unchanged) + 0006: stall-watchdog stage 3 keeps healing
+    # while the GUI sleeps (bump -> fresh port -> soft restart, backoff 30/60/120 s, through the
+    # shared budget; U9), in-place backend soft restart on the same TUN fd without
+    # setTunnelNetworkSettings (NE step + `soft_restart` provider message; U6), keepalive-only
+    # export wgSendKeepalives after a fresh port (no second BindUpdate), episode re-armed after a
+    # resume. TribeRoaming.swift for this version = tribe/TribeRoaming.swift (conanfile.py).
     - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
     - patch_file: "patches/0002-xray-socket-protection-result.patch"
     - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+  "3.1.4-tribe.7":
+    # Bounded autonomous AWG recovery on top of the UNCHANGED tribe.5 roaming patch: one arbiter
+    # (TribeRecoveryArbiter) asks the shared GUI/NE budget BEFORE the stall stage moves (a refusal
+    # is retried, never burned), cooldown only between actions of the same kind, keepalive after
+    # every fresh port, typed rebind result for the provider message (K4), NE-owned bootstrap
+    # recovery, adaptive 1 s / 5 s watchdog cadence.  Patch slot 0004 is taken by the imported
+    # amnezia-libxray core patch (applied to vendor/ in build()), hence 0005.
+    # "3.1.4-tribe.6" was an unpublished review build (PR #14) that edited 0003 in place; it is
+    # superseded by this entry and intentionally not reproducible from this recipe.
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
   "3.1.4-tribe.5":
     # Existing Tribe adapters with AWG core v3.1.20260828.
     - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"

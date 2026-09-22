@@ -68,30 +68,30 @@ extension PacketTunnelProvider {
                    (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
 
             // Start the tunnel
-            wgAdapter = WireGuardAdapter(with: self) { [weak self] logLevel, message in
+            let generation = tribeRuntimeGeneration
+            let adapter = WireGuardAdapter(with: self) { [weak self] logLevel, message in
                 wg_log(logLevel.osLogLevel, message: message)
                 // Persist recovery evidence even with a dead/suspended GUI and disabled ne.log.
-                // Never copy arbitrary native log text (it can contain endpoints/config values).
-                if message.hasPrefix("Tribe roaming:") || message.hasPrefix("rebindListenPort:") {
-                    let event = message.contains("still stalled") ? "stall_rebind" :
-                                message.contains("inbound stalled") ? "stall_bump" :
-                                message.hasPrefix("rebindListenPort:") ? "gui_rebind" : "path_change"
-                    let generation = self?.tribeRuntimeGeneration ?? "unknown"
-                    self?.wgAdapter?.roamingCounters { counters in
-                        TribeSharedState.appGroup?.record(source: "ne", event: event,
-                            fields: ["generation": generation, "counters": counters.asDictionary])
-                    }
+                // Never copy arbitrary native log text (it can contain endpoints/config values):
+                // only the fixed event label (TribeNEJournal) and the adapter counters.
+                guard let event = TribeNEJournal.event(forAdapterLog: message) else { return }
+                // Runs on the adapter's workQueue: the counters callback is queued behind this log
+                // call, and the journal write itself hops to TribeSharedState.journalQueue (D4).
+                self?.wgAdapter?.roamingCounters { counters in
+                    TribeSharedState.appGroup?.recordAsync(source: "ne", event: event,
+                        fields: ["generation": generation, "counters": counters.asDictionary])
                 }
             }
+            wgAdapter = adapter
 
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
             let roaming = wgConfig.roamingPolicy
-            wgAdapter?.roamingPolicy = roaming
+            adapter.roamingPolicy = roaming
             wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
 
-            wgAdapter?.start(tunnelConfiguration: tunnelConfiguration) { [weak self] adapterError in
+            adapter.start(tunnelConfiguration: tunnelConfiguration) { adapterError in
                 guard let adapterError else {
-                    let interfaceName = self?.wgAdapter?.interfaceName ?? "unknown"
+                    let interfaceName = adapter.interfaceName ?? "unknown"
                     wg_log(.info, message: "Tunnel interface is \(interfaceName)")
                     completionHandler(nil)
                     return
@@ -169,7 +169,7 @@ extension PacketTunnelProvider {
                 let summary = counters.asDictionary.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
                 if summary != self.tribeLastRecoverySummary {
                     self.tribeLastRecoverySummary = summary
-                    TribeSharedState.appGroup?.record(source: "ne", event: "recovery_status", fields: ["generation": metadata["generation"] ?? "legacy", "counters": counters.asDictionary])
+                    TribeSharedState.appGroup?.recordAsync(source: "ne", event: "recovery_status", fields: ["generation": metadata["generation"] ?? "legacy", "counters": counters.asDictionary])
                 }
                 let response: [String: Any] = [
                     "session_metadata": metadata,
@@ -186,18 +186,40 @@ extension PacketTunnelProvider {
 
     // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета живого туннеля. wgSetConfig("listen_port=0")
     // -> IpcSet -> BindUpdate в awg-go: сокет закрывается и открывается на НОВОМ эфемерном
-    // порту (новый 5-tuple flow — лечит сессионный блок ТСПУ; эквивалент режима полёта).
-    // Туннель/handshake-стейт не трогаются, пиры не заменяются. Ответ {"ok":Bool} — для лога GUI.
+    // порту (новый 5-tuple flow — лечит сессионный блок ТСПУ; эквивалент режима полёта), затем
+    // keepalive — сервер сразу узнаёт новый порт. Туннель/handshake-стейт не трогаются.
+    // AVPN (K4, awg-apple tribe.7+): ответ — {"rebind":"performed"} | {"rebind":"denied",
+    // "reason":"budget"|"not_started"|"offline"}; отказ общего бюджета восстановления GUI/NE
+    // подписан честно, а не «adapter not started». tribe.8: после listen_port=0 уходит только
+    // keepalive (wgSendKeepalives), без второго BindUpdate нового сокета.
     func handleRebindAppMessage(completionHandler: ((Data?) -> Void)? = nil) {
         guard let completionHandler = completionHandler else { return }
         guard protoType == .wireguard, let wgAdapter = wgAdapter else {
-            completionHandler(try? JSONSerialization.data(withJSONObject: ["ok": false], options: []))
+            wg_log(.info, message: "AVPN rebind-heal: denied (no WireGuard adapter)")
+            completionHandler(try? JSONSerialization.data(withJSONObject: TribeRebindResult.notStarted.responsePayload, options: []))
             return
         }
-        wgAdapter.rebindListenPort { error in
-            let ok = (error == nil)
-            wg_log(.info, message: "AVPN rebind-heal: listen_port rebind " + (ok ? "done" : "failed (adapter not started)"))
-            completionHandler(try? JSONSerialization.data(withJSONObject: ["ok": ok], options: []))
+        wgAdapter.rebindListenPortResult { result in
+            wg_log(.info, message: "AVPN rebind-heal: listen_port rebind \(result.logDescription)")
+            completionHandler(try? JSONSerialization.data(withJSONObject: result.responsePayload, options: []))
+        }
+    }
+
+    // AVPN (U6, awg-apple tribe.8): мягкий рестарт бэкенда в NE — wgTurnOff + wgTurnOn с той же
+    // TunnelConfiguration на том же TUN-fd, БЕЗ setTunnelNetworkSettings: новое устройство, сокет и
+    // handshake, а utun, маршруты и потоки приложений (VoIP) живут. Общий бюджет восстановления
+    // GUI/NE (один на эпизод + rolling cap). Ответ: {"soft_restart":"performed"} |
+    // {"soft_restart":"denied","reason":"budget"|"not_started"|"offline"|"failed"}.
+    func handleSoftRestartAppMessage(completionHandler: ((Data?) -> Void)? = nil) {
+        guard let completionHandler = completionHandler else { return }
+        guard protoType == .wireguard, let wgAdapter = wgAdapter else {
+            wg_log(.info, message: "AVPN soft-restart: denied (no WireGuard adapter)")
+            completionHandler(try? JSONSerialization.data(withJSONObject: TribeSoftRestartResult.notStarted.responsePayload, options: []))
+            return
+        }
+        wgAdapter.softRestartBackendResult { result in
+            wg_log(.info, message: "AVPN soft-restart: backend \(result.logDescription)")
+            completionHandler(try? JSONSerialization.data(withJSONObject: result.responsePayload, options: []))
         }
     }
 
@@ -254,7 +276,7 @@ extension PacketTunnelProvider {
             return
         }
         adapter.stop { error in
-            if self.wgAdapter === adapter { self.wgAdapter = nil }
+            self.clearWgAdapter(ifIdenticalTo: adapter)
             ErrorNotifier.removeLastErrorFile()
 
             if let error {

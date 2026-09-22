@@ -1,0 +1,228 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index b935d76..b3bbdce 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -66,6 +66,8 @@ public class WireGuardAdapter {
+     private var recovery = TribeRecoveryArbiter(jitter: Double.random(in: 0...2))
+     private var previousWatchdogSample: TribeStallSample?
+     private var lastLoggedDenial: TribeRecoveryDenial?
++    // tribe.8: attempts left to bring the backend back after a failed in-place restart.
++    private var softRestartRetriesLeft = 0
+ 
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+@@ -337,7 +339,7 @@ public class WireGuardAdapter {
+     /// was done: adapter not started, path unsatisfied, or the shared recovery budget refused.
+     public func rebindListenPortResult(completionHandler: @escaping (TribeRebindResult) -> Void) {
+         workQueue.async {
+-            guard case .started(let handle, _) = self.state else {
++            guard case .started(let handle, let settingsGenerator) = self.state else {
+                 self.logHandler(.error, "rebindListenPort: adapter not started (state=\(self.state))")
+                 completionHandler(.notStarted)
+                 return
+@@ -349,12 +351,41 @@ public class WireGuardAdapter {
+                 completionHandler(result)
+                 return
+             }
+-            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle)
++            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
+             self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port, keepalive sent")
+             completionHandler(.performed)
+         }
+     }
+ 
++    /// Tribe (tribe.8, U6): restart the WireGuard backend IN PLACE: wgTurnOff + wgTurnOn with the
++    /// same configuration on the same TUN file descriptor, WITHOUT setTunnelNetworkSettings. New
++    /// device, new UDP socket, new handshake; the utun interface, its routes and the apps' flows
++    /// (a VoIP call) survive, unlike a stopTunnel/startTunnel re-up. Goes through the shared
++    /// GUI/NE recovery budget (one per episode, rolling cap).
++    public func softRestartBackendResult(completionHandler: @escaping (TribeSoftRestartResult) -> Void) {
++        workQueue.async {
++            guard case .started(let handle, let settingsGenerator) = self.state else {
++                self.logHandler(.error, "softRestartBackend: adapter not started (state=\(self.state))")
++                completionHandler(.notStarted)
++                return
++            }
++            let result = self.recovery.requestSoftRestart(self.currentStallSample(handle: handle),
++                                                          pathSatisfied: self.lastPathSatisfiable)
++            guard result == .performed else {
++                self.logHandler(.verbose, "softRestartBackend: \(result.logDescription)")
++                completionHandler(result)
++                return
++            }
++            guard self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator) else {
++                self.logHandler(.verbose, "softRestartBackend: \(TribeSoftRestartResult.failed.logDescription)")
++                completionHandler(.failed)
++                return
++            }
++            self.logHandler(.verbose, "softRestartBackend: performed (same TUN, no network settings change)")
++            completionHandler(.performed)
++        }
++    }
++
+     /// Tribe: roaming/stall counters for the app's stats reply and the diagnostics report.
+     public func roamingCounters(completionHandler: @escaping (TribeRoamingCounters) -> Void) {
+         workQueue.async {
+@@ -589,6 +620,9 @@ public class WireGuardAdapter {
+                 self.roamCounters.resumes += 1
+                 self.pathLostAt = nil
+                 self.lastPathSatisfiable = true
++                // tribe.8: a resumed backend is a new device with a new handshake: re-arm the
++                // recovery episode (the rolling cap stays), so its bootstrap is not refused.
++                self.recovery.noteBackendResumed()
+                 self.startStallWatchdog()
+             } catch {
+                 self.logHandler(.error, "Failed to restart backend: \(error.localizedDescription)")
+@@ -700,7 +734,9 @@ public class WireGuardAdapter {
+     /// Socket operations for a stall step (TribeRoaming.socketOps). Every step ends with a
+     /// keepalive so the server learns the new outer address/port at once; otherwise inbound
+     /// traffic (a VoIP call) keeps going to the old address until our next data packet.
+-    private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32) {
++    /// tribe.8: after `listen_port=0` only a keepalive goes out (`wgSendKeepalives`, no second
++    /// BindUpdate of the new socket); `restartBackend` ends the old handle.
++    private func performSocketOps(_ ops: [TribeSocketOp], handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) {
+         for op in ops {
+             switch op {
+             case .freshListenPort:
+@@ -710,12 +746,68 @@ public class WireGuardAdapter {
+                 #endif
+             case .bumpWithKeepalive:
+                 wgBumpSockets(handle)
++            case .sendKeepalive:
++                wgSendKeepalives(handle)
++            case .restartBackend:
++                _ = self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator)
++                return
++            }
++        }
++    }
++
++    /// Same TUN fd, same configuration (endpoints re-resolved for DNS64 like every UAPI refresh),
++    /// no setTunnelNetworkSettings: wgTurnOn dups the fd, wgTurnOff closes only that dup (the same
++    /// mechanism as upstream pause/resume, minus the network settings). The recovery arbiter is
++    /// rebased on the new device's zero counters (not progress). On failure the adapter is left in
++    /// temporaryShutdown (the upstream resume path restores it on the next satisfied path event)
++    /// and up to 3 in-place retries run 2 s apart.
++    private func restartBackendInPlace(handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {
++        let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
++        self.logEndpointResolutionResults(resolutionResults)
++        wgTurnOff(handle)
++        do {
++            let newHandle = try self.startWireGuardBackend(wgConfig: wgConfig)
++            self.state = .started(newHandle, settingsGenerator)
++            self.roamCounters.softRestarts += 1
++            self.previousWatchdogSample = nil
++            if let sample = self.currentStallSample(handle: newHandle) {
++                self.recovery.rebaseAfterBackendRestart(sample)
++            }
++            self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place (same TUN, no network settings change) (\(self.roamCounters.summary))")
++            return true
++        } catch {
++            self.state = .temporaryShutdown(settingsGenerator)
++            self.stopStallWatchdog()
++            self.softRestartRetriesLeft = 3
++            self.logHandler(.error, "Tribe roaming: soft restart failed (\(error)), backend left paused; retrying in place")
++            self.scheduleSoftRestartRetry()
++            return false
++        }
++    }
++
++    private func scheduleSoftRestartRetry() {
++        guard self.softRestartRetriesLeft > 0 else { return }
++        self.softRestartRetriesLeft -= 1
++        self.workQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
++            guard let self = self, case .temporaryShutdown(let settingsGenerator) = self.state else { return }
++            let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
++            self.logEndpointResolutionResults(resolutionResults)
++            do {
++                self.state = .started(try self.startWireGuardBackend(wgConfig: wgConfig), settingsGenerator)
++                self.softRestartRetriesLeft = 0
++                self.roamCounters.softRestarts += 1
++                self.recovery.noteBackendResumed()
++                self.startStallWatchdog()
++                self.logHandler(.verbose, "Tribe roaming: backend soft-restarted in place after a retry (\(self.roamCounters.summary))")
++            } catch {
++                self.logHandler(.error, "Tribe roaming: soft restart retry failed (\(error)), \(self.softRestartRetriesLeft) left")
++                self.scheduleSoftRestartRetry()
+             }
+         }
+     }
+ 
+     private func stallTick() {
+-        guard case .started(let handle, _) = self.state,
++        guard case .started(let handle, let settingsGenerator) = self.state,
+               let sample = self.currentStallSample(handle: handle) else { return }
+         if !self.everHadHandshake && sample.lastHandshakeSec > 0 {
+             self.everHadHandshake = true
+@@ -739,17 +831,23 @@ public class WireGuardAdapter {
+             self.logHandler(.verbose, "Tribe roaming: stall recovery denied by budget (step=\(step) reason=\(reason.rawValue)) (\(self.roamCounters.summary))")
+         case .perform(let action):
+             self.lastLoggedDenial = nil
+-            switch action {
+-            case .none:
+-                break
+-            case .bumpSockets:
+-                self.roamCounters.stallBumps += 1
+-                self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
+-            case .rebindPort:
+-                self.roamCounters.stallRebinds += 1
+-                self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
++            if let tracker = self.recovery.tracker, tracker.stage == 3 {
++                // tribe.8 (U9): stage 3 keeps healing after the fresh port while the GUI may sleep.
++                self.roamCounters.stallPersistent += 1
++                self.logHandler(.verbose, "Tribe roaming: persistent heal step \(tracker.persistentSteps) (\(action.logName)) after backoff, inbound frozen (tx=\(sample.txBytes) rx=\(sample.rxBytes)) (\(self.roamCounters.summary))")
++            } else {
++                switch action {
++                case .none, .softRestart:
++                    break
++                case .bumpSockets:
++                    self.roamCounters.stallBumps += 1
++                    self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
++                case .rebindPort:
++                    self.roamCounters.stallRebinds += 1
++                    self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
++                }
+             }
+-            self.performSocketOps(TribeRoaming.socketOps(for: action), handle: handle)
++            self.performSocketOps(TribeRoaming.socketOps(for: action), handle: handle, settingsGenerator: settingsGenerator)
+         }
+     }
+ 
+diff --git a/Sources/WireGuardKitGo/api-apple.go b/Sources/WireGuardKitGo/api-apple.go
+index 4d631f1..cde7c19 100644
+--- a/Sources/WireGuardKitGo/api-apple.go
++++ b/Sources/WireGuardKitGo/api-apple.go
+@@ -194,6 +194,20 @@ func wgBumpSockets(tunnelHandle int32) {
+ 	}()
+ }
+ 
++// Tribe (awg-apple tribe.8): keepalive to every peer with a live keypair WITHOUT BindUpdate. Used
++// right after listen_port=0, which has already reopened the socket on a fresh port, so the server
++// learns the new outer port at once (tribe.7 re-bound that new socket a second time through
++// wgBumpSockets just to get this keepalive out).
++//
++//export wgSendKeepalives
++func wgSendKeepalives(tunnelHandle int32) {
++	dev, ok := tunnelHandles[tunnelHandle]
++	if !ok {
++		return
++	}
++	dev.SendKeepalivesToPeersWithCurrentKeypair()
++}
++
+ //export wgDisableSomeRoamingForBrokenMobileSemantics
+ func wgDisableSomeRoamingForBrokenMobileSemantics(tunnelHandle int32) {
+ 	dev, ok := tunnelHandles[tunnelHandle]
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index dd92d13..e4b7d14 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -17,6 +17,8 @@ extern void wgTurnOff(int handle);
+ extern int64_t wgSetConfig(int handle, const char *settings);
+ extern char *wgGetConfig(int handle);
+ extern void wgBumpSockets(int handle);
++/* Tribe (awg-apple tribe.8): keepalive to peers with a live keypair, no BindUpdate. */
++extern void wgSendKeepalives(int handle);
+ extern void wgDisableSomeRoamingForBrokenMobileSemantics(int handle);
+ extern const char *wgVersion();
+ 
