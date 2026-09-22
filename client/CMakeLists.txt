@@ -16,6 +16,10 @@ set(BUILD_IOS_APP_IDENTIFIER "hk.wellwon.vpn" CACHE STRING "iOS application iden
 set(BUILD_IOS_GROUP_IDENTIFIER "group.hk.wellwon.tribe" CACHE STRING "Apple app group")
 set(BUILD_VPN_DEVELOPMENT_TEAM "Q7DVH5MCWF" CACHE STRING "Tribe development team")
 
+# AVPN (ревью 2026-09-22): апстримный апдейтер Amnezia (gw.amnezia.org/v1/app_update → чужой
+# .exe/.pkg) выключен во ВСЕХ сборках Tribe. После мержа 5.0.3.0 он вызывался на всех платформах и
+# молчал лишь потому, что в сборку не вшит PROD_AGW_PUBLIC_KEY. Обновления Tribe — свои (SelfUpdate).
+set(CLIENT_ENABLE_APP_UPDATES 0)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/clientBrandingDefaults.cmake)
 
 set(PROJECT ${CLIENT_TARGET_NAME})

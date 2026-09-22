@@ -231,10 +231,12 @@ Item {
 
         // AVPN (self-update v2): тихая установка — тумблер только там, где приложение умеет
         // ставить себя само (десктопный macOS). Пишется синхронно в QSettings (движок).
+        // Виден и во время установки: при авто-режиме экран сразу «занят», и тумблер иначе
+        // не увидеть; выключение отменяет идущую тихую установку (ревью 2026-09-22).
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: Theme.space.xs
-            visible: sheet.hasEngine && TribeEngine.canSelfUpdate === true && !sheet.busy
+            visible: sheet.hasEngine && TribeEngine.canSelfUpdate === true
             spacing: Theme.space.md
 
             ColumnLayout {
