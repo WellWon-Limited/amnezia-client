@@ -17,6 +17,8 @@ Item {
     property string mode: "blocking"
     property bool busy: false                 // идёт установка (macOS: скачивание/проверка)
     property string busyText: ""              // подпись под кнопкой во время установки
+    property int percent: -1                  // AVPN (self-update v2): процент скачивания, -1 = неизвестен
+    readonly property bool hasEngine: typeof TribeEngine !== "undefined"
     property string errorText: ""             // ошибка установки, если была
 
     signal updateRequested()
@@ -208,16 +210,59 @@ Item {
             onClicked: sheet.updateRequested()
         }
 
+        // ход установки: полоса прогресса + стадия («Скачиваем обновление · 42%»)
+        TribeProgressBar {
+            Layout.fillWidth: true
+            visible: sheet.busy
+            percent: sheet.percent
+        }
+
         Text {
             Layout.fillWidth: true
             visible: sheet.busy && sheet.busyText.length > 0
-            text: sheet.busyText
+            text: sheet.percent >= 0 ? sheet.busyText + " · " + sheet.percent + "%" : sheet.busyText
             textFormat: Text.PlainText
             color: Theme.color.text3
             font.family: Theme.font.body
             font.pixelSize: Theme.font.caption
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
+        }
+
+        // AVPN (self-update v2): тихая установка — тумблер только там, где приложение умеет
+        // ставить себя само (десктопный macOS). Пишется синхронно в QSettings (движок).
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.space.xs
+            visible: sheet.hasEngine && TribeEngine.canSelfUpdate === true && !sheet.busy
+            spacing: Theme.space.md
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("Обновлять автоматически")
+                    textFormat: Text.PlainText
+                    color: Theme.color.text1
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                    font.weight: Theme.font.wMedium
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("Ставим новую версию сами, когда VPN выключен. Если что-то пойдёт не так — вернём прежнюю.")
+                    textFormat: Text.PlainText
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.caption
+                    wrapMode: Text.WordWrap
+                }
+            }
+            TribeToggle {
+                checked: sheet.hasEngine ? TribeEngine.autoUpdate : true
+                onToggled: if (sheet.hasEngine) TribeEngine.setAutoUpdate(checked)
+            }
         }
 
         TribeButton {

@@ -9,6 +9,7 @@
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
+#include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
@@ -204,6 +205,21 @@ class AvpnEngineQml : public QObject {
     // сама (скачивание нашего dmg + проверка подписи/нотаризации/версии). На остальных платформах
     // false — UI открывает страницу загрузки/стор, как раньше.
     Q_PROPERTY(bool canSelfUpdate READ canSelfUpdate CONSTANT)
+    // AVPN (self-update v2, реш. владельца 2026-09-22): тихая установка рекомендованной версии
+    // при выключенном туннеле (тумблер, default ON; QSettings AvpnSettings/autoUpdate), ход
+    // установки для UI (стадия + процент скачивания), отозванная сервером текущая версия
+    // (blocked_versions → updateState 3) с откатом на сохранённую предыдущую копию, одноразовое
+    // уведомление после отката. Механика — SelfUpdate.cpp + LaunchGuard.cpp.
+    Q_PROPERTY(bool autoUpdate READ autoUpdate WRITE setAutoUpdate NOTIFY autoUpdateChanged)
+    Q_PROPERTY(bool selfUpdateBusy READ selfUpdateBusy NOTIFY selfUpdateChanged)
+    Q_PROPERTY(bool selfUpdateBackground READ selfUpdateBackground NOTIFY selfUpdateChanged)
+    Q_PROPERTY(QString selfUpdateStage READ selfUpdateStage NOTIFY selfUpdateChanged)
+    Q_PROPERTY(int selfUpdatePercent READ selfUpdatePercent NOTIFY selfUpdateChanged)
+    Q_PROPERTY(QString selfUpdateTarget READ selfUpdateTarget NOTIFY selfUpdateChanged)
+    Q_PROPERTY(bool currentVersionBlocked READ currentVersionBlocked NOTIFY changed)
+    Q_PROPERTY(bool canRollback READ canRollback NOTIFY changed)
+    Q_PROPERTY(QString previousVersion READ previousVersion NOTIFY changed)
+    Q_PROPERTY(QString rollbackNotice READ rollbackNotice NOTIFY rollbackNoticeChanged)
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
     // server-tunable (numbers.probe_services_interval_ms), фолбэк вкомпиленные 180000мс (3 мин).
     Q_PROPERTY(int probeServicesIntervalMs READ probeServicesIntervalMs NOTIFY changed)
@@ -336,6 +352,20 @@ public:
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
     bool canSelfUpdate() const { return avpn::SelfUpdate::isSupported(); }
+    bool autoUpdate() const;
+    Q_INVOKABLE void setAutoUpdate(bool on);
+    bool selfUpdateBusy() const { return m_selfUpdate && m_selfUpdate->running(); }
+    bool selfUpdateBackground() const { return m_selfUpdateBackground; }
+    QString selfUpdateStage() const { return m_selfUpdateStage; }
+    int selfUpdatePercent() const { return m_selfUpdatePercent; }
+    QString selfUpdateTarget() const { return m_selfUpdateTarget; }
+    bool currentVersionBlocked() const { return m_updateState == 3; }
+    bool canRollback() const;
+    QString previousVersion() const;
+    QString rollbackNotice() const { return m_rollbackNotice; }
+    Q_INVOKABLE void dismissRollbackNotice();
+    // Откат на сохранённую предыдущую версию (текущая отозвана сервером). Приложение выйдет само.
+    Q_INVOKABLE void rollbackToPrevious();
     // Маркетинговая версия приложения (первые три компонента APP_VERSION, без номера сборки).
     QString appVersion() const;
     // Версия, которую предлагает control plane для ЭТОЙ платформы (recommended_version, при его
@@ -722,6 +752,9 @@ signals:
     void selfUpdateProgress(const QString &text);
     void selfUpdateFailed(const QString &reason);
     void selfUpdateInstalled();
+    void selfUpdateChanged();
+    void autoUpdateChanged();
+    void rollbackNoticeChanged();
     void changed();
     void error(const QString &message);
     // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
@@ -1169,6 +1202,16 @@ private:
     // storeUrl читают отсюда) + вердикт force-update (см. updateState()).
     avpn::ConfigService          *m_configSvc = nullptr;
     avpn::SelfUpdate *m_selfUpdate = nullptr;  // AVPN: установка обновления (macOS desktop)
+    // AVPN (self-update v2): ход установки для UI + планировщик тихой установки.
+    bool    m_selfUpdateBackground = false;
+    QString m_selfUpdateStage;
+    int     m_selfUpdatePercent = -1;          // -1 = процент неизвестен (сервер не дал размер)
+    QString m_selfUpdateTarget;                // версия, которую ставим
+    QString m_rollbackNotice;                  // одноразовое «версию X вернули к Y»
+    void    ensureSelfUpdate();
+    void    startSelfUpdateInternal(bool background);
+    void    maybeAutoUpdate();
+    void    launchGuardFlushReport();
     // AVPN server-driven АнтиВПН (Task 10): оркестратор /v1/bypass-lists (подписанный fetch/LKG/
     // анти-downgrade). Kill-switch remote_bypass_lists — ВНУТРИ сервиса (onRemoteConfigApplied):
     // при флаге=false кладёт пустой invalid снапшот в BypassListStore и ставит фетч на паузу.
@@ -1178,7 +1221,7 @@ private:
     // AVPN (diag-report, Task 4 bff-3): epoch последнего configApplied (ConfigService) —
     // в отчёте отдаём возраст; 0 = ещё не применялся (ключ в JSON опускается).
     qint64                        m_lastConfigAppliedEpoch = 0;
-    int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block
+    int                           m_updateState = 0; // 0 Ok / 1 Recommend / 2 Block / 3 текущая отозвана
     // AVPN RU-direct carve-out (2026-07-05): актуальные IP хоста API (async QHostInfo из
     // конструктора; T6 — дополняется резолвом НОВОГО edge-хоста при activeEdgeChanged, см.
     // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из

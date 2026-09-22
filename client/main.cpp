@@ -7,6 +7,9 @@
 #include "core/utils/osSignalHandler.h"
 #include "core/utils/migrations.h"
 #include "core/utils/appUiConfig.h"
+#ifdef AVPN_ENGINE_ENABLED
+#include "core/serviceEngine/LaunchGuard.h" // AVPN (self-update v2): crash-loop после обновления → откат
+#endif
 #include "version.h"
 
 
@@ -105,6 +108,21 @@ int main(int argc, char *argv[])
     bool doExec = app.parseCommands();
 
     if (doExec) {
+#if defined(AVPN_ENGINE_ENABLED) && defined(Q_OS_MACOS) && !defined(MACOS_NE)
+        // AVPN (self-update v2): третий старт подряд без подтверждения «жива» после обновления =
+        // crash-loop (инцидент 112: падение в QML до любого нашего кода). Откат на сохранённую
+        // копию ДО загрузки QML, отдельным процессом; сами выходим, он ждёт наш PID.
+        {
+            const QString stateDir = avpn::LaunchGuard::defaultStateDir();
+            const QString appPath = avpn::LaunchGuard::installedAppPath();
+            if (avpn::LaunchGuard::startNeedsRollback(stateDir, QStringLiteral(APP_VERSION), appPath)
+                && avpn::LaunchGuard::spawnRollback(stateDir, appPath, QStringLiteral("crash_loop"),
+                                                    QCoreApplication::applicationPid())) {
+                qWarning().noquote() << "LaunchGuard: crash-loop after update, rolling back and exiting";
+                return 0;
+            }
+        }
+#endif
         app.init();
 
         qInfo().noquote() << QString("Started %1 version %2 %3").arg(APPLICATION_NAME, APP_VERSION, GIT_COMMIT_HASH);
