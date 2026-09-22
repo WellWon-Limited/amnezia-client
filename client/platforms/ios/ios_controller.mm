@@ -1,6 +1,7 @@
 #include "ios_controller.h"
 
 #include <QDebug>
+#include <QDateTime>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -194,6 +195,11 @@ void IosController::emitConnectionStateIfChanged(Vpn::ConnectionState state)
     if (m_lastEmittedState == state) {
         return;
     }
+    emitConnectionStateForced(state);
+}
+
+void IosController::emitConnectionStateForced(Vpn::ConnectionState state)
+{
     m_lastEmittedState = state;
 #if defined(Q_OS_IOS)
     Avpn_recordLifecycle(QStringLiteral("os_state"), {{QStringLiteral("state"), int(state)},
@@ -222,8 +228,38 @@ IosController* IosController::Instance() {
 // что AmneziaVPN-2026-07-06-091741.ips). IosController — синглтон, статик-лок достаточен.
 static os_unfair_lock s_tunnelOwnershipLock = OS_UNFAIR_LOCK_INIT;
 
+// AVPN (ревью REV-2): фаза NE-сессии для решений натива (чистая логика — IosNativePolicy.h).
+static avpn_ios::SessionPhase sessionPhase(NEVPNStatus status)
+{
+    switch (status) {
+    case NEVPNStatusConnecting: return avpn_ios::SessionPhase::Starting;
+    case NEVPNStatusConnected:
+    case NEVPNStatusReasserting: return avpn_ios::SessionPhase::Live;
+    case NEVPNStatusDisconnecting: return avpn_ios::SessionPhase::TearingDown;
+    default: return avpn_ios::SessionPhase::Down;
+    }
+}
+
+static NSString *managerIdentity(NETunnelProviderManager *manager)
+{
+    if (!manager) return nil;
+    id proto = manager.protocolConfiguration;
+    if (![proto isKindOfClass:[NETunnelProviderProtocol class]]) return nil;
+    id identity = ((NETunnelProviderProtocol *)proto).providerConfiguration[@"tribeManagerId"];
+    return [identity isKindOfClass:[NSString class]] ? (NSString *)identity : nil;
+}
+
 void IosController::setCurrentTunnel(NETunnelProviderManager *tunnel)
 {
+    // AVPN (C5/H7): каждый реконсил (configChange/foreground) отдаёт НОВЫЙ экземпляр менеджера того
+    // же профиля. Раньше смена указателя инвалидировала ответ status, уже летящий от NE, — во время
+    // роуминга это съедало подтверждение handshake. Тот же профиль (tribeManagerId) — та же сессия
+    // наблюдения; поколение/заявки сбрасываем только при смене профиля. Новую NE-сессию того же
+    // профиля отделяют connectVpn/disconnectVpn (явный ++m_statusGeneration) и не-Connected статус.
+    // Вызывается только с Qt-потока (m_currentTunnel пишется только здесь же).
+    NSString *oldIdentity = managerIdentity(m_currentTunnel);
+    NSString *newIdentity = managerIdentity(tunnel);
+    const bool sameProfile = oldIdentity && newIdentity && [oldIdentity isEqualToString:newIdentity];
     os_unfair_lock_lock(&s_tunnelOwnershipLock);
     if (tunnel == m_currentTunnel) {
         os_unfair_lock_unlock(&s_tunnelOwnershipLock);
@@ -232,8 +268,10 @@ void IosController::setCurrentTunnel(NETunnelProviderManager *tunnel)
     NETunnelProviderManager *old = m_currentTunnel;
     [tunnel retain];
     m_currentTunnel = tunnel;
-    ++m_statusGeneration;
-    m_statusRequests.invalidate();
+    if (!sameProfile) {
+        ++m_statusGeneration;
+        m_statusRequests.invalidate();
+    }
     os_unfair_lock_unlock(&s_tunnelOwnershipLock);
     [old release]; // release ВНЕ лока (dealloc может дёргать KVO/колбэки)
 }
@@ -280,8 +318,13 @@ void IosController::restoreSessionMetadata(NETunnelProviderManager *manager)
     if (proto.providerConfiguration[@"xray"]) m_proto = amnezia::Proto::Xray;
     else if (proto.providerConfiguration[@"ovpn"]) m_proto = amnezia::Proto::OpenVpn;
     else m_proto = amnezia::Proto::Awg;
-    if (!restored.isEmpty() && m_sessionMetadata.value(QStringLiteral("configuration_generation")) == restored.value(QStringLiteral("generation")))
-        restored = m_sessionMetadata; // prefs identify configuration, runtime status identifies each NE run
+    // prefs identify configuration, runtime status identifies each NE run. AVPN (REV-4): runtime
+    // поколение закончившейся сессии на новый запуск того же профиля (Настройки/Control Center) не
+    // переносим — иначе до первого status-ответа новая сессия носила чужой ключ (множество
+    // «погашено приложением», сопоставление записи NE о стопе).
+    if (!m_sessionRuntimeEnded && !restored.isEmpty()
+        && m_sessionMetadata.value(QStringLiteral("configuration_generation")) == restored.value(QStringLiteral("generation")))
+        restored = m_sessionMetadata;
     if (m_sessionMetadata != restored) {
         m_sessionMetadata = restored;
         emit sessionMetadataChanged(restored);
@@ -320,27 +363,40 @@ void IosController::requestReconcileStatus()
         QMetaObject::invokeMethod(this, [this] { requestReconcileStatus(); }, Qt::QueuedConnection);
         return;
     }
+    scheduleReconcileLoad(0);
+}
+
+// AVPN (фикс-волна 2026-09-22, C1 — источник блокера §2.1): дедлайн/ошибка loadAllFromPreferences —
+// это ОТСУТСТВИЕ наблюдения, а не терминал туннеля. Раньше здесь эмитился Error (при живой
+// NE-сессии и холодном старте GUI) → фасад защёлкивал «ждём подтверждённый down» → иконка VPN
+// есть, кнопка серая. Теперь: ничего не эмитим, повторяем с backoff (ограниченно), поздний ответ
+// того же запроса принимаем; после исчерпания — честное «статус неизвестен» (только лог).
+void IosController::scheduleReconcileLoad(int attempt)
+{
     if (m_connectPending || m_reconcileScheduled) return;
     m_reconcileScheduled = true;
     const uint64_t request = ++m_reconcileGeneration;
     const uint64_t operation = m_operationGeneration;
-    QTimer::singleShot(3000, this, [this, request] {
+    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [this, request, attempt] {
         if (m_reconcileGeneration != request || !m_reconcileScheduled) return;
-        ++m_reconcileGeneration;
-        m_reconcileScheduled = false;
-        qWarning() << "[ios lifecycle] preference reconciliation timed out";
-        if (!m_currentTunnel) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-        // Absence of a callback is NOT proof the tunnel is down.
+        m_reconcileScheduled = false; // запрос остаётся текущим: поздний ответ ещё применим
+        qWarning() << "[ios lifecycle] preference reconciliation timed out, attempt" << attempt;
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("reconcile_timeout"), {{QStringLiteral("attempt"), attempt}});
+#endif
+        retryReconcileLater(request, attempt);
     });
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
         [managers retain]; [error retain];
-        QMetaObject::invokeMethod(this, [this, managers, error, request, operation] {
+        QMetaObject::invokeMethod(this, [this, managers, error, request, operation, attempt] {
             if (request == m_reconcileGeneration && operation == m_operationGeneration) {
+                const bool deadlinePassed = !m_reconcileScheduled;
                 m_reconcileScheduled = false;
                 if (error) {
                     qWarning() << "[ios lifecycle] preference reconciliation failed" << error.code;
-                    if (!m_currentTunnel) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                    if (!deadlinePassed) retryReconcileLater(request, attempt); // иначе повтор уже взведён дедлайном
                 } else {
+                    ++m_reconcileGeneration; // ответ получен: взведённый повтор этого запроса гаснет
                     NETunnelProviderManager *manager = selectOurManager(managers);
                     if (manager) {
                         setCurrentTunnel(manager);
@@ -350,7 +406,9 @@ void IosController::requestReconcileStatus()
                                m_currentTunnel.connection.status == NEVPNStatusInvalid) {
                         setCurrentTunnel(nil);
                         restoreSessionMetadata(nil);
-                        emit disconnectReason(QStringLiteral("profile_missing"), true);
+                        // AVPN (C2): отсутствие профиля (первый запуск / профиль удалён) — НЕ решение
+                        // пользователя выключить VPN: intentional=false, один раз на переход.
+                        emitDisconnectReason(QStringLiteral("profile_missing"), false);
                         emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnected);
                     } // Loaded no profile but an old session still active: never invent its terminal.
                 }
@@ -358,6 +416,23 @@ void IosController::requestReconcileStatus()
             [managers release]; [error release];
         }, Qt::QueuedConnection);
     }];
+}
+
+void IosController::retryReconcileLater(uint64_t request, int attempt)
+{
+    const int delay = avpn_ios::retryDelayMs(attempt);
+    if (delay < 0) {
+        qWarning() << "[ios lifecycle] OS tunnel status unknown after" << attempt + 1 << "reconcile attempts";
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("reconcile_status_unknown"), {{QStringLiteral("attempts"), attempt + 1}});
+#endif
+        return; // честно «неизвестно»: терминал не выдумываем, следующий внешний запрос начнёт заново
+    }
+    QTimer::singleShot(delay, this, [this, request, attempt] {
+        // Более новый запрос, полученный ответ или смена операции — повтор не нужен.
+        if (m_reconcileGeneration != request || m_reconcileScheduled || m_connectPending) return;
+        scheduleReconcileLoad(attempt + 1);
+    });
 }
 
 bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configuration)
@@ -373,6 +448,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     ++m_reconcileGeneration;
     m_reconcileScheduled = false;
     m_connectPending = true;
+    m_connectAwaitingTeardown = 0;
 #if defined(Q_OS_IOS)
     m_operationIntentGeneration = Avpn_currentIntentGeneration();
 #endif
@@ -390,34 +466,64 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_lastXrayStartFailure.clear();
     m_lastXrayCoreLogTail.clear();
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
-    QTimer::singleShot(10000, this, [this, operation] {
-        if (m_operationGeneration != operation || !m_connectPending) return;
-        ++m_operationGeneration; // save/load callbacks cannot start after the deadline
-        m_connectPending = false;
-        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-        requestReconcileStatus();
-    });
+    m_creatingProfile = false;
+    setPermissionPromptPending(false);
+    armConnectDeadline(operation, avpn_ios::nativeTimings().connectDeadlineMs);
     [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
         [managers retain]; [error retain];
         QMetaObject::invokeMethod(this, [this, managers, error, operation] {
             if (operationCurrent(operation)) {
                 if (error) {
                     m_connectPending = false;
+                    ++m_connectDeadlineToken;
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                 } else {
                     NETunnelProviderManager *manager = selectOurManager(managers);
-                    if (manager && manager.connection.status != NEVPNStatusDisconnected && manager.connection.status != NEVPNStatusInvalid) {
-                        // The engine must first obtain a real terminal before replacing a live profile.
+                    const avpn_ios::ConnectOverExisting existing = manager
+                        ? avpn_ios::decideConnectOverExisting(sessionPhase(manager.connection.status))
+                        : avpn_ios::ConnectOverExisting::StartNew;
+                    if (existing == avpn_ios::ConnectOverExisting::AwaitTeardown) {
+                        // AVPN (ревью REV-2): профиль гасится (стоп из Настроек/Shortcut, хвост нашего
+                        // стопа). Он не живой: liveSessionFound здесь терял нажатие Connect (фасад ждал
+                        // Connected, а приходил Disconnected = «внешний обрыв»). Ждём реальный
+                        // Disconnected в пределах дедлайна коннекта и стартуем обычным путём.
+                        setCurrentTunnel(manager);
+                        m_currentTunnel.localizedDescription = @"Tribe VPN";
+                        beginAwaitTeardown(operation);
+                    } else if (existing == avpn_ios::ConnectOverExisting::AdoptLive) {
+                        // AVPN (C3/K3): Connect застал СВОЙ живой профиль (Настройки/Shortcuts/Intent/прошлый
+                        // запуск). Стартовать поверх нельзя, но и Error — ложь (туннель жив; Error защёлкивал
+                        // фасад «ждём down» → серая кнопка при живой иконке). Снимаем заявку, восстанавливаем
+                        // метаданные и говорим фасаду liveSessionFound() ДО реального статуса: он отменит
+                        // свой старт и адоптирует следующий Connected.
                         setCurrentTunnel(manager);
                         m_connectPending = false;
+                        ++m_connectDeadlineToken;
                         restoreSessionMetadata(manager);
-                        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+#if defined(Q_OS_IOS)
+                        Avpn_recordLifecycle(QStringLiteral("live_session_found"), {{QStringLiteral("status"), int(manager.connection.status)},
+                            {QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
+#endif
+                        emit liveSessionFound();
                         vpnStatusDidChange(manager.connection);
                     } else {
+                        const bool creating = (manager == nil);
                         setCurrentTunnel(manager ?: [[[NETunnelProviderManager alloc] init] autorelease]);
                         m_currentTunnel.localizedDescription = @"Tribe VPN";
+                        if (creating) {
+                            // AVPN (C4): save НОВОГО профиля на первом запуске показывает системный диалог
+                            // «Разрешить VPN»; 10-секундный дедлайн накрывал его и рвал коннект, пока
+                            // пользователь читал диалог. Пока ждём save — только длинный потолок;
+                            // обычный дедлайн взводится от completion save (startTunnel).
+                            m_creatingProfile = true;
+                            setPermissionPromptPending(true);
+                            armConnectDeadline(operation, avpn_ios::nativeTimings().permissionPromptCapMs);
+                        }
                         if (!configureSelectedTunnel()) {
                             m_connectPending = false;
+                            ++m_connectDeadlineToken;
+                            m_creatingProfile = false;
+                            setPermissionPromptPending(false);
                             emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                         }
                     }
@@ -427,6 +533,31 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
         }, Qt::QueuedConnection);
     }];
     return true;
+}
+
+void IosController::armConnectDeadline(uint64_t operation, int ms)
+{
+    const uint64_t token = ++m_connectDeadlineToken;
+    QTimer::singleShot(ms, this, [this, operation, token] {
+        if (token != m_connectDeadlineToken || m_operationGeneration != operation || !m_connectPending) return;
+        ++m_operationGeneration; // save/load callbacks cannot start after the deadline
+        m_connectPending = false;
+        m_creatingProfile = false;
+        setPermissionPromptPending(false);
+        qWarning() << "[ios lifecycle] connect deadline";
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("connect_deadline"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+#endif
+        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+        requestReconcileStatus();
+    });
+}
+
+void IosController::setPermissionPromptPending(bool pending)
+{
+    if (m_permissionPromptPending == pending) return;
+    m_permissionPromptPending = pending;
+    emit permissionPromptPending(pending);
 }
 
 bool IosController::configureSelectedTunnel()
@@ -454,7 +585,11 @@ void IosController::disconnectVpn()
     ++m_reconcileGeneration;
     m_reconcileScheduled = false;
     m_connectPending = false;
-    m_localStopRequested = true;
+    ++m_connectDeadlineToken;
+    m_creatingProfile = false;
+    setPermissionPromptPending(false);
+    m_connectAwaitingTeardown = 0;
+    markLocalStopRequested();
     ++m_statusGeneration;
     m_statusRequests.invalidate();
 
@@ -462,51 +597,259 @@ void IosController::disconnectVpn()
     // чтобы движок не повис в ожидании. Если сессия ЖИВАЯ — только stopTunnel; РЕАЛЬНЫЙ Disconnected
     // прилетит из vpnStatusDidChange (его и ждёт reconcile перед реконнектом на новый сервер — это и есть
     // «как в Amnezia»: не стартуем новый туннель, пока старый не дошёл до Disconnected).
+    // AVPN (C1): терминалы этих веток — напрямую (emitConnectionStateForced): движок после
+    // disconnectFromVpn стоит в Disconnecting и должен получить ответ, даже если прошлый эмит
+    // натива уже был Disconnected (дедуп ...IfChanged его проглатывал).
     if (!m_currentTunnel) {
         // A stopped GUI may not have discovered an active Settings/Intent session yet.
-        const uint64_t operation = m_operationGeneration;
-        QTimer::singleShot(3000, this, [this, operation] {
-            if (m_operationGeneration != operation || !m_localStopRequested) return;
-            ++m_operationGeneration;
-            m_localStopRequested = false;
-            emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-            requestReconcileStatus();
-        });
-        [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
-            [managers retain]; [error retain];
-            QMetaObject::invokeMethod(this, [this, managers, error, operation] {
-                if (operation == m_operationGeneration) {
-                    if (error) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-                    else {
-                        NETunnelProviderManager *manager = selectOurManager(managers);
-                        if (manager) {
-                            setCurrentTunnel(manager);
-                            restoreSessionMetadata(manager);
-                            disconnectVpn();
-                        } else {
-                            m_localStopRequested = false;
-                            emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnected);
-                        }
-                    }
-                }
-                [managers release]; [error release];
-            }, Qt::QueuedConnection);
-        }];
+        discoverTunnelToStop(m_operationGeneration, 0);
         return;
     }
     if (![m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
-        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+        m_localStopRequested = false; // гасить нечем — флаг не должен залипать до следующего обрыва
+        emitConnectionStateForced(Vpn::ConnectionState::Error);
         return;
     }
     NEVPNStatus st = m_currentTunnel.connection.status;
     if (st == NEVPNStatusDisconnected || st == NEVPNStatusInvalid) {
         m_localStopRequested = false;
-        emit disconnectReason(QStringLiteral("expected_app_stop"), false);
-        m_lastEmittedState = Vpn::ConnectionState::Disconnected;
-        emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
+        emitDisconnectReason(QStringLiteral("expected_app_stop"), false);
+        emitConnectionStateForced(Vpn::ConnectionState::Disconnected);
         return;
     }
+    noteAppStopForCurrentSession();
     [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
+}
+
+// AVPN (C1): менеджер ещё не найден (холодный старт GUI при живой Settings/Intent-сессии).
+// Дедлайн/ошибка loadAll — не доказательство down и не повод для Error: повторяем с backoff;
+// поздний ответ принимаем; после исчерпания — честное «статус неизвестен» (ничего не эмитим,
+// m_localStopRequested снимается — иначе следующий внешний обрыв ошибочно считался бы нашим).
+void IosController::discoverTunnelToStop(uint64_t operation, int attempt)
+{
+    const auto settled = std::make_shared<bool>(false);
+    const auto noObservation = [this, operation, attempt, settled](const char *why) {
+        if (*settled) return;
+        *settled = true;
+        if (m_operationGeneration != operation || !m_localStopRequested) return;
+        const int delay = avpn_ios::retryDelayMs(attempt);
+        qWarning() << "[ios lifecycle] stop discovery:" << why << "attempt" << attempt;
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("stop_discovery_retry"), {{QStringLiteral("why"), QString::fromLatin1(why)},
+                                                                      {QStringLiteral("attempt"), attempt}});
+#endif
+        if (delay < 0) {
+            m_localStopRequested = false;
+#if defined(Q_OS_IOS)
+            Avpn_recordLifecycle(QStringLiteral("stop_status_unknown"), {{QStringLiteral("attempts"), attempt + 1}});
+#endif
+            requestReconcileStatus(); // реальный статус придёт наблюдением, если оно вообще случится
+            return;
+        }
+        QTimer::singleShot(delay, this, [this, operation, attempt] {
+            if (m_operationGeneration != operation || !m_localStopRequested) return;
+            if (m_currentTunnel) {
+                disconnectVpn(); // профиль нашёлся иным путём (реконсил) — гасим его
+                return;
+            }
+            discoverTunnelToStop(operation, attempt + 1);
+        });
+    };
+    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [noObservation] { noObservation("timeout"); });
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+        [managers retain]; [error retain];
+        QMetaObject::invokeMethod(this, [this, managers, error, operation, noObservation, settled] {
+            if (operation == m_operationGeneration && m_localStopRequested) {
+                if (error) {
+                    noObservation("error");
+                } else {
+                    *settled = true; // поздний ответ тоже годится: это реальное наблюдение
+                    NETunnelProviderManager *manager = selectOurManager(managers);
+                    if (manager) {
+                        setCurrentTunnel(manager);
+                        restoreSessionMetadata(manager);
+                        disconnectVpn();
+                    } else {
+                        m_localStopRequested = false;
+                        emitDisconnectReason(QStringLiteral("expected_app_stop"), false);
+                        emitConnectionStateForced(Vpn::ConnectionState::Disconnected);
+                    }
+                }
+            }
+            [managers release]; [error release];
+        }, Qt::QueuedConnection);
+    }];
+}
+
+void IosController::noteAppStopForCurrentSession()
+{
+    // AVPN (ревью CL-C REV-4): в множество «погашено приложением» — только runtime-поколение ЖИВОЙ
+    // сессии. Поколение конфигурации (статус-ответа ещё не было) у следующей сессии того же профиля
+    // из Настроек то же — её пользовательский стоп стал бы expected_app_stop. Для этого случая
+    // стоп опознаётся флагом m_localStopRequested (+ localStopSupersededByNewSession).
+    if (m_sessionRuntimeEnded || !m_sessionMetadata.contains(QStringLiteral("configuration_generation"))) return;
+    m_disconnectGate.noteAppStop(m_sessionMetadata.value(QStringLiteral("generation")).toString().toStdString());
+}
+
+// AVPN (REV-4): сессия закончилась (наблюдали Disconnected) — её runtime-метаданные больше не
+// описывают текущий профиль. Откатываемся на метаданные конфигурации из prefs.
+void IosController::noteSessionRuntimeEnded()
+{
+    m_sessionRuntimeEnded = true;
+    if (m_currentTunnel && m_sessionMetadata.contains(QStringLiteral("configuration_generation")))
+        restoreSessionMetadata(m_currentTunnel);
+}
+
+// AVPN (ревью REV-3): стоп приложения запоминает, ЧЬЮ сессию гасили. Флаг снимается не только
+// наблюдением её Disconnected (GUI в фоне может его пропустить), но и доказательством новой
+// сессии (avpn_ios::localStopSupersededByNewSession) — иначе пользовательский стоп следующей
+// сессии из Настроек приходил как expected_app_stop (intentional=false).
+void IosController::markLocalStopRequested()
+{
+    m_localStopRequested = true;
+    m_localStopInfo.generation = m_sessionMetadata.value(QStringLiteral("generation")).toString().toStdString();
+    m_localStopInfo.generationIsRuntime = m_sessionMetadata.contains(QStringLiteral("configuration_generation"));
+    NEVPNStatus st = NEVPNStatusInvalid;
+    if (m_currentTunnel) st = m_currentTunnel.connection.status;
+    m_localStopInfo.stoppedLiveSession = (st == NEVPNStatusConnected || st == NEVPNStatusReasserting);
+}
+
+void IosController::clearLocalStopIfNewSession(bool observedConnecting)
+{
+    if (!m_localStopRequested) return;
+    const std::string generation = m_sessionMetadata.value(QStringLiteral("generation")).toString().toStdString();
+    const bool runtime = m_sessionMetadata.contains(QStringLiteral("configuration_generation"));
+    if (!avpn_ios::localStopSupersededByNewSession(m_localStopInfo, observedConnecting, generation, runtime,
+                                                   m_disconnectGate.isAppStopped(generation)))
+        return;
+    m_localStopRequested = false;
+    m_localStopInfo = {};
+#if defined(Q_OS_IOS)
+    Avpn_recordLifecycle(QStringLiteral("local_stop_superseded"), {{QStringLiteral("session_generation"), QString::fromStdString(generation)},
+                                                                   {QStringLiteral("connecting"), observedConnecting}});
+#endif
+}
+
+void IosController::beginAwaitTeardown(uint64_t operation)
+{
+    m_connectAwaitingTeardown = operation;
+#if defined(Q_OS_IOS)
+    Avpn_recordLifecycle(QStringLiteral("connect_awaits_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+#endif
+    recheckTeardown(operation);
+}
+
+// Терминал мог наступить до того, как мы начали ждать, а уведомление — прийти другому экземпляру
+// сессии (реконсил во время заявки коннекта не бежит): перепроверяем статус сразу и затем с шагом.
+// Ожидание ограничено дедлайном коннекта (armConnectDeadline снимает заявку → operationCurrent=false).
+void IosController::recheckTeardown(uint64_t operation)
+{
+    if (m_connectAwaitingTeardown != operation) return;
+    switch (continueConnectAfterTeardown()) {
+    case TeardownStep::Waiting:
+        QTimer::singleShot(250, this, [this, operation] { recheckTeardown(operation); });
+        break;
+    case TeardownStep::LiveFound:
+        vpnStatusDidChange(m_currentTunnel.connection); // реальный статус — после liveSessionFound
+        break;
+    default:
+        break;
+    }
+}
+
+IosController::TeardownStep IosController::continueConnectAfterTeardown()
+{
+    const uint64_t operation = m_connectAwaitingTeardown;
+    if (!operation) return TeardownStep::NotAwaiting;
+    if (!operationCurrent(operation) || !m_currentTunnel) {
+        m_connectAwaitingTeardown = 0; // дедлайн/стоп/смена намерения — обычная обработка наблюдений
+        return TeardownStep::NotAwaiting;
+    }
+    const avpn_ios::SessionPhase phase = sessionPhase(m_currentTunnel.connection.status);
+    if (phase == avpn_ios::SessionPhase::TearingDown) return TeardownStep::Waiting; // фасад в Op::Starting
+    m_connectAwaitingTeardown = 0;
+    if (phase == avpn_ios::SessionPhase::Down) {
+        // Старая сессия погашена. Её Disconnected поглощаем без disconnectReason: нажатие Connect
+        // пользователя новее этого стопа, а intentional=true (стоп из Настроек) снял бы только что
+        // выраженное намерение «вкл» и отменил наш старт.
+        m_disconnectGate.claimReport();
+        m_disconnectGate.clearLive();
+        m_localStopRequested = false;
+        m_localStopInfo = {};
+        noteSessionRuntimeEnded();
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("connect_after_teardown"), {{QStringLiteral("operation_generation"), qulonglong(operation)}});
+#endif
+        if (!configureSelectedTunnel()) {
+            m_connectPending = false;
+            ++m_connectDeadlineToken;
+            emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+        }
+        return TeardownStep::StartContinued;
+    }
+    // За время ожидания профиль снова поднялся (Настройки/Shortcut) — это живая сессия (K3).
+    m_connectPending = false;
+    ++m_connectDeadlineToken;
+    restoreSessionMetadata(m_currentTunnel);
+#if defined(Q_OS_IOS)
+    Avpn_recordLifecycle(QStringLiteral("live_session_found"), {{QStringLiteral("status"), int(m_currentTunnel.connection.status)},
+        {QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
+#endif
+    emit liveSessionFound();
+    return TeardownStep::LiveFound; // вызывающий пересылает реальный статус
+}
+
+void IosController::emitDisconnectReason(const QString &reason, bool intentional)
+{
+    if (!m_disconnectGate.claimReport()) return; // K2: не более одного раза на переход в Disconnected
+    emit disconnectReason(reason, intentional);
+#if defined(Q_OS_IOS)
+    Avpn_recordLifecycle(QStringLiteral("disconnect_reason"), {{QStringLiteral("reason"), reason},
+        {QStringLiteral("intentional"), intentional},
+        {QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
+#endif
+}
+
+// AVPN (фикс-волна 2026-09-22, C2/K2): причина перехода в Disconnected. Раньше intentional = последний
+// intent "off"/"pause" независимо от того, кто гасил: стоп самого приложения (свитч/реконнект,
+// 3 таймаута рукопожатия) и внешний обрыв туннеля, поднятого из Настроек после давнего OFF
+// («липкий intent»), снимали намерение в фасаде → «VPN сам выключается». И каждый реконсил
+// переэмитил причину. Решение — avpn_ios::decideDisconnect (юнит-тесты IosNativePolicyTests).
+void IosController::reportDisconnected()
+{
+#if defined(Q_OS_IOS)
+    const QString sessionGeneration = m_sessionMetadata.value(QStringLiteral("generation")).toString();
+    if (!m_disconnectGate.reported()) {
+        avpn_ios::DisconnectInputs in;
+        in.localStopRequested = m_localStopRequested;
+        in.sessionGeneration = sessionGeneration.toStdString();
+        in.sessionConfigurationGeneration =
+            m_sessionMetadata.value(QStringLiteral("configuration_generation")).toString().toStdString();
+        in.appStoppedGeneration = m_disconnectGate.isAppStopped(in.sessionGeneration);
+        const QVariantMap intent = Avpn_currentIntent();
+        in.intentAction = intent.value(QStringLiteral("action")).toString().toStdString();
+        in.intentGeneration = intent.value(QStringLiteral("generation")).toString().toStdString();
+        in.haveLiveBaseline = m_disconnectGate.haveLive();
+        in.intentGenerationAtLive = m_disconnectGate.intentAtLive();
+        in.liveSinceMs = m_disconnectGate.liveSinceMs();
+        const QVariantMap stop = Avpn_lastStop();
+        in.neStop.present = !stop.isEmpty();
+        in.neStop.generation = stop.value(QStringLiteral("generation")).toString().toStdString();
+        in.neStop.configurationGeneration = stop.value(QStringLiteral("configuration_generation")).toString().toStdString();
+        in.neStop.reason = stop.value(QStringLiteral("reason")).toInt();
+        in.neStop.intentional = stop.value(QStringLiteral("intentional")).toBool();
+        in.neStop.utcMs = stop.value(QStringLiteral("utc_ms")).toLongLong();
+        in.nowMs = QDateTime::currentMSecsSinceEpoch();
+        const avpn_ios::DisconnectDecision decision = avpn_ios::decideDisconnect(in);
+        emitDisconnectReason(QString::fromStdString(decision.reason), decision.intentional);
+    }
+#else
+    emitDisconnectReason(m_localStopRequested ? QStringLiteral("expected_app_stop") : QStringLiteral("unknown_external"), false);
+#endif
+    m_localStopRequested = false;
+    m_localStopInfo = {};
+    m_disconnectGate.clearLive();
+    noteSessionRuntimeEnded();
 }
 
 
@@ -535,7 +878,9 @@ void IosController::checkStatus()
     const auto ticket = m_statusRequests.begin(gen);
     if (!ticket) { [tunnel release]; return; }
     const uint64_t request = *ticket;
-    QTimer::singleShot(3000, this, [this, gen, request] {
+    // AVPN (C5): дедлайн освобождает только СЛОТ заявки (можно начать следующую); поздний ответ
+    // этой заявки всё равно применится, если он новее последнего применённого (accept ниже).
+    QTimer::singleShot(avpn_ios::nativeTimings().statusDeadlineMs, this, [this, gen, request] {
         if (!m_statusRequests.complete(gen, request)) return;
         qWarning() << "[ios lifecycle] status deadline" << gen << request;
 #if defined(Q_OS_IOS)
@@ -604,13 +949,21 @@ void IosController::checkStatus()
                                          startFailure, ifaceName, coreLogTail, roamSummary,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
-            if (m_statusGeneration.load() != gen || !m_statusRequests.complete(gen, request))
+            // AVPN (C5/H7): владение заявкой (complete — exactly-once) и применение полезной нагрузки
+            // (accept — request новее последнего применённого) разделены: ответ, опоздавший за
+            // 3-секундный дедлайн (роуминг, workQueue адаптера), больше не теряет handshake/rx/tx.
+            m_statusRequests.complete(gen, request);
+            if (m_statusGeneration.load() != gen || !m_statusRequests.accept(gen, request))
                 return;
             if (metadata.value(QStringLiteral("schema_version")).toInt() == 1 &&
-                !metadata.value(QStringLiteral("generation")).toString().isEmpty() && m_sessionMetadata != metadata) {
-                m_sessionMetadata = metadata;
-                emit sessionMetadataChanged(metadata);
+                !metadata.value(QStringLiteral("generation")).toString().isEmpty()) {
+                m_sessionRuntimeEnded = false; // AVPN (REV-4): runtime-поколение живой сессии
+                if (m_sessionMetadata != metadata) {
+                    m_sessionMetadata = metadata;
+                    emit sessionMetadataChanged(metadata);
+                }
             }
+            clearLocalStopIfNewSession(false); // AVPN (REV-3): runtime-поколение новой NE-сессии
             if (!roamSummary.isEmpty() && roamSummary != m_lastRoamSummary) {
                 m_lastRoamSummary = roamSummary;
                 qInfo() << "[roam] NE counters:" << roamSummary;
@@ -658,6 +1011,10 @@ void IosController::checkStatus()
                         emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                         if (m_currentTunnel &&
                             [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
+                            // AVPN (C2/K2): этот стоп — решение приложения, не пользователя: NE запишет
+                            // .userInitiated, но Disconnected должен прийти как expected_app_stop.
+                            markLocalStopRequested();
+                            noteAppStopForCurrentSession();
                             [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
                         }
                     } else {
@@ -722,10 +1079,18 @@ void IosController::checkStatus()
 }
 
 // AVPN (BUG-4 auto-heal): ребайнд сокета живого NE-туннеля. Тот же канал, что checkStatus
-// (retained-менеджер + provider message), но fire-and-forget: подтверждение heal'а — сам
-// data-plane (HealthLoop увидит оживший rx/handshake либо повторный DEAD → failover).
+// (retained-менеджер + provider message). Подтверждение heal'а — сам data-plane (HealthLoop),
+// а факт выполнения (K4) — ответ NE: {"rebind":"performed"} | {"rebind":"denied","reason":...}.
+// Раньше fire-and-forget: отказ NE по бюджету/«адаптер не запущен» GUI считал успешным
+// ребайндом → failover откладывался на лишние DEAD-циклы.
 bool IosController::rebindTunnel()
 {
+    if (QThread::currentThread() != thread()) {
+        // Сигнал и дедлайн живут на Qt-потоке контроллера; вызывающий с чужого потока получает
+        // «отправляется» (true), итог — rebindFinished.
+        QMetaObject::invokeMethod(this, [this] { if (!rebindTunnel()) emit rebindFinished(false); }, Qt::QueuedConnection);
+        return true;
+    }
     NETunnelProviderManager *tunnel = retainedCurrentTunnel();
     if (!tunnel)
         return false;
@@ -738,12 +1103,38 @@ bool IosController::rebindTunnel()
     NSString *tunnelIdKey = [NSString stringWithUTF8String:MessageKey::tunnelId];
     NSString *tunnelIdValue = !m_tunnelId.isEmpty() ? m_tunnelId.toNSString() : @"";
     NSDictionary *message = @{actionKey : actionValue, tunnelIdKey : tunnelIdValue};
+    // exactly-once: ответ NE / nil-колбэк / дедлайн 3 с соревнуются за один флаг.
+    const auto finished = std::make_shared<std::atomic_bool>(false);
+    // AVPN (ревью REV-5): сигнал без идентификатора заявки — итог перекрытого вызова (поздний false
+    // дедлайна/медленного ответа) не должен закрыть ожидание более нового rebind в ServiceEngine.
+    const uint64_t seq = ++m_rebindSeq;
+    QTimer::singleShot(avpn_ios::nativeTimings().rebindReplyDeadlineMs, this, [this, finished, seq] {
+        if (finished->exchange(true)) return;
+        qWarning() << "IosController::rebindTunnel : no extension reply in time";
+        if (seq != m_rebindSeq) return; // перекрыт более новым rebindTunnel()
+        emit rebindFinished(false);
+    });
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // tunnel: наш retain отпускается в конце блока (паттерн checkStatus) — ответ-хендлер
-        // менеджер не трогает, только лог.
-        sendVpnExtensionMessage(tunnel, message, [](NSDictionary *response) {
-            const bool ok = response && [response[@"ok"] boolValue];
-            qInfo() << "IosController::rebindTunnel : extension replied" << (ok ? "ok" : "no/ignored");
+        // менеджер не трогает. Разбор ответа — здесь (NSDictionary живёт только в хендлере).
+        sendVpnExtensionMessage(tunnel, message, [this, finished, seq](NSDictionary *response) {
+            id rebind = response[@"rebind"];
+            id legacyOk = response[@"ok"];
+            id reason = response[@"reason"];
+            const bool hasRebind = [rebind isKindOfClass:[NSString class]];
+            const bool hasLegacyOk = [legacyOk respondsToSelector:@selector(boolValue)];
+            const bool performed = avpn_ios::rebindPerformed(
+                response != nil, hasRebind, hasRebind ? std::string([(NSString *)rebind UTF8String] ?: "") : std::string(),
+                hasLegacyOk, hasLegacyOk && [legacyOk boolValue]);
+            const QString detail = hasRebind ? QString::fromNSString((NSString *)rebind)
+                                   + ([reason isKindOfClass:[NSString class]] ? QLatin1Char('/') + QString::fromNSString((NSString *)reason) : QString())
+                                 : response ? QStringLiteral("legacy") : QStringLiteral("no-reply");
+            QMetaObject::invokeMethod(this, [this, finished, performed, detail, seq] {
+                if (finished->exchange(true)) return;
+                qInfo() << "IosController::rebindTunnel : extension replied" << detail << "performed" << performed;
+                if (seq != m_rebindSeq) return; // перекрыт более новым rebindTunnel()
+                emit rebindFinished(performed);
+            }, Qt::QueuedConnection);
         });
         [tunnel release];
     });
@@ -762,6 +1153,12 @@ void IosController::vpnStatusDidChange(void *pNotification)
     if (!session) {
         return;
     }
+    // AVPN (ревью REV-2): Connect ждёт терминал гасящегося профиля — его Disconnecting/Disconnected
+    // фасаду не пересылаем (он в своём Op::Starting), по Disconnected продолжаем старт.
+    if (m_connectAwaitingTeardown) {
+        const TeardownStep step = continueConnectAfterTeardown();
+        if (step == TeardownStep::Waiting || step == TeardownStep::StartContinued) return;
+    }
     if (!m_currentTunnel || (NETunnelProviderSession *)m_currentTunnel.connection != session) {
         requestReconcileStatus();
         return;
@@ -769,28 +1166,24 @@ void IosController::vpnStatusDidChange(void *pNotification)
 
     qDebug() << "IosController::vpnStatusDidChange" << iosStatusToState(session.status) << session;
 
-        if (session.status == NEVPNStatusDisconnected) {
+        if (session.status != NEVPNStatusDisconnected && session.status != NEVPNStatusInvalid) {
+            // AVPN (K2): сессия наблюдается не в Disconnected — следующий Disconnected будет новым
+            // переходом (одна причина на переход). Живая фаза фиксирует базовую линию intent:
+            // намерение "off", записанное ДО неё, для обрыва этой сессии «липкое» и не считается.
+            m_disconnectGate.noteNotDisconnected();
 #if defined(Q_OS_IOS)
-            const QVariantMap intent = Avpn_currentIntent();
-            bool intentional = intent.value(QStringLiteral("action")).toString() == QLatin1String("pause") ||
-                               intent.value(QStringLiteral("action")).toString() == QLatin1String("off");
-            QString reason = intentional ? QStringLiteral("user_intent") :
-                             m_localStopRequested ? QStringLiteral("expected_app_stop") : QStringLiteral("unknown_external");
-            const QVariantMap stop = Avpn_lastStop();
-            const QString sessionGeneration = m_sessionMetadata.value(QStringLiteral("generation")).toString();
-            if (!intentional && !m_localStopRequested && !sessionGeneration.isEmpty() &&
-                stop.value(QStringLiteral("generation")).toString() == sessionGeneration) {
-                intentional = stop.value(QStringLiteral("intentional")).toBool();
-                reason = QStringLiteral("ne_stop_%1").arg(stop.value(QStringLiteral("reason")).toInt());
-            }
-            emit disconnectReason(reason, intentional);
-            Avpn_recordLifecycle(QStringLiteral("disconnect_reason"), {{QStringLiteral("reason"), reason},
-                {QStringLiteral("intentional"), intentional}, {QStringLiteral("session_generation"), sessionGeneration}});
-            m_localStopRequested = false;
-#else
-            emit disconnectReason(QStringLiteral("unknown_external"), false);
+            if (session.status != NEVPNStatusDisconnecting)
+                m_disconnectGate.noteLive(Avpn_currentIntentGeneration().toStdString(), QDateTime::currentMSecsSinceEpoch());
 #endif
-            if (@available(iOS 16.0, *)) {
+            if (session.status != NEVPNStatusDisconnecting)
+                clearLocalStopIfNewSession(session.status == NEVPNStatusConnecting);
+        }
+        if (session.status == NEVPNStatusDisconnected) {
+            const bool firstReport = !m_disconnectGate.reported();
+            reportDisconnected();
+            if (!firstReport) {
+                // повторное наблюдение того же Disconnected (реконсил) — причина уже сообщена
+            } else if (@available(iOS 16.0, *)) {
                 [session fetchLastDisconnectErrorWithCompletionHandler:^(NSError * _Nullable error) {
                     if (error != nil) {
                         qDebug() << "Disconnect error" << error.domain << error.code << error.localizedDescription;
@@ -1276,32 +1669,89 @@ void IosController::startTunnel()
     [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
         [tunnel retain]; [saveError retain];
         QMetaObject::invokeMethod(this, [this, tunnel, saveError, operation] {
-            if (operationCurrent(operation)) {
+            if (operation == m_operationGeneration && m_connectPending && !operationCurrent(operation)) {
+                // AVPN (ревью CL-C REV-3): пока был открыт диалог «Разрешить VPN», намерение сменилось
+                // (Shortcut off/pause). Старт не выполняем, но и не ждём 120-секундный потолок с Error
+                // в конце: заявку снимаем сразу, флаг диалога гасим, отдаём реальный статус (как в
+                // ветке NotCurrent у старта).
+                m_creatingProfile = false;
+                setPermissionPromptPending(false);
+                m_connectPending = false;
+                ++m_connectDeadlineToken;
+#if defined(Q_OS_IOS)
+                Avpn_recordLifecycle(QStringLiteral("start_intent_superseded"), {{QStringLiteral("stage"), QStringLiteral("save")}});
+#endif
+                if (tunnel == m_currentTunnel) vpnStatusDidChange(tunnel.connection);
+            } else if (operationCurrent(operation)) {
+                // AVPN (C4): save нового профиля завершён (диалог «Разрешить VPN» закрыт) — обычный
+                // дедлайн коннекта взводится ОТ этого момента, а не от нажатия Connect.
+                const bool wasCreating = m_creatingProfile;
+                m_creatingProfile = false;
+                setPermissionPromptPending(false);
                 if (saveError) {
                     m_connectPending = false;
+                    ++m_connectDeadlineToken;
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                 } else {
+                    if (wasCreating) armConnectDeadline(operation, avpn_ios::nativeTimings().connectDeadlineMs);
                     [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
                         [tunnel retain]; [loadError retain];
                         QMetaObject::invokeMethod(this, [this, tunnel, loadError, operation] {
                             if (operationCurrent(operation)) {
                                 m_connectPending = false;
+                                ++m_connectDeadlineToken;
                                 if (loadError) {
                                     emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                                 } else if (tunnel.connection.status == NEVPNStatusDisconnected || tunnel.connection.status == NEVPNStatusInvalid) {
                                     NSError *startError = nil;
                                     BOOL started = NO;
 #if defined(Q_OS_IOS)
-                                    Avpn_performIfCurrent(m_operationIntentGeneration, [&] {
+                                    const AvpnIntentPerform performed = Avpn_performIfCurrent(m_operationIntentGeneration, [&] {
                                         started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
                                     });
+                                    if (performed == AvpnIntentPerform::NotCurrent) {
+                                        // Намерение сменилось до старта (Shortcut/NE): это не ошибка коннекта.
+                                        // Отдаём реальный наблюдаемый статус (туннель опущен — проверено выше).
+                                        Avpn_recordLifecycle(QStringLiteral("start_intent_superseded"));
+                                        vpnStatusDidChange(tunnel.connection);
+                                    } else
 #else
                                     started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
 #endif
-                                    if (!started || startError) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-                                    else vpnStatusDidChange(tunnel.connection);
+                                    if (!started || startError) {
+                                        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                                    } else {
+                                        // Впереди новый переход; следующий Disconnected — новая причина (K2).
+                                        m_disconnectGate.noteStartIssued();
+                                        // AVPN (ревью REV-3): новая сессия — флаг стопа прошлой ей не принадлежит.
+                                        m_localStopRequested = false;
+                                        m_localStopInfo = {};
+#if defined(Q_OS_IOS)
+                                        if (performed == AvpnIntentPerform::Superseded) {
+                                            // За время start записали новое намерение. Выключение/пауза
+                                            // побеждают наш старт; повторный resume — нет.
+                                            const QString action = Avpn_currentIntent().value(QStringLiteral("action")).toString();
+                                            Avpn_recordLifecycle(QStringLiteral("start_intent_raced"), {{QStringLiteral("action"), action}});
+                                            if (action == QLatin1String("off") || action == QLatin1String("pause"))
+                                                [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+                                        }
+#endif
+                                        // AVPN (C9): НЕ перечитываем connection.status синхронно — сразу после
+                                        // startVPNTunnelWithOptions он ещё Disconnected (обновляется асинхронно),
+                                        // и движок получал ложный терминал для Op::Starting. Реальный статус
+                                        // придёт NEVPNStatusDidChangeNotification (Connecting → Connected).
+                                    }
+                                } else if (sessionPhase(tunnel.connection.status) == avpn_ios::SessionPhase::TearingDown) {
+                                    // AVPN (ревью REV-2): профиль гасится — не живой; ждём его Disconnected
+                                    // и стартуем (заявка и дедлайн коннекта возвращаются).
+                                    m_connectPending = true;
+                                    armConnectDeadline(operation, avpn_ios::nativeTimings().connectDeadlineMs);
+                                    beginAwaitTeardown(operation);
                                 } else {
                                     // A Settings/Intent start won the race: observe it, do not start over it.
+                                    // AVPN (K3): это тот же случай «Connect застал живой профиль».
+                                    restoreSessionMetadata(tunnel);
+                                    emit liveSessionFound();
                                     vpnStatusDidChange(tunnel.connection);
                                 }
                             }
