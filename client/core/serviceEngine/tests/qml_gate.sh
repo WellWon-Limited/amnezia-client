@@ -53,7 +53,10 @@ run() {
   log="$sandbox/run.log"
   # Изоляция: свой HOME (QSettings, Application Support/LaunchGuard, Logs) и TMPDIR (сокет
   # единственного экземпляра) — установленная Tribe VPN и её состояние не участвуют.
+  # В бандле только cocoa; offscreen берём из установленного Qt той же версии (окно не всплывает).
+  local plugins="${QT_BIN%/bin}/plugins/platforms"
   HOME="$sandbox/home" TMPDIR="$sandbox/tmp/" QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" \
+    QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-$plugins}" \
     "$bin" >"$log" 2>&1 &
   pid=$!
   local waited=0
