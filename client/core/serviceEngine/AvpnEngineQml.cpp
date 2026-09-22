@@ -1601,6 +1601,13 @@ QVariantList AvpnEngineQml::nodePool() const
 // AVPN (выбор по скорости): прямой ICMP-замер RTT до всех живых нод (off-tunnel). См. заголовок.
 void AvpnEngineQml::probeNodeRtt()
 {
+    // Fresh issuance has already been applied by the caller (or the bounded LKG
+    // fallback timer fired). A usable manual location does not need fleet ranking.
+    // A stale/dead pin still follows the measured Auto fallback.
+    if (m_preparingStart && m_engine.hasConnectablePin()) {
+        finishStartPreparation(QStringLiteral("pinned_location_ready"));
+        return;
+    }
     if (!m_rttProbe)
         return;
     // Через поднятый туннель замер к чужим нодам идёт ВНУТРИ туннеля (смазан) — держим кэш, не мерим.
@@ -1699,8 +1706,9 @@ void AvpnEngineQml::finishStartPreparation(const QString &reason)
     reliabilityEvent(QStringLiteral("selection_pool=%1 rtt_age_ms=%2 candidates=%3")
         .arg(m_engine.poolRevision()).arg(m_engine.measuredRttAgeMs()).arg(candidateIds.join(QLatin1Char(','))));
     const bool measured = std::any_of(m_nodeRtt.cbegin(), m_nodeRtt.cend(), [](int rtt) { return rtt >= 0; });
-    reliabilityEvent(reason + (measured ? QStringLiteral(" measured_candidates")
-                                       : QStringLiteral(" weight_fallback")));
+    reliabilityEvent(reason == QLatin1String("pinned_location_ready") ? reason
+        : reason + (measured ? QStringLiteral(" measured_candidates")
+                             : QStringLiteral(" weight_fallback")));
     if (!m_wantConnected) { emit changed(); return; }
     if (!m_engine.hasSubscription()) {
         m_wantConnected = false;

@@ -615,6 +615,33 @@ int main(int argc, char **argv)
         CHECK(eng.transportMode() == TransportMode::Auto);
     }
 
+    // Only a usable location pin bypasses the pre-connect RTT wait. A transport
+    // mode alone still needs location ranking, and a newly dead pin falls back to Auto.
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        const QByteArray ee = awgNodeJson("9:awg", 9, "EE", 1.0);
+        const QByteArray us = awgNodeJson("2:awg", 2, "US", 1.0);
+        CHECK(eng.loadSubscription(subJson({ee, us}), err));
+        eng.setTransportMode(TransportMode::Awg);
+        CHECK(!eng.hasConnectablePin());
+        CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));
+        CHECK(eng.hasConnectablePin());
+        CHECK(eng.measuredRtt().isEmpty());
+        CHECK(eng.connect(err));
+        CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
+        eng.requestStop();
+        QByteArray dead = ee;
+        dead.replace("\"weight\":", "\"health\": {\"telegram\": 0.0}, \"weight\":");
+        CHECK(eng.loadSubscription(subJson({dead, us}), err));
+        CHECK(!eng.hasConnectablePin());
+        eng.setMeasuredRtt({{QStringLiteral("2:awg"), 30}});
+        CHECK(eng.connect(err));
+        CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+    }
+
     CHECK(appliedIntentState(false, false).wantConnected); // Enable from OFF still means ON.
     CHECK(!appliedIntentState(true, false).resumeAfterPause); // Pause of OFF cannot auto-enable.
     CHECK(appliedIntentState(true, true).resumeAfterPause);

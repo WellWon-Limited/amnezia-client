@@ -178,6 +178,7 @@ public:
     // фасад использует для «Обновить подключение» через единый reconcile). Пусто = некуда ротировать.
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
+    bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
     // (авто-выбор её исключает) → по этому флагу RU-direct-сплит отключается (full-tunnel через РФ).
@@ -281,6 +282,7 @@ private:
     const SubscriptionNode *pickTransport(const QString &preferLocation, const QString &preferNodeId,
                                           const QString &exclA, bool withExclusions) const;
     const SubscriptionNode *findNode(const QString &nodeId) const;
+    const SubscriptionNode *pinnedCandidate() const;
     bool anySupportedNode() const;
     // Провал data-plane текущей ноды: история + сессионный список провалов.
     void noteDataPlaneFailure();
