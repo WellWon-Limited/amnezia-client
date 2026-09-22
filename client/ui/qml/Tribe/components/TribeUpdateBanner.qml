@@ -103,7 +103,10 @@ Item {
             }
 
             Text {
+                // «отозвана» без сохранённой копии: «Обновить» — только если есть версия новее
+                // (иначе кнопка гарантированно упадёт с «не более новая», ревью 2026-09-22).
                 visible: root.mode !== "busy"
+                         && !(root.mode === "blocked" && !TribeEngine.canRollback && !TribeEngine.newerAvailable)
                 text: root.mode === "notice" ? qsTr("Скрыть")
                     : root.mode === "blocked" ? (TribeEngine.canRollback ? qsTr("Вернуть %1").arg(TribeEngine.previousVersion)
                                                                           : qsTr("Обновить"))
