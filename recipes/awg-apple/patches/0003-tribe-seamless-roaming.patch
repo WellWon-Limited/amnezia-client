@@ -1,7 +1,8 @@
 diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index 9c2af38..5875c11 100644
 --- a/Sources/WireGuardKit/WireGuardAdapter.swift
 +++ b/Sources/WireGuardKit/WireGuardAdapter.swift
-@@ -51,5 +51,19 @@
+@@ -51,6 +51,18 @@ public class WireGuardAdapter {
      /// Tracks whether the tunnel has ever had a successful handshake during the lifetime of this adapter instance.
      private var everHadHandshake = false
  
@@ -16,12 +17,11 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 +    private var roamRebindPending = false
 +    private var stallTracker: TribeStallTracker?
 +    private var stallTimer: DispatchSourceTimer?
-+    private var recoveryBudget = TribeRecoveryBudget(jitter: Double.random(in: 0...2))
-+    private var previousWatchdogSample: TribeStallSample?
 +
      /// Packet tunnel provider.
      private weak var packetTunnelProvider: NEPacketTunnelProvider?
-@@ -211,6 +225,7 @@
+ 
+@@ -211,6 +223,7 @@ public class WireGuardAdapter {
                      settingsGenerator
                  )
                  self.networkMonitor = networkMonitor
@@ -29,7 +29,7 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
                  completionHandler(nil)
              } catch let error as WireGuardAdapterError {
                  networkMonitor.cancel()
-@@ -240,6 +255,9 @@
+@@ -240,6 +253,9 @@ public class WireGuardAdapter {
  
              self.networkMonitor?.cancel()
              self.networkMonitor = nil
@@ -39,34 +39,21 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
  
              self.state = .stopped
  
-@@ -314,12 +332,26 @@
-                 completionHandler(.invalidState)
-                 return
-             }
-+            guard self.permitRecovery(handle: handle, freshPort: true) else {
-+                completionHandler(.invalidState)
-+                return
-+            }
-             wgSetConfig(handle, "listen_port=0\n")
-             #if os(iOS)
-             wgDisableSomeRoamingForBrokenMobileSemantics(handle)
-             #endif
-             self.logHandler(.verbose, "rebindListenPort: socket rebound to a new ephemeral port")
-             completionHandler(nil)
-+        }
-+    }
-+
-+    /// Tribe: roaming/stall counters for the app's stats reply and the diagnostics report.
-+    public func roamingCounters(completionHandler: @escaping (TribeRoamingCounters) -> Void) {
-+        workQueue.async {
-+            self.roamCounters.recoveryUsed = UInt64(self.recoveryBudget.episodeUsed)
-+            self.roamCounters.recoveryDenied = self.recoveryBudget.denied
-+            self.roamCounters.recoveryInterventions = self.recoveryBudget.interventions
-+            completionHandler(self.roamCounters)
+@@ -323,6 +339,13 @@ public class WireGuardAdapter {
          }
      }
  
-@@ -485,25 +517,45 @@
++    /// Tribe: roaming/stall counters for the app's stats reply and the diagnostics report.
++    public func roamingCounters(completionHandler: @escaping (TribeRoamingCounters) -> Void) {
++        workQueue.async {
++            completionHandler(self.roamCounters)
++        }
++    }
++
+     // MARK: - Private methods
+ 
+     /// Setup WireGuard log handler.
+@@ -485,25 +508,45 @@ public class WireGuardAdapter {
          case .started(let handle, let settingsGenerator):
              self.updateEverHadHandshake(handle: handle)
              if path.status.isSatisfiable {
@@ -97,15 +84,14 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 +                case .pauseNow:
 +                    // Upstream behaviour (kill-switch `roamKeepBackend=0`): pause, restart on return.
                      self.logHandler(.verbose, "Connectivity offline, pausing backend.")
--
++                    self.pauseBackend(handle: handle, settingsGenerator: settingsGenerator)
+ 
 -                    self.state = .temporaryShutdown(settingsGenerator)
 -                    wgTurnOff(handle)
 -                } else {
 -                    let remaining = self.remainingUnsatisfiedGraceSeconds()
 -                    if remaining > 0 {
 -                        self.logHandler(.verbose, "Connectivity unsatisfied right after applying routes, not pausing backend for ~\(Int(ceil(remaining)))s.")
-+                    self.pauseBackend(handle: handle, settingsGenerator: settingsGenerator)
-+
 +                case .keepBackend:
 +                    self.notePathLost()
 +                    if self.roamingPolicy.keepBackendOnPathLoss {
@@ -127,7 +113,7 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
                  }
              }
  
-@@ -524,6 +576,10 @@
+@@ -524,6 +567,10 @@ public class WireGuardAdapter {
                      try self.startWireGuardBackend(wgConfig: wgConfig),
                      settingsGenerator
                  )
@@ -138,12 +124,10 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
              } catch {
                  self.logHandler(.error, "Failed to restart backend: \(error.localizedDescription)")
              }
-@@ -535,6 +591,145 @@
-         #else
-         #error("Unsupported")
+@@ -537,6 +584,136 @@ public class WireGuardAdapter {
          #endif
-+    }
-+
+     }
+ 
 +    // MARK: - Tribe seamless roaming helpers (workQueue only)
 +
 +    private func notePathLost() {
@@ -241,12 +225,6 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 +        }
 +    }
 +
-+    private func permitRecovery(handle: Int32, freshPort: Bool) -> Bool {
-+        guard self.lastPathSatisfiable, let sample = self.currentStallSample(handle: handle) else { return false }
-+        self.recoveryBudget.observe(sample)
-+        return self.recoveryBudget.permit(at: sample.at, freshPort: freshPort)
-+    }
-+
 +    private func stallTick() {
 +        guard case .started(let handle, _) = self.state,
 +              let sample = self.currentStallSample(handle: handle) else { return }
@@ -254,12 +232,11 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 +            self.everHadHandshake = true
 +            self.logHandler(.verbose, "Observed first handshake at last_handshake_time_sec=\(sample.lastHandshakeSec)")
 +        }
-+        // The NE owns bounded no-first-handshake recovery even while the GUI is suspended.
-+        self.recoveryBudget.observe(sample)
-+        let idle = self.previousWatchdogSample.map { $0.txBytes == sample.txBytes && $0.rxBytes == sample.rxBytes } ?? false
-+        self.previousWatchdogSample = sample
-+        let interval: Double = (!self.lastPathSatisfiable || idle) ? 5 : 1
-+        self.stallTimer?.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(300))
++        // Bootstrap (no handshake yet) belongs to the app's handshake watchdog, not to us.
++        guard self.everHadHandshake else {
++            self.stallTracker = nil
++            return
++        }
 +        guard var tracker = self.stallTracker else {
 +            self.stallTracker = TribeStallTracker(first: sample)
 +            return
@@ -270,17 +247,17 @@ diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/
 +        case .none:
 +            break
 +        case .bumpSockets:
-+            guard self.permitRecovery(handle: handle, freshPort: false) else { return }
 +            self.roamCounters.stallBumps += 1
 +            self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
 +            wgBumpSockets(handle)
 +        case .rebindPort:
-+            guard self.permitRecovery(handle: handle, freshPort: true) else { return }
 +            self.roamCounters.stallRebinds += 1
 +            self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
 +            wgSetConfig(handle, "listen_port=0\n")
 +            wgDisableSomeRoamingForBrokenMobileSemantics(handle)
 +        }
-     }
- 
++    }
++
      // MARK: - iOS offline detection helpers
+ 
+     private var unsatisfiedGracePeriodAfterNetworkSettings: TimeInterval {

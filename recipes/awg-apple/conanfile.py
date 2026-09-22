@@ -20,10 +20,31 @@ class AwgApple(ConanFile):
     # AVPN: official v3.1.4 contains the AWG 3.1 parser fix.  The package
     # suffix is deliberate: it also carries the small, reviewable Tribe
     # split-DNS/warmup/rebind patch from the old fork.
-    version = "3.1.4-tribe.6"
+    # tribe.8: tribe.7 (0001-0003 byte-identical to tribe.5 + 0005 bounded recovery) + 0006
+    # persistent heal / in-place soft restart (conandata.yml). TribeRoaming.swift is NOT shared
+    # across versions any more: a released version builds from its own frozen snapshot
+    # (_roaming_snapshots), so tribe.5/tribe.7 rebuilt from this recipe behave as shipped.
+    version = "3.1.4-tribe.8"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
+
+    # Released version -> frozen copy of TribeRoaming.swift + its build-gate test
+    # (tribe/snapshots/<v>/, tests/snapshots/<v>/). Absent = the current tribe/TribeRoaming.swift.
+    # tribe.4 and tribe.5 shipped the same file (git 0d2dd24c); tribe.3 has no roaming patch.
+    _roaming_snapshots = {
+        "3.1.4-tribe.4": "3.1.4-tribe.5",
+        "3.1.4-tribe.5": "3.1.4-tribe.5",
+        "3.1.4-tribe.7": "3.1.4-tribe.7",
+    }
+
+    def _roaming_sources(self):
+        snapshot = self._roaming_snapshots.get(str(self.version))
+        if snapshot is None:
+            return (os.path.join(self.source_folder, "tribe", "TribeRoaming.swift"),
+                    os.path.join(self.source_folder, "tests", "TribeRoamingTests.swift"))
+        return (os.path.join(self.source_folder, "tribe", "snapshots", snapshot, "TribeRoaming.swift"),
+                os.path.join(self.source_folder, "tests", "snapshots", snapshot, "TribeRoamingTests.swift"))
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -108,9 +129,12 @@ class AwgApple(ConanFile):
         # Tribe seamless roaming (tribe.4): the adapter patch 0003 references TribeRoaming.swift;
         # gate the package on its unit test first (plain swiftc, host toolchain), then ship the
         # file alongside the adapter so the NE target compiles it from AWG_APPLE_SOURCE_DIR.
-        self.run("sh " + os.path.join(self.source_folder, "tests", "run_tribe_roaming_tests.sh"))
-        copy(self, "TribeRoaming.swift", src=os.path.join(self.source_folder, "tribe"),
-             dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"))
+        # tribe.8: the version's own snapshot of the file and of its test (see _roaming_snapshots).
+        roaming_swift, roaming_test = self._roaming_sources()
+        self.run(f'sh "{os.path.join(self.source_folder, "tests", "run_tribe_roaming_tests.sh")}" '
+                 f'"{roaming_swift}" "{roaming_test}"')
+        copy(self, "TribeRoaming.swift", src=os.path.dirname(roaming_swift),
+             dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"), keep_path=False)
         go_path = os.path.join(self.build_folder, ".tribe-go-path")
         go_cache = os.path.join(self.build_folder, ".tribe-go-cache")
         prep_env = Environment()
@@ -166,7 +190,11 @@ class AwgApple(ConanFile):
         copy(self, "*", src=os.path.join(self.source_folder, "Sources"),
              dst=os.path.join(self.package_folder, "src", "Sources"),
              excludes=("WireGuardKitGo/.tmp/*", "WireGuardKitGo/out/*",
-                       "WireGuardKitGo/vendor/*"))
+                       "WireGuardKitGo/vendor/*",
+                       # tribe.7: build()'s private GOPATH/GOCACHE (~1.4 GB in tribe.6) and the
+                       # generator scripts are build-only state, never Swift/C source input.
+                       "WireGuardKitGo/.tribe-go-path/*", "WireGuardKitGo/.tribe-go-cache/*",
+                       "WireGuardKitGo/conan/*"))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_target_name", "amnezia::awg-apple")
