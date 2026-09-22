@@ -39,9 +39,11 @@ constexpr const char *kAllowedHostSuffix = "tribevpn.com";
 // $6 PID приложения, $7 файл разрешения замены, $8 каталог журнала,
 // $9 каталог состояния апдейтера (LaunchGuard: previous.app/pending.json/rollback.sh),
 // $10 режим (auto = тихая установка, окно новой версии не выводится на передний план),
-// $11 отозванные сервером версии через запятую (образ с такой версией не ставится).
+// $11 отозванные сервером версии через запятую (образ с такой версией не ставится),
+// $12 ожидаемая версия образа (recommended; пусто = любая новее текущей).
 // Каждый шаг печатает стадию (stage:), процент скачивания (percent:N); любой провал печатает
-// fail: и выходит с ненулевым кодом.
+// fail: и выходит с ненулевым кодом. defer: перед fail: = сбой не по вине версии (сеть, образ
+// не той версии) — тихий режим не сжигает на нём попытку (ревью 2026-09-22).
 constexpr const char *kScript = R"SH(#!/bin/bash
 set -u
 set -o pipefail
@@ -78,6 +80,7 @@ log_dir="$8"
 state="${9:-}"
 mode="${10:-manual}"
 blocked=",${11:-},"
+expected="${12:-}"
 mkdir -p "$log_dir" || fail "Не удалось создать журнал обновления"
 log="$log_dir/self-update.log"
 exec 2>>"$log"
@@ -107,6 +110,7 @@ done
 wait "$curl_pid"; curl_rc=$?
 http_code="$(cat "$tmp/http_code" 2>/dev/null)"
 if [ "$curl_rc" -ne 0 ] || [ "$http_code" != 200 ]; then
+  echo "defer:network"
   echo "fail:Не удалось скачать обновление. Проверьте соединение."
   exit 1
 fi
@@ -156,6 +160,13 @@ if ! [[ "$new_ver" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
   echo "fail:В образе не указана версия"
   exit 1
 fi
+# Ровно та версия, которую рекомендует сервер: ссылка на образ и recommended могут разойтись
+# (кэш CDN, правка одного поля) — не ставим «что лежит», а откладываем.
+if [ -n "$expected" ] && [ "$new_ver" != "$expected" ]; then
+  echo "defer:version_mismatch"
+  echo "fail:В образе версия $new_ver, ожидалась $expected. Попробуем позже."
+  exit 1
+fi
 # Строго новее текущей: сравниваем как версии, не как строки.
 newest="$(printf '%s\n%s\n' "$cur" "$new_ver" | sort -V | tail -1)"
 if [ "$new_ver" = "$cur" ] || [ "$newest" != "$new_ver" ]; then
@@ -194,6 +205,9 @@ state="$7"; mode="$8"; team="$9"; bid="${10}"; log_dir="${11}"; cur="${12}"; new
 backup="$transaction/previous.app"
 fail() {
   echo "Update failed: $1" >&2
+  # Маркер для приложения: после quit окна нет, пауза 6 ч ставится при следующем старте.
+  [ -n "$state" ] && mkdir -p "$state" 2>/dev/null \
+    && printf '%s %s\n' "$new_ver" "$(date +%s)" > "$state/finisher_failed"
   # После quit нет окна Qt, поэтому ошибка остаётся в журнале и системном диалоге.
   /usr/bin/osascript - "$1" <<'APPLESCRIPT'
 on run argv
@@ -205,6 +219,12 @@ APPLESCRIPT
 touch "$tmp/ready" || exit 1
 # Ждём выхода приложения (до 30 секунд), затем меняем бандл.
 for _ in $(seq 1 60); do
+  # Установку отменили после подготовки (например, включили VPN) — уходим молча.
+  if [ -f "$commit.abort" ]; then
+    rm -f -- "$commit.abort" "$commit"
+    rm -rf -- "$transaction" "$tmp"
+    exit 0
+  fi
   kill -0 "$parent" 2>/dev/null || break
   sleep 0.5
 done
@@ -230,37 +250,47 @@ if ! mv -- "$staged" "$dst"; then
   rm -rf -- "$transaction" "$tmp"
   fail "Не удалось установить обновление. Прежняя версия восстановлена."
 fi
+# ── LaunchGuard: сохраняем ПРЕДЫДУЩУЮ версию и пишем pending ДО запуска новой ─────────────
+# Новая копия читает pending.json в main() за миллисекунды после exec: запись после open теряла
+# первый старт и давала «подтверждение» без маркера (ревью 2026-09-22). Без каталога состояния
+# (старый вызывающий) — прежнее поведение: резервная копия удаляется вместе с транзакцией.
+keep="$backup"
+if [ -n "$state" ] && mkdir -p "$state" 2>/dev/null; then
+  rm -rf -- "$state/previous.app" "$state/failed.app"
+  if mv -- "$backup" "$state/previous.app"; then
+    keep="$state/previous.app"
+    printf '{"version":"%s","path":"%s","kept_at":%s}\n' "$cur" "$state/previous.app" "$(date +%s)" > "$state/previous.json"
+  else
+    echo "warn: could not keep previous copy" >&2
+  fi
+  rm -f -- "$state/confirmed" "$state/finisher_failed"
+  printf '{"from":"%s","to":"%s","app":"%s","installed_at":%s,"attempts":0,"mode":"%s"}\n' \
+    "$cur" "$new_ver" "$dst" "$(date +%s)" "$mode" > "$state/pending.json"
+fi
 open_args="-n"
 [ "$mode" = "auto" ] && open_args="-n -g"   # тихая установка: не выводим окно на передний план
 if ! open $open_args "$dst"; then
+  [ -n "$state" ] && rm -f -- "$state/pending.json" "$state/previous.json"
   # Сохраняем обе копии, если откат тоже не удался.
-  mv -- "$dst" "$staged" && mv -- "$backup" "$dst" \
-    || fail "Не удалось восстановить приложение. Резервная копия: $backup"
+  mv -- "$dst" "$staged" && mv -- "$keep" "$dst" \
+    || fail "Не удалось восстановить приложение. Резервная копия: $keep"
   open -n "$dst"
   rm -rf -- "$transaction" "$tmp"
   fail "Не удалось запустить обновление. Прежняя версия восстановлена."
 fi
 echo "Update handed to LaunchServices: $dst" >&2
 
-# ── LaunchGuard: сохраняем ПРЕДЫДУЩУЮ версию и сторожим первый запуск новой ──────────
-# Без каталога состояния (старый вызывающий) — прежнее поведение: резервная копия удаляется.
-if [ -n "$state" ] && mkdir -p "$state" 2>/dev/null; then
-  rm -rf -- "$state/previous.app" "$state/failed.app"
-  if mv -- "$backup" "$state/previous.app"; then
-    printf '{"version":"%s","path":"%s","kept_at":%s}\n' "$cur" "$state/previous.app" "$(date +%s)" > "$state/previous.json"
-  else
-    echo "warn: could not keep previous copy" >&2
-  fi
-  rm -f -- "$state/confirmed"
-  printf '{"from":"%s","to":"%s","app":"%s","installed_at":%s,"attempts":0,"mode":"%s"}\n' \
-    "$cur" "$new_ver" "$dst" "$(date +%s)" "$mode" > "$state/pending.json"
+if [ -n "$state" ] && [ -f "$state/pending.json" ]; then
   rm -rf -- "$transaction" "$tmp"
   # Сторож ≤40 с: новая версия обязана создать маркер confirmed. Умерла до него (или не
   # появилась за 10 с) — откат на сохранённую копию тем же rollback.sh, что и crash-loop.
   seen=0
+  # pgrep -f — регулярка: путь экранируем («Tribe VPN (1).app» иначе не находится и сторож
+  # откатывает здоровую версию); -U — только наши процессы (Fast User Switching).
+  dst_re="$(printf '%s' "$dst/Contents/MacOS/" | sed 's/[][\.*^$()+?{}|]/\\&/g')"
   for i in $(seq 1 80); do
     if [ -f "$state/confirmed" ]; then echo "watchdog: $new_ver confirmed" >&2; break; fi
-    if pgrep -f -- "$dst/Contents/MacOS/" >/dev/null 2>&1; then
+    if pgrep -U "$(id -u)" -f -- "$dst_re" >/dev/null 2>&1; then
       seen=1
     elif [ "$seen" = 1 ] || [ "$i" -ge 20 ]; then
       echo "watchdog: $new_ver not alive (seen=$seen, tick=$i) -> rollback" >&2
@@ -374,7 +404,9 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion, con
     script.close();
     m_error.clear();
     m_prepared = false;
+    m_deferred = false;
     m_background = opts.background;
+    m_mayCommit = opts.mayCommit;
 
 #ifdef AVPN_SELFUPDATE_IMPL
     const QDir executableDir(QCoreApplication::applicationDirPath());
@@ -416,7 +448,7 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion, con
                     QDir::homePath() + QStringLiteral("/Library/Logs/Tribe VPN"),
                     opts.stateDir,
                     opts.background ? QStringLiteral("auto") : QStringLiteral("manual"),
-                    opts.blocked.join(QLatin1Char(',')) });
+                    opts.blocked.join(QLatin1Char(',')), opts.expectedVersion });
 #else
     Q_UNUSED(currentVersion)
     Q_UNUSED(opts)
@@ -442,7 +474,9 @@ void SelfUpdate::readOutput()
             const int pct = line.mid(8).toInt(&ok);
             if (ok && pct >= 0 && pct <= 100)
                 emit downloadProgress(pct);
-        } else if (line.startsWith(QLatin1String("fail:")))
+        } else if (line.startsWith(QLatin1String("defer:")))
+            m_deferred = true;
+        else if (line.startsWith(QLatin1String("fail:")))
             m_error = line.mid(5);
         else if (line.startsWith(QLatin1String("ok:")) && line.size() > 3)
             m_prepared = true;
@@ -467,6 +501,10 @@ void SelfUpdate::finish(const QString &reason)
 {
     m_timeout->stop();
     QString error = reason;
+    if (error.isEmpty() && m_mayCommit && !m_mayCommit()) {
+        m_deferred = true;
+        error = tr("Обновление отложено: VPN включён");
+    }
     if (error.isEmpty()) {
         // Финишер меняет файлы только после этого разрешения И выхода нашего PID.
         // Отмена/аварийный выход до передачи управления не приведут к установке позже.
@@ -475,6 +513,14 @@ void SelfUpdate::finish(const QString &reason)
             || commit.write("install\n") != 8 || !commit.commit())
             error = tr("Не удалось передать установку процессу перезапуска");
     }
+    if (!error.isEmpty() && m_prepared && !m_scriptPath.isEmpty()) {
+        // Финишер уже ждёт нашего выхода: отмена после подготовки — пусть уйдёт молча,
+        // а не через 30 с системным алертом «приложение не завершилось».
+        QFile abort(m_scriptPath + QStringLiteral(".commit.abort"));
+        if (abort.open(QIODevice::WriteOnly))
+            abort.write("abort\n");
+    }
+    m_mayCommit = nullptr;
     if (!m_scriptPath.isEmpty()) {
         QFile::remove(m_scriptPath);
         m_scriptPath.clear();

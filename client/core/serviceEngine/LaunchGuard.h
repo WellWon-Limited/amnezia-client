@@ -25,6 +25,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
@@ -36,6 +37,9 @@ namespace launchguard {
 
 static constexpr int kMaxStartAttempts = 3;   // третий старт без подтверждения = crash-loop
 static constexpr int kConfirmAfterMs = 15000; // окно есть и столько прожили — считаем живой
+// Свежий (сетевой) конфиг подтверждает раньше, но не раньше этого срока после окна: падение в
+// первые секунды (первый кадр, Loader, первое подключение) обязано успеть до «жива» (ревью 2026-09-22).
+static constexpr int kConfirmMinAfterWindowMs = 5000;
 
 struct Pending
 {
@@ -237,6 +241,7 @@ private:
     QString m_previousVersion;
     QString m_previousPath;
     bool    m_windowCreated = false;
+    QElapsedTimer m_windowClock;          // с момента создания главного окна
     bool    m_configApplied = false;
     bool    m_confirmed = false;
 };
