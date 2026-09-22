@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <atomic>
 #include "IosStatusRequest.h"
+#include "IosNativePolicy.h"
 
 #ifdef __OBJC__
     #import <Foundation/Foundation.h>
@@ -66,8 +67,9 @@ public:
 
     // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета ЖИВОГО NE-туннеля — provider message
     // {"action":"rebind"} (extension зовёт wgSetConfig listen_port=0 → BindUpdate → новый
-    // локальный порт = новый 5-tuple flow, лечит сессионный блок ТСПУ). Fire-and-forget:
-    // true = сообщение отправлено живому туннелю, итог меряет HealthLoop по rx/handshake.
+    // локальный порт = новый 5-tuple flow, лечит сессионный блок ТСПУ).
+    // true = сообщение отправляется живому туннелю; итог (K4) — сигнал rebindFinished(bool).
+    // false = отправлять некому (нет менеджера / туннель не Connected), сигнала не будет.
     bool rebindTunnel();
 
     bool shareText(const QStringList &filesToSend);
@@ -128,6 +130,29 @@ signals:
     void importConfigFromOutside(const QString);
     void importBackupFromOutside(const QString);
     void storeTransactionUpdated(const QVariantMap &transaction);
+    // AVPN (контракт K3, фикс-волна 2026-09-22): connectVpn застал СВОЙ живой профиль
+    // (Connected/Connecting/Reasserting, поднятый Настройками/Shortcuts/Intent или прошлым
+    // запуском). Натив НЕ эмитит Error и не стартует поверх: снимает m_connectPending,
+    // восстанавливает sessionMetadata и эмитит этот сигнал ПЕРЕД пересылкой реального статуса.
+    // Фасад отменяет свой Op::Starting и адоптирует следующий Connected (identity — sessionMetadata()).
+    // Профиль в Disconnecting живым НЕ считается (ревью REV-2): сигнала нет, натив молча ждёт
+    // реальный Disconnected (в пределах дедлайна коннекта) и продолжает обычный старт; фасад всё
+    // это время остаётся в своём Op::Starting. Если за ожидание профиль снова поднялся (Настройки),
+    // это уже живая сессия — liveSessionFound.
+    void liveSessionFound();
+    // AVPN (контракт K4): итог provider message {"action":"rebind"}. performed=true — NE ответил
+    // {"rebind":"performed"}; false — {"rebind":"denied",...}, нет живого туннеля, ошибка отправки
+    // или ответ не пришёл за 3 с. Эмитится ровно один раз на каждый вызов rebindTunnel(), вернувший
+    // true (при false-возврате сигнала нет: вызывающий уже знает, что rebind не отправлен).
+    // Ревью REV-5: итог вызова, который перекрыт более новым rebindTunnel(), не эмитится —
+    // запоздалый false прошлого шага не закрывает ожидание нового.
+    void rebindFinished(bool performed);
+    // AVPN (C4): true — натив создаёт НОВЫЙ профиль и ждёт completion saveToPreferences (на первом
+    // запуске iOS показывает системный диалог «Разрешить VPN»); дедлайн коннекта в это время не
+    // тикает (потолок NativeTimings::permissionPromptCapMs). false — ожидание закончилось
+    // (сохранили/ошибка/отмена). ОБЯЗАТЕЛЕН для фасада (ревью REV-1): пока true, его сторож старта
+    // не должен звать down() — disconnectVpn сменит поколение операции, и поздний save отбросится.
+    void permissionPromptPending(bool pending);
 
     void finished();
 
@@ -151,6 +176,30 @@ private:
     bool operationCurrent(uint64_t generation) const;
 
     void emitConnectionStateIfChanged(Vpn::ConnectionState state);
+    // AVPN (C1): терминал напрямую, минуя дедуп m_lastEmittedState — движок, стоящий в
+    // Disconnecting после disconnectVpn, обязан получить ответ, даже если прошлый эмит был тем же.
+    void emitConnectionStateForced(Vpn::ConnectionState state);
+    // AVPN (C1): реконсил с ограниченными повторами вместо синтетического Error.
+    void scheduleReconcileLoad(int attempt);
+    void retryReconcileLater(uint64_t request, int attempt);
+    // AVPN (C1): поиск профиля для стопа, когда менеджер ещё не известен (с повторами).
+    void discoverTunnelToStop(uint64_t operation, int attempt);
+    // AVPN (C2/K2): единственная точка эмиссии disconnectReason (не более раза на переход).
+    void emitDisconnectReason(const QString &reason, bool intentional);
+    void reportDisconnected();
+    void noteAppStopForCurrentSession();
+    void noteSessionRuntimeEnded();
+    // AVPN (ревью REV-3): флаг стопа приложения привязан к сессии; снимаем при доказательстве новой.
+    void markLocalStopRequested();
+    void clearLocalStopIfNewSession(bool observedConnecting);
+    // AVPN (ревью REV-2): connectVpn застал свой профиль в Disconnecting — ждём терминал.
+    enum class TeardownStep { NotAwaiting, Waiting, StartContinued, LiveFound };
+    void beginAwaitTeardown(uint64_t operation);
+    void recheckTeardown(uint64_t operation);
+    TeardownStep continueConnectAfterTeardown();
+    // AVPN (C4): дедлайн фазы коннекта; повторный вызов перевзводит (старый таймер гаснет).
+    void armConnectDeadline(uint64_t operation, int ms);
+    void setPermissionPromptPending(bool pending);
 
 private:
     void *m_iosControllerWrapper {};
@@ -191,8 +240,19 @@ private:
     bool m_connectPending = false;
     bool m_reconcileScheduled = false;
     bool m_localStopRequested = false;
+    avpn_ios::LocalStopInfo m_localStopInfo;        // AVPN (REV-3): чью сессию гасили
+    uint64_t m_connectAwaitingTeardown = 0;         // AVPN (REV-2): операция ждёт Disconnected
+    avpn_ios::DisconnectReasonGate m_disconnectGate; // AVPN (K2)
+    uint64_t m_connectDeadlineToken = 0;            // AVPN (C4)
+    bool m_creatingProfile = false;                 // AVPN (C4): ждём save нового профиля
+    bool m_permissionPromptPending = false;         // AVPN (C4)
     QString m_operationIntentGeneration;
     QVariantMap m_sessionMetadata;
+    // AVPN (ревью CL-C REV-4): runtime-метаданные в m_sessionMetadata принадлежат сессии, которая
+    // уже закончилась (наблюдали её Disconnected). restoreSessionMetadata их не переносит на новый
+    // запуск того же профиля; снимается первым принятым status-ответом новой сессии.
+    bool m_sessionRuntimeEnded = false;
+    uint64_t m_rebindSeq = 0; // AVPN (REV-5): итог только последнего rebindTunnel()
 
     QString m_lastRoamSummary; // AVPN seamless roaming: последняя строка счётчиков NE (лог при изменении)
     // AVPN (девайс-разбор 2026-09-02): последняя доставленная причина отказа ядра Xray и хвост его
