@@ -124,8 +124,9 @@ int main(int argc, char **argv)
         CHECK(!eng.measuredRtt().contains(QStringLiteral("B")));
         CHECK(!eng.hasPendingReseed());
         CHECK(eng.debugSnapshot().trafficUsed == 5); // счётчики из нового тела
-        // та же ревизия / нет ревизии / пустой пул — пул не затирают
-        CHECK(eng.reseedPool(parse(subJson({ B }, 2))) == ReseedResult::Rejected);
+        // Equal revisions are not a content hash: membership/health may have changed.
+        CHECK(eng.reseedPool(parse(subJson({ A, C }, 2))) == ReseedResult::Applied);
+        CHECK(eng.reseedPool(parse(subJson({ B }, 1))) == ReseedResult::Rejected);
         CHECK(eng.reseedPool(parse(subJson({ B }, -1))) == ReseedResult::Rejected);
         CHECK(eng.reseedPool(parse(subJson({}, 3))) == ReseedResult::Rejected);
         CHECK(poolIds(eng) == QStringList({QStringLiteral("A"), QStringLiteral("C")}));
@@ -194,8 +195,13 @@ int main(int argc, char **argv)
         const QByteArray C2 = awgNodeJson("C", 3, "US", "10.0.0.33:585");
         CHECK(eng.reseedPool(parse(subJson({ C2 }, 6))) == ReseedResult::Deferred);
         CHECK(eng.reseedPool(parse(subJson({ C2, A }, 7))) == ReseedResult::Deferred);
-        CHECK(eng.loadSubscription(subJson({ C, A }, 8), err));
-        CHECK(!eng.hasPendingReseed());
+        CHECK(eng.loadSubscription(subJson({ C2, A }, 8), err));
+        CHECK(eng.hasPendingReseed());
+        CHECK(eng.poolRevision() == 5);
+        eng.requestStop();
+        CHECK(eng.applyPendingReseed());
+        CHECK(eng.poolRevision() == 8);
+        CHECK(!eng.loadSubscription(subJson({ A }, 7), err));
         CHECK(eng.poolRevision() == 8);
     }
 
@@ -246,6 +252,38 @@ int main(int argc, char **argv)
         CHECK(!eng.applyPendingReseed());
     }
 
+
+    // Same node ID with changed endpoint/config must lose its old RTT, even offline.
+    {
+        ServiceEngine eng;
+        QString err;
+        CHECK(eng.loadSubscription(subJson({ A, B }, 1), err));
+        eng.setMeasuredRtt({{QStringLiteral("A"), 5}, {QStringLiteral("B"), 80}});
+        const auto changedA = awgNodeJson("A", 1, "FI", "10.0.0.100:585");
+        CHECK(eng.reseedPool(parse(subJson({ changedA, B }, 2))) == ReseedResult::Applied);
+        CHECK(!eng.measuredRtt().contains(QStringLiteral("A")));
+        CHECK(eng.measuredRtt().value(QStringLiteral("B")) == 80);
+        eng.updateSubscriptionTraffic(3, 100, QString());
+        CHECK(eng.debugSnapshot().expiresAt.isEmpty());
+    }
+    // Runtime AWG config changes are deferred; a preserved node ID is insufficient.
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({ A, B }, 1), err));
+        CHECK(eng.setPinnedNode(QStringLiteral("A"), err));
+        CHECK(eng.connect(err));
+        CHECK(eng.onTunnelConnected());
+        auto changed = parse(subJson({ A, B }, 2));
+        changed.nodes[0].awg.S1 += 1;
+        CHECK(eng.reseedPool(changed) == ReseedResult::Deferred);
+        changed.poolRevision = 3;
+        changed.address = {QStringLiteral("10.7.0.9/32")};
+        CHECK(eng.reseedPool(changed) == ReseedResult::Deferred);
+        CHECK(eng.reseedPool(parse(subJson({ A, B }, 2))) == ReseedResult::Rejected);
+    }
     if (g_failed) {
         fprintf(stderr, "reseed_pool_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

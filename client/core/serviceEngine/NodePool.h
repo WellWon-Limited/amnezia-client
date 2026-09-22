@@ -20,13 +20,12 @@ public:
 
     // AVPN (#35 живой трафик): узкое обновление ТОЛЬКО счётчиков подписки из свежего GET /v1/account —
     // ноды/ключи не трогаем (они из /v1/subscription). Инертно к туннелю (up() читает эти поля лишь
-    // для отображения/cap, не реконнектит). expiresAt="" не затираем — бессрочную подписку не портим.
+    // для отображения/cap, не реконнектит). Пустой expiresAt — авторитетное отсутствие срока.
     void updateTraffic(qint64 used, qint64 limit, const QString &expiresAt)
     {
         m_sub.trafficUsed = used;
         m_sub.trafficLimit = limit;
-        if (!expiresAt.isEmpty())
-            m_sub.expiresAt = expiresAt;
+        m_sub.expiresAt = expiresAt;
     }
 
     // TODO(C-4): хранить измеренные score, отдавать отсортированный список кандидатов.

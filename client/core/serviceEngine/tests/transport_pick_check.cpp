@@ -598,6 +598,62 @@ int main(int argc, char **argv)
         CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
     }
 
+
+    // Frozen Xray is also disabled before any remote config arrives (cold/offline LKG).
+    {
+        TuningStore::set({}, {}, {}, {});
+        CHECK(!xrayClientSupported());
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0)}), err));
+        eng.setTransportMode(TransportMode::Xray);
+        CHECK(eng.connect(err));
+        CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
+        CHECK(eng.transportMode() == TransportMode::Auto);
+    }
+
+    CHECK(appliedIntentState(false, false).wantConnected); // Enable from OFF still means ON.
+    CHECK(!appliedIntentState(true, false).resumeAfterPause); // Pause of OFF cannot auto-enable.
+    CHECK(appliedIntentState(true, true).resumeAfterPause);
+
+    // A queued metadata observation must not undo a newer user action or teardown.
+    CHECK(canAdoptObservedTunnel(true, false, false, false, false, true)); // cold own runtime
+    CHECK(canAdoptObservedTunnel(true, true, true, false, false, true));
+    CHECK(!canAdoptObservedTunnel(true, true, false, false, false, true)); // manual OFF
+    CHECK(!canAdoptObservedTunnel(true, true, true, true, false, true));   // pause
+    CHECK(!canAdoptObservedTunnel(true, true, true, false, true, true));   // stop deadline
+    CHECK(!canAdoptObservedTunnel(true, true, true, false, false, false)); // operation in progress
+
+    // Stop/error/deadline cancel a pending two-phase switch; none proves old runtime down.
+    for (int terminal = 0; terminal < 3; ++terminal) {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          awgNodeJson("10:awg", 10, "US", 1.0)}), err));
+        CHECK(eng.connect(err));
+        CHECK(eng.onTunnelConnected());
+        TuningStore::set({}, {{QStringLiteral("rebind_heal"), false},
+                              {QStringLiteral("transport_auto_pick"), true}}, {}, {});
+        tun.st = mkStats(0, 100, 100);
+        CHECK(!eng.tick(1000));
+        tun.st = mkStats(0, 100, 200);
+        CHECK(!eng.tick(1004));
+        tun.st = mkStats(0, 100, 300);
+        CHECK(eng.tick(1008));
+        CHECK(eng.state() == EngineState::Switching);
+        const int ups = tun.upCalls;
+        if (terminal == 0) eng.requestStop();
+        if (terminal == 1) CHECK(eng.onTunnelError());
+        if (terminal == 2) CHECK(eng.expireSwitch(0));
+        eng.onTunnelDisconnected();
+        CHECK(tun.upCalls == ups);
+        CHECK(eng.state() != EngineState::Switching);
+    }
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

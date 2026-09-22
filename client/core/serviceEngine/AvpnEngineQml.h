@@ -846,6 +846,14 @@ private:
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     void guardedStop();    // опустить туннель (requestStop+down): op-in-flight + сторож
+    void beginStartPreparation();
+    void finishStartPreparation(const QString &reason);
+    void cancelStartPreparation();
+    void invalidateNetworkMeasurements();
+    void persistPin();
+    void restorePin();
+    void reliabilityEvent(const QString &event);
+    void adoptNativeIdentity();
     // AVPN awg31-xray-v1 (спека §2.3):
     //  onTunnelUpEffects()     — побочные эффекты реального «Подключено» (пуши, чипы, живой RTT,
     //                            история транспорта); awg — сразу на Vpn::Connected, xray — после verify.
@@ -866,7 +874,7 @@ private:
     // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
     bool surrenderIfDataPlaneDead();
     void persistTransportHistory();
-    void applyReseed(const avpn::Subscription &sub);
+    void applyReseed(const avpn::Subscription &sub, quint64 sequence, const QString &token);
     void applyPendingReseed();
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (beachball-фикс): финиш фоновой установки root-демона (главный поток, queued из worker).
@@ -998,6 +1006,20 @@ private:
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
+    quint64                     m_rttEpoch = 0;
+    bool                        m_rttInFlight = false;
+    bool                        m_preparingStart = false;
+    bool                        m_startPrepared = false;
+    quint64                     m_startPreparationEpoch = 0;
+    quint64                     m_subscriptionSequence = 0;
+    quint64                     m_bootstrapSequence = 0;
+    QString                     m_savedPin;
+    QStringList                 m_reliabilityLog;
+    QElapsedTimer               m_reliabilityClock;
+    QTimer                      m_transitionTimer;
+    bool                        m_requireConfirmedDown = false;
+    bool                        m_userIntentKnown = false;
+    QString                     m_lastIntentGeneration;
     // AVPN (панель администратора): in-app бенч (создаётся в конструкторе, владелец — this).
     BenchRunner                 *m_bench = nullptr;
     bool                         m_benchRunning = false;
@@ -1169,6 +1191,7 @@ private:
     // (мёртвый туннель!), доезжает после восстановления/перезапуска.
     void outboxEnqueue(const QString &json);
     void outboxFlush();
+    QSet<QString> m_reportsInFlight;
     bool m_outboxWasConnected = false; // фронт connected → отложенный flush
     void docStartRuSplit();           // пробы RU-корпуса (или сразу Speed при выкл. сплите)
     void docStartAltNodes();          // собрать очередь альтернатив (или сразу Send)

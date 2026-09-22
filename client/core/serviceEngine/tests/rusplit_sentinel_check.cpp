@@ -44,6 +44,9 @@ int main()
     CHECK(clampIntervalHours(100) == 48, "interval: верх -> 48ч");
     CHECK(clampIntervalHours(12) == 12, "interval: валидный проходит");
 
+    CHECK(reportType(true) == QLatin1String("rusplit_fail"), "failure/mixed round keeps failure type");
+    CHECK(reportType(false) == QLatin1String("rusplit_recovered"), "recovery round has a distinct type");
+
     // парс вахт-листа
     QString n, u;
     CHECK(parseWatchEntry(QStringLiteral("Аэрофлот|https://www.aeroflot.ru/"), n, u)

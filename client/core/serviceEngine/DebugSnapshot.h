@@ -7,6 +7,25 @@
 
 namespace avpn {
 
+// Native observations never override a newer user OFF, pause or pending teardown.
+inline bool canAdoptObservedTunnel(bool connected, bool intentKnown, bool wantConnected,
+                                  bool paused, bool awaitingDown, bool operationIdle)
+{
+    return connected && (!intentKnown || wantConnected) && !paused && !awaitingDown && operationIdle;
+}
+
+
+struct AppliedIntentState {
+    bool paused;
+    bool resumeAfterPause;
+    bool wantConnected;
+};
+inline AppliedIntentState appliedIntentState(bool pause, bool wasActive)
+{
+    // Resume is an explicit Enable; the state before the command may have been OFF.
+    return {pause, pause && wasActive, !pause};
+}
+
 struct NodeDebugRow {
     QString nodeId;
     QString region;

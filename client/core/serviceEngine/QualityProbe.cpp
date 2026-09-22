@@ -23,10 +23,25 @@ void QualityProbe::measure(int timeoutMs)
 {
     if (m_inFlight || !m_nam || m_endpoints.isEmpty())
         return;
+    ++m_generation;
     m_inFlight = true;
     m_timeoutMs = timeoutMs > 0 ? timeoutMs : 4000;
     m_curIdx = 0;
     tryEndpoint(0);
+}
+
+void QualityProbe::cancel()
+{
+    ++m_generation; // abort() can synchronously emit finished: invalidate first.
+    m_inFlight = false;
+    m_timeout->stop();
+    if (m_reply) {
+        auto *reply = m_reply.data();
+        m_reply.clear();
+        disconnect(reply, nullptr, this, nullptr);
+        reply->abort();
+        reply->deleteLater();
+    }
 }
 
 void QualityProbe::tryEndpoint(int idx)
@@ -51,15 +66,21 @@ void QualityProbe::tryEndpoint(int idx)
     m_clock.restart();
     QNetworkReply *reply = m_nam->head(req); // HEAD: 0 тела; если 405 — всё равно вернётся статус/TTFB
     m_reply = reply;
+    const quint64 generation = m_generation;
 
     // TTFB: заголовки получены = ~RTT пути. Завершаем по finished (для HEAD тело пустое).
     // AVPN (аудит N10): shared_ptr вместо голого new — при уничтожении реплая без finished
     // (shutdown) память освобождается вместе с лямбдами, ручной delete не нужен.
     auto ttfb = std::make_shared<qint64>(-1);
-    connect(reply, &QNetworkReply::metaDataChanged, this, [this, ttfb]() {
+    connect(reply, &QNetworkReply::metaDataChanged, this, [this, ttfb, generation]() {
+        if (generation != m_generation || !m_inFlight) return;
         if (*ttfb < 0) *ttfb = m_clock.elapsed();
     });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, ttfb, idx]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, ttfb, idx, generation]() {
+        if (generation != m_generation || !m_inFlight || m_reply != reply) {
+            reply->deleteLater();
+            return;
+        }
         m_timeout->stop();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool ok = (reply->error() == QNetworkReply::NoError

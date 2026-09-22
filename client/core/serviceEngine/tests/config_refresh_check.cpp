@@ -4,10 +4,12 @@
 #include <QByteArray>
 #include <QStringList>
 namespace avpn {
+static QByteArray cachedConfig;
+static int savedConfigs = 0;
 class ConfigStore {
 public:
-    static QByteArray loadConfig() { return {}; }
-    static void saveConfig(const QByteArray &) {}
+    static QByteArray loadConfig() { return cachedConfig; }
+    static void saveConfig(const QByteArray &body) { cachedConfig = body; ++savedConfigs; }
     static QStringList loadEdges() { return {}; }
     static void saveEdges(const QStringList &) {}
     static QString activeEdge(const QString &value) { return value; }
@@ -26,6 +28,36 @@ bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 class ConfigRefreshTest : public QObject {
     Q_OBJECT
 private slots:
+    void init() { avpn::cachedConfig.clear(); avpn::savedConfigs = 0; }
+    void cachedXrayDoesNotThawUntilFreshSignedResponse()
+    {
+        const QByteArray cached = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfig = cached;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        connect(&server, &QTcpServer::newConnection, this, [&]() {
+            while (auto *socket = server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [socket]() {
+                    socket->readAll();
+                    const QByteArray body = R"({"features":{"xray_client":true},"recommended_version":{"macos":"fresh"}})";
+                    socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QNetworkAccessManager network;
+        const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
+        avpn::ConfigService service(&network, base, "fixture-key", {base});
+        service.start();
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(avpn::cachedConfig, cached); // no forged write of the modified signed LKG.
+        QCOMPARE(avpn::savedConfigs, 0);
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("fresh"));
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(avpn::savedConfigs, 1);
+    }
     void refreshesWithoutApplicationRestart()
     {
         runScenario(false);
