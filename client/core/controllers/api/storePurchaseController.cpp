@@ -188,6 +188,9 @@ ErrorCode StorePurchaseController::importServiceFromMarket(const QString &userCo
 
     quint16 crc = qChecksum(QJsonDocument(configObject).toJson());
 
+    if (!serverConfigUtils::isConfigFormatVersionSupported(configObject)) {
+        return ErrorCode::ConfigFormatVersionNotSupportedError;
+    }
     if (configObject.value(configKey::configVersion).toInt() != serverConfigUtils::ConfigSource::AmneziaGateway) {
         return ErrorCode::InternalError;
     }
@@ -358,8 +361,8 @@ ErrorCode StorePurchaseController::processPlayMarketPurchase(const QString &user
         outcome.purchaseToken = purchase.value("purchaseToken").toString();
         outcome.isAcknowledged = purchase.value("isAcknowledged").toBool();
         int purchaseState = purchase.value("purchaseState").toInt(-1);
-        qInfo().noquote() << "[Billing] Purchase success. isAcknowledged:" << outcome.isAcknowledged
-                          << "purchaseState:" << purchaseState;
+        qInfo().noquote() << "[Billing] Purchase success. purchaseToken:" << outcome.purchaseToken
+                          << "isAcknowledged:" << outcome.isAcknowledged << "purchaseState:" << purchaseState;
         // purchaseState: 1 = PURCHASED, 2 = PENDING (user must confirm payment in Google Play), 0 = UNSPECIFIED
         if (purchaseState == purchaseStatePending) {
             qWarning() << "[Billing] Purchase is in PENDING state, waiting for user to confirm payment";

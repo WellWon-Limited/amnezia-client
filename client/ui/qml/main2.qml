@@ -181,9 +181,6 @@ Window  {
             PageController.disableControls(visible)
         }
 
-        function onShowChangelogDrawer() {
-            changelogDrawer.openTriggered()
-        }
     }
 
     Connections {
@@ -320,6 +317,15 @@ Window  {
 
         PopupType {
             id: popupNotificationMessage
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    popupNotificationMessage.close()
+                    popupNotificationTimer.stop()
+                }
+            }
         }
 
         Timer {
