@@ -18,12 +18,14 @@
 #include <QtQuick/QQuickWindow>  
 #include <QWindow>     
 
+#include "core/controllers/updateController.h"
 #include "core/protocols/qmlRegisterProtocols.h"
 #include "logger.h"
 #include "ui/controllers/qml/pageController.h"
 #include "ui/models/installedAppsModel.h"
 #include "ui/utils/mtProxyPublicHostInput.h"
 #include "version.h"
+#include "core/utils/appUiConfig.h"
 
 #include "platforms/ios/QRCodeReaderBase.h"
 
@@ -167,7 +169,7 @@ void AmneziaApplication::init()
     m_marketplaceUpdateController.reset(new MarketplaceUpdateController());
     m_marketplaceUpdateController->start();
 
-    m_engine->addImportPath("qrc:/ui/qml/Modules/");
+    m_engine->addImportPath(QStringLiteral(APP_QML_IMPORT_PATH)); // AVPN: upstream define; our qmlSrcEnv override below
     if (!qmlSrcEnv.isEmpty())
         m_engine->addImportPath(QString::fromUtf8(qmlSrcEnv) + "/Modules/");
 
@@ -183,6 +185,10 @@ void AmneziaApplication::init()
     m_engine->load(url);
 
     m_coreController->setQmlRoot();
+
+#if CLIENT_ENABLE_APP_UPDATES
+    m_coreController->checkForAppUpdates();
+#endif
 
 #ifdef Q_OS_WIN //TODO
     if (m_parser.isSet(m_optAutostart))
@@ -252,6 +258,7 @@ void AmneziaApplication::registerTypes()
     amnezia::declareQmlProtocolEnum();
     Vpn::declareQmlVpnConnectionStateEnum();
     PageLoader::declareQmlPageEnum();
+    UpdateState::declareQmlUpdateStateEnum();
 }
 
 void AmneziaApplication::loadFonts()

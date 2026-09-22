@@ -108,7 +108,6 @@ signals:
     void escapePressed();
     void closeTopDrawer();
 
-    void showChangelogDrawer();
     void imeHeightChanged(int height);
     void imeShiftChanged(); // AVPN: живая позиция клавиатуры (см. imeShift)
     void safeAreaTopMarginChanged();

@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PROJECT AmneziaVPN)
 if(NOT AMNEZIAVPN_VERSION)
-    set(AMNEZIAVPN_VERSION 5.0.1.5 CACHE STRING "Client app version")
+    set(AMNEZIAVPN_VERSION 5.0.3.1 CACHE STRING "Client app version")
 endif()
 
 # AVPN: Tribe — СОБСТВЕННАЯ версия (ВСЕ платформы: iOS/macOS/Android/Windows) перекрывает upstream
@@ -25,6 +25,8 @@ project(${PROJECT} VERSION ${AMNEZIAVPN_VERSION}
         DESCRIPTION "AmneziaVPN"
         HOMEPAGE_URL "https://amnezia.org/"
 )
+
+option(AMNEZIA_BUILD_TESTS "Build test executables" OFF)
 
 # trigger conan to kick off `conan install` globally
 find_package(OpenSSL REQUIRED)
