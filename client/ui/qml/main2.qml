@@ -541,15 +541,6 @@ Window  {
         }
     }
 
-    Item {
-        anchors.fill: parent
-
-        ChangelogDrawer {
-            id: changelogDrawer
-
-            anchors.fill: parent
-        }
-    }
     } // конец appContent // AVPN (macOS rounded)
 
     function showUnsupportedConnectDrawer() {
