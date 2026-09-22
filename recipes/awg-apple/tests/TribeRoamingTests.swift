@@ -140,4 +140,38 @@ do {
     check(c.asDictionary["roam_bumps"] == 2, "dictionary export")
 }
 
+// Autonomous bootstrap is bounded without assuming that the GUI exists.
+do {
+    var tracker = TribeStallTracker(first: s(0, 0, 0, 0))
+    check(tracker.observe(s(1024, 0, 0, 4), pathSatisfied: true, policy: seamless) == .none, "bootstrap respects built-in retries")
+    check(tracker.observe(s(1024, 0, 0, 12), pathSatisfied: false, policy: seamless) == .none, "offline never heals")
+    check(tracker.observe(s(1024, 0, 0, 12), pathSatisfied: true, policy: seamless) == .bumpSockets, "bootstrap local bump after retry grace")
+    check(tracker.observe(s(2048, 0, 0, 30), pathSatisfied: true, policy: seamless) == .rebindPort, "bootstrap fresh port after grace")
+    for time in 31...600 {
+        check(tracker.observe(s(UInt64(time * 1024), 0, 0, Double(time)), pathSatisfied: true, policy: seamless) == .none, "bootstrap exhausted stays quiet")
+    }
+}
+do {
+    var budget = TribeRecoveryBudget(jitter: 2)
+    check(budget.permit(at: 0, freshPort: false), "NE bump accepted")
+    check(!budget.permit(at: 9, freshPort: true), "GUI cannot bypass NE cooldown")
+    check(budget.permit(at: 10, freshPort: true), "one shared second stage")
+    check(!budget.permit(at: 100, freshPort: true), "elapsed time alone does not rearm dead peer")
+    budget.observe(s(100, 0, 0, 110))
+    check(!budget.permit(at: 110, freshPort: false), "tx/reset alone does not rearm recovery")
+    budget.observe(s(100, 1, 0, 120))
+    check(budget.permit(at: 120, freshPort: true), "real inbound progress rearms")
+    check(!budget.permit(at: 140, freshPort: false), "GUI fresh-port repair consumes whole episode")
+}
+do {
+    var budget = TribeRecoveryBudget()
+    for n in 0..<4 {
+        budget.observe(s(100, UInt64(n + 1), 0, Double(n * 10)))
+        check(budget.permit(at: Double(n * 10), freshPort: true), "progress grants episode within rolling cap")
+    }
+    budget.observe(s(100, 10, 0, 40))
+    check(!budget.permit(at: 40, freshPort: true), "progress cannot bypass rolling energy cap")
+    check(budget.permit(at: 120, freshPort: true), "rolling cap expires")
+}
+
 if failures == 0 { print("TribeRoamingTests: OK") } else { print("TribeRoamingTests: \(failures) failure(s)"); exit(1) }

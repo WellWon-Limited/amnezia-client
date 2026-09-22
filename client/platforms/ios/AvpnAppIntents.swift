@@ -21,84 +21,131 @@ import Foundation
 import AppIntents
 import NetworkExtension
 
-// MARK: - App Group bridge (#7)
-
-/// Общий контейнер с приложением и network-extension. Совпадает с Log.swift / main.entitlements.
-private let kAvpnAppGroupID = "group.hk.wellwon.tribe"
-
-/// Ключи, которые читает Qt-движок (AvpnEngineQml) при следующем выходе в foreground, чтобы
-/// синхронизировать своё состояние паузы с тем, что интент уже сделал с туннелем.
-private enum AvpnIntentBridgeKey {
-    /// bool: интент попросил паузу «для покупок». Движок вызовет pauseForShopping/учтёт m_paused.
-    static let pauseRequested = "AvpnIntent/pauseRequested"
-    /// bool: интент попросил включить туннель обратно (resume).
-    static let resumeRequested = "AvpnIntent/resumeRequested"
-    /// Double (timeIntervalSince1970): когда интент последний раз сработал — для дедупликации/дебага.
-    static let lastActionAt = "AvpnIntent/lastActionAt"
-}
-
-private func avpnSharedDefaults() -> UserDefaults? {
-    UserDefaults(suiteName: kAvpnAppGroupID)
-}
-
-/// Записывает «намерение» интента в App Group, чтобы движок согласовал состояние при foreground.
-private func avpnPostBridge(pause: Bool) {
-    guard let defaults = avpnSharedDefaults() else { return }
-    defaults.set(pause, forKey: AvpnIntentBridgeKey.pauseRequested)
-    defaults.set(!pause, forKey: AvpnIntentBridgeKey.resumeRequested)
-    defaults.set(Date().timeIntervalSince1970, forKey: AvpnIntentBridgeKey.lastActionAt)
-}
-
-// MARK: - Tunnel control (фон, без UI)
+// MARK: - Versioned, cancellable ownership across GUI and App Intents
 
 @available(iOS 16.0, *)
 private enum AvpnTunnelError: Error, CustomLocalizedStringResourceConvertible {
-    case noManager
-
+    case noManager, superseded, timeout, unavailable, ambiguousManager
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case .noManager:
-            return "Туннель Tribe ещё не настроен. Откройте приложение и подключитесь один раз."
+        case .ambiguousManager: return "Найдено несколько профилей Tribe. Откройте приложение и подключитесь один раз."
+        case .noManager: return "Туннель Tribe ещё не настроен. Откройте приложение и подключитесь один раз."
+        case .superseded: return "Команда отменена более новым действием."
+        case .timeout: return "iOS не завершила изменение VPN. Проверьте состояние в Tribe."
+        case .unavailable: return "Не удалось сохранить состояние команды. Откройте Tribe."
         }
     }
 }
 
-/// Берём первый сконфигурированный туннель Tribe из системных префов.
-/// В этом приложении один NETunnelProviderManager (packet-tunnel-provider), как в ios_controller.mm.
-@available(iOS 16.0, *)
-private func avpnLoadManager() async throws -> NETunnelProviderManager {
-    let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-    guard let manager = managers.first else {
-        throw AvpnTunnelError.noManager
-    }
-    return manager
-}
-
-/// Поднять туннель из фона. Грузим префы (иначе connection может быть stale) → startVPNTunnel().
-@available(iOS 16.0, *)
-private func avpnStartTunnel() async throws {
-    let manager = try await avpnLoadManager()
-    // loadAllFromPreferences уже даёт «загруженный» объект, но повторный load гарантирует свежий
-    // connection после внешних изменений (как делает ios_controller перед startTunnel).
-    try await manager.loadFromPreferences()
-    if !manager.isEnabled {
-        manager.isEnabled = true
-        try await manager.saveToPreferences()
-        try await manager.loadFromPreferences()
-    }
-    guard let session = manager.connection as? NETunnelProviderSession else { return }
-    // Не дёргаем повторно, если уже поднят/поднимается — startVPNTunnel в этом случае кинул бы ошибку.
-    if session.status != .connected && session.status != .connecting {
-        try session.startVPNTunnel()
+private final class AvpnCompletion<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+    init(_ continuation: CheckedContinuation<T, Error>) { self.continuation = continuation }
+    func finish(_ result: Result<T, Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
     }
 }
 
-/// Опустить туннель из фона (пауза «для покупок»). stopVPNTunnel() — мягкая остановка сессии.
 @available(iOS 16.0, *)
-private func avpnStopTunnel() async throws {
-    let manager = try await avpnLoadManager()
-    try await manager.loadFromPreferences()
-    manager.connection.stopVPNTunnel()
+private struct AvpnIntentOperation {
+    let store: TribeSharedState
+    let generation: String
+    let expires = ProcessInfo.processInfo.systemUptime + 15
+
+    func check() throws {
+        try Task.checkCancellation()
+        guard store.isCurrent(generation) else { throw AvpnTunnelError.superseded }
+        guard ProcessInfo.processInfo.systemUptime < expires else { throw AvpnTunnelError.timeout }
+    }
+    func wait<T>(_ work: (@escaping (Result<T, Error>) -> Void) -> Void) async throws -> T {
+        try check()
+        let value: T = try await withCheckedThrowingContinuation { continuation in
+            let once = AvpnCompletion(continuation)
+            DispatchQueue.global().asyncAfter(deadline: .now() + max(0, expires - ProcessInfo.processInfo.systemUptime)) {
+                once.finish(.failure(AvpnTunnelError.timeout))
+            }
+            work { once.finish($0) }
+        }
+        try check() // every await is a cancellation boundary, including save/load preferences
+        return value
+    }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+private func avpnPerform(pause: Bool) async throws {
+    guard let store = TribeSharedState.appGroup else { throw AvpnTunnelError.unavailable }
+    let generation = try store.begin(action: pause ? "pause" : "resume")
+    let operation = AvpnIntentOperation(store: store, generation: generation)
+    do {
+        let managers: [NETunnelProviderManager] = try await operation.wait { finish in
+            NETunnelProviderManager.loadAllFromPreferences { managers, error in
+                if let error = error { finish(.failure(error)) }
+                else { finish(.success(managers ?? [])) }
+            }
+        }
+        let appID = (Bundle.main.bundleIdentifier ?? "hk.wellwon.vpn.AppIntentsExtension")
+            .replacingOccurrences(of: ".AppIntentsExtension", with: "")
+        let own = managers.filter {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == appID + ".network-extension"
+        }
+        func rank(_ manager: NETunnelProviderManager) -> Int {
+            switch manager.connection.status {
+            case .connected, .reasserting: return 3
+            case .connecting: return 2
+            case .disconnecting: return 1
+            default: return 0
+            }
+        }
+        guard let manager = own.max(by: { rank($0) < rank($1) }) else { throw AvpnTunnelError.noManager }
+        guard own.filter({ rank($0) == rank(manager) }).count == 1 else { throw AvpnTunnelError.ambiguousManager }
+        let _: Void = try await operation.wait { finish in
+            manager.loadFromPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+        }
+        let wasActive = manager.connection.status == .connected || manager.connection.status == .connecting || manager.connection.status == .reasserting
+        guard try store.update(generation, fields: ["was_active": wasActive]) else { throw AvpnTunnelError.superseded }
+        if !pause && !manager.isEnabled {
+            manager.isEnabled = true
+            let _: Void = try await operation.wait { finish in
+                manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+            }
+            let _: Void = try await operation.wait { finish in
+                manager.loadFromPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+            }
+        }
+        if !pause {
+            // A previous stop must actually reach terminal; .reasserting is an active session.
+            while manager.connection.status == .disconnecting {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                try operation.check()
+            }
+        }
+        try store.locked {
+            try operation.check()
+            if pause { manager.connection.stopVPNTunnel() }
+            else if manager.connection.status == .disconnected || manager.connection.status == .invalid {
+                try manager.connection.startVPNTunnel()
+            }
+        }
+        if pause {
+            while manager.connection.status != .disconnected && manager.connection.status != .invalid {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                try operation.check()
+            }
+        }
+        guard try store.update(generation, fields: ["applied": true]) else { throw AvpnTunnelError.superseded }
+        store.record(source: "intent", event: pause ? "pause_applied" : "resume_applied", fields: ["generation": generation, "was_active": wasActive])
+    } catch {
+        // A failed command is not replayed as a successful GUI action. Its generation still
+        // cancels older starts, and a requested OFF remains fail-closed until a newer action.
+        _ = try? store.update(generation, fields: ["applied": false, "failed": true])
+        store.record(source: "intent", event: "action_failed", fields: ["generation": generation])
+        throw error
+    }
 }
 
 // MARK: - Intent: Tribe — включить
@@ -117,8 +164,7 @@ struct TribeEnableIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // Сообщаем движку (#7): запрошен resume — он снимет m_paused/перезапустит failover при foreground.
-        avpnPostBridge(pause: false)
-        try await avpnStartTunnel()
+        try await avpnPerform(pause: false)
         return .result(dialog: "Tribe включён")
     }
 }
@@ -139,8 +185,7 @@ struct TribePauseIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // Мост к движку pauseForShopping (#7): движок при foreground выставит m_paused и погасит failover,
         // чтобы прилетевший Disconnected не переподнял ноду. Реальный эффект (туннель вниз) — сразу здесь.
-        avpnPostBridge(pause: true)
-        try await avpnStopTunnel()
+        try await avpnPerform(pause: true)
         return .result(dialog: "Tribe на паузе для покупок")
     }
 }

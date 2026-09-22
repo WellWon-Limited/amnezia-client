@@ -21,7 +21,7 @@
 }
 
 - (void) vpnConfigurationDidChange:(NSNotification *)notification {
-//    cppController->vpnStatusDidChange(notification);
+    cppController->vpnConfigurationDidChange(notification);
 }
 
 @end

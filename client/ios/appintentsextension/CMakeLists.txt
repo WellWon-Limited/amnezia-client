@@ -69,4 +69,5 @@ target_compile_options(appintentsextension PRIVATE -DGROUP_ID=\"${BUILD_IOS_GROU
 
 target_sources(appintentsextension PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/AvpnAppIntents.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeSharedState.swift
 )

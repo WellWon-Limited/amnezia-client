@@ -68,8 +68,20 @@ extension PacketTunnelProvider {
                    (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
 
             // Start the tunnel
-            wgAdapter = WireGuardAdapter(with: self) { logLevel, message in
+            wgAdapter = WireGuardAdapter(with: self) { [weak self] logLevel, message in
                 wg_log(logLevel.osLogLevel, message: message)
+                // Persist recovery evidence even with a dead/suspended GUI and disabled ne.log.
+                // Never copy arbitrary native log text (it can contain endpoints/config values).
+                if message.hasPrefix("Tribe roaming:") || message.hasPrefix("rebindListenPort:") {
+                    let event = message.contains("still stalled") ? "stall_rebind" :
+                                message.contains("inbound stalled") ? "stall_bump" :
+                                message.hasPrefix("rebindListenPort:") ? "gui_rebind" : "path_change"
+                    let generation = self?.tribeRuntimeGeneration ?? "unknown"
+                    self?.wgAdapter?.roamingCounters { counters in
+                        TribeSharedState.appGroup?.record(source: "ne", event: event,
+                            fields: ["generation": generation, "counters": counters.asDictionary])
+                    }
+                }
             }
 
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
@@ -151,7 +163,16 @@ extension PacketTunnelProvider {
             // AVPN seamless roaming: счётчики адаптера (path_lost/restored, bumps, rebinds,
             // pauses) — в тот же статус-ответ; движок и диагностика видят, что делал роуминг.
             wgAdapter.roamingCounters { counters in
+                var metadata = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
+                metadata["configuration_generation"] = metadata["generation"]
+                metadata["generation"] = self.tribeRuntimeGeneration
+                let summary = counters.asDictionary.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
+                if summary != self.tribeLastRecoverySummary {
+                    self.tribeLastRecoverySummary = summary
+                    TribeSharedState.appGroup?.record(source: "ne", event: "recovery_status", fields: ["generation": metadata["generation"] ?? "legacy", "counters": counters.asDictionary])
+                }
                 let response: [String: Any] = [
+                    "session_metadata": metadata,
                     "rx_bytes": settingsDictionary["rx_bytes"] ?? "0",
                     "tx_bytes": settingsDictionary["tx_bytes"] ?? "0",
                     "last_handshake_time_sec": lastHandshake,
@@ -227,7 +248,13 @@ extension PacketTunnelProvider {
     func stopWireguard(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         wg_log(.info, message: "Stopping tunnel: reason: \(reason.amneziaDescription)")
 
-        wgAdapter?.stop { error in
+        guard let adapter = wgAdapter else {
+            ErrorNotifier.removeLastErrorFile()
+            completionHandler()
+            return
+        }
+        adapter.stop { error in
+            if self.wgAdapter === adapter { self.wgAdapter = nil }
             ErrorNotifier.removeLastErrorFile()
 
             if let error {

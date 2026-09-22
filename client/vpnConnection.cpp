@@ -49,6 +49,8 @@ VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureA
     m_checkTimer.setInterval(qBound(250, (int)avpn::TuningStore::numberOr(QStringLiteral("status_poll_ms"), 1000), 5000)); // AVPN: server-tunable
     connect(IosController::Instance(), &IosController::connectionStateChanged, this, &VpnConnection::setConnectionState);
     connect(IosController::Instance(), &IosController::bytesChanged, this, &VpnConnection::onBytesChanged);
+    // Polling belongs to the observer lifetime: Settings/Shortcuts can start without connectToVpn.
+    connect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus);
 #endif
 }
 
@@ -376,7 +378,8 @@ void VpnConnection::connectToVpn(const QString &serverId, DockerContainer contai
     m_vpnProtocol.reset(androidVpnProtocol);
 #elif defined Q_OS_IOS || defined(MACOS_NE)
     Proto proto = ContainerUtils::defaultProtocol(container);
-    IosController::Instance()->connectVpn(proto, m_vpnConfiguration);
+    if (!IosController::Instance()->connectVpn(proto, m_vpnConfiguration))
+        setConnectionState(Vpn::ConnectionState::Error);
     // AVPN (аудит N5): UniqueConnection — путь Error→повторный connectToVpn не проходит через
     // disconnectFromVpn (там единственный disconnect этого коннекта) → дубликаты копились.
     connect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus,
@@ -638,7 +641,6 @@ void VpnConnection::disconnectFromVpn()
     // реконнект на новый сервер НЕ стартует, пока старый туннель не дошёл до Disconnected (как в Amnezia;
     // иначе старт поверх Disconnecting → «Operation not permitted» → Network Error при смене сервера).
     setConnectionState(Vpn::ConnectionState::Disconnecting);
-    disconnect(&m_checkTimer, &QTimer::timeout, IosController::Instance(), &IosController::checkStatus);
     IosController::Instance()->disconnectVpn();
     return;
 #endif

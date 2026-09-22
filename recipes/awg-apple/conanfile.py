@@ -20,7 +20,7 @@ class AwgApple(ConanFile):
     # AVPN: official v3.1.4 contains the AWG 3.1 parser fix.  The package
     # suffix is deliberate: it also carries the small, reviewable Tribe
     # split-DNS/warmup/rebind patch from the old fork.
-    version = "3.1.4-tribe.5"
+    version = "3.1.4-tribe.6"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
