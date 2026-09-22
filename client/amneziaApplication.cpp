@@ -166,9 +166,6 @@ void AmneziaApplication::init()
 
     m_coreController.reset(new CoreController(m_vpnConnection, m_settings, m_engine));
 
-    m_marketplaceUpdateController.reset(new MarketplaceUpdateController());
-    m_marketplaceUpdateController->start();
-
     m_engine->addImportPath(QStringLiteral(APP_QML_IMPORT_PATH)); // AVPN: upstream define; our qmlSrcEnv override below
     if (!qmlSrcEnv.isEmpty())
         m_engine->addImportPath(QString::fromUtf8(qmlSrcEnv) + "/Modules/");
