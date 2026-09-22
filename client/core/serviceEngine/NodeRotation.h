@@ -78,11 +78,11 @@ inline bool isXrayProto(const QString &proto)
 //    статистика bytesChanged). Android/Windows — следующая волна: движки упакованы, но rx/tx на
 //    xray-пути там нет (HealthLoop слеп), поэтому клиент xray не выбирает; сервер им xray и так
 //    не выдаёт (per-platform min_app_version на листенере, спека §2.2);
-//  • kill-switch features.xray_client (default ВКЛ) — бэк гасит xray на клиентах без релиза.
+//  • kill-switch features.xray_client (default ВЫКЛ: заморожен) — бэк гасит xray на клиентах без релиза.
 inline bool xrayClientSupported()
 {
 #if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
-    return TuningStore::flag(QStringLiteral("xray_client"), true);
+    return TuningStore::flag(QStringLiteral("xray_client"), false);
 #else
     return false;
 #endif

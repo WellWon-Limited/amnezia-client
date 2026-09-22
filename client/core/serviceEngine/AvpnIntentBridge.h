@@ -20,6 +20,7 @@
 #pragma once
 
 #include <QObject>
+#include <QVariantMap>
 
 namespace avpn {
 
@@ -33,12 +34,14 @@ public:
     // после чтения App Group: интент попросил паузу «для покупок» / выход из паузы.
     void requestPause();
     void requestResume();
+    void requestAction(const QVariantMap &action);
 
 signals:
     // AVPN (Task E): coreController/движок связывает это с AvpnEngineQml::pauseForShopping()
     // и resumeFromPause(), чтобы m_paused/failover совпали с тем, что интент уже сделал с туннелем.
     void pauseRequested();
     void resumeRequested();
+    void actionRequested(const QVariantMap &action);
 
 private:
     explicit AvpnIntentBridge(QObject *parent = nullptr);
@@ -50,3 +53,4 @@ private:
 // Читает флаги App Group через AvpnIntentController.mm и эмитит сигналы моста; затем сбрасывает флаги.
 // На desktop — no-op (App Group нет).
 extern "C" void Avpn_consumeIntentFlags(void);
+extern "C" void Avpn_recordGuiIntent(bool enabled);

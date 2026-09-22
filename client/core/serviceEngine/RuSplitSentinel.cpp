@@ -116,6 +116,7 @@ void RuSplitSentinel::finishRound()
         QSettings st;
         const qint64 today = QDateTime::currentSecsSinceEpoch() / 86400;
         bool report = false;
+        bool failureTransition = false;
         QJsonArray targets;
         for (const auto &p : m_round) {
             const bool ok = rusentinel::probeOk(p.cls);
@@ -123,8 +124,10 @@ void RuSplitSentinel::finishRound()
             const QStringList prev = st.value(stateKey(p.name)).toString().split(QLatin1Char('|'));
             const int prevState = prev.size() == 2 ? prev.at(0).toInt() : -1;
             qint64 lastDay = prev.size() == 2 ? prev.at(1).toLongLong() : -1;
-            if (m_tunnelAlive && rusentinel::shouldReport(prevState, ok, lastDay, today)) {
+            const bool changed = m_tunnelAlive && rusentinel::shouldReport(prevState, ok, lastDay, today);
+            if (changed) {
                 report = true;
+                failureTransition |= !ok;
                 lastDay = today;
             }
             if (m_tunnelAlive) // состояние обновляем только при живом интернете (иначе шум обрыва)
@@ -133,13 +136,16 @@ void RuSplitSentinel::finishRound()
             QJsonObject t;
             t.insert(QStringLiteral("name"), p.name);
             t.insert(QStringLiteral("ok"), ok);
+            t.insert(QStringLiteral("transition"), changed
+                ? (ok ? QStringLiteral("recovery") : QStringLiteral("failure"))
+                : QStringLiteral("unchanged"));
             if (!ok) t.insert(QStringLiteral("error"), p.cls);
             targets.append(t);
         }
         if (!report || !m_submit)
             return;
         QJsonObject o;
-        o.insert(QStringLiteral("type"), QStringLiteral("rusplit_fail"));
+        o.insert(QStringLiteral("type"), rusentinel::reportType(failureTransition));
         o.insert(QStringLiteral("schema"), 1);
         o.insert(QStringLiteral("targets"), targets);
         o.insert(QStringLiteral("tunnel_alive"), m_tunnelAlive);

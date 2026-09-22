@@ -37,6 +37,10 @@ void ConfigService::start()
         RemoteConfig c;
         QString err;
         if (parseConfig(lkg, c, err)) {
+            // Frozen transport cannot be re-enabled by an old/offline policy cache.
+            // This is an in-memory safety policy only: never rewrite the signed payload.
+            // A future freshly verified response may explicitly authorize Xray again.
+            c.features.insert(QStringLiteral("xray_client"), false);
             m_config = c;
             emit configApplied(m_config);
         }

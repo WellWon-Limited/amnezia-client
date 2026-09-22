@@ -25,6 +25,12 @@ namespace avpn {
 
 namespace rusentinel {
 
+inline QString reportType(bool hasFailureTransition)
+{
+    return hasFailureTransition ? QStringLiteral("rusplit_fail") : QStringLiteral("rusplit_recovered");
+}
+
+
 // Класс ошибки пробы по (QNetworkReply::NetworkError, httpCode). Категории обезличены.
 //   qtError: значение enum как int (0 = NoError); httpCode: 0 = ответа не было.
 inline QString classifyProbe(int qtError, int httpCode)

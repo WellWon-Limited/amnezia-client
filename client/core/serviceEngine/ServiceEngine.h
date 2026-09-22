@@ -16,6 +16,7 @@
 #include "dto/Subscription.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QSet>
 #include <QString>
@@ -41,8 +42,11 @@ public:
 
     // AVPN (выбор по скорости): кэш измеренного RTT по nodeId (off-tunnel ICMP, из AvpnEngineQml::probeNodeRtt).
     // connect() предпочитает ноду с минимальным RTT отсюда (pickByMeasuredRtt); пусто → фолбэк на weight.
-    void setMeasuredRtt(const QHash<QString, int> &rtt) { m_measuredRtt = rtt; }
-    QHash<QString, int> measuredRtt() const { return m_measuredRtt; } // AVPN awg31-xray-v1: после reseed (обрезан)
+    void setMeasuredRtt(const QHash<QString, int> &rtt) { m_measuredRtt = rtt; m_rttAge.start(); }
+    qint64 measuredRttAgeMs() const { return m_rttAge.isValid() ? m_rttAge.elapsed() : -1; }
+    QHash<QString, int> measuredRtt() const {
+        return m_rttAge.isValid() && m_rttAge.elapsed() <= 120000 ? m_measuredRtt : QHash<QString, int>();
+    }
 
     // Первый вход: genkey (Identity, reuse форка) → POST /v1/trial → сохранить токен. [IN-FORK]
     // store/nam отдаёт приложение (SecureAppSettingsRepository, amnApp->networkManager()).
@@ -199,7 +203,10 @@ public:
     // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected
     // (обрыв байндинга при уходе в фон). Единственный легальный «воскреситель» Connected извне фаз
     // подъёма; обычный onTunnelConnected терминалы намеренно НЕ воскрешает.
-    bool adoptTunnelConnected();
+    bool adoptTunnelConnected(const QString &nodeId = {}, const QString &proto = {},
+                              const QString &endpoint = {});
+    // Poll independently of health sampling (including when the uplink is offline).
+    bool expireSwitch(int timeoutMs = 30000);
 
     // AVPN: пользователь нажал «стоп». Помечаем НАМЕРЕННОЕ отключение (state→Disconnected,
     // сбрасываем текущую ноду) ДО m_tunnel.down(), иначе прилетевший Disconnected уйдёт в
@@ -302,6 +309,8 @@ private:
     QString       m_currentNodeId;
     QString       m_pinnedNodeId; // AVPN: закреплённая пользователем нода (switchToNode); пусто = авто
     QHash<QString, int> m_measuredRtt; // AVPN (выбор по скорости): off-tunnel ICMP RTT по nodeId (кэш)
+    QElapsedTimer m_rttAge;
+    QElapsedTimer m_switchClock;
     QString       m_pendingSwitchNodeId; // AVPN: целевая нода во время двухфазного свитча (пусто = нет)
     QString       m_pendingSwitchReason; // AVPN: причина для switchLog (pinned/rotate/dead)
     QString       m_token;

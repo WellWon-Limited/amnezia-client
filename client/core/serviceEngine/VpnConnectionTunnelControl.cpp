@@ -318,6 +318,12 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
 #endif
 
     QJsonObject cfg = AwgConfigBuilder::build(sub, primary, m_keys);
+    cfg.insert(QStringLiteral("tribeSessionMetadata"), QJsonObject {
+        {QStringLiteral("schema_version"), 1},
+        {QStringLiteral("node_id"), primary.nodeId},
+        {QStringLiteral("proto"), protoOf(primary)},
+        {QStringLiteral("endpoint"), primary.endpoint}
+    });
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // AVPN awg31-xray-v1 (инвариант волны §4.5 «незнакомый ключ не доезжает до NE»): awg-apple 3.1.4
     // (TunnelConfiguration+WgQuickConfig.swift) бросает interfaceHasUnrecognizedKey на любом

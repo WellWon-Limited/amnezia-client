@@ -7,6 +7,7 @@
 
 #include <QDateTime>
 #include <QRandomGenerator> // AVPN: рандомизация авто-выбора среди равных нод (иначе всегда первая = Польша)
+#include <algorithm>
 
 // [IN-FORK] токен/хранилище для startFlow:
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -170,7 +171,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        (isManualOnlyNode(n) ? ruRows : rows).append({ n.nodeId, m_measuredRtt.value(n.nodeId, -1) }); // manual/RU — в fallback
+        (isManualOnlyNode(n) ? ruRows : rows).append({ n.nodeId, measuredRtt().value(n.nodeId, -1) });
     }
     const QString id = fastestMeasuredNodeId(rows.isEmpty() ? ruRows : rows); // fallback на RU если не-RU нет
     if (id.isEmpty())
@@ -196,7 +197,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     const auto randomIndex = [](int size) {
         return static_cast<int>(QRandomGenerator::global()->bounded(size));
     };
-    return pickTransportNode(m_pool.nodes(), m_measuredRtt, m_transportHistory, in, randomIndex);
+    return pickTransportNode(m_pool.nodes(), measuredRtt(), m_transportHistory, in, randomIndex);
 }
 
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
@@ -204,12 +205,21 @@ bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
     Subscription sub;
     if (!SubscriptionParser::parse(json, sub, error))
         return false;
-    m_pool.setSubscription(sub);
-    m_lkgActive = false; // AVPN (LKG): свежие данные с сервера — кэш больше не «маска»
-    // AVPN awg31-xray-v1: полная перезагрузка пула (bootstrap/refreshPool) перекрывает отложенный
-    // reseed; сессионные провалы узлов старого пула больше не актуальны.
-    m_pendingReseed.reset();
-    m_failedThisSession.clear();
+    const qint64 latestRevision = m_pendingReseed.has_value()
+        ? qMax(m_pendingReseed->poolRevision, m_pool.subscription().poolRevision)
+        : m_pool.subscription().poolRevision;
+    if (sub.poolRevision > 0 && sub.poolRevision < latestRevision) {
+        error = QStringLiteral("stale subscription revision");
+        return false;
+    }
+    // Bootstrap can finish while a tunnel is already alive. It obeys the same identity
+    // checks as periodic refresh; it must never replace credentials under a live session.
+    if (!reseedApplicableNow(sub)) {
+        m_pendingReseed = sub;
+        m_pool.updateTraffic(sub.trafficUsed, sub.trafficLimit, sub.expiresAt);
+    } else {
+        applyReseedNow(sub);
+    }
     return true;
 }
 
@@ -239,13 +249,17 @@ bool ServiceEngine::sameNodeIdentity(const SubscriptionNode &a, const Subscripti
         return a.xray->uuid == b.xray->uuid && a.xray->publicKey == b.xray->publicKey
                && a.xray->shortId == b.xray->shortId && a.xray->serverName == b.xray->serverName;
     }
-    return a.serverPubkey == b.serverPubkey;
+    // Compare the effective runtime config, including PSK, AWG obfuscation, DNS and MTU.
+    // Values stay in memory and are never written to diagnostics.
+    return AwgConfigBuilder::buildInner({}, a, {}) == AwgConfigBuilder::buildInner({}, b, {});
 }
 
 bool ServiceEngine::reseedApplicableNow(const Subscription &sub) const
 {
     if (m_state == EngineState::Disconnected || m_state == EngineState::Error)
         return true;
+    if (sub.address != m_pool.subscription().address)
+        return false;
     // Не терминал: текущая нода (и цель незавершённого свитча) обязаны быть в новом пуле без
     // изменений — иначе живой туннель/секвенс свитча остался бы без своей ноды.
     const auto unchanged = [this, &sub](const QString &id) {
@@ -281,7 +295,12 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     // RTT-кэш и сессионные провалы исчезнувших узлов — сбросить (иначе стейл-замер ранжировал бы
     // призрака, а провал — держал бы новый узел с тем же id в чёрном списке).
     for (auto it = m_measuredRtt.begin(); it != m_measuredRtt.end();) {
-        if (!newIds.contains(it.key()))
+        const auto oldNode = std::find_if(old.nodes.cbegin(), old.nodes.cend(),
+            [&it](const SubscriptionNode &n) { return n.nodeId == it.key(); });
+        const auto newNode = std::find_if(sub.nodes.cbegin(), sub.nodes.cend(),
+            [&it](const SubscriptionNode &n) { return n.nodeId == it.key(); });
+        if (oldNode == old.nodes.cend() || newNode == sub.nodes.cend()
+            || !sameNodeIdentity(*oldNode, *newNode))
             it = m_measuredRtt.erase(it);
         else
             ++it;
@@ -316,8 +335,13 @@ ReseedResult ServiceEngine::reseedPool(const Subscription &sub)
         return ReseedResult::Rejected;           // пустое тело не затирает пул
     if (sub.poolRevision <= 0)
         return ReseedResult::Rejected;           // старый бэк/LKG без ревизии — reseed не по чему
-    if (sub.poolRevision == m_pool.subscription().poolRevision)
-        return ReseedResult::Rejected;           // та же выдача
+    const qint64 latestRevision = m_pendingReseed.has_value()
+        ? qMax(m_pendingReseed->poolRevision, m_pool.subscription().poolRevision)
+        : m_pool.subscription().poolRevision;
+    if (sub.poolRevision < latestRevision)
+        return ReseedResult::Rejected; // delayed response cannot roll back a newer pool.
+    // Equal revisions can contain changed health/eligibility and even membership. Accept
+    // the authenticated snapshot; revision is not a content hash.
     if (!reseedApplicableNow(sub)) {
         m_pendingReseed = sub;                   // применим при переходе в терминал (applyPendingReseed)
         return ReseedResult::Deferred;
@@ -364,7 +388,7 @@ bool ServiceEngine::connect(QString &error)
     m_dataPlaneFailStreak = 0;
     m_dataPlaneExhausted = false;
     // AVPN awg31-xray-v1: kill-switch автоматики транспортов. Выключен → авто-пути = легаси-цепочка
-    // «измеренный RTT → Selector::pick → weight» ТОЛЬКО по awg (xray — ручной режим/pin).
+    // «измеренный RTT → weight» ТОЛЬКО по awg (xray — ручной режим/pin).
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
     std::optional<SubscriptionNode> candidate; // AVPN: optional — закрепление/weight-фолбэк ниже
     // AVPN (live-node picker): если пользователь закрепил ноду — стартуем с неё (она есть и жива).
@@ -395,13 +419,11 @@ bool ServiceEngine::connect(QString &error)
         // Легаси-цепочка (как до волны awg31-xray-v1; авто = только awg):
         // AVPN (выбор по скорости): «Авто (быстрейший)» — приоритет ноде с МИНИМАЛЬНЫМ ИЗМЕРЕННЫМ RTT
         // (off-tunnel ICMP, кэш из AvpnEngineQml::probeNodeRtt). Это и есть настоящий «быстрейший». Пусто
-        // (кэш холодный / UDP-фильтр) → ниже Selector::pick (TCP) → pickByWeight (backend-weight). Без I/O.
+        // (кэш холодный / ICMP-фильтр) → pickByWeight (backend-weight). Без I/O.
         if (const SubscriptionNode *fast = pickByMeasuredRtt(QString(), QString())) // AVPN
             candidate = *fast;
-        if (!candidate)
-            // AVPN: случайный seed для джиттера среди near-best (иначе seed=0 → всегда первый кандидат).
-            candidate = m_selector.pick(m_pool, m_currentNodeId, 75,
-                                        QRandomGenerator::global()->generate()); // C-4: TCP-ping → score → choose
+        // All direct measurements are asynchronous in the facade. The legacy kill-switch
+        // must not reintroduce nested event loops or TCP probes against AWG's UDP listener.
         if (!candidate) {
             // MVP-фолбэк (спайк §9.3): AWG-порт UDP-only → TCP-ping может не пройти ни до одной ноды
             // (фильтр выкинет всё). Не отказываем: берём живую ноду с максимальным weight (бэкенд).
@@ -498,7 +520,7 @@ bool ServiceEngine::bootstrap(QNetworkAccessManager *nam, const QString &baseUrl
 
 bool ServiceEngine::tick(qint64 nowEpoch)
 {
-    if (m_state != EngineState::Connected || !m_tunnel)
+    if (m_state != EngineState::Connected || !m_tunnel || m_currentNodeId.isEmpty())
         return false;
     const TunnelStats stats = m_tunnel->readStats();
     // AVPN awg31-xray-v1: для xray handshake отсутствует по определению (адаптер эпоху не сеет,
@@ -581,8 +603,15 @@ bool ServiceEngine::verifyFailed() // AVPN awg31-xray-v1
     return true;
 }
 
-bool ServiceEngine::adoptTunnelConnected() // AVPN
+bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &proto,
+                                         const QString &endpoint)
 {
+    if (!nodeId.isEmpty()) {
+        const auto *node = findNode(nodeId);
+        if (!node || protoOf(*node) != proto || node->endpoint != endpoint)
+            return false;
+        m_currentNodeId = nodeId;
+    }
     // Android-адопт (см. ServiceEngine.h): восстановление факта «туннель жив» после фейкового
     // Disconnected. Из любой фазы, кроме уже-Connected. AVPN awg31-xray-v1: из Verifying тоже не
     // «воскрешаем» — «Подключено» по xray только после пробы (фасад перезапускает верификацию).
@@ -599,10 +628,10 @@ bool ServiceEngine::adoptTunnelConnected() // AVPN
 
 bool ServiceEngine::onTunnelError() // AVPN
 {
-    // AVPN: ошибка в фазе down() свитча (iOS иногда рапортует Error вместо чистого Disconnected при
-    // тиар-дауне) — это ожидаемо, продолжаем секвенс (up() на целевую), а не валимся в Error.
-    if (m_state == EngineState::Switching && !m_pendingSwitchNodeId.isEmpty())
-        return continuePendingSwitch();
+    // Error does not prove that the previous runtime is down.
+    m_pendingSwitchNodeId.clear();
+    m_pendingSwitchReason.clear();
+    m_switchClock.invalidate();
     if (m_state == EngineState::Error)
         return false;
     m_state = EngineState::Error;
@@ -628,6 +657,7 @@ bool ServiceEngine::onTunnelDisconnected() // AVPN
 
 void ServiceEngine::requestStop() // AVPN
 {
+    m_switchClock.invalidate();
     // Намеренный стоп: гасим фазу до down(), чтобы Disconnected не запустил failover.
     // Pending-свитч отменяем тоже (ревью 2026-07-11): юзер остановил — недоигранный
     // continuePendingSwitch не должен мочь воскреснуть ни на каком последующем колбэке.
@@ -738,6 +768,7 @@ bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, co
     m_pendingSwitchNodeId = targetNodeId;
     m_pendingSwitchReason = reason;
     m_state = EngineState::Switching;       // гард: transient Disconnected/Error от down() не триггерит failover
+    m_switchClock.start();
     m_health.reset();
     if (tunnelUp) {
         m_tunnel->down();                   // ждём реальный Disconnected → continuePendingSwitch() поднимет up()
@@ -771,6 +802,19 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
     appendSwitchLog(QStringLiteral("switch %1→%2: %3").arg(from, tid, reason));
     m_health.reset();
     // остаёмся Switching; onTunnelConnected() подтвердит Connected, когда туннель реально поднимется.
+    return true;
+}
+
+bool ServiceEngine::expireSwitch(int timeoutMs)
+{
+    if (m_state != EngineState::Switching || !m_switchClock.isValid()
+        || m_switchClock.elapsed() < qMax(0, timeoutMs))
+        return false;
+    appendSwitchLog(QStringLiteral("switch deadline: awaiting confirmed native status"));
+    m_pendingSwitchNodeId.clear();
+    m_pendingSwitchReason.clear();
+    m_switchClock.invalidate();
+    m_state = EngineState::Error;
     return true;
 }
 

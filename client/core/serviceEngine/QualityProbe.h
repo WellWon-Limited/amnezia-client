@@ -27,11 +27,12 @@ public:
     explicit QualityProbe(QNetworkAccessManager *nam, QObject *parent = nullptr);
 
     // Список URL по приоритету (свой бэкенд-пинг, затем публичный generate_204-фолбэк).
-    void setEndpoints(const QStringList &urls) { m_endpoints = urls; }
+    void setEndpoints(const QStringList &urls) { cancel(); m_endpoints = urls; }
     QStringList endpoints() const { return m_endpoints; }
 
     // Запустить один async-замер. Игнорируется, если предыдущий ещё в полёте.
     void measure(int timeoutMs = 4000);
+    void cancel();
     bool inFlight() const { return m_inFlight; }
 
 signals:
@@ -51,6 +52,7 @@ private:
     int                    m_curIdx = 0;
     int                    m_timeoutMs = 4000;
     bool                   m_inFlight = false;
+    quint64                m_generation = 0;
     qint64                 m_bust = 0; // cache-buster счётчик (вместо запрещённого Math.random — монотонный)
 };
 
