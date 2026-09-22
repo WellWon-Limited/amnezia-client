@@ -25,6 +25,9 @@ struct RemoteConfig
 {
     QMap<QString, QString> minAppVersion;
     QMap<QString, QString> recommendedVersion;
+    // Отозванные релизы по платформам (blocked_versions): апдейтер такую версию не ставит,
+    // а уже стоящей предлагает откат/обновление. Отсутствует в старом конфиге => пусто.
+    QMap<QString, QStringList> blockedVersions;
     QVector<ProbeTarget>   probeTargets;
     int                    subscriptionRefreshIntervalS = 43200;
     QStringList            edges;
@@ -62,6 +65,15 @@ inline bool parseConfig(const QByteArray &body, RemoteConfig &out, QString &err)
     out.minAppVersion = parseStrMap(o.value(QStringLiteral("min_app_version")).toObject());
     out.recommendedVersion = parseStrMap(o.value(QStringLiteral("recommended_version")).toObject());
     out.urls = parseStrMap(o.value(QStringLiteral("urls")).toObject());
+    const QJsonObject blocked = o.value(QStringLiteral("blocked_versions")).toObject();
+    for (auto it = blocked.begin(); it != blocked.end(); ++it) {
+        QStringList vals;
+        for (const QJsonValue &v : it.value().toArray())
+            if (v.isString() && !v.toString().isEmpty() && !vals.contains(v.toString()))
+                vals << v.toString();
+        if (!vals.isEmpty())
+            out.blockedVersions.insert(it.key(), vals);
+    }
     if (o.contains(QStringLiteral("subscription_refresh_interval_s")))
         out.subscriptionRefreshIntervalS =
             o.value(QStringLiteral("subscription_refresh_interval_s")).toInt(43200);
@@ -110,6 +122,19 @@ inline bool featureFlag(const RemoteConfig &c, const QString &key, bool def)
 inline double numberOr(const RemoteConfig &c, const QString &key, double def)
 {
     return c.numbers.contains(key) ? c.numbers.value(key) : def;
+}
+
+// Версия отозвана сервером для этой платформы (точное совпадение маркетинговой версии;
+// "5.1.83.112" сравниваем и как есть, и по первым трём компонентам).
+inline bool versionBlocked(const RemoteConfig &c, const QString &platform, const QString &version)
+{
+    const QStringList list = c.blockedVersions.value(platform);
+    if (list.isEmpty() || version.isEmpty())
+        return false;
+    if (list.contains(version))
+        return true;
+    const QStringList parts = version.split(QLatin1Char('.'));
+    return parts.size() > 3 && list.contains(parts.mid(0, 3).join(QLatin1Char('.')));
 }
 
 } // namespace avpn

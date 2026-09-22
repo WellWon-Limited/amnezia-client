@@ -43,6 +43,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/SubscriptionParser.h
     ${AVPN_SE}/AwgConfigBuilder.h
     ${AVPN_SE}/SelfUpdate.h
+    ${AVPN_SE}/LaunchGuard.h
     ${AVPN_SE}/XrayConfigBuilder.h
     ${AVPN_SE}/ITunnelControl.h
     ${AVPN_SE}/VpnConnectionTunnelControl.h
@@ -99,6 +100,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/SubscriptionParser.cpp
     ${AVPN_SE}/AwgConfigBuilder.cpp
     ${AVPN_SE}/SelfUpdate.cpp
+    ${AVPN_SE}/LaunchGuard.cpp
     ${AVPN_SE}/XrayConfigBuilder.cpp
     ${AVPN_SE}/Prober.cpp
     ${AVPN_SE}/QualityProbe.cpp

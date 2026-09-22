@@ -82,8 +82,11 @@ Item {
         anchors.centerIn: parent
         width: parent.width - 2 * Theme.space.xl
         mode: gate.blocking ? "blocking" : "soft"
-        busy: gate.installing
-        busyText: gate.installText
+        // AVPN (self-update v2): экран открыт во время тихой установки — показываем её ход
+        busy: gate.installing || ((typeof TribeEngine !== "undefined") && TribeEngine.selfUpdateBusy)
+        busyText: gate.installText.length > 0 ? gate.installText
+                : ((typeof TribeEngine !== "undefined") ? TribeEngine.selfUpdateStage : "")
+        percent: (typeof TribeEngine !== "undefined") ? TribeEngine.selfUpdatePercent : -1
         errorText: gate.installError
         onUpdateRequested: gate.startUpdate()
         onLaterRequested: gate.closeSoft()
