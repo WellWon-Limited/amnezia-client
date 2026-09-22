@@ -388,8 +388,23 @@ int main(int argc, char **argv)
         CHECK(!eng.tick(1004));
         tun.st = mkStats(0, 100, 300);
         CHECK(eng.tick(1008)); // 2 плохих цикла → DEAD
+        // AVPN (фикс-волна 2026-09-22, B6): первый DEAD (rebind недоступен) → переподъём ТОЙ ЖЕ
+        // ноды; провал в историю НЕ пишется (нода не доказана мёртвой).
         CHECK(eng.state() == EngineState::Switching);
         CHECK(tun.downCalls == 1);
+        CHECK(eng.transportHistory().entry(QStringLiteral("h:9"), QStringLiteral("awg")).samples == 1);
+        CHECK(eng.onTunnelDisconnected());
+        CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
+        CHECK(eng.onTunnelConnected() && eng.state() == EngineState::Connected);
+        // повторный DEAD на той же ноде → другой транспорт ТОЙ ЖЕ локации (xray), не соседняя
+        tun.st = mkStats(0, 100, 400);
+        CHECK(!eng.tick(1010));
+        tun.st = mkStats(0, 100, 500);
+        CHECK(!eng.tick(1012));
+        tun.st = mkStats(0, 100, 600);
+        CHECK(eng.tick(1014));
+        CHECK(eng.state() == EngineState::Switching);
+        CHECK(tun.downCalls == 2);
         CHECK(eng.transportHistory().entry(QStringLiteral("h:9"), QStringLiteral("awg")).samples == 2);
         CHECK(eng.onTunnelDisconnected()); // continuePendingSwitch → up(9:xray)
         CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
@@ -649,7 +664,15 @@ int main(int argc, char **argv)
     // A queued metadata observation must not undo a newer user action or teardown.
     CHECK(canAdoptObservedTunnel(true, false, false, false, false, true)); // cold own runtime
     CHECK(canAdoptObservedTunnel(true, true, true, false, false, true));
-    CHECK(!canAdoptObservedTunnel(true, true, false, false, false, true)); // manual OFF
+    // AVPN (фикс-волна 2026-09-22, A4): OFF-намерение с уже подтверждённым стопом (Disconnected
+    // видели) — туннель поднят НОВОЙ сессией ОС/Настроек/Shortcuts → адопт с новым намерением.
+    CHECK(canAdoptObservedTunnel(true, true, false, false, false, true));
+    CHECK(decideTunnelAdoption(true, true, false, false, false, true) == TunnelAdoption::AdoptNewIntent);
+    // стоп ещё в пути: то же поколение → не адоптировать; другое поколение → новая сессия
+    CHECK(decideTunnelAdoption(true, true, false, false, true, true,
+                               QStringLiteral("g1"), QStringLiteral("g1")) == TunnelAdoption::Reject);
+    CHECK(decideTunnelAdoption(true, true, false, false, true, true,
+                               QStringLiteral("g1"), QStringLiteral("g2")) == TunnelAdoption::AdoptNewIntent);
     CHECK(!canAdoptObservedTunnel(true, true, true, true, false, true));   // pause
     CHECK(!canAdoptObservedTunnel(true, true, true, false, true, true));   // stop deadline
     CHECK(!canAdoptObservedTunnel(true, true, true, false, false, false)); // operation in progress
@@ -709,6 +732,7 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *, const QString &, con
 }
 
 void Enrollment::saveLkgSubscription(const QByteArray &) { }
+QByteArray Enrollment::loadLkgSubscription() { return {}; } // ревью CL-B REV-4: гард LKG в ensureSubscription
 
 QString Enrollment::loadToken()
 {

@@ -55,6 +55,35 @@ inline int rebindHealMaxTriesTuned()
     return qBound(0, int(TuningStore::numberOr(QStringLiteral("rebind_heal_max_tries"), 2)), 5);
 }
 
+// AVPN (фикс-волна 2026-09-22, B6): кап переподъёмов ТОЙ ЖЕ ноды (шаг 2 лестницы лечения DEAD:
+// rebind → переподъём → другая нода) на ноду-сессию. Пол 0 (легитимно глушит шаг числом, есть и
+// kill-switch features.dead_reup_same_node), потолок 3 (выше — борьба с реально мёртвой нодой).
+inline int deadReupMaxTriesTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("dead_reup_max_tries"), 1)), 3);
+}
+
+// AVPN (фикс-волна 2026-09-22, B6, ревью CL-B REV-1): через сколько секунд ЗДОРОВОГО туннеля на
+// той же ноде (rx растёт или свежий handshake, ни одного плохого цикла) бюджет лечения (rebind/
+// переподъём) возвращается (numbers.heal_budget_restore_s). Без этого за долгую сессию с частыми
+// сменами точки доступа лестница выгорала и каждый следующий ложный DEAD уводил EE→US. Пол 60
+// (ниже — вечная лестница против реально мёртвой ноды), потолок 3600.
+inline int healBudgetRestoreSTuned()
+{
+    return qBound(60, int(TuningStore::numberOr(QStringLiteral("heal_budget_restore_s"), 300)), 3600);
+}
+
+// AVPN (фикс-волна 2026-09-22, B8, роуминг): окно после смены сети (numbers.health_network_grace_s),
+// в котором HealthLoop не выносит DEAD — NE сам лечит путь (bump/rebind ≤ ~15 с), ложный DEAD уводил
+// EE→US. Пол 0 (окно выключено), потолок 120 (выше — мёртвый туннель висит без failover).
+// Ревью CL-B (REV-5): серия частых смен продлевает окно не дальше 2×grace от первой смены серии,
+// затем grace секунд «остывания» — смены не открывают окно и не сбрасывают выборку (флаппинг
+// Wi-Fi/LTE не должен навсегда глушить DEAD при реально мёртвом data-plane).
+inline int healthNetworkGraceSTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("health_network_grace_s"), 20)), 120);
+}
+
 // AVPN seamless roaming (2026-09-03, CONNECT-INVARIANTS §23): числа политики адаптера AWG в iOS NE.
 // Пауза устройства при ДОЛГОЙ потере пути (numbers.ios_roam_pause_after_s): 0 = никогда (дефолт,
 // консенсус Tailscale/Proton/sing-box), потолок 600 (выше — бессмысленно, WG сам переживает часы).

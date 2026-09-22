@@ -21,6 +21,7 @@
 #include <QSet>
 #include <QString>
 
+#include <functional>
 #include <optional>
 
 namespace avpn {
@@ -31,7 +32,10 @@ namespace avpn {
 enum class EngineState { Disconnected, Selecting, Connecting, Verifying, Connected, Switching, Error };
 
 // AVPN awg31-xray-v1: исход reseedPool (см. ниже).
-enum class ReseedResult { Applied, Deferred, Rejected };
+// AVPN (фикс-волна 2026-09-22, K5): Unchanged — тело по содержимому совпало с текущим пулом
+// (состав, identity и метаданные нод, адрес): обновлены только traffic/expiry/status, switchLog не
+// трогаем (равная ревизия каждые ~20 с вымывала его), фасаду — ни changed(), ни persistPin, ни проб.
+enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
 
 class ServiceEngine {
 public:
@@ -40,13 +44,27 @@ public:
     // Платформенный туннель-адаптер (владение — у вызывающего).
     void setTunnel(ITunnelControl *tunnel) { m_tunnel = tunnel; m_switcher = Switcher(tunnel); }
 
+    // AVPN (фикс-волна 2026-09-22): инъекция часов (epoch ms) для тестов — TTL кэша RTT и часы
+    // фаз свитча. Пусто = QDateTime::currentMSecsSinceEpoch().
+    void setNowMsForTest(std::function<qint64()> nowMs) { m_nowMsFn = std::move(nowMs); }
+
     // AVPN (выбор по скорости): кэш измеренного RTT по nodeId (off-tunnel ICMP, из AvpnEngineQml::probeNodeRtt).
     // connect() предпочитает ноду с минимальным RTT отсюда (pickByMeasuredRtt); пусто → фолбэк на weight.
-    void setMeasuredRtt(const QHash<QString, int> &rtt) { m_measuredRtt = rtt; m_rttAge.start(); }
-    qint64 measuredRttAgeMs() const { return m_rttAge.isValid() ? m_rttAge.elapsed() : -1; }
-    QHash<QString, int> measuredRtt() const {
-        return m_rttAge.isValid() && m_rttAge.elapsed() <= 120000 ? m_measuredRtt : QHash<QString, int>();
-    }
+    // AVPN (фикс-волна 2026-09-22, B9): у каждой ноды свой возраст замера (TTL kRttTtlMs).
+    //  setMeasuredRtt(map) — заменить свежий кэш: ноды вне map забываются; значение <0 («нет ответа в
+    //    этом раунде») НЕ затирает прошлый замер этой ноды, если он моложе TTL (один потерянный пакет не
+    //    исключает ноду из ранжирования);
+    //  mergeMeasuredRtt(map) — то же, но ноды вне map сохраняются (раунд дополняет кэш);
+    //  measuredRtt() — только значения >=0 моложе TTL;
+    //  lastKnownRtt() — последний известный замер каждой ноды БЕЗ TTL (failover при запрете замеров в
+    //    connected: лучше старый RTT с пометкой возраста в switchLog, чем монета по весам).
+    static constexpr qint64 kRttTtlMs = 120000;
+    void setMeasuredRtt(const QHash<QString, int> &rtt);
+    void mergeMeasuredRtt(const QHash<QString, int> &rtt);
+    qint64 measuredRttAgeMs() const;
+    QHash<QString, int> measuredRtt() const;
+    QHash<QString, int> lastKnownRtt() const;
+    qint64 lastKnownRttAgeMs(const QString &nodeId) const; // -1 = замера не было
 
     // Первый вход: genkey (Identity, reuse форка) → POST /v1/trial → сохранить токен. [IN-FORK]
     // store/nam отдаёт приложение (SecureAppSettingsRepository, amnApp->networkManager()).
@@ -55,7 +73,18 @@ public:
     QString subscriptionToken() const { return m_token; }
 
     // Загрузить подписку (тело GET /v1/subscription). Заполняет NodePool. false + error при провале.
+    // AVPN (фикс-волна 2026-09-22, K5/B1): false — ТОЛЬКО битое тело (парс). Серверная pool_revision
+    // не глобальный монотонный счётчик — по ней не отвергаем (порядок ответов гарантирует фасад по
+    // m_subscriptionSequence). Пустые nodes при непустом пуле ТОГО ЖЕ аккаунта (address совпал):
+    // обновляются только traffic/expiry/status/grace, пул и pending-reseed сохраняются (degraded/окно
+    // readiness не затирает рабочий пул). Пустые nodes с ДРУГИМ address (redeem/transfer → новый
+    // аккаунт в окне readiness) — обычный путь применения/отложения: чужой пул и /32 не сохраняем.
     bool loadSubscription(const QByteArray &json, QString &error);
+
+    // AVPN (фикс-волна 2026-09-22, K5/B1, ревью CL-B): правило перезаписи дискового LKG телом ответа
+    // (то же, что shouldPersistLkgBody фасада): тело с нодами — пишем; пустое — только если в текущем
+    // дисковом LKG нод нет или LKG принадлежит другому аккаунту (другой address).
+    static bool lkgWriteAllowed(const Subscription &body, const QByteArray &diskLkg);
 
     // AVPN (LKG, C-7): загрузить подписку из ДИСКОВОГО кэша (последний удачный ответ) — мгновенный
     // бейдж/пул при старте до сетевого bootstrap. Помечает снапшот lkgStale=true; свежий сетевой
@@ -78,12 +107,28 @@ public:
     // текущая нода (и цель незавершённого свитча) в новом пуле НЕ изменилась (endpoint +
     // server_pubkey / xray uuid); иначе Deferred — тело откладывается и применяется при переходе в
     // терминал (applyPendingReseed, фасад зовёт через QTimer::singleShot(0) — никогда из-под
-    // Selector::pick). Rejected: пустой пул / нет ревизии / та же ревизия — пул НЕ затирается.
-    // При применении: ревалидация pin по локации (узел исчез → сосед той же локации, иначе снять),
-    // сброс RTT-кэша и сессионных провалов для исчезнувших узлов, запись в switchLog.
+    // Selector::pick). Rejected: пустой пул / нет ревизии — пул НЕ затирается.
+    // AVPN (фикс-волна 2026-09-22, K5/B2): меньшая ревизия допустима (ревизия не монотонна — удаление
+    // ноды опускает max); Unchanged — содержимое совпало с текущим пулом (см. enum).
+    // При применении: ревалидация pin по локации (узел исчез → сосед той же локации, иначе снять;
+    // актуальный pin — pinnedNodeId(), фасад персистит его, а не старый id), сброс RTT-кэша и
+    // сессионных провалов для исчезнувших узлов, запись в switchLog (только при смене состава/identity
+    // или ревизии). Адоптированный туннель без identity: после применения — попытка опознать текущую
+    // ноду по endpoint сессии (подсказка из adoptTunnelConnected).
     ReseedResult reseedPool(const Subscription &sub);
     bool hasPendingReseed() const { return m_pendingReseed.has_value(); }
     bool applyPendingReseed();
+    // GAP-1: отложенное тело reseed движок применяет сам МЕЖДУ рантаймами своего свитча (DEAD →
+    // переподъём/другая нода; туннель гасится или уже погашен) — иначе переподъём «той же ноды» шёл
+    // по старому конфигу (порт/awg_params/pubkey) и поднимался мёртвым. Чистая операция в памяти (без
+    // I/O). Фасад, у которого после этого hasPendingReseed()==false, забирает флаг и делает свою
+    // пост-обработку applyPendingReseed (m_nodeRtt, persist актуального pin, changed()). true = было.
+    bool takeReseedAppliedInSwitch()
+    {
+        const bool was = m_reseedAppliedInSwitch;
+        m_reseedAppliedInSwitch = false;
+        return was;
+    }
     qint64 poolRevision() const { return m_pool.subscription().poolRevision; }
 
     // Подключиться: выбрать ноду и поднять туннель. [СКАФФОЛД: выбор=первый, реальный скоринг в C-4]
@@ -102,12 +147,32 @@ public:
     //  notifyConnectionLost() — реактивный: дёргать из onConnectionStateChanged при неожиданном
     //           Error/Disconnected, пока state==Connected → немедленный свитч.
     //  Возвращают true, если произошёл свитч/обработка DEAD.
+    // AVPN (фикс-волна 2026-09-22, K5/B3): tick работает и для адоптированного туннеля без identity
+    // (нода сессии не найдена в пуле) — DEAD → лечение/failover на авто-выбор, лог «dead (unknown identity)».
     bool tick(qint64 nowEpoch);
     bool notifyConnectionLost();
     // AVPN (macOS wake-реконнект, спека 2026-07-17 §2.2): сброс prev-сэмпла HealthLoop на
     // пробуждении — ночные дельты rx/tx против свежего замера дали бы ложный onDead (up() в ещё
     // не готовую сеть). Аналог общий с iOS P1 (foreground-ресинк). Только сэмплинг, фазу не трогает.
     void resetHealthSampling() { m_health.reset(); }
+    // AVPN (фикс-волна 2026-09-22, K5/B8, роуминг): смена сети (reachability/интерфейс/путь) —
+    // сброс выборки HealthLoop и запрет DEAD-вердикта в окне grace (health_network_grace_s, деф. 20 с):
+    // NE лечит путь сам (bump/rebind ≤ ~15 с), ложный DEAD в этом окне уводил EE→US.
+    // nowEpoch <0 → текущее время (сек).
+    void noteNetworkChange(qint64 nowEpoch = -1);
+
+    // AVPN (фикс-волна 2026-09-22, K4/B7): итог rebind в NE (IosController::rebindFinished →
+    // фасад). performed=false (NE отказал по бюджету / адаптер не запущен / нет ответа за 3 с) =
+    // провал шага лечения: следующий DEAD-цикл сразу идёт на шаг 2/3 (переподъём / другая нода).
+    // Ответ без ожидающего rebind (поздний/чужой) игнорируется. true = учтено.
+    // GAP-2: reason — причина отказа из ответа NE ({"rebind":"denied","reason":…}). "offline" = у NE
+    // путь unsatisfied (телефон без сети, нода ни при чём): это НЕ провал шага — попытка rebind не
+    // тратится, m_rebindDenied не ставится, открывается окно grace смены сети (как noteNetworkChange);
+    // следующий DEAD снова делает rebind. Кап kRebindOfflineDeferMax таких отсрочек на сессию лечения
+    // (страховка от вечной петли при ложном "offline"). "budget"/"not_started"/пусто — провал (как было).
+    bool onRebindResult(bool performed, const QString &reason = QString());
+    static constexpr int kRebindOfflineDeferMax = 10;
+    bool rebindAwaitingResult() const { return m_rebindAwaiting; }
     QString currentNodeId() const { return m_currentNodeId; }
 
     // AVPN awg31-xray-v1: транспорт текущей ноды ("awg"/"xray"; пусто = нет текущей) и её локация.
@@ -204,10 +269,40 @@ public:
     // ре-байнда мессенджера/холодного старта), а движок — в терминале после фейкового Disconnected
     // (обрыв байндинга при уходе в фон). Единственный легальный «воскреситель» Connected извне фаз
     // подъёма; обычный onTunnelConnected терминалы намеренно НЕ воскрешает.
+    // AVPN (фикс-волна 2026-09-22, A5/B3): нода сессии не найдена в пуле (или её endpoint/proto уже
+    // другие) → адопт с НЕИЗВЕСТНОЙ identity (true), подсказка {nodeId, proto, endpoint} запоминается:
+    // после reseed движок пытается опознать текущую ноду по ней (tryIdentifyCurrentNode). В фазе
+    // Connected — только обновление identity/подсказки (false, как раньше).
     bool adoptTunnelConnected(const QString &nodeId = {}, const QString &proto = {},
                               const QString &endpoint = {});
+    bool currentIdentityKnown() const { return !m_currentNodeId.isEmpty(); }
+    bool tryIdentifyCurrentNode();
+
     // Poll independently of health sampling (including when the uplink is offline).
+    // AVPN (фикс-волна 2026-09-22, K5/B4): часы свитча — ПО ФАЗАМ: фаза down (ждём Disconnected
+    // старого рантайма) — бюджет timeoutMs; фаза up (up() на цель отправлен) — часы перезапускаются,
+    // бюджет max(timeoutMs, reconcileWatchdogMsTuned()) — не меньше сторожа коннекта. Истечение →
+    // Error + interruptedSwitch (фасад повторяет старт с анти-зацикливанием, намерение НЕ снимает).
     bool expireSwitch(int timeoutMs = 30000);
+    bool switchInUpPhase() const { return m_state == EngineState::Switching && m_switchUpPhase; }
+
+    // AVPN (фикс-волна 2026-09-22, K5/B4/B5): внутренний свитч/failover движка прерван (Error или
+    // дедлайн фазы). Фасад по hasInterruptedSwitch() понимает, что шёл НАШ свитч (не внешний обрыв):
+    // намерение сохраняется, следующий старт — после подтверждённого down, с анти-зацикливанием.
+    //  interruptedSwitchTarget() — цель, которую стоит повторить (прервано в фазе down: цель ещё не
+    //    пробовали — в том числе переподъём той же ноды, шаг 2 лестницы; фаза up переподъёма в окне
+    //    grace смены сети — тоже: сеть не готова, нода не виновата); пусто — цель провалила подъём
+    //    (фаза up: нода в сессионных провалах). connect() сам предпочитает сохранённую цель
+    //    (одноразово), авто-выбор повтора ранжирует по failoverRtt (свежий поверх последнего
+    //    известного: в connected замеров не было), сессию лечения той же ноды и счётчик провалов
+    //    data-plane НЕ сбрасывает (повтор — не действие пользователя); запись сбрасывается там же и
+    //    в requestStop()/setPinnedNode()/адопте.
+    //  interruptedSwitchCause() — "error_down" / "error_up" / "deadline_down" / "deadline_up".
+    bool hasInterruptedSwitch() const { return m_interrupted.active; }
+    QString interruptedSwitchTarget() const { return m_interrupted.target; }
+    QString interruptedSwitchReason() const { return m_interrupted.reason; }
+    QString interruptedSwitchCause() const { return m_interrupted.cause; }
+    void clearInterruptedSwitch() { m_interrupted = InterruptedSwitch{}; }
 
     // AVPN: пользователь нажал «стоп». Помечаем НАМЕРЕННОЕ отключение (state→Disconnected,
     // сбрасываем текущую ноду) ДО m_tunnel.down(), иначе прилетевший Disconnected уйдёт в
@@ -261,6 +356,11 @@ private:
     // tunnelStillUp=true (health-DEAD из tick — туннель ещё «поднят») → down()→ждём Disconnected→up();
     // false (failover из реального Disconnected/Error — туннель уже опущен) → up() сразу.
     // reason — для switchLog (dead / verify failed / probe failed).
+    // AVPN (фикс-волна 2026-09-22, B6): лестница лечения на health-DEAD при живом туннеле —
+    // шаг 1 rebind (новый порт в NE, кап rebind_heal_max_tries, отказ NE → шаг пропускается);
+    // шаг 2 переподъём ТОЙ ЖЕ ноды (down→up, кап dead_reup_max_tries, kill-switch
+    // features.dead_reup_same_node); шаг 3 — другая нода, сначала та же локация, RTT — последний
+    // известный (с пометкой возраста). Неизвестная identity: шаг 1, затем авто-выбор из пула.
     bool onDead(bool tunnelStillUp, const QString &reason = QString()); // выбрать кандидата (исключая текущую) и переключиться
 
     // AVPN (live-node picker): backend-фолбэк выбор по max weight среди ЖИВЫХ нод, исключая exclA/exclB
@@ -279,8 +379,11 @@ private:
     // локация при failover / соседние; учитывает ручной режим, сессионные провалы, историю.
     // withExclusions=false — повторная попытка без сессионных провалов (иначе «нет нод» после
     // круга failover'ов). nullptr = кандидатов нет.
+    // useLastKnownRtt=true (failover) — RTT без TTL (свежий поверх последнего известного).
     const SubscriptionNode *pickTransport(const QString &preferLocation, const QString &preferNodeId,
-                                          const QString &exclA, bool withExclusions) const;
+                                          const QString &exclA, bool withExclusions,
+                                          bool useLastKnownRtt = false) const;
+    QHash<QString, int> failoverRtt() const;
     const SubscriptionNode *findNode(const QString &nodeId) const;
     const SubscriptionNode *pinnedCandidate() const;
     bool anySupportedNode() const;
@@ -289,9 +392,28 @@ private:
     // AVPN awg31-xray-v1 (reseed): применимо ли тело сейчас (терминал ИЛИ текущая/целевая нода без изменений).
     bool reseedApplicableNow(const Subscription &sub) const;
     static bool sameNodeIdentity(const SubscriptionNode &a, const SubscriptionNode &b);
+    // AVPN (фикс-волна 2026-09-22, B2): полное совпадение содержимого (identity + метаданные выбора/
+    // отображения) и совпадение состава пула/адреса — основа ReseedResult::Unchanged.
+    static bool sameNodeContent(const SubscriptionNode &a, const SubscriptionNode &b);
+    bool samePoolContent(const Subscription &sub) const;
+    // Обновить только «аккаунтные» поля (traffic/expiry/status/grace/ревизию), пул не трогая.
+    void updateAccountFields(const Subscription &sub, bool includeRevision);
     void applyReseedNow(const Subscription &sub);
+    // GAP-1: применить m_pendingReseed (с нодами) между рантаймами свитча; true = применено.
+    bool applyPendingReseedBetweenRuntimes();
     void markUpStarted();
     void appendSwitchLog(const QString &line);
+    qint64 nowMs() const;
+    // Сессия лечения (rebind/переподъём) принадлежит ноде: сбрасывается при смене ноды, стопе,
+    // connect() и адопте — переподъём той же ноды бюджет НЕ возвращает (иначе вечная лестница).
+    // Ревью CL-B (REV-1): бюджет возвращается и сам — после heal_budget_restore_s здорового туннеля
+    // на той же ноде (rx растёт или свежий handshake, ни одного плохого цикла), см. noteHealthyTick.
+    void resetHealSession(const QString &nodeId);
+    void noteHealStep();
+    void noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch);
+    bool applyLoadedSubscription(const Subscription &sub);
+    // Внутренний свитч прерван (Error/дедлайн): фиксируем для фасада (см. hasInterruptedSwitch).
+    void noteSwitchInterrupted(const QString &cause);
 
     // AVPN (фикс iOS-шторма свитча): двухфазный секвенс-свитч. requestSwitch ставит m_state=Switching
     // (→ transient Disconnected/Error от down() НЕ запускает failover) и: при tunnelUp — down(), ждём
@@ -310,16 +432,38 @@ private:
     EngineState   m_state = EngineState::Disconnected;
     QString       m_currentNodeId;
     QString       m_pinnedNodeId; // AVPN: закреплённая пользователем нода (switchToNode); пусто = авто
-    QHash<QString, int> m_measuredRtt; // AVPN (выбор по скорости): off-tunnel ICMP RTT по nodeId (кэш)
-    QElapsedTimer m_rttAge;
-    QElapsedTimer m_switchClock;
+    // AVPN (выбор по скорости): off-tunnel ICMP RTT по nodeId. B9: у каждого замера свой момент (epoch ms).
+    struct RttSample { int ms = -1; qint64 atMs = 0; };
+    QHash<QString, RttSample> m_rttFresh;     // свежий кэш (читается с TTL kRttTtlMs)
+    QHash<QString, RttSample> m_rttLastKnown; // последний известный замер без TTL (failover)
+    qint64        m_rttSetAtMs = -1;          // момент последнего set/merge (measuredRttAgeMs)
+    std::function<qint64()> m_nowMsFn;        // тестовые часы (пусто = системные)
+    qint64        m_switchStartedMs = -1;     // B4: начало ТЕКУЩЕЙ фазы свитча (-1 = часы не идут)
+    bool          m_switchUpPhase = false;    // B4: фаза up (up() на цель отправлен)
+    bool          m_pendingSwitchIsReup = false; // B6: текущий свитч — переподъём той же ноды
+    QString       m_upPhaseReason;            // B4/B5: причина свитча в фазе up (для interruptedSwitch)
     QString       m_pendingSwitchNodeId; // AVPN: целевая нода во время двухфазного свитча (пусто = нет)
     QString       m_pendingSwitchReason; // AVPN: причина для switchLog (pinned/rotate/dead)
+    struct InterruptedSwitch { bool active = false; QString target, reason, cause; };
+    InterruptedSwitch m_interrupted;     // B4/B5: прерванный внутренний свитч (решает фасад)
+    // A5/B3: подсказка identity адоптированной сессии (sessionMetadata), когда нода не опознана.
+    QString       m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint;
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;
     int           m_rebindHealTries = 0; // AVPN BUG-4: попытки heal на текущей ноде-сессии (кап tunable)
     int           m_rebindHealTotal = 0; // AVPN BUG-4: суммарно с запуска (в benchExtra отчётов)
+    QString       m_healNodeId;          // B6: нода, которой принадлежит текущая сессия лечения
+    int           m_sameNodeReupTries = 0; // B6: переподъёмы той же ноды в этой сессии лечения
+    bool          m_rebindAwaiting = false; // B7: rebind отправлен, ждём итог NE
+    bool          m_rebindDenied = false;   // B7: NE отказал — шаг rebind в этой сессии лечения пропускаем
+    int           m_rebindOfflineDefers = 0; // GAP-2: отказы NE "offline" в этой сессии лечения (кап)
+    bool          m_reseedAppliedInSwitch = false; // GAP-1: pending-reseed применён движком в свитче
+    // REV-1: восстановление бюджета лечения по времени здорового туннеля (epoch сек, 0 = нет).
+    qint64        m_lastTickEpoch = 0;      // момент последнего tick (шаги лечения зовутся из него)
+    qint64        m_healStepEpoch = 0;      // последний шаг лечения (rebind/переподъём) этой сессии
+    qint64        m_healthySinceEpoch = 0;  // начало непрерывного здорового отрезка после шага
+    qint64        m_tickPrevRx = -1;        // rx прошлого tick (рост rx = доказательство живого туннеля)
     // AVPN awg31-xray-v1:
     TransportMode m_transportMode = TransportMode::Auto;
     TransportHistory m_transportHistory;

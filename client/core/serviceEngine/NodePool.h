@@ -28,6 +28,18 @@ public:
         m_sub.expiresAt = expiresAt;
     }
 
+    // AVPN (фикс-волна 2026-09-22, K5/B1): «аккаунтные» поля свежего тела БЕЗ нод — пустая/degraded
+    // выдача при уже имеющемся пуле обновляет traffic/expiry/status/grace, но не затирает ноды.
+    // includeRevision — перенести и pool_revision (тело по содержимому совпало с пулом — Unchanged).
+    void updateAccount(const Subscription &sub, bool includeRevision)
+    {
+        updateTraffic(sub.trafficUsed, sub.trafficLimit, sub.expiresAt);
+        m_sub.status = sub.status;
+        m_sub.graceUntil = sub.graceUntil;
+        if (includeRevision)
+            m_sub.poolRevision = sub.poolRevision;
+    }
+
     // TODO(C-4): хранить измеренные score, отдавать отсортированный список кандидатов.
 
 private:
