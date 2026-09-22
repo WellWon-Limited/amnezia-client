@@ -47,9 +47,19 @@ on run argv
 end run
 APPLESCRIPT
 }
-fail() { echo "rollback failed: $1"; alert "$1"; exit 1; }
+# Провал отката снимает pending: иначе следующий старт снова получит вердикт crash-loop, снова
+# упадёт здесь же, и приложение перестанет запускаться вовсе (ревью 2026-09-22).
+fail() {
+  echo "rollback failed: $1"
+  [ -f "$state/pending.json" ] && mv -f -- "$state/pending.json" "$state/pending.failed"
+  alert "$1"
+  exit 1
+}
 
 prev="$state/previous.app"
+# Ссылка проходит codesign цели, но mv перенёс бы саму ссылку: содержимое можно подменить
+# после проверки, а финишер обновлений отказывает ссылке навсегда.
+[ -L "$prev" ] && fail "Сохранённая версия — ссылка, а не приложение. Скачайте Tribe VPN заново с tribevpn.com."
 [ -d "$prev/Contents" ] || fail "Сохранённой предыдущей версии нет. Скачайте Tribe VPN заново с tribevpn.com."
 case "$dst" in
   /Volumes/*|*/AppTranslocation/*) fail "Приложение запущено не из папки «Программы»" ;;
@@ -261,18 +271,22 @@ void LaunchGuard::onMainWindowCreated()
     if (m_windowCreated)
         return;
     m_windowCreated = true;
-    if (m_configApplied) {
-        confirm();
-        return;
-    }
-    QTimer::singleShot(launchguard::kConfirmAfterMs, this, [this] { confirm(); });
+    m_windowClock.start();
+    QTimer::singleShot(m_configApplied ? launchguard::kConfirmMinAfterWindowMs : launchguard::kConfirmAfterMs,
+                       this, [this] { confirm(); });
 }
 
+// Вызывается только на СВЕЖИЙ (сетевой) конфиг: LKG-кеш применяется синхронно ещё в
+// конструкторе и подтверждал версию в момент создания окна (ревью 2026-09-22).
 void LaunchGuard::onConfigApplied()
 {
+    if (m_configApplied)
+        return;
     m_configApplied = true;
-    if (m_windowCreated)
-        confirm();
+    if (!m_windowCreated)
+        return; // окно ещё не создано — onMainWindowCreated выберет короткий срок
+    const qint64 left = launchguard::kConfirmMinAfterWindowMs - m_windowClock.elapsed();
+    QTimer::singleShot(int(qMax<qint64>(0, left)), this, [this] { confirm(); });
 }
 
 void LaunchGuard::confirm()
