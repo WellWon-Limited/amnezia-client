@@ -36,8 +36,12 @@ constexpr const char *kDefaultDmgUrl = "https://tribevpn.com/dl/TribeVPN.dmg";
 constexpr const char *kAllowedHostSuffix = "tribevpn.com";
 
 // $1 URL, $2 версия, $3 Team ID, $4 bundle id, $5 установленный app,
-// $6 PID приложения, $7 файл разрешения замены, $8 каталог журнала.
-// Каждый шаг печатает стадию; любой провал печатает fail: и выходит с ненулевым кодом.
+// $6 PID приложения, $7 файл разрешения замены, $8 каталог журнала,
+// $9 каталог состояния апдейтера (LaunchGuard: previous.app/pending.json/rollback.sh),
+// $10 режим (auto = тихая установка, окно новой версии не выводится на передний план),
+// $11 отозванные сервером версии через запятую (образ с такой версией не ставится).
+// Каждый шаг печатает стадию (stage:), процент скачивания (percent:N); любой провал печатает
+// fail: и выходит с ненулевым кодом.
 constexpr const char *kScript = R"SH(#!/bin/bash
 set -u
 set -o pipefail
@@ -71,20 +75,42 @@ if [ ! -d "$app_dst/Contents" ] || [ -L "$app_dst" ] || [ ! -w "$(dirname "$app_
 fi
 
 log_dir="$8"
+state="${9:-}"
+mode="${10:-manual}"
+blocked=",${11:-},"
 mkdir -p "$log_dir" || fail "Не удалось создать журнал обновления"
 log="$log_dir/self-update.log"
 exec 2>>"$log"
 date >&2
+echo "prepare: mode=$mode cur=$cur url=$url" >&2
 
 echo "stage:Скачиваем обновление"
+# Размер образа (для процента) — из заголовков; нет заголовка = прогресс без процентов.
+total="$(curl -q -fsSI --proto '=https' --tlsv1.2 --connect-timeout 30 --max-time 60 "$url" 2>/dev/null \
+        | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' | tail -1)"
+case "$total" in ''|*[!0-9]*) total="" ;; esac
 # Не следуем редиректам: URL уже проверен C++, Location может вести на чужой домен.
-http_code="$(curl -q -fsS --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+curl -q -fsS --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
         --connect-timeout 30 --max-time 900 --retry-max-time 900 \
-        -w '%{http_code}' -o "$tmp/Tribe.dmg" "$url")"
-if [ "$?" -ne 0 ] || [ "$http_code" != 200 ]; then
+        -w '%{http_code}' -o "$tmp/Tribe.dmg" "$url" > "$tmp/http_code" &
+curl_pid=$!
+last_pct=-1
+while kill -0 "$curl_pid" 2>/dev/null; do
+  if [ -n "$total" ] && [ "$total" -gt 0 ] && [ -f "$tmp/Tribe.dmg" ]; then
+    size="$(stat -f %z "$tmp/Tribe.dmg" 2>/dev/null || echo 0)"
+    pct=$(( size * 100 / total ))
+    [ "$pct" -gt 99 ] && pct=99
+    if [ "$pct" -ne "$last_pct" ]; then echo "percent:$pct"; last_pct=$pct; fi
+  fi
+  sleep 0.5
+done
+wait "$curl_pid"; curl_rc=$?
+http_code="$(cat "$tmp/http_code" 2>/dev/null)"
+if [ "$curl_rc" -ne 0 ] || [ "$http_code" != 200 ]; then
   echo "fail:Не удалось скачать обновление. Проверьте соединение."
   exit 1
 fi
+echo "percent:100"
 
 echo "stage:Проверяем подпись"
 mnt="$(hdiutil attach "$tmp/Tribe.dmg" -nobrowse -readonly -mountrandom /tmp 2>/dev/null \
@@ -136,6 +162,10 @@ if [ "$new_ver" = "$cur" ] || [ "$newest" != "$new_ver" ]; then
   echo "fail:В образе не более новая версия"
   exit 1
 fi
+# Отозвана сервером (blocked_versions) — не ставим, даже если новее.
+case "$blocked" in
+  *",$new_ver,"*) echo "fail:Версия $new_ver отозвана разработчиком"; exit 1 ;;
+esac
 
 echo "stage:Устанавливаем"
 # Подготовка на том же томе: после quit нужны только rename, а не долгое копирование
@@ -160,6 +190,7 @@ cat > "$runner" <<'INNER'
 set -u
 umask 077
 staged="$1"; dst="$2"; parent="$3"; tmp="$4"; transaction="$5"; commit="$6"
+state="$7"; mode="$8"; team="$9"; bid="${10}"; log_dir="${11}"; cur="${12}"; new_ver="${13}"
 backup="$transaction/previous.app"
 fail() {
   echo "Update failed: $1" >&2
@@ -199,7 +230,9 @@ if ! mv -- "$staged" "$dst"; then
   rm -rf -- "$transaction" "$tmp"
   fail "Не удалось установить обновление. Прежняя версия восстановлена."
 fi
-if ! open -n "$dst"; then
+open_args="-n"
+[ "$mode" = "auto" ] && open_args="-n -g"   # тихая установка: не выводим окно на передний план
+if ! open $open_args "$dst"; then
   # Сохраняем обе копии, если откат тоже не удался.
   mv -- "$dst" "$staged" && mv -- "$backup" "$dst" \
     || fail "Не удалось восстановить приложение. Резервная копия: $backup"
@@ -208,12 +241,47 @@ if ! open -n "$dst"; then
   fail "Не удалось запустить обновление. Прежняя версия восстановлена."
 fi
 echo "Update handed to LaunchServices: $dst" >&2
+
+# ── LaunchGuard: сохраняем ПРЕДЫДУЩУЮ версию и сторожим первый запуск новой ──────────
+# Без каталога состояния (старый вызывающий) — прежнее поведение: резервная копия удаляется.
+if [ -n "$state" ] && mkdir -p "$state" 2>/dev/null; then
+  rm -rf -- "$state/previous.app" "$state/failed.app"
+  if mv -- "$backup" "$state/previous.app"; then
+    printf '{"version":"%s","path":"%s","kept_at":%s}\n' "$cur" "$state/previous.app" "$(date +%s)" > "$state/previous.json"
+  else
+    echo "warn: could not keep previous copy" >&2
+  fi
+  rm -f -- "$state/confirmed"
+  printf '{"from":"%s","to":"%s","app":"%s","installed_at":%s,"attempts":0,"mode":"%s"}\n' \
+    "$cur" "$new_ver" "$dst" "$(date +%s)" "$mode" > "$state/pending.json"
+  rm -rf -- "$transaction" "$tmp"
+  # Сторож ≤40 с: новая версия обязана создать маркер confirmed. Умерла до него (или не
+  # появилась за 10 с) — откат на сохранённую копию тем же rollback.sh, что и crash-loop.
+  seen=0
+  for i in $(seq 1 80); do
+    if [ -f "$state/confirmed" ]; then echo "watchdog: $new_ver confirmed" >&2; break; fi
+    if pgrep -f -- "$dst/Contents/MacOS/" >/dev/null 2>&1; then
+      seen=1
+    elif [ "$seen" = 1 ] || [ "$i" -ge 20 ]; then
+      echo "watchdog: $new_ver not alive (seen=$seen, tick=$i) -> rollback" >&2
+      if [ -x "$state/rollback.sh" ]; then
+        /bin/bash "$state/rollback.sh" "$dst" "$state" watchdog 0 "$team" "$bid" "$log_dir"
+      else
+        echo "watchdog: rollback.sh missing, leaving $new_ver in place" >&2
+      fi
+      break
+    fi
+    sleep 0.5
+  done
+  exit 0
+fi
 rm -rf -- "$transaction" "$tmp"
 INNER
 chmod +x "$runner" || fail "Не удалось подготовить перезапуск"
 
 # Закрываем stdin и оба канала QProcess; проверяем запуск до того, как просить GUI выйти.
 nohup /bin/bash "$runner" "$staged" "$app_dst" "$parent" "$tmp" "$transaction" "$commit" \
+  "$state" "$mode" "$team" "$bid" "$log_dir" "$cur" "$new_ver" \
   </dev/null >>"$log" 2>&1 &
 runner_pid=$!
 disown 2>/dev/null || true
@@ -267,6 +335,11 @@ bool SelfUpdate::running() const
 
 void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion)
 {
+    start(dmgUrl, currentVersion, StartOptions());
+}
+
+void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion, const StartOptions &opts)
+{
     if (!isSupported()) {
         emit failed(tr("Обновление внутри приложения тут недоступно"));
         return;
@@ -301,6 +374,7 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion)
     script.close();
     m_error.clear();
     m_prepared = false;
+    m_background = opts.background;
 
 #ifdef AVPN_SELFUPDATE_IMPL
     const QDir executableDir(QCoreApplication::applicationDirPath());
@@ -339,9 +413,13 @@ void SelfUpdate::start(const QString &dmgUrl, const QString &currentVersion)
                     QString::fromLatin1(kTeamId), QString::fromLatin1(kBundleId), appPath,
                     QString::number(QCoreApplication::applicationPid()),
                     m_scriptPath + QStringLiteral(".commit"),
-                    QDir::homePath() + QStringLiteral("/Library/Logs/Tribe VPN") });
+                    QDir::homePath() + QStringLiteral("/Library/Logs/Tribe VPN"),
+                    opts.stateDir,
+                    opts.background ? QStringLiteral("auto") : QStringLiteral("manual"),
+                    opts.blocked.join(QLatin1Char(',')) });
 #else
     Q_UNUSED(currentVersion)
+    Q_UNUSED(opts)
 #endif
 }
 
@@ -359,7 +437,12 @@ void SelfUpdate::readOutput()
         const QString line = QString::fromUtf8(m_proc->readLine()).trimmed();
         if (line.startsWith(QLatin1String("stage:")))
             emit progress(line.mid(6));
-        else if (line.startsWith(QLatin1String("fail:")))
+        else if (line.startsWith(QLatin1String("percent:"))) {
+            bool ok = false;
+            const int pct = line.mid(8).toInt(&ok);
+            if (ok && pct >= 0 && pct <= 100)
+                emit downloadProgress(pct);
+        } else if (line.startsWith(QLatin1String("fail:")))
             m_error = line.mid(5);
         else if (line.startsWith(QLatin1String("ok:")) && line.size() > 3)
             m_prepared = true;

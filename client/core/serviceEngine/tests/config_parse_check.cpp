@@ -22,6 +22,7 @@ int main(int argc, char **argv)
         "urls": {"cabinet":"https://tribevpn.com/account"},
         "numbers": {"edge_fail_threshold": 3},
         "lists": {"bench_http_ru": ["https://ya.ru"]},
+        "blocked_versions": {"macos": ["5.1.83", "5.1.83", 7, "5.1.80"], "ios": []},
         "future_thing": {"nested": [1,2,3]}
     })";
     avpn::RemoteConfig c;
@@ -40,6 +41,12 @@ int main(int argc, char **argv)
     CHECK(avpn::numberOr(c, "edge_fail_threshold", 99) == 3, "number");
     CHECK(avpn::numberOr(c, "missing", 7) == 7, "missing number => default");
     CHECK(c.lists.value("bench_http_ru") == QStringList{"https://ya.ru"}, "lists bench_http_ru");
+    CHECK(c.blockedVersions.value("macos") == (QStringList{"5.1.83", "5.1.80"}), "blocked dedup + non-string dropped");
+    CHECK(!c.blockedVersions.contains("ios"), "empty blocked list not stored");
+    CHECK(avpn::versionBlocked(c, "macos", "5.1.83"), "blocked exact");
+    CHECK(avpn::versionBlocked(c, "macos", "5.1.83.112"), "blocked by marketing prefix");
+    CHECK(!avpn::versionBlocked(c, "macos", "5.1.84"), "not blocked");
+    CHECK(!avpn::versionBlocked(c, "ios", "5.1.83"), "other platform not blocked");
 
     // Отсутствующие поля => дефолты, не крэш.
     avpn::RemoteConfig c2; QString err2;
@@ -47,6 +54,7 @@ int main(int argc, char **argv)
     CHECK(c2.subscriptionRefreshIntervalS == 43200, "refresh default when absent");
     CHECK(c2.edges.isEmpty(), "edges empty when absent");
     CHECK(c2.lists.isEmpty(), "lists empty when absent");
+    CHECK(c2.blockedVersions.isEmpty() && !avpn::versionBlocked(c2, "macos", "5.1.83"), "blocked empty when absent");
 
     // Битый JSON => false, valid=false.
     avpn::RemoteConfig c3; QString err3;
