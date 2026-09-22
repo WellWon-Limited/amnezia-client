@@ -20,6 +20,9 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
+
+#include <functional>
 
 QT_BEGIN_NAMESPACE
 class QProcess;
@@ -51,14 +54,22 @@ public:
     // версию, пишет pending.json и сторожит первый запуск); background — тихая установка
     // (окно новой версии не выводится на передний план); blocked — отозванные сервером версии
     // (образ с такой версией скрипт отвергает до установки).
+    // expectedVersion — версия, которую рекомендует сервер: образ другой версии не ставится
+    // (defer). mayCommit — последний гейт перед передачей установки финишеру: false (например,
+    // туннель уже поднят) = установка отложена, финишер уходит молча (ревью 2026-09-22).
     struct StartOptions
     {
         QString     stateDir;
         bool        background = false;
         QStringList blocked;
+        QString     expectedVersion;
+        std::function<bool()> mayCommit;
     };
     void start(const QString &dmgUrl, const QString &currentVersion, const StartOptions &opts);
     bool background() const { return m_background; }
+    // Последний failed() — «отложено» (сеть, образ не той версии, гейт mayCommit), а не отказ
+    // версии: тихий режим не засчитывает такую попытку.
+    bool lastFailureDeferred() const { return m_deferred; }
 
     void cancel();
 
@@ -84,6 +95,8 @@ private:
     QString m_error;
     bool m_prepared = false;
     bool m_background = false;
+    bool m_deferred = false;
+    std::function<bool()> m_mayCommit;
     QString m_scriptPath;                 // временный файл со скриптом установки (удаляем за собой)
 };
 

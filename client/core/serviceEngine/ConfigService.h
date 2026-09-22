@@ -20,6 +20,9 @@ public:
 
     void start();
     const RemoteConfig &config() const { return m_config; }
+    // true после первого конфига, пришедшего из сети (подпись проверена); LKG-кеш — false.
+    // Тихая установка и подтверждение «жива» опираются только на свежий конфиг (ревью 2026-09-22).
+    bool isFresh() const { return m_fresh; }
     QString activeBaseUrl() const { return m_activeBase; }
 
     void reportNetworkFailure();
@@ -47,6 +50,7 @@ private:
     int          m_failStreak = 0;
     QTimer       m_refreshTimer;
     bool         m_configInFlight = false;
+    bool         m_fresh = false;
 };
 
 } // namespace avpn

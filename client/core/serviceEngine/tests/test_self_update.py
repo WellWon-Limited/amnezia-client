@@ -55,6 +55,9 @@ elif name == "mv":
 elif name == "pgrep":
     sys.exit(0 if (root / "alive").exists() else 1)
 elif name == "open":
+    # Фиксируем, видела ли запускаемая копия pending.json (он обязан существовать ДО open).
+    with (root / "pending_at_open").open("a") as f:
+        f.write(str((root / "state" / "pending.json").exists()) + "\n")
     with (root / "open_args").open("a") as f:
         f.write(" ".join(args[:-1]) + "\n")
     with (root / "opened").open("a") as f:
@@ -122,12 +125,12 @@ class SelfUpdateTests(unittest.TestCase):
             "CFBundleIdentifier": bundle, "CFBundleShortVersionString": version,
         }))
 
-    def prepare(self, fault="", state=None, mode="manual", blocked=""):
+    def prepare(self, fault="", state=None, mode="manual", blocked="", expected=""):
         self.env["WW_UPDATE_TEST_FAULT"] = fault
         return subprocess.run(["/bin/bash", str(self.script), "https://tribevpn.com/dl/TribeVPN.dmg",
                                "5.1.79", "Q7DVH5MCWF", "hk.wellwon.vpn", str(self.dst),
                                str(self.parent.pid), str(self.commit), str(self.root / "logs"),
-                               str(self.state if state is None else state), mode, blocked],
+                               str(self.state if state is None else state), mode, blocked, expected],
                               env=self.env, capture_output=True, text=True, timeout=15)
 
     def install_rollback_script(self):
@@ -241,6 +244,53 @@ class SelfUpdateTests(unittest.TestCase):
                 self.assert_old()
 
     # ── LaunchGuard: previous copy, pending, watchdog, blocked, percent, auto mode ──────────
+
+    def test_unexpected_image_version_is_deferred_not_installed(self):
+        # Ссылка на образ и recommended разошлись (кэш CDN, правка одного поля): не ставим
+        # «что лежит», а откладываем без сжигания попытки (defer:), установленная не тронута.
+        result = self.prepare(expected="5.1.81")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("defer:", result.stdout)
+        self.assertIn("fail:", result.stdout)
+        self.assert_old()
+        self.assertEqual(self.prepare(expected="5.1.80").returncode, 0)
+
+    def test_network_download_failure_is_deferred(self):
+        result = self.prepare("download")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("defer:", result.stdout)
+        self.assert_old()
+
+    def test_pending_is_written_before_the_new_version_is_launched(self):
+        # Новая копия читает pending в main() за миллисекунды после exec: запись после open
+        # теряла первый старт (crash-loop на 4-м) и давала подтверждение без маркера.
+        self.install_rollback_script()
+        (self.root / "alive").write_text("")
+        self.assertEqual(self.prepare().returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.root / "pending_at_open").exists())
+        (self.state / "confirmed").write_text("5.1.80\n")
+        self.wait_runner_done()
+        self.assertEqual((self.root / "pending_at_open").read_text(), "True\n")
+
+    def test_finisher_failure_leaves_marker_for_the_app(self):
+        # После quit окна нет — приложение узнаёт о провале финишера по маркеру и ставит паузу 6 ч
+        # вместо немедленной повторной попытки.
+        self.assertEqual(self.prepare("replace").returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.root / "alert").exists())
+        self.assert_old()
+        self.assertIn("5.1.80", (self.state / "finisher_failed").read_text())
+
+    def test_abort_file_stops_finisher_silently(self):
+        # Установка отменена после подготовки (включили VPN): финишер уходит молча, без
+        # системного алерта «не завершилось» и без замены.
+        self.assertEqual(self.prepare().returncode, 0)
+        pathlib_abort = Path(str(self.commit) + ".abort")
+        pathlib_abort.write_text("")
+        self.wait_runner_done()
+        self.assert_old()
+        self.assertFalse((self.root / "alert").exists())
 
     def test_install_keeps_previous_and_pending_then_confirm_stops_watchdog(self):
         self.install_rollback_script()
