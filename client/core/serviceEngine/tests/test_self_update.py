@@ -25,6 +25,9 @@ fault = os.environ.get("WW_UPDATE_TEST_FAULT", "")
 with (root / "commands").open("a") as f:
     f.write(name + " " + repr(args) + "\n")
 if name == "curl":
+    if "-fsSI" in args:  # HEAD for the download size (percent); 11 = len("fixture dmg")
+        print("HTTP/2 200\r\ncontent-length: 11\r\n\r\n", end="")
+        sys.exit(0)
     if fault == "download": sys.exit(28)
     pathlib.Path(args[args.index("-o") + 1]).write_text("fixture dmg")
     print("302" if fault == "redirect" else "200", end="")
@@ -49,7 +52,11 @@ elif name == "mv":
     if fault == "rollback" and src.endswith("previous.app"): sys.exit(1)
     if fault == "backup" and dst.endswith("previous.app"): sys.exit(1)
     os.rename(src, dst)
+elif name == "pgrep":
+    sys.exit(0 if (root / "alive").exists() else 1)
 elif name == "open":
+    with (root / "open_args").open("a") as f:
+        f.write(" ".join(args[:-1]) + "\n")
     with (root / "opened").open("a") as f:
         f.write((pathlib.Path(args[-1]) / "version").read_text() + "\n")
     if fault == "launch" and (pathlib.Path(args[-1]) / "version").read_text() == "new":
@@ -70,7 +77,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ("curl", "hdiutil", "codesign", "ditto", "mv", "open", "osascript", "nohup"):
+        for name in ("curl", "hdiutil", "codesign", "ditto", "mv", "open", "osascript", "nohup", "pgrep"):
             command = self.bin / name
             command.write_text(f"#!{sys.executable}\n" + MOCK)
             command.chmod(0o700)
@@ -80,6 +87,8 @@ class SelfUpdateTests(unittest.TestCase):
             (app / "Contents").mkdir(parents=True)
             (app / "version").write_text(version)
         self.set_plist()
+        self.set_plist(version="5.1.79", app=self.dst)
+        self.state = self.root / "state"
         source = (Path(__file__).parent.parent / "SelfUpdate.cpp").read_text()
         script = re.search(r'R"SH\((.*?)\)SH";', source, re.S).group(1)
         # Only shorten parent-exit wait and redirect the error dialog in this fixture.
@@ -108,17 +117,34 @@ class SelfUpdateTests(unittest.TestCase):
             self.fail("fixture runner did not terminate")
         self.temporary.cleanup()
 
-    def set_plist(self, version="5.1.80", bundle="hk.wellwon.vpn"):
-        (self.src / "Contents" / "Info.plist").write_bytes(plistlib.dumps({
+    def set_plist(self, version="5.1.80", bundle="hk.wellwon.vpn", app=None):
+        ((app or self.src) / "Contents" / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundleIdentifier": bundle, "CFBundleShortVersionString": version,
         }))
 
-    def prepare(self, fault=""):
+    def prepare(self, fault="", state=None, mode="manual", blocked=""):
         self.env["WW_UPDATE_TEST_FAULT"] = fault
         return subprocess.run(["/bin/bash", str(self.script), "https://tribevpn.com/dl/TribeVPN.dmg",
                                "5.1.79", "Q7DVH5MCWF", "hk.wellwon.vpn", str(self.dst),
-                               str(self.parent.pid), str(self.commit), str(self.root / "logs")],
+                               str(self.parent.pid), str(self.commit), str(self.root / "logs"),
+                               str(self.state if state is None else state), mode, blocked],
                               env=self.env, capture_output=True, text=True, timeout=15)
+
+    def install_rollback_script(self):
+        """Real rollback.sh from LaunchGuard.cpp, with the same fixture shortcuts as prepare.sh."""
+        source = (Path(__file__).parent.parent / "LaunchGuard.cpp").read_text()
+        script = re.search(r'R"SH\((.*?)\)SH";', source, re.S).group(1)
+        script = script.replace("sleep 0.5", "sleep 0.01")
+        script = script.replace("/usr/bin/osascript", str(self.bin / "osascript"))
+        self.state.mkdir(exist_ok=True)
+        (self.state / "rollback.sh").write_text(script)
+        (self.state / "rollback.sh").chmod(0o700)
+
+    def wait_runner_done(self):
+        def done():
+            runners = subprocess.check_output(["/bin/ps", "-axo", "command="], text=True)
+            return not any(str(self.root) in line and "/finish.sh" in line for line in runners.splitlines())
+        self.wait_for(done)
 
     def stop_parent(self):
         if self.parent.poll() is None:
@@ -213,6 +239,102 @@ class SelfUpdateTests(unittest.TestCase):
                 self.set_plist(version, bundle)
                 self.assertNotEqual(self.prepare().returncode, 0)
                 self.assert_old()
+
+    # ── LaunchGuard: previous copy, pending, watchdog, blocked, percent, auto mode ──────────
+
+    def test_install_keeps_previous_and_pending_then_confirm_stops_watchdog(self):
+        self.install_rollback_script()
+        (self.root / "alive").write_text("")           # the new version "is running"
+        self.assertEqual(self.prepare().returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.state / "pending.json").exists())
+        (self.state / "confirmed").write_text("5.1.80\n")   # the new version confirms itself
+        self.wait_runner_done()
+        self.assertEqual((self.dst / "version").read_text(), "new")
+        self.assertEqual((self.state / "previous.app" / "version").read_text(), "old")
+        previous = (self.state / "previous.json").read_text()
+        self.assertIn('"version":"5.1.79"', previous)
+        pending = (self.state / "pending.json").read_text()
+        self.assertIn('"from":"5.1.79"', pending)
+        self.assertIn('"to":"5.1.80"', pending)
+        self.assertIn('"app":"%s"' % self.dst, pending)
+        self.assertIn('"attempts":0', pending)
+        self.assertIn('"mode":"manual"', pending)
+        self.assertFalse((self.state / "rollback.json").exists())
+        self.assertFalse(list(self.dst.parent.glob(".tribe-update.*")))
+
+    def assert_rolled_back(self, reason="watchdog"):
+        self.assertEqual((self.dst / "version").read_text(), "old")
+        self.assertEqual((self.state / "failed.app" / "version").read_text(), "new")
+        report = (self.state / "rollback.json").read_text()
+        self.assertIn('"from":"5.1.80"', report)
+        self.assertIn('"to":"5.1.79"', report)
+        self.assertIn('"reason":"%s"' % reason, report)
+        self.assertFalse((self.state / "pending.json").exists())
+        self.assertFalse((self.state / "previous.json").exists())
+        self.assertEqual((self.root / "opened").read_text(), "new\nold\n")
+
+    def test_watchdog_rolls_back_when_new_version_dies_before_confirming(self):
+        self.install_rollback_script()
+        (self.root / "alive").write_text("")
+        self.assertEqual(self.prepare().returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.state / "pending.json").exists())
+        (self.root / "alive").unlink()                  # …and then it crashes
+        self.wait_runner_done()
+        self.assert_rolled_back("watchdog")
+        self.assertIn('"mode":"manual"', (self.state / "rollback.json").read_text())
+
+    def test_watchdog_rolls_back_when_new_version_never_appears(self):
+        self.install_rollback_script()
+        self.assertEqual(self.prepare(mode="auto").returncode, 0)
+        self.authorize_and_exit()
+        self.wait_runner_done()
+        self.assert_rolled_back("watchdog")
+        self.assertIn('"mode":"auto"', (self.state / "rollback.json").read_text())
+
+    def test_watchdog_without_rollback_script_leaves_new_version(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        self.authorize_and_exit()
+        self.wait_runner_done()
+        self.assertEqual((self.dst / "version").read_text(), "new")
+        self.assertFalse((self.state / "rollback.json").exists())
+
+    def test_blocked_version_is_refused_before_install(self):
+        result = self.prepare(blocked="5.1.77,5.1.80")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("отозвана", result.stdout)
+        self.assertNotIn("ok:", result.stdout)
+        self.assert_old()
+        self.assertFalse(list(self.dst.parent.glob(".tribe-update.*")))
+        # A different blocked version does not interfere.
+        self.assertEqual(self.prepare(blocked="5.1.77").returncode, 0)
+
+    def test_download_reports_percent(self):
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("percent:100", lines)
+        self.assertLess(lines.index("stage:Скачиваем обновление"), lines.index("percent:100"))
+        self.assertLess(lines.index("percent:100"), lines.index("stage:Проверяем подпись"))
+
+    def test_auto_mode_opens_new_version_in_background(self):
+        (self.root / "alive").write_text("")
+        self.assertEqual(self.prepare(mode="auto").returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.root / "open_args").exists())
+        self.assertIn("-g", (self.root / "open_args").read_text().splitlines()[0])
+        (self.state / "confirmed").write_text("")
+        self.wait_runner_done()
+
+    def test_manual_mode_opens_new_version_in_foreground(self):
+        (self.root / "alive").write_text("")
+        self.assertEqual(self.prepare(mode="manual").returncode, 0)
+        self.authorize_and_exit()
+        self.wait_for(lambda: (self.root / "open_args").exists())
+        self.assertEqual((self.root / "open_args").read_text().splitlines()[0], "-n")
+        (self.state / "confirmed").write_text("")
+        self.wait_runner_done()
 
     def test_installed_symlink_rejected(self):
         actual = self.dst.with_name("Actual.app")

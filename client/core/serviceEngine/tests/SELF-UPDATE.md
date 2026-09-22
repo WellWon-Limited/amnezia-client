@@ -21,6 +21,25 @@ parent/exit/timeout, cancellation before handoff, successful replacement, downlo
 and verification failures, failed replacement, failed launch and failed rollback.
 It does not alter `/Applications`, launch the VPN, use its settings or access keys.
 
+Self-update v2 (2026-09-22, spec tribe-front `docs/superpowers/specs/2026-09-22-macos-self-update-v2-design.md`):
+
+```sh
+bash client/core/serviceEngine/tests/build_launch_guard.sh
+WW_TEST=1 WW_TEST_ID=launch-guard python3 -B -m unittest discover \
+  -s client/core/serviceEngine/tests -p test_launch_guard.py -v
+```
+
+`launch_guard_check` covers the pure LaunchGuard logic (pending round-trip, start
+decision incl. crash-loop on the third unconfirmed start and stale/foreign records,
+rollback report → server JSON). `test_launch_guard.py` runs the embedded rollback
+script against fixtures: trusted previous copy swapped in, failed copy kept for
+diagnosis, `rollback.json` written, refusal on missing/untrusted previous copy,
+parent wait, launch failure. `test_self_update.py` additionally covers the v2
+finisher: previous copy kept in the state dir, `pending.json`, watchdog rollback
+when the new version dies or never appears, `confirmed` stopping the watchdog,
+blocked versions refused before install, download percent lines, background
+(`open -g`) vs foreground launch.
+
 The config refresh test uses a loopback HTTP server and in-memory storage. It checks
 that a running macOS client discovers a changed recommended version without an app
 restart and that slow requests do not overlap. The production interval is 15 minutes.
@@ -29,7 +48,9 @@ Unchanged subscription refresh intervals retain their existing timer deadline.
 ## Installation contract
 
 Preparation copies the verified app to a private directory on the destination
-volume. The detached finisher acknowledges readiness. Only an explicit `ok:` plus
+volume. The prepare script also emits `percent:N` while downloading (size from a
+HEAD request; no size = no percent lines) and refuses an image whose version is
+in the server's `blocked_versions` for this platform. The detached finisher acknowledges readiness. Only an explicit `ok:` plus
 a normal zero exit permits C++ to atomically create the handoff marker and emit
 `installed()`. `AvpnEngineQml` then requests application shutdown.
 

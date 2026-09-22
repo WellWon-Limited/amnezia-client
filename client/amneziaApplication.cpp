@@ -1,4 +1,7 @@
 #include "amneziaApplication.h"
+#ifdef AVPN_ENGINE_ENABLED
+#include "core/serviceEngine/LaunchGuard.h" // AVPN (self-update v2)
+#endif
 
 #include <QClipboard>
 #include <QFontDatabase>
@@ -124,6 +127,10 @@ void AmneziaApplication::init()
                 QCoreApplication::exit(-1);
                 return;
             }
+#ifdef AVPN_ENGINE_ENABLED
+            if (url == objUrl) // AVPN (self-update v2): главное окно создано — половина «жива»
+                avpn::LaunchGuard::instance().onMainWindowCreated();
+#endif
             // install filter on main window
             if (auto win = qobject_cast<QQuickWindow*>(obj)) {
                 win->installEventFilter(this);

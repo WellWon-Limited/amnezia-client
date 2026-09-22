@@ -47,12 +47,26 @@ public:
     // dmgUrl — из TuningStore/urls (фолбэк defaultDmgUrl()); currentVersion — версия приложения
     // ("5.1.69"), она же нижняя граница: образ со старшей версией установится, с равной/младшей нет.
     void start(const QString &dmgUrl, const QString &currentVersion);
+    // AVPN (self-update v2): stateDir — каталог LaunchGuard (финишер сохраняет туда предыдущую
+    // версию, пишет pending.json и сторожит первый запуск); background — тихая установка
+    // (окно новой версии не выводится на передний план); blocked — отозванные сервером версии
+    // (образ с такой версией скрипт отвергает до установки).
+    struct StartOptions
+    {
+        QString     stateDir;
+        bool        background = false;
+        QStringList blocked;
+    };
+    void start(const QString &dmgUrl, const QString &currentVersion, const StartOptions &opts);
+    bool background() const { return m_background; }
 
     void cancel();
 
 signals:
     // Человеческая стадия для UI («Скачиваем…», «Проверяем подпись…», «Устанавливаем…»).
     void progress(const QString &text);
+    // Процент скачивания образа (0..100); не приходит, если сервер не отдал размер.
+    void downloadProgress(int percent);
     // Установка не удалась; reason уже готов к показу пользователю (без путей и внутренностей).
     void failed(const QString &reason);
     // Образ проверен, финишер готов: приложение должно выйти, чтобы разрешить замену.
@@ -69,6 +83,7 @@ private:
     QTimer *m_timeout = nullptr;
     QString m_error;
     bool m_prepared = false;
+    bool m_background = false;
     QString m_scriptPath;                 // временный файл со скриптом установки (удаляем за собой)
 };
 
