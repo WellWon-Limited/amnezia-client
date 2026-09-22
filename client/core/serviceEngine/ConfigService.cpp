@@ -132,6 +132,7 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64)
     if (!parseConfig(body, c, err))
         return;
     m_config = c;
+    m_fresh = true;
     ConfigStore::saveConfig(body);
     if (!c.edges.isEmpty())
         ConfigStore::saveEdges(c.edges);

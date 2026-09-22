@@ -89,7 +89,10 @@ class RollbackScriptTests(unittest.TestCase):
     def assert_untouched(self):
         self.assertEqual((self.dst / "version").read_text(), "new")
         self.assertEqual((self.prev / "version").read_text(), "old")
-        self.assertTrue((self.state / "pending.json").exists())
+        # Провал отката снимает pending (→ pending.failed): иначе каждый следующий старт снова
+        # получает вердикт crash-loop, снова падает на откате и приложение не запускается вовсе.
+        self.assertFalse((self.state / "pending.json").exists())
+        self.assertTrue((self.state / "pending.failed").exists())
         self.assertFalse((self.state / "rollback.json").exists())
         self.assertFalse((self.root / "opened").exists())
 
@@ -157,7 +160,8 @@ class RollbackScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.dst / "version").read_text(), "new")
         self.assertFalse((self.state / "failed.app").exists())
-        self.assertTrue((self.state / "pending.json").exists())
+        self.assertFalse((self.state / "pending.json").exists())
+        self.assertTrue((self.state / "pending.failed").exists())
 
     def test_launch_failure_after_swap_keeps_previous_version_installed(self):
         result = self.run_rollback(fault="launch")
@@ -165,6 +169,18 @@ class RollbackScriptTests(unittest.TestCase):
         self.assertEqual((self.dst / "version").read_text(), "old")
         self.assertIn("не запустилась", (self.root / "alert").read_text())
         self.assertTrue((self.state / "rollback.json").exists())
+
+    def test_symlinked_previous_copy_is_refused(self):
+        # Ссылка на рабочий бандл проходит codesign/нотаризацию, а mv перенёс бы в /Applications
+        # саму ссылку: содержимое меняется после проверки, финишер потом отказывает навсегда.
+        real = self.root / "elsewhere.app"
+        self.prev.rename(real)
+        self.prev.symlink_to(real)
+        result = self.run_rollback()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ссылка", (self.root / "alert").read_text())
+        self.assertEqual((self.dst / "version").read_text(), "new")
+        self.assertFalse((self.state / "rollback.json").exists())
 
     def test_translocated_or_volume_app_is_refused(self):
         for bad in ("/Volumes/Tribe VPN/Tribe VPN.app", "/private/var/folders/x/AppTranslocation/y/d/Tribe VPN.app"):

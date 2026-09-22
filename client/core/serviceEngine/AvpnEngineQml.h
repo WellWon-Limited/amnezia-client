@@ -218,6 +218,8 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(QString selfUpdateTarget READ selfUpdateTarget NOTIFY selfUpdateChanged)
     Q_PROPERTY(bool currentVersionBlocked READ currentVersionBlocked NOTIFY changed)
     Q_PROPERTY(bool canRollback READ canRollback NOTIFY changed)
+    // Рекомендованная версия строго новее текущей и не отозвана (кнопка «Обновить» у «отозвана»).
+    Q_PROPERTY(bool newerAvailable READ newerAvailable NOTIFY changed)
     Q_PROPERTY(QString previousVersion READ previousVersion NOTIFY changed)
     Q_PROPERTY(QString rollbackNotice READ rollbackNotice NOTIFY rollbackNoticeChanged)
     // AVPN backend-first (T10): интервал авто-self-heal чипов сервисов (PageConnectTribe.qml) —
@@ -365,6 +367,7 @@ public:
     int selfUpdatePercent() const { return m_selfUpdatePercent; }
     QString selfUpdateTarget() const { return m_selfUpdateTarget; }
     bool currentVersionBlocked() const { return m_updateState == 3; }
+    bool newerAvailable() const;
     bool canRollback() const;
     QString previousVersion() const;
     QString rollbackNotice() const { return m_rollbackNotice; }
@@ -1287,6 +1290,10 @@ private:
     QString m_selfUpdateStage;
     int     m_selfUpdatePercent = -1;          // -1 = процент неизвестен (сервер не дал размер)
     QString m_selfUpdateTarget;                // версия, которую ставим
+    bool    m_selfUpdateTunnelCancel = false;  // фоновую установку отменил подъём туннеля (не попытка)
+    bool    m_daemonProbed = false;            // проба демона на старте отработала: Unknown ≠ «VPN выкл»
+    bool    m_freshConfig = false;             // был хотя бы один /v1/config из сети (не LKG-кеш)
+    bool    tunnelOffForUpdate() const;        // туннель выключен и никто его не поднимает
     QString m_rollbackNotice;                  // одноразовое «версию X вернули к Y»
     void    ensureSelfUpdate();
     void    startSelfUpdateInternal(bool background);

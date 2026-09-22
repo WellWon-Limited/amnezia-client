@@ -613,8 +613,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_updateState = (v == avpn::UpdateVerdict::Block) ? 2
                               : avpn::versionBlocked(c, plat, appVer) ? 3
                               : (v == avpn::UpdateVerdict::Recommend) ? 1 : 0;
-                avpn::LaunchGuard::instance().onConfigApplied(); // «жива»: окно есть + конфиг прочитан
-                QTimer::singleShot(0, this, [this] { maybeAutoUpdate(); });
+                // AVPN (ревью 2026-09-22): LKG-кеш применяется синхронно ещё в конструкторе —
+                // по нему ни «жива» (падение через секунды после окна не ловилось), ни тихая
+                // установка (по старому blocked/URL ставилась уже отозванная версия).
+                if (m_configSvc && m_configSvc->isFresh()) {
+                    m_freshConfig = true;
+                    avpn::LaunchGuard::instance().onConfigApplied(); // «жива»: окно + свежий конфиг
+                    QTimer::singleShot(0, this, [this] { maybeAutoUpdate(); });
+                }
                 applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
                 refreshQualityEndpoints();  // AVPN (T16): urls.quality_probe_url мог смениться
                 emit changed();
@@ -909,6 +915,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // после показа окна; чисто async (QLocalSocket), вложенных QEventLoop нет — конфликт с
     // bootstrap(1200мс) исключён.
     QTimer::singleShot(1500, this, &AvpnEngineQml::probeDaemonTunnelOnStartup);
+    // Проба ждёт ответа демона ≤3 с: до её конца Unknown — не «VPN выключен» (живой туннель
+    // демона ещё не адоптирован), тихая установка ждёт (ревью 2026-09-22).
+    QTimer::singleShot(1500 + 3000 + 500, this, [this] {
+        m_daemonProbed = true;
+        maybeAutoUpdate();
+    });
+#else
+    m_daemonProbed = true;
 #endif
 
     // AVPN (LKG, C-7): мгновенный бейдж/пул из последнего удачного ответа /v1/subscription —
@@ -1110,6 +1124,10 @@ void AvpnEngineQml::setAutoUpdate(bool on)
     emit autoUpdateChanged();
     if (on)
         QTimer::singleShot(0, this, [this] { maybeAutoUpdate(); });
+    else if (m_selfUpdate && m_selfUpdate->running() && m_selfUpdateBackground) {
+        m_selfUpdateTunnelCancel = true; // выключили тумблер — не попытка, не пауза
+        m_selfUpdate->cancel();
+    }
 }
 
 bool AvpnEngineQml::canRollback() const
@@ -1117,7 +1135,20 @@ bool AvpnEngineQml::canRollback() const
     const avpn::LaunchGuard &g = avpn::LaunchGuard::instance();
     if (!g.hasPrevious() || g.previousVersion() == QStringLiteral(APP_VERSION).split(QLatin1Char('.')).mid(0, 3).join(QLatin1Char('.')))
         return false;
-    return !avpn::versionBlocked(m_remoteCfg, avpnPlatformKey(), g.previousVersion());
+    if (avpn::versionBlocked(m_remoteCfg, avpnPlatformKey(), g.previousVersion()))
+        return false;
+    // Не откатываем ниже min_app_version: человек упрётся в принудительный экран обновления.
+    return avpn::compareVersions(g.previousVersion(), m_remoteCfg.minAppVersion.value(avpnPlatformKey()),
+                                 QString()) != avpn::UpdateVerdict::Block;
+}
+
+bool AvpnEngineQml::newerAvailable() const
+{
+    const QString plat = avpnPlatformKey();
+    const QString target = m_remoteCfg.recommendedVersion.value(plat);
+    return !target.isEmpty()
+        && avpn::compareVersions(QStringLiteral(APP_VERSION), QString(), target) == avpn::UpdateVerdict::Recommend
+        && !avpn::versionBlocked(m_remoteCfg, plat, target);
 }
 
 QString AvpnEngineQml::previousVersion() const
@@ -1181,18 +1212,28 @@ void AvpnEngineQml::maybeAutoUpdate()
         return;
     if (m_selfUpdate && m_selfUpdate->running())
         return;
-    switch (m_lastTunnelState) {
-    case Vpn::Disconnected:
-    case Vpn::Unknown:
-    case Vpn::Error:
-        break;
-    default:
+    if (!m_freshConfig || !m_daemonProbed)
+        return; // только по свежему /v1/config и после пробы демона (ревью 2026-09-22)
+    if (!tunnelOffForUpdate())
         return; // туннель активен — ждём onConnectionStateChanged
-    }
     const QString plat = avpnPlatformKey();
     const QString target = m_remoteCfg.recommendedVersion.value(plat);
     const QString marketing = QStringLiteral(APP_VERSION).split(QLatin1Char('.')).mid(0, 3).join(QLatin1Char('.'));
     QSettings st;
+    // Финишер (после нашего quit) не смог заменить/запустить версию — он оставил маркер;
+    // ставим паузу 6 ч, иначе следующий старт сразу жёг бы следующую попытку.
+    {
+        const QString marker = avpn::LaunchGuard::instance().stateDir() + QStringLiteral("/finisher_failed");
+        QFile f(marker);
+        if (f.open(QIODevice::ReadOnly)) {
+            const QList<QByteArray> parts = f.readAll().trimmed().split(' ');
+            f.close();
+            QFile::remove(marker);
+            if (parts.size() == 2 && !parts.at(0).isEmpty())
+                st.setValue(QStringLiteral("AvpnUpdate/lastFail_") + QString::fromUtf8(parts.at(0)),
+                            parts.at(1).toLongLong());
+        }
+    }
     // Текущая версия отозвана сервером, а рекомендованной новее нет — сами возвращаем
     // сохранённую предыдущую копию (спека §4.2). Один раз: rolledBack помнит эту версию.
     if (m_updateState == 3 && canRollback()
@@ -1227,6 +1268,21 @@ void AvpnEngineQml::maybeAutoUpdate()
     startSelfUpdateInternal(/*background=*/true);
 }
 
+bool AvpnEngineQml::tunnelOffForUpdate() const
+{
+    if (m_op != Op::None || m_wantConnected)
+        return false; // подключаемся/переподключаемся или человек хочет быть подключённым
+    switch (m_lastTunnelState) {
+    case Vpn::Disconnected:
+    case Vpn::Error:
+        return true;
+    case Vpn::Unknown:
+        return m_daemonProbed; // до пробы демона Unknown может скрывать живой туннель
+    default:
+        return false;
+    }
+}
+
 void AvpnEngineQml::ensureSelfUpdate()
 {
     if (m_selfUpdate)
@@ -1248,13 +1304,22 @@ void AvpnEngineQml::ensureSelfUpdate()
         m_selfUpdateBackground = false;
         m_selfUpdateStage.clear();
         m_selfUpdatePercent = -1;
+        const bool tunnelCancel = m_selfUpdateTunnelCancel;
+        m_selfUpdateTunnelCancel = false;
         if (background) {
             // Тихая попытка не удалась: без всплывающих окон, баннер с кнопкой остаётся.
             QSettings st;
-            st.setValue(QStringLiteral("AvpnUpdate/lastFail_") + m_selfUpdateTarget,
-                        QDateTime::currentSecsSinceEpoch());
+            const QString attemptsKey = QStringLiteral("AvpnUpdate/attempts_") + m_selfUpdateTarget;
+            if (tunnelCancel || m_selfUpdate->lastFailureDeferred()) {
+                // Отложено (включили VPN, сеть, образ не той версии) — попытку не засчитываем.
+                st.setValue(attemptsKey, qMax(0, st.value(attemptsKey, 0).toInt() - 1));
+            }
+            if (!tunnelCancel) // отмена туннелем — без паузы: поставим, как только VPN выключат
+                st.setValue(QStringLiteral("AvpnUpdate/lastFail_") + m_selfUpdateTarget,
+                            QDateTime::currentSecsSinceEpoch());
             st.sync();
-            qWarning() << "[selfupdate] background update failed:" << r;
+            qWarning() << "[selfupdate] background update failed:" << r
+                       << (tunnelCancel ? "(tunnel came up)" : m_selfUpdate->lastFailureDeferred() ? "(deferred)" : "");
         } else {
             emit selfUpdateFailed(r);
         }
@@ -1305,7 +1370,12 @@ void AvpnEngineQml::startSelfUpdateInternal(bool background)
         opts.stateDir = avpn::LaunchGuard::defaultStateDir();
     opts.background = background;
     opts.blocked = m_remoteCfg.blockedVersions.value(plat);
+    // Ставим ровно рекомендованную сервером версию (ссылка на образ могла разойтись с ней).
+    opts.expectedVersion = m_remoteCfg.recommendedVersion.value(plat);
+    if (background) // тихая: последний гейт — туннель всё ещё выключен в момент передачи
+        opts.mayCommit = [this] { return tunnelOffForUpdate(); };
     m_selfUpdateBackground = background;
+    m_selfUpdateTunnelCancel = false;
     m_selfUpdateTarget = availableVersion();
     m_selfUpdatePercent = -1;
     m_selfUpdateStage = tr("Скачиваем и проверяем подпись…");
@@ -3578,6 +3648,13 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // (условия внутри; отложенно, чтобы не вклиниваться в обработку перехода).
     if (s == Vpn::Disconnected || s == Vpn::Error)
         QTimer::singleShot(1500, this, [this] { maybeAutoUpdate(); });
+    // Туннель пошёл вверх, а тихая установка качается — отменяем: перезапуск приложения при
+    // поднятом VPN нарушает «пока подключён, тихо не рвём» (ревью 2026-09-22).
+    if (m_selfUpdate && m_selfUpdate->running() && m_selfUpdateBackground && !tunnelOffForUpdate()) {
+        qInfo() << "[selfupdate] tunnel is coming up — cancelling background update";
+        m_selfUpdateTunnelCancel = true;
+        m_selfUpdate->cancel();
+    }
     // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
     switch (s) {
