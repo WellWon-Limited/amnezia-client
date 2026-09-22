@@ -200,6 +200,17 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     return pickTransportNode(m_pool.nodes(), measuredRtt(), m_transportHistory, in, randomIndex);
 }
 
+const SubscriptionNode *ServiceEngine::pinnedCandidate() const
+{
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    if (!pinned) return nullptr;
+    const QString loc = locationKeyOf(*pinned);
+    const SubscriptionNode *candidate = pickTransport(loc, m_pinnedNodeId, QString(), true);
+    if (!candidate && !m_failedThisSession.isEmpty())
+        candidate = pickTransport(loc, m_pinnedNodeId, QString(), false);
+    return candidate;
+}
+
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
 {
     Subscription sub;
@@ -396,16 +407,8 @@ bool ServiceEngine::connect(QString &error)
     // AVPN awg31-xray-v1: pin — ПО ЛОКАЦИИ: транспорт внутри закреплённой локации выбирает
     // pickTransport (transport_rank + история + ручной режим + сессионные провалы). Стейл-pin
     // (локация мертва/без поднимаемых узлов) → падаем в авто-выбор вместо заведомо мёртвого up().
-    if (!m_pinnedNodeId.isEmpty()) {
-        if (const SubscriptionNode *pinned = findNode(m_pinnedNodeId)) {
-            const QString loc = locationKeyOf(*pinned);
-            const SubscriptionNode *c = pickTransport(loc, m_pinnedNodeId, QString(), /*withExclusions=*/true);
-            if (!c && !m_failedThisSession.isEmpty())
-                c = pickTransport(loc, m_pinnedNodeId, QString(), /*withExclusions=*/false);
-            if (c)
-                candidate = *c;
-        }
-    }
+    if (const SubscriptionNode *pinned = pinnedCandidate())
+        candidate = *pinned;
     if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         // AVPN awg31-xray-v1: локация — по измеренному off-tunnel RTT (кэш AvpnEngineQml::probeNodeRtt),
         // без замеров — weight-ярус (случайно среди равных); транспорт внутри — ранг + история. Без I/O.
