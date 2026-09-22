@@ -124,13 +124,17 @@ int main(int argc, char **argv)
         CHECK(!eng.measuredRtt().contains(QStringLiteral("B")));
         CHECK(!eng.hasPendingReseed());
         CHECK(eng.debugSnapshot().trafficUsed == 5); // счётчики из нового тела
-        // Equal revisions are not a content hash: membership/health may have changed.
-        CHECK(eng.reseedPool(parse(subJson({ A, C }, 2))) == ReseedResult::Applied);
-        CHECK(eng.reseedPool(parse(subJson({ B }, 1))) == ReseedResult::Rejected);
+        // AVPN (фикс-волна 2026-09-22, K5/B2): то же содержимое → Unchanged (без лога, пул тот же).
+        CHECK(eng.reseedPool(parse(subJson({ A, C }, 2))) == ReseedResult::Unchanged);
         CHECK(eng.reseedPool(parse(subJson({ B }, -1))) == ReseedResult::Rejected);
         CHECK(eng.reseedPool(parse(subJson({}, 3))) == ReseedResult::Rejected);
         CHECK(poolIds(eng) == QStringList({QStringLiteral("A"), QStringLiteral("C")}));
         CHECK(eng.poolRevision() == 2);
+        // pool_revision не монотонна (delete_node опускает max) — меньшая ревизия ПРИМЕНЯЕТСЯ.
+        CHECK(eng.reseedPool(parse(subJson({ A, C, B }, 1))) == ReseedResult::Applied);
+        CHECK(eng.poolRevision() == 1);
+        CHECK(eng.reseedPool(parse(subJson({ A, C }, 2))) == ReseedResult::Applied);
+        CHECK(poolIds(eng) == QStringList({QStringLiteral("A"), QStringLiteral("C")}));
         // switchLog фиксирует reseed
         bool logged = false;
         for (const QString &l : eng.switchLog())
@@ -201,8 +205,10 @@ int main(int argc, char **argv)
         eng.requestStop();
         CHECK(eng.applyPendingReseed());
         CHECK(eng.poolRevision() == 8);
-        CHECK(!eng.loadSubscription(subJson({ A }, 7), err));
-        CHECK(eng.poolRevision() == 8);
+        // K5/B1: loadSubscription по ревизии НЕ отвергает (порядок держит фасад по sequence).
+        CHECK(eng.loadSubscription(subJson({ A }, 7), err));
+        CHECK(eng.poolRevision() == 7);
+        CHECK(poolIds(eng) == QStringList{QStringLiteral("A")});
     }
 
     // --- 3) ревалидация pin по локации ---
@@ -282,7 +288,9 @@ int main(int argc, char **argv)
         changed.poolRevision = 3;
         changed.address = {QStringLiteral("10.7.0.9/32")};
         CHECK(eng.reseedPool(changed) == ReseedResult::Deferred);
-        CHECK(eng.reseedPool(parse(subJson({ A, B }, 2))) == ReseedResult::Rejected);
+        // K5/B2: сервер вернул тело, совпавшее с ТЕКУЩИМ пулом → Unchanged, устаревший pending снят.
+        CHECK(eng.reseedPool(parse(subJson({ A, B }, 2))) == ReseedResult::Unchanged);
+        CHECK(!eng.hasPendingReseed());
     }
     if (g_failed) {
         fprintf(stderr, "reseed_pool_check: FAILED %d/%d\n", g_failed, g_total);
@@ -312,6 +320,7 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *, const QString &, con
 }
 
 void Enrollment::saveLkgSubscription(const QByteArray &) { }
+QByteArray Enrollment::loadLkgSubscription() { return {}; } // ревью CL-B REV-4: гард LKG в ensureSubscription
 
 QString Enrollment::loadToken()
 {

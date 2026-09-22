@@ -6,6 +6,7 @@
 // PersistentKeepalive=25 держит handshake свежим на живом туннеле.
 #pragma once
 
+#include "ConnectTunables.h"
 #include "ITunnelControl.h"
 #include "TuningStore.h"
 
@@ -50,6 +51,15 @@ public:
     {
         if (!cur.valid)
             return m_dead; // нет данных — состояние не меняем
+        // AVPN (фикс-волна 2026-09-22, B8): окно grace после смены сети — выборку держим свежей
+        // (prev обновляется), но «плохие» циклы не копим и DEAD не выносим: NE сам лечит путь.
+        if (inNetworkGrace(nowEpoch)) {
+            m_prev = cur;
+            m_hasPrev = true;
+            m_bad = 0;
+            m_dead = false;
+            return false;
+        }
         // Снапшот порогов ОДИН раз на вызов (= один тик ServiceEngine::tick() для этой ноды),
         // не дёргать TuningStore на каждое внутреннее сравнение.
         const HealthThresholds th = HealthThresholds::fromTuning();
@@ -63,7 +73,44 @@ public:
         return m_dead;
     }
 
-    void reset()
+    void reset() { resetSampling(); }
+
+    // AVPN (фикс-волна 2026-09-22, K5/B8, роуминг): смена сети (путь/интерфейс/reachability) —
+    // сброс выборки (дельты старого пути против нового ложны) и запрет DEAD-вердикта на graceSec.
+    // graceSec <0 → серверный health_network_grace_s (ConnectTunables, клампован, деф. 20 с).
+    // reset() окно НЕ снимает: свитч/ре-синк внутри окна не должен возвращать ложный DEAD.
+    // Ревью CL-B (REV-5): окно серии частых смен не длиннее 2×grace от первой смены серии; после —
+    // grace секунд «остывания», в которые смены НЕ открывают окно и НЕ сбрасывают выборку (иначе
+    // смена каждые <grace с глушила DEAD навсегда). Возвращает true, если окно открыто/продлено.
+    bool noteNetworkChange(qint64 nowEpoch, int graceSec = -1)
+    {
+        const int g = graceSec >= 0 ? graceSec : healthNetworkGraceSTuned();
+        if (g <= 0) {
+            resetSampling(); // окно выключено: только свежая выборка, как reset()
+            return false;
+        }
+        const qint64 cap = m_graceSeriesStart + 2 * qint64(g);
+        if (m_hasGraceSeries && nowEpoch >= m_graceSeriesStart && nowEpoch < cap + qint64(g)) {
+            if (nowEpoch >= cap)
+                return false; // остывание флаппинга: DEAD-детект идёт по накопленной выборке
+            resetSampling();
+            m_graceUntilEpoch = qMin(cap, qMax(m_graceUntilEpoch, nowEpoch + qint64(g)));
+            return true;
+        }
+        resetSampling(); // новая серия
+        m_hasGraceSeries = true;
+        m_graceSeriesStart = nowEpoch;
+        m_graceUntilEpoch = nowEpoch + qint64(g);
+        return true;
+    }
+    bool inNetworkGrace(qint64 nowEpoch) const { return nowEpoch < m_graceUntilEpoch; }
+    qint64 networkGraceUntil() const { return m_graceUntilEpoch; }
+
+    int  badCycles() const { return m_bad; }
+    bool isDead() const { return m_dead; }
+
+private:
+    void resetSampling()
     {
         m_prev = TunnelStats{};
         m_hasPrev = false;
@@ -71,14 +118,13 @@ public:
         m_dead = false;
     }
 
-    int  badCycles() const { return m_bad; }
-    bool isDead() const { return m_dead; }
-
-private:
     TunnelStats m_prev;
     bool m_hasPrev = false;
     int  m_bad = 0;
     bool m_dead = false;
+    qint64 m_graceUntilEpoch = 0;  // B8: до этого момента (epoch сек) DEAD не выносим
+    qint64 m_graceSeriesStart = 0; // REV-5: первая смена текущей серии
+    bool m_hasGraceSeries = false;
 };
 
 } // namespace avpn

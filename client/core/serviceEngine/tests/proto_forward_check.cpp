@@ -334,6 +334,7 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *, const QString &, con
 }
 
 void Enrollment::saveLkgSubscription(const QByteArray &) { }
+QByteArray Enrollment::loadLkgSubscription() { return {}; } // ревью CL-B REV-4: гард LKG в ensureSubscription
 
 QString Enrollment::loadToken()
 {

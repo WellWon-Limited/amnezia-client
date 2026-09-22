@@ -7,7 +7,7 @@ QT="${QT_ROOT:-$HOME/Qt/6.10.2/macos}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$HERE/../../.."
 MAIN_CLIENT="${AVPN_MAIN_CLIENT:-$HOME/amnezia-client/client}"
-OUT=/tmp/avpn_reseed_pool_check
+OUT="${OUT:-/tmp/avpn_reseed_pool_check}"
 SHIM="$(mktemp -d)"
 trap 'rm -rf "$SHIM"' EXIT
 printf '#pragma once\n#define QKEYCHAIN_EXPORT\n' > "$SHIM/qkeychain_export.h"

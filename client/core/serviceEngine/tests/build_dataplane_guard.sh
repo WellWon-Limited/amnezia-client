@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$HERE/../../.."
 # Фолбэк для хедеров 3rd-сабмодулей (qtkeychain): в git-worktree сабмодули могут быть не развёрнуты.
 MAIN_CLIENT="${AVPN_MAIN_CLIENT:-$HOME/amnezia-client/client}"
-OUT=/tmp/avpn_dataplane_guard_check
+OUT="${OUT:-/tmp/avpn_dataplane_guard_check}"
 # Шим генерируемого qkeychain_export.h (транзитивно через secureQSettings.h; сам keychain не нужен).
 SHIM="$(mktemp -d)"
 trap 'rm -rf "$SHIM"' EXIT

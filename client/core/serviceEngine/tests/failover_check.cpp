@@ -223,11 +223,20 @@ int main(int argc, char **argv)
         CHECK(!feedDead(1000));                                   // DEAD №2 → heal-попытка 2 (кап деф. 2)
         CHECK(tun.rebindCalls == 2);
         CHECK(eng.rebindHealTotal() == 2);
-        CHECK(feedDead(2000));                                    // DEAD №3 → кап исчерпан → failover
+        // AVPN (фикс-волна 2026-09-22, B6): DEAD №3 → кап rebind исчерпан → шаг 2: переподъём
+        // ТОЙ ЖЕ ноды (down→up cur), не failover на другую.
+        CHECK(feedDead(2000));
         CHECK(tun.rebindCalls == 2);                              // третьей попытки НЕ было
         CHECK(tun.downCalls > downs0);                            // двухфазный свитч начался (down)
-        // свежий подъём возвращает бюджет heal
-        eng.onTunnelDisconnected();                               // доиграть pending-свитч (up на цель)
+        eng.onTunnelDisconnected();                               // доиграть pending-свитч (up на ту же)
+        CHECK(tun.lastUpNodeId == QLatin1String("cur"));
+        eng.onTunnelConnected();
+        CHECK(eng.rebindHealTries() == 2);                        // переподъём бюджет НЕ возвращает
+        // DEAD №4 → шаг 3: другая нода; свежий подъём другой ноды возвращает бюджет heal
+        CHECK(feedDead(3000));
+        CHECK(tun.rebindCalls == 2);
+        eng.onTunnelDisconnected();
+        CHECK(tun.lastUpNodeId != QLatin1String("cur"));
         eng.onTunnelConnected();
         CHECK(eng.rebindHealTries() == 0);
     }
@@ -290,6 +299,7 @@ bool Enrollment::fetchSubscription(QNetworkAccessManager *, const QString &, con
 }
 
 void Enrollment::saveLkgSubscription(const QByteArray &) { } // LKG-персист тестом не проверяется
+QByteArray Enrollment::loadLkgSubscription() { return {}; } // ревью CL-B REV-4: гард LKG в ensureSubscription
 
 QString Enrollment::loadToken()
 {

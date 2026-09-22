@@ -93,12 +93,18 @@ void RttProbeIcmp::cleanup()
         m_timer->deleteLater();
         m_timer = nullptr;
     }
+    if (m_sweep) {
+        m_sweep->stop();
+        m_sweep->deleteLater();
+        m_sweep = nullptr;
+    }
     if (m_fd >= 0) {
         ::close(m_fd);
         m_fd = -1;
     }
     m_pending.clear();
     m_seqToIdx.clear();
+    m_seqToEcho.clear();
     m_remaining = 0;
 }
 
@@ -149,9 +155,13 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int timeoutMs, Samp
     for (int i = 0; i < targets.size(); ++i) {
         Pending p;
         p.nodeId = targets[i].nodeId;
-        p.seq = static_cast<quint16>(m_seqBase + i * 251 + 1); // разнести seq между целями
+        for (int k = 0; k < RttEchoAggregate::kEchoes; ++k) {
+            // разнести seq между целями и эхами (i*251 — как раньше; +k внутри цели)
+            p.seq[k] = static_cast<quint16>(m_seqBase + i * 251 + 1 + k);
+            m_seqToIdx.insert(p.seq[k], i);
+            m_seqToEcho.insert(p.seq[k], k);
+        }
         m_pending.append(p);
-        m_seqToIdx.insert(p.seq, i);
     }
 
     m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
@@ -161,6 +171,11 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int timeoutMs, Samp
     m_timer->setSingleShot(true);
     QObject::connect(m_timer, &QTimer::timeout, this, [this]() { onTimeout(); });
     m_timer->start(timeoutMs > 0 ? timeoutMs : 1500);
+
+    m_sweep = new QTimer(this);
+    m_sweep->setInterval(40);
+    QObject::connect(m_sweep, &QTimer::timeout, this, [this]() { onSweep(); });
+    m_sweep->start();
 
     // Резолв + отправка. IP-литерал → шлём сразу; иначе async-резолв.
     for (int i = 0; i < targets.size(); ++i) {
@@ -196,6 +211,21 @@ void RttProbeIcmp::sendEcho(int idx)
 {
     if (m_fd < 0 || idx < 0 || idx >= m_pending.size())
         return;
+    sendOne(idx, 0);
+    const int gen = m_gen;
+    for (int k = 1; k < RttEchoAggregate::kEchoes; ++k) {
+        QTimer::singleShot(RttEchoAggregate::kEchoSpacingMs * k, this, [this, idx, k, gen]() {
+            if (gen != m_gen || m_fd < 0 || idx >= m_pending.size() || m_pending[idx].done)
+                return;
+            sendOne(idx, k);
+        });
+    }
+}
+
+void RttProbeIcmp::sendOne(int idx, int echo)
+{
+    if (m_fd < 0 || idx < 0 || idx >= m_pending.size())
+        return;
     Pending &p = m_pending[idx];
 
     quint8 pkt[sizeof(IcmpEchoHdr) + kPayloadLen];
@@ -205,10 +235,10 @@ void RttProbeIcmp::sendEcho(int idx)
     h->code = 0;
     h->cksum = 0;
     h->id = htons(m_magic);
-    h->seq = htons(p.seq);
+    h->seq = htons(p.seq[echo]);
     quint8 *pl = pkt + sizeof(IcmpEchoHdr);
     const quint16 nMagic = htons(m_magic);
-    const quint16 nSeq = htons(p.seq);
+    const quint16 nSeq = htons(p.seq[echo]);
     std::memcpy(pl, &nMagic, 2);
     std::memcpy(pl + 2, &nSeq, 2);
     h->cksum = inetChecksum(pkt, sizeof(pkt));
@@ -221,7 +251,12 @@ void RttProbeIcmp::sendEcho(int idx)
     const ssize_t n =
         ::sendto(m_fd, pkt, sizeof(pkt), 0, reinterpret_cast<sockaddr *>(&dst), sizeof(dst));
     if (n < 0)
-        finishIdx(idx, -1); // не ушло — недостижимо
+        p.agg.markSendFailed(echo);
+    else
+        p.agg.markSent(echo, m_clock.elapsed());
+    // все эха провалились при отправке и ответов нет — недостижимо, не ждём таймаута
+    if (p.agg.allAccounted() && p.agg.best < 0 && p.agg.lastSentAt < 0)
+        finishIdx(idx, -1);
 }
 
 void RttProbeIcmp::onReadable()
@@ -260,20 +295,31 @@ void RttProbeIcmp::onReadable()
         if (magic != m_magic)
             continue; // чужой ICMP
         const int idx = m_seqToIdx.value(seq, -1);
-        if (idx < 0)
+        if (idx < 0 || idx >= m_pending.size() || m_pending[idx].done)
             continue;
-        const qint64 ms = m_clock.elapsed();
-        finishIdx(idx, ms < 0 ? 0 : static_cast<int>(ms));
+        Pending &p = m_pending[idx];
+        p.agg.markReply(m_seqToEcho.value(seq, -1), m_clock.elapsed());
+        if (p.agg.complete())
+            finishIdx(idx, p.agg.best);
         if (m_doneFired)
             break;
     }
 }
 
+void RttProbeIcmp::onSweep()
+{
+    const qint64 now = m_clock.elapsed();
+    for (int i = 0; i < m_pending.size() && !m_doneFired; ++i)
+        if (!m_pending[i].done && m_pending[i].agg.settled(now))
+            finishIdx(i, m_pending[i].agg.best);
+}
+
 void RttProbeIcmp::onTimeout()
 {
-    for (int i = 0; i < m_pending.size(); ++i)
+    // Общий таймаут раунда: цель с хотя бы одним ответом отдаёт минимум, без ответа — -1.
+    for (int i = 0; i < m_pending.size() && !m_doneFired; ++i)
         if (!m_pending[i].done)
-            finishIdx(i, -1);
+            finishIdx(i, m_pending[i].agg.best);
 }
 
 // AVPN bench v5 (MTU-проба): одиночный DF-echo с паддингом. Самодостаточна: свой сокет/нотифаер/
@@ -399,6 +445,7 @@ void RttProbeIcmp::cleanup()
 {
     m_pending.clear();
     m_seqToIdx.clear();
+    m_seqToEcho.clear();
     m_remaining = 0;
 }
 
@@ -419,15 +466,20 @@ void RttProbeIcmp::probeAll(const QList<RttTarget> &targets, int /*timeoutMs*/, 
     m_onDone = std::move(onDone);
     m_doneFired = false;
     m_remaining = targets.size();
-    for (const RttTarget &t : targets)
-        m_pending.append(Pending{ t.nodeId, {}, 0, false });
+    for (const RttTarget &t : targets) {
+        Pending p;
+        p.nodeId = t.nodeId;
+        m_pending.append(p);
+    }
     for (int i = 0; i < m_pending.size(); ++i)
         finishIdx(i, -1);
 }
 
 void RttProbeIcmp::sendEcho(int) {}
+void RttProbeIcmp::sendOne(int, int) {}
 void RttProbeIcmp::onReadable() {}
 void RttProbeIcmp::onTimeout() {}
+void RttProbeIcmp::onSweep() {}
 
 // MTU-проба на Win не реализована (нет unprivileged ICMP-пути) → «не мерили», не «MTU плохой»
 void RttProbeIcmp::probeMtuOne(const QString &, int, int, std::function<void(bool)> done)

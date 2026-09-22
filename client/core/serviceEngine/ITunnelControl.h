@@ -72,6 +72,11 @@ public:
     // (BUG-4: два телефона одного оператора, один жив, второй мёртв, режим полёта чинит).
     // true = команда отправлена (асинхронно; итог виден HealthLoop'у — rx/handshake оживут
     // или DEAD придёт снова); false = платформа примитива не имеет → сразу failover.
+    // AVPN (фикс-волна 2026-09-22, K4/B7): iOS/MACOS_NE — «отправлена» ≠ «сделана»: NE отвечает
+    // {"rebind":"performed"|"denied"}, IosController эмитит rebindFinished(bool), фасад передаёт
+    // в ServiceEngine::onRebindResult — отказ пропускает шаг rebind на следующем DEAD.
+    // GAP-2: причина отказа ("reason") доходит до onRebindResult(performed, reason); "offline"
+    // (путь NE unsatisfied) — ожидание сети, а не провал шага (попытка не тратится).
     virtual bool rebindSocket() { return false; }
 
     virtual void down() = 0;
