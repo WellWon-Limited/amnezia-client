@@ -9,6 +9,7 @@
 #include <QList>
 #include <QElapsedTimer>
 #include <atomic>
+#include "IosStatusRequest.h"
 
 #ifdef __OBJC__
     #import <Foundation/Foundation.h>
@@ -59,6 +60,9 @@ public:
 
     void getBackendLogs(std::function<void(const QString &)> &&callback);
     void checkStatus();
+    void requestReconcileStatus();
+    QVariantMap sessionMetadata() const;
+
 
     // AVPN (BUG-4 auto-heal): ребайнд UDP-сокета ЖИВОГО NE-туннеля — provider message
     // {"action":"rebind"} (extension зовёт wgSetConfig listen_port=0 → BindUpdate → новый
@@ -110,6 +114,8 @@ public:
     bool isTestFlight();
 
 signals:
+    void sessionMetadataChanged(const QVariantMap &metadata);
+    void disconnectReason(const QString &reason, bool intentional);
     void connectionStateChanged(Vpn::ConnectionState state);
     void bytesChanged(quint64 receivedBytes, quint64 sentBytes);
     // AVPN: возраст WG-хендшейка (unix sec, 0 = нет/неизвестно) — для DEAD-детекта serviceEngine
@@ -141,6 +147,9 @@ private:
     bool startXray(const QString &jsonConfig);
 
     void startTunnel();
+    bool configureSelectedTunnel();
+    bool operationCurrent(uint64_t generation) const;
+
     void emitConnectionStateIfChanged(Vpn::ConnectionState state);
 
 private:
@@ -156,6 +165,10 @@ private:
     // треде → UAF (класс краша AmneziaVPN-2026-07-06). Фоновые читатели берут менеджер ТОЛЬКО через
     // retainedCurrentTunnel() (retain под локом; caller обязан release), ivar напрямую не читать.
     NETunnelProviderManager *retainedCurrentTunnel();
+    NETunnelProviderManager *selectOurManager(NSArray<NETunnelProviderManager *> *managers);
+    void restoreSessionMetadata(NETunnelProviderManager *manager);
+    NSDictionary *providerMetadata();
+
     NSString *m_serverAddress {};
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary *message,
@@ -172,7 +185,15 @@ private:
     QElapsedTimer m_handshakeTimer;
     int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;
-    std::atomic_bool m_statusRequestInFlight { false };
+    IosStatusRequest m_statusRequests;
+    std::atomic<uint64_t> m_operationGeneration { 0 };
+    uint64_t m_reconcileGeneration = 0;
+    bool m_connectPending = false;
+    bool m_reconcileScheduled = false;
+    bool m_localStopRequested = false;
+    QString m_operationIntentGeneration;
+    QVariantMap m_sessionMetadata;
+
     QString m_lastRoamSummary; // AVPN seamless roaming: последняя строка счётчиков NE (лог при изменении)
     // AVPN (девайс-разбор 2026-09-02): последняя доставленная причина отказа ядра Xray и хвост его
     // лога — чтобы одну и ту же строку не эмитить/не писать в лог на каждом опросе статуса.

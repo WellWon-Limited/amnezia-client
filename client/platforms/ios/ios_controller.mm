@@ -7,8 +7,11 @@
 #include <QJsonObject>
 #include <QThread>
 #include <QEventLoop>
+#include <QTimer>
+#include <QUuid>
+#include <memory>
+#include "AvpnIntentController.h"
 
-#include "../core/protocols/vpnProtocol.h"
 #import "ios_controller_wrapper.h"
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
 #import "core/utils/swiftBridge.h"
@@ -192,6 +195,12 @@ void IosController::emitConnectionStateIfChanged(Vpn::ConnectionState state)
         return;
     }
     m_lastEmittedState = state;
+#if defined(Q_OS_IOS)
+    Avpn_recordLifecycle(QStringLiteral("os_state"), {{QStringLiteral("state"), int(state)},
+        {QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))},
+        {QStringLiteral("operation_generation"), qulonglong(m_operationGeneration)},
+        {QStringLiteral("request_id"), qulonglong(m_statusRequests.requestId())}});
+#endif
     emit connectionStateChanged(state);
 }
 
@@ -223,6 +232,8 @@ void IosController::setCurrentTunnel(NETunnelProviderManager *tunnel)
     NETunnelProviderManager *old = m_currentTunnel;
     [tunnel retain];
     m_currentTunnel = tunnel;
+    ++m_statusGeneration;
+    m_statusRequests.invalidate();
     os_unfair_lock_unlock(&s_tunnelOwnershipLock);
     [old release]; // release ВНЕ лока (dealloc может дёргать KVO/колбэки)
 }
@@ -235,184 +246,263 @@ NETunnelProviderManager *IosController::retainedCurrentTunnel()
     return t; // caller обязан release
 }
 
+QVariantMap IosController::sessionMetadata() const
+{
+    return m_sessionMetadata; // controller/engine share Qt affinity; all updates are marshalled here
+}
+
+NETunnelProviderManager *IosController::selectOurManager(NSArray<NETunnelProviderManager *> *managers)
+{
+    NETunnelProviderManager *selected = nil;
+    int best = -1;
+    NSString *currentId = ((NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration).providerConfiguration[@"tribeManagerId"];
+    for (NETunnelProviderManager *manager in managers) {
+        if (!isOurManager(manager)) continue;
+        const NEVPNStatus status = manager.connection.status;
+        int rank = (status == NEVPNStatusConnected || status == NEVPNStatusReasserting) ? 30 :
+                   status == NEVPNStatusConnecting ? 20 : status == NEVPNStatusDisconnecting ? 10 : 0;
+        NSString *identity = ((NETunnelProviderProtocol *)manager.protocolConfiguration).providerConfiguration[@"tribeManagerId"];
+        if (currentId && [currentId isEqual:identity]) ++rank;
+        if (rank > best) { selected = manager; best = rank; }
+    }
+    return selected;
+}
+
+void IosController::restoreSessionMetadata(NETunnelProviderManager *manager)
+{
+    NETunnelProviderProtocol *proto = (NETunnelProviderProtocol *)manager.protocolConfiguration;
+    NSDictionary *metadata = proto.providerConfiguration[@"tribeSessionMetadata"];
+    QVariantMap restored;
+    if ([metadata isKindOfClass:[NSDictionary class]] && [metadata[@"schema_version"] intValue] == 1) {
+        NSData *data = [NSJSONSerialization dataWithJSONObject:metadata options:0 error:nil];
+        restored = QJsonDocument::fromJson(QByteArray((const char *)data.bytes, data.length)).object().toVariantMap();
+    }
+    if (proto.providerConfiguration[@"xray"]) m_proto = amnezia::Proto::Xray;
+    else if (proto.providerConfiguration[@"ovpn"]) m_proto = amnezia::Proto::OpenVpn;
+    else m_proto = amnezia::Proto::Awg;
+    if (!restored.isEmpty() && m_sessionMetadata.value(QStringLiteral("configuration_generation")) == restored.value(QStringLiteral("generation")))
+        restored = m_sessionMetadata; // prefs identify configuration, runtime status identifies each NE run
+    if (m_sessionMetadata != restored) {
+        m_sessionMetadata = restored;
+        emit sessionMetadataChanged(restored);
+    }
+}
+
+NSDictionary *IosController::providerMetadata()
+{
+    QJsonObject metadata = m_rawConfig.value(QStringLiteral("tribeSessionMetadata")).toObject();
+    metadata.insert(QStringLiteral("generation"), QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const QByteArray encoded = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
+    NSDictionary *value = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:encoded.constData() length:encoded.size()] options:0 error:nil];
+    return value ?: @{};
+}
+
+bool IosController::operationCurrent(uint64_t generation) const
+{
+    if (generation != m_operationGeneration || !m_connectPending) return false;
+#if defined(Q_OS_IOS)
+    return m_operationIntentGeneration == Avpn_currentIntentGeneration();
+#else
+    return true;
+#endif
+}
+
 bool IosController::initialize()
 {
-    __block bool ok = true;
-    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
-        @try {
-            if (error) {
-                qWarning() << "IosController::initialize : loadAllFromPreferences failed:"
-                           << [error.localizedDescription UTF8String]
-                           << "domain:" << [error.domain UTF8String] << "code:" << error.code;
-                ok = false;
-                return;
-            }
+    // Async errors are signals; returning a stack bool before loadAll completed was meaningless.
+    requestReconcileStatus();
+    return true;
+}
 
-            NSInteger managerCount = managers.count;
-            qDebug() << "IosController::initialize : We have received managers:" << (long)managerCount;
-
-
-            for (NETunnelProviderManager *manager in managers) {
-                qDebug() << "IosController::initialize : VPNC: " << manager.localizedDescription;
-
-                if (manager.connection.status == NEVPNStatusConnected) {
-                    setCurrentTunnel(manager); // AVPN: владеющее присвоение (retain)
-                    qDebug() << "IosController::initialize : VPN already connected with" << manager.localizedDescription;
-                    emit connectionStateChanged(Vpn::ConnectionState::Connected);
-                    break;
-
-                    // TODO: show connected state
+void IosController::requestReconcileStatus()
+{
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this] { requestReconcileStatus(); }, Qt::QueuedConnection);
+        return;
+    }
+    if (m_connectPending || m_reconcileScheduled) return;
+    m_reconcileScheduled = true;
+    const uint64_t request = ++m_reconcileGeneration;
+    const uint64_t operation = m_operationGeneration;
+    QTimer::singleShot(3000, this, [this, request] {
+        if (m_reconcileGeneration != request || !m_reconcileScheduled) return;
+        ++m_reconcileGeneration;
+        m_reconcileScheduled = false;
+        qWarning() << "[ios lifecycle] preference reconciliation timed out";
+        if (!m_currentTunnel) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+        // Absence of a callback is NOT proof the tunnel is down.
+    });
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+        [managers retain]; [error retain];
+        QMetaObject::invokeMethod(this, [this, managers, error, request, operation] {
+            if (request == m_reconcileGeneration && operation == m_operationGeneration) {
+                m_reconcileScheduled = false;
+                if (error) {
+                    qWarning() << "[ios lifecycle] preference reconciliation failed" << error.code;
+                    if (!m_currentTunnel) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                } else {
+                    NETunnelProviderManager *manager = selectOurManager(managers);
+                    if (manager) {
+                        setCurrentTunnel(manager);
+                        restoreSessionMetadata(manager);
+                        vpnStatusDidChange(manager.connection);
+                    } else if (!m_currentTunnel || m_currentTunnel.connection.status == NEVPNStatusDisconnected ||
+                               m_currentTunnel.connection.status == NEVPNStatusInvalid) {
+                        setCurrentTunnel(nil);
+                        restoreSessionMetadata(nil);
+                        emit disconnectReason(QStringLiteral("profile_missing"), true);
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnected);
+                    } // Loaded no profile but an old session still active: never invent its terminal.
                 }
             }
-        }
-        @catch (NSException *exception) {
-            qDebug() << "IosController::setTunnel : exception" << QString::fromNSString(exception.reason);
-            ok = false;
-        }
+            [managers release]; [error release];
+        }, Qt::QueuedConnection);
     }];
-
-    return ok;
 }
 
 bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configuration)
 {
+    if (QThread::currentThread() != thread()) {
+        const uint64_t queuedOperation = ++m_operationGeneration;
+        QMetaObject::invokeMethod(this, [this, proto, configuration, queuedOperation] {
+            if (queuedOperation == m_operationGeneration) connectVpn(proto, configuration);
+        }, Qt::QueuedConnection);
+        return true;
+    }
+    const uint64_t operation = ++m_operationGeneration;
+    ++m_reconcileGeneration;
+    m_reconcileScheduled = false;
+    m_connectPending = true;
+#if defined(Q_OS_IOS)
+    m_operationIntentGeneration = Avpn_currentIntentGeneration();
+#endif
     m_proto = proto;
     m_rawConfig = configuration;
-    m_serverAddress = configuration.value(configKey::hostName).toString().toNSString();
-
-    const QString serverDescription = configuration.value(configKey::description).toString().trimmed();
-    QString tunnelName;
-    if (serverDescription.isEmpty()) {
-        tunnelName = ProtocolUtils::protoToString(proto);
-    } else {
-        tunnelName = QString("%1 %2")
-          .arg(serverDescription)
-          .arg(ProtocolUtils::protoToString(proto));
-    }
-
-    qDebug() << "IosController::connectVpn" << tunnelName;
-
-    // AVPN (фикс 2-го коннекта): сбрасываем стейт прошлого цикла. Без этого m_handshakeConfirmed оставался
-    // true со старого туннеля → 2-й Connected эмитился БЕЗ реального handshake новой ноды («зелёный орб,
-    // но трафика нет» = Network Error); m_lastEmittedState глушил нужный переход (dedup); m_statusRequestInFlight
-    // блокировал checkStatus. (void)tunnelName — имя больше не используем для матчинга (см. ниже).
-    (void)tunnelName;
-    setCurrentTunnel(nil); // AVPN: release старого менеджера
-
+    [m_serverAddress release];
+    m_serverAddress = [configuration.value(configKey::hostName).toString().toNSString() copy];
     m_handshakeConfirmed = false;
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
     m_handshakeTimeouts = 0;
-    m_statusRequestInFlight = false;
+    m_statusRequests.invalidate();
+    ++m_statusGeneration;
+    m_rxBytes = m_txBytes = 0;
     m_lastXrayStartFailure.clear();
     m_lastXrayCoreLogTail.clear();
     m_lastEmittedState = Vpn::ConnectionState::Unknown;
-    m_rxBytes = 0;
-    m_txBytes = 0;
-    ++m_statusGeneration; // AVPN: инвалидируем ответы checkStatus прошлой сессии (стейл-гонка)
-
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    __block bool ok = true;
-
-    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> * _Nullable managers, NSError * _Nullable error) {
-        @try {
-            if (error) {
-                qDebug() << "IosController::connectVpn : loadAllFromPreferences error:" << [error.localizedDescription UTF8String];
-                emit connectionStateChanged(Vpn::ConnectionState::Error);
-                ok = false;
-                return;
-            }
-
-            qDebug() << "IosController::connectVpn : managers received:" << (long)managers.count;
-
-            // AVPN (фикс смены сервера): ПЕРЕИСПОЛЬЗУЕМ ОДИН менеджер (как официальный WireGuard iOS),
-            // НЕ плодим по имени-с-сервером. Раньше localizedDescription = "<сервер> <proto>" → на каждый
-            // сервер создавался НОВЫЙ NETunnelProviderManager → они копились в системе → конфликты
-            // save/load/start у iOS-NE → вис «коннектинг» + Network Error при смене сервера. Берём наш
-            // менеджер по bundle-id провайдера (isOurManager), все лишние/битые/дубли — удаляем.
-            NSMutableArray<NETunnelProviderManager *> *extras = [NSMutableArray array];
-            for (NETunnelProviderManager *manager in managers) {
-                if (!m_currentTunnel && isOurManager(manager)) {
-                    setCurrentTunnel(manager); // AVPN: владеющее присвоение (retain)
+    QTimer::singleShot(10000, this, [this, operation] {
+        if (m_operationGeneration != operation || !m_connectPending) return;
+        ++m_operationGeneration; // save/load callbacks cannot start after the deadline
+        m_connectPending = false;
+        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+        requestReconcileStatus();
+    });
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+        [managers retain]; [error retain];
+        QMetaObject::invokeMethod(this, [this, managers, error, operation] {
+            if (operationCurrent(operation)) {
+                if (error) {
+                    m_connectPending = false;
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
                 } else {
-                    [extras addObject:manager];
+                    NETunnelProviderManager *manager = selectOurManager(managers);
+                    if (manager && manager.connection.status != NEVPNStatusDisconnected && manager.connection.status != NEVPNStatusInvalid) {
+                        // The engine must first obtain a real terminal before replacing a live profile.
+                        setCurrentTunnel(manager);
+                        m_connectPending = false;
+                        restoreSessionMetadata(manager);
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                        vpnStatusDidChange(manager.connection);
+                    } else {
+                        setCurrentTunnel(manager ?: [[[NETunnelProviderManager alloc] init] autorelease]);
+                        m_currentTunnel.localizedDescription = @"Tribe VPN";
+                        if (!configureSelectedTunnel()) {
+                            m_connectPending = false;
+                            emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                        }
+                    }
                 }
             }
-            for (NETunnelProviderManager *m in extras) {
-                [m removeFromPreferencesWithCompletionHandler:^(NSError *e) {
-                    if (e) qDebug() << "IosController::connectVpn : remove extra manager error" << e.localizedDescription.UTF8String;
-                }];
-            }
-
-            if (!m_currentTunnel) {
-                // AVPN: setCurrentTunnel ретейнит, поэтому alloc-объект отдаём в autorelease (иначе утечка +1)
-                setCurrentTunnel([[[NETunnelProviderManager alloc] init] autorelease]);
-                qDebug() << "IosController::connectVpn : creating new tunnel manager";
-            }
-            // AVPN: стабильное имя — чтобы конфиг в Настройках iOS назывался понятно и не плодился по серверам.
-            m_currentTunnel.localizedDescription = @"Tribe VPN";
-        }
-        @catch (NSException *exception) {
-            qDebug() << "IosController::connectVpn : exception" << QString::fromNSString(exception.reason);
-            ok = false;
-            setCurrentTunnel(nil); // AVPN: release старого менеджера
-        }
-        @finally {
-            dispatch_semaphore_signal(semaphore);
-        }
+            [managers release]; [error release];
+        }, Qt::QueuedConnection);
     }];
+    return true;
+}
 
-    // AVPN: таймаут вместо DISPATCH_TIME_FOREVER — если completion не пришёл (битые prefs / лимит NE-профилей),
-    // не виснем на потоке навсегда; считаем ошибкой и выходим.
-    // AVPN (краш-фикс): 3 c < iOS-watchdog 5 c. Блокировка потока на 10 c при suspend/terminate
-    // (главный поток ждёт join этого воркера) перебивала watchdog → 0x8BADF00D. Таймаут = ошибка коннекта.
-    if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC))) != 0) {
-        qDebug() << "IosController::connectVpn : loadAllFromPreferences timed out";
-        return false;
+bool IosController::configureSelectedTunnel()
+{
+    switch (m_proto) {
+    case amnezia::Proto::OpenVpn: return setupOpenVPN();
+    case amnezia::Proto::WireGuard: return setupWireGuard();
+    case amnezia::Proto::Awg: return setupAwg();
+    case amnezia::Proto::Xray: return setupXray();
+    case amnezia::Proto::SSXray: return setupSSXray();
+    default: return false;
     }
-    if (!ok) return false;
-
-    [[NSNotificationCenter defaultCenter]
-        removeObserver:(__bridge NSObject *)m_iosControllerWrapper];
-
-    [[NSNotificationCenter defaultCenter]
-        addObserver:(__bridge NSObject *)m_iosControllerWrapper
-            selector:@selector(vpnStatusDidChange:)
-            name:NEVPNStatusDidChangeNotification
-            object:m_currentTunnel.connection];
-
-
-    if (proto == amnezia::Proto::OpenVpn) {
-        return setupOpenVPN();
-    }
-    if (proto == amnezia::Proto::WireGuard) {
-        return setupWireGuard();
-    }
-    if (proto == amnezia::Proto::Awg) {
-        return setupAwg();
-    }
-    if (proto == amnezia::Proto::Xray) {
-        return setupXray();
-    }
-    if (proto == amnezia::Proto::SSXray) {
-        return setupSSXray();
-    }
-
-    return false;
 }
 
 void IosController::disconnectVpn()
 {
+    if (QThread::currentThread() != thread()) {
+        const uint64_t queuedOperation = ++m_operationGeneration;
+        QMetaObject::invokeMethod(this, [this, queuedOperation] {
+            if (queuedOperation == m_operationGeneration) disconnectVpn();
+        }, Qt::QueuedConnection);
+        return;
+    }
+    ++m_operationGeneration;
+    ++m_reconcileGeneration;
+    m_reconcileScheduled = false;
+    m_connectPending = false;
+    m_localStopRequested = true;
+    ++m_statusGeneration;
+    m_statusRequests.invalidate();
+
     // AVPN: если гасить нечего (нет менеджера / нет сессии / уже опущен) — эмитим Disconnected СРАЗУ,
     // чтобы движок не повис в ожидании. Если сессия ЖИВАЯ — только stopTunnel; РЕАЛЬНЫЙ Disconnected
     // прилетит из vpnStatusDidChange (его и ждёт reconcile перед реконнектом на новый сервер — это и есть
     // «как в Amnezia»: не стартуем новый туннель, пока старый не дошёл до Disconnected).
-    if (!m_currentTunnel || ![m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
-        emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
+    if (!m_currentTunnel) {
+        // A stopped GUI may not have discovered an active Settings/Intent session yet.
+        const uint64_t operation = m_operationGeneration;
+        QTimer::singleShot(3000, this, [this, operation] {
+            if (m_operationGeneration != operation || !m_localStopRequested) return;
+            ++m_operationGeneration;
+            m_localStopRequested = false;
+            emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+            requestReconcileStatus();
+        });
+        [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
+            [managers retain]; [error retain];
+            QMetaObject::invokeMethod(this, [this, managers, error, operation] {
+                if (operation == m_operationGeneration) {
+                    if (error) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                    else {
+                        NETunnelProviderManager *manager = selectOurManager(managers);
+                        if (manager) {
+                            setCurrentTunnel(manager);
+                            restoreSessionMetadata(manager);
+                            disconnectVpn();
+                        } else {
+                            m_localStopRequested = false;
+                            emitConnectionStateIfChanged(Vpn::ConnectionState::Disconnected);
+                        }
+                    }
+                }
+                [managers release]; [error release];
+            }, Qt::QueuedConnection);
+        }];
+        return;
+    }
+    if (![m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
+        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
         return;
     }
     NEVPNStatus st = m_currentTunnel.connection.status;
     if (st == NEVPNStatusDisconnected || st == NEVPNStatusInvalid) {
+        m_localStopRequested = false;
+        emit disconnectReason(QStringLiteral("expected_app_stop"), false);
+        m_lastEmittedState = Vpn::ConnectionState::Disconnected;
         emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
         return;
     }
@@ -422,6 +512,11 @@ void IosController::disconnectVpn()
 
 void IosController::checkStatus()
 {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this] { checkStatus(); }, Qt::QueuedConnection);
+        return;
+    }
+
     // AVPN (ревью 2026-07-11): менеджер — только retained-копией (гонка с release на реконнекте),
     // ответ — только для СВОЕЙ сессии (gen): стейл-ответ старой сессии, долетевший после
     // реконнекта, перезаписывал m_rxBytes старым большим кумулятивом → следующая дельта
@@ -436,11 +531,17 @@ void IosController::checkStatus()
         return;
     }
 
-    if (m_statusRequestInFlight.exchange(true)) {
-        [tunnel release];
-        return;
-    }
     const uint64_t gen = m_statusGeneration.load();
+    const auto ticket = m_statusRequests.begin(gen);
+    if (!ticket) { [tunnel release]; return; }
+    const uint64_t request = *ticket;
+    QTimer::singleShot(3000, this, [this, gen, request] {
+        if (!m_statusRequests.complete(gen, request)) return;
+        qWarning() << "[ios lifecycle] status deadline" << gen << request;
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("status_timeout"), {{QStringLiteral("generation"), qulonglong(gen)}, {QStringLiteral("request_id"), qulonglong(request)}});
+#endif
+    });
 
     NSString *actionKey = [NSString stringWithUTF8String:MessageKey::action];
     NSString *actionValue = [NSString stringWithUTF8String:Action::getStatus];
@@ -452,15 +553,19 @@ void IosController::checkStatus()
     // tunnel: наш retain (retainedCurrentTunnel) отпускается в КОНЦЕ блока — синхронно после
     // sendProviderMessage (ответ-хендлер менеджер не трогает; release в колбэке был бы двойным
     // при callback(nil)-ветках). Сам блок дополнительно держит tunnel как object-capture.
-    sendVpnExtensionMessage(tunnel, message, [this, gen](NSDictionary* response){
+    sendVpnExtensionMessage(tunnel, message, [this, gen, request](NSDictionary* response){
         if (!response) {
-            QMetaObject::invokeMethod(this, [this, gen]() {
-                if (m_statusGeneration.load() == gen)
-                    m_statusRequestInFlight = false;
+            QMetaObject::invokeMethod(this, [this, gen, request]() {
+                m_statusRequests.complete(gen, request);
             }, Qt::QueuedConnection);
             return;
         }
 
+        QVariantMap metadata;
+        if ([response[@"session_metadata"] isKindOfClass:[NSDictionary class]]) {
+            NSData *data = [NSJSONSerialization dataWithJSONObject:response[@"session_metadata"] options:0 error:nil];
+            metadata = QJsonDocument::fromJson(QByteArray((const char *)data.bytes, data.length)).object().toVariantMap();
+        }
         const uint64_t txBytes = uint64FromResponse(response, @"tx_bytes");
         const uint64_t rxBytes = uint64FromResponse(response, @"rx_bytes");
         const long long last_handshake_time_sec = int64FromResponse(response, @"last_handshake_time_sec");
@@ -495,12 +600,17 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
                                          startFailure, ifaceName, coreLogTail, roamSummary,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
-            if (m_statusGeneration.load() != gen)
+            if (m_statusGeneration.load() != gen || !m_statusRequests.complete(gen, request))
                 return;
+            if (metadata.value(QStringLiteral("schema_version")).toInt() == 1 &&
+                !metadata.value(QStringLiteral("generation")).toString().isEmpty() && m_sessionMetadata != metadata) {
+                m_sessionMetadata = metadata;
+                emit sessionMetadataChanged(metadata);
+            }
             if (!roamSummary.isEmpty() && roamSummary != m_lastRoamSummary) {
                 m_lastRoamSummary = roamSummary;
                 qInfo() << "[roam] NE counters:" << roamSummary;
@@ -605,7 +715,6 @@ void IosController::checkStatus()
             }
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;
-            m_statusRequestInFlight = false;
         }, Qt::QueuedConnection);
     });
     [tunnel release]; // парный к retainedCurrentTunnel() в checkStatus
@@ -644,17 +753,43 @@ bool IosController::rebindTunnel()
 void IosController::vpnStatusDidChange(void *pNotification)
 {
     NETunnelProviderSession *session = (NETunnelProviderSession *)pNotification;
+    if (QThread::currentThread() != thread()) {
+        [session retain];
+        QMetaObject::invokeMethod(this, [this, session] { vpnStatusDidChange(session); [session release]; }, Qt::QueuedConnection);
+        return;
+    }
 
     if (!session) {
         return;
     }
     if (!m_currentTunnel || (NETunnelProviderSession *)m_currentTunnel.connection != session) {
+        requestReconcileStatus();
         return;
     }
 
     qDebug() << "IosController::vpnStatusDidChange" << iosStatusToState(session.status) << session;
 
         if (session.status == NEVPNStatusDisconnected) {
+#if defined(Q_OS_IOS)
+            const QVariantMap intent = Avpn_currentIntent();
+            bool intentional = intent.value(QStringLiteral("action")).toString() == QLatin1String("pause") ||
+                               intent.value(QStringLiteral("action")).toString() == QLatin1String("off");
+            QString reason = intentional ? QStringLiteral("user_intent") :
+                             m_localStopRequested ? QStringLiteral("expected_app_stop") : QStringLiteral("unknown_external");
+            const QVariantMap stop = Avpn_lastStop();
+            const QString sessionGeneration = m_sessionMetadata.value(QStringLiteral("generation")).toString();
+            if (!intentional && !m_localStopRequested && !sessionGeneration.isEmpty() &&
+                stop.value(QStringLiteral("generation")).toString() == sessionGeneration) {
+                intentional = stop.value(QStringLiteral("intentional")).toBool();
+                reason = QStringLiteral("ne_stop_%1").arg(stop.value(QStringLiteral("reason")).toInt());
+            }
+            emit disconnectReason(reason, intentional);
+            Avpn_recordLifecycle(QStringLiteral("disconnect_reason"), {{QStringLiteral("reason"), reason},
+                {QStringLiteral("intentional"), intentional}, {QStringLiteral("session_generation"), sessionGeneration}});
+            m_localStopRequested = false;
+#else
+            emit disconnectReason(QStringLiteral("unknown_external"), false);
+#endif
             if (@available(iOS 16.0, *)) {
                 [session fetchLastDisconnectErrorWithCompletionHandler:^(NSError * _Nullable error) {
                     if (error != nil) {
@@ -765,36 +900,15 @@ void IosController::vpnStatusDidChange(void *pNotification)
             m_handshakeConfirmed = false;
             m_handshakeTimer.invalidate();
             m_handshakeTimeouts = 0;
-            m_statusRequestInFlight = false;
+            m_statusRequests.invalidate();
         }
         emitConnectionStateIfChanged(nextState);
 }
 
-void IosController::vpnConfigurationDidChange(void *pNotification)
+void IosController::vpnConfigurationDidChange(void *)
 {
-    qDebug() << "IosController::vpnConfigurationDidChange" << pNotification;
-    // AVPN (фикс краша «удалил VPN-конфиг в Настройках»): если наш менеджер удалён извне, дальше любое
-    // обращение к m_currentTunnel.connection (checkStatus/start) — это разыменование удалённого объекта.
-    // Проверяем актуальность; если наш менеджер пропал из системы — сбрасываем ссылку и стейт, чтобы
-    // следующий connect пересоздал менеджер с нуля (как делают другие VPN-приложения — без краша).
-    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *error) {
-        if (error)
-            return;
-        bool stillExists = false;
-        for (NETunnelProviderManager *m in managers) {
-            if (m == m_currentTunnel) { stillExists = true; break; }
-        }
-        if (!stillExists && m_currentTunnel) {
-            qDebug() << "IosController::vpnConfigurationDidChange : our manager was removed externally — clearing";
-            setCurrentTunnel(nil); // AVPN: release (менеджер удалён извне)
-            m_handshakeConfirmed = false;
-            m_handshakeAwaiting = false;
-            m_handshakeTimer.invalidate();
-            m_statusRequestInFlight = false;
-            m_lastEmittedState = Vpn::ConnectionState::Unknown;
-            emit connectionStateChanged(Vpn::ConnectionState::Disconnected);
-        }
-    }];
+    // Configuration notifications include our save/load. One coalesced, generation-checked load.
+    QMetaObject::invokeMethod(this, [this] { requestReconcileStatus(); }, Qt::QueuedConnection);
 }
 
 bool IosController::setupOpenVPN()
@@ -868,6 +982,9 @@ bool IosController::setupWireGuard()
     }
 
     wgConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
+
+    if (m_rawConfig.contains(QStringLiteral("dnsFwdWarmup")))
+        wgConfig.insert(QStringLiteral("dnsFwdWarmup"), m_rawConfig.value(QStringLiteral("dnsFwdWarmup")));
 
     if (config.contains(configKey::allowedIps) && config[configKey::allowedIps].isArray()) {
         wgConfig.insert(configKey::allowedIps, config[configKey::allowedIps]);
@@ -1013,6 +1130,9 @@ bool IosController::setupAwg()
         }
     }
 
+    if (m_rawConfig.contains(QStringLiteral("dnsFwdWarmup")))
+        wgConfig.insert(QStringLiteral("dnsFwdWarmup"), m_rawConfig.value(QStringLiteral("dnsFwdWarmup")));
+
     if (config.contains(configKey::allowedIps) && config[configKey::allowedIps].isArray()) {
         wgConfig.insert(configKey::allowedIps, config[configKey::allowedIps]);
     } else {
@@ -1071,7 +1191,13 @@ bool IosController::startOpenVPN(const QString &config)
 #endif
     }
 
+    NSMutableDictionary *provider = [NSMutableDictionary dictionaryWithDictionary:tunnelProtocol.providerConfiguration ?: @{}];
+    provider[@"tribeSessionMetadata"] = providerMetadata();
+    provider[@"tribeManagerId"] = ((NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration).providerConfiguration[@"tribeManagerId"] ?: [[NSUUID UUID] UUIDString];
+    tunnelProtocol.providerConfiguration = provider;
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
+    [tunnelProtocol release]; // protocolConfiguration retains/copies; this file is MRC
+    restoreSessionMetadata(m_currentTunnel);
 
     NETunnelProviderProtocol *appliedProtocol = (NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration;
     NSData *ovpnPayload = appliedProtocol.providerConfiguration[@"ovpn"];
@@ -1106,7 +1232,13 @@ bool IosController::startWireGuard(const QString &config)
     tunnelProtocol.providerConfiguration = @{@"wireguard": wgConfigData};
     tunnelProtocol.serverAddress = m_serverAddress;
 
+    NSMutableDictionary *provider = [NSMutableDictionary dictionaryWithDictionary:tunnelProtocol.providerConfiguration ?: @{}];
+    provider[@"tribeSessionMetadata"] = providerMetadata();
+    provider[@"tribeManagerId"] = ((NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration).providerConfiguration[@"tribeManagerId"] ?: [[NSUUID UUID] UUIDString];
+    tunnelProtocol.providerConfiguration = provider;
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
+    [tunnelProtocol release]; // protocolConfiguration retains/copies; this file is MRC
+    restoreSessionMetadata(m_currentTunnel);
 
     startTunnel();
     return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
@@ -1123,7 +1255,13 @@ bool IosController::startXray(const QString &config)
     tunnelProtocol.providerConfiguration = @{@"xray": xrayConfigData};
     tunnelProtocol.serverAddress = m_serverAddress;
 
+    NSMutableDictionary *provider = [NSMutableDictionary dictionaryWithDictionary:tunnelProtocol.providerConfiguration ?: @{}];
+    provider[@"tribeSessionMetadata"] = providerMetadata();
+    provider[@"tribeManagerId"] = ((NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration).providerConfiguration[@"tribeManagerId"] ?: [[NSUUID UUID] UUIDString];
+    tunnelProtocol.providerConfiguration = provider;
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
+    [tunnelProtocol release]; // protocolConfiguration retains/copies; this file is MRC
+    restoreSessionMetadata(m_currentTunnel);
 
     startTunnel();
     return true; // AVPN(N3): не было return — UB; результат сейчас игнорируется, но поток обязан вернуть значение
@@ -1131,75 +1269,56 @@ bool IosController::startXray(const QString &config)
 
 void IosController::startTunnel()
 {
-    // AVPN (фикс краша): без менеджера дальше идёт nil-разыменование (m_currentTunnel.protocolConfiguration
-    // и т.д.). Бывает при teardown→reconnect (rotateNext) и при удалённом в Настройках iOS VPN-конфиге.
-    if (!m_currentTunnel) {
-        qDebug() << "IosController::startTunnel : no current tunnel manager";
-        emit connectionStateChanged(Vpn::ConnectionState::Error);
-        return;
-    }
-    NSString *protocolName = @"Unknown";
-
-    NETunnelProviderProtocol *tunnelProtocol = (NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration;
-    if (tunnelProtocol.providerConfiguration[@"wireguard"] != nil) {
-        protocolName = @"WireGuard";
-    } else if (tunnelProtocol.providerConfiguration[@"ovpn"] != nil) {
-        protocolName = @"OpenVPN";
-    }
-
-    m_rxBytes = 0;
-    m_txBytes = 0;
-
+    const uint64_t operation = m_operationGeneration;
     NETunnelProviderManager *tunnel = m_currentTunnel;
+    if (!tunnel || !operationCurrent(operation)) return;
     [tunnel setEnabled:YES];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
-            dispatch_async(dispatch_get_main_queue(), ^{
+    [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
+        [tunnel retain]; [saveError retain];
+        QMetaObject::invokeMethod(this, [this, tunnel, saveError, operation] {
+            if (operationCurrent(operation)) {
                 if (saveError) {
-                    qDebug().nospace() << "IosController::startTunnel" << protocolName << ": Connect " << protocolName
-                                       << " Tunnel Save Error" << saveError.localizedDescription.UTF8String << " domain:"
-                                       << saveError.domain.UTF8String << " code:" << saveError.code;
-                    emit connectionStateChanged(Vpn::ConnectionState::Error);
-                    return;
+                    m_connectPending = false;
+                    emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                } else {
+                    [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
+                        [tunnel retain]; [loadError retain];
+                        QMetaObject::invokeMethod(this, [this, tunnel, loadError, operation] {
+                            if (operationCurrent(operation)) {
+                                m_connectPending = false;
+                                if (loadError) {
+                                    emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                                } else if (tunnel.connection.status == NEVPNStatusDisconnected || tunnel.connection.status == NEVPNStatusInvalid) {
+                                    NSError *startError = nil;
+                                    BOOL started = NO;
+#if defined(Q_OS_IOS)
+                                    Avpn_performIfCurrent(m_operationIntentGeneration, [&] {
+                                        started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+                                    });
+#else
+                                    started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+#endif
+                                    if (!started || startError) emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
+                                    else vpnStatusDidChange(tunnel.connection);
+                                } else {
+                                    // A Settings/Intent start won the race: observe it, do not start over it.
+                                    vpnStatusDidChange(tunnel.connection);
+                                }
+                            }
+                            [tunnel release]; [loadError release];
+                        }, Qt::QueuedConnection);
+                    }];
                 }
-
-                [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (loadError) {
-                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
-                                               << ": Connect " << protocolName << " Tunnel Load Error"
-                                               << loadError.localizedDescription.UTF8String;
-                            emit connectionStateChanged(Vpn::ConnectionState::Error);
-                            return;
-                        }
-
-                        // AVPN: ПРЯМОЙ старт (как ванильная Amnezia). Гейт-ожидание здесь ломало ПЕРВЫЙ
-                        // коннект (свежий менеджер в переходном статусе → stopTunnel → «сброс»). Гарантию
-                        // «не стартовать поверх живого туннеля» даём РАНЬШЕ: ждём РЕАЛЬНОГО Disconnected
-                        // перед connectVpn нового сервера (disconnectVpn + vpnConnection iOS-ветка).
-                        NSError *startError = nil;
-                        BOOL started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
-                        if (!started || startError) {
-                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
-                                               << " : Tunnel Start Error"
-                                               << (startError ? startError.localizedDescription.UTF8String : "");
-                            emit connectionStateChanged(Vpn::ConnectionState::Error);
-                        } else {
-                            qDebug().nospace() << "IosController::startTunnel :" << tunnel.localizedDescription << protocolName
-                                               << " : started ok";
-                        }
-                    });
-                }];
-            });
-        }];
-    });
+            }
+            [tunnel release]; [saveError release];
+        }, Qt::QueuedConnection);
+    }];
 }
 
 bool IosController::isOurManager(NETunnelProviderManager* manager) {
     NETunnelProviderProtocol* tunnelProto = (NETunnelProviderProtocol*)manager.protocolConfiguration;
 
-    if (!tunnelProto) {
+    if (![tunnelProto isKindOfClass:[NETunnelProviderProtocol class]]) {
         qDebug() << "Ignoring manager because the proto is invalid";
         return false;
     }
@@ -1232,6 +1351,11 @@ void IosController::sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSD
         return;
     }
 
+    const auto delivered = std::make_shared<std::atomic_bool>(false);
+    const auto originalCallback = callback;
+    callback = [delivered, originalCallback](NSDictionary *response) {
+        if (!delivered->exchange(true) && originalCallback) originalCallback(response);
+    };
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:message options:0 error:&error];
 

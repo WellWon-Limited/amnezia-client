@@ -38,6 +38,9 @@ struct Constants {
 }
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
+    var tribeLastRecoverySummary = ""
+    var tribeRuntimeGeneration = UUID().uuidString
+
     var wgAdapter: WireGuardAdapter?
     var ovpnAdapter: OpenVPNAdapter?
     private lazy var openVPNPacketFlowAdapter = PacketTunnelFlowAdapter(flow: packetFlow)
@@ -252,6 +255,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String : NSObject]? = nil,
                               completionHandler: @escaping ((any Error)?) -> Void) {
+        tribeRuntimeGeneration = UUID().uuidString
+        let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
+        TribeSharedState.appGroup?.record(source: "ne", event: "start", fields: ["generation": tribeRuntimeGeneration, "configuration_generation": metadata["generation"] ?? "legacy", "node_id": metadata["node_id"] ?? "unknown", "proto": metadata["proto"] ?? "unknown"])
+
         let activationAttemptId = options?[Constants.kActivationAttemptId] as? String
         let errorNotifier = ErrorNotifier(activationAttemptId: activationAttemptId)
 
@@ -311,6 +318,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
   
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        let generation = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any]
+        let stop: [String: Any] = ["generation": tribeRuntimeGeneration, "configuration_generation": generation?["generation"] ?? "legacy", "reason": reason.rawValue,
+                                   "intentional": reason == .userInitiated || reason == .configurationDisabled || reason == .configurationRemoved || reason == .superceded,
+                                   "utc_ms": Int64(Date().timeIntervalSince1970 * 1000)]
+        if let store = TribeSharedState.appGroup {
+            try? store.locked { try store.write(stop, "TribeLastStop.json") }
+            store.record(source: "ne", event: "stop", fields: stop)
+        }
+
         cancelPendingOpenVPNReconnect()
         cancelPendingNetworkChangeHandling()
 

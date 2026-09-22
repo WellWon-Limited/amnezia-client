@@ -153,15 +153,21 @@ public struct TribeStallTracker: Equatable {
         guard pathSatisfied, policy.stallProbeSeconds > 0 else { return .none }
         let stalledFor = sample.at - lastProgressAt
         let txSince = sample.txBytes - txAtProgress
+        // Without a first handshake, let AWG's built-in retries run for at least 12 seconds.
+        // Handshake-only traffic is smaller than data traffic; still require evidence of demand.
+        let bootstrap = sample.lastHandshakeSec == 0 && sample.rxBytes == 0
+        let probeSeconds = bootstrap ? max(12, policy.stallProbeSeconds) : policy.stallProbeSeconds
+        let rebindSeconds = bootstrap ? max(18, policy.stallRebindSeconds) : policy.stallRebindSeconds
+        let requiredTx = bootstrap ? UInt64(256) : policy.stallMinTxBytes
         switch stage {
         case 0:
-            if stalledFor >= policy.stallProbeSeconds && txSince >= policy.stallMinTxBytes {
+            if stalledFor >= probeSeconds && txSince >= requiredTx {
                 stage = 1
                 return .bumpSockets
             }
         case 1:
             guard policy.stallRebindSeconds > 0 else { return .none }
-            if stalledFor >= policy.stallProbeSeconds + policy.stallRebindSeconds && txSince >= policy.stallMinTxBytes * 2 {
+            if stalledFor >= probeSeconds + rebindSeconds && txSince >= requiredTx * 2 {
                 stage = 2
                 return .rebindPort
             }
@@ -169,6 +175,40 @@ public struct TribeStallTracker: Equatable {
             break
         }
         return .none
+    }
+}
+
+/// One owner (adapter workQueue) arbitrates GUI and autonomous repairs. A new socket consumes
+/// the entire two-step episode; path notifications alone do not grant another repair budget.
+/// Genuine inbound progress rearms an episode, while the rolling cap remains in force.
+public struct TribeRecoveryBudget: Equatable {
+    public private(set) var episodeUsed = 0
+    public private(set) var denied: UInt64 = 0
+    public private(set) var interventions: UInt64 = 0
+    private var recent: [TimeInterval] = []
+    private var lastActionAt: TimeInterval?
+    private var lastRx: UInt64 = 0
+    private var lastHandshake: Int64 = 0
+    private let cooldown: TimeInterval
+
+    public init(jitter: TimeInterval = 0) { cooldown = 8 + min(2, max(0, jitter)) }
+
+    public mutating func observe(_ sample: TribeStallSample) {
+        if sample.rxBytes > lastRx || sample.lastHandshakeSec > lastHandshake { episodeUsed = 0 }
+        lastRx = sample.rxBytes
+        lastHandshake = sample.lastHandshakeSec
+    }
+
+    public mutating func permit(at: TimeInterval, freshPort: Bool) -> Bool {
+        recent.removeAll { at - $0 >= 120 }
+        let cost = freshPort && episodeUsed == 0 ? 2 : 1
+        guard episodeUsed + cost <= 2, recent.count < 4,
+              lastActionAt.map({ at - $0 >= cooldown }) ?? true else { denied += 1; return false }
+        episodeUsed += cost
+        recent.append(at)
+        lastActionAt = at
+        interventions += 1
+        return true
     }
 }
 
@@ -180,12 +220,16 @@ public struct TribeRoamingCounters: Equatable {
     public var stallRebinds: UInt64 = 0
     public var pauses: UInt64 = 0
     public var resumes: UInt64 = 0
+    public var recoveryUsed: UInt64 = 0
+    public var recoveryDenied: UInt64 = 0
+    public var recoveryInterventions: UInt64 = 0
 
     public init() {}
 
     public var asDictionary: [String: UInt64] {
         ["path_lost": pathLost, "path_restored": pathRestored, "roam_bumps": roamBumps,
-         "stall_bumps": stallBumps, "stall_rebinds": stallRebinds, "pauses": pauses, "resumes": resumes]
+         "stall_bumps": stallBumps, "stall_rebinds": stallRebinds, "pauses": pauses, "resumes": resumes,
+         "recovery_used": recoveryUsed, "recovery_denied": recoveryDenied, "recovery_interventions": recoveryInterventions]
     }
 
     public var summary: String {
