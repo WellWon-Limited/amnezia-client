@@ -8,9 +8,13 @@ import ".."   // Theme
 Item {
     id: bar
     property int percent: -1
+    property int thickness: 3
     readonly property bool indeterminate: percent < 0
-    implicitHeight: 3
+    implicitHeight: thickness
     height: implicitHeight
+    // Бегунок останавливается там, где застал его первый процент: без сброса определённая
+    // заливка росла из середины полосы (баг 5.1.85, скриншот владельца 2026-09-23).
+    onIndeterminateChanged: if (!indeterminate) fill.x = 0
 
     Rectangle {
         anchors.fill: parent

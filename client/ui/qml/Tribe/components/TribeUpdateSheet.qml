@@ -253,7 +253,7 @@ Item {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: qsTr("Ставим новую версию сами, когда VPN выключен. Если что-то пойдёт не так — вернём прежнюю.")
+                    text: qsTr("Ставим новую версию сами, VPN выключать не нужно. Если что-то пойдёт не так — вернём прежнюю.")
                     textFormat: Text.PlainText
                     color: Theme.color.text3
                     font.family: Theme.font.body

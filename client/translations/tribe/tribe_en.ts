@@ -1005,7 +1005,7 @@
         <translation>Access activated on this device</translation>
     </message>
     <message>
-        <location line="+361"/>
+        <location line="+345"/>
         <source>Доступ к сайтам РФ включён</source>
         <translation>Access to Russian sites is on</translation>
     </message>
@@ -1026,12 +1026,12 @@
     </message>
     <message>
         <location line="+199"/>
-        <location line="+397"/>
+        <location line="+400"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-396"/>
+        <location line="-399"/>
         <source>Сеть ограничена оператором — подключитесь к Wi-Fi</source>
         <translation>Network restricted by carrier — connect to Wi-Fi</translation>
     </message>
@@ -1051,17 +1051,12 @@
         <translation>Connect — tap the button above</translation>
     </message>
     <message>
-        <location line="+83"/>
+        <location line="+94"/>
         <source>Умный выбор сервера</source>
         <translation>Smart server selection</translation>
     </message>
     <message>
-        <location line="+18"/>
-        <source>auto</source>
-        <translation>auto</translation>
-    </message>
-    <message>
-        <location line="+48"/>
+        <location line="+58"/>
         <source>Сервис запускает узел</source>
         <translation>The service is starting a node</translation>
     </message>
@@ -1098,7 +1093,12 @@
         <translation>How do I renew my access?</translation>
     </message>
     <message>
-        <location line="+116"/>
+        <location line="-140"/>
+        <source>Авто</source>
+        <translation type="unfinished">Auto</translation>
+    </message>
+    <message>
+        <location line="+256"/>
         <source>Заменить сервер</source>
         <translation>Change server</translation>
     </message>
@@ -1177,9 +1177,14 @@
         <translation>MODE</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+14"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (fastest)</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Авто</source>
+        <translation type="unfinished">Auto</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1592,17 +1597,27 @@ A gift for every friend!</translation>
         <translation>Search country</translation>
     </message>
     <message>
-        <location line="+64"/>
+        <location line="+66"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (fastest)</translation>
     </message>
     <message>
-        <location line="+10"/>
+        <location line="+0"/>
+        <source>Авто</source>
+        <translation type="unfinished">Auto</translation>
+    </message>
+    <message>
+        <location line="+11"/>
         <source>Сервис подберёт быстрейший узел</source>
         <translation>The service picks the fastest node</translation>
     </message>
     <message>
-        <location line="+49"/>
+        <location line="+1"/>
+        <source>Сервис подберёт узел автоматически</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+52"/>
         <source>РЕЖИМ СОЕДИНЕНИЯ</source>
         <translation>CONNECTION MODE</translation>
     </message>
@@ -1746,7 +1761,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeAnnouncementSheet</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+256"/>
+        <location filename="../../ui/qml/Tribe/components/TribeAnnouncementSheet.qml" line="+261"/>
         <source>Далее</source>
         <translation>Next</translation>
     </message>
@@ -2050,32 +2065,190 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeUpdateBanner</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeUpdateBanner.qml" line="+44"/>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateBanner.qml" line="+67"/>
+        <source>Обновляем до %1…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Обновляем…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Версия %1 отозвана разработчиком</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Доступна версия %1</source>
+        <translation type="unfinished">Version %1 is available</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Доступна новая версия Tribe VPN</source>
         <translation>A new version of Tribe VPN is available</translation>
     </message>
     <message>
-        <location line="+9"/>
+        <location line="+37"/>
+        <source>Скрыть</source>
+        <translation type="unfinished">Hide</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Вернуть %1</source>
+        <translation type="unfinished">Restore %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <location line="+1"/>
         <source>Обновить</source>
         <translation>Update</translation>
     </message>
 </context>
 <context>
-    <name>TribeUpdateGate</name>
+    <name>TribeUpdateCard</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeUpdateGate.qml" line="+84"/>
-        <source>Обновите приложение</source>
-        <translation>Update the app</translation>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateCard.qml" line="+135"/>
+        <source>Скрыть</source>
+        <translation>Hide</translation>
     </message>
     <message>
-        <location line="+10"/>
-        <source>Эта версия больше не поддерживается. Установите свежую версию, чтобы продолжить пользоваться Tribe VPN.</source>
-        <translation>This version is no longer supported. Install the latest version to keep using Tribe VPN.</translation>
+        <location line="+2"/>
+        <source>Вернуть %1</source>
+        <translation>Restore %1</translation>
     </message>
     <message>
-        <location line="+12"/>
+        <location line="+1"/>
         <source>Обновить</source>
         <translation>Update</translation>
+    </message>
+    <message>
+        <location line="+29"/>
+        <source>Обновляем до %1</source>
+        <translation>Updating to %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Обновляем</source>
+        <translation>Updating</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Версия %1 отозвана</source>
+        <translation>Version %1 was recalled</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Доступна версия %1</source>
+        <translation>Version %1 is available</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Доступна новая версия</source>
+        <translation>A new version is available</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Вернём прежнюю версию</source>
+        <translation>We will restore the previous version</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Поставьте новую версию</source>
+        <translation>Please install the new version</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <location line="+2"/>
+        <source>VPN выключать не нужно</source>
+        <translation>No need to turn off the VPN</translation>
+    </message>
+    <message>
+        <location line="-1"/>
+        <source>Через TestFlight · VPN выключать не нужно</source>
+        <translation>Via TestFlight · no need to turn off the VPN</translation>
+    </message>
+</context>
+<context>
+    <name>TribeUpdateGate</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateGate.qml" line="+105"/>
+        <source>Скачиваем и проверяем подпись…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Готово, перезапускаем приложение…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Не удалось обновить. Попробуйте скачать вручную.</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>TribeUpdateSheet</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateSheet.qml" line="+31"/>
+        <source>Доступна новая версия</source>
+        <translation type="unfinished">A new version is available</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Эта версия больше не работает с нашими серверами. Обновитесь, чтобы продолжить.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Обновление уже готово — займёт меньше минуты.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Новый протокол соединения — труднее заблокировать</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Приложение само выбирает самый быстрый способ подключения</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Список серверов обновляется без перезапуска</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Меньше обрывов при смене сети и после сна</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+150"/>
+        <source>Обновляем…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Обновить</source>
+        <translation type="unfinished">Update</translation>
+    </message>
+    <message>
+        <location line="+38"/>
+        <source>Обновлять автоматически</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Ставим новую версию сами, VPN выключать не нужно. Если что-то пойдёт не так — вернём прежнюю.</source>
+        <translation>We install new versions ourselves, no need to turn off the VPN. If something goes wrong, we will restore the previous one.</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>Позже</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
@@ -2109,7 +2282,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+1455"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2341"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -2194,62 +2367,87 @@ You can attach a photo or video.</translation>
         <translation>Connect test interrupted: %1</translation>
     </message>
     <message>
-        <location line="+62"/>
+        <location line="+59"/>
         <source>Отчёт слишком большой для отправки</source>
         <translation>Report too large to send</translation>
     </message>
     <message>
-        <location line="+9"/>
-        <source>Нет токена устройства — отправка недоступна</source>
-        <translation>No device token — sending unavailable</translation>
-    </message>
-    <message>
-        <location line="+14"/>
+        <location line="+56"/>
         <source>Отправлен на сервер ✓ (%1)</source>
         <translation>Sent to server ✓ (%1)</translation>
     </message>
     <message>
-        <location line="+3"/>
+        <location line="+2"/>
         <source>Отчёт отправлен разработчику ✓</source>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="+7"/>
-        <source>Не отправлен: сервер не принимает — сохрани файлом</source>
-        <translation>Not sent: server won&apos;t accept — save as a file</translation>
-    </message>
-    <message>
-        <location line="+3"/>
-        <source>Сервер ещё не принимает отчёты — сохрани файлом</source>
-        <translation>Server doesn&apos;t accept reports yet — save as a file</translation>
-    </message>
-    <message>
-        <location line="+4"/>
-        <source>Нет авторизации для отправки (%1)</source>
-        <translation>Not authorized to send (%1)</translation>
-    </message>
-    <message>
-        <location line="+6"/>
-        <source>Не отправлен (%1) — сохрани файлом</source>
-        <translation>Not sent (%1) — save as a file</translation>
-    </message>
-    <message>
-        <location line="+0"/>
-        <source>сеть</source>
-        <translation>network</translation>
-    </message>
-    <message>
-        <location line="+2"/>
-        <source>Сервер отклонил отчёт (%1)</source>
-        <translation>Server rejected the report (%1)</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сеть недоступна — отчёт будет дослан позже</source>
+        <location line="-1973"/>
+        <source>Предыдущей версии для возврата нет</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+169"/>
+        <location line="+6"/>
+        <source>Не удалось запустить возврат предыдущей версии</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Возвращаем предыдущую версию…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+162"/>
+        <source>Готово, перезапускаем приложение…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Обновление внутри приложения тут недоступно</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+38"/>
+        <source>Скачиваем и проверяем подпись…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+549"/>
+        <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Не удалось обновить список серверов. Повторите подключение.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1151"/>
+        <source>Этот отчёт уже доставлен</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Отчёт сохранён; отправим после авторизации</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+23"/>
+        <source>Сервер отклонил отчёт (HTTP %1) — сохраните его файлом</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+22"/>
+        <source>Доставка не подтверждена — отчёт сохранён</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Доставка не подтверждена — сохраните отчёт файлом</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+173"/>
         <location line="+59"/>
         <source>этап 1/3 · тест коннекта…</source>
         <translation>stage 1/3 · connect test…</translation>
@@ -2305,7 +2503,7 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+708"/>
+        <location line="+908"/>
         <source>Установка службы VPN отменена</source>
         <translation type="unfinished"></translation>
     </message>
@@ -2315,7 +2513,22 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+293"/>
+        <location line="+428"/>
+        <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Отключение ещё не подтверждено системой.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Не удалось переключить сервер. Подключитесь ещё раз.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+51"/>
         <location line="+14"/>
         <source>Сервер недоступен в этой версии приложения — обновите приложение</source>
         <translation>This server is not supported in this app version — please update the app</translation>
@@ -2332,22 +2545,27 @@ You can attach a photo or video.</translation>
         <translation>Could not pick a server — refresh the server list</translation>
     </message>
     <message>
-        <location line="+93"/>
+        <location line="+114"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+37"/>
+        <location line="+40"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+146"/>
+        <location line="+165"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>The server is not passing traffic — try another server</translation>
     </message>
     <message>
-        <location line="+72"/>
+        <location line="+24"/>
+        <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+81"/>
         <source>Введите код доступа</source>
         <translation>Enter your access code</translation>
     </message>
@@ -2418,7 +2636,7 @@ You can attach a photo or video.</translation>
         <translation>Could not activate the key</translation>
     </message>
     <message>
-        <location line="+413"/>
+        <location line="+418"/>
         <source>Не указано устройство</source>
         <translation>No device specified</translation>
     </message>
@@ -2448,7 +2666,7 @@ You can attach a photo or video.</translation>
         <translation>Could not disconnect the device (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+539"/>
+        <location line="+583"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>
@@ -2483,6 +2701,64 @@ You can attach a photo or video.</translation>
     <message>
         <location filename="../../core/serviceEngine/AvpnPushBridge.cpp" line="+342"/>
         <source>Сегодня в %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>avpn::SelfUpdate</name>
+    <message>
+        <location filename="../../core/serviceEngine/SelfUpdate.cpp" line="+337"/>
+        <source>Обновление заняло слишком много времени. Попробуйте ещё раз.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+37"/>
+        <source>Обновление внутри приложения тут недоступно</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Адрес обновления не прошёл проверку</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Не удалось подготовить обновление</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Не удалось сохранить установщик обновления</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Запустите установленное приложение из папки «Программы»</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>Не удалось запустить обновление</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+27"/>
+        <source>Обновление отменено</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+33"/>
+        <source>Обновление не подготовлено. Попробуйте ещё раз.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Обновление отложено: VPN включён</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Не удалось передать установку процессу перезапуска</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
