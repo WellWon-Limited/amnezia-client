@@ -1214,7 +1214,7 @@ void AvpnEngineQml::maybeAutoUpdate()
         return;
     if (!m_freshConfig || !m_daemonProbed)
         return; // только по свежему /v1/config и после пробы демона (ревью 2026-09-22)
-    if (!tunnelOffForUpdate())
+    if (!tunnelSteadyForUpdate())
         return; // туннель активен — ждём onConnectionStateChanged
     const QString plat = avpnPlatformKey();
     const QString target = m_remoteCfg.recommendedVersion.value(plat);
@@ -1268,16 +1268,23 @@ void AvpnEngineQml::maybeAutoUpdate()
     startSelfUpdateInternal(/*background=*/true);
 }
 
-bool AvpnEngineQml::tunnelOffForUpdate() const
+bool AvpnEngineQml::tunnelSteadyForUpdate() const
 {
-    if (m_op != Op::None || m_wantConnected)
-        return false; // подключаемся/переподключаемся или человек хочет быть подключённым
+    // Реш. владельца 2026-09-23: обновление качается и ставится и при ВКЛЮЧЁННОМ VPN — в РФ без
+    // туннеля tribevpn.com/Apple режутся, и «только при выключенном» не скачивалось никогда. На macOS
+    // выход GUI туннель не гасит (root-демон, BUG-6), новая копия адоптирует его
+    // (probeDaemonTunnelOnStartup). Нельзя только посреди перехода: подключаемся/переключаемся/
+    // гасим или цикл авто-переподключения (Error/Disconnected при желании быть подключённым).
+    if (m_op != Op::None)
+        return false;
     switch (m_lastTunnelState) {
+    case Vpn::Connected:
+        return true;
     case Vpn::Disconnected:
     case Vpn::Error:
-        return true;
+        return !m_wantConnected;
     case Vpn::Unknown:
-        return m_daemonProbed; // до пробы демона Unknown может скрывать живой туннель
+        return m_daemonProbed && !m_wantConnected; // до пробы демона Unknown может скрывать туннель
     default:
         return false;
     }
@@ -1373,7 +1380,14 @@ void AvpnEngineQml::startSelfUpdateInternal(bool background)
     // Ставим ровно рекомендованную сервером версию (ссылка на образ могла разойтись с ней).
     opts.expectedVersion = m_remoteCfg.recommendedVersion.value(plat);
     if (background) // тихая: последний гейт — туннель всё ещё выключен в момент передачи
-        opts.mayCommit = [this] { return tunnelOffForUpdate(); };
+        opts.mayCommit = [this] {
+            // посреди перехода туннеля — отложить без паузы и без сжигания попытки: продолжим,
+            // как только туннель встанет (onConnectionStateChanged → maybeAutoUpdate).
+            const bool ok = tunnelSteadyForUpdate();
+            if (!ok)
+                m_selfUpdateTunnelCancel = true;
+            return ok;
+        };
     m_selfUpdateBackground = background;
     m_selfUpdateTunnelCancel = false;
     m_selfUpdateTarget = availableVersion();
@@ -3646,15 +3660,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     m_lastTunnelState = s; // AVPN: кэш реального состояния туннеля (для отложенного start() при смене узла)
     // AVPN (self-update v2): туннель погас — можно тихо поставить ожидающее обновление
     // (условия внутри; отложенно, чтобы не вклиниваться в обработку перехода).
-    if (s == Vpn::Disconnected || s == Vpn::Error)
+    // Туннель пришёл в устойчивое состояние (вкл или выкл) — можно продолжить отложенную тихую
+    // установку. Скачивание переходы НЕ отменяют (реш. 2026-09-23: качаем и через VPN); перезапуск
+    // приложения посреди перехода не даст гейт mayCommit в момент передачи финишеру.
+    if (s == Vpn::Disconnected || s == Vpn::Error || s == Vpn::Connected)
         QTimer::singleShot(1500, this, [this] { maybeAutoUpdate(); });
-    // Туннель пошёл вверх, а тихая установка качается — отменяем: перезапуск приложения при
-    // поднятом VPN нарушает «пока подключён, тихо не рвём» (ревью 2026-09-22).
-    if (m_selfUpdate && m_selfUpdate->running() && m_selfUpdateBackground && !tunnelOffForUpdate()) {
-        qInfo() << "[selfupdate] tunnel is coming up — cancelling background update";
-        m_selfUpdateTunnelCancel = true;
-        m_selfUpdate->cancel();
-    }
     // Правдивый статус: маппим РЕАЛЬНОЕ состояние VpnConnection в фазу движка. up() лишь ставит
     // туннель в очередь (async) и НЕ объявляет Connected — переход прилетает сюда.
     switch (s) {

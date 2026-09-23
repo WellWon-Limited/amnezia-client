@@ -8,9 +8,14 @@ import ".."   // Theme
 Item {
     id: bar
     property int percent: -1
+    property int thickness: 3
+    property color fillColor: Theme.color.accent
     readonly property bool indeterminate: percent < 0
-    implicitHeight: 3
+    implicitHeight: thickness
     height: implicitHeight
+    // Бегунок останавливается там, где застал его первый процент: без сброса определённая
+    // заливка росла из середины полосы (баг 5.1.85, скриншот владельца 2026-09-23).
+    onIndeterminateChanged: if (!indeterminate) fill.x = 0
 
     Rectangle {
         anchors.fill: parent
@@ -22,7 +27,7 @@ Item {
             id: fill
             height: parent.height
             radius: Theme.radius.pill
-            color: Theme.color.accent
+            color: bar.fillColor
             width: bar.indeterminate ? parent.width * 0.3 : parent.width * Math.max(0, Math.min(100, bar.percent)) / 100
             x: 0
             Behavior on width { enabled: !bar.indeterminate; NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic } }
