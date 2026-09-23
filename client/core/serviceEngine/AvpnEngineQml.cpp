@@ -25,6 +25,7 @@
 #include "Ipv6Presence.h" // AVPN (IPv6-волна): есть ли у сети глобальный v6 мимо туннеля (Доктор)
 #ifdef Q_OS_IOS
 #include "platforms/ios/AvpnDiagnostics.h" // AVPN backend-first (2026-07-10): crash-diag следует за edge-walk базой
+#include "platforms/ios/AvpnBackgroundGuard.h" // AVPN (разбор 2026-09-23): фоновое время на перезапуск туннеля
 #endif
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
@@ -50,6 +51,7 @@
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
 #include "BypassSeedStamp.h"      // AVPN: стамп входов сева АнтиВПН — скип пересева 10k CIDR при неизменных входах
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
+#include <QPointer>               // AVPN (разбор 2026-09-23): колбэк истечения фонового времени iOS
 #include "LegalDocs.h"            // AVPN in-app Legal: URL/кэш/валидация Privacy/Terms
 #include <QDir>                   // AVPN in-app Legal: каталог кэша
 #include <QImage>                 // AVPN: QR → PNG для share-листа переноса (shareTextWithQr)
@@ -629,7 +631,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &base) {
                 m_baseUrl = base;              // control plane переключился на живой вход (edge-walk)
                 refreshQualityEndpoints();     // AVPN (T16): живые палочки — новый /v1/ping-хост
-                rebuildApiCarveOut();          // новый хост — в carve-out (async резолв + reapply)
+                reliabilityEvent(QStringLiteral("edge_switch to=%1").arg(QUrl(base).host().left(64)));
+                rebuildApiCarveOut();          // новый хост — в carve-out (async резолв; туннель НЕ передёргиваем)
                 emit apiBaseChanged(base);     // AVPN backend-first: сателлиты (чат поддержки) следуют за edge
 #ifdef Q_OS_IOS
                 AvpnDiagnostics_setBase(m_baseUrl.toUtf8().constData());
@@ -695,6 +698,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_stopRetryTimer, &QTimer::timeout, this, &AvpnEngineQml::onStopRetryTimer);
     m_liveSessionTimer.setSingleShot(true);
     connect(&m_liveSessionTimer, &QTimer::timeout, this, &AvpnEngineQml::onLiveSessionTimeout);
+    // AVPN (разбор 2026-09-23): каждый переход автомата заканчивается changed() — удержание фонового
+    // времени iOS следует за ним (RestartGuard.h).
+    connect(this, &AvpnEngineQml::changed, this, &AvpnEngineQml::syncRestartGuard);
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     connect(IosController::Instance(), &IosController::sessionMetadataChanged, this,
             [this](const QVariantMap &) { adoptNativeIdentity(); }, Qt::QueuedConnection);
@@ -971,6 +977,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 [this](Qt::ApplicationState st) {
                     if (st != Qt::ApplicationActive)
                         return;
+                    // AVPN (разбор 2026-09-23): на экране фоновое время не нужно; защёлку истечения
+                    // снимаем, чтобы следующий уход в фон посреди перезапуска снова был защищён.
+                    m_restartGuard.onForeground();
+                    syncRestartGuard();
                     // AVPN (белые списки): foreground-триггер детектора — ДО троттла рефреша
                     // (детектор дебаунсит сам; в активном режиме это немедленная exit-проба).
                     if (m_whitelistDetector)
@@ -1442,25 +1452,27 @@ void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QStringList> &sites) const
 // AVPN remote-config (T6): «новый активный edge — в carve-out». Резолвит host(m_baseUrl) (уже
 // переключён вызывающим activeEdgeChanged-обработчиком) в m_apiHostIps (async QHostInfo, тот же
 // паттерн, что в конструкторе для исходного m_baseUrl; накопительно — не теряем IP предыдущих
-// edge, лишний carve-out безвреден) и передёргивает сплит через reapplyBypass(). reapplyBypass()
-// — единственный штатный способ докатить сев до ЖИВОГО туннеля (см. setBypassMasterOn и др.):
-// на живом коннекте reconcile сделает stop→start, а guardedStart() пересеет applyRuBypassSplit()
-// (который зовёт rebuildApiCarveOut(sites) выше) уже со свежим m_apiHostIps. Офлайн → no-op
-// (reapplyBypass сам гейтит по m_wantConnected) — свежий сев подхватится на следующем Connect.
+// edge, лишний carve-out безвреден). Вырез применяется при СЛЕДУЮЩЕМ обычном старте:
+// guardedStart() → applyRuBypassSplit() → rebuildApiCarveOut(sites) со свежим m_apiHostIps
+// (стамп сева учитывает apiCarveIps(), пересев не пропустится).
+// AVPN (разбор 2026-09-23, журнал iPhone владельца): раньше здесь стоял reapplyBypass() — смена
+// edge передёргивала живой туннель (guardedStop "reconcile_restart"). Ложные «три отказа подряд»
+// (запросы, пережившие заморозку iOS или гибель чужого VPN) давали смену edge при каждом возврате
+// в приложение, а iOS замораживала приложение между стопом и стартом → VPN выключен до следующего
+// открытия. Для текущих edge маршрут от выреза не зависит (IP api.tribevpn.com — во вкомпиленном
+// фолбэке apiCarveIps(), vpn.wellwon.hk вне RU-префиксов), поэтому перезапуск ничего не давал.
+// Инвариант держит tests/check_edge_switch_no_restart.sh.
 void AvpnEngineQml::rebuildApiCarveOut()
 {
     const QString host = QUrl(m_baseUrl).host();
-    if (host.isEmpty() || !QHostAddress(host).isNull()) { // пусто или уже literal-IP — резолвить не надо
-        reapplyBypass();
+    if (host.isEmpty() || !QHostAddress(host).isNull()) // пусто или уже literal-IP — резолвить не надо
         return;
-    }
     QHostInfo::lookupHost(host, this, [this](const QHostInfo &info) {
-        if (info.error() == QHostInfo::NoError) {
-            for (const QHostAddress &ip : info.addresses())
-                if (!m_apiHostIps.contains(ip))
-                    m_apiHostIps.append(ip);
-        }
-        reapplyBypass();
+        if (info.error() != QHostInfo::NoError)
+            return;
+        for (const QHostAddress &ip : info.addresses())
+            if (!m_apiHostIps.contains(ip))
+                m_apiHostIps.append(ip);
     });
 }
 
@@ -2018,6 +2030,45 @@ void AvpnEngineQml::reliabilityEvent(const QString &event)
                 .arg(QCoreApplication::applicationVersion()),
         event.left(256), 128);
     QSettings().setValue(QStringLiteral("avpn/reliabilityLog"), m_reliabilityRing.lines);
+}
+
+// AVPN (разбор 2026-09-23): см. RestartGuard.h. Зовётся на каждый changed() (все переходы автомата
+// заканчиваются им), из guardedStop до стопа и при выходе на экран. Дёшево: сравнение флагов,
+// UIKit — только на фронтах. В кольцо пишем только то, что меняет картину разбора.
+void AvpnEngineQml::syncRestartGuard()
+{
+#ifdef Q_OS_IOS
+    avpn::RestartGuardInputs in;
+    in.wantConnected = m_wantConnected;
+    in.tunnelConnected = (m_lastTunnelState == Vpn::Connected);
+    in.opInFlight = m_opInFlight;
+    in.needsRestart = m_needsRestart;
+    switch (m_restartGuard.sync(avpn::restartGuardWanted(in))) {
+    case avpn::RestartGuardLatch::Action::Begin: {
+        QPointer<AvpnEngineQml> self(this);
+        const bool ok = AvpnBackgroundGuard_begin([self]() {
+            if (!self)
+                return;
+            self->m_restartGuard.onExpired();
+            self->reliabilityEvent(QStringLiteral("restart_guard_expired native=%1 intent_on=%2")
+                                       .arg(int(self->m_lastTunnelState)).arg(self->m_wantConnected));
+        });
+        if (!ok) {
+            m_restartGuard.onExpired(); // iOS отказала — не просим снова в этом фоне
+            reliabilityEvent(QStringLiteral("restart_guard_denied"));
+        }
+        break;
+    }
+    case avpn::RestartGuardLatch::Action::End:
+        AvpnBackgroundGuard_end();
+        if (QGuiApplication::applicationState() != Qt::ApplicationActive)
+            reliabilityEvent(QStringLiteral("restart_guard_done_in_background native=%1")
+                                 .arg(int(m_lastTunnelState)));
+        break;
+    case avpn::RestartGuardLatch::Action::None:
+        break;
+    }
+#endif
 }
 
 // AVPN (фикс-волна 2026-09-22, A1/A4/A5): новые метаданные сессии (runtime-поколение, identity).
@@ -4771,6 +4822,9 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
     // Критик полноты (жалобы 1/2): повтор после дедлайна свитча — без requestStop(), иначе он
     // стирал цель повтора (в том числе переподъём EE), бюджет лечения и стрик data-plane движка.
     facadeEngineStop(m_engine, keepEngineSwitch);
+    // AVPN (разбор 2026-09-23): стоп с намерением ON — часть перезапуска; фоновое время iOS берём ДО
+    // стопа, чтобы свёрнутое приложение дожило до Disconnected и отправило старт.
+    syncRestartGuard();
     m_tunnel.down();
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6): туннель был адоптирован без протокола этой GUI-сессии — down() демона не

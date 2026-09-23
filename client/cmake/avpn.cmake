@@ -172,6 +172,11 @@ if(IOS)
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnDiagnostics.mm)
+    # AVPN (разбор 2026-09-23): фоновое время iOS на перезапуск туннеля, начатый приложением
+    # (решение — serviceEngine/RestartGuard.h). UIKit уже линкуется.
+    list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.h)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.mm)
     # AVPN (haptics): тактильный отклик — UIFeedbackGenerator (UIKit уже линкуется).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
