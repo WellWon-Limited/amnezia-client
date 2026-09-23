@@ -1699,20 +1699,34 @@ QVariantMap AvpnEngineQml::currentNode() const
         for (const NodeDebugRow &r : s.pool)
             if (r.nodeId == showId) { pick = &r; break; }
     }
+    // AVPN (A5, жалоба владельца 2026-09-23): туннель поднят и усыновлён, но движок не опознал ноду
+    // сессии (нода удалена/пересоздана, сменился порт) — раньше карточка писала «Умный выбор
+    // сервера» при работающем VPN. Показываем честный факт из подсказки сессии: ноду пула с тем же
+    // id или хостом, иначе сам адрес. Identity движка (health/failover) это не меняет.
+    QString hintOnlyEndpoint;
+    if (!pick && (connectedNow || s.state == QLatin1String("verifying")) && s.currentNodeId.isEmpty()) {
+        const ServiceEngine::SessionHint hint = m_engine.sessionHint();
+        const int row = hintedPoolRow(s.pool, hint.nodeId, hint.endpoint);
+        if (row >= 0)
+            pick = &s.pool.at(row);
+        else
+            hintOnlyEndpoint = hint.endpoint;
+    }
+    const bool hintOnly = !pick && !hintOnlyEndpoint.isEmpty();
     QVariantMap node;
     node["nodeId"]    = pick ? pick->nodeId : QString();
     node["region"]    = pick ? pick->region : QString();
-    node["name"]      = pick ? pick->name : QString();
+    node["name"]      = pick ? pick->name : (hintOnly ? tr("Текущий сервер") : QString());
     node["countryCode"] = pick ? pick->countryCode : QString(); // AVPN: для флага-эмодзи
-    node["endpoint"]  = pick ? pick->endpoint : QString();
-    node["ip"]        = pick ? pick->endpoint.section(QLatin1Char(':'), 0, 0) : QString();
+    node["endpoint"]  = pick ? pick->endpoint : hintOnlyEndpoint;
+    node["ip"]        = endpointHost(pick ? pick->endpoint : hintOnlyEndpoint);
     // AVPN awg31-xray-v1: транспорт показанного узла — бейдж «Amnezia v3.1»/«Xray» на карточке
     // Connect. Даём из currentNode (а не сканом nodePool в QML): nodePool пересобирает и ранжирует
     // весь снапшот на КАЖДЫЙ changed() (тик ~4с) — биндинг главного экрана этого не стоит.
     node["proto"]        = pick ? pick->proto : QString();
     node["protoVersion"] = pick ? pick->protoVersion : QString(); // "2"/"3"/"3.1"; xray — пусто
     node["connected"] = (s.state == QLatin1String("connected"));
-    node["hasNode"]   = (pick != nullptr);
+    node["hasNode"]   = (pick != nullptr) || hintOnly;
     // AVPN: бейдж «auto» — показываем ТОЛЬКО когда подключены в авто-режиме (узел выбрал движок, pin
     // пуст). При ручном выборе (pin задан) бейджа нет. pinned — что показанный узел закреплён вручную.
     node["pinned"]    = (!pinned.isEmpty() && pick && pick->nodeId == pinned);
