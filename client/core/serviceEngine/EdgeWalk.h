@@ -3,6 +3,7 @@
 #pragma once
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 
 namespace avpn {
 
@@ -26,6 +27,19 @@ inline QStringList edgeCandidates(const QStringList &cached, const QStringList &
     // primary (первый baked) обязан присутствовать — блокированный primary всё равно кандидат.
     if (!baked.isEmpty() && !out.contains(baked.first()))
         out << baked.first();
+    return out;
+}
+
+// AVPN (разбор 2026-09-23): уникальные хосты edge-URL — фасад заранее резолвит их все в carve-out,
+// чтобы смена edge никогда не требовала перезапуска живого туннеля. Литерал-IP сохраняется как есть.
+inline QStringList edgeHosts(const QStringList &edges)
+{
+    QStringList out;
+    for (const QString &e : edges) {
+        const QString host = QUrl(e).host();
+        if (!host.isEmpty() && !out.contains(host))
+            out << host;
+    }
     return out;
 }
 

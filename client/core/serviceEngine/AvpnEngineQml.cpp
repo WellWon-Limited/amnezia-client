@@ -49,6 +49,7 @@
 #include "AvpnPushBridge.h" // AVPN (Task 9): device token → /v1/devices/push-token; markAllRead → /v1/notifications/read
 #include "ru_prefixes.h"          // AVPN RU-direct: весь рунет CIDR для split-tunnel (applyRuBypassSplit)
 #include "CidrCarve.h"            // AVPN RU-direct: carve-out IP API из сева (control plane всегда в туннеле)
+#include "EdgeWalk.h"             // AVPN (разбор 2026-09-23): хосты всех edge — в carve-out заранее
 #include "BypassSeedStamp.h"      // AVPN: стамп входов сева АнтиВПН — скип пересева 10k CIDR при неизменных входах
 #include <QHostInfo>              // AVPN RU-direct: async-резолв хоста API для carve-out
 #include <QPointer>               // AVPN (разбор 2026-09-23): колбэк истечения фонового времени iOS
@@ -175,13 +176,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     });
 #endif
 
-    const QString apiHost = QUrl(m_baseUrl).host();
-    if (!apiHost.isEmpty() && QHostAddress(apiHost).isNull()) { // literal-IP резолвить не надо
-        QHostInfo::lookupHost(apiHost, this, [this](const QHostInfo &info) {
-            if (info.error() == QHostInfo::NoError && !info.addresses().isEmpty())
-                m_apiHostIps = info.addresses();
-        });
-    }
+    // AVPN (разбор 2026-09-23): накопительно (не присваиванием) — параллельно резолвятся хосты всех
+    // edge-кандидатов (после создания ConfigService ниже), ответ primary их не затирает.
+    resolveApiCarveHosts({QUrl(m_baseUrl).host()});
 
     m_engine.setTunnel(&m_tunnel);
     m_tunnel.setStore(store); // AVPN RU-direct: гейт сплита по фактической ноде — в up() (T2)
@@ -580,6 +577,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     static const QStringList kBakedEdges{QStringLiteral("https://api.tribevpn.com"),
                                          QStringLiteral("https://vpn.wellwon.hk")};
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
+    // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
+    // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
+    resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
                 avpn::TuningStore::set(c.numbers, c.features, c.lists, c.urls); // AVPN backend-first (T19)
@@ -594,6 +594,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 if (!m_subRefreshTimer.isActive() || m_subRefreshTimer.interval() != refreshMs)
                     m_subRefreshTimer.start(refreshMs);
                 m_remoteCfg = c;
+                // AVPN (разбор 2026-09-23): новые edge с сервера — сразу в carve-out (см. resolveApiCarveHosts).
+                if (!c.edges.isEmpty())
+                    resolveApiCarveHosts(avpn::edgeHosts(c.edges));
                 // AVPN (diag-report, Task 4 bff-3): timestamp применения конфига → возраст в отчёте.
                 m_lastConfigAppliedEpoch = QDateTime::currentSecsSinceEpoch();
                 // AVPN backend-first (T19): down/up speed-URL бенча — urls.bench_speed_down_url/
@@ -1464,16 +1467,31 @@ void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QStringList> &sites) const
 // Инвариант держит tests/check_edge_switch_no_restart.sh.
 void AvpnEngineQml::rebuildApiCarveOut()
 {
-    const QString host = QUrl(m_baseUrl).host();
-    if (host.isEmpty() || !QHostAddress(host).isNull()) // пусто или уже literal-IP — резолвить не надо
-        return;
-    QHostInfo::lookupHost(host, this, [this](const QHostInfo &info) {
-        if (info.error() != QHostInfo::NoError)
-            return;
-        for (const QHostAddress &ip : info.addresses())
-            if (!m_apiHostIps.contains(ip))
-                m_apiHostIps.append(ip);
-    });
+    resolveApiCarveHosts({QUrl(m_baseUrl).host()});
+}
+
+// AVPN (разбор 2026-09-23): IP хостов control plane → m_apiHostIps (накопительно, без дублей).
+// Литерал-IP добавляется сразу (раньше не вырезался вовсе), имя — async QHostInfo. Провал резолва
+// не страшен: в apiCarveIps() всегда есть вкомпиленный фолбэк. Туннель не трогает.
+void AvpnEngineQml::resolveApiCarveHosts(const QStringList &hosts)
+{
+    for (const QString &host : hosts) {
+        if (host.isEmpty())
+            continue;
+        const QHostAddress literal(host);
+        if (!literal.isNull()) {
+            if (!m_apiHostIps.contains(literal))
+                m_apiHostIps.append(literal);
+            continue;
+        }
+        QHostInfo::lookupHost(host, this, [this](const QHostInfo &info) {
+            if (info.error() != QHostInfo::NoError)
+                return;
+            for (const QHostAddress &ip : info.addresses())
+                if (!m_apiHostIps.contains(ip))
+                    m_apiHostIps.append(ip);
+        });
+    }
 }
 
 // AVPN remote-config (T6): сервер может переопределить цели проб чипов (probeTargets из
@@ -2041,7 +2059,8 @@ void AvpnEngineQml::syncRestartGuard()
     avpn::RestartGuardInputs in;
     in.wantConnected = m_wantConnected;
     in.tunnelConnected = (m_lastTunnelState == Vpn::Connected);
-    in.opInFlight = m_opInFlight;
+    // Свитч движка (down() → continuePendingSwitch → up()) идёт без m_op фасада — тоже «в полёте».
+    in.opInFlight = m_opInFlight || m_engine.state() == avpn::EngineState::Switching;
     in.needsRestart = m_needsRestart;
     switch (m_restartGuard.sync(avpn::restartGuardWanted(in))) {
     case avpn::RestartGuardLatch::Action::Begin: {
