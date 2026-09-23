@@ -70,10 +70,11 @@ Item {
             onClicked: root.act()
         }
 
-        // ── иконка: круг 52 (как флаг сервера), золотая стрелка вверх (Lucide "arrow-up") ──
+        // ── иконка: круг 44, золотая стрелка вверх (Lucide "arrow-up"); меньше флага сервера (52),
+        //    чтобы на ширине iPhone заголовок и кнопка помещались без обрезки ──
         Rectangle {
             id: badge
-            width: 52; height: 52; radius: 26
+            width: 44; height: 44; radius: 22
             anchors.left: parent.left; anchors.leftMargin: Theme.space.lg
             anchors.verticalCenter: parent.verticalCenter
             anchors.verticalCenterOffset: root.mode === "busy" ? -Theme.space.xs : 0
@@ -82,8 +83,8 @@ Item {
             border.color: root.mode === "blocked" ? Theme.color.warning : Theme.color.cta
             Shape {
                 anchors.centerIn: parent
-                width: 22; height: 22
-                transform: Scale { xScale: 22 / 24; yScale: 22 / 24 }
+                width: 20; height: 20
+                transform: Scale { xScale: 20 / 24; yScale: 20 / 24 }
                 preferredRendererType: Shape.CurveRenderer
                 ShapePath {
                     strokeColor: root.mode === "blocked" ? Theme.color.warning : Theme.color.cta
@@ -112,18 +113,14 @@ Item {
 
         Rectangle {
             id: actionBtn
-            visible: root.mode !== "busy" && root.hasAction
+            visible: root.mode !== "busy" && root.mode !== "notice" && root.hasAction
             anchors.right: parent.right; anchors.rightMargin: Theme.space.lg
             anchors.verticalCenter: parent.verticalCenter
             height: 36
             width: actionText.implicitWidth + 2 * Theme.space.lg
             radius: Theme.radius.pill
-            // «Скрыть» — тихая кнопка; «Обновить»/«Вернуть» — золото CTA (как «Продлить доступ»)
-            readonly property bool quiet: root.mode === "notice"
-            color: quiet ? Theme.color.surface2 : "transparent"
-            gradient: quiet ? null : goldGrad
-            Gradient {
-                id: goldGrad
+            // «Обновить»/«Вернуть» — золото CTA (как «Продлить доступ»)
+            gradient: Gradient {
                 GradientStop { position: 0.0; color: btnMa.pressed ? Theme.color.ctaDeep : Theme.color.cta }
                 GradientStop { position: 1.0; color: Theme.color.ctaDeep }
             }
@@ -132,11 +129,9 @@ Item {
             Text {
                 id: actionText
                 anchors.centerIn: parent
-                text: root.mode === "notice" ? qsTr("Скрыть")
-                    : (root.mode === "blocked" && root.hasEngine && TribeEngine.canRollback)
-                      ? qsTr("Вернуть %1").arg(TribeEngine.previousVersion)
-                    : qsTr("Обновить")
-                color: actionBtn.quiet ? Theme.color.text1 : Theme.color.bg900
+                text: (root.mode === "blocked" && root.hasEngine && TribeEngine.canRollback)
+                      ? qsTr("Вернуть") : qsTr("Обновить")
+                color: Theme.color.bg900
                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wBold
             }
             MouseArea {
@@ -148,10 +143,33 @@ Item {
             }
         }
 
+        // закрыть уведомление об откате — inline Lucide "x" (не пилюля: длинному тексту нужно место)
+        Item {
+            id: closeBtn
+            visible: root.mode === "notice"
+            width: 32; height: 32
+            anchors.right: parent.right; anchors.rightMargin: Theme.space.md
+            anchors.verticalCenter: parent.verticalCenter
+            Shape {
+                anchors.centerIn: parent
+                width: 16; height: 16
+                transform: Scale { xScale: 16 / 24; yScale: 16 / 24 }
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: Theme.color.text3; fillColor: "transparent"; strokeWidth: 2
+                    capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                    PathSvg { path: "M18 6 L6 18 M6 6 L18 18" }
+                }
+            }
+            MouseArea { anchors.fill: parent; anchors.margins: -Theme.space.xs; cursorShape: Qt.PointingHandCursor; onClicked: root.act() }
+        }
+
         // ── середина: заголовок + подпись ──
         Column {
             anchors.left: badge.right; anchors.leftMargin: Theme.space.md
-            anchors.right: root.mode === "busy" ? pct.left : (actionBtn.visible ? actionBtn.left : parent.right)
+            anchors.right: root.mode === "busy" ? pct.left
+                         : root.mode === "notice" ? closeBtn.left
+                         : (actionBtn.visible ? actionBtn.left : parent.right)
             anchors.rightMargin: Theme.space.md
             anchors.verticalCenter: parent.verticalCenter
             anchors.verticalCenterOffset: root.mode === "busy" ? -Theme.space.sm : 0
@@ -167,14 +185,16 @@ Item {
                                ? qsTr("Обновляем до %1").arg(TribeEngine.selfUpdateTarget)
                                : qsTr("Обновляем")
                     if (root.mode === "blocked")
-                        return qsTr("Версия %1 отозвана").arg(TribeEngine.appVersion.split(".").slice(0, 3).join("."))
+                        return qsTr("%1 отозвана").arg(TribeEngine.appVersion.split(".").slice(0, 3).join("."))
                     return TribeEngine.availableVersion
-                           ? qsTr("Доступна версия %1").arg(TribeEngine.availableVersion)
-                           : qsTr("Доступна новая версия")
+                           ? qsTr("Доступна %1").arg(TribeEngine.availableVersion)
+                           : qsTr("Доступно обновление")
                 }
                 textFormat: Text.PlainText
                 color: root.mode === "blocked" ? Theme.color.warning : Theme.color.text1
-                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM; font.weight: Theme.font.wSemibold
+                font.family: Theme.font.body
+                font.pixelSize: root.mode === "notice" ? Theme.font.bodyS : Theme.font.bodyM
+                font.weight: Theme.font.wSemibold
                 elide: Text.ElideRight
                 maximumLineCount: root.mode === "notice" ? 2 : 1
                 wrapMode: root.mode === "notice" ? Text.WordWrap : Text.NoWrap
@@ -183,12 +203,9 @@ Item {
                 width: parent.width
                 visible: root.mode === "recommend" || root.mode === "blocked"
                 text: root.mode === "blocked"
-                      ? (root.hasEngine && TribeEngine.canRollback ? qsTr("Вернём прежнюю версию")
+                      ? (root.hasEngine && TribeEngine.canRollback ? qsTr("Вернём %1").arg(TribeEngine.previousVersion)
                                                                    : qsTr("Поставьте новую версию"))
-                      : (root.selfInstall
-                         ? qsTr("VPN выключать не нужно")
-                         : (Qt.platform.os === "ios" ? qsTr("Через TestFlight · VPN выключать не нужно")
-                                                     : qsTr("VPN выключать не нужно")))
+                      : qsTr("Не выключая VPN")   // macOS ставит через туннель; iOS — TestFlight через VPN
                 textFormat: Text.PlainText
                 color: Theme.color.text3
                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
@@ -204,6 +221,7 @@ Item {
             anchors.leftMargin: Theme.space.lg; anchors.rightMargin: Theme.space.lg
             anchors.bottomMargin: Theme.space.md
             thickness: 6
+            fillColor: Theme.color.cta
             percent: root.percent
         }
     }

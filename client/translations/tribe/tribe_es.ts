@@ -2109,22 +2109,17 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>TribeUpdateCard</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeUpdateCard.qml" line="+135"/>
-        <source>Скрыть</source>
-        <translation>Ocultar</translation>
-    </message>
-    <message>
-        <location line="+2"/>
-        <source>Вернуть %1</source>
-        <translation>Restaurar %1</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location filename="../../ui/qml/Tribe/components/TribeUpdateCard.qml" line="+133"/>
         <source>Обновить</source>
         <translation>Actualizar</translation>
     </message>
     <message>
-        <location line="+29"/>
+        <location line="+0"/>
+        <source>Вернуть</source>
+        <translation>Restaurar</translation>
+    </message>
+    <message>
+        <location line="+52"/>
         <source>Обновляем до %1</source>
         <translation>Actualizando a %1</translation>
     </message>
@@ -2135,39 +2130,33 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+2"/>
-        <source>Версия %1 отозвана</source>
-        <translation>La versión %1 fue retirada</translation>
+        <source>%1 отозвана</source>
+        <translation>%1 fue retirada</translation>
     </message>
     <message>
         <location line="+2"/>
-        <source>Доступна версия %1</source>
-        <translation>Versión %1 disponible</translation>
+        <source>Доступна %1</source>
+        <translation>%1 disponible</translation>
     </message>
     <message>
         <location line="+1"/>
-        <source>Доступна новая версия</source>
-        <translation>Hay una nueva versión disponible</translation>
+        <source>Доступно обновление</source>
+        <translation>Actualización disponible</translation>
     </message>
     <message>
-        <location line="+13"/>
-        <source>Вернём прежнюю версию</source>
-        <translation>Restauraremos la versión anterior</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Поставьте новую версию</source>
-        <translation>Instale la nueva versión</translation>
+        <location line="+15"/>
+        <source>Вернём %1</source>
+        <translation>Restauraremos %1</translation>
     </message>
     <message>
         <location line="+2"/>
-        <location line="+2"/>
-        <source>VPN выключать не нужно</source>
-        <translation>No hace falta apagar la VPN</translation>
+        <source>Не выключая VPN</source>
+        <translation>Sin apagar la VPN</translation>
     </message>
     <message>
         <location line="-1"/>
-        <source>Через TestFlight · VPN выключать не нужно</source>
-        <translation>Vía TestFlight · no hace falta apagar la VPN</translation>
+        <source>Поставьте новую версию</source>
+        <translation>Instale la nueva versión</translation>
     </message>
 </context>
 <context>
