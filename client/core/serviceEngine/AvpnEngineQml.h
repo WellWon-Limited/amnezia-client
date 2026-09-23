@@ -1290,10 +1290,10 @@ private:
     QString m_selfUpdateStage;
     int     m_selfUpdatePercent = -1;          // -1 = процент неизвестен (сервер не дал размер)
     QString m_selfUpdateTarget;                // версия, которую ставим
-    bool    m_selfUpdateTunnelCancel = false;  // фоновую установку отменил подъём туннеля (не попытка)
+    bool    m_selfUpdateTunnelCancel = false;  // тихая установка отложена переходом туннеля/тумблером (не попытка, без паузы)
     bool    m_daemonProbed = false;            // проба демона на старте отработала: Unknown ≠ «VPN выкл»
     bool    m_freshConfig = false;             // был хотя бы один /v1/config из сети (не LKG-кеш)
-    bool    tunnelOffForUpdate() const;        // туннель выключен и никто его не поднимает
+    bool    tunnelSteadyForUpdate() const;     // туннель не в переходе (вкл или выкл) — можно перезапускаться
     QString m_rollbackNotice;                  // одноразовое «версию X вернули к Y»
     void    ensureSelfUpdate();
     void    startSelfUpdateInternal(bool background);
