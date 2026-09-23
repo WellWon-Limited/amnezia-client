@@ -10,6 +10,7 @@
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
+#include "RestartGuard.h"    // AVPN (разбор 2026-09-23): фоновое время iOS на перезапуск туннеля
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
@@ -867,6 +868,9 @@ private:
     void restorePin(const QString &pinBefore);
     void restorePin() { restorePin(m_engine.pinnedNodeId()); }
     void reliabilityEvent(const QString &event);
+    // AVPN (разбор 2026-09-23): держать фоновое время iOS, пока намерение ON, а туннель не устоялся
+    // (перезапуск «стоп → старт», начатый приложением, иначе замерзал между стопом и стартом).
+    void syncRestartGuard();
     void adoptNativeIdentity();
     // AVPN (фикс-волна 2026-09-22, A1/A4/A5/K3) — см. AvpnEngineQml.cpp.
     bool tryAdoptObservedTunnel(const char *why);
@@ -973,9 +977,8 @@ private:
     //    applyRuBypassSplit РОВНО там же, где раньше был инлайн-блок (behaviour-preserving extraction).
     //  · rebuildApiCarveOut() — вызывается из ConfigService::activeEdgeChanged: резолвит НОВЫЙ активный
     //    edge-хост в m_apiHostIps (async QHostInfo, тот же паттерн, что в конструкторе для исходного
-    //    m_baseUrl) и передёргивает сплит через reapplyBypass(), чтобы следующий пересев (внутри
-    //    applyRuBypassSplit → rebuildApiCarveOut(sites)) унёс с собой и свежий carve-out. Офлайн/ещё
-    //    не резолвлено → применится на следующем Connect, как везде в RU-direct (см. reapplyBypass()).
+    //    m_baseUrl). Живой туннель НЕ передёргивает (разбор 2026-09-23): свежий carve-out уедет со
+    //    следующим обычным стартом (applyRuBypassSplit → rebuildApiCarveOut(sites)).
     void rebuildApiCarveOut(QMap<QString, QStringList> &sites) const;
     void rebuildApiCarveOut();
     // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
@@ -1055,6 +1058,7 @@ private:
     // m_latch.awaitingStopConfirm (МЫ просили стоп) и m_latch.needStatusBeforeStart (после Error на
     // iOS/MACOS_NE; адопт и health не блокирует). См. DebugSnapshot.h::TeardownLatch.
     TeardownLatch               m_latch;
+    avpn::RestartGuardLatch     m_restartGuard;          // разбор 2026-09-23: удержание фонового времени iOS
     SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)
     int                         m_statusRequestAttempts = 0; // запросы статуса в текущем ожидании
     QTimer                      m_statusRetryTimer;      // backoff запросов статуса (1/2/4 с)
