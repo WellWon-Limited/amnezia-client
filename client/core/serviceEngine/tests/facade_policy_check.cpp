@@ -404,6 +404,29 @@ static void gap4ReportReliabilityContext()
     CHECK(tailWithinBytes({QStringLiteral("0123456789")}, 5).isEmpty());
 }
 
+static void a5HintedCardRow()
+{
+    // Жалоба владельца 2026-09-23: Connected, VPN работает, карточка «Умный выбор сервера» —
+    // адопт с неизвестной identity. Карточка берёт ноду пула по подсказке сессии.
+    CHECK(endpointHost(QStringLiteral("38.180.164.134:585")) == QStringLiteral("38.180.164.134"));
+    CHECK(endpointHost(QStringLiteral("[2a01:4f9::1]:585")) == QStringLiteral("2a01:4f9::1"));
+    CHECK(endpointHost(QStringLiteral("host")) == QStringLiteral("host"));
+    QList<NodeDebugRow> pool;
+    NodeDebugRow ee; ee.nodeId = QStringLiteral("9"); ee.region = QStringLiteral("Estonia");
+    ee.endpoint = QStringLiteral("38.180.164.134:585");
+    NodeDebugRow us; us.nodeId = QStringLiteral("10"); us.region = QStringLiteral("USA");
+    us.endpoint = QStringLiteral("149.33.7.203:585");
+    pool << ee << us;
+    // та же нода по id (сменился только порт/протокол)
+    CHECK(hintedPoolRow(pool, QStringLiteral("10"), QStringLiteral("149.33.7.203:443")) == 1);
+    // нода пересоздана с новым id на том же сервере — по хосту
+    CHECK(hintedPoolRow(pool, QStringLiteral("5"), QStringLiteral("38.180.164.134:51820")) == 0);
+    // сервера больше нет в пуле — -1 (карточка покажет адрес сессии, а не «Умный выбор»)
+    CHECK(hintedPoolRow(pool, QStringLiteral("3"), QStringLiteral("79.110.48.13:585")) == -1);
+    // пустая подсказка — ничего не подбираем
+    CHECK(hintedPoolRow(pool, QString(), QString()) == -1);
+}
+
 int main()
 {
     a1ErrorDoesNotLatchAdoption();
@@ -418,6 +441,7 @@ int main()
     a16ReliabilityRingCollapse();
     gap1DoctorNodeProblem();
     gap4ReportReliabilityContext();
+    a5HintedCardRow();
     if (g_fail) {
         std::printf("facade_policy_check: %d FAILED\n", g_fail);
         return 1;

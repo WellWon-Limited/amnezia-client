@@ -277,6 +277,13 @@ public:
                               const QString &endpoint = {});
     bool currentIdentityKnown() const { return !m_currentNodeId.isEmpty(); }
     bool tryIdentifyCurrentNode();
+    // AVPN (A5): подсказка сессии {node_id, proto, endpoint} неопознанного адопта — только для
+    // показа на карточке (DebugSnapshot.h::hintedPoolRow); пусто, когда identity известна.
+    struct SessionHint { QString nodeId, proto, endpoint; };
+    SessionHint sessionHint() const
+    {
+        return {m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint};
+    }
 
     // Poll independently of health sampling (including when the uplink is offline).
     // AVPN (фикс-волна 2026-09-22, K5/B4): часы свитча — ПО ФАЗАМ: фаза down (ждём Disconnected
