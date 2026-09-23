@@ -26,6 +26,15 @@ int main(int argc, char **argv)
     const QStringList dup{"https://a", "https://a", "https://b"};
     CHECK(avpn::edgeCandidates(dup, baked).size() == 3, "dedup cached + primary");
 
+    // AVPN (разбор 2026-09-23): хосты ВСЕХ кандидатов резолвятся в carve-out заранее — смена edge
+    // не требует перезапуска туннеля (tests/check_edge_switch_no_restart.sh).
+    const QStringList hosts = avpn::edgeHosts({"https://api.tribevpn.com", "https://api.tribevpn.com/",
+                                               "https://vpn.wellwon.hk:443/v1", "https://159.194.214.36",
+                                               "", "not a url"});
+    CHECK(hosts == QStringList({"api.tribevpn.com", "vpn.wellwon.hk", "159.194.214.36"}),
+          "edgeHosts: unique hosts, literal IP kept, junk dropped");
+    CHECK(avpn::edgeHosts({}).isEmpty(), "edgeHosts: empty list");
+
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
 }

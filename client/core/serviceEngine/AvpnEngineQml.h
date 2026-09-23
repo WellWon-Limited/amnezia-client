@@ -981,6 +981,8 @@ private:
     //    следующим обычным стартом (applyRuBypassSplit → rebuildApiCarveOut(sites)).
     void rebuildApiCarveOut(QMap<QString, QStringList> &sites) const;
     void rebuildApiCarveOut();
+    // AVPN (разбор 2026-09-23): IP хостов control plane (все edge-кандидаты) → m_apiHostIps заранее.
+    void resolveApiCarveHosts(const QStringList &hosts);
     // ЕДИНЫЙ список carve-IP (вкомпиленный фолбэк + m_apiHostIps) — для выреза И для стампа сева
     // (bypassSeedStamp): один источник исключает дрейф «carve изменился, а стамп не заметил».
     QStringList apiCarveIps() const;
