@@ -406,6 +406,37 @@ struct NodeDebugRow {
     QString     activeProto;
 };
 
+// AVPN (A5, жалоба владельца 2026-09-23 «Connected, VPN работает, а карточка пишет «Умный выбор
+// сервера»»): хост endpoint'а без порта — "host:port" → host, "[v6]:port" → v6.
+inline QString endpointHost(const QString &endpoint)
+{
+    if (endpoint.startsWith(QLatin1Char('['))) {
+        const int close = endpoint.indexOf(QLatin1Char(']'));
+        return close > 0 ? endpoint.mid(1, close - 1) : endpoint;
+    }
+    const int colon = endpoint.lastIndexOf(QLatin1Char(':'));
+    return colon > 0 ? endpoint.left(colon) : endpoint;
+}
+
+// Строка пула для карточки адоптированной сессии с НЕИЗВЕСТНОЙ identity (движок её не опознал:
+// нода удалена/пересоздана или сменился порт/протокол): нода с id подсказки, иначе первая нода
+// того же хоста (тот же сервер — та же страна). -1 — такого сервера в пуле нет, карточка
+// показывает адрес сессии. Только показ: identity движка (health/failover) это НЕ меняет.
+inline int hintedPoolRow(const QList<NodeDebugRow> &pool, const QString &hintNodeId,
+                         const QString &hintEndpoint)
+{
+    if (!hintNodeId.isEmpty())
+        for (int i = 0; i < pool.size(); ++i)
+            if (pool.at(i).nodeId == hintNodeId)
+                return i;
+    const QString host = endpointHost(hintEndpoint);
+    if (!host.isEmpty())
+        for (int i = 0; i < pool.size(); ++i)
+            if (endpointHost(pool.at(i).endpoint) == host)
+                return i;
+    return -1;
+}
+
 struct DebugSnapshot {
     QString state;                       // фаза машины состояний
     QString currentNodeId;
