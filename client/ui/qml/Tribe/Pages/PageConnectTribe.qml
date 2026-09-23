@@ -520,25 +520,8 @@ PageType {
         }
     }
 
-    // AVPN (Task 7): мягкий баннер «доступно обновление» (remote-config, updateState===1).
-    // Anchors НЕЗАВИСИМЫ от header (topMargin реагирует на updateBanner.visible): скрытый баннер
-    // схлопывается в implicitHeight 0 и не двигает autoVpnCard/orb ни на пиксель относительно
-    // текущей пиксель-точной раскладки; видимый — вставляет себя в цепочку якорей без правки
-    // констант sceneShift (orb якорится на autoVpnCard.bottom, а не на фиксированных числах).
-    TribeUpdateBanner {
-        id: updateBanner
-        // AVPN (белые списки): в эпизоде store-ссылка всё равно не откроется — баннер подавлен
-        // (dismissed-биндинг вернёт баннер после выхода из режима; клик по крестику, как и
-        // раньше, перезаписывает биндинг статическим true до перезапуска — поведение сохранено).
-        dismissed: root.whitelistModeNow
-        onUpdateRequested: updateGate.openSoft()
-        anchors.top: header.bottom
-        anchors.topMargin: visible ? Theme.space.md : 0
-        anchors.left: parent.left; anchors.right: parent.right
-        anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
-        anchors.rightMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
-        z: 10
-    }
+    // AVPN (реш. владельца 2026-09-23): верхний баннер обновления убран — обновление показывает
+    // TribeUpdateCard на месте карточки сервера (нижний блок, см. serverCard).
 
     // AVPN backend-first-3 (Task 7): incident-баннер из подписанного /v1/config (strings.
     // incident_text_<lang>) — оповещение об инцидентах ВСЕМ (вкл. анонимов без enrollment).
@@ -547,7 +530,7 @@ PageType {
     // якорную цепочку updateBanner → incidentBanner → autoVpnCard без правки констант sceneShift.
     TribeIncidentBanner {
         id: incidentBanner
-        anchors.top: updateBanner.bottom
+        anchors.top: header.bottom
         anchors.topMargin: visible ? Theme.space.md : 0
         anchors.left: parent.left; anchors.right: parent.right
         anchors.leftMargin: root.isMobile ? Theme.space.xl : Theme.space.lg
@@ -828,8 +811,19 @@ PageType {
 
         // карточка сервера — тап открывает страницу выбора сервера (PageServersTribe). // AVPN
         // (карточка «АвтоVPN» перенесена НАД орб — см. autoVpnCard выше, реш. 2026-07-02)
+        // обновление — НА МЕСТЕ карточки сервера, пока новая версия доступна (реш. владельца
+        // 2026-09-23); та же геометрия, нижний блок не прыгает. Белые списки: ссылка всё равно
+        // не откроется — карточка подавлена, виден сервер.
+        TribeUpdateCard {
+            id: updateCard
+            width: parent.width
+            suppressed: root.whitelistModeNow
+            onUpdateRequested: updateGate.openSoft()
+        }
+
         Rectangle {
             id: serverCard
+            visible: !updateCard.shouldShow
             width: parent.width; implicitHeight: 80; height: 80
             radius: 24
             color: Qt.rgba(0x1E/255, 0x29/255, 0x3B/255, 0.40)
