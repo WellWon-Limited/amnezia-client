@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLoggingCategory>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QNetworkAccessManager>
@@ -38,6 +39,8 @@ const QString kWasActiveKey = QStringLiteral("avpn/journal/wasActive");
 const QString kLastSentKey = QStringLiteral("avpn/journal/lastSentAt");
 // Снимок диагностики в одном событии — не больше этого (серверный кап распакованного — 4 МиБ).
 constexpr int kSnapshotMaxChars = 512 * 1024;
+// Таймаут одной пачки: укладывается в фоновое время iOS (~30 с) с запасом.
+constexpr int kRequestTimeoutMs = 20000;
 
 qint64 loadOffset(const QString &key)
 {
@@ -103,6 +106,10 @@ QList<journal::JournalSource> TribeJournal::sources()
 #ifndef Q_OS_ANDROID
     list.append({QStringLiteral("qt"), Logger::userLogsFilePath(), TextFormat::QtLog, QStringLiteral("app")});
 #endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    // Десктоп: туннель живёт в привилегированной службе — её лог (тот же формат Logger) = «туннель».
+    list.append({QStringLiteral("svc"), Logger::serviceLogsFilePath(), TextFormat::QtLog, QStringLiteral("ne")});
+#endif
 #ifdef Q_OS_IOS
     const QString group = TribeJournalIos_appGroupDir();
     if (!group.isEmpty()) {
@@ -133,6 +140,11 @@ void TribeJournal::setActive(bool on, bool keepFileLogs)
     if (was == on)
         return;
 
+    // Подробный сетевой лог Qt (TLS, монитор сети) — пока журнал включён: объясняет зависшие
+    // и оборванные запросы. Только наши категории qt.network.*; выключение возвращает умолчания.
+    QLoggingCategory::setFilterRules(on ? QStringLiteral("qt.network.ssl.debug=true\n"
+                                                         "qt.network.monitor.debug=true")
+                                        : QString());
 #ifndef Q_OS_ANDROID
     if (on) {
         // На desktop пользовательский лог уже открыт апстримом (CoreController::initLogging); на iOS
@@ -151,6 +163,9 @@ void TribeJournal::setActive(bool on, bool keepFileLogs)
 #endif
 #ifdef Q_OS_IOS
     TribeJournalIos_setNativeLogging(on || keepFileLogs);
+#endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    Logger::setServiceLogsEnabled(on || keepFileLogs); // лог службы туннеля (IPC; служба не запущена — no-op)
 #endif
     Q_UNUSED(keepFileLogs)
 }
@@ -234,12 +249,15 @@ void TribeJournalUploader::flush(const QString &reason, const QString &snapshot)
             m_pendingSnapshot = snapshot;
         return;
     }
-    if (!TribeJournal::active())
+    if (!TribeJournal::active()) {
+        emit idle();
         return;
+    }
     if (!m_nam || m_token().isEmpty()) {
         m_lastError = tr("Нет авторизации устройства");
         emit statusChanged();
         emit flushFinished(false);
+        emit idle();
         return;
     }
     m_inFlight = true;
@@ -263,7 +281,7 @@ void TribeJournalUploader::flush(const QString &reason, const QString &snapshot)
     e.insert(QStringLiteral("msg"), snapshot.left(kSnapshotMaxChars));
     QByteArray line = QJsonDocument(e).toJson(QJsonDocument::Compact);
     line += '\n';
-    post(line, QStringLiteral("app"), [this](int code) {
+    post(line, QStringLiteral("app"), 1, [this](int code) {
         if (code >= 200 && code < 300) {
             m_anyOk = true;
             ++m_batches;
@@ -303,7 +321,7 @@ void TribeJournalUploader::sendNext()
         QTimer::singleShot(0, this, &TribeJournalUploader::sendNext);
         return;
     }
-    post(plan.jsonl, plan.srcTag, [this, apply](int code) {
+    post(plan.jsonl, plan.srcTag, plan.events, [this, apply](int code) {
         if (code >= 200 && code < 300) {
             apply();
             m_anyOk = true;
@@ -322,7 +340,8 @@ void TribeJournalUploader::sendNext()
     });
 }
 
-void TribeJournalUploader::post(const QByteArray &jsonl, const QString &srcTag, std::function<void(int)> done)
+void TribeJournalUploader::post(const QByteArray &jsonl, const QString &srcTag, int events,
+                                std::function<void(int)> done)
 {
     // qCompress = 4 байта длины (Qt) + поток zlib; сервер принимает чистый zlib.
     const QByteArray body = qCompress(jsonl, 6).mid(4);
@@ -331,21 +350,53 @@ void TribeJournalUploader::post(const QByteArray &jsonl, const QString &srcTag, 
     req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + m_token().toUtf8());
     req.setRawHeader(QByteArrayLiteral("X-Journal-Source"), srcTag.toLatin1());
     req.setRawHeader(QByteArrayLiteral("X-App-Version"), QCoreApplication::applicationVersion().left(64).toUtf8());
-    req.setTransferTimeout(30000);
+    req.setTransferTimeout(kRequestTimeoutMs);
     QNetworkReply *reply = m_nam->post(req, body);
+    m_reply = reply;
+    m_replyClock.start();
     QPointer<TribeJournalUploader> self(this);
-    connect(reply, &QNetworkReply::finished, this, [self, reply, done = std::move(done)]() {
+    const qint64 sent = body.size();
+    const qint64 raw = jsonl.size();
+    connect(reply, &QNetworkReply::finished, this,
+            [self, reply, done = std::move(done), sent, raw, srcTag, events]() {
         reply->deleteLater();
         if (!self)
             return;
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // Результат каждой отправки — в журнал (уйдёт следующей пачкой): без него зависшая или
+        // отклонённая досылка невидима при разборе.
+        QJsonObject f{{QStringLiteral("code"), code},
+                      {QStringLiteral("ms"), self->m_replyClock.isValid() ? self->m_replyClock.elapsed() : -1},
+                      {QStringLiteral("bytes"), sent},
+                      {QStringLiteral("raw"), raw},
+                      {QStringLiteral("events"), events},
+                      {QStringLiteral("batch_src"), srcTag}};
+        if (reply->error() != QNetworkReply::NoError)
+            f.insert(QStringLiteral("net_error"), int(reply->error()));
+        // Не сразу в файл: иначе эта же досылка тут же отправила бы пачку ради этого события.
+        self->m_uploadLog.append(f);
+        if (self->m_reply == reply)
+            self->m_reply.clear();
         done(code);
     });
+}
+
+bool TribeJournalUploader::kickIfStale(int maxAgeMs)
+{
+    if (!m_inFlight || !m_reply || !m_replyClock.isValid() || m_replyClock.elapsed() < maxAgeMs)
+        return false;
+    TribeJournal::append(QStringLiteral("journal_kick"),
+                         {{QStringLiteral("age_ms"), m_replyClock.elapsed()}});
+    m_reply->abort(); // finished(OperationCanceledError), code 0 → досылка завершится неудачей
+    return true;
 }
 
 void TribeJournalUploader::finish(bool ok)
 {
     m_inFlight = false;
+    for (const QJsonObject &f : std::as_const(m_uploadLog))
+        TribeJournal::append(QStringLiteral("journal_upload"), f);
+    m_uploadLog.clear();
     if (m_anyOk) {
         m_lastSentAt = QDateTime::currentDateTime();
         QSettings().setValue(kLastSentKey, m_lastSentAt);
@@ -358,7 +409,9 @@ void TribeJournalUploader::finish(bool ok)
         const QString snapshot = m_pendingSnapshot;
         m_pendingSnapshot.clear();
         QTimer::singleShot(0, this, [this, reason, snapshot]() { flush(reason, snapshot); });
+        return; // idle — после досылки из очереди
     }
+    emit idle();
 }
 
 } // namespace avpn

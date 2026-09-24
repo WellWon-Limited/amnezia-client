@@ -8,6 +8,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QJsonDocument>
@@ -37,6 +38,8 @@ static int g_total = 0;
 
 static QString g_qtLogPath;
 QString Logger::userLogsFilePath() { return g_qtLogPath; }
+QString Logger::serviceLogsFilePath() { return g_qtLogPath + QStringLiteral(".svc"); }
+bool Logger::setServiceLogsEnabled(bool) { return true; }
 bool Logger::init(bool) { return true; }
 void Logger::deInit() {}
 
@@ -73,6 +76,8 @@ public:
                 got.append({head, buf->mid(he + 4, len)});
                 buf->remove(0, he + 4 + len);
                 const int code = codes.isEmpty() ? 201 : codes.takeFirst();
+                if (code < 0)
+                    return; // «зависший» сервер: запрос принят, ответа нет
                 const QByteArray body = "{\"id\":\"1\",\"accepted\":1,\"dropped\":0}";
                 s->write("HTTP/1.1 " + QByteArray::number(code) + " X\r\nContent-Type: application/json\r\n"
                          "Content-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body);
@@ -255,6 +260,70 @@ int main(int argc, char **argv)
     server.got.clear();
     up.flush(QStringLiteral("timer"));
     CHECK(!up.sending() && server.got.isEmpty(), "no upload while off");
+
+    // ── v2: очередь досылок, событие journal_upload, обрыв застрявшего запроса ──
+    TribeJournal::setActive(true, false);
+    {
+        int finished = 0, idle = 0;
+        auto c1 = QObject::connect(&up, &TribeJournalUploader::flushFinished, [&](bool) { ++finished; });
+        auto c2 = QObject::connect(&up, &TribeJournalUploader::idle, [&]() { ++idle; });
+        TribeJournal::append(QStringLiteral("ring"), {{QStringLiteral("msg"), QStringLiteral("q1")}});
+        server.got.clear();
+        QEventLoop loop;
+        QObject::connect(&up, &TribeJournalUploader::idle, &loop, &QEventLoop::quit);
+        QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+        up.flush(QStringLiteral("first"));
+        up.flush(QStringLiteral("second")); // во время первой — в очередь
+        loop.exec();
+        CHECK(finished == 2, "queued flush runs after the first one");
+        CHECK(idle == 1, "idle fires once, only when the queue is empty");
+        QObject::disconnect(c1);
+        QObject::disconnect(c2);
+    }
+    {
+        // Результат каждой отправки — событием в журнале (уходит следующей пачкой).
+        server.got.clear();
+        flushAndWait(up, QStringLiteral("timer"));
+        bool sawUpload = false;
+        for (const Received &r : server.got)
+            for (const QJsonObject &o : events(r))
+                if (o.value(QStringLiteral("ev")).toString() == QLatin1String("journal_upload")) {
+                    sawUpload = o.value(QStringLiteral("code")).toInt() == 201
+                                && o.contains(QStringLiteral("ms")) && o.contains(QStringLiteral("bytes"));
+                }
+        CHECK(sawUpload, "journal_upload event with code/ms/bytes");
+    }
+    {
+        // Запрос, застрявший (например, в заморозке iOS), обрывается при выходе на экран.
+        TribeJournal::append(QStringLiteral("ring"), {{QStringLiteral("msg"), QStringLiteral("stuck")}});
+        server.codes = {-1};
+        server.got.clear();
+        up.flush(QStringLiteral("background"));
+        CHECK(up.sending(), "request in flight on a hung server");
+        QElapsedTimer waitClock;
+        waitClock.start();
+        while (server.got.isEmpty() && waitClock.elapsed() < 3000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50); // запрос дошёл и завис
+        CHECK(!up.kickIfStale(60000), "fresh request is not kicked");
+        QEventLoop loop;
+        bool ok = true;
+        auto c = QObject::connect(&up, &TribeJournalUploader::flushFinished, &loop, [&](bool r) {
+            ok = r;
+            loop.quit();
+        });
+        QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+        CHECK(up.kickIfStale(0), "stale request is kicked");
+        loop.exec();
+        QObject::disconnect(c);
+        CHECK(!ok && !up.sending(), "kicked flush finishes as failed and frees the queue");
+        server.got.clear();
+        CHECK(flushAndWait(up, QStringLiteral("foreground")), "next flush goes through");
+        bool resent = false;
+        for (const Received &r : server.got)
+            for (const QJsonObject &o : events(r))
+                resent |= o.value(QStringLiteral("msg")).toString() == QLatin1String("stuck");
+        CHECK(resent, "events of the kicked batch are resent");
+    }
 
     QSettings().clear();
     std::printf("journal_upload_check: %d/%d passed\n", g_total - g_failed, g_total);
