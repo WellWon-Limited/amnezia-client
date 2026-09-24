@@ -62,12 +62,12 @@
         <location filename="../../ui/qml/Tribe/Pages/PageAccountTribe.qml" line="+134"/>
         <location line="+7"/>
         <location line="+257"/>
-        <location line="+918"/>
+        <location line="+934"/>
         <source>Движок недоступен — обновите приложение</source>
         <translation>Engine unavailable — update the app</translation>
     </message>
     <message>
-        <location line="-1168"/>
+        <location line="-1184"/>
         <location line="+12"/>
         <location line="+20"/>
         <source>Проверяем…</source>
@@ -102,12 +102,12 @@
     </message>
     <message>
         <location line="-276"/>
-        <location line="+891"/>
+        <location line="+907"/>
         <source>Устройство</source>
         <translation>Device</translation>
     </message>
     <message>
-        <location line="-613"/>
+        <location line="-629"/>
         <source>Пробный</source>
         <translation>Trial</translation>
     </message>
@@ -262,7 +262,7 @@
         <translation>Lost your device? Message support from the new device and mention your payment — amount, date and method. We will transfer your access manually.</translation>
     </message>
     <message>
-        <location line="+158"/>
+        <location line="+174"/>
         <source>Выберите устройство, которое нужно отключить, чтобы активировать код здесь.</source>
         <translation>Choose the device to disconnect so you can activate the code here.</translation>
     </message>
@@ -282,7 +282,7 @@
         <translation>Point the camera at a transfer or activation-code QR and hold for a couple of seconds.</translation>
     </message>
     <message>
-        <location line="-842"/>
+        <location line="-858"/>
         <source>Создайте одноразовую ссылку и откройте её на другом устройстве. Текущее устройство отключится автоматически.</source>
         <translation>Create a one-time link and open it on another device. This device will be disconnected automatically.</translation>
     </message>
@@ -329,12 +329,12 @@
     </message>
     <message>
         <location line="+26"/>
-        <location line="+450"/>
+        <location line="+466"/>
         <source>Отключить</source>
         <translation>Disconnect</translation>
     </message>
     <message>
-        <location line="-446"/>
+        <location line="-462"/>
         <source>устройство</source>
         <translation>device</translation>
     </message>
@@ -374,7 +374,12 @@
         <translation>Terms of Use</translation>
     </message>
     <message>
-        <location line="+39"/>
+        <location line="+25"/>
+        <source>ДИАГНОСТИКА</source>
+        <translation>DIAGNOSTICS</translation>
+    </message>
+    <message>
+        <location line="+30"/>
         <source>Панель администратора</source>
         <translation>Admin Panel</translation>
     </message>
@@ -745,7 +750,7 @@
         <location line="+0"/>
         <location line="+1"/>
         <location line="+1"/>
-        <location line="+170"/>
+        <location line="+176"/>
         <location line="+1"/>
         <location line="+5"/>
         <location line="+1"/>
@@ -758,7 +763,7 @@
         <translation> ms</translation>
     </message>
     <message>
-        <location line="-318"/>
+        <location line="-324"/>
         <source>Отключение (медиана)</source>
         <translation>Disconnection (median)</translation>
     </message>
@@ -778,7 +783,7 @@
         <translation>Save connect report to file</translation>
     </message>
     <message>
-        <location line="+28"/>
+        <location line="+34"/>
         <source>Split-DNS</source>
         <translation>Split-DNS</translation>
     </message>
@@ -1991,6 +1996,29 @@ You can attach a photo or video.</translation>
     </message>
 </context>
 <context>
+    <name>TribeJournalCard</name>
+    <message>
+        <location filename="../../ui/qml/Tribe/components/TribeJournalCard.qml" line="+34"/>
+        <source>Журнал тестирования</source>
+        <translation>Test log</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Включён администратором. Приложение пишет технический журнал и само отправляет его разработчикам.</source>
+        <translation>Enabled by an administrator. The app keeps a technical log and sends it to the developers automatically.</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Весь день пишет технический журнал приложения и туннеля и сам отправляет его разработчикам. Без адресов сайтов и содержимого трафика.</source>
+        <translation>Keeps a technical log of the app and the tunnel all day and sends it to the developers automatically. No website addresses or traffic content.</translation>
+    </message>
+    <message>
+        <location line="+32"/>
+        <source>Отправить накопленное</source>
+        <translation>Send collected log</translation>
+    </message>
+</context>
+<context>
     <name>TribeResultSheet</name>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeResultSheet.qml" line="+110"/>
@@ -2271,7 +2299,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2341"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2605"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -2371,7 +2399,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-1973"/>
+        <location line="-2123"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation type="unfinished"></translation>
     </message>
@@ -2401,7 +2429,12 @@ You can attach a photo or video.</translation>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+549"/>
+        <location line="+341"/>
+        <source>Текущий сервер</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+239"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation type="unfinished"></translation>
     </message>
@@ -2411,7 +2444,22 @@ You can attach a photo or video.</translation>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location line="+1151"/>
+        <location line="+163"/>
+        <source>Отправляем…</source>
+        <translation>Sending…</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Пишется, ещё не отправлялся</source>
+        <translation>Recording, not sent yet</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Пишется, отправлено в %1</source>
+        <translation>Recording, sent at %1</translation>
+    </message>
+    <message>
+        <location line="+1099"/>
         <source>Этот отчёт уже доставлен</source>
         <translation type="unfinished"></translation>
     </message>
@@ -2502,7 +2550,7 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+428"/>
+        <location line="+431"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation type="unfinished"></translation>
     </message>
@@ -2655,7 +2703,7 @@ You can attach a photo or video.</translation>
         <translation>Could not disconnect the device (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+583"/>
+        <location line="+592"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>
@@ -2749,6 +2797,31 @@ You can attach a photo or video.</translation>
         <location line="+8"/>
         <source>Не удалось передать установку процессу перезапуска</source>
         <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>avpn::TribeJournalUploader</name>
+    <message>
+        <location filename="../../core/serviceEngine/TribeJournal.cpp" line="+240"/>
+        <source>Нет авторизации устройства</source>
+        <translation>Device is not authorized</translation>
+    </message>
+    <message>
+        <location line="+33"/>
+        <location line="+46"/>
+        <source>Нет связи с сервером</source>
+        <translation>No connection to the server</translation>
+    </message>
+    <message>
+        <location line="-46"/>
+        <location line="+46"/>
+        <source>Сервер ответил %1</source>
+        <translation>Server responded %1</translation>
+    </message>
+    <message>
+        <location line="-3"/>
+        <source>Сервер отклонил часть журнала (%1)</source>
+        <translation>Server rejected part of the log (%1)</translation>
     </message>
 </context>
 <context>
