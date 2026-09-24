@@ -1029,8 +1029,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_nam, [this]() { return m_baseUrl; }, [this]() { return authToken(); }, this);
     connect(m_journal, &avpn::TribeJournalUploader::statusChanged, this, &AvpnEngineQml::journalChanged);
 #ifdef Q_OS_IOS
-    connect(m_journal, &avpn::TribeJournalUploader::flushFinished, this,
-            [](bool) { TribeJournalIos_endBackground(); });
+    // Фоновое время отпускаем, только когда очередь досылок пуста: досылка из очереди без него
+    // замерзала посреди запроса (разбор журнала 24.09: «Отправляем…» по полчаса).
+    connect(m_journal, &avpn::TribeJournalUploader::idle, this,
+            []() { TribeJournalIos_endBackground(); });
 #endif
     m_journalTimer.setInterval(15 * 60 * 1000);
     connect(&m_journalTimer, &QTimer::timeout, this, [this]() { m_journal->flush(QStringLiteral("timer")); });
@@ -1041,6 +1043,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             if (st == Qt::ApplicationActive) {
                 avpn::TribeJournal::append(QStringLiteral("app_foreground"));
                 m_journalTimer.start();
+                // Запрос, начатый перед заморозкой iOS, мёртв — не ждём его таймаута.
+                m_journal->kickIfStale(15000);
                 m_journal->flush(QStringLiteral("foreground"));
             } else if (st == Qt::ApplicationSuspended || st == Qt::ApplicationHidden) {
                 avpn::TribeJournal::append(QStringLiteral("app_background"),
@@ -1070,8 +1074,13 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             case QNetworkInformation::TransportMedium::Ethernet: medium = QStringLiteral("ethernet"); break;
             default: medium = QStringLiteral("unknown"); break;
             }
+            // Оператор (MCC-MNC) и поколение сотовой — отличить блокировку оператором от сбоя ноды.
             avpn::TribeJournal::append(QStringLiteral("net"),
-                                       {{QStringLiteral("reach"), reach}, {QStringLiteral("medium"), medium}});
+                                       {{QStringLiteral("reach"), reach},
+                                        {QStringLiteral("medium"), medium},
+                                        {QStringLiteral("carrier"), avpn::carrierCode()},
+                                        {QStringLiteral("gen"), avpn::cellularGeneration()},
+                                        {QStringLiteral("metered"), avpn::meteredState()}});
         };
         connect(ni, &QNetworkInformation::reachabilityChanged, this, netEvent);
         connect(ni, &QNetworkInformation::transportMediumChanged, this, netEvent);
@@ -1103,6 +1112,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                       {QStringLiteral("path"), QLatin1Char('/') + parts.join(QLatin1Char('/'))},
                       {QStringLiteral("host"), r->url().host()},
                       {QStringLiteral("code"), r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()}};
+        // Длительность — у запросов, заведённых через armTimeout (метка старта на reply).
+        const QVariant t0 = r->property("avpn_t0");
+        if (t0.isValid())
+            f.insert(QStringLiteral("ms"), QDateTime::currentMSecsSinceEpoch() - t0.toLongLong());
         if (r->error() != QNetworkReply::NoError)
             f.insert(QStringLiteral("net_error"), int(r->error()));
         avpn::TribeJournal::append(QStringLiteral("http"), f);
@@ -1942,6 +1955,9 @@ void AvpnEngineQml::probeNodeRtt()
         targets, 1500,
         [this, epoch](const QString &nodeId, int rttMs) {
             if (epoch != m_rttEpoch || !m_rttInFlight) return;
+            // Журнал тестирования: каждый ICMP-замер (off-tunnel) — по нему выбирается нода.
+            avpn::TribeJournal::append(QStringLiteral("rtt"),
+                                       {{QStringLiteral("node"), nodeId}, {QStringLiteral("ms"), rttMs}});
             mergeRttSample(m_nodeRtt, nodeId, rttMs);
             // AVPN: авто-выбор «быстрейший» берёт RTT отсюда (pickByMeasuredRtt); merge — остальные
             // ноды кэша сохраняются, «нет ответа» не затирает свежий прошлый замер (K5/B9).
@@ -2237,6 +2253,11 @@ void AvpnEngineQml::syncJournal()
                                    {{QStringLiteral("forced"), journalForced()},
                                     {QStringLiteral("testflight"), avpn::TribeJournal::isTestFlight()},
                                     {QStringLiteral("build"), QCoreApplication::applicationVersion()},
+                                    {QStringLiteral("platform"), QSysInfo::productType()},
+                                    {QStringLiteral("os"), QSysInfo::productVersion()},
+                                    {QStringLiteral("device"), avpn::deviceMarketingName()},
+                                    {QStringLiteral("carrier"), avpn::carrierCode()},
+                                    {QStringLiteral("gen"), avpn::cellularGeneration()},
                                     {QStringLiteral("tunnel"), m_journalLastState}});
         m_journalTimer.start();
         QTimer::singleShot(0, this, [this]() { m_journal->flush(QStringLiteral("enabled")); });
@@ -7662,6 +7683,12 @@ void AvpnEngineQml::docStageDone(const doctor::StageResult &r)
 {
     m_docGuard.stop();
     m_docStages.append(r);
+    // Журнал тестирования: стадия Доктора с сырыми фактами (метод, цели, RTT, вердикт).
+    avpn::TribeJournal::append(QStringLiteral("doctor_stage"),
+                               {{QStringLiteral("id"), r.id},
+                                {QStringLiteral("status"), r.status},
+                                {QStringLiteral("note"), r.note},
+                                {QStringLiteral("data"), r.data}});
     emit doctorChanged();
     const DoctorPhase donePh = m_docPhase;
     QTimer::singleShot(0, this, [this, e = m_docEpoch, donePh] {
@@ -8160,6 +8187,7 @@ void AvpnEngineQml::docAltRecord(bool probe2)
             d.insert(QStringLiteral("ep_icmp_big"), m_docAltEpBig == 1);
     }
     d.insert(QStringLiteral("verdict"), verdict);
+    avpn::TribeJournal::append(QStringLiteral("doctor_alt"), QJsonObject::fromVariantMap(d));
     m_docAltDetails.append(d);
     m_docAltOks.append(verdict >= 2); // РАБОЧАЯ только если стабильна (обе пробы)
     docAltNext();
@@ -8188,6 +8216,11 @@ void AvpnEngineQml::docFinish()
     }
     m_docSummary = m_docReport.value(QStringLiteral("summary")).toString();
     m_docHasProblem = doctor::hasProblem(m_docStages);
+    avpn::TribeJournal::append(QStringLiteral("doctor_report"),
+                               {{QStringLiteral("mode"), m_docFull ? QStringLiteral("full") : QStringLiteral("quick")},
+                                {QStringLiteral("has_problem"), m_docHasProblem},
+                                {QStringLiteral("summary"), m_docSummary},
+                                {QStringLiteral("report"), m_docReport}});
     // Анонимный отчёт на control plane ВСЕГДА (наш анализ /v1/bench/report — все прогоны,
     // и удачные, и проблемные, для улучшения пула). В ТРЕД поддержки шлёт QML — и ТОЛЬКО
     // при проблеме (нет сбоев ⇒ не дёргаем поддержку и не пишем «ожидайте ответа»).

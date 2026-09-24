@@ -93,6 +93,7 @@ extension PacketTunnelProvider {
                 guard let adapterError else {
                     let interfaceName = adapter.interfaceName ?? "unknown"
                     wg_log(.info, message: "Tunnel interface is \(interfaceName)")
+                    self.startTribeStatsTimer()
                     completionHandler(nil)
                     return
                 }
@@ -269,6 +270,7 @@ extension PacketTunnelProvider {
 
     func stopWireguard(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         wg_log(.info, message: "Stopping tunnel: reason: \(reason.amneziaDescription)")
+        stopTribeStatsTimer()
 
         guard let adapter = wgAdapter else {
             ErrorNotifier.removeLastErrorFile()
@@ -290,6 +292,54 @@ extension PacketTunnelProvider {
             // sufficient quantities of users.
             exit(0)
 #endif
+        }
+    }
+}
+
+// MARK: - AVPN (журнал тестирования v2): статистика туннеля в ne.log
+
+extension PacketTunnelProvider {
+    /// Раз в 10 с, пока включён файловый лог: байты туда/обратно, возраст последнего рукопожатия,
+    /// аплинк. В фоне приложение заморожено — эта строка единственный взгляд изнутри туннеля.
+    func startTribeStatsTimer() {
+        tribeStatsQueue.async { [weak self] in
+            guard let self else { return }
+            self.tribeStatsTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.tribeStatsQueue)
+            timer.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(2))
+            timer.setEventHandler { [weak self] in self?.logTribeStats() }
+            self.tribeStatsTimer = timer
+            timer.resume()
+        }
+    }
+
+    func stopTribeStatsTimer() {
+        tribeStatsQueue.async { [weak self] in
+            self?.tribeStatsTimer?.cancel()
+            self?.tribeStatsTimer = nil
+        }
+    }
+
+    private func logTribeStats() {
+        guard Log.isLoggingEnabled, let adapter = wgAdapter else { return }
+        adapter.getRuntimeConfiguration { [weak self] settings in
+            guard let settings else { return }
+            var rx: UInt64 = 0
+            var tx: UInt64 = 0
+            var handshake: UInt64 = 0
+            for line in settings.split(separator: "\n") {
+                if line.hasPrefix("rx_bytes=") {
+                    rx += UInt64(line.dropFirst("rx_bytes=".count)) ?? 0
+                } else if line.hasPrefix("tx_bytes=") {
+                    tx += UInt64(line.dropFirst("tx_bytes=".count)) ?? 0
+                } else if line.hasPrefix("last_handshake_time_sec=") {
+                    handshake = max(handshake, UInt64(line.dropFirst("last_handshake_time_sec=".count)) ?? 0)
+                }
+            }
+            let now = UInt64(Date().timeIntervalSince1970)
+            let age = handshake > 0 && now >= handshake ? "\(now - handshake)s" : "never"
+            let uplink = self?.tribeUplinkDescription() ?? "?"
+            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink)")
         }
     }
 }

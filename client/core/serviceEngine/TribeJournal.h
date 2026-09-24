@@ -13,12 +13,15 @@
 #include "JournalPolicy.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <functional>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 namespace avpn {
 
@@ -52,6 +55,10 @@ public:
     // выполняется сразу после текущей.
     void flush(const QString &reason, const QString &snapshot = QString());
     bool sending() const { return m_inFlight; }
+    // Оборвать запрос, висящий дольше maxAgeMs (iOS заморозила приложение посреди отправки —
+    // после выхода на экран сокет мёртв, а таймаут Qt отсчитывается заново). true — оборван;
+    // досылка завершится как неудачная и отпустит очередь.
+    bool kickIfStale(int maxAgeMs);
     QDateTime lastSentAt() const { return m_lastSentAt; }
     QString lastError() const { return m_lastError; }
     qint64 pendingBytes() const;
@@ -59,10 +66,13 @@ public:
 signals:
     void statusChanged();
     void flushFinished(bool ok);
+    // Очередь досылок пуста (после последней отправки или если досылка не стартовала) —
+    // момент, когда можно отпускать фоновое время iOS.
+    void idle();
 
 private:
     void sendNext();
-    void post(const QByteArray &jsonl, const QString &srcTag, std::function<void(int)> done);
+    void post(const QByteArray &jsonl, const QString &srcTag, int events, std::function<void(int)> done);
     void finish(bool ok);
     void maintain();
 
@@ -75,6 +85,9 @@ private:
     bool m_flushAgain = false;
     QString m_againReason;
     QString m_pendingSnapshot;
+    QPointer<QNetworkReply> m_reply;
+    QList<QJsonObject> m_uploadLog; // результаты отправок — в журнал по окончании досылки
+    QElapsedTimer m_replyClock;
     QDateTime m_lastSentAt;
     QString m_lastError;
 };

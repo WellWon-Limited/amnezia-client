@@ -14,6 +14,7 @@
 
 #include <QEventLoop>
 #include <QNetworkReply>
+#include <QDateTime>
 #include <QTimer>
 
 namespace avpn {
@@ -58,6 +59,8 @@ inline void armTimeout(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
 {
     if (!reply)
         return;
+    // Журнал тестирования: метка старта — длительность запроса в событии http.
+    reply->setProperty("avpn_t0", QDateTime::currentMSecsSinceEpoch());
     QTimer *t = new QTimer(reply);
     t->setSingleShot(true);
     QObject::connect(t, &QTimer::timeout, reply, [reply]() {
