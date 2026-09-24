@@ -94,6 +94,8 @@ list(APPEND HEADERS
     ${AVPN_SE}/CrashGuard.h
     ${AVPN_SE}/TribeNetInfo.h
     ${AVPN_SE}/RuSplitSentinel.h
+    ${AVPN_SE}/JournalPolicy.h
+    ${AVPN_SE}/TribeJournal.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -127,6 +129,7 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/CrashGuard.cpp
     ${AVPN_SE}/TribeNetInfo.cpp
     ${AVPN_SE}/RuSplitSentinel.cpp
+    ${AVPN_SE}/TribeJournal.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
@@ -177,6 +180,10 @@ if(IOS)
     list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.h)
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/AvpnBackgroundGuard.mm)
+    # AVPN (журнал тестирования, 2026-09-23): App Group (ne.log), флаг лога NE, фоновое время досылки.
+    list(APPEND HEADERS ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeJournalIos.h)
+    list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeJournalIos.mm)
+    list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeJournalIos.mm)
     # AVPN (haptics): тактильный отклик — UIFeedbackGenerator (UIKit уже линкуется).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeHapticsIos.mm)

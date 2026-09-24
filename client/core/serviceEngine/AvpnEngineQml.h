@@ -11,6 +11,7 @@
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
 #include "RestartGuard.h"    // AVPN (разбор 2026-09-23): фоновое время iOS на перезапуск туннеля
+#include "TribeJournal.h"    // AVPN (журнал тестирования, 2026-09-23): запись + досылка на /v1/diag/journal
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
 
@@ -125,6 +126,15 @@ class AvpnEngineQml : public QObject {
     // AVPN (admin-гейт): серверный флаг devices.is_admin из /v1/account — «Панель администратора»
     // видна ТОЛЬКО помеченным устройствам. Оффлайн/401/нет ключа → m_account пуста → false.
     Q_PROPERTY(bool isAdminDevice READ isAdminDevice NOTIFY accountChanged)
+    // AVPN (журнал тестирования, Tribe-Backend docs/specs/2026-09-23-tester-journal-design.md):
+    // переключатель виден TestFlight/админ-устройствам или при удалённом включении из /panel
+    // (/v1/account diag_journal_forced). Решения — JournalPolicy.h.
+    Q_PROPERTY(bool journalVisible READ journalVisible NOTIFY journalChanged)
+    Q_PROPERTY(bool journalUserOn READ journalUserOn NOTIFY journalChanged)
+    Q_PROPERTY(bool journalForced READ journalForced NOTIFY journalChanged)
+    Q_PROPERTY(bool journalActive READ journalActive NOTIFY journalChanged)
+    Q_PROPERTY(bool journalSending READ journalSending NOTIFY journalChanged)
+    Q_PROPERTY(QString journalStatus READ journalStatus NOTIFY journalChanged)
     // AVPN (i18n): язык приложения "ru"/"en"/"es" для переключателя в Tribe-настройках.
     // Хранение/цепочка ретрансляции — апстримные (SecureAppSettingsRepository::setAppLanguage →
     // appLanguageChanged → LanguageUiController → CoreController::updateTranslator → retranslate).
@@ -340,6 +350,16 @@ public:
     QVariantMap account() const { return m_account; }
     // AVPN (admin-гейт): пустая мапа / отсутствие ключа → QVariant().toBool() == false.
     bool isAdminDevice() const { return m_account.value(QStringLiteral("is_admin")).toBool(); }
+    // AVPN (журнал тестирования)
+    bool journalVisible() const;
+    bool journalUserOn() const;
+    bool journalForced() const;
+    bool journalActive() const { return avpn::TribeJournal::active(); }
+    bool journalSending() const { return m_journal && m_journal->sending(); }
+    QString journalStatus() const;
+    Q_INVOKABLE void setJournalUserOn(bool on);
+    // «Отправить накопленное»: всё новое + снимок диагностики (buildDiagReport).
+    Q_INVOKABLE void sendJournalNow();
 
     // AVPN (i18n): текущий язык ("ru"/"en"/"es" — префикс локали) и смена из QML.
     QString appLang() const;
@@ -784,6 +804,7 @@ signals:
     // AVPN: async-ответ /v1/devices и /v1/account готов (property devices/account обновлены).
     void devicesChanged();
     void accountChanged();
+    void journalChanged(); // AVPN (журнал тестирования)
     void whitelistModeChanged();  // AVPN (белые списки): вход/выход РКН-режима whitelist
     void whitelistAckedChanged(); // AVPN (белые списки): «Понятно» нажато/сброшено
     void appLangChanged();   // AVPN (i18n): сменили язык через setAppLang
@@ -871,6 +892,8 @@ private:
     // AVPN (разбор 2026-09-23): держать фоновое время iOS, пока намерение ON, а туннель не устоялся
     // (перезапуск «стоп → старт», начатый приложением, иначе замерзал между стопом и стартом).
     void syncRestartGuard();
+    // AVPN (журнал тестирования): включить/выключить по видимости/выбору/флагу сервера.
+    void syncJournal();
     void adoptNativeIdentity();
     // AVPN (фикс-волна 2026-09-22, A1/A4/A5/K3) — см. AvpnEngineQml.cpp.
     bool tryAdoptObservedTunnel(const char *why);
@@ -1060,6 +1083,9 @@ private:
     // m_latch.awaitingStopConfirm (МЫ просили стоп) и m_latch.needStatusBeforeStart (после Error на
     // iOS/MACOS_NE; адопт и health не блокирует). См. DebugSnapshot.h::TeardownLatch.
     TeardownLatch               m_latch;
+    avpn::TribeJournalUploader *m_journal = nullptr;     // журнал тестирования: досылка
+    QTimer                      m_journalTimer;          // журнал тестирования: 15 мин, пока на экране
+    QString                     m_journalLastState;      // журнал тестирования: прошлое состояние для перехода
     avpn::RestartGuardLatch     m_restartGuard;          // разбор 2026-09-23: удержание фонового времени iOS
     SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)
     int                         m_statusRequestAttempts = 0; // запросы статуса в текущем ожидании
