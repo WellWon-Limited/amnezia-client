@@ -26,6 +26,7 @@
 #ifdef Q_OS_IOS
 #include "platforms/ios/AvpnDiagnostics.h" // AVPN backend-first (2026-07-10): crash-diag следует за edge-walk базой
 #include "platforms/ios/AvpnBackgroundGuard.h" // AVPN (разбор 2026-09-23): фоновое время на перезапуск туннеля
+#include "platforms/ios/TribeJournalIos.h" // AVPN (журнал тестирования): фоновое время на досылку журнала
 #endif
 #include "BenchRunner.h"  // AVPN (панель администратора): in-app бенч соединения
 #include "BootstrapRetry.h" // AVPN: политика ретраев тихого bootstrap (бэкофф → вечный медленный цикл)
@@ -94,6 +95,7 @@ extern "C" void AvpnDockBadge_install();
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QRegularExpression> // AVPN (журнал тестирования): путь запроса без идентификаторов
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QUrlQuery> // AVPN (P-ANN): query-параметры GET /v1/announcements
@@ -1018,6 +1020,105 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     });
         }
     }
+
+    // AVPN (журнал тестирования, Tribe-Backend docs/specs/2026-09-23-tester-journal-design.md):
+    // отправляет только приложение (туннель лишь пишет ne.log по флагу App Group). Досылка: при
+    // включении, выходе на экран, раз в 15 минут на экране, при уходе в фон (фоновое время iOS) и
+    // кнопкой «Отправить накопленное». Все события — no-op, пока журнал выключен.
+    m_journal = new avpn::TribeJournalUploader(
+        m_nam, [this]() { return m_baseUrl; }, [this]() { return authToken(); }, this);
+    connect(m_journal, &avpn::TribeJournalUploader::statusChanged, this, &AvpnEngineQml::journalChanged);
+#ifdef Q_OS_IOS
+    connect(m_journal, &avpn::TribeJournalUploader::flushFinished, this,
+            [](bool) { TribeJournalIos_endBackground(); });
+#endif
+    m_journalTimer.setInterval(15 * 60 * 1000);
+    connect(&m_journalTimer, &QTimer::timeout, this, [this]() { m_journal->flush(QStringLiteral("timer")); });
+    if (auto *guiApp = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        connect(guiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState st) {
+            if (!avpn::TribeJournal::active())
+                return;
+            if (st == Qt::ApplicationActive) {
+                avpn::TribeJournal::append(QStringLiteral("app_foreground"));
+                m_journalTimer.start();
+                m_journal->flush(QStringLiteral("foreground"));
+            } else if (st == Qt::ApplicationSuspended || st == Qt::ApplicationHidden) {
+                avpn::TribeJournal::append(QStringLiteral("app_background"),
+                                           {{QStringLiteral("tunnel"), state()}});
+                m_journalTimer.stop();
+#ifdef Q_OS_IOS
+                TribeJournalIos_beginBackground(
+                    []() { avpn::TribeJournal::append(QStringLiteral("journal_bg_expired")); });
+#endif
+                m_journal->flush(QStringLiteral("background"));
+            }
+        });
+    }
+    if (auto *ni = QNetworkInformation::instance()) {
+        auto netEvent = [ni]() {
+            QString reach, medium;
+            switch (ni->reachability()) {
+            case QNetworkInformation::Reachability::Online: reach = QStringLiteral("online"); break;
+            case QNetworkInformation::Reachability::Disconnected: reach = QStringLiteral("disconnected"); break;
+            case QNetworkInformation::Reachability::Local: reach = QStringLiteral("local"); break;
+            case QNetworkInformation::Reachability::Site: reach = QStringLiteral("site"); break;
+            default: reach = QStringLiteral("unknown"); break;
+            }
+            switch (ni->transportMedium()) {
+            case QNetworkInformation::TransportMedium::WiFi: medium = QStringLiteral("wifi"); break;
+            case QNetworkInformation::TransportMedium::Cellular: medium = QStringLiteral("cellular"); break;
+            case QNetworkInformation::TransportMedium::Ethernet: medium = QStringLiteral("ethernet"); break;
+            default: medium = QStringLiteral("unknown"); break;
+            }
+            avpn::TribeJournal::append(QStringLiteral("net"),
+                                       {{QStringLiteral("reach"), reach}, {QStringLiteral("medium"), medium}});
+        };
+        connect(ni, &QNetworkInformation::reachabilityChanged, this, netEvent);
+        connect(ni, &QNetworkInformation::transportMediumChanged, this, netEvent);
+    }
+    // Ответы control plane: метод, путь без идентификаторов, код. Только пути API (/v1, /admin) —
+    // запросы к сторонним хостам (бенч, пробы) сюда не попадают; саму досылку журнала не пишем.
+    connect(m_nam, &QNetworkAccessManager::finished, this, [](QNetworkReply *r) {
+        if (!avpn::TribeJournal::active())
+            return;
+        const QString path = r->url().path();
+        if (!(path.startsWith(QLatin1String("/v1/")) || path.startsWith(QLatin1String("/admin/")))
+            || path == QLatin1String("/v1/diag/journal"))
+            return;
+        QStringList parts = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        static const QRegularExpression word(QStringLiteral("^([a-z_\\-]+|v[0-9]+)$"));
+        for (QString &p : parts) {
+            if (!word.match(p).hasMatch())
+                p = QStringLiteral(":id");
+        }
+        QString op;
+        switch (r->operation()) {
+        case QNetworkAccessManager::GetOperation: op = QStringLiteral("GET"); break;
+        case QNetworkAccessManager::PostOperation: op = QStringLiteral("POST"); break;
+        case QNetworkAccessManager::PutOperation: op = QStringLiteral("PUT"); break;
+        case QNetworkAccessManager::DeleteOperation: op = QStringLiteral("DELETE"); break;
+        default: op = QStringLiteral("OTHER"); break;
+        }
+        QJsonObject f{{QStringLiteral("method"), op},
+                      {QStringLiteral("path"), QLatin1Char('/') + parts.join(QLatin1Char('/'))},
+                      {QStringLiteral("host"), r->url().host()},
+                      {QStringLiteral("code"), r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()}};
+        if (r->error() != QNetworkReply::NoError)
+            f.insert(QStringLiteral("net_error"), int(r->error()));
+        avpn::TribeJournal::append(QStringLiteral("http"), f);
+    });
+    // Переходы туннеля (все переходы автомата заканчиваются changed()).
+    connect(this, &AvpnEngineQml::changed, this, [this]() {
+        if (!avpn::TribeJournal::active())
+            return;
+        const QString st = state();
+        if (st == m_journalLastState)
+            return;
+        avpn::TribeJournal::append(QStringLiteral("tunnel"),
+                                   {{QStringLiteral("from"), m_journalLastState}, {QStringLiteral("to"), st}});
+        m_journalLastState = st;
+    });
+    syncJournal();
 
     // AVPN (белые списки, спека 2026-07-12): детектор дифф-проб «РКН-whitelist на сотовой».
     // Только мобилки (PLATFORM-SCOPING): на десктопе сотовая — экзотика, гейт снимем позже.
@@ -2048,6 +2149,8 @@ void AvpnEngineQml::reliabilityEvent(const QString &event)
                 .arg(QCoreApplication::applicationVersion()),
         event.left(256), 128);
     QSettings().setValue(QStringLiteral("avpn/reliabilityLog"), m_reliabilityRing.lines);
+    // AVPN (журнал тестирования): кольцо надёжности целиком — в журнал (no-op, пока выключен).
+    avpn::TribeJournal::append(QStringLiteral("ring"), {{QStringLiteral("msg"), event.left(256)}});
 }
 
 // AVPN (разбор 2026-09-23): см. RestartGuard.h. Зовётся на каждый changed() (все переходы автомата
@@ -2088,6 +2191,83 @@ void AvpnEngineQml::syncRestartGuard()
         break;
     }
 #endif
+}
+
+// ── AVPN (журнал тестирования, Tribe-Backend docs/specs/2026-09-23-tester-journal-design.md) ──
+// Флаги сервера (is_admin, diag_journal_forced) берутся из последнего ответа /v1/account, а до
+// него — из кэша: рестарт оффлайн не должен гасить журнал (выкл→вкл сдвигает смещения в конец).
+static bool journalCachedFlag(const QVariantMap &account, const QString &key, const QString &cacheKey)
+{
+    if (account.contains(key))
+        return account.value(key).toBool();
+    return QSettings().value(cacheKey, false).toBool();
+}
+
+bool AvpnEngineQml::journalForced() const
+{
+    return journalCachedFlag(m_account, QStringLiteral("diag_journal_forced"),
+                             QStringLiteral("avpn/journal/forced"));
+}
+
+bool AvpnEngineQml::journalVisible() const
+{
+    const bool admin = journalCachedFlag(m_account, QStringLiteral("is_admin"), QStringLiteral("avpn/journal/admin"));
+    return avpn::journal::journalVisible(avpn::TribeJournal::isTestFlight(), admin, journalForced());
+}
+
+bool AvpnEngineQml::journalUserOn() const
+{
+    return QSettings().value(QStringLiteral("avpn/journal/userOn"), false).toBool();
+}
+
+void AvpnEngineQml::setJournalUserOn(bool on)
+{
+    QSettings().setValue(QStringLiteral("avpn/journal/userOn"), on);
+    syncJournal();
+}
+
+void AvpnEngineQml::syncJournal()
+{
+    const bool on = avpn::journal::journalEnabled(journalUserOn(), journalForced(), journalVisible());
+    const bool was = avpn::TribeJournal::active();
+    avpn::TribeJournal::setActive(on, m_store && m_store->isSaveLogs());
+    if (on && !was) {
+        m_journalLastState = state();
+        avpn::TribeJournal::append(QStringLiteral("journal_on"),
+                                   {{QStringLiteral("forced"), journalForced()},
+                                    {QStringLiteral("testflight"), avpn::TribeJournal::isTestFlight()},
+                                    {QStringLiteral("build"), QCoreApplication::applicationVersion()},
+                                    {QStringLiteral("tunnel"), m_journalLastState}});
+        m_journalTimer.start();
+        QTimer::singleShot(0, this, [this]() { m_journal->flush(QStringLiteral("enabled")); });
+    } else if (!on && was) {
+        m_journalTimer.stop();
+    }
+    emit journalChanged();
+}
+
+QString AvpnEngineQml::journalStatus() const
+{
+    if (!avpn::TribeJournal::active() || !m_journal)
+        return QString();
+    if (m_journal->sending())
+        return tr("Отправляем…");
+    if (!m_journal->lastError().isEmpty())
+        return m_journal->lastError();
+    const QDateTime at = m_journal->lastSentAt();
+    if (!at.isValid())
+        return tr("Пишется, ещё не отправлялся");
+    const QString when = at.date() == QDate::currentDate() ? at.toString(QStringLiteral("HH:mm"))
+                                                           : at.toString(QStringLiteral("dd.MM HH:mm"));
+    return tr("Пишется, отправлено в %1").arg(when);
+}
+
+void AvpnEngineQml::sendJournalNow()
+{
+    if (!avpn::TribeJournal::active() || !m_journal)
+        return;
+    m_journal->flush(QStringLiteral("manual"), buildDiagReport());
+    emit journalChanged();
 }
 
 // AVPN (фикс-волна 2026-09-22, A1/A4/A5): новые метаданные сессии (runtime-поколение, identity).
@@ -6267,6 +6447,14 @@ void AvpnEngineQml::refreshAccount()
                 // AVPN (admin-гейт): devices.is_admin с бэка. Отсутствие ключа/оффлайн/401 →
                 // пустая мапа → isAdminDevice()==false — панель администратора скрыта.
                 result.insert(QStringLiteral("is_admin"), o.value(QStringLiteral("is_admin")).toBool());
+                // AVPN (журнал тестирования): удалённое включение из /panel. Флаги кэшируются —
+                // до первого ответа после рестарта (или оффлайн) журнал не выключается.
+                result.insert(QStringLiteral("diag_journal_forced"),
+                              o.value(QStringLiteral("diag_journal_forced")).toBool());
+                QSettings cache;
+                cache.setValue(QStringLiteral("avpn/journal/forced"),
+                               result.value(QStringLiteral("diag_journal_forced")));
+                cache.setValue(QStringLiteral("avpn/journal/admin"), result.value(QStringLiteral("is_admin")));
                 // AVPN (короткий ID, канон 2026-07-21): порядковый числовой Account.id —
                 // ЕГО показываем юзеру (шапка чата, карточка «Статус доступа»); длинный
                 // hex account_id — технический (копия/перенос). 0/нет поля = старый бэк →
@@ -6290,6 +6478,7 @@ void AvpnEngineQml::refreshAccount()
         }
         m_account = result;
         emit accountChanged();
+        syncJournal(); // AVPN (журнал тестирования)
         // AVPN (оплата, ДВОЕ ЧАСОВ): числа /v1/account — ЧАСЫ АККАУНТА, а платёж продлевает ЧАСЫ
         // УСТРОЙСТВА (apply_paid → device.expires_at/traffic; account.status/expires не трогает).
         // Прежний merge updateSubscriptionTraffic(/v1/account) ЗАТИРАЛ device-часы шапки аккаунт-

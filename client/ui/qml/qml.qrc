@@ -93,6 +93,7 @@
         <file>Tribe/components/TribeButton.qml</file>
         <file>Tribe/components/TribeCard.qml</file>
         <file>Tribe/components/TribeToggle.qml</file>
+        <file>Tribe/components/TribeJournalCard.qml</file>
         <file>Tribe/components/TribeField.qml</file>
         <file>Tribe/components/TribeBadge.qml</file>
         <file>Tribe/components/TribePill.qml</file>
