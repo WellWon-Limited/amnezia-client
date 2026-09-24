@@ -1,4 +1,5 @@
 import Foundation
+import CxxStdlib // AVPN (Xcode 27): std.string(String) живёт в оверлее CxxStdlib — без импорта инициализатор не находится
 
 public func swiftUpdateLogData(_ qtString: std.string) -> std.string {
   let qtLog = Log(String(describing: qtString))
