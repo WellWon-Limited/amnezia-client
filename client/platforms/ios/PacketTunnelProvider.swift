@@ -59,6 +59,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if wgAdapterStorage === adapter { wgAdapterStorage = nil }
         wgAdapterLock.unlock()
     }
+    // AVPN (журнал тестирования v2): строка статистики туннеля в ne.log раз в 10 с, пока включён
+    // файловый лог (переключатель журнала). Только чтение счётчиков — на коннект не влияет.
+    var tribeStatsTimer: DispatchSourceTimer?
+    let tribeStatsQueue = DispatchQueue(label: Constants.processQueueName + ".tribe-stats")
     var ovpnAdapter: OpenVPNAdapter?
     private lazy var openVPNPacketFlowAdapter = PacketTunnelFlowAdapter(flow: packetFlow)
     private let pathMonitorQueue = DispatchQueue(label: Constants.processQueueName + ".path-monitor")
@@ -538,6 +542,21 @@ extension PacketTunnelProvider {
         default: typeName = "other"
         }
         return "\(typeName):\(iface.name):\(iface.index)"
+    }
+
+    /// AVPN (журнал тестирования v2): текущий аплинк для строки статистики — статус пути и тип
+    /// физического интерфейса (wifi/cellular/wired). Читает потокобезопасный pathMonitor.currentPath.
+    func tribeUplinkDescription() -> String {
+        let path = pathMonitor.currentPath
+        let kind: String
+        switch primaryPhysicalInterface(for: path)?.type {
+        case .wifi: kind = "wifi"
+        case .cellular: kind = "cellular"
+        case .wiredEthernet: kind = "wired"
+        case .none: kind = "none"
+        default: kind = "other"
+        }
+        return "\(path.status)/\(kind)\(path.isExpensive ? "/exp" : "")"
     }
 
     /// Предпочтительный ФИЗИЧЕСКИЙ интерфейс пути (без loopback и виртуальных utun/ipsec/…):
