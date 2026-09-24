@@ -615,6 +615,12 @@ PageType {
                     }
                 }
 
+                // ── журнал тестирования (та же карточка, что в Настройках → «Диагностика») ──
+                TribeJournalCard {
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.space.sm
+                }
+
                 // ── split-DNS форвардер (iOS, эксперимент v1; дизайн SPLIT-DNS-FORWARDER-DESIGN.md) ──
                 TribeCard {
                     Layout.fillWidth: true

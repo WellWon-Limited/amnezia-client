@@ -1041,6 +1041,22 @@ PageType {
             }
         }
 
+        // ── ДИАГНОСТИКА: журнал тестирования ─────────────────────────────────
+        // Виден сборкам TestFlight, админ-устройствам и при удалённом включении из /panel
+        // (Tribe-Backend docs/specs/2026-09-23-tester-journal-design.md). // AVPN
+        Text {
+            visible: root.hasEngine && TribeEngine.journalVisible === true
+            text: qsTr("ДИАГНОСТИКА")
+            color: Theme.color.text3
+            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+            Layout.topMargin: Theme.space.sm
+        }
+        TribeJournalCard {
+            Layout.fillWidth: true
+            visible: root.hasEngine && TribeEngine.journalVisible === true
+        }
+
         // ── ПАНЕЛЬ АДМИНИСТРАТОРА (низ настроек) ────────────────────────────
         // Бенч соединения и тест-инструменты (PageAdminTribe). Видна только устройствам
         // с серверным is_admin (devices.is_admin → GET /v1/account → TribeEngine.isAdminDevice);
