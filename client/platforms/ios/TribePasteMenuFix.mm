@@ -1,120 +1,170 @@
 // TribePasteMenuFix.mm — Tribe VPN (форк Amnezia), iOS
 //
-// Убирает системный промпт iOS 16+ «Разрешить вставку / Не разрешать», который
-// выскакивал при КАЖДОМ фокусе на текстовом поле, если в буфере что-то было.
+// Заслон от системного промпта iOS 16+ «Разрешить вставку / Не разрешать»: содержимое общего
+// буфера обмена читается ТОЛЬКО сразу после того, как пользователь сам нажал «Вставить».
 //
-// Корень (нативный, НЕ QML): Qt в -[QUIView canPerformAction:withSender:] для
-// @selector(paste:) читает [UIPasteboard generalPasteboard].string, чтобы решить,
-// показывать ли пункт «Вставить». В iOS 16+ любое ЧТЕНИЕ содержимого буфера
-// рождает системный secure-paste промпт. Удаление пункта «Вставить» из нашего
-// QML-меню (ContextMenuType.qml) этот нативный зонд не глушит — поэтому промпт и
-// «возвращался» после апгрейда Qt / рефакторинга QML.
+// Корень (найден 2026-09-25 по исходникам Qt 6.11.1): QQuickTextInput — то есть ЛЮБОЙ
+// TextField/TribeField — в canPaste() и q_canPasteChanged() зовёт QMimeData::text() →
+// QIOSMimeData::retrieveData → -[UIPasteboard dataForPasteboardType:]. Это чтение содержимого,
+// а оно в iOS 16+ без жеста пользователя = промпт. q_canPasteChanged висит на
+// QClipboard::dataChanged, а QIOSClipboard шлёт его на UIApplicationDidBecomeActive, если
+// буфер сменился. Итог: скопировал что-то в Safari/на Маке → открыл Tribe → промпт от каждого
+// живого текстового поля. Апстрим Qt починил в qtdeclarative ef692a52e3 (QTBUG-149610, ветки
+// 6.11/6.12; в релизах 6.11.2 и 6.12.0-rc1 фикса ещё нет).
 //
-// Фикс: свизлим canPerformAction:withSender: у приватного Qt-класса QUIView и
-// возвращаем NO для paste-семейства ДО того, как отработает код Qt → буфер не
-// читается → нет промпта, пункт «Вставить» исчезает из нативного callout. Для всех
-// прочих действий (copy/cut/select/selectAll) зовём оригинал Qt — копирование и
-// выделение целы. Explicit textField.paste() из setup-wizard идёт МИМО
-// canPerformAction (прямое чтение QClipboard) и продолжает работать.
+// Почему заслон на границе с iOS, а не правка QML/Qt: прежние фиксы били не туда — убирали
+// canPaste из ContextMenuType.qml (чтение по dataChanged оставалось), свизлили
+// -[QUIView canPerformAction:] (он буфер не читает). Заслону всё равно, какая версия Qt,
+// что вернёт очередное слияние апстрима и какой SDK полезет в буфер.
 //
-// Тот же приём +load-свизла Qt-приватного класса уже применяется в
-// AmneziaSceneDelegateHooks.mm — фикс консистентен с существующим кодом.
+// Как: UIPasteboard — кластер классов, реальный объект — _UIConcretePasteboard*, и геттеры
+// переопределены именно там (свизл на UIPasteboard.class не перехватывает НИЧЕГО — поэтому
+// прежний трассер f11647a8 и «не поймал виновника»). Оборачиваем геттеры СОДЕРЖИМОГО на
+// конкретном классе общего буфера и на базовом. Вне окна вставки они возвращают nil/@[] и
+// буфер не трогают → нет промпта; Qt видит «пусто» → canPaste=false. Метаданные
+// (pasteboardTypes/hasStrings/changeCount) промпта не вызывают — их не трогаем. Именные
+// буферы тоже не трогаем.
 //
-// ДИАГНОСТИКА (2026-07-04): попап «Разрешить вставку» ЖИВ после свизла QUIView — при этом
-// анализ исходников Qt 6.11.1 (qiostextresponder/qiosclipboard/quiview) показал: canPerformAction
-// буфер НЕ читает (решает по выделению), единственное чтение контента = QIOSMimeData::retrieveData
-// (потребитель QClipboard). Явных чтений в коде приложения нет. Чтобы поймать реального виновника
-// на устройстве, ниже — ТРАССЕР: свизлим все промптящие геттеры UIPasteboard и логируем стек вызова
-// ([TRIBE-PB] в unified log → idevicesyslog/Console). Промпт триггерят ТОЛЬКО эти чтения, они редки —
-// лог не шумит; на решение «показывать ли попап» трассер не влияет (оригинал вызывается всегда).
+// Окно вставки: -[QIOSTextInputResponder paste:] (системное меню «Вставить», Cmd+V) открывает
+// его на kPasteGrantSeconds. Окно, а не флаг на время вызова: Qt доставляет Ctrl+V
+// асинхронно (QWindowSystemInterface DefaultDelivery), и буфер читается уже после возврата.
 //
-// build 62: трассер ЗАГЕЙЧЕН под TRIBE_PASTE_TRACE (диагностика не завершена — виновник не пойман,
-// но релизным сборкам свизл 14 геттеров UIPasteboard не нужен). Для следующей охоты за попапом:
-// добавить -DTRIBE_PASTE_TRACE=1 к флагам этого файла в client/cmake/ios.cmake и смотреть [TRIBE-PB].
-// Боевой фикс (свизл QUIView ниже) от флага НЕ зависит и работает всегда.
+// Цена: программная вставка без системного жеста (кнопки «Вставить» апстрим-мастера
+// PageSetupWizard*, в UI Tribe недостижимы) ничего не вставит — вместо промпта.
+//
+// Тест: client/platforms/ios/tests/build_paste_gate.sh (Mac Catalyst, без устройства).
+// Диагностика: -DTRIBE_PASTE_TRACE=1 к флагам этого файла в client/cmake/ios.cmake →
+// [TRIBE-PB] в unified log: каждое чтение общего буфера, решение заслона и стек вызова.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-typedef BOOL (*CanPerformActionIMP)(id, SEL, SEL, id);
-static CanPerformActionIMP g_origCanPerformAction = nullptr;
+#include <atomic>
 
-static BOOL tribe_canPerformAction(id self, SEL _cmd, SEL action, id sender)
+namespace {
+
+constexpr NSTimeInterval kPasteGrantSeconds = 2.0;
+
+std::atomic<NSTimeInterval> g_pasteGrantUntil{0};
+UIPasteboard *g_generalPasteboard = nil; // синглтон общего буфера, живёт весь процесс
+
+NSTimeInterval uptimeSeconds()
 {
-    // Гасим paste-семейство: не даём iOS/Qt прочитать UIPasteboard ради решения
-    // «показывать ли Вставить» → нет secure-paste промпта, нет пункта «Вставить».
-    if (action == @selector(paste:)
-        || action == @selector(pasteAndMatchStyle:)
-        || action == sel_registerName("_promptForReplace:")
-        || action == sel_registerName("pasteAndGo:")
-        || action == sel_registerName("pasteAndSearch:")) {
-        return NO;
-    }
-    if (g_origCanPerformAction) {
-        return g_origCanPerformAction(self, _cmd, action, sender);
-    }
-    return NO;
+    return NSProcessInfo.processInfo.systemUptime;
 }
 
-// ── Трассер промптящих чтений UIPasteboard (только под TRIBE_PASTE_TRACE) ───────────────────
-#if defined(TRIBE_PASTE_TRACE)
-// Логирует селектор + стек (кто прочитал буфер). Кадры 0-1 (сам трассер) пропускаем.
-static void tribeLogPasteboardRead(SEL sel)
+bool contentReadAllowed(id pasteboard, SEL sel)
 {
+    if (pasteboard != g_generalPasteboard) {
+        return true; // именные буферы промпта не вызывают
+    }
+    const bool allowed = uptimeSeconds() < g_pasteGrantUntil.load();
+#if defined(TRIBE_PASTE_TRACE)
     NSArray<NSString *> *syms = [NSThread callStackSymbols];
     NSMutableString *bt = [NSMutableString string];
     const NSUInteger n = MIN((NSUInteger)18, syms.count);
     for (NSUInteger i = 2; i < n; ++i)
         [bt appendFormat:@"\n    %@", syms[i]];
-    NSLog(@"[TRIBE-PB] чтение UIPasteboard -%@ (это триггер secure-paste промпта) — стек:%@",
-          NSStringFromSelector(sel), bt);
+    NSLog(@"[TRIBE-PB] -%@ %@ — стек:%@", NSStringFromSelector(sel),
+          allowed ? @"пропущено (окно вставки)" : @"ЗАБЛОКИРОВАНО (без жеста = был бы промпт)", bt);
+#else
+    (void)sel;
+#endif
+    return allowed;
 }
 
-// Геттеры-свойства без аргументов (string/strings/URL/URLs/image/images/color/colors/items/itemProviders).
-static void tribeSwizzlePbGetter(SEL sel)
+// Метод, объявленный в САМОМ классе (не унаследованный) — иначе обернём чужую реализацию
+// суперкласса или обернём одно и то же дважды.
+Method ownMethod(Class cls, SEL sel)
 {
-    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
-    if (!m)
-        return;
-    typedef id (*GetterIMP)(id, SEL);
-    GetterIMP orig = reinterpret_cast<GetterIMP>(method_getImplementation(m));
-    IMP repl = imp_implementationWithBlock(^id(id pb) {
-        tribeLogPasteboardRead(sel);
-        return orig(pb, sel);
-    });
-    method_setImplementation(m, repl);
+    unsigned count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    Method found = nullptr;
+    for (unsigned i = 0; i < count; ++i) {
+        if (method_getName(methods[i]) == sel) {
+            found = methods[i];
+            break;
+        }
+    }
+    free(methods);
+    return found;
 }
 
-// Методы с 1 объектным аргументом (dataForPasteboardType:, valueForPasteboardType:).
-static void tribeSwizzlePb1Arg(SEL sel)
+// Геттеры без аргументов. nonnull-массивы (items/itemProviders) отдаём пустыми, не nil.
+void gateGetter(Class cls, SEL sel, bool emptyArray)
 {
-    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
+    Method m = ownMethod(cls, sel);
     if (!m)
         return;
-    typedef id (*OneArgIMP)(id, SEL, id);
-    OneArgIMP orig = reinterpret_cast<OneArgIMP>(method_getImplementation(m));
-    IMP repl = imp_implementationWithBlock(^id(id pb, id a1) {
-        tribeLogPasteboardRead(sel);
-        return orig(pb, sel, a1);
-    });
-    method_setImplementation(m, repl);
+    using Getter = id (*)(id, SEL);
+    Getter orig = reinterpret_cast<Getter>(method_getImplementation(m));
+    method_setImplementation(m, imp_implementationWithBlock(^id(id pb) {
+        if (contentReadAllowed(pb, sel))
+            return orig(pb, sel);
+        return emptyArray ? @[] : nil;
+    }));
 }
 
-// Методы с 2 объектными аргументами (dataForPasteboardType:inItemSet:, valuesForPasteboardType:inItemSet:).
-static void tribeSwizzlePb2Arg(SEL sel)
+// dataForPasteboardType:, valueForPasteboardType:
+void gate1Arg(Class cls, SEL sel)
 {
-    Method m = class_getInstanceMethod(UIPasteboard.class, sel);
+    Method m = ownMethod(cls, sel);
     if (!m)
         return;
-    typedef id (*TwoArgIMP)(id, SEL, id, id);
-    TwoArgIMP orig = reinterpret_cast<TwoArgIMP>(method_getImplementation(m));
-    IMP repl = imp_implementationWithBlock(^id(id pb, id a1, id a2) {
-        tribeLogPasteboardRead(sel);
-        return orig(pb, sel, a1, a2);
-    });
-    method_setImplementation(m, repl);
+    using OneArg = id (*)(id, SEL, id);
+    OneArg orig = reinterpret_cast<OneArg>(method_getImplementation(m));
+    method_setImplementation(m, imp_implementationWithBlock(^id(id pb, id a1) {
+        return contentReadAllowed(pb, sel) ? orig(pb, sel, a1) : nil;
+    }));
 }
-#endif // TRIBE_PASTE_TRACE
+
+// dataForPasteboardType:inItemSet:, valuesForPasteboardType:inItemSet:
+void gate2Arg(Class cls, SEL sel)
+{
+    Method m = ownMethod(cls, sel);
+    if (!m)
+        return;
+    using TwoArg = id (*)(id, SEL, id, id);
+    TwoArg orig = reinterpret_cast<TwoArg>(method_getImplementation(m));
+    method_setImplementation(m, imp_implementationWithBlock(^id(id pb, id a1, id a2) {
+        return contentReadAllowed(pb, sel) ? orig(pb, sel, a1, a2) : nil;
+    }));
+}
+
+void gatePasteboardClass(Class cls)
+{
+    gateGetter(cls, @selector(string), false);
+    gateGetter(cls, @selector(strings), false);
+    gateGetter(cls, @selector(URL), false);
+    gateGetter(cls, @selector(URLs), false);
+    gateGetter(cls, @selector(image), false);
+    gateGetter(cls, @selector(images), false);
+    gateGetter(cls, @selector(color), false);
+    gateGetter(cls, @selector(colors), false);
+    gateGetter(cls, @selector(items), true);
+    gateGetter(cls, @selector(itemProviders), true);
+    gate1Arg(cls, @selector(dataForPasteboardType:));
+    gate1Arg(cls, @selector(valueForPasteboardType:));
+    gate2Arg(cls, @selector(dataForPasteboardType:inItemSet:));
+    gate2Arg(cls, @selector(valuesForPasteboardType:inItemSet:));
+}
+
+// Системное «Вставить» → -[… paste:] открывает окно, затем отрабатывает код Qt.
+bool grantOnPasteAction(Class cls)
+{
+    Method m = cls ? ownMethod(cls, @selector(paste:)) : nullptr;
+    if (!m)
+        return false;
+    using Action = void (*)(id, SEL, id);
+    Action orig = reinterpret_cast<Action>(method_getImplementation(m));
+    method_setImplementation(m, imp_implementationWithBlock(^(id responder, id sender) {
+        g_pasteGrantUntil.store(uptimeSeconds() + kPasteGrantSeconds);
+        orig(responder, @selector(paste:), sender);
+    }));
+    return true;
+}
+
+} // namespace
 
 @interface TribePasteMenuFix : NSObject
 @end
@@ -123,48 +173,22 @@ static void tribeSwizzlePb2Arg(SEL sel)
 
 + (void)load
 {
-#if defined(TRIBE_PASTE_TRACE)
-    // Трассер чтений буфера (диагностика «попап жив»). Ставим ДО свизла QUIView — не зависят друг от друга.
-    tribeSwizzlePbGetter(@selector(string));
-    tribeSwizzlePbGetter(@selector(strings));
-    tribeSwizzlePbGetter(@selector(URL));
-    tribeSwizzlePbGetter(@selector(URLs));
-    tribeSwizzlePbGetter(@selector(image));
-    tribeSwizzlePbGetter(@selector(images));
-    tribeSwizzlePbGetter(@selector(color));
-    tribeSwizzlePbGetter(@selector(colors));
-    tribeSwizzlePbGetter(@selector(items));
-    tribeSwizzlePbGetter(@selector(itemProviders));
-    tribeSwizzlePb1Arg(@selector(dataForPasteboardType:));
-    tribeSwizzlePb1Arg(@selector(valueForPasteboardType:));
-    tribeSwizzlePb2Arg(@selector(dataForPasteboardType:inItemSet:));
-    tribeSwizzlePb2Arg(@selector(valuesForPasteboardType:inItemSet:));
-#endif // TRIBE_PASTE_TRACE
+    g_generalPasteboard = [UIPasteboard.generalPasteboard retain];
 
-    Class cls = objc_getClass("QUIView");
-    if (!cls) {
-        return;
+    Class concrete = object_getClass(g_generalPasteboard);
+    gatePasteboardClass(concrete);
+    if (concrete != UIPasteboard.class) {
+        gatePasteboardClass(UIPasteboard.class);
     }
 
-    SEL sel = @selector(canPerformAction:withSender:);
-    Method existing = class_getInstanceMethod(cls, sel);
-
-    // Тип-энкодинг метода: BOOL(B), self(@), _cmd(:), action(SEL=:), sender(id=@).
-    const char *types = existing ? method_getTypeEncoding(existing) : "B@::@";
-
-    // Сохраняем текущую реализацию (собственную QUIView либо унаследованную от
-    // UIResponder) — её зовём для проброса всех НЕ-paste действий.
-    g_origCanPerformAction = existing
-        ? reinterpret_cast<CanPerformActionIMP>(method_getImplementation(existing))
-        : nullptr;
-
-    // class_addMethod вернёт YES только если у QUIView НЕТ собственной реализации
-    // (тогда наш override добавляется ИМЕННО на QUIView, суперкласс не трогаем).
-    // Вернёт NO → у QUIView своя реализация; свизлим её на месте, сохранив оригинал.
-    if (!class_addMethod(cls, sel, reinterpret_cast<IMP>(tribe_canPerformAction), types)) {
-        Method own = class_getInstanceMethod(cls, sel);
-        g_origCanPerformAction = reinterpret_cast<CanPerformActionIMP>(method_getImplementation(own));
-        method_setImplementation(own, reinterpret_cast<IMP>(tribe_canPerformAction));
+    // paste: живёт в QIOSTextInputResponder (Qt 6.11); базовый QIOSTextResponder — на случай,
+    // если Qt перенесёт его туда. Не нашли ни там, ни там → системная вставка перестанет
+    // вставлять (промпта всё равно не будет) — видно в логе.
+    const bool input = grantOnPasteAction(objc_getClass("QIOSTextInputResponder"));
+    const bool base = grantOnPasteAction(objc_getClass("QIOSTextResponder"));
+    if (!input && !base) {
+        NSLog(@"[TRIBE-PB] -paste: у QIOSTextInputResponder/QIOSTextResponder не найден — "
+              @"системное «Вставить» не откроет окно чтения буфера");
     }
 }
 
