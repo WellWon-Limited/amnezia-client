@@ -269,6 +269,19 @@ static void testTryLock()
     unlink(path);
 }
 
+// Разбор журнала 25.09: холодный старт при давно живой сессии — Connected сразу, без
+// «выключено → подключаемся»; свежий подъём и повторное Connected после Reasserting — как раньше.
+static void testEstablishedSession()
+{
+    using namespace avpn_ios;
+    assert(showEstablishedAsConnected(false, false, kEstablishedSessionMs));
+    assert(showEstablishedAsConnected(false, false, 10 * 60 * 1000));
+    assert(!showEstablishedAsConnected(false, false, kEstablishedSessionMs - 1)); // только что поднялась
+    assert(!showEstablishedAsConnected(true, false, 10 * 60 * 1000));  // наш подъём в полёте
+    assert(!showEstablishedAsConnected(false, true, 10 * 60 * 1000));  // уже видели живой (Reasserting)
+    assert(!showEstablishedAsConnected(false, false, -1));             // время подключения неизвестно
+}
+
 int main()
 {
     testRetryBudget();
@@ -280,6 +293,7 @@ int main()
     testLifecycleCollapse();
     testStatusAccept();
     testTryLock();
+    testEstablishedSession();
     std::cout << "IosNativePolicyTests: all checks passed\n";
     return 0;
 }

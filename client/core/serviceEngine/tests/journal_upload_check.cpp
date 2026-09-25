@@ -325,6 +325,24 @@ int main(int argc, char **argv)
         CHECK(resent, "events of the kicked batch are resent");
     }
 
+    {
+        // Разбор журнала 25.09: досылка не прошла, пользователь выключил и снова включил журнал —
+        // неотправленные строки текстового лога не выбрасываются (раньше смещение уходило в конец).
+        appendLine(g_qtLogPath, "[2026-09-25 02:05:00.000Z] [INFO] AmneziaVPN  : unsent night line\n");
+        server.codes = {503};
+        server.got.clear();
+        flushAndWait(up, QStringLiteral("timer"));
+        TribeJournal::setActive(false, false);
+        TribeJournal::setActive(true, false);
+        server.got.clear();
+        CHECK(flushAndWait(up, QStringLiteral("enabled")), "flush after off->on goes through");
+        bool night = false;
+        for (const Received &r : server.got)
+            for (const QJsonObject &o : events(r))
+                night |= o.value(QStringLiteral("msg")).toString().contains(QLatin1String("unsent night line"));
+        CHECK(night, "unsent text-log line survives journal off->on");
+    }
+
     QSettings().clear();
     std::printf("journal_upload_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed == 0 ? 0 : 1;

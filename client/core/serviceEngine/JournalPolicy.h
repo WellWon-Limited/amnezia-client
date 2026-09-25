@@ -130,6 +130,22 @@ inline bool shouldTruncate(qint64 size, qint64 sentOffset)
     return (sentOffset >= size && size > kTextLogCapBytes) || size > kTextLogHardCapBytes;
 }
 
+// Насколько лог может вырасти, пока журнал выключен, чтобы при повторном включении досылать
+// неотправленное (при выключенном журнале нативный лог обычно не пишется вовсе).
+inline constexpr qint64 kReenableGapBytes = 1024 * 1024;
+
+// Смещение текстового лога при включении журнала. sizeAtDisable < 0 — метки выключения нет
+// (первое включение): старую историю не шлём, смещение в конец. Повторное включение (выкл→вкл):
+// строки, записанные пока журнал был включён и ещё не отправленные, досылаем — смещение остаётся,
+// если за время выключения лог не укоротился и вырос не больше kReenableGapBytes; иначе — в конец.
+// Разбор 25.09: выкл→вкл после двух неудачных досылок выбросил ночь ne.log.
+inline qint64 offsetOnEnable(qint64 stored, qint64 sizeAtDisable, qint64 sizeNow)
+{
+    if (sizeAtDisable < 0 || sizeNow < sizeAtDisable || sizeNow - sizeAtDisable > kReenableGapBytes)
+        return sizeNow;
+    return effectiveOffset(stored, sizeNow);
+}
+
 struct JournalSource {
     QString key;       // ключ смещения (QSettings)
     QString path;      // файл
