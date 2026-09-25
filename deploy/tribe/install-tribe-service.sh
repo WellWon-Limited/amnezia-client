@@ -55,10 +55,13 @@ install() {
     local bin="$destdir/$LABEL"
     local srcdir="$(cd "$(dirname "$src")" && pwd)"
     mkdir -p "$destdir"
-    cp -f "$src" "$bin"
+    # Не `cp -f` поверх работающего подписанного бинаря (тот же inode → ядро держит старую подпись →
+    # «Code Signature Invalid» до перезагрузки, инцидент 5.1.92): копия во временный файл + mv.
+    cp -p "$src" "$bin.new.$$" && mv -f "$bin.new.$$" "$bin"
 
     # amneziawg-go демон запускает из своего же каталога (applicationDirPath) — кладём рядом.
-    [ -x "$srcdir/amneziawg-go" ] && cp -f "$srcdir/amneziawg-go" "$destdir/amneziawg-go" \
+    [ -x "$srcdir/amneziawg-go" ] && cp -p "$srcdir/amneziawg-go" "$destdir/amneziawg-go.new.$$" \
+        && mv -f "$destdir/amneziawg-go.new.$$" "$destdir/amneziawg-go" \
         || echo "  ⚠️ amneziawg-go не найден рядом с демоном — туннель не поднимется"
 
     # Вшитый Qt+openssl (bundle-daemon-qt.sh): демон ищет их по rpath @loader_path/Frameworks.
