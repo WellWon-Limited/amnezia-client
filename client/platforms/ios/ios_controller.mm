@@ -841,6 +841,16 @@ void IosController::reportDisconnected()
         in.neStop.utcMs = stop.value(QStringLiteral("utc_ms")).toLongLong();
         in.nowMs = QDateTime::currentMSecsSinceEpoch();
         const avpn_ios::DisconnectDecision decision = avpn_ios::decideDisconnect(in);
+        if (in.neStop.present) {
+            // Разбор журнала 25.09: запись NE о последнем стопе — в лог, даже когда она не отнесена к
+            // этой сессии (ночной стоп при холодном старте уходил в unknown_external без причины;
+            // reason — NEProviderStopReason: 11 другой VPN, 16 обновление приложения).
+            qInfo().noquote() << QStringLiteral("[ios lifecycle] NE last stop reason=%1 intentional=%2 age_s=%3 -> %4")
+                                         .arg(in.neStop.reason)
+                                         .arg(in.neStop.intentional ? 1 : 0)
+                                         .arg((in.nowMs - in.neStop.utcMs) / 1000)
+                                         .arg(QString::fromStdString(decision.reason));
+        }
         emitDisconnectReason(QString::fromStdString(decision.reason), decision.intentional);
     }
 #else
@@ -1281,7 +1291,17 @@ void IosController::vpnStatusDidChange(void *pNotification)
         Vpn::ConnectionState nextState = iosStatusToState(session.status);
         if (session.status == NEVPNStatusConnected && isWireGuardBasedProto(m_proto)) {
             if (!m_handshakeConfirmed) {
-                nextState = Vpn::ConnectionState::Connecting;
+                // AVPN (холодный старт, разбор журнала 25.09): давно живую сессию, пережившую выгрузку
+                // приложения, показываем Connected сразу; рукопожатие проверяется ниже, как раньше.
+                NSDate *connectedAt = session.connectedDate;
+                const long long connectedForMs =
+                        connectedAt ? (long long)(-[connectedAt timeIntervalSinceNow] * 1000.0) : -1;
+                const bool previouslyLive = m_lastEmittedState == Vpn::ConnectionState::Connected ||
+                        m_lastEmittedState == Vpn::ConnectionState::Connecting ||
+                        m_lastEmittedState == Vpn::ConnectionState::Reconnecting;
+                nextState = avpn_ios::showEstablishedAsConnected(m_connectPending, previouslyLive, connectedForMs)
+                        ? Vpn::ConnectionState::Connected
+                        : Vpn::ConnectionState::Connecting;
                 if (!m_handshakeAwaiting) {
                     m_handshakeAwaiting = true;
                     m_handshakeTimer.restart();
