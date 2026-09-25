@@ -121,10 +121,12 @@ static void notifyStatus(NETunnelProviderSession *session);
 @property (nonatomic, assign) BOOL stopWritesUserInitiated;
 @property (nonatomic, copy) NSString *runtimeGeneration;
 @property (nonatomic, copy) NSString *configurationGeneration;
+@property (nonatomic, retain) NSDate *hConnectedDate; // nil — время подключения неизвестно
 @end
 
 @implementation HarnessSession
 - (NEVPNStatus)status { return self.hStatus; }
+- (NSDate *)connectedDate { return self.hConnectedDate; }
 - (void)fetchLastDisconnectErrorWithCompletionHandler:(void (^)(NSError *))handler { if (handler) handler(nil); }
 - (void)stopTunnel
 {
@@ -929,6 +931,37 @@ static void test_rebind_superseded_result_dropped()
 }
 
 struct Test { const char *name; void (*fn)(); };
+// Разбор журнала 25.09: холодный старт при сессии, которую iOS держит Connected давно (приложение
+// выгрузили, туннель жил), — Connected сразу, без Connecting до ответа NE на status.
+static void test_cold_start_established_session_connected()
+{
+    HarnessSession *s = newSession(NEVPNStatusConnected);
+    s.runtimeGeneration = @"run-1";
+    s.hConnectedDate = [NSDate dateWithTimeIntervalSinceNow:-600];
+    s.statusReply = nil; // NE ещё не ответил
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    g_loadMode = LoadMode::Deliver;
+    IosController::Instance()->requestReconcileStatus();
+    spin(60);
+    CHECK(obs.has(Vpn::ConnectionState::Connected), "давно живая сессия не показана Connected до ответа NE");
+    CHECK(!obs.has(Vpn::ConnectionState::Connecting), "давно живая сессия прошла через Connecting");
+}
+
+// Только что поднятая сессия (Настройки/Shortcuts секунду назад) — по-прежнему ждёт рукопожатия.
+static void test_fresh_session_waits_handshake()
+{
+    HarnessSession *s = newSession(NEVPNStatusConnected);
+    s.runtimeGeneration = @"run-1";
+    s.hConnectedDate = [NSDate date];
+    s.statusReply = nil;
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    g_loadMode = LoadMode::Deliver;
+    IosController::Instance()->requestReconcileStatus();
+    spin(60);
+    CHECK(obs.has(Vpn::ConnectionState::Connecting), "свежая сессия не ждёт подтверждения рукопожатия");
+    CHECK(!obs.has(Vpn::ConnectionState::Connected), "свежая сессия показана Connected без рукопожатия");
+}
+
 static const Test kTests[] = {
     {"reconcile_deadline_no_error", test_reconcile_deadline_no_error},
     {"reconcile_error_no_error", test_reconcile_error_no_error},
@@ -960,6 +993,8 @@ static const Test kTests[] = {
     {"app_stop_generation_not_inherited", test_app_stop_generation_not_inherited},
     {"permission_prompt_intent_changed", test_permission_prompt_intent_changed},
     {"rebind_superseded_result_dropped", test_rebind_superseded_result_dropped},
+    {"cold_start_established_session_connected", test_cold_start_established_session_connected},
+    {"fresh_session_waits_handshake", test_fresh_session_waits_handshake},
 };
 
 int main(int argc, char **argv)

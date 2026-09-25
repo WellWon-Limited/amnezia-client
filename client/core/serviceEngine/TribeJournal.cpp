@@ -36,6 +36,7 @@ bool g_loggerOwned = false; // лог Qt открыл журнал, а не по
 
 const QString kOffsetPrefix = QStringLiteral("avpn/journal/offset/");
 const QString kWasActiveKey = QStringLiteral("avpn/journal/wasActive");
+const QString kOffAtPrefix = QStringLiteral("avpn/journal/offAt/"); // размер лога при выключении
 const QString kLastSentKey = QStringLiteral("avpn/journal/lastSentAt");
 // Снимок диагностики в одном событии — не больше этого (серверный кап распакованного — 4 МиБ).
 constexpr int kSnapshotMaxChars = 512 * 1024;
@@ -126,13 +127,24 @@ void TribeJournal::setActive(bool on, bool keepFileLogs)
     QSettings settings;
     const bool wasActive = settings.value(kWasActiveKey, false).toBool();
     if (on && !wasActive) {
-        // Включили только что: старую историю текстовых логов не шлём, только новое.
+        // Включили: при первом включении старую историю текстовых логов не шлём, только новое;
+        // при повторном (выкл→вкл) неотправленное досылаем (JournalPolicy::offsetOnEnable).
         for (const journal::JournalSource &s : sources()) {
-            if (s.fmt != journal::TextFormat::Structured)
-                storeOffset(s.key, fileSize(s.path));
+            if (s.fmt == journal::TextFormat::Structured)
+                continue;
+            const QString mark = kOffAtPrefix + s.key;
+            const qint64 offAt = settings.value(mark, -1).toLongLong();
+            storeOffset(s.key, journal::offsetOnEnable(loadOffset(s.key), offAt, fileSize(s.path)));
+            settings.remove(mark);
         }
         settings.setValue(kWasActiveKey, true);
     } else if (!on && wasActive) {
+        // Размер логов в момент выключения: по нему повторное включение отличит неотправленное
+        // от записанного, пока журнал был выключен.
+        for (const journal::JournalSource &s : sources()) {
+            if (s.fmt != journal::TextFormat::Structured)
+                settings.setValue(kOffAtPrefix + s.key, fileSize(s.path));
+        }
         settings.setValue(kWasActiveKey, false);
     }
 

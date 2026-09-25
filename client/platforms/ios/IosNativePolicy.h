@@ -88,6 +88,18 @@ inline bool neStopMatchesSession(const DisconnectInputs &in)
     return s.configurationGeneration == in.sessionGeneration;
 }
 
+// Холодный старт (разбор журнала 25.09): iOS выгрузила приложение, туннель жил; при запуске
+// Connected ждал ответа NE на status (~1–1.5 с), и UI мигал «выключено → подключаемся → подключено».
+// Сессию, которую iOS держит Connected не меньше kEstablishedSessionMs, увиденную живой впервые
+// (прошлое эмитированное состояние — не живое) и не во время нашего подъёма, показываем Connected
+// сразу; проверка рукопожатия (m_handshakeAwaiting и её таймауты) идёт как раньше, в фоне.
+// connectedForMs < 0 — время подключения неизвестно: по-старому ждём подтверждения.
+inline constexpr long long kEstablishedSessionMs = 15000;
+inline bool showEstablishedAsConnected(bool connectPending, bool previouslyLive, long long connectedForMs)
+{
+    return !connectPending && !previouslyLive && connectedForMs >= kEstablishedSessionMs;
+}
+
 inline DisconnectDecision decideDisconnect(const DisconnectInputs &in)
 {
     // 1. Стоп запросило само приложение для этого поколения: это не решение пользователя.
