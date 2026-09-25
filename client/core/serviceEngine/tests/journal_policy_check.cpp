@@ -160,6 +160,19 @@ static void batches()
     CHECK(cut.events == 1 && cut.newOffsets.value("qt") == 1024, "oversize line cut at batch cap");
 }
 
+// Разбор журнала 25.09: выкл→вкл журнала сдвигал смещения в конец и выбрасывал ночь
+// неотправленного ne.log. Теперь в конец — только первое включение и долгий перерыв с логом.
+static void reenable()
+{
+    CHECK(offsetOnEnable(100, -1, 5000) == 5000, "first enable -> end, old history not sent");
+    CHECK(offsetOnEnable(100, 5000, 5000) == 100, "re-enable, log idle while off -> unsent kept");
+    CHECK(offsetOnEnable(100, 5000, 6000) == 100, "re-enable, small growth while off -> unsent kept");
+    CHECK(offsetOnEnable(100, 5000, 5000 + kReenableGapBytes + 1) == 5000 + kReenableGapBytes + 1,
+          "re-enable after big growth while off -> end");
+    CHECK(offsetOnEnable(100, 5000, 300) == 300, "log shrank while off (rotation) -> end");
+    CHECK(offsetOnEnable(9000, 5000, 5000) == 0, "stored beyond size -> from start, as planBatch");
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -168,6 +181,7 @@ int main(int argc, char **argv)
     lineToEvent();
     offsets();
     batches();
+    reenable();
     std::printf("journal_policy_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed == 0 ? 0 : 1;
 }
