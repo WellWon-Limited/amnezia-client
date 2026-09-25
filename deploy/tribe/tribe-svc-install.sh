@@ -26,10 +26,23 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 [ -x "$SRC/amneziawg-go" ]  || { echo "нет amneziawg-go в tarball"; exit 1; }
 [ -d "$SRC/Frameworks" ]    || { echo "нет Frameworks в tarball"; exit 1; }
 
+# AVPN (инцидент 5.1.92, 2026-09-25): замена бинарей поверх РАБОТАЮЩЕГО демона через `cp -f` пишет
+# в тот же файл (тот же inode) — ядро держит закэшированную подпись старой версии, и каждый новый
+# запуск убивается «SIGKILL (Code Signature Invalid)» до перезагрузки (демон в крэш-лупе, VPN не
+# поднимается). Поэтому: 1) сначала останавливаем демон и его amneziawg-go, 2) кладём файлы через
+# временное имя + mv (новый inode — ядро читает подпись заново).
+launchctl bootout "system/${LABEL}" 2>/dev/null || launchctl bootout system "$PLIST" 2>/dev/null || true
+pkill -f "$DEST/amneziawg-go" 2>/dev/null || true
+replace_file() {
+  local src="$1" dst="$2" tmp="$2.new.$$"
+  cp -p "$src" "$tmp" && mv -f "$tmp" "$dst" || { rm -f "$tmp"; echo "замена $dst не удалась"; exit 1; }
+}
 mkdir -p "$DEST"
-cp -f  "$SRC/Tribe-service" "$DEST/Tribe-service"
-cp -f  "$SRC/amneziawg-go"  "$DEST/amneziawg-go"
-rm -rf "$DEST/Frameworks"; cp -aR "$SRC/Frameworks" "$DEST/Frameworks"
+replace_file "$SRC/Tribe-service" "$DEST/Tribe-service"
+replace_file "$SRC/amneziawg-go"  "$DEST/amneziawg-go"
+rm -rf "$DEST/Frameworks.new"; cp -aR "$SRC/Frameworks" "$DEST/Frameworks.new" \
+  && rm -rf "$DEST/Frameworks" && mv "$DEST/Frameworks.new" "$DEST/Frameworks" \
+  || { echo "замена Frameworks не удалась"; exit 1; }
 mkdir -p "$DEST/pf"; cp -f "$SRC/pf/"*.conf "$DEST/pf/" 2>/dev/null || true
 # AVPN: маркер версии демона (хэш бинарей) — приложение сверяет и переустанавливает при отличии
 # (иначе апдейт логики демона не доезжал бы до юзеров с уже установленным демоном). Нет файла в
