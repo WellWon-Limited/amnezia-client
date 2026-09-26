@@ -913,7 +913,9 @@ private:
     void saveLkgSubscriptionGuarded(const QByteArray &body, bool bodyHasNodes);
     // A6: pin из списка — персистентный; «Заменить сервер»/Доктор/свип — только в памяти.
     void switchToNodeImpl(const QString &nodeId, bool persist);
-    void pinAndReconnectImpl(const QString &nodeId, bool persist);
+    // forceConnect — держать/поднять туннель даже если он сейчас не поднят (Доктор: туннель лежит,
+    // потому что его остановил сам Доктор; пикер передаёт false — «офлайн = только цель»).
+    void pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect = false);
     void selectAutoImpl(bool persist);
     void docRestoreSelection(); // Доктор: вернуть исходный выбор (pin или авто), не гася VPN
     // AVPN awg31-xray-v1 (спека §2.3):

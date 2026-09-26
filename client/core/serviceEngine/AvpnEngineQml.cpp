@@ -5364,9 +5364,9 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
 
 // AVPN (фикс-волна 2026-09-22, A6): Доктор зовёт с persist=false — его пересадки и возвраты
 // не становятся постоянным pin (иначе после перезапуска всегда та же нода без замера).
-void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist)
+void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect)
 {
-    if (!featureEnabled(QStringLiteral("picker_instant_reconnect"), true)) {
+    if (!forceConnect && !featureEnabled(QStringLiteral("picker_instant_reconnect"), true)) {
         switchToNodeImpl(nodeId, persist);
         return;
     }
@@ -5377,9 +5377,10 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist)
     }
     if (persist) persistPin();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    if (avpn::isTunnelUpStateName(st)) { // AVPN awg31-xray-v1: verifying = туннель поднят
+    const bool up = avpn::isTunnelUpStateName(st); // AVPN awg31-xray-v1: verifying = туннель поднят
+    if (up || forceConnect) {
         m_wantConnected = true;
-        m_needsRestart = true;   // reconcile: stop→Disconnected→start на закреплённой ноде
+        m_needsRestart = up;     // поднят: stop→Disconnected→start; лежит: reconcile просто стартует
         m_startAttempts = 0;
     } else {
         m_wantConnected = false; // офлайн: только цель, туннель не стартуем
@@ -7481,16 +7482,27 @@ void AvpnEngineQml::docStartConnect()
 // Туннель уже на исходной ноде — только снять pin; на альтернативе — переподнять авто-выбором.
 void AvpnEngineQml::docRestoreSelection()
 {
+    // Разбор журнала 26.09 (устр. 64, 11:53 МСК): после неудачной последней альтернативы туннель
+    // лежал (его остановил сам Доктор), и возврат по правилу пикера снимал намерение — VPN оставался
+    // выключенным, хотя был включён до Доктора. Теперь держим состояние со старта Доктора.
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    const bool up = avpn::isTunnelUpStateName(st);
+    const bool keep = doctor::restoreKeepsConnected(m_docWasConnected, up);
+    reliabilityEvent(QStringLiteral("doctor_restore was_connected=%1 up=%2 keep=%3 orig_pin=%4")
+                         .arg(m_docWasConnected).arg(up).arg(keep).arg(!m_docOrigPin.isEmpty()));
     if (!m_docOrigPin.isEmpty()) {
-        pinAndReconnectImpl(m_docOrigPin, pinOriginPersists(PinOrigin::Doctor));
+        pinAndReconnectImpl(m_docOrigPin, pinOriginPersists(PinOrigin::Doctor), /*forceConnect=*/keep);
         return;
     }
     m_engine.clearPin();
-    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
     const bool movedAway = !m_docOrigNode.isEmpty() && m_engine.currentNodeId() != m_docOrigNode;
-    if (avpn::isTunnelUpStateName(st) && movedAway) {
+    if (up && movedAway) {
         m_wantConnected = true;
         m_needsRestart = true; // reconcile: stop→Disconnected→start на авто-выборе
+        m_startAttempts = 0;
+    } else if (!up && keep) {
+        m_wantConnected = true; // туннель лежит после альтернатив — просто поднять на авто-выборе
+        m_needsRestart = false;
         m_startAttempts = 0;
     }
     emit changed();
@@ -8085,10 +8097,12 @@ void AvpnEngineQml::docAltNext()
             }
         QString switchedTo;
         if (m_docAltHadProblem && bestStable >= 0 && bestStable < m_docAltQueue.size()) {
-            pinAndReconnectImpl(m_docAltQueue.at(bestStable), pinOriginPersists(PinOrigin::Doctor));
+            pinAndReconnectImpl(m_docAltQueue.at(bestStable), pinOriginPersists(PinOrigin::Doctor),
+                                /*forceConnect=*/true);
             switchedTo = m_docAltNames.value(bestStable);
         } else if (m_docAltHadProblem && bestShaky >= 0 && bestShaky < m_docAltQueue.size()) {
-            pinAndReconnectImpl(m_docAltQueue.at(bestShaky), pinOriginPersists(PinOrigin::Doctor));
+            pinAndReconnectImpl(m_docAltQueue.at(bestShaky), pinOriginPersists(PinOrigin::Doctor),
+                                /*forceConnect=*/true);
             switchedTo = m_docAltNames.value(bestShaky);
         } else {
             docRestoreSelection();
@@ -8104,7 +8118,10 @@ void AvpnEngineQml::docAltNext()
     m_docSawProgress = false;
     m_docGuard.start(40000); // подъём альтернативы
     emit doctorChanged();    // note текущей стадии в UI обновится (docStage прежний)
-    pinAndReconnectImpl(m_docAltQueue.at(m_docAltIdx), pinOriginPersists(PinOrigin::Doctor)); // stop→start на выбранную (путь пикера)
+    // stop→start на выбранную; forceConnect — проверяемая альтернатива поднимается, даже если
+    // туннель в этот момент лежит после прошлой (иначе намерение снималось и проба была ложной).
+    pinAndReconnectImpl(m_docAltQueue.at(m_docAltIdx), pinOriginPersists(PinOrigin::Doctor),
+                        /*forceConnect=*/true);
 }
 
 // Проба 1 сразу после connected: HEAD 204 + ICMP через туннель + возраст handshake. Результат

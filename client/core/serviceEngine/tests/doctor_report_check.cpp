@@ -17,6 +17,12 @@ int main()
     using namespace doctor;
 
     // клампы таймаута стадии
+    // Разбор журнала 26.09: возврат выбора после альтернатив не должен оставлять VPN выключенным,
+    // если он был включён на старте Доктора (туннель лежит, потому что его остановил сам Доктор).
+    CHECK(restoreKeepsConnected(true, false), "restore: был включён, туннель сейчас лежит -> включить");
+    CHECK(restoreKeepsConnected(true, true), "restore: был включён и поднят -> включён");
+    CHECK(restoreKeepsConnected(false, true), "restore: был выключен, Доктор поднял -> как раньше, включён");
+    CHECK(!restoreKeepsConnected(false, false), "restore: был выключен и лежит -> выключен");
     CHECK(clampStageTimeoutMs(0) == 25000, "timeout: нет ключа -> дефолт 25с");
     CHECK(clampStageTimeoutMs(100) == 5000, "timeout: низ клампится в 5с");
     CHECK(clampStageTimeoutMs(999999) == 60000, "timeout: верх клампится в 60с");
