@@ -75,6 +75,11 @@ class ControllerImpl : public QObject {
   void connected(const QString& pubkey,
                  const QDateTime& connectionTimestamp = QDateTime());
   void disconnected();
+  // AVPN (волна-4): сокет демона оборвался НЕ по нашей просьбе (служба упала/перезапущена,
+  // обновление). Эмитится ПЕРЕД disconnected(): движок классифицирует следующий Disconnected
+  // как потерю компонента (намерение держим, старт повторится), а не как внешний стоп (журнал
+  // Mac 28.09 20:52: «Error occurred: 1» → intent_off why=external_loss).
+  void daemonSocketLost();
 
   // This method should be emitted after a checkStatus() call.
   // "serverIpv4Gateway" is the current VPN tunnel gateway.

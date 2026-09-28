@@ -418,6 +418,9 @@ void VpnConnection::createProtocolConnections()
         connect(rep.data(), &IpcInterfaceReplica::networkChanged, this, &VpnConnection::reconnectToVpn, Qt::QueuedConnection);
         connect(rep.data(), &IpcInterfaceReplica::wakeup, this, &VpnConnection::reconnectToVpn, Qt::QueuedConnection);
     });
+    // AVPN (волна-4): сокет демона оборвался сам — потеря компонента (см. ControllerImpl::daemonSocketLost).
+    if (auto *wg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()))
+        connect(wg, &WireguardProtocol::daemonSocketLost, this, &VpnConnection::daemonLost);
 #endif
 }
 

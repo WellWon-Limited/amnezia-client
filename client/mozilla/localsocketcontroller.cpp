@@ -66,6 +66,11 @@ void LocalSocketController::errorOccurred(
     QLocalSocket::LocalSocketError error) {
   logger.error() << "Error occurred:" << error;
 
+  // AVPN (волна-4): обрыв УЖЕ установленного канала к демону — потеря компонента, не стоп.
+  if (m_daemonState == eReady) {
+    emit daemonSocketLost();
+  }
+
   if (m_daemonState == eInitializing) {
     if (m_initializingRetry++ < MAX_CONNECTION_RETRY) {
       m_initializingTimer.start(CONNECTION_RETRY_TIMER_MSEC);

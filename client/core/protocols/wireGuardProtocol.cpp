@@ -37,6 +37,7 @@ WireguardProtocol::WireguardProtocol(const QJsonObject &configuration, QObject *
                 }
             });
 
+    connect(m_impl.get(), &ControllerImpl::daemonSocketLost, this, &WireguardProtocol::daemonSocketLost);
     connect(m_impl.get(), &ControllerImpl::disconnected, this,
             [this]() { setConnectionState(Vpn::ConnectionState::Disconnected); });
     m_impl->initialize(nullptr, nullptr);

@@ -69,19 +69,32 @@ extension PacketTunnelProvider {
 
             // Start the tunnel
             let generation = tribeRuntimeGeneration
-            let adapter = WireGuardAdapter(with: self) { [weak self] logLevel, message in
+            // AVPN (волна-4, P1-3): обработчик лога зовётся из Go (callLogger) на его потоке. Брать
+            // здесь сильную ссылку на адаптер нельзя: во время stop() ссылка провайдера уже снята,
+            // и временная ссылка колбэка оказывалась ПОСЛЕДНЕЙ — адаптер деаллоцировался внутри
+            // Go-колбэка (2 краша NE 121/122: WireGuardAdapter.__deallocating_deinit <- closure in
+            // setupLogHandler <- callLogger). У апстрима здесь одна строка wg_log. Счётчики читаем
+            // по слабой ссылке с очереди журнала: там деаллокация безопасна.
+            let adapterBox = TribeWeakAdapterBox()
+            let adapter = WireGuardAdapter(with: self) { logLevel, message in
                 wg_log(logLevel.osLogLevel, message: message)
                 // Persist recovery evidence even with a dead/suspended GUI and disabled ne.log.
                 // Never copy arbitrary native log text (it can contain endpoints/config values):
                 // only the fixed event label (TribeNEJournal) and the adapter counters.
                 guard let event = TribeNEJournal.event(forAdapterLog: message) else { return }
-                // Runs on the adapter's workQueue: the counters callback is queued behind this log
-                // call, and the journal write itself hops to TribeSharedState.journalQueue (D4).
-                self?.wgAdapter?.roamingCounters { counters in
-                    TribeSharedState.appGroup?.recordAsync(source: "ne", event: event,
-                        fields: ["generation": generation, "counters": counters.asDictionary])
+                TribeSharedState.journalQueue.async {
+                    guard let live = adapterBox.adapter else {
+                        TribeSharedState.appGroup?.recordAsync(source: "ne", event: event,
+                            fields: ["generation": generation])
+                        return
+                    }
+                    live.roamingCounters { counters in
+                        TribeSharedState.appGroup?.recordAsync(source: "ne", event: event,
+                            fields: ["generation": generation, "counters": counters.asDictionary])
+                    }
                 }
             }
+            adapterBox.adapter = adapter
             wgAdapter = adapter
 
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
@@ -294,6 +307,11 @@ extension PacketTunnelProvider {
 #endif
         }
     }
+}
+
+/// AVPN (волна-4, P1-3): слабая ссылка на адаптер для обработчика лога (см. startWireguard).
+final class TribeWeakAdapterBox {
+    weak var adapter: WireGuardAdapter?
 }
 
 // MARK: - AVPN (журнал тестирования v2): статистика туннеля в ne.log

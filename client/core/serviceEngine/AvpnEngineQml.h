@@ -52,6 +52,8 @@ class AvpnEngineQml : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString state READ state NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
+    // Волна-4 (P1-4): подхват уже живой сессии — UI показывает «Проверяем…», тап не гасит.
+    Q_PROPERTY(bool adopting READ adopting NOTIFY changed)
     // AVPN: направление активного перехода — движок занят ОПУСКАНИЕМ туннеля (намерение = офлайн).
     // Источник правды для «не показывать Connecting… при выключении»: живёт в движке (не в странице),
     // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
@@ -295,6 +297,7 @@ public:
 
     QString state() const;
     bool busy() const { return m_busy; }
+    bool adopting() const { return m_liveSessionPending; }
     // busy при намерении «офлайн» = идёт teardown (вкл. отмену недоехавшего коннекта). // AVPN
     bool stopping() const { return m_busy && !m_wantConnected; }
     bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
@@ -560,6 +563,9 @@ public:
     Q_INVOKABLE void kickBootstrap();                // AVPN: поджать ретрай bootstrap (сеть появилась/foreground). No-op когда подписка загружена; туннель НЕ трогает
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
+    // Волна-4 (P1-4): стоп ПО ТАПУ — с политикой stopTapIgnored (подхват/свежий адопт = повторный
+    // «включить»); программные вызовы stop() (Доктор, ротация) политику не проходят.
+    Q_INVOKABLE void stopFromUi();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
     Q_INVOKABLE void resetLkg();                     // очистить кэш токена/подписки (re-enroll при start)
@@ -914,6 +920,10 @@ private:
     // Сторож старта: на время системного диалога «Разрешить VPN» (C4) — потолок натива + обычный бюджет.
     int startWatchdogMs() const;
     void onLiveSessionTimeout();
+    // Волна-4: единая классификация исхода запроса к API (edge-walk + детектор белых списков).
+    void noteApiOutcome(QNetworkReply *reply);
+    void onForegroundDebounced();   // волна-4 (P2-4): одна пачка на возврат на экран
+    void runConnectEffects();       // волна-4 (P2-3): чипы + пробы сервисов для новой сессии
     void onSwitchDeadline();
     void onSelectionBudget(quint64 epoch, bool ceiling);
     void notePreparationPoolSettled(bool poolWillBeProbed);
@@ -1114,6 +1124,19 @@ private:
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;
     QTimer                      m_liveSessionTimer;
+    qint64                      m_lastAdoptMs = -1;              // волна-4 (P1-4): момент адопта живой сессии
+    int                         m_startWatchdogDeferrals = 0;    // волна-4 (P1-5): перевзводы сторожа старта при живой NE-сессии
+    qint64                      m_lastTunnelTransitionMs = -1;   // волна-4: момент последнего наблюдённого перехода туннеля
+    qint64                      m_lastResumeMs = -1;             // волна-4: последний выход на экран
+    qint64                      m_lastHiddenMs = -1;             // волна-4: последний уход в фон/скрытие
+    qint64                      m_lastInactiveMs = -1;           // волна-4: начало текущего Inactive
+    bool                        m_hiddenSeen = false;            // волна-4: была заморозка/скрытие с прошлого Active
+    QTimer                      m_fgTimer;                       // волна-4: дебаунс координатора выхода на экран
+    QString                     m_lastEffectsNode;               // волна-4 (P2-3): нода последних проб сервисов
+    qint64                      m_lastEffectsMs = -1;
+    bool                        m_effectsPending = false;        // волна-4: пробы отложены до выхода на экран
+    qint64                      m_restartRequestedMs = -1;       // волна-4 (P1-6): когда взведён m_needsRestart
+    qint64                      m_componentLostMs = -1;          // волна-4: когда пришёл daemonLost
     // A10/A11: подготовка старта — пул освежён (или refresh провалился) / раунд RTT завершён.
     bool                        m_prepPoolSettled = false;
     bool                        m_prepRoundDone = false;

@@ -6,6 +6,7 @@
 #include "EdgeWalk.h"
 #include "NetAwait.h"
 
+#include <QDateTime>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -64,12 +65,17 @@ void ConfigService::fetchConfig()
     if (!m_nam || m_configInFlight)
         return;
     m_configInFlight = true;
+    m_lastFetchMs = QDateTime::currentMSecsSinceEpoch();
     QNetworkRequest req{QUrl(m_activeBase + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         m_configInFlight = false;
         reply->deleteLater();
+        // Волна-4 (P2-2, регресс 126): запрос оборвали мы сами (смена ноды/стоп гасит летящие
+        // запросы), а не вход — ни отказ, ни успех; таймаут (avpn_timed_out) — честный отказ.
+        if (reply->error() == QNetworkReply::OperationCanceledError && !reply->property("avpn_timed_out").toBool())
+            return;
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         // Только транспортный сбой = проблема ЭТОГО входа → повод шагнуть на другой edge:
         // code==0 (abort/timeout из armTimeout, либо сокет не подключился) или 5xx (серверная авария).
@@ -149,8 +155,21 @@ void ConfigService::reportNetworkSuccess()
     m_failStreak = 0;
 }
 
+void ConfigService::refreshIfStale(qint64 maxAgeMs)
+{
+    if (m_lastFetchMs > 0 && QDateTime::currentMSecsSinceEpoch() - m_lastFetchMs < maxAgeMs)
+        return;
+    fetchConfig();
+}
+
 void ConfigService::reportNetworkFailure()
 {
+    // Волна-4 (P2-2): стрик без затухания копил отказы часами (таймауты после заморозки iOS
+    // 40% /v1/subscription с кодом 0) и шагал на другой вход по трём несвязанным событиям.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastFailMs > 0 && now - m_lastFailMs > 60000)
+        m_failStreak = 0;
+    m_lastFailMs = now;
     if (++m_failStreak < failThreshold())
         return;
     m_failStreak = 0;

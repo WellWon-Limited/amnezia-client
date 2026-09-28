@@ -64,8 +64,12 @@ inline void armTimeout(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
     QTimer *t = new QTimer(reply);
     t->setSingleShot(true);
     QObject::connect(t, &QTimer::timeout, reply, [reply]() {
-        if (reply->isRunning())
+        if (reply->isRunning()) {
+            // Волна-4 (P2-2): таймаут — честный отказ входа; abort без этой метки (смена ноды,
+            // стоп туннеля) отказом не считается (classifyApiOutcome).
+            reply->setProperty("avpn_timed_out", true);
             reply->abort();
+        }
     });
     t->start(timeoutMs);
 }
