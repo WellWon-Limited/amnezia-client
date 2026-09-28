@@ -1,4 +1,18 @@
 patches:
+  "3.1.4-tribe.9":
+    # tribe.8 (0001+0002+0003+0005+0006, all unchanged) + 0007: a path that returns after a real
+    # loss or moves to another interface gets a FRESH local port + keepalive instead of the
+    # same-port bump (field data 24-28.09: fresh port healed 31/82 stalls, bump 4/27); the roam
+    # step is recorded in the recovery arbiter without restarting the stall clock. The stall
+    # ladder (TribeRoaming.swift for this version = tribe/TribeRoaming.swift) is fresh port ->
+    # soft restart -> 30/60/120 s backoff cycle; tribe.4-8 bumped first and `rearm` zeroed the
+    # clock on every path event (~200/h on cellular), so the fresh port was rarely reached.
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
   "3.1.4-tribe.8":
     # tribe.7 (0001+0002+0003+0005, all unchanged) + 0006: stall-watchdog stage 3 keeps healing
     # while the GUI sleeps (bump -> fresh port -> soft restart, backoff 30/60/120 s, through the

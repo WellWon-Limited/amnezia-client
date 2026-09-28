@@ -7,14 +7,6 @@
 // 3-10 s dead tunnel and every flow in the tunnel is reset. Tailscale, ProtonVPN, sing-box and the
 // official WireGuard Android app never stop the device; they rebind the socket on return.
 //
-// tribe.9 (2026-09-29, field data 24-28.09, 4 devices / 9 device-days): a path that RETURNS after a
-// real loss (or moves to another interface) gets a FRESH local port + keepalive, not a same-port bump:
-// the carrier NAT/DPI had killed the old 5-tuple in 38 of 44 long "connected but no data" episodes,
-// and a fresh port healed 31 of 82 stalls against 4 of 27 for the same-port bump. The stall ladder
-// is fresh port -> soft restart -> (30/60/120 s backoff) fresh port / soft restart, and a path event
-// never restarts the stall clock (tribe.4-8 zeroed it on every event, ~200/h on cellular, so the
-// fresh-port step was almost never reached: 14 s + 8 KB without a path event).
-//
 // This file has NO NetworkExtension/Go dependency: the conan recipe compiles it together with
 // tests/TribeRoamingTests.swift under plain swiftc, so the package cannot ship with broken logic.
 import Foundation
@@ -26,13 +18,12 @@ public struct TribeRoamingPolicy: Equatable {
     /// > 0: a path loss that PERSISTS this many seconds still pauses the device (long true-offline
     /// fallback, e.g. airplane mode); 0 = never pause. Ignored when keepBackendOnPathLoss is false.
     public var pauseAfterUnsatisfiedSeconds: TimeInterval
-    /// Coalescing window for rebind-on-return: bursts of path events become ONE socket step.
+    /// Coalescing window for rebind-on-return: bursts of path events become ONE socket bump.
     public var rebindCoalesceSeconds: TimeInterval
     /// Stall watchdog: outbound grows while inbound (rx bytes / handshake) is frozen this long on a
-    /// satisfied path -> fresh local port + keepalive (tribe.9; tribe.4-8: same-port bump). 0 = off.
+    /// satisfied path -> wgBumpSockets (same port, keepalive burst). 0 = watchdog off.
     public var stallProbeSeconds: TimeInterval
-    /// Still stalled this long AFTER the first step -> soft restart of the backend (tribe.9;
-    /// tribe.4-8: listen_port=0). 0 = no second stage.
+    /// Still stalled this long AFTER the bump -> listen_port=0 (fresh 5-tuple). 0 = no second stage.
     public var stallRebindSeconds: TimeInterval
     /// Outbound bytes required since the last inbound progress before a stall is believed
     /// (filters keepalive-only idle: 32 B every 25 s).
@@ -122,10 +113,7 @@ public struct TribeStallSample: Equatable {
 
 public enum TribeStallAction: Equatable {
     case none
-    /// wgBumpSockets: BindUpdate on the SAME local port + keepalive. tribe.9: only the reaction to
-    /// a path event without a real loss (interface order change); no longer a stall-ladder step.
     case bumpSockets
-    /// listen_port=0 + keepalive: a fresh local port = a new 5-tuple through the carrier NAT.
     case rebindPort
     /// tribe.8 (U6): wgTurnOff + wgTurnOn on the SAME TUN fd with the same configuration, no
     /// setTunnelNetworkSettings: new device, new socket, new handshake; utun and app flows survive.
@@ -139,6 +127,178 @@ public enum TribeStallAction: Equatable {
         case .rebindPort: return "fresh port"
         case .softRestart: return "soft restart"
         }
+    }
+}
+
+/// Stall watchdog on top of the device's own counters. Inbound progress = rx bytes grew OR a newer
+/// handshake (handshake responses are not counted in rx_bytes, so an idle-but-healthy tunnel that
+/// keeps re-keying must not look stalled). Stage 0 armed -> stage 1 bumped (same port) -> stage 2
+/// rebound (new port). tribe.4-7: exhausted there until inbound progress re-arms. tribe.8 (U9,
+/// `persistent`): stage 3 keeps healing while the GUI sleeps -- the next step of `persistentSequence`
+/// after `persistentBackoff` (30/60/120 s, then 120 s) from the previous step, only while the path is
+/// satisfied and outbound grew since that step without any inbound progress. Progress resets the
+/// stage and the backoff. The app engine's failover (HealthLoop DEAD) still sits above this.
+public struct TribeStallTracker: Equatable {
+    public private(set) var stage: Int = 0
+    /// tribe.8: persistent (stage 3) steps committed since the last inbound progress.
+    public private(set) var persistentSteps: Int = 0
+    private var lastProgressAt: TimeInterval
+    private var txAtProgress: UInt64
+    private var lastRx: UInt64
+    private var lastHandshake: Int64
+    /// Time and tx counter of the last committed step at stage >= 2 (fresh port, persistent step,
+    /// or an external GUI step): the stage-3 backoff and its demand evidence count from here.
+    private var lastStepAt: TimeInterval?
+    private var txAtLastStep: UInt64 = 0
+
+    /// Stage-3 order: same-port bump, fresh port, then a soft restart of the backend.
+    public static let persistentSequence: [TribeStallAction] = [.bumpSockets, .rebindPort, .softRestart]
+
+    /// Stage-3 backoff before persistent step `index` (0-based): 30, 60, 120 s, capped at 120 s.
+    public static func persistentBackoff(_ index: Int) -> TimeInterval {
+        let steps: [TimeInterval] = [30, 60, 120]
+        return steps[Swift.min(Swift.max(0, index), steps.count - 1)]
+    }
+
+    public init(first: TribeStallSample) {
+        lastProgressAt = first.at
+        txAtProgress = first.txBytes
+        lastRx = first.rxBytes
+        lastHandshake = first.lastHandshakeSec
+    }
+
+    /// Reset the stall clock without touching the escalation stage semantics (used right after a
+    /// roam rebind so the watchdog does not double-bump the socket that was just bumped).
+    /// tribe.8: the stage-3 backoff (persistentSteps, last step time) survives a rearm: a path
+    /// event is not inbound progress, so a flapping path cannot restart the 30 s backoff.
+    public mutating func rearm(_ sample: TribeStallSample) {
+        lastProgressAt = sample.at
+        txAtProgress = sample.txBytes
+        lastRx = sample.rxBytes
+        lastHandshake = sample.lastHandshakeSec
+        stage = 0
+        bumpedAt = nil
+    }
+
+    /// tribe.8: the backend was restarted in place (soft restart): the counters start from zero on
+    /// the new device. Rebase them WITHOUT treating the drop as progress; the stall clock, the stage
+    /// and the stage-3 backoff keep running (only a real rx/handshake on the new device resets them).
+    public mutating func rebaseCounters(_ sample: TribeStallSample) {
+        txAtProgress = sample.txBytes
+        lastRx = sample.rxBytes
+        lastHandshake = sample.lastHandshakeSec
+        txAtLastStep = sample.txBytes
+    }
+
+    /// tribe.8: a step was done outside the watchdog (GUI soft restart): at least stage 2, and the
+    /// stage-3 backoff counts from this step.
+    public mutating func noteExternalStep(at: TimeInterval, tx: UInt64) {
+        if stage == 0 { bumpedAt = at }
+        stage = Swift.max(stage, 2)
+        lastStepAt = at
+        txAtLastStep = tx
+    }
+
+    /// tribe.4/tribe.5 semantics, unchanged: every proposed step is committed immediately.
+    public mutating func observe(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy) -> TribeStallAction {
+        step(sample, pathSatisfied: pathSatisfied, policy: policy, minGapAfterBump: 0, persistent: false) { _ in true }
+    }
+
+    /// tribe.7: the escalation stage moves ONLY when `permit` accepts the proposed action. A refusal
+    /// (shared recovery budget: rolling cap, cooldown) leaves the stage where it was, so the same
+    /// step is proposed again on the next tick and fires as soon as the budget frees up. The
+    /// tribe.6 order (commit stage, then ask the budget) burned the step on every refusal.
+    /// tribe.8: `persistent` = stage 3 after the fresh port (U9); false = tribe.7 (exhausted at stage 2).
+    public mutating func observe(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
+                                 persistent: Bool = false,
+                                 permit: (TribeStallAction) -> Bool) -> TribeStallAction {
+        step(sample, pathSatisfied: pathSatisfied, policy: policy,
+             minGapAfterBump: TribeStallTracker.minGapAfterBump(policy), persistent: persistent, permit: permit)
+    }
+
+    /// A fresh port right after a late (budget-delayed) bump would give the bump's keepalive no
+    /// chance to be answered; keep a small gap, never longer than the configured rebind step.
+    public static func minGapAfterBump(_ policy: TribeRoamingPolicy) -> TimeInterval {
+        min(3, policy.stallRebindSeconds)
+    }
+
+    /// Mark steps as already spent in this episode (a GUI fresh-port rebind, or a bump the budget
+    /// says was spent before a roam rearm). Never moves the stage backwards.
+    public mutating func advance(toStage target: Int, at: TimeInterval, tx: UInt64? = nil) {
+        guard target > stage else { return }
+        if stage == 0 { bumpedAt = at }
+        stage = min(2, target)
+        if stage == 2 && lastStepAt == nil {
+            lastStepAt = at
+            txAtLastStep = tx ?? txAtLastStep
+        }
+    }
+
+    private var bumpedAt: TimeInterval?
+
+    private mutating func step(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
+                               minGapAfterBump: TimeInterval, persistent: Bool,
+                               permit: (TribeStallAction) -> Bool) -> TribeStallAction {
+        let progressed = sample.rxBytes > lastRx
+            || sample.lastHandshakeSec > lastHandshake
+            || sample.txBytes < txAtProgress // counters reset = backend restarted, not a stall
+        lastRx = sample.rxBytes
+        lastHandshake = sample.lastHandshakeSec
+        if progressed {
+            lastProgressAt = sample.at
+            txAtProgress = sample.txBytes
+            stage = 0
+            bumpedAt = nil
+            persistentSteps = 0
+            lastStepAt = nil
+            txAtLastStep = sample.txBytes
+            return .none
+        }
+        guard pathSatisfied, policy.stallProbeSeconds > 0 else { return .none }
+        let stalledFor = sample.at - lastProgressAt
+        let txSince = sample.txBytes - txAtProgress
+        // Without a first handshake, let AWG's built-in retries run for at least 12 seconds.
+        // Handshake-only traffic is smaller than data traffic; still require evidence of demand.
+        let bootstrap = sample.lastHandshakeSec == 0 && sample.rxBytes == 0
+        let probeSeconds = bootstrap ? max(12, policy.stallProbeSeconds) : policy.stallProbeSeconds
+        let rebindSeconds = bootstrap ? max(18, policy.stallRebindSeconds) : policy.stallRebindSeconds
+        let requiredTx = bootstrap ? UInt64(256) : policy.stallMinTxBytes
+        switch stage {
+        case 0:
+            if stalledFor >= probeSeconds && txSince >= requiredTx, permit(.bumpSockets) {
+                stage = 1
+                bumpedAt = sample.at
+                return .bumpSockets
+            }
+        case 1:
+            guard policy.stallRebindSeconds > 0 else { return .none }
+            let sinceBump = bumpedAt.map { sample.at - $0 } ?? .infinity
+            if stalledFor >= probeSeconds + rebindSeconds && txSince >= requiredTx * 2
+                && sinceBump >= minGapAfterBump, permit(.rebindPort) {
+                stage = 2
+                lastStepAt = sample.at
+                txAtLastStep = sample.txBytes
+                return .rebindPort
+            }
+        default:
+            // Stage 3 (tribe.8, U9): never on the tribe.4-7 entry points; a refusal leaves every
+            // field untouched, so the same step is proposed again on the next tick (rule D1).
+            guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
+            let sinceStep = sample.at - last
+            let txSinceStep = sample.txBytes >= txAtLastStep ? sample.txBytes - txAtLastStep : 0
+            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps), txSinceStep >= requiredTx else {
+                return .none
+            }
+            let next = TribeStallTracker.persistentSequence[persistentSteps % TribeStallTracker.persistentSequence.count]
+            if permit(next) {
+                stage = 3
+                persistentSteps += 1
+                lastStepAt = sample.at
+                txAtLastStep = sample.txBytes
+                return next
+            }
+        }
+        return .none
     }
 }
 
@@ -161,174 +321,14 @@ public enum TribeRecoveryKind: Equatable {
     case softRestart
 }
 
-/// Stall watchdog on top of the device's own counters. Inbound progress = rx bytes grew OR a newer
-/// handshake (handshake responses are not counted in rx_bytes, so an idle-but-healthy tunnel that
-/// keeps re-keying must not look stalled).
-///
-/// tribe.9 ladder: stage 0 armed -> (stalled `stallProbeSeconds`, demand `stallMinTxBytes`)
-/// FRESH PORT -> stage 2 -> (stalled `stallProbeSeconds + stallRebindSeconds`, demand x2) SOFT
-/// RESTART -> stage 3: while the path is satisfied and outbound keeps growing without any inbound
-/// progress, `persistentSequence` continues (fresh port, soft restart, ...) with a backoff of 30, 60,
-/// 120 s from the previous step, then 120 s. Inbound progress resets the stage and the backoff.
-///
-/// A path event (roam) does NOT reset the stall clock: a roam fresh port is recorded as this
-/// episode's fresh port (`noteExternalStep`), a same-port roam bump is not recorded at all. tribe.4-8
-/// `rearm` zeroed the clock and the stage on every path event, which on cellular (~200 events/h)
-/// starved the ladder. The app engine's failover (HealthLoop DEAD) still sits above this.
-public struct TribeStallTracker: Equatable {
-    /// 0 = armed, 2 = fresh port done (first step), 3 = two or more steps done (persistent phase).
-    public private(set) var stage: Int = 0
-    /// Steps committed after the first fresh port (the soft restart is step 1). 0 at stage <= 2.
-    public private(set) var persistentSteps: Int = 0
-    private var lastProgressAt: TimeInterval
-    private var txAtProgress: UInt64
-    private var lastRx: UInt64
-    private var lastHandshake: Int64
-    /// Time and tx counter of the last committed step (watchdog, GUI or roam): the second-stage
-    /// gap, the stage-3 backoff and its demand evidence count from here.
-    private var lastStepAt: TimeInterval?
-    private var txAtLastStep: UInt64 = 0
-
-    /// Stage-3 order after the soft restart (persistentSteps = 1 -> index 1 = fresh port first).
-    public static let persistentSequence: [TribeStallAction] = [.softRestart, .rebindPort]
-
-    /// Stage-3 backoff before persistent step `index` (0-based): 30, 60, 120 s, capped at 120 s.
-    public static func persistentBackoff(_ index: Int) -> TimeInterval {
-        let steps: [TimeInterval] = [30, 60, 120]
-        return steps[Swift.min(Swift.max(0, index), steps.count - 1)]
-    }
-
-    public init(first: TribeStallSample) {
-        lastProgressAt = first.at
-        txAtProgress = first.txBytes
-        lastRx = first.rxBytes
-        lastHandshake = first.lastHandshakeSec
-    }
-
-    /// tribe.8: the backend was restarted in place (soft restart): the counters start from zero on
-    /// the new device. Rebase them WITHOUT treating the drop as progress; the stall clock, the stage
-    /// and the stage-3 backoff keep running (only a real rx/handshake on the new device resets them).
-    public mutating func rebaseCounters(_ sample: TribeStallSample) {
-        txAtProgress = sample.txBytes
-        lastRx = sample.rxBytes
-        lastHandshake = sample.lastHandshakeSec
-        txAtLastStep = sample.txBytes
-    }
-
-    /// A step done outside the watchdog: a GUI fresh port / soft restart (provider messages) or a
-    /// roam fresh port (path returned after a loss). It counts as the episode's step of that kind
-    /// and the next watchdog step counts its gap/backoff from it. The stall clock is NOT touched
-    /// (rule of tribe.9: only inbound progress restarts it). A same-port bump is not a step.
-    public mutating func noteExternalStep(_ kind: TribeRecoveryKind, at: TimeInterval, tx: UInt64) {
-        switch kind {
-        case .bump:
-            return
-        case .freshPort:
-            if stage < 2 { stage = 2; persistentSteps = 0 }
-        case .softRestart:
-            stage = 3
-            persistentSteps = Swift.max(persistentSteps, 1)
-        }
-        lastStepAt = at
-        txAtLastStep = tx
-    }
-
-    /// tribe.4/tribe.5 entry point: every proposed step is committed immediately; no steps after the
-    /// first fresh port.
-    public mutating func observe(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy) -> TribeStallAction {
-        step(sample, pathSatisfied: pathSatisfied, policy: policy, minGapAfterStep: 0, persistent: false) { _ in true }
-    }
-
-    /// tribe.7: the escalation stage moves ONLY when `permit` accepts the proposed action. A refusal
-    /// (shared recovery budget: rolling cap, cooldown) leaves the stage where it was, so the same
-    /// step is proposed again on the next tick and fires as soon as the budget frees up.
-    /// `persistent` (tribe.8/9): steps after the first fresh port; false = fresh port only.
-    public mutating func observe(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
-                                 persistent: Bool = false,
-                                 permit: (TribeStallAction) -> Bool) -> TribeStallAction {
-        step(sample, pathSatisfied: pathSatisfied, policy: policy,
-             minGapAfterStep: TribeStallTracker.minGapAfterStep(policy), persistent: persistent, permit: permit)
-    }
-
-    /// A soft restart right after a late (budget-delayed) fresh port would give its keepalive no
-    /// chance to be answered; keep a small gap, never longer than the configured second stage.
-    public static func minGapAfterStep(_ policy: TribeRoamingPolicy) -> TimeInterval {
-        min(3, policy.stallRebindSeconds)
-    }
-
-    private mutating func step(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
-                               minGapAfterStep: TimeInterval, persistent: Bool,
-                               permit: (TribeStallAction) -> Bool) -> TribeStallAction {
-        let progressed = sample.rxBytes > lastRx
-            || sample.lastHandshakeSec > lastHandshake
-            || sample.txBytes < txAtProgress // counters reset = backend restarted, not a stall
-        lastRx = sample.rxBytes
-        lastHandshake = sample.lastHandshakeSec
-        if progressed {
-            lastProgressAt = sample.at
-            txAtProgress = sample.txBytes
-            stage = 0
-            persistentSteps = 0
-            lastStepAt = nil
-            txAtLastStep = sample.txBytes
-            return .none
-        }
-        guard pathSatisfied, policy.stallProbeSeconds > 0 else { return .none }
-        let stalledFor = sample.at - lastProgressAt
-        let txSince = sample.txBytes - txAtProgress
-        // Without a first handshake, let AWG's built-in retries run for at least 12 seconds.
-        // Handshake-only traffic is smaller than data traffic; still require evidence of demand.
-        let bootstrap = sample.lastHandshakeSec == 0 && sample.rxBytes == 0
-        let probeSeconds = bootstrap ? max(12, policy.stallProbeSeconds) : policy.stallProbeSeconds
-        let rebindSeconds = bootstrap ? max(18, policy.stallRebindSeconds) : policy.stallRebindSeconds
-        let requiredTx = bootstrap ? UInt64(256) : policy.stallMinTxBytes
-        switch stage {
-        case 0, 1:
-            if stalledFor >= probeSeconds && txSince >= requiredTx, permit(.rebindPort) {
-                stage = 2
-                persistentSteps = 0
-                lastStepAt = sample.at
-                txAtLastStep = sample.txBytes
-                return .rebindPort
-            }
-        case 2:
-            guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
-            if stalledFor >= probeSeconds + rebindSeconds && txSince >= requiredTx * 2
-                && sample.at - last >= minGapAfterStep, permit(.softRestart) {
-                stage = 3
-                persistentSteps = 1
-                lastStepAt = sample.at
-                txAtLastStep = sample.txBytes
-                return .softRestart
-            }
-        default:
-            // Stage 3: a refusal leaves every field untouched, so the same step is proposed again on
-            // the next tick (rule D1).
-            guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
-            let sinceStep = sample.at - last
-            let txSinceStep = sample.txBytes >= txAtLastStep ? sample.txBytes - txAtLastStep : 0
-            guard sinceStep >= TribeStallTracker.persistentBackoff(persistentSteps - 1), txSinceStep >= requiredTx else {
-                return .none
-            }
-            let next = TribeStallTracker.persistentSequence[persistentSteps % TribeStallTracker.persistentSequence.count]
-            if permit(next) {
-                persistentSteps += 1
-                lastStepAt = sample.at
-                txAtLastStep = sample.txBytes
-                return next
-            }
-        }
-        return .none
-    }
-}
-
 /// One owner (adapter workQueue) arbitrates GUI and autonomous repairs. An episode holds at most
-/// one fresh port and one soft restart; only inbound progress re-arms it. Path notifications alone
-/// do not grant another repair budget, while the rolling cap remains in force.
+/// one bump and one fresh port; a fresh port (from the NE watchdog or the GUI) closes the episode.
+/// Path notifications alone do not grant another repair budget; genuine inbound progress re-arms an
+/// episode, while the rolling cap remains in force.
 ///
 /// tribe.7: the cooldown only separates actions of the SAME kind. tribe.6 applied an 8-10 s cooldown
-/// between ANY two actions, which is longer than the watchdog's own first -> second step at low
-/// outbound rates, so the second stage was refused.
+/// between ANY two actions, which is longer than the watchdog's own bump -> fresh-port step at low
+/// outbound rates (600 B/s: bump at 7 s, fresh port due at 14 s), so the second stage was refused.
 public struct TribeRecoveryBudget: Equatable {
     public static let rollingWindow: TimeInterval = 120
     public static let rollingCap = 4
@@ -510,7 +510,7 @@ public enum TribeSoftRestartResult: Equatable {
 public struct TribeRecoveryArbiter: Equatable {
     public private(set) var budget: TribeRecoveryBudget
     public private(set) var tracker: TribeStallTracker?
-    /// Steps after the first fresh port (soft restart, then the stage-3 cycle). false = fresh port only.
+    /// tribe.8 (U9): stage 3 after the fresh port. false = tribe.7 behaviour (exhausted at stage 2).
     public let persistentHeal: Bool
 
     public init(jitter: TimeInterval = 0, persistentHeal: Bool = true) {
@@ -534,19 +534,16 @@ public struct TribeRecoveryArbiter: Equatable {
     /// Watchdog (re)start or pause: the next sample seeds a fresh tracker. The budget persists.
     public mutating func resetTracker() { tracker = nil }
 
-    /// tribe.9: a path event just rebound the socket. `freshPort` = the path returned after a real
-    /// loss or moved to another interface (new local port + keepalive): recorded as the episode's
-    /// fresh port, so the watchdog's next step is the soft restart, not another fresh port. A
-    /// same-port bump (path event without a loss) is not a ladder step. Neither touches the stall
-    /// clock (tribe.4-8 `rearmAfterRoam` restarted it on every path event and starved the ladder).
-    public mutating func noteRoamRebind(_ sample: TribeStallSample, freshPort: Bool) {
+    /// A roam rebind (path event) just bumped the socket: restart the stall clock, but steps the
+    /// budget already spent in this episode stay spent (a path event is not inbound progress).
+    public mutating func rearmAfterRoam(_ sample: TribeStallSample) {
         budget.observe(sample)
         if tracker == nil {
             tracker = TribeStallTracker(first: sample)
+        } else {
+            tracker?.rearm(sample)
         }
-        if freshPort {
-            tracker?.noteExternalStep(.freshPort, at: sample.at, tx: sample.txBytes)
-        }
+        syncTrackerWithBudget(sample)
     }
 
     public mutating func tick(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy) -> TribeWatchdogOutcome {
@@ -558,19 +555,29 @@ public struct TribeRecoveryArbiter: Equatable {
         var proposed = TribeStallAction.none
         var denial: TribeRecoveryDenial?
         var budget = self.budget
-        // Stage 3 proposes persistent steps (not limited by the episode; its own backoff paces it).
-        let persistentPhase = current.stage >= 3
+        // Stages 2/3 can only propose a persistent step (the tracker's own backoff paces it).
+        let persistentPhase = current.stage >= 2
         let action = current.observe(sample, pathSatisfied: pathSatisfied, policy: policy,
                                      persistent: persistentHeal) { step in
             proposed = step
+            if !persistentPhase && step == .bumpSockets && budget.bumpSpent && !budget.freshPortSpent {
+                // The bump of this episode already ran (before a roam rearm): go straight to the
+                // fresh-port step instead of asking for a second bump forever.
+                return false
+            }
             denial = budget.request(at: sample.at, kind: TribeRecoveryArbiter.kind(of: step), persistent: persistentPhase)
             return denial == nil
         }
         self.budget = budget
         tracker = current
         if action != .none { return .perform(action) }
-        guard proposed != .none, let denial else { return .none }
-        return .denied(proposed, denial)
+        guard proposed != .none else { return .none }
+        if let denial {
+            if denial == .episode { syncTrackerWithBudget(sample) }
+            return .denied(proposed, denial)
+        }
+        syncTrackerWithBudget(sample) // skipped an already-spent bump
+        return .none
     }
 
     private static func kind(of step: TribeStallAction) -> TribeRecoveryKind {
@@ -587,8 +594,7 @@ public struct TribeRecoveryArbiter: Equatable {
         guard let sample else { return .notStarted }
         budget.observe(sample)
         if let denial = budget.request(at: sample.at, kind: .freshPort) { return .budget(denial) }
-        if tracker == nil { tracker = TribeStallTracker(first: sample) }
-        tracker?.noteExternalStep(.freshPort, at: sample.at, tx: sample.txBytes)
+        syncTrackerWithBudget(sample)
         return .performed
     }
 
@@ -600,9 +606,13 @@ public struct TribeRecoveryArbiter: Equatable {
         guard let sample else { return .notStarted }
         budget.observe(sample)
         if let denial = budget.request(at: sample.at, kind: .softRestart) { return .budget(denial) }
-        if tracker == nil { tracker = TribeStallTracker(first: sample) }
-        tracker?.noteExternalStep(.softRestart, at: sample.at, tx: sample.txBytes)
+        tracker?.noteExternalStep(at: sample.at, tx: sample.txBytes)
         return .performed
+    }
+
+    private mutating func syncTrackerWithBudget(_ sample: TribeStallSample) {
+        let spentStage = budget.freshPortSpent ? 2 : (budget.bumpSpent ? 1 : 0)
+        tracker?.advance(toStage: spentStage, at: sample.at, tx: sample.txBytes)
     }
 }
 
@@ -610,8 +620,6 @@ public struct TribeRoamingCounters: Equatable {
     public var pathLost: UInt64 = 0
     public var pathRestored: UInt64 = 0
     public var roamBumps: UInt64 = 0
-    /// tribe.9: fresh local port on a path that returned after a loss / moved to another interface.
-    public var roamFreshPorts: UInt64 = 0
     public var stallBumps: UInt64 = 0
     public var stallRebinds: UInt64 = 0
     public var pauses: UInt64 = 0
@@ -626,14 +634,14 @@ public struct TribeRoamingCounters: Equatable {
     public init() {}
 
     public var asDictionary: [String: UInt64] {
-        ["path_lost": pathLost, "path_restored": pathRestored, "roam_bumps": roamBumps, "roam_fresh_ports": roamFreshPorts,
+        ["path_lost": pathLost, "path_restored": pathRestored, "roam_bumps": roamBumps,
          "stall_bumps": stallBumps, "stall_rebinds": stallRebinds, "pauses": pauses, "resumes": resumes,
          "recovery_used": recoveryUsed, "recovery_denied": recoveryDenied, "recovery_interventions": recoveryInterventions,
          "stall_persistent": stallPersistent, "soft_restarts": softRestarts]
     }
 
     public var summary: String {
-        "path_lost=\(pathLost) path_restored=\(pathRestored) roam_bumps=\(roamBumps) roam_fresh_ports=\(roamFreshPorts) stall_bumps=\(stallBumps) stall_rebinds=\(stallRebinds) pauses=\(pauses) resumes=\(resumes)"
+        "path_lost=\(pathLost) path_restored=\(pathRestored) roam_bumps=\(roamBumps) stall_bumps=\(stallBumps) stall_rebinds=\(stallRebinds) pauses=\(pauses) resumes=\(resumes)"
     }
 }
 
@@ -662,15 +670,6 @@ public enum TribeRoaming {
         case .rebindPort: return [.freshListenPort, .sendKeepalive]
         case .softRestart: return [.restartBackend]
         }
-    }
-
-    /// tribe.9: what a (re)appearing path gets. After a REAL loss (the path was unsatisfied) or a
-    /// move to another interface (Wi-Fi <-> cellular) the old 5-tuple is dead or foreign to the new
-    /// NAT: a fresh local port + keepalive (upstream restarts the whole device here and gets a new
-    /// port as a side effect). A path event without a loss on the same interface (interface order,
-    /// DNS, expensive flag) keeps the upstream reaction: a same-port bump.
-    public static func roamRebindAction(realLoss: Bool, interfaceChanged: Bool) -> TribeStallAction {
-        (realLoss || interfaceChanged) ? .rebindPort : .bumpSockets
     }
 
     /// `legacyWouldPause` = upstream's own gates (12 s grace after applying routes, first handshake
