@@ -4850,13 +4850,23 @@ void AvpnEngineQml::hookDaemonWakeSignals()
     // Kill-switch: features.wake_restart=false — ванильное поведение (подписки не срезаем).
     if (!avpn::TuningStore::flag(QStringLiteral("wake_restart")))
         return;
+    // Срез ванильного пути БЕЗ правки апстрима: снимаем все подписки rep→VpnConnection
+    // (createProtocolConnections их к тому же копит дубликатами на каждый connectToVpn).
+    // Окно между connectToVpn и Connected безопасно: reconnectToVpn игнорирует не-Connected.
+    // Волна «как апстрим» (2026-09-28), КОРЕНЬ «VPN сам пропадает» на Mac: IpcClient —
+    // thread_local (ipcClient.cpp), у потока VpnConnection своя реплика. Ванильные подписки
+    // createProtocolConnections живут на реплике ЕГО потока, а срез шёл по реплике GUI-потока —
+    // мимо: в логе 26.09 12:08:14 «Reconnect triggered» и «[wake] networkChanged» в одну мс,
+    // 13 накопленных дубликатов → Reconnecting → 20с-сторож §16 → Disconnected → §13 снимал
+    // намерение (9 из 9 external_loss за 26–28.09). Срезаем в потоке VpnConnection.
+    QMetaObject::invokeMethod(m_conn, [conn = m_conn]() {
+        IpcClient::withInterface([conn](QSharedPointer<IpcInterfaceReplica> rep) {
+            QObject::disconnect(rep.data(), &IpcInterfaceReplica::wakeup, conn, nullptr);
+            QObject::disconnect(rep.data(), &IpcInterfaceReplica::networkChanged, conn, nullptr);
+        });
+    }, Qt::QueuedConnection);
     // На Connected демон гарантированно жив → waitForSource внутри withInterface мгновенен.
     IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
-        // Срез ванильного пути БЕЗ правки апстрима: снимаем все подписки rep→VpnConnection
-        // (createProtocolConnections их к тому же копит дубликатами на каждый connectToVpn).
-        // Окно между connectToVpn и Connected безопасно: reconnectToVpn игнорирует не-Connected.
-        QObject::disconnect(rep.data(), &IpcInterfaceReplica::wakeup, m_conn, nullptr);
-        QObject::disconnect(rep.data(), &IpcInterfaceReplica::networkChanged, m_conn, nullptr);
         // Наши обработчики (UniqueConnection — на каждом Connected хук повторяется).
         connect(rep.data(), &IpcInterfaceReplica::wakeup, this, &AvpnEngineQml::onDaemonWakeup,
                 Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
