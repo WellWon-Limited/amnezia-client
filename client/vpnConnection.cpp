@@ -124,6 +124,13 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
     default:
         break;
     }
+    // AVPN (волна «как апстрим»): сервера Tribe в репозитории нет — берём контейнер коннекта.
+    // Только macOS: там ветка «не-AWG» — чистый шум (RouterMac::routeAdd отвергает пустой шлюз,
+    // маршруты байпаса ставит монитор демона); на Windows/Linux поведение не трогаем без замера.
+#ifdef Q_OS_MACOS
+    if (container == DockerContainer::None)
+        container = m_connectContainer;
+#endif
 
     IpcClient::withInterface([&](QSharedPointer<IpcInterfaceReplica> iface) {
         switch (state) {
@@ -342,6 +349,7 @@ void VpnConnection::connectToVpn(const QString &serverId, DockerContainer contai
              << m_appSettingsRepository->routeMode();
 
     m_remoteAddress = NetworkUtilities::getIPAddress(vpnConfiguration.value(configKey::hostName).toString());
+    m_connectContainer = container; // AVPN (волна «как апстрим»): см. vpnConnection.h
     setConnectionState(Vpn::ConnectionState::Connecting);
 
     m_vpnConfiguration = vpnConfiguration;

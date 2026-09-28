@@ -100,6 +100,11 @@ private:
    // AVPN (IPC-stall fix): поколение реконнекта — сторож в reconnectToVpn() действует только на
    // СВОЁ окно Reconnecting (иначе таймер прошлого реконнекта мог бы уронить следующий).
    quint64 m_reconnectGeneration = 0;
+   // AVPN (волна «как апстрим», 2026-09-28): контейнер ПОСЛЕДНЕГО connectToVpn. Сервисный путь
+   // Tribe не заводит сервер в репозиторий Amnezia → defaultServerId даёт None, и на каждом
+   // Connected шла ветка «не-AWG»: 8,7 тыс. `Critical, trying to add invalid route` + 2178 резолвов
+   // IPv6-CIDR (лог Mac 26–28.09). Фолбэк на фактический контейнер коннекта = семантика апстрима.
+   DockerContainer m_connectContainer = DockerContainer::None;
 
    void createProtocolConnections();
 
