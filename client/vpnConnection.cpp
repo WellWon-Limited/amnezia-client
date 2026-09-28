@@ -685,6 +685,9 @@ void VpnConnection::disconnectFromVpn()
 
 void VpnConnection::armReconnectWatchdog(quint64 generation)
 {
+#ifndef AMNEZIA_DESKTOP
+    Q_UNUSED(generation) // reconnectToVpn/§16-сторож — только десктоп с демоном (iOS/Android/NE не сюда)
+#else
     QTimer::singleShot(20000, this, [this, generation]() {
         if (generation != m_reconnectGeneration)
             return;  // начался следующий реконнект — это не наше окно
@@ -718,6 +721,7 @@ void VpnConnection::armReconnectWatchdog(quint64 generation)
             setConnectionState(Vpn::ConnectionState::Disconnected);
         });
     });
+#endif
 }
 
 void VpnConnection::setConnectionState(Vpn::ConnectionState state) {
