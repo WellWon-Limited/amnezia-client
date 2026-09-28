@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QMetaEnum>
 #include <QStandardPaths>
@@ -68,7 +69,27 @@ bool Logger::init(bool isServiceLogger)
         return false;
     }
 
-    m_file.setFileName(appDir.filePath(logFileName));
+    const QString fullPath = appDir.filePath(logFileName);
+    // AVPN (волна-3, 2026-09-28): идемпотентность. Повторный init при уже открытом том же файле
+    // (клиент шлёт службе «лог вкл» дважды — журнал тестирования и «сохранять логи») давал
+    // «QFile::setFileName: File already open» и молчащий лог службы сутками.
+    if (m_file.isOpen()) {
+        if (m_file.fileName() == fullPath)
+            return true;
+        m_textStream.setDevice(nullptr);
+        m_file.close();
+    }
+    // AVPN (волна-3): ротация — лог службы рос без потолка (85 МБ за 2 суток). Порог 10 МБ,
+    // одна предыдущая копия <name>.1.
+    {
+        QFileInfo fi(fullPath);
+        if (fi.exists() && fi.size() > 10 * 1024 * 1024) {
+            const QString rotated = fullPath + QStringLiteral(".1");
+            QFile::remove(rotated);
+            QFile::rename(fullPath, rotated);
+        }
+    }
+    m_file.setFileName(fullPath);
     if (!m_file.open(QIODevice::Append)) {
         qWarning() << "Cannot open log file:" << logFileName;
         return false;

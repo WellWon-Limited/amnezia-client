@@ -19,6 +19,11 @@
 #include "killswitch.h"
 
 constexpr const int WG_TUN_PROC_TIMEOUT = 15000; // AVPN: было 5000 — мало для первого старта amneziawg-go под демоном (создание utun + проверка подписи) → таймаут → демон убивал процесс
+// AVPN (волна-3): 15 с нужны только старту процесса/ожиданию имени utun; UAPI и остановка — свои
+// короткие бюджеты (раньше 15 с на UAPI + 15+15 с terminate/kill = глухая блокировка потока демона до 30 с).
+constexpr const int WG_UAPI_TIMEOUT = 2000;
+constexpr const int WG_TUN_STOP_TIMEOUT = 3000;
+constexpr const int WG_TUN_KILL_TIMEOUT = 2000;
 constexpr const char* WG_RUNTIME_DIR = "/var/run/amneziawg"; // AVPN: ДОЛЖЕН совпадать с зашитым в amneziawg-go каталогом UAPI-сокета (/var/run/amneziawg), иначе waitForTunnelName не находит <ifname>.sock → таймаут. Изоляция от upstream сохраняется: у официальной Amnezia wireguard-go = /var/run/wireguard
 
 namespace {
@@ -64,10 +69,9 @@ bool WireguardUtilsMacos::addInterface(const InterfaceConfig& config) {
     return false;
   }
 
-  // AVPN: «один VPN». До подъёма нашего туннеля гасим любой чужой VPN, держащий
-  // дефолт-маршрут (Amnezia, Outline и любой full-tunnel) — иначе на macOS два
-  // демон-VPN могут сосуществовать и драться за маршрут.
-  displaceConflictingVpns(m_ifname);
+  // AVPN (волна-3): displaceConflictingVpns удалён — за 3 месяца 0 срабатываний, от VPN, поднятого
+  // ПОСЛЕ нас, не защищал, а `ifconfig down` чужого utun ломал чужие приложения. Защита теперь в
+  // мониторе маршрутов (default только на физическом интерфейсе) и в pf (200.allowVPN — только свой utun).
 
   QDir wgRuntimeDir(WG_RUNTIME_DIR);
   if (!wgRuntimeDir.exists()) {
@@ -225,9 +229,9 @@ bool WireguardUtilsMacos::deleteInterface() {
 
   // Attempt to terminate gracefully.
   m_tunnel.terminate();
-  if (!m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT)) {
+  if (!m_tunnel.waitForFinished(WG_TUN_STOP_TIMEOUT)) {
     m_tunnel.kill();
-    m_tunnel.waitForFinished(WG_TUN_PROC_TIMEOUT);
+    m_tunnel.waitForFinished(WG_TUN_KILL_TIMEOUT);
   }
 
   // Garbage collect.
@@ -458,10 +462,10 @@ QString WireguardUtilsMacos::uapiCommand(const QString& command) {
   QString wgSocketFile = wgRuntimeDir.filePath(m_ifname + ".sock");
 
   uapiTimeout.setSingleShot(true);
-  uapiTimeout.start(WG_TUN_PROC_TIMEOUT);
+  uapiTimeout.start(WG_UAPI_TIMEOUT);
 
   socket.connectToServer(wgSocketFile, QIODevice::ReadWrite);
-  if (!socket.waitForConnected(WG_TUN_PROC_TIMEOUT)) {
+  if (!socket.waitForConnected(WG_UAPI_TIMEOUT)) {
     logger.error() << "QLocalSocket::waitForConnected() failed:"
                    << socket.errorString();
     return QString();
@@ -528,53 +532,6 @@ QString WireguardUtilsMacos::waitForTunnelName(const QString& filename) {
   return QString();
 }
 
-// AVPN: гарантия «на macOS активен один VPN». Перед подъёмом нашего туннеля находим
-// чужие utun-интерфейсы, которые держат дефолт-маршрут (0/1, 128.0/1, default или их
-// IPv6-аналоги) — это конкурирующие full-tunnel VPN (Amnezia/Outline/любой). Системные
-// utun (AirDrop/Handoff/Continuity) дефолт-маршрут НЕ держат, поэтому не затрагиваются.
-// Гасим их интерфейс (ifconfig down) + сносим их дефолт-маршруты: чужой туннель теряет
-// трафик, его собственный сетевой монитор это видит и отключается. Свой интерфейс
-// (selfIfname) и физические (en*) не трогаем.
-void WireguardUtilsMacos::displaceConflictingVpns(const QString& selfIfname) {
-  // ТОЛЬКО IPv4-дефолт: full-tunnel VPN держит 0/1 / 128.0/1 / default через utun.
-  // Системные utun (Continuity/AirDrop/iCloud Relay) держат лишь IPv6-половинки (::/1) —
-  // их НЕ трогаем, иначе ломается системная сеть. Поэтому inet6 исключён намеренно.
-  const QString script = QStringLiteral(
-      "netstat -rnf inet 2>/dev/null | "
-      "awk '($1==\"default\"||$1==\"0/1\"||$1==\"128.0/1\") "
-      "&& $NF ~ /^utun[0-9]+$/ {print $NF}' | sort -u");
-
-  QProcess finder;
-  finder.start(QStringLiteral("/bin/sh"), QStringList{QStringLiteral("-c"), script});
-  if (!finder.waitForFinished(3000)) {
-    finder.kill();
-    return;
-  }
-  const QStringList ifaces =
-      QString::fromUtf8(finder.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
-
-  for (QString ifn : ifaces) {
-    ifn = ifn.trimmed();
-    if (ifn.isEmpty() || !ifn.startsWith(QStringLiteral("utun"))) continue;
-    if (!selfIfname.isEmpty() && ifn == selfIfname) continue;  // не трогаем свой
-
-    logger.warning() << "Displacing conflicting VPN on interface" << ifn;
-    // Снести дефолт-маршруты, идущие через чужой интерфейс.
-    for (const QString& r : {QStringLiteral("default"), QStringLiteral("0.0.0.0/1"),
-                             QStringLiteral("128.0.0.0/1")}) {
-      QProcess del;
-      del.start(QStringLiteral("/sbin/route"),
-                QStringList{QStringLiteral("-q"), QStringLiteral("-n"),
-                            QStringLiteral("delete"), QStringLiteral("-ifscope"), ifn, r});
-      del.waitForFinished(2000);
-    }
-    // Погасить чужой интерфейс — туннель остаётся без устройства, чужой VPN отключается.
-    QProcess down;
-    down.start(QStringLiteral("/sbin/ifconfig"), QStringList{ifn, QStringLiteral("down")});
-    down.waitForFinished(2000);
-  }
-}
-
 void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
 {
   // double-check + ensure our firewall is installed and enabled. This is necessary as
@@ -592,7 +549,13 @@ void WireguardUtilsMacos::applyFirewallRules(FirewallParams& params)
   MacOSFirewall::setAnchorTable(QStringLiteral("120.blockNets"), params.blockNets,
                                 QStringLiteral("blocknets"), params.blockAddrs);
 
-  MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
+  // AVPN (волна-3): пропускать наружу только СВОЙ utun. Статический файл пропускал utun0–utun30 —
+  // трафик, ушедший в чужой VPN (см. монитор маршрутов), kill switch не ловил.
+  if (!m_ifname.isEmpty())
+    MacOSFirewall::setAnchorWithRules(QStringLiteral("200.allowVPN"), true,
+                                      { QStringLiteral("pass out on %1 flags any no state").arg(m_ifname) });
+  else
+    MacOSFirewall::setAnchorEnabled(QStringLiteral("200.allowVPN"), true);
   MacOSFirewall::setAnchorEnabled(QStringLiteral("250.blockIPv6"), true);
   MacOSFirewall::setAnchorEnabled(QStringLiteral("290.allowDHCP"), true);
   MacOSFirewall::setAnchorEnabled(QStringLiteral("300.allowLAN"), true);

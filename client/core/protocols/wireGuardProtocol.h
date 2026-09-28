@@ -24,6 +24,9 @@ public:
 
     ErrorCode startMzImpl();
     ErrorCode stopMzImpl();
+    // AVPN (волна-3): §16-сторож VpnConnection спрашивает демона напрямую ({"type":"status"});
+    // ответ приходит как statusUpdated → bytesChanged — это и есть признак живого демона.
+    void requestStatus();
 
 private:
 

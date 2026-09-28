@@ -1013,7 +1013,16 @@ void IosController::checkStatus()
                     m_handshakeTimer.restart();
                     // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов
                     // честно отдаём Error и гасим туннель (типично: IP:порт ноды режется оператором).
-                    if (++m_handshakeTimeouts >= handshakeMaxTimeouts) {
+                    if (++m_handshakeTimeouts >= handshakeMaxTimeouts && !m_connectPending) {
+                        // AVPN (волна-3, 2026-09-28): сессию НЕ нашего старта (адоптированная после
+                        // холодного старта, поднятая из Настроек/On-Demand, мягкий рестарт NE) не гасим:
+                        // Error при m_op==None фасад считал внешним обрывом (intent_off why=external_loss),
+                        // и VPN выключался через 36 с после открытия приложения. Как апстрим — только
+                        // Reconnecting; мёртвую сессию лечит лестница NE/HealthLoop. Таймауты копим
+                        // дальше, чтобы не спамить лог.
+                        m_handshakeTimer.restart();
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                    } else if (m_handshakeTimeouts >= handshakeMaxTimeouts) {
                         qWarning() << "IosController::checkStatus : handshake failed after"
                                    << m_handshakeTimeouts << "timeouts — stopping tunnel";
                         m_handshakeAwaiting = false;

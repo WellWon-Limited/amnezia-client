@@ -600,6 +600,7 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
 
 bool Daemon::deactivate(bool emitSignals) {
   Q_ASSERT(wgutils() != nullptr);
+  m_handshakeTimer.stop(); // AVPN (волна-3): опрос рукопожатия принадлежит уходящей сессии («Invalid name» ×5 после deactivate)
 
 #ifdef Q_OS_WIN
   // AVPN win-fix (BUG-12): фоновый досев исключений принадлежит уходящей сессии — снять до

@@ -351,13 +351,69 @@ inline StartPrep decideStartPreparation(bool haveSubscription, bool hasConnectab
 // каждые 20 с при окне в фоне (Mac владельца: 13,3 тыс. пингов за 2,3 сут). Палочки RTT видны
 // только на экране; бейдж трафика в фоне освежаем не чаще ~5 мин (лимиты/срок режет сервер).
 constexpr int kBackgroundTrafficSyncTicks = 75; // × health-tick 4 с ≈ 5 мин
-inline bool liveRttAllowed(bool flagOn, bool connected, bool uiActive)
+// Волна-2 (ревью 5.1.95): в фоне проба не выключается, а разрежается до каждого 15-го тика
+// (~60 с). Удачная проба через туннель — единственный сброс счётчика провалов data-plane
+// (ServiceEngine::feedProbeResult); без неё 4 failover за долгую сессию давали «сдаёмся» и
+// снятие намерения, а мёртвый xray в фоне не обнаруживался.
+constexpr int kBackgroundProbeEveryTicks = 15;
+inline bool liveProbeDue(bool flagOn, bool connected, bool uiActive, int bgTick)
 {
-    return flagOn && connected && uiActive;
+    if (!flagOn || !connected)
+        return false;
+    return uiActive || (bgTick > 0 && bgTick % kBackgroundProbeEveryTicks == 0);
+}
+// Волна-2: «подключаемся сразу по кэшу RTT» — только если замер сделан ПОСЛЕ последней смены
+// сети и покрывает все авто-ноды пула. Частичный замер (EE потерял пакет, US измерен) или замер
+// из прошлой сети (Wi-Fi → LTE) уводил бы на дальнюю ноду без раунда.
+inline bool rttCoverageFresh(int eligible, int measuredEligible, qint64 rttAgeMs, qint64 sinceNetChangeMs)
+{
+    if (eligible <= 0 || measuredEligible < eligible || rttAgeMs < 0)
+        return false;
+    return sinceNetChangeMs < 0 || rttAgeMs < sinceNetChangeMs;
 }
 inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 {
     return uiActive ? configuredTicks : qMax(configuredTicks, kBackgroundTrafficSyncTicks);
+}
+// ---- Волна-3 (2026-09-28): намерение пользователя переживает отсутствие сети и падение компонента ----
+// Апстрим Amnezia не снимает «хочу VPN» никогда; мы снимали его по счётчику 3×15 с и по любому
+// Disconnected при m_op==None. Разбор Mac 26–28.09: 9/9 «сам выключился» и 3×15 с в сеть без
+// default route. Правила: (1) попытка старта без физического аплинка не считается — ждём сеть;
+// (2) исчерпание попыток при живой сети = пауза с ростом 30/60/120 с, не OFF (пользователь
+// всегда может выключить сам); (3) обрыв классифицируется, намерение снимает ТОЛЬКО внешний
+// (§13: пользователь/другой VPN/ОС), а «нет сети» и «упал компонент» его держат.
+enum class StartFailure { CountAndRetry, WaitUplink };
+inline StartFailure judgeStartFailure(bool uplinkUp)
+{
+    return uplinkUp ? StartFailure::CountAndRetry : StartFailure::WaitUplink;
+}
+inline int startRetryBackoffMs(int exhaustedRounds)
+{
+    static const int steps[] = { 30000, 60000, 120000 };
+    const int i = exhaustedRounds < 0 ? 0 : (exhaustedRounds > 2 ? 2 : exhaustedRounds);
+    return steps[i];
+}
+enum class LossClass { Own, External, NoNetwork, Component };
+inline LossClass classifyLoss(bool weAreOperating, const QString &engineStateBeforeCallback,
+                              bool engineInterruptedSwitch, bool componentLost, bool uplinkUp)
+{
+    if (weAreOperating || engineOwnTransitionState(engineStateBeforeCallback) || engineInterruptedSwitch)
+        return LossClass::Own;
+    if (componentLost)
+        return LossClass::Component;
+    if (!uplinkUp)
+        return LossClass::NoNetwork;
+    return LossClass::External;
+}
+inline bool lossDropsIntent(LossClass c) { return c == LossClass::External; }
+// §16-сторож десктопа: 20 с в Reconnecting → спросить демона (status). Ответил (эхо статистики)
+// → жив, остаёмся в Reconnecting (перевзвод ≤ 3 раз ≈ ещё 60 с); молчит 3 с → мёртв.
+enum class ReconnectWatchdog { Rearm, ForceDisconnectedAlive, ForceDisconnectedDead };
+inline ReconnectWatchdog decideReconnectWatchdog(bool daemonAnswered, int rearmsDone, int maxRearms = 3)
+{
+    if (!daemonAnswered)
+        return ReconnectWatchdog::ForceDisconnectedDead;
+    return rearmsDone < maxRearms ? ReconnectWatchdog::Rearm : ReconnectWatchdog::ForceDisconnectedAlive;
 }
 // Смена сети во время подготовки: refresh нужен, только если пула ещё нет (свежая установка).
 // Раньше смена сети (в том числе от гашения собственного туннеля при смене ноды) заново взводила

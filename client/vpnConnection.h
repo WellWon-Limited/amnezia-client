@@ -64,6 +64,9 @@ signals:
     void vpnProtocolError(amnezia::ErrorCode error);
 
     void serviceIsNotReady();
+    // AVPN (волна-3): §16-сторож не дождался ответа демона на status — демон мёртв/перезапускается.
+    // Движок держит намерение (класс Component), подключение повторится, когда служба вернётся.
+    void daemonLost();
 
 protected slots:
     void onBytesChanged(quint64 receivedBytes, quint64 sentBytes);
@@ -100,6 +103,13 @@ private:
    // AVPN (IPC-stall fix): поколение реконнекта — сторож в reconnectToVpn() действует только на
    // СВОЁ окно Reconnecting (иначе таймер прошлого реконнекта мог бы уронить следующий).
    quint64 m_reconnectGeneration = 0;
+   // AVPN (волна-3): §16-сторож сначала спрашивает демона (status). Любое эхо статистики после
+   // запроса = демон жив (statusUpdated → bytesChanged); остаёмся в Reconnecting и перевзводимся
+   // (≤ 3 раз). Молчит 3 с → мёртв → честный Disconnected + daemonLost().
+   bool m_reconnectProbing = false;
+   bool m_reconnectProbeAnswered = false;
+   int  m_reconnectRearms = 0;
+   void armReconnectWatchdog(quint64 generation);
    // AVPN (волна «как апстрим», 2026-09-28): контейнер ПОСЛЕДНЕГО connectToVpn. Сервисный путь
    // Tribe не заводит сервер в репозиторий Amnezia → defaultServerId даёт None, и на каждом
    // Connected шла ветка «не-AWG»: 8,7 тыс. `Critical, trying to add invalid route` + 2178 резолвов

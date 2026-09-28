@@ -1,5 +1,6 @@
 // AVPN — Tribe: чат поддержки, реализация. Комментарии по-русски (конвенция слоя).
 #include "TribeSupportChat.h"
+#include "AvpnEngineQml.h" // волна-2: uiForeground()
 
 #include <QBuffer>
 #include <QDateTime>
@@ -288,8 +289,8 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
             return;
         if (m_active)
             refresh();
-        else if (QGuiApplication::applicationState() == Qt::ApplicationActive)
-            refreshUnread(); // волна «как апстрим» (2026-09-28): бейдж в фоне не опрашиваем
+        else if (AvpnEngineQml::uiForeground())
+            refreshUnread(); // волна «как апстрим» (2026-09-28): бейдж в фоне не опрашиваем (волна-2: по видимости окна)
     });
     m_pollTimer.start();
     // Вернулись на экран — бейдж сразу, не через минуту (фоновый опрос выше выключен).

@@ -298,8 +298,17 @@ static void parityConnectDoesNotWaitForNetwork()
     // → selection_budget_expired), хотя локация была закреплена, а handshake занимает 0,7 с.
     // Пул есть + пригодный pin → подключаемся сразу.
     CHECK(decideStartPreparation(true, /*pin=*/true, /*freshRtt=*/false) == StartPrep::ConnectNow);
-    // Пул есть + свежий (≤ TTL) замер RTT → «Авто» выбирает по нему сразу.
+    // Пул есть + свежий замер RTT, покрывающий все авто-ноды и сделанный после последней смены
+    // сети → «Авто» выбирает по нему сразу.
     CHECK(decideStartPreparation(true, false, true) == StartPrep::ConnectNow);
+    // Волна-2 (ревью 5.1.95, находка 2): свежесть замера = после последней смены сети И покрытие
+    // всех авто-нод; частичный замер или замер из прошлой сети → обычный раунд (≤ 1,5 с).
+    CHECK(rttCoverageFresh(/*eligible=*/3, /*measuredEligible=*/3, /*rttAgeMs=*/5000, /*sinceNetChangeMs=*/60000));
+    CHECK(!rttCoverageFresh(3, 2, 5000, 60000));   // частичный
+    CHECK(!rttCoverageFresh(3, 3, 70000, 60000));  // замер старше последней смены сети
+    CHECK(!rttCoverageFresh(3, 3, -1, 60000));     // замера нет
+    CHECK(!rttCoverageFresh(0, 0, 5000, 60000));   // авто-нод нет
+    CHECK(rttCoverageFresh(3, 3, 5000, -1));       // смены сети не было вовсе
     // Пул есть, pin нет, замера нет → только ICMP-раунд (≤ 1,5 с), без ожидания refresh.
     CHECK(decideStartPreparation(true, false, false) == StartPrep::MeasureRtt);
     // Пула нет (свежая установка) → ждём bootstrap, как раньше (потолок 20 с).
@@ -315,16 +324,55 @@ static void parityBackgroundPollingOnlyWhenActive()
     // Волна «как апстрим» (2026-09-28): у апстрима нет ни одного периодического сетевого таймера.
     // Mac владельца: 13,3 тыс. HEAD /v1/ping за 2,3 сут (каждые 4 с) и /v1/subscription каждые 20 с —
     // при окне в фоне. Палочки RTT — только при активном окне (их никто не видит в фоне).
-    CHECK(liveRttAllowed(/*flag=*/true, /*connected=*/true, /*uiActive=*/true));
-    CHECK(!liveRttAllowed(true, true, false));
-    CHECK(!liveRttAllowed(false, true, true));
-    CHECK(!liveRttAllowed(true, false, true));
+    // Волна-2 (ревью 5.1.95, находка 1): в фоне пробу НЕ выключаем, а разрежаем до ~60 с —
+    // удачная проба через туннель единственная сбрасывает счётчик провалов data-plane
+    // (ServiceEngine::feedProbeResult), без неё 4 failover за сессию = «сдаёмся» и intent off.
+    CHECK(liveProbeDue(/*flag=*/true, /*connected=*/true, /*uiActive=*/true, /*bgTick=*/1));
+    CHECK(liveProbeDue(true, true, true, 7));
+    CHECK(!liveProbeDue(true, true, false, 1));
+    CHECK(!liveProbeDue(true, true, false, 14));
+    CHECK(liveProbeDue(true, true, false, 15));
+    CHECK(liveProbeDue(true, true, false, 30));
+    CHECK(!liveProbeDue(false, true, true, 15));
+    CHECK(!liveProbeDue(true, false, true, 15));
+    CHECK(kBackgroundProbeEveryTicks == 15);
     // Синк трафика: на экране — как настроено (дефолт 5 тиков ≈ 20 с), в фоне — не чаще ~5 мин
     // (expiry всё равно режет сервер; клиенту — только бейдж).
     CHECK(trafficSyncTicks(5, true) == 5);
     CHECK(trafficSyncTicks(5, false) == kBackgroundTrafficSyncTicks);
     CHECK(kBackgroundTrafficSyncTicks == 75);
     CHECK(trafficSyncTicks(200, false) == 200); // сервер просит реже — не учащаем
+}
+
+static void wave3StartAndLossPolicy()
+{
+    // Волна-3 (2026-09-28): попытка старта без физического аплинка не считается — ждём сеть.
+    CHECK(judgeStartFailure(/*uplinkUp=*/true) == StartFailure::CountAndRetry);
+    CHECK(judgeStartFailure(false) == StartFailure::WaitUplink);
+    // Исчерпание попыток при живой сети — не снятие намерения, а пауза с ростом 30/60/120 с.
+    CHECK(startRetryBackoffMs(0) == 30000);
+    CHECK(startRetryBackoffMs(1) == 60000);
+    CHECK(startRetryBackoffMs(2) == 120000);
+    CHECK(startRetryBackoffMs(9) == 120000);
+    // Классификация обрыва (вместо голого «внешний / не внешний»).
+    CHECK(classifyLoss(/*weOperate=*/true, QStringLiteral("connected"), false, false, true) == LossClass::Own);
+    CHECK(classifyLoss(false, QStringLiteral("switching"), false, false, true) == LossClass::Own);
+    CHECK(classifyLoss(false, QStringLiteral("connected"), /*interrupted=*/true, false, true) == LossClass::Own);
+    CHECK(classifyLoss(false, QStringLiteral("connected"), false, /*componentLost=*/true, true) == LossClass::Component);
+    CHECK(classifyLoss(false, QStringLiteral("connected"), false, false, /*uplinkUp=*/false) == LossClass::NoNetwork);
+    CHECK(classifyLoss(false, QStringLiteral("connected"), false, false, true) == LossClass::External);
+    CHECK(classifyLoss(false, QStringLiteral("error"), false, false, true) == LossClass::External);
+    // Только External снимает намерение (§13); остальные классы держат его.
+    CHECK(lossDropsIntent(LossClass::External));
+    CHECK(!lossDropsIntent(LossClass::Own));
+    CHECK(!lossDropsIntent(LossClass::Component));
+    CHECK(!lossDropsIntent(LossClass::NoNetwork));
+    // Сторож §16: демон ответил на status (эхо байтов) → остаёмся в Reconnecting и перевзводим
+    // (не больше 3 раз), не ответил → демон мёртв → честный Disconnected.
+    CHECK(decideReconnectWatchdog(/*daemonAnswered=*/true, /*rearms=*/0) == ReconnectWatchdog::Rearm);
+    CHECK(decideReconnectWatchdog(true, 2) == ReconnectWatchdog::Rearm);
+    CHECK(decideReconnectWatchdog(true, 3) == ReconnectWatchdog::ForceDisconnectedAlive);
+    CHECK(decideReconnectWatchdog(false, 0) == ReconnectWatchdog::ForceDisconnectedDead);
 }
 
 static void a12Outbox()
@@ -478,6 +526,7 @@ int main()
     a10a11Selection();
     parityConnectDoesNotWaitForNetwork();
     parityBackgroundPollingOnlyWhenActive();
+    wave3StartAndLossPolicy();
     a12Outbox();
     a16ReliabilityRingCollapse();
     gap1DoctorNodeProblem();

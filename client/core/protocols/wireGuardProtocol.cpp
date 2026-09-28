@@ -77,3 +77,10 @@ ErrorCode WireguardProtocol::start()
 {
     return startMzImpl();
 }
+
+// AVPN (волна-3): см. wireGuardProtocol.h.
+void WireguardProtocol::requestStatus()
+{
+    if (m_impl)
+        m_impl->checkStatus();
+}
