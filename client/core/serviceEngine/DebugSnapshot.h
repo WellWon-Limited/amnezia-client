@@ -312,11 +312,17 @@ inline PinRestoreAction decidePinRestore(const QString &saved, const QString &pi
     return pinBefore == saved ? PinRestoreAction::PersistMigrated : PinRestoreAction::Nothing;
 }
 
-// A10: бюджет подготовки старта. С пулом — мягкий бюджет (6 с) завершает подготовку; без пула
+// A10: бюджет подготовки старта. С пулом — мягкий бюджет завершает подготовку; без пула
 // (свежая установка: enroll+fetch) намерение НЕ снимается до общего потолка (~20 с).
+// Волна «как апстрим» (2026-09-28): мягкий бюджет 6 с → 2 с. С пулом подготовка ждёт только
+// ICMP-раунд (таймаут 1,5 с), а не ответ refresh: после гашения туннеля тот висел до 15 с, и
+// каждый Connect на Mac владельца упирался в 6 с (журнал 26–28.09, 11 из 11).
+constexpr qint64 kStartPrepSoftBudgetMs = 2000;
+constexpr qint64 kStartPrepCeilingMs = 20000;
 enum class SelectionBudget { KeepWaiting, Finish, GiveUp };
 inline SelectionBudget decideSelectionBudget(bool haveSubscription, qint64 elapsedMs,
-                                             qint64 softBudgetMs = 6000, qint64 ceilingMs = 20000)
+                                             qint64 softBudgetMs = kStartPrepSoftBudgetMs,
+                                             qint64 ceilingMs = kStartPrepCeilingMs)
 {
     if (haveSubscription)
         return elapsedMs >= softBudgetMs ? SelectionBudget::Finish : SelectionBudget::KeepWaiting;
@@ -326,6 +332,39 @@ inline SelectionBudget decideSelectionBudget(bool haveSubscription, qint64 elaps
 inline bool startRttRoundImmediately(bool hasConnectablePin, bool haveSubscription)
 {
     return !hasConnectablePin && haveSubscription;
+}
+// Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1 «кнопка Connect в сеть не ходит»):
+// что делать на входе в подготовку старта. Пул уже есть (LKG/последний refresh), и цель известна —
+// закреплённая локация или свежий (≤ TTL) замер RTT — подключаемся сразу; пул обновляют фоновые
+// refresh (выход на экран, таймер), не кнопка. Без цели — только ICMP-раунд; без пула — bootstrap.
+enum class StartPrep { ConnectNow, MeasureRtt, AwaitPool };
+inline StartPrep decideStartPreparation(bool haveSubscription, bool hasConnectablePin, bool haveFreshRtt)
+{
+    if (!haveSubscription)
+        return StartPrep::AwaitPool;
+    if (hasConnectablePin || haveFreshRtt)
+        return StartPrep::ConnectNow;
+    return StartPrep::MeasureRtt;
+}
+// Волна «как апстрим» (2026-09-28): фоновые сетевые опросы — пока окно приложения активно. У апстрима
+// периодических сетевых таймеров нет вовсе; у нас HEAD /v1/ping шёл каждые 4 с и /v1/subscription
+// каждые 20 с при окне в фоне (Mac владельца: 13,3 тыс. пингов за 2,3 сут). Палочки RTT видны
+// только на экране; бейдж трафика в фоне освежаем не чаще ~5 мин (лимиты/срок режет сервер).
+constexpr int kBackgroundTrafficSyncTicks = 75; // × health-tick 4 с ≈ 5 мин
+inline bool liveRttAllowed(bool flagOn, bool connected, bool uiActive)
+{
+    return flagOn && connected && uiActive;
+}
+inline int trafficSyncTicks(int configuredTicks, bool uiActive)
+{
+    return uiActive ? configuredTicks : qMax(configuredTicks, kBackgroundTrafficSyncTicks);
+}
+// Смена сети во время подготовки: refresh нужен, только если пула ещё нет (свежая установка).
+// Раньше смена сети (в том числе от гашения собственного туннеля при смене ноды) заново взводила
+// ожидание refresh — и подготовка упиралась в бюджет.
+inline bool prepRefreshOnNetworkChange(bool haveSubscription)
+{
+    return !haveSubscription;
 }
 // A11: результат замера не затирает прошлый RTT ноды «нет ответа» (заменяем по приходу нового).
 inline void mergeRttSample(QHash<QString, int> &cache, const QString &nodeId, int rttMs)

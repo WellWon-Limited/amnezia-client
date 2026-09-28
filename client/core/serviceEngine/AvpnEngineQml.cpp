@@ -1991,10 +1991,14 @@ void AvpnEngineQml::invalidateNetworkMeasurements()
     if (m_probe) m_probe->cancel();
     reliabilityEvent(QStringLiteral("network_measurements_invalidated"));
     if (m_preparingStart) {
-        // A11: во время подготовки старта — перезапустить раунд (а не отменить) и освежить пул.
+        // A11: во время подготовки старта — перезапустить раунд (а не отменить).
+        // Волна «как апстрим» (2026-09-28): пул освежаем только без пула — иначе гашение своего же
+        // туннеля (смена ноды) заново взводило ожидание refresh, а тот висел до 15 с.
         m_prepRoundDone = false;
-        m_prepPoolSettled = false;
-        refreshSubscription();
+        if (prepRefreshOnNetworkChange(m_engine.hasSubscription())) {
+            m_prepPoolSettled = false;
+            refreshSubscription();
+        }
         if (startRttRoundImmediately(m_engine.hasConnectablePin(), m_engine.hasSubscription()))
             probeNodeRtt();
     }
@@ -2011,7 +2015,28 @@ void AvpnEngineQml::beginStartPreparation()
     m_prepRoundDone = false;
     m_busy = true;
     const quint64 epoch = ++m_startPreparationEpoch;
+    // Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1): пул есть и цель известна (pin или
+    // свежий замер) — подключаемся сразу, без сети. До волны здесь каждый Connect ждал ответа
+    // refresh, а тот после гашения туннеля висел до 15 с → бюджет 6 с (журнал Mac 26–28.09).
+    const StartPrep prep = decideStartPreparation(m_engine.hasSubscription(),
+                                                  m_engine.hasConnectablePin(),
+                                                  !m_engine.measuredRtt().isEmpty());
+    if (prep == StartPrep::ConnectNow) {
+        m_prepPoolSettled = true;
+        finishStartPreparation(m_engine.hasConnectablePin() ? QStringLiteral("pinned_location_ready")
+                                                            : QStringLiteral("measured_cache"));
+        return;
+    }
     reliabilityEvent(QStringLiteral("selection_wait_fresh_pool"));
+    if (prep == StartPrep::MeasureRtt) {
+        // Пул есть, цели нет («Авто» без свежего замера): ждём только ICMP-раунд (≤ 1,5 с).
+        // Пул не освежаем — его держат фоновые refresh (выход на экран, таймер).
+        m_prepPoolSettled = true;
+        probeNodeRtt();
+        QTimer::singleShot(kStartPrepSoftBudgetMs, this, [this, epoch]() { onSelectionBudget(epoch, false); });
+        emit changed();
+        return;
+    }
     // Bound control-plane + measurement latency. A usable LKG remains an explicit
     // fallback if the API is unavailable; an empty pool never enters a nested event loop.
     if (authToken().isEmpty()) {
@@ -2029,17 +2054,18 @@ void AvpnEngineQml::beginStartPreparation()
     // при живой сети); раньше раунд ждал таймер 4 с. Свежий пул (Applied) перезапустит раунд.
     if (startRttRoundImmediately(m_engine.hasConnectablePin(), m_engine.hasSubscription()))
         probeNodeRtt();
-    QTimer::singleShot(6000, this, [this, epoch]() { onSelectionBudget(epoch, false); });
-    QTimer::singleShot(20000, this, [this, epoch]() { onSelectionBudget(epoch, true); });
+    QTimer::singleShot(kStartPrepSoftBudgetMs, this, [this, epoch]() { onSelectionBudget(epoch, false); });
+    QTimer::singleShot(kStartPrepCeilingMs, this, [this, epoch]() { onSelectionBudget(epoch, true); });
     emit changed();
 }
 
-// A10: мягкий бюджет (6 с) завершает подготовку, только если пул есть; без пула (свежая
-// установка, enroll+fetch дольше) намерение не снимаем до общего потолка (~20 с).
+// A10: мягкий бюджет (kStartPrepSoftBudgetMs) завершает подготовку, только если пул есть; без пула
+// (свежая установка, enroll+fetch дольше) намерение не снимаем до общего потолка (~20 с).
 void AvpnEngineQml::onSelectionBudget(quint64 epoch, bool ceiling)
 {
     if (epoch != m_startPreparationEpoch || !m_preparingStart) return;
-    switch (decideSelectionBudget(m_engine.hasSubscription(), ceiling ? 20000 : 6000)) {
+    switch (decideSelectionBudget(m_engine.hasSubscription(),
+                                  ceiling ? kStartPrepCeilingMs : kStartPrepSoftBudgetMs)) {
     case SelectionBudget::Finish:
         finishStartPreparation(QStringLiteral("selection_budget_expired"));
         break;
@@ -2424,7 +2450,10 @@ void AvpnEngineQml::onTick()
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
     // measure() сам игнорит повторный запуск, пока предыдущий в полёте. На не-connected — не мерим
     // и держим бары на 0 (hard-gate сбросит при следующем reachable=false, см. ниже onConnectionStateChanged).
-    if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt")) && state() == QLatin1String("connected"))
+    // Волна «как апстрим» (2026-09-28): только при активном окне — в фоне палочки никто не видит.
+    const bool uiActive = QGuiApplication::applicationState() == Qt::ApplicationActive;
+    if (m_probe && liveRttAllowed(avpn::TuningStore::flag(QStringLiteral("live_rtt")),
+                                  state() == QLatin1String("connected"), uiActive))
         m_probe->measure();
 
     // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
@@ -2434,7 +2463,8 @@ void AvpnEngineQml::onTick()
     // refreshSubscription пишет traffic/expires в снапшот + emit changed() → бейдж живой.
     if (state() == QLatin1String("connected")) {
         if (++m_trafficSyncTicks
-            >= int(avpn::TuningStore::numberOr(QStringLiteral("traffic_sync_ticks"), 5))) {
+            >= trafficSyncTicks(int(avpn::TuningStore::numberOr(QStringLiteral("traffic_sync_ticks"), 5)),
+                                uiActive)) {
             m_trafficSyncTicks = 0;
             refreshSubscription();
         }
@@ -3918,6 +3948,12 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         .arg(int(s)).arg(m_wantConnected).arg(m_engine.debugSnapshot().state)
         .arg(m_engine.currentNodeId()).arg(m_engine.currentNodeProto()));
     if (m_probe) m_probe->cancel();
+    // Волна «как апстрим» (2026-09-28): keep-alive соединения к API, открытые через туннель, после
+    // его гашения мертвы, но QNAM их переиспользует — все запросы висели до таймаута 15 с (журнал
+    // Mac: /v1/subscription, /v1/account, /v1/devices после каждой смены ноды). Апстрим чистит кэш на
+    // Connected (connectionUiController.cpp); чистим и на Disconnected — путь сменился в обе стороны.
+    if (m_nam && s != m_lastTunnelState && (s == Vpn::Connected || s == Vpn::Disconnected))
+        m_nam->clearConnectionCache();
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
     const QString engineStateBefore = m_engine.debugSnapshot().state;

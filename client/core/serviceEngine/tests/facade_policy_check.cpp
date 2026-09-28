@@ -271,8 +271,11 @@ static void a10a11Selection()
     CHECK(decideSelectionBudget(false, 6000) == SelectionBudget::KeepWaiting);
     CHECK(decideSelectionBudget(false, 19999) == SelectionBudget::KeepWaiting);
     CHECK(decideSelectionBudget(false, 20000) == SelectionBudget::GiveUp);
-    CHECK(decideSelectionBudget(true, 5999) == SelectionBudget::KeepWaiting);
-    CHECK(decideSelectionBudget(true, 6000) == SelectionBudget::Finish);
+    // Волна «как апстрим» (2026-09-28): с пулом мягкий бюджет 2 с — ждём только ICMP-раунд (1,5 с),
+    // не ответ refresh (после гашения туннеля он висел до 15 с, и каждый Connect ждал 6 с).
+    CHECK(kStartPrepSoftBudgetMs == 2000);
+    CHECK(decideSelectionBudget(true, 1999) == SelectionBudget::KeepWaiting);
+    CHECK(decideSelectionBudget(true, 2000) == SelectionBudget::Finish);
 
     // A11: без pin ICMP-раунд сразу (параллельно refresh), а не по таймеру 4 с.
     CHECK(startRttRoundImmediately(false, true));
@@ -286,6 +289,42 @@ static void a10a11Selection()
     CHECK(cache.value(QStringLiteral("9:awg")) == 35);
     mergeRttSample(cache, QStringLiteral("10:awg"), -1);
     CHECK(cache.value(QStringLiteral("10:awg")) == -1);
+}
+
+static void parityConnectDoesNotWaitForNetwork()
+{
+    // Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1: кнопка Connect в сеть не ходит).
+    // Журнал Mac владельца 26–28.09: все 11 ручных Connect ждали 5,7–6,4 с (selection_wait_fresh_pool
+    // → selection_budget_expired), хотя локация была закреплена, а handshake занимает 0,7 с.
+    // Пул есть + пригодный pin → подключаемся сразу.
+    CHECK(decideStartPreparation(true, /*pin=*/true, /*freshRtt=*/false) == StartPrep::ConnectNow);
+    // Пул есть + свежий (≤ TTL) замер RTT → «Авто» выбирает по нему сразу.
+    CHECK(decideStartPreparation(true, false, true) == StartPrep::ConnectNow);
+    // Пул есть, pin нет, замера нет → только ICMP-раунд (≤ 1,5 с), без ожидания refresh.
+    CHECK(decideStartPreparation(true, false, false) == StartPrep::MeasureRtt);
+    // Пула нет (свежая установка) → ждём bootstrap, как раньше (потолок 20 с).
+    CHECK(decideStartPreparation(false, true, true) == StartPrep::AwaitPool);
+    CHECK(decideStartPreparation(false, false, false) == StartPrep::AwaitPool);
+    // Смена сети во время подготовки: refresh нужен только без пула.
+    CHECK(!prepRefreshOnNetworkChange(true));
+    CHECK(prepRefreshOnNetworkChange(false));
+}
+
+static void parityBackgroundPollingOnlyWhenActive()
+{
+    // Волна «как апстрим» (2026-09-28): у апстрима нет ни одного периодического сетевого таймера.
+    // Mac владельца: 13,3 тыс. HEAD /v1/ping за 2,3 сут (каждые 4 с) и /v1/subscription каждые 20 с —
+    // при окне в фоне. Палочки RTT — только при активном окне (их никто не видит в фоне).
+    CHECK(liveRttAllowed(/*flag=*/true, /*connected=*/true, /*uiActive=*/true));
+    CHECK(!liveRttAllowed(true, true, false));
+    CHECK(!liveRttAllowed(false, true, true));
+    CHECK(!liveRttAllowed(true, false, true));
+    // Синк трафика: на экране — как настроено (дефолт 5 тиков ≈ 20 с), в фоне — не чаще ~5 мин
+    // (expiry всё равно режет сервер; клиенту — только бейдж).
+    CHECK(trafficSyncTicks(5, true) == 5);
+    CHECK(trafficSyncTicks(5, false) == kBackgroundTrafficSyncTicks);
+    CHECK(kBackgroundTrafficSyncTicks == 75);
+    CHECK(trafficSyncTicks(200, false) == 200); // сервер просит реже — не учащаем
 }
 
 static void a12Outbox()
@@ -437,6 +476,8 @@ int main()
     a6a7PinPersistence();
     a8a9a15InternalSwitch();
     a10a11Selection();
+    parityConnectDoesNotWaitForNetwork();
+    parityBackgroundPollingOnlyWhenActive();
     a12Outbox();
     a16ReliabilityRingCollapse();
     gap1DoctorNodeProblem();
