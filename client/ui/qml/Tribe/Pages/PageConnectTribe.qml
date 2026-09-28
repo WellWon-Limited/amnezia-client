@@ -369,7 +369,10 @@ PageType {
                 x: modelData.tx * starField.width; y: modelData.ty * starField.height
                 opacity: modelData.o
                 SequentialAnimation on opacity {
-                    running: !Theme.motion.reduceMotion; loops: Animation.Infinite
+                    // Волна «как апстрим» (2026-09-28): мерцание — только при активном окне. Бесконечные
+                    // анимации звёзд крутили рендер и в фоне (подозрение на ~10% CPU у Mac владельца, 28.09).
+                    running: !Theme.motion.reduceMotion && Qt.application.state === Qt.ApplicationActive
+                    loops: Animation.Infinite
                     NumberAnimation { from: modelData.o; to: modelData.o * 0.25; duration: 1400; easing.type: Easing.InOutSine }
                     NumberAnimation { from: modelData.o * 0.25; to: modelData.o; duration: 1400; easing.type: Easing.InOutSine }
                     PauseAnimation { duration: modelData.d }
@@ -1011,7 +1014,8 @@ PageType {
             // через TribeEngine.probeServicesIntervalMs), фолбэк 180000мс (3 мин) без engine/офлайн.
             interval: root.hasEngine ? TribeEngine.probeServicesIntervalMs : 180000
             repeat: true
-            running: root.isOn && root.hasEngine
+            // Волна «как апстрим» (2026-09-28): в фоне чипов никто не видит — 128 КБ проб не качаем.
+            running: root.isOn && root.hasEngine && Qt.application.state === Qt.ApplicationActive
             onTriggered: TribeEngine.probeServices()
         }
 

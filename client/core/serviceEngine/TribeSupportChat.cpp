@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication> // AVPN (волна «как апстрим»): фоновый опрос бейджа — только при активном окне
 #include <QHttpMultiPart>
 #include <QHttpPart>
 #include <QImageReader>
@@ -287,10 +288,18 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
             return;
         if (m_active)
             refresh();
-        else
-            refreshUnread();
+        else if (QGuiApplication::applicationState() == Qt::ApplicationActive)
+            refreshUnread(); // волна «как апстрим» (2026-09-28): бейдж в фоне не опрашиваем
     });
     m_pollTimer.start();
+    // Вернулись на экран — бейдж сразу, не через минуту (фоновый опрос выше выключен).
+    if (auto *guiApp = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        connect(guiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState st) {
+            if (st == Qt::ApplicationActive && !m_active
+                && TuningStore::flag(QStringLiteral("support_chat_poll")))
+                refreshUnread();
+        });
+    }
 
     // Бейдж вкладки актуален вскоре после старта, не через минуту (но и не в
     // конструкторе: enroll/токен могли ещё не подняться).
