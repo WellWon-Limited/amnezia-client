@@ -64,7 +64,9 @@ mkdir -p "$ST/pf"; cp -f "$REPO/deploy/data/macos/pf/tribe."*.conf "$REPO/deploy
 HT="$(mktemp -d)"
 cp -f "$SRV/Tribe-service" "$HT/Tribe-service"; cp -f "$SRV/amneziawg-go" "$HT/amneziawg-go"
 codesign --remove-signature "$HT/Tribe-service"; codesign --remove-signature "$HT/amneziawg-go"
-DVER="$(cat "$HT/Tribe-service" "$HT/amneziawg-go" | shasum -a 256 | cut -c1-16)"
+# AVPN (волна-3, 2026-09-28): pf-правила — тоже часть службы (200.allowVPN и др.): правка только pf
+# иначе не доезжала до уже установленных пользователей (маркер не менялся).
+DVER="$(cat "$HT/Tribe-service" "$HT/amneziawg-go" "$ST"/pf/*.conf | shasum -a 256 | cut -c1-16)"
 rm -rf "$HT"
 echo "$DVER" > "$ST/VERSION"
 echo "$DVER" > "$APP/Contents/Resources/tribe-svc.version"

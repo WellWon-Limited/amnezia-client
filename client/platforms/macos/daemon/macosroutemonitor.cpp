@@ -5,6 +5,7 @@
 #include "macosroutemonitor.h"
 
 #include <arpa/inet.h>
+#include <string.h>
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -58,6 +59,24 @@ MacosRouteMonitor::~MacosRouteMonitor() {
   logger.debug() << "MacosRouteMonitor destroyed.";
 }
 
+// AVPN (волна-3, 2026-09-28): виртуальные интерфейсы (utun/ipsec/ppp/gif/stf) не бывают нашим
+// «путём в интернет»: default route через чужой VPN (Happ/Outline/Tailscale) уводил ВСЕ
+// исключения и /32 сервера в его utun — рукопожатие пропадало, Mac оставался без сети (28.09
+// 07:59Z: «Updating default route via utun7 link#26»). Считаем default только на физических
+// интерфейсах и только со шлюзом-IP (link#N — не шлюз).
+static bool isVirtualIfname(const char* ifname) {
+  static const char* const prefixes[] = {"utun", "ipsec", "ppp", "gif", "stf", "bridge", "awdl", "llw"};
+  for (const char* p : prefixes) {
+    if (strncmp(ifname, p, strlen(p)) == 0) return true;
+  }
+  return false;
+}
+static bool isIpGateway(const QByteArray& gw) {
+  if (gw.size() < int(sizeof(struct sockaddr))) return false;
+  const struct sockaddr* sa = reinterpret_cast<const struct sockaddr*>(gw.constData());
+  return sa->sa_family == AF_INET || sa->sa_family == AF_INET6;
+}
+
 // Compare memory against zero.
 static int memcmpzero(const void* data, size_t len) {
   const quint8* ptr = static_cast<const quint8*>(data);
@@ -86,9 +105,11 @@ void MacosRouteMonitor::handleRtmDelete(const struct rt_msghdr* rtm,
   if (rtm->rtm_index != 0) {
     if_indextoname(rtm->rtm_index, ifname);
   }
+#ifdef MZ_DEBUG
   logger.debug() << "Route deleted via" << ifname
                  << QString("addrs(%1):").arg(rtm->rtm_addrs, 0, 16)
                  << list.join(" ");
+#endif
 
   // We expect all useful routes to contain a destination, netmask and gateway.
   if (!(rtm->rtm_addrs & RTA_DST) || !(rtm->rtm_addrs & RTA_GATEWAY) ||
@@ -130,24 +151,40 @@ void MacosRouteMonitor::handleRtmDelete(const struct rt_msghdr* rtm,
       reinterpret_cast<const struct sockaddr*>(addrlist[0].constData());
   QAbstractSocket::NetworkLayerProtocol protocol;
   if (dst->sa_family == AF_INET) {
+    // AVPN (волна-3): пропал чужой default (utun другого VPN) — наш физический на месте, исключения
+    // не трогаем. Раньше любой исчезнувший default снимал все 8,7 тыс. маршрутов.
+    if (m_defaultIfindexIpv4 != 0 && rtm->rtm_index != 0 &&
+        static_cast<unsigned int>(rtm->rtm_index) != m_defaultIfindexIpv4) {
+      logger.debug() << "Ignoring foreign IPv4 default route loss via" << ifname;
+      return;
+    }
     m_defaultGatewayIpv4.clear();
     m_defaultIfindexIpv4 = 0;
     protocol = QAbstractSocket::IPv4Protocol;
   } else if (dst->sa_family == AF_INET6) {
+    if (m_defaultIfindexIpv6 != 0 && rtm->rtm_index != 0 &&
+        static_cast<unsigned int>(rtm->rtm_index) != m_defaultIfindexIpv6) {
+      logger.debug() << "Ignoring foreign IPv6 default route loss via" << ifname;
+      return;
+    }
     m_defaultGatewayIpv6.clear();
     m_defaultIfindexIpv6 = 0;
     protocol = QAbstractSocket::IPv6Protocol;
+  } else {
+    return;
   }
 
   logger.debug() << "Lost default route via" << ifname
                  << logger.sensitive(addrToString(addrlist[1]));
+  int removed = 0;
   for (const IPAddress& prefix : m_exclusionRoutes) {
     if (prefix.address().protocol() == protocol) {
-      logger.debug() << "Removing exclusion route to"
-                     << prefix.toString();
       rtmSendRoute(RTM_DELETE, prefix, rtm->rtm_index, nullptr);
+      ++removed;
     }
   }
+  // AVPN (волна-3): одна сводка вместо строки на маршрут (8,7 тыс. строк на событие → 85 МБ лога).
+  logger.debug() << "Removed exclusion routes:" << removed;
 }
 
 void MacosRouteMonitor::handleRtmUpdate(const struct rt_msghdr* rtm,
@@ -202,9 +239,16 @@ void MacosRouteMonitor::handleRtmUpdate(const struct rt_msghdr* rtm,
   }
 #endif
   if_indextoname(ifindex, ifname);
+#ifdef MZ_DEBUG
   logger.debug() << "Route update via" << ifname
                  << QString("addrs(%1):").arg(rtm->rtm_addrs, 0, 16)
                  << list.join(" ");
+#endif
+  // AVPN (волна-3): default через виртуальный интерфейс (чужой VPN) или без IP-шлюза (link#N)
+  // не считаем путём в интернет — исключения остаются на физическом интерфейсе.
+  if (isVirtualIfname(ifname) || !isIpGateway(addrlist[1])) {
+    return;
+  }
 
   // Check for a default route, which should have a netmask of zero.
   const struct sockaddr* sa =
@@ -256,13 +300,14 @@ void MacosRouteMonitor::handleRtmUpdate(const struct rt_msghdr* rtm,
   // Update the exclusion routes with the new default route.
   logger.debug() << "Updating default route via" << ifname
                  << addrToString(addrlist[1]);
+  int updated = 0;
   for (const IPAddress& prefix : m_exclusionRoutes) {
     if (prefix.address().protocol() == protocol) {
-      logger.debug() << "Updating exclusion route to"
-                     << prefix.toString();
       rtmSendRoute(rtm_type, prefix, ifindex, addrlist[1].constData());
+      ++updated;
     }
   }
+  logger.debug() << "Updated exclusion routes:" << updated; // AVPN (волна-3): сводка вместо построчного лога
 }
 
 void MacosRouteMonitor::handleIfaceInfo(const struct if_msghdr* ifm,
@@ -486,7 +531,10 @@ bool MacosRouteMonitor::rtmFetchRoutes(int family) {
   if (len == rtm->rtm_msglen) {
     return true;
   }
-  logger.warning() << "Failed to request routing table:" << strerror(errno);
+  if (errno == ESRCH)
+    logger.debug() << "No default route yet (ESRCH)"; // AVPN (волна-3): сети нет — не ошибка
+  else
+    logger.warning() << "Failed to request routing table:" << strerror(errno);
   return false;
 }
 
@@ -510,8 +558,6 @@ bool MacosRouteMonitor::deleteRoute(const IPAddress& prefix, int flags) {
 }
 
 bool MacosRouteMonitor::addExclusionRoute(const IPAddress& prefix) {
-  logger.debug() << "Adding exclusion route for" << prefix.toString();
-
   if (m_exclusionRoutes.contains(prefix)) {
     logger.warning() << "Exclusion route already exists";
     return false;
@@ -535,8 +581,6 @@ bool MacosRouteMonitor::addExclusionRoute(const IPAddress& prefix) {
 }
 
 bool MacosRouteMonitor::deleteExclusionRoute(const IPAddress& prefix) {
-  logger.debug() << "Deleting exclusion route for" << prefix.toString();
-
   m_exclusionRoutes.removeAll(prefix);
   if (prefix.address().protocol() == QAbstractSocket::IPv4Protocol) {
     return rtmSendRoute(RTM_DELETE, prefix, m_defaultIfindexIpv4, nullptr);
