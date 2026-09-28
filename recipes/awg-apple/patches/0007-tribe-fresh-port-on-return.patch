@@ -1,0 +1,148 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index b3bbdce..7864344 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -68,6 +68,10 @@ public class WireGuardAdapter {
+     private var lastLoggedDenial: TribeRecoveryDenial?
+     // tribe.8: attempts left to bring the backend back after a failed in-place restart.
+     private var softRestartRetriesLeft = 0
++    // tribe.9: interface of the last satisfied path (Wi-Fi <-> cellular = fresh port on return) and
++    // whether the pending coalesced roam step is a fresh port (path returned after a real loss).
++    private var lastPathInterface: String?
++    private var roamWantsFreshPort = false
+ 
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+@@ -564,11 +568,19 @@ public class WireGuardAdapter {
+                 // the server updates our endpoint on the first authenticated packet, no handshake.
+                 self.lastPathSatisfiable = true
+                 self.cancelPendingPause()
++                let realLoss = self.pathLostAt != nil
++                let interfaceChanged = self.notePathInterface(path)
+                 if let lostAt = self.pathLostAt {
+                     self.pathLostAt = nil
+                     self.roamCounters.pathRestored += 1
+                     let outage = Int((Date().timeIntervalSince(lostAt) * 1000).rounded())
+-                    self.logHandler(.verbose, "Tribe roaming: path restored after \(outage) ms, rebinding socket on the live device (\(self.roamCounters.summary))")
++                    self.logHandler(.verbose, "Tribe roaming: path restored after \(outage) ms, fresh local port on the live device (\(self.roamCounters.summary))")
++                }
++                // tribe.9: after a real loss or a move to another interface the old 5-tuple is dead
++                // or foreign to the new NAT (field data 24-28.09: a fresh port healed 31 of 82 stalls,
++                // the same-port bump 4 of 27): fresh local port + keepalive instead of the bump.
++                if TribeRoaming.roamRebindAction(realLoss: realLoss, interfaceChanged: interfaceChanged) == .rebindPort {
++                    self.roamWantsFreshPort = true
+                 }
+                 self.scheduleRoamRebind()
+             } else {
+@@ -620,6 +632,7 @@ public class WireGuardAdapter {
+                 self.roamCounters.resumes += 1
+                 self.pathLostAt = nil
+                 self.lastPathSatisfiable = true
++                _ = self.notePathInterface(path)
+                 // tribe.8: a resumed backend is a new device with a new handshake: re-arm the
+                 // recovery episode (the rolling cap stays), so its bootstrap is not refused.
+                 self.recovery.noteBackendResumed()
+@@ -645,6 +658,16 @@ public class WireGuardAdapter {
+         self.roamCounters.pathLost += 1
+     }
+ 
++    /// tribe.9: remembers the physical interface of the satisfied path (utun/ipsec are `.other`
++    /// and skipped); true when it differs from the previous satisfied path (Wi-Fi <-> cellular).
++    /// The first observation is never a change.
++    private func notePathInterface(_ path: Network.NWPath) -> Bool {
++        guard let name = path.availableInterfaces.first(where: { $0.type != .other })?.name else { return false }
++        defer { self.lastPathInterface = name }
++        guard let previous = self.lastPathInterface else { return false }
++        return previous != name
++    }
++
+     /// One coalesced rebind per burst of path events (Proton: 100 ms). Keeps the device handle,
+     /// keys and endpoint; `BindUpdate` reopens the UDP socket on the SAME local port and sends a
+     /// keepalive with the current keypair, so the server learns the new outer address without a
+@@ -662,9 +685,19 @@ public class WireGuardAdapter {
+ 
+             wgSetConfig(handle, wgConfig)
+             wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-            wgBumpSockets(handle)
+-            self.roamCounters.roamBumps += 1
+-            self.rearmStallTracker(handle: handle)
++            let freshPort = self.roamWantsFreshPort
++            self.roamWantsFreshPort = false
++            if freshPort {
++                // tribe.9: new local port (new 5-tuple through the carrier NAT) + keepalive, so the
++                // server learns the new outer address at once. Device, keys and TUN untouched.
++                self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
++                self.roamCounters.roamFreshPorts += 1
++                self.logHandler(.verbose, "Tribe roaming: path returned, fresh local port + keepalive on the live device (\(self.roamCounters.summary))")
++            } else {
++                wgBumpSockets(handle)
++                self.roamCounters.roamBumps += 1
++            }
++            self.noteRoamStep(handle: handle, freshPort: freshPort)
+         }
+     }
+ 
+@@ -697,7 +730,8 @@ public class WireGuardAdapter {
+     // Stall watchdog: same-SSID roams sometimes produce NO path event at all, and a NAT/AP switch
+     // can leave outbound flowing into a black hole. Every second we read the device's own
+     // counters; outbound growing while inbound (rx bytes, handshake) is frozen on a satisfied path
+-    // escalates: bump (same port) -> listen_port=0 (new 5-tuple) -> hand over to the app engine.
++    // escalates (tribe.9): fresh local port -> soft restart -> backoff cycle (TribeRoaming.swift);
++    // the app engine's failover to another node still sits above this.
+     private func startStallWatchdog() {
+         self.stopStallWatchdog()
+         guard self.roamingPolicy.stallProbeSeconds > 0 else { return }
+@@ -726,9 +760,11 @@ public class WireGuardAdapter {
+         return TribeRoaming.parseSample(uapi: config, at: ProcessInfo.processInfo.systemUptime)
+     }
+ 
+-    private func rearmStallTracker(handle: Int32) {
++    /// tribe.9: a roam step never restarts the stall clock (tribe.4-8 `rearmAfterRoam` did, and on
++    /// cellular ~200 path events/h starved the ladder); a roam fresh port is the episode's fresh port.
++    private func noteRoamStep(handle: Int32, freshPort: Bool) {
+         guard self.stallTimer != nil, let sample = self.currentStallSample(handle: handle) else { return }
+-        self.recovery.rearmAfterRoam(sample)
++        self.recovery.noteRoamRebind(sample, freshPort: freshPort)
+     }
+ 
+     /// Socket operations for a stall step (TribeRoaming.socketOps). Every step ends with a
+@@ -827,25 +863,23 @@ public class WireGuardAdapter {
+             // an already-spent step waits for inbound progress. Logged once per streak.
+             guard self.lastLoggedDenial != reason else { return }
+             self.lastLoggedDenial = reason
+-            let step = action == .rebindPort ? "fresh port" : "bump"
+-            self.logHandler(.verbose, "Tribe roaming: stall recovery denied by budget (step=\(step) reason=\(reason.rawValue)) (\(self.roamCounters.summary))")
++            self.logHandler(.verbose, "Tribe roaming: stall recovery denied by budget (step=\(action.logName) reason=\(reason.rawValue)) (\(self.roamCounters.summary))")
+         case .perform(let action):
+             self.lastLoggedDenial = nil
+-            if let tracker = self.recovery.tracker, tracker.stage == 3 {
+-                // tribe.8 (U9): stage 3 keeps healing after the fresh port while the GUI may sleep.
++            // tribe.9 ladder: fresh port (first step) -> soft restart (second) -> persistent cycle.
++            // The fixed prefixes feed the app's TribeNEJournal.event(forAdapterLog:) labels.
++            let steps = self.recovery.tracker?.persistentSteps ?? 0
++            switch action {
++            case .none, .bumpSockets:
++                break
++            case .rebindPort where steps == 0:
++                self.roamCounters.stallRebinds += 1
++                self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), fresh local port + keepalive (\(self.roamCounters.summary))")
++            case .softRestart where steps <= 1:
++                self.logHandler(.verbose, "Tribe roaming: still stalled after the fresh port, soft restart of the backend (\(self.roamCounters.summary))")
++            default:
+                 self.roamCounters.stallPersistent += 1
+-                self.logHandler(.verbose, "Tribe roaming: persistent heal step \(tracker.persistentSteps) (\(action.logName)) after backoff, inbound frozen (tx=\(sample.txBytes) rx=\(sample.rxBytes)) (\(self.roamCounters.summary))")
+-            } else {
+-                switch action {
+-                case .none, .softRestart:
+-                    break
+-                case .bumpSockets:
+-                    self.roamCounters.stallBumps += 1
+-                    self.logHandler(.verbose, "Tribe roaming: inbound stalled (tx=\(sample.txBytes) rx=\(sample.rxBytes)), bumping socket on the same port (\(self.roamCounters.summary))")
+-                case .rebindPort:
+-                    self.roamCounters.stallRebinds += 1
+-                    self.logHandler(.verbose, "Tribe roaming: still stalled after bump, rebinding to a new local port (\(self.roamCounters.summary))")
+-                }
++                self.logHandler(.verbose, "Tribe roaming: persistent heal step \(steps) (\(action.logName)) after backoff, inbound frozen (tx=\(sample.txBytes) rx=\(sample.rxBytes)) (\(self.roamCounters.summary))")
+             }
+             self.performSocketOps(TribeRoaming.socketOps(for: action), handle: handle, settingsGenerator: settingsGenerator)
+         }

@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.8` | 0001 + 0002 + 0003 + 0005 + 0006 | current; 0006 = persistent heal (stage 3) + in-place soft restart |
+| `3.1.4-tribe.9` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 | current; 0007 = fresh port on a returning path, ladder fresh port -> soft restart |
+| `3.1.4-tribe.8` | 0001 + 0002 + 0003 + 0005 + 0006 | shipped (iOS 5.1.90-5.1.96); 0006 = persistent heal (stage 3) + in-place soft restart |
 | `3.1.4-tribe.7` | 0001 + 0002 + 0003 + 0005 | rollback target; 0005 = bounded GUI/NE recovery (see below) |
 | `3.1.4-tribe.5` | 0001 + 0002 + 0003 | shipped (AWG core v3.1.20260828) |
 | `3.1.4-tribe.4` | 0001 + 0002 + 0003 | shipped (seamless roaming) |
@@ -80,6 +81,36 @@ Rules:
 - New counters `stall_persistent`, `soft_restarts`; NE journal labels `stall_persistent`,
   `soft_restart`, `soft_restart_failed`, `gui_soft_restart[_denied|_not_started]`.
 
+## tribe.9 behaviour (patch 0007 + TribeRoaming.swift)
+
+Field data 24-28.09 (4 iOS devices, 9 device-days, tester journal): in 38 of 44 long "connected
+but no data" episodes on cellular the node received nothing from the phone (the carrier NAT/DPI had
+killed the UDP flow); a fresh local port healed 31 of 82 stalls, the same-port bump 4 of 27, and the
+tribe.4-8 ladder rarely reached its fresh-port step because `rearm` zeroed the stall clock on every
+path event (~200/h on cellular). Upstream heals such cases by accident: a real loss restarts the
+whole device with a new port.
+
+- **Fresh port on return.** `didReceivePathUpdate`: a satisfied path after a real loss
+  (`pathLostAt != nil`) or on another physical interface than the previous satisfied path (Wi-Fi <->
+  cellular; `.other` interfaces such as utun are skipped) performs `listen_port=0` + keepalive
+  (`TribeRoaming.roamRebindAction`, counter `roam_fresh_ports`, log `Tribe roaming: path returned,
+  fresh local port ...`). A path event without a loss on the same interface keeps the upstream
+  reaction (same-port `wgBumpSockets`, counter `roam_bumps`).
+- **Roam steps do not restart the stall clock.** `TribeRecoveryArbiter.noteRoamRebind(sample,
+  freshPort:)` replaces `rearmAfterRoam`: a roam fresh port is recorded as the episode's fresh port
+  (`TribeStallTracker.noteExternalStep(.freshPort)`), a bump is not a step; only inbound progress
+  resets the clock and the stage.
+- **Ladder.** stage 0 -> fresh port after `stallProbeSeconds` (4 s; bootstrap 12 s) with
+  `stallMinTxBytes` of demand -> soft restart after `stallProbeSeconds + stallRebindSeconds` (14 s;
+  bootstrap 30 s) with double demand and >= 3 s after the fresh port -> stage 3: fresh port, soft
+  restart, ... with a backoff of 30, 60, 120 s from the previous step (then 120 s), demand required,
+  path satisfied. There is no same-port bump stage any more. GUI fresh port / soft restart
+  (provider messages) are recorded as the corresponding step. Budget rules unchanged (episode,
+  rolling cap 4 per 120 s, same-kind cooldown 8-10 s).
+- Log prefixes for the app's journal labels: `inbound stalled ... fresh local port` (first step),
+  `still stalled after the fresh port, soft restart` (second), `persistent heal step N` (stage 3),
+  `path returned, fresh local port` (roam).
+
 ## Tests
 
 ```sh
@@ -115,7 +146,7 @@ conan create recipes/awg-apple \
 ```
 
 macOS Network Extension (`-DMACOS_NE=ON`): the root `conanfile.py` requires
-`awg-apple/3.1.4-tribe.8` there too, and `cmake/platform_settings.cmake` configures it as universal
+`awg-apple/3.1.4-tribe.9` there too (tribe.9 has not been built for macOS yet; the macOS app does not use the NE), and `cmake/platform_settings.cmake` configures it as universal
 `arm64;x86_64` with deployment target 12.0. tribe.8 was built for macOS with the profile below
 (universal `x86_64 arm64` `libwg-go.a`, `minos 12.0`, `_wgSendKeepalives` in both slices; package id
 `744edb127c3ec4851841205920a44fb06d950e81`); the macOS NE Swift sources were typechecked against the
@@ -157,11 +188,11 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.8")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.9")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
-pin the root requirement back to `awg-apple/3.1.4-tribe.7` (iOS; the NE sources then lose the
-`soft_restart` provider message: revert `PacketTunnelProvider*.swift` to their tribe.7 state) or
-`3.1.4-tribe.5`. Both can be resolved from a cache that holds their binaries or rebuilt from this
+pin the root requirement back to `awg-apple/3.1.4-tribe.8` (iOS; its binary is still in the
+release cache), `3.1.4-tribe.7` (the NE sources then lose the `soft_restart` provider message:
+revert `PacketTunnelProvider*.swift` to their tribe.7 state) or `3.1.4-tribe.5`. Both can be resolved from a cache that holds their binaries or rebuilt from this
 recipe: their `TribeRoaming.swift` and test are frozen snapshots (rule above), their patch lists are
 unchanged. The rebuilt recipe revision differs from the original one (the recipe files changed), the
 package content does not.

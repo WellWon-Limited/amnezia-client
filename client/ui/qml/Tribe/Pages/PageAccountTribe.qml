@@ -227,10 +227,10 @@ PageType {
             scanSheet.close()
             settingsLoadTimer.restart()
         }
-        // движок перечитал данные (kick / redeem / transfer) → освежаем устройства и аккаунт.
-        // НЕ синхронно в обработчике: changed() может прилетать пачкой (connect/state) — дебаунсим
-        // через таймер, иначе каждый сигнал = 2 сетевых вызова прямо в слоте (джанк/фриз).
-        function onChanged() { settingsLoadTimer.restart() }
+        // Волна-4 (P2-4): раньше КАЖДЫЙ TribeEngine.changed() (состояние туннеля, тики) давал
+        // GET /v1/devices + GET /v1/account. Теперь список перечитывается при открытии экрана,
+        // после переноса (onTransferRedeemed) и самим движком после kick/redeem (refreshDevices/
+        // refreshAccount внутри kickDevice/redeemCode) — сюда сигналы changed() больше не ведут.
         // ссылка web-кабинета готова (успех или fallback — эмитится всегда). Гард по cabinetLinking:
         // сигнал общий на движок — не реагируем на запросы, инициированные другими страницами.
         function onCabinetLinkReady(url) {

@@ -151,11 +151,17 @@ enum TribeNEJournal {
         }
         guard message.hasPrefix("Tribe roaming:") else { return nil }
         if message.contains("stall recovery denied") { return "stall_denied" }
+        // awg-apple tribe.9: fresh local port on a path that returned after a loss / interface change.
+        if message.contains("path returned") { return "roam_fresh_port" }
         // tribe.8: stage-3 watchdog step (U9) and the in-place restart itself (NE or GUI).
         if message.contains("persistent heal") { return "stall_persistent" }
         if message.contains("soft restart") && message.contains("failed") { return "soft_restart_failed" }
         if message.contains("soft-restarted in place") { return "soft_restart" }
         if message.contains("pausing backend") { return "pause" }
+        // tribe.9 ladder: first step = fresh port ("inbound stalled ... fresh local port"), second =
+        // soft restart ("still stalled after the fresh port"). tribe.4-8 names kept for old NE builds.
+        if message.contains("still stalled after the fresh port") { return "stall_soft_restart" }
+        if message.contains("inbound stalled") && message.contains("fresh local port") { return "stall_fresh_port" }
         if message.contains("still stalled") { return "stall_rebind" }
         if message.contains("inbound stalled") { return "stall_bump" }
         return "path_change"

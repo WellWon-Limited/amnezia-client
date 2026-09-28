@@ -24,7 +24,9 @@ class AwgApple(ConanFile):
     # persistent heal / in-place soft restart (conandata.yml). TribeRoaming.swift is NOT shared
     # across versions any more: a released version builds from its own frozen snapshot
     # (_roaming_snapshots), so tribe.5/tribe.7 rebuilt from this recipe behave as shipped.
-    version = "3.1.4-tribe.8"
+    # tribe.9: tribe.8 + 0007 fresh port on a returning path / interface change, ladder
+    # fresh port -> soft restart -> backoff cycle, no stall-clock reset on path events.
+    version = "3.1.4-tribe.9"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -36,6 +38,7 @@ class AwgApple(ConanFile):
         "3.1.4-tribe.4": "3.1.4-tribe.5",
         "3.1.4-tribe.5": "3.1.4-tribe.5",
         "3.1.4-tribe.7": "3.1.4-tribe.7",
+        "3.1.4-tribe.8": "3.1.4-tribe.8",
     }
 
     def _roaming_sources(self):

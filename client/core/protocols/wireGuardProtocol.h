@@ -28,6 +28,10 @@ public:
     // ответ приходит как statusUpdated → bytesChanged — это и есть признак живого демона.
     void requestStatus();
 
+signals:
+    // AVPN (волна-4): проброс ControllerImpl::daemonSocketLost к VpnConnection::daemonLost.
+    void daemonSocketLost();
+
 private:
 
     QScopedPointer<ControllerImpl> m_impl;

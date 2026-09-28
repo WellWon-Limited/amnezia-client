@@ -1305,8 +1305,10 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 NSDate *connectedAt = session.connectedDate;
                 const long long connectedForMs =
                         connectedAt ? (long long)(-[connectedAt timeIntervalSinceNow] * 1000.0) : -1;
-                const bool previouslyLive = m_lastEmittedState == Vpn::ConnectionState::Connected ||
-                        m_lastEmittedState == Vpn::ConnectionState::Connecting ||
+                // AVPN (волна-4, IOS-L1): повторное наблюдение той же живой сессии (второе
+                // уведомление до ответа на status, реконсил) откатывало Connected → Connecting, а тап
+                // по «Connecting…» гасил VPN. «Ранее живым» считаем только наш/наблюдаемый подъём.
+                const bool previouslyLive = m_lastEmittedState == Vpn::ConnectionState::Connecting ||
                         m_lastEmittedState == Vpn::ConnectionState::Reconnecting;
                 nextState = avpn_ios::showEstablishedAsConnected(m_connectPending, previouslyLive, connectedForMs)
                         ? Vpn::ConnectionState::Connected

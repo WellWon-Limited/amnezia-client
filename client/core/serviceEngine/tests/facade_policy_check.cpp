@@ -375,6 +375,64 @@ static void wave3StartAndLossPolicy()
     CHECK(decideReconnectWatchdog(false, 0) == ReconnectWatchdog::ForceDisconnectedDead);
 }
 
+static void wave4UpstreamBehaviour()
+{
+    // P1-4: второй тап во время подхвата / сразу после адопта — не стоп; отмена своего старта — стоп.
+    CHECK(stopTapIgnored(true, false, false, true, -1));      // «Проверяем…», статус ещё не пришёл
+    CHECK(stopTapIgnored(false, false, false, false, 900));   // адопт 0,9 с назад (журнал: 0,6–1,5 с)
+    CHECK(!stopTapIgnored(false, false, false, false, 2600)); // грация вышла — обычный стоп
+    CHECK(!stopTapIgnored(true, false, true, false, 500));    // отмена подготовки своего старта
+    CHECK(!stopTapIgnored(true, true, false, true, 500));     // своя операция в полёте — стоп законен
+    CHECK(!stopTapIgnored(false, false, false, false, -1));   // адопта не было
+    // P1-5: сторож старта ждёт натив, пока тот сообщает живую сессию, но не дольше 4 перевзводов.
+    CHECK(decideStartWatchdog(true, 0) == StartWatchdog::Defer);
+    CHECK(decideStartWatchdog(true, 3) == StartWatchdog::Defer);
+    CHECK(decideStartWatchdog(true, 4) == StartWatchdog::Stop);
+    CHECK(decideStartWatchdog(false, 0) == StartWatchdog::Stop); // натив молчит (Unknown/Disconnected)
+    // P2-2: классификация отказа API.
+    const qint64 now = 1'000'000;
+    CHECK(classifyApiOutcome(200, false, false, now - 100, -1, -1, now) == ApiOutcome::Success);
+    CHECK(classifyApiOutcome(401, false, false, now - 100, -1, -1, now) == ApiOutcome::Success); // вход жив
+    CHECK(classifyApiOutcome(0, true, false, now - 100, -1, -1, now) == ApiOutcome::Ignore);     // наш abort (регресс 126)
+    CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, -1, now) == ApiOutcome::Failure);  // таймаут — честный отказ
+    CHECK(classifyApiOutcome(0, false, false, now - 100, -1, -1, now) == ApiOutcome::Failure);  // сокет не подключился
+    CHECK(classifyApiOutcome(503, false, false, now - 100, -1, -1, now) == ApiOutcome::Failure); // 5xx = шагнуть
+    CHECK(classifyApiOutcome(0, true, true, now - 20000, now - 1000, -1, now) == ApiOutcome::Ignore); // начат до разморозки
+    CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 3000, now) == ApiOutcome::Ignore); // рядом со своим переходом
+    CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 9000, now) == ApiOutcome::Failure); // окно вышло
+    // P2-3: эффекты Connected — только новая сессия и только на экране.
+    CHECK(decideConnectEffects(false, -1, true) == ConnectEffects::RunNow);
+    CHECK(decideConnectEffects(true, 60000, true) == ConnectEffects::Skip);      // та же нода, минуту назад
+    CHECK(decideConnectEffects(true, kConnectEffectsRepeatMs, true) == ConnectEffects::RunNow);
+    CHECK(decideConnectEffects(false, 1000, false) == ConnectEffects::Defer);    // новая нода, экран в фоне
+    // P1-6: липкий запрос рестарта старше 2 минут сбрасывается.
+    CHECK(!restartRequestStale(now - 5000, now));
+    CHECK(restartRequestStale(now - kRestartRequestTtlMs - 1, now));
+    CHECK(!restartRequestStale(-1, now));
+    // P1-5: give-up свитча — держим живой туннель, лежачий — бэкофф, намерение не снимаем.
+    CHECK(decideSwitchGiveUp(true) == SwitchGiveUp::KeepTunnel);
+    CHECK(decideSwitchGiveUp(false) == SwitchGiveUp::BackoffRetry);
+    // P2-6: своё событие сети.
+    CHECK(networkChangeIsOwnTunnel(true, -1, now));
+    CHECK(networkChangeIsOwnTunnel(false, now - 2000, now));
+    CHECK(!networkChangeIsOwnTunnel(false, now - 6000, now));
+    CHECK(!networkChangeIsOwnTunnel(false, -1, now));
+    // P2-4: координатор выхода на экран.
+    CHECK(foregroundIsReturn(true, 0));                       // была заморозка/скрытие
+    CHECK(!foregroundIsReturn(false, 3000));                  // Пункт управления: 3 с Inactive
+    CHECK(foregroundIsReturn(false, 120000));                 // десктоп: 2 мин в браузере
+    const ForegroundPlan fresh = planForeground(-1, -1);
+    CHECK(fresh.refreshSubscription && fresh.refreshConfig);
+    const ForegroundPlan soon = planForeground(5000, 60000);
+    CHECK(!soon.refreshSubscription && !soon.refreshConfig);
+    const ForegroundPlan later = planForeground(40000, kFgConfigThrottleMs);
+    CHECK(later.refreshSubscription && later.refreshConfig);
+    // Волна-4: потеря компонента объясняет только ближайший обрыв.
+    CHECK(componentLossFresh(true, now - 1000, now));
+    CHECK(!componentLossFresh(true, now - 60000, now));
+    CHECK(!componentLossFresh(false, now - 1000, now));
+}
+
 static void a12Outbox()
 {
     const QByteArray ack = "{\"id\":\"8f14e45f-ceea-4e7a-9b1c-2d3e4f5a6b7c\"}";
@@ -527,6 +585,7 @@ int main()
     parityConnectDoesNotWaitForNetwork();
     parityBackgroundPollingOnlyWhenActive();
     wave3StartAndLossPolicy();
+    wave4UpstreamBehaviour();
     a12Outbox();
     a16ReliabilityRingCollapse();
     gap1DoctorNodeProblem();

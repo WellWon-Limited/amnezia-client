@@ -42,6 +42,8 @@ PageType {
     // Гард на undefined — старый бинарь без свойства ведёт себя как раньше (busy = Connecting).
     readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
     readonly property bool showBusy: isBusy && !engineStopping
+    // Волна-4 (P1-4): подхват уже живой сессии — «Проверяем…», а не «Connecting…».
+    readonly property bool adopting: hasEngine && TribeEngine.adopting === true
 
     // AVPN awg31-xray-v1: фаза «туннель поднят, но трафик ещё не подтверждён» (xray: «Подключено»
     // только после DNS+HTTPS через туннель — инвариант волны). Гард `=== true` — старый бинарь без
@@ -190,7 +192,9 @@ PageType {
             // «включи обратно» (start задаёт намерение, reconcile доведёт из терминала). Раньше клик
             // уходил в stop() и глотался reconcile-дебаунсом (ревью 2026-07-03).
             if (root.engineStopping) { TribeEngine.start(); return }
-            if (isOn || isBusy) TribeEngine.stop()
+            // Волна-4 (P1-4): тап во время подхвата живой сессии / сразу после адопта движок
+            // трактует как повторный «включить», а не «выключить» (stopFromUi → stopTapIgnored).
+            if (isOn || isBusy) TribeEngine.stopFromUi()
             else TribeEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
@@ -253,25 +257,11 @@ PageType {
     // резюма — риск watchdog, CONNECT-INVARIANTS); вместо него kickBootstrap — он лишь поджимает
     // таймер ретрая, если подписка ТАК И НЕ загрузилась (фикс «на сотовой ∞ навсегда»), и no-op
     // после успеха. ВНЕ троттла: дёшев, а ждать 30с с пустым пулом нельзя.
-    Connections {
-        target: Qt.application
-        function onStateChanged() {
-            if (Qt.application.state !== Qt.ApplicationActive) return
-            if (!root.hasEngine) return
-            if (typeof TribeEngine.kickBootstrap === "function")
-                TribeEngine.kickBootstrap()
-            var now = Date.now()
-            // AVPN backend-first-3 (Task 8): троттл server-tunable (numbers.fg_refresh_throttle_ms,
-            // клампы 1с..10мин); 30000 — вкомпиленный QML-фолбэк при отсутствии движка (dev-превью).
-            if (now - root.lastFgRefreshMs < (root.hasEngine ? TribeEngine.fgRefreshThrottleMs : 30000)) return
-            root.lastFgRefreshMs = now
-            if (typeof TribeEngine.refreshSubscription === "function")
-                TribeEngine.refreshSubscription()   // device-часы: бейдж/CTA
-            if (typeof TribeEngine.refreshAccount === "function")
-                TribeEngine.refreshAccount()        // account-справка: Настройки
-            // AVPN (P-ANN): refreshAnnouncements при возврате дёргает глобальный хост (PageStart)
-        }
-    }
+    // Волна-4 (2026-09-29, P2-4): выход на экран обрабатывает ОДИН координатор в движке
+    // (AvpnEngineQml: только возврат после реальной заморозки/скрытия, дебаунс 1 с, одна пачка:
+    // kickBootstrap + подписка с троттлом + конфиг раз в 15 мин). Раньше здесь был второй
+    // обработчик (ещё refreshSubscription + refreshAccount на КАЖДЫЙ Inactive→Active) — 5–8
+    // запросов на открытие, их таймауты кормили смену API-эджа.
 
     // AVPN (Task 11): bootstrap НЕ зовём из Component.onCompleted — он делает блокирующий сетевой
     // вызов (вложенный QEventLoop), а во время построения QML это вызывает re-entrancy и краш
@@ -727,7 +717,7 @@ PageType {
 
         Text {
             anchors.centerIn: parent; z: 40
-            text: root.showBusy ? "Connecting…" : (root.isOn ? "Connected" : "Connect")
+            text: root.showBusy ? (root.adopting ? "Checking…" : "Connecting…") : (root.isOn ? "Connected" : "Connect")
             color: root.isOn ? "white" : root.slate900
             font.family: Theme.font.display; font.pixelSize: 26; font.weight: Theme.font.wBold
         }

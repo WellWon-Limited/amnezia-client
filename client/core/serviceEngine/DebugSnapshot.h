@@ -423,6 +423,125 @@ inline bool prepRefreshOnNetworkChange(bool haveSubscription)
     return !haveSubscription;
 }
 // A11: результат замера не затирает прошлый RTT ноды «нет ответа» (заменяем по приходу нового).
+// ── Волна-4 «как апстрим» (2026-09-29, аудит iOS против апстрима + журнал 24–28.09) ────────
+
+// P1-4: тап по орбу во время подхвата живой сессии (liveSessionFound → ждём статус, m_busy) или в
+// первые секунды после адопта — это второй тап пользователя, который хотел ВКЛЮЧИТЬ (орб ещё
+// показывал «выкл»/«Проверяем…»), а не выключить. 8 из 33 быстрых стопов по журналу — ровно эта
+// последовательность (journal_on → adopt_connected → guarded_stop why=user за 0,6–1,5 с). Отмена
+// СВОЕГО старта (подготовка, Op в полёте) остаётся законной.
+constexpr qint64 kAdoptTapGraceMs = 2500;
+inline bool stopTapIgnored(bool busy, bool ownOpInFlight, bool preparingStart, bool liveSessionPending,
+                           qint64 sinceAdoptMs)
+{
+    if (preparingStart || ownOpInFlight)
+        return false;
+    if (busy && liveSessionPending)
+        return true;
+    return sinceAdoptMs >= 0 && sinceAdoptMs < kAdoptTapGraceMs;
+}
+
+// P1-5: сторож старта на iOS/NE. Натив держит свои бюджеты (дедлайн коннекта 10 с, рукопожатие
+// 3×12 с → Error+stop) и всегда отдаёт терминал; 15-секундный сторож фасада гасил живую NE-сессию
+// посреди медленного рукопожатия на сотовой (12 watchdog_start за 9 у-сут). Пока натив сообщает,
+// что сессия есть (Connecting/Reconnecting), сторож перевзводится (≤ maxDeferrals), а не гасит.
+enum class StartWatchdog { Stop, Defer };
+inline StartWatchdog decideStartWatchdog(bool nativeSessionAlive, int deferrals, int maxDeferrals = 4)
+{
+    return (nativeSessionAlive && deferrals < maxDeferrals) ? StartWatchdog::Defer : StartWatchdog::Stop;
+}
+
+// P2-2: отказ API идёт в edge-walk/детектор белых списков, только если он честный: не наш abort
+// при гашении туннеля (OperationCanceled без таймаута), не запрос, начатый до заморозки iOS
+// (t0 < момент выхода на экран), не отказ в окне 5 с после своего перехода туннеля (keep-alive
+// через погашенный utun). Регресс 126: abort всех запросов на Disconnected давал 2–3 «отказа»
+// разом → смена API-эджа почти на каждой смене ноды.
+enum class ApiOutcome { Success, Failure, Ignore };
+constexpr qint64 kApiTransitionWindowMs = 5000;
+inline ApiOutcome classifyApiOutcome(int httpCode, bool canceled, bool timedOut, qint64 startedMs,
+                                     qint64 lastResumeMs, qint64 lastTunnelTransitionMs, qint64 nowMs)
+{
+    if (httpCode > 0 && httpCode < 500)
+        return ApiOutcome::Success;        // любой прикладной ответ доказывает, что вход жив
+    if (canceled && !timedOut)
+        return ApiOutcome::Ignore;         // оборвали сами (смена ноды/стоп) — не отказ входа
+    if (startedMs > 0 && lastResumeMs > 0 && startedMs < lastResumeMs)
+        return ApiOutcome::Ignore;         // запрос пережил заморозку — таймаут не про сеть
+    if (lastTunnelTransitionMs > 0 && nowMs - lastTunnelTransitionMs < kApiTransitionWindowMs)
+        return ApiOutcome::Ignore;         // рядом со своим переходом туннеля
+    return ApiOutcome::Failure;
+}
+
+// P2-3: эффекты «Подключено» (сброс чипов, пробы сервисов 2×128 КБ) — только для НОВОЙ сессии
+// (другая нода или прошло ≥ 30 мин) и только на экране; повторный Connected той же сессии
+// (Reconnecting→Connected при смене сети, подхват) их не запускает. Не на экране — откладываем до
+// выхода на экран.
+enum class ConnectEffects { RunNow, Defer, Skip };
+constexpr qint64 kConnectEffectsRepeatMs = 30 * 60 * 1000;
+inline ConnectEffects decideConnectEffects(bool sameNodeAsLastProbe, qint64 sinceLastProbeMs, bool uiOnScreen)
+{
+    const bool newSession = !sameNodeAsLastProbe || sinceLastProbeMs < 0 || sinceLastProbeMs >= kConnectEffectsRepeatMs;
+    if (!newSession)
+        return ConnectEffects::Skip;
+    return uiOnScreen ? ConnectEffects::RunNow : ConnectEffects::Defer;
+}
+
+// P1-6: липкий m_needsRestart. Флаг взводят действия пользователя и исполняют немедленно; флаг,
+// доживший до reconcile старше kRestartRequestTtlMs (уход в фон посреди перехода, ранний выход
+// reconcile), исполнялся при первом Connected после разморозки — рестарт живого туннеля через
+// 1–7 с после открытия. Просроченный запрос сбрасываем.
+constexpr qint64 kRestartRequestTtlMs = 120000;
+inline bool restartRequestStale(qint64 requestedMs, qint64 nowMs)
+{
+    return requestedMs > 0 && nowMs - requestedMs > kRestartRequestTtlMs;
+}
+
+// P1-5: исчерпан дедлайн внутреннего свитча. Раньше: intent_off + гашение живого туннеля. Теперь:
+// туннель поднят — остаёмся на нём (свитч не удался, связь есть); опущен — пауза с ростом
+// (start_retry_backoff), намерение не снимаем (как апстрим/Mullvad).
+enum class SwitchGiveUp { KeepTunnel, BackoffRetry };
+inline SwitchGiveUp decideSwitchGiveUp(bool tunnelConnected)
+{
+    return tunnelConnected ? SwitchGiveUp::KeepTunnel : SwitchGiveUp::BackoffRetry;
+}
+
+// P2-6: собственные up/down utun приходят как reachability/transportMedium changed и инвалидировали
+// замер RTT (257 инвалидаций за 4,5 сут у одного устройства) → следующий Connect ждал ICMP-раунд.
+// В окне своей операции или 5 с после своего перехода туннеля событие сети — своё.
+inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastTunnelTransitionMs, qint64 nowMs)
+{
+    return ownOpInFlight || (lastTunnelTransitionMs > 0 && nowMs - lastTunnelTransitionMs < kApiTransitionWindowMs);
+}
+
+// P2-4: один координатор выхода на экран. Реагируем на возврат после реальной заморозки/скрытия
+// (Suspended/Hidden) или после долгого Inactive (десктоп: фокус в браузере после оплаты), не на
+// Inactive→Active-мигание (Пункт управления, системный алерт); подписка — с троттлом, конфиг —
+// раз в 15 мин (ENG-03: iOS обновлял конфиг только перезапуском процесса).
+constexpr qint64 kFgMinInactiveMs = 10000;
+constexpr qint64 kFgSubscriptionThrottleMs = 30000;
+constexpr qint64 kFgConfigThrottleMs = 15 * 60 * 1000;
+inline bool foregroundIsReturn(bool hiddenSeen, qint64 inactiveForMs)
+{
+    return hiddenSeen || inactiveForMs >= kFgMinInactiveMs;
+}
+struct ForegroundPlan { bool refreshSubscription = false; bool refreshConfig = false; };
+inline ForegroundPlan planForeground(qint64 sinceLastSubRefreshMs, qint64 sinceLastConfigFetchMs)
+{
+    ForegroundPlan p;
+    p.refreshSubscription = sinceLastSubRefreshMs < 0 || sinceLastSubRefreshMs >= kFgSubscriptionThrottleMs;
+    p.refreshConfig = sinceLastConfigFetchMs < 0 || sinceLastConfigFetchMs >= kFgConfigThrottleMs;
+    return p;
+}
+
+// Волна-4: потеря компонента (сокет демона/§16-сторож) годится как объяснение только для
+// ближайшего Disconnected; флаг, зависший на часы, не должен переклассифицировать поздний
+// внешний обрыв (§13: чужой VPN погасил — не переподключаемся).
+constexpr qint64 kComponentLossTtlMs = 30000;
+inline bool componentLossFresh(bool flagged, qint64 lostMs, qint64 nowMs)
+{
+    return flagged && lostMs > 0 && nowMs - lostMs < kComponentLossTtlMs;
+}
+
 inline void mergeRttSample(QHash<QString, int> &cache, const QString &nodeId, int rttMs)
 {
     if (rttMs >= 0 || !cache.contains(nodeId))

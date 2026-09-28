@@ -27,6 +27,9 @@ public:
 
     void reportNetworkFailure();
     void reportNetworkSuccess();
+    // Волна-4 (ENG-03): iOS обновлял конфиг только перезапуском процесса (таймер — macOS-only).
+    // Координатор выхода на экран зовёт это раз в >= 15 мин; дедуп по m_configInFlight внутри.
+    void refreshIfStale(qint64 maxAgeMs);
 
 signals:
     void configApplied(const avpn::RemoteConfig &cfg);
@@ -48,6 +51,8 @@ private:
     QStringList  m_bakedEdges;
     RemoteConfig m_config;
     int          m_failStreak = 0;
+    qint64       m_lastFailMs = -1;     // волна-4 (P2-2): затухание стрика — 3 отказа за час не повод шагать
+    qint64       m_lastFetchMs = -1;    // волна-4 (ENG-03): когда последний раз ходили за конфигом
     QTimer       m_refreshTimer;
     bool         m_configInFlight = false;
     bool         m_fresh = false;
