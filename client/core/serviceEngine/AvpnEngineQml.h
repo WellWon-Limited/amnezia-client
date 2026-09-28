@@ -210,6 +210,7 @@ class AvpnEngineQml : public QObject {
     // Без них сообщение «доступна новая версия» неотличимо от старого/ошибочного, и человек не
     // понимает, обновился он уже или нет.
     Q_PROPERTY(QString appVersion READ appVersion CONSTANT)
+    Q_PROPERTY(QString appBuild READ appBuild CONSTANT)     // волна-3: номер сборки (4-й компонент TRIBE_VERSION)
     Q_PROPERTY(QString availableVersion READ availableVersion NOTIFY changed)
     Q_PROPERTY(QString storeUrl READ storeUrl NOTIFY changed)
     // AVPN (реш. владельца 2026-09-02): на десктопном macOS кнопка «Обновить» ставит новую версию
@@ -285,6 +286,10 @@ class AvpnEngineQml : public QObject {
     // релиза). Пусто/отсутствие ключа → фолбэк на вкомпиленный порядок (listOr «пусто=фолбэк»).
     Q_PROPERTY(QStringList onboardingBrandTiles READ onboardingBrandTiles NOTIFY changed)
 public:
+    // Волна-2: UI на экране (десктоп — видимость окна; мобильные — состояние приложения). Публичный:
+    // им же пользуется TribeSupportChat для опроса бейджа.
+    static bool uiForeground();
+    static bool uplinkUp();          // волна-3: физический аплинк (UplinkMonitor)
     AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
                   QNetworkAccessManager *nam, QObject *parent = nullptr);
 
@@ -397,6 +402,7 @@ public:
     Q_INVOKABLE void rollbackToPrevious();
     // Маркетинговая версия приложения (первые три компонента APP_VERSION, без номера сборки).
     QString appVersion() const;
+    QString appBuild() const;
     // Версия, которую предлагает control plane для ЭТОЙ платформы (recommended_version, при его
     // отсутствии — min_app_version). Пусто = сервер ничего не предлагает.
     QString availableVersion() const;
@@ -880,6 +886,7 @@ private:
     // data-plane движка сохраняются (без requestStop).
     void guardedStop(const char *why, bool keepEngineSwitch = false);
     void beginStartPreparation();
+    bool freshRttCoversPool();        // волна-2: замер после смены сети и по всем авто-нодам
     void finishStartPreparation(const QString &reason);
     void cancelStartPreparation();
     void invalidateNetworkMeasurements();
@@ -945,6 +952,9 @@ private:
     // ok → reconcile() продолжает старт (намерение живо); fail → error + счёт попытки.
     void finishSvcInstall(bool ok, const QString &err);
 
+#endif
+#if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)
+    // Волна-3 (2026-09-28): wake-перехват общий для всего десктопа (macOS/Windows/Linux).
     // AVPN (macOS wake-реконнект, спека 2026-07-17-macos-wake-reconnect-design.md): «закрыл крышку —
     // утром VPN off». Wake — НАША операция, а не внешний обрыв: демон туннель через ночь держит,
     // рвал его ванильный reconnectToVpn (stop+start в неготовую сеть) + наш 20с-сторож + §13.
@@ -959,6 +969,8 @@ private:
     void daemonWakeEvent(const char *why);
     void wakeLivenessProbe();         // async HEAD через туннель; мёртв → needsRestart+reconcile
     void wakeKick();                  // ретрай подъёма по появлению сети (кап tries)
+#endif
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6, адопция при перезапуске GUI): демон держит туннель после выхода GUI, но на
     // холодном старте протокол (LocalSocketController) не создаётся до клика Connect — факт
     // «connected» демона никто не спрашивает. Стартовая проба: свой QLocalSocket → {"type":"status"}
@@ -1070,6 +1082,8 @@ private:
     QHash<QString, int>          m_chipConfirms;      // key → потрачено confirm-переппроб этой серии
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
+    IRttProbe                   *m_gwProbe = nullptr;  // волна-3: ICMP до шлюза ноды через туннель
+    int                          m_gwRtt = -1;         // волна-3: сглаженный RTT до шлюза (−1 = нет)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
     quint64                     m_rttEpoch = 0;
     bool                        m_rttInFlight = false;
@@ -1355,6 +1369,7 @@ private:
     // svcInstalling. На не-macOS всегда false.
     bool                         m_svcInstalling = false;
     bool                         m_svcInstallInFlight = false;
+    bool                         m_svcUpgradeDeclined = false;     // волна-3: отказ от обновления работающей службы — раз за сессию
     // AVPN (macOS wake-реконнект): состояние wake-операции. wakeProbing — дедуп пробы живости
     // (wakeup+networkChanged летят пачкой); wakeRestartPending — наш рестарт в полёте, ретраи по
     // reachabilityChanged восстанавливают намерение (это НЕ авто-коннект §13 — операция наша);
@@ -1372,6 +1387,9 @@ private:
     int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)
     bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
     bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
+    QString                      m_restartOrigin;                  // волна-2: кто взвёл m_needsRestart (журнал reconcile_restart:<origin>)
+    int                          m_bgProbeTick = 0;                // волна-2: тики health в фоне между редкими пробами
+    qint64                       m_lastNetChangeMs = -1;           // волна-2: момент последней смены сети (свежесть кэша RTT)
     // AVPN awg31-xray-v1: верификация xray (см. startXrayVerification): epoch гейтит стейл-ответы
     // (сменился туннель/стоп → ответ старой серии выбрасывается), clock — бюджет, ms/ok — факты
     // последней верификации для отчётов бенча/диагностики (benchExtra.transport).
@@ -1390,6 +1408,10 @@ private:
                                                                    // состояния (в отличие от m_opInFlight) — иначе
                                                                    // reconcile внутри цикла застекал бы 2-й loop.exec
     int                          m_startAttempts = 0;              // подряд неудачных connect — анти-зацикливание
+    bool                         m_waitUplink = false;             // волна-3: старт ждёт физический аплинк (попытки не считаются)
+    bool                         m_componentLost = false;          // волна-3: §16-сторож сообщил о мёртвом демоне (следующий Disconnected = Component)
+    int                          m_startBackoffRound = 0;          // волна-3: раунд паузы 30/60/120 с после исчерпания попыток
+    quint64                      m_startRetryEpoch = 0;            // волна-3: отмена отложенного повтора (start/stop/успех)
     // AVPN (sub-grace): флаг для UI «движок сам погасил туннель по истечению подписки» (Q_PROPERTY
     // subEnforcedStop) + гард однократности, пока идёт остановка. Оба сбрасывает явный start().
     bool                         m_subEnforcedStop = false;

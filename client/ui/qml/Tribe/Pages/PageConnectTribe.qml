@@ -77,6 +77,11 @@ PageType {
     // trafficLimit/daysLeft/subActive — читают загруженную Subscription через движок. Гард на
     // undefined-движок (dev-превью) с литеральными фолбэками.
     readonly property bool hasEngine:     (typeof TribeEngine !== "undefined")
+    // Волна-2: «экран виден». На macOS Qt.application.state — фокус приложения, не видимость окна
+    // (qcocoa шлёт только didBecomeActive/didResignActive); на десктопе берём состояние окна.
+    readonly property bool uiOnScreen: (Qt.platform.os === "osx" || Qt.platform.os === "windows" || Qt.platform.os === "linux")
+        ? (Window.visibility !== Window.Minimized && Window.visibility !== Window.Hidden)
+        : Qt.application.state === Qt.ApplicationActive
     // AVPN (оплата): гард двойного тапа по золотой CTA — ждём cabinetLinkReady (приходит всегда).
     property bool ctaLinking: false
     // AVPN (оплата): троттл foreground-рефреша статуса подписки (мс, Date.now()).
@@ -371,7 +376,8 @@ PageType {
                 SequentialAnimation on opacity {
                     // Волна «как апстрим» (2026-09-28): мерцание — только при активном окне. Бесконечные
                     // анимации звёзд крутили рендер и в фоне (подозрение на ~10% CPU у Mac владельца, 28.09).
-                    running: !Theme.motion.reduceMotion && Qt.application.state === Qt.ApplicationActive
+                    // Волна-2: на macOS ApplicationActive = фокус, не видимость; берём видимость окна.
+                    running: !Theme.motion.reduceMotion && root.uiOnScreen
                     loops: Animation.Infinite
                     NumberAnimation { from: modelData.o; to: modelData.o * 0.25; duration: 1400; easing.type: Easing.InOutSine }
                     NumberAnimation { from: modelData.o * 0.25; to: modelData.o; duration: 1400; easing.type: Easing.InOutSine }
@@ -1015,7 +1021,7 @@ PageType {
             interval: root.hasEngine ? TribeEngine.probeServicesIntervalMs : 180000
             repeat: true
             // Волна «как апстрим» (2026-09-28): в фоне чипов никто не видит — 128 КБ проб не качаем.
-            running: root.isOn && root.hasEngine && Qt.application.state === Qt.ApplicationActive
+            running: root.isOn && root.hasEngine && root.uiOnScreen
             onTriggered: TribeEngine.probeServices()
         }
 

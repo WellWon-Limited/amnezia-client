@@ -96,6 +96,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/RuSplitSentinel.h
     ${AVPN_SE}/JournalPolicy.h
     ${AVPN_SE}/TribeJournal.h
+    ${AVPN_SE}/UplinkMonitor.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -132,6 +133,15 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/TribeJournal.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
+
+# AVPN (волна-3): физический аплинк — nw_path_monitor на macOS-desktop, QNetworkInformation везде ещё.
+if(APPLE AND NOT IOS AND NOT MACOS_NE)
+    list(APPEND SOURCES ${AVPN_SE}/UplinkMonitor.mm)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/UplinkMonitor.mm)
+else()
+    list(APPEND SOURCES ${AVPN_SE}/UplinkMonitor.cpp)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/UplinkMonitor.cpp)
+endif()
 
 # AVPN: авто-установка root-демона из вшитого pkg — только macOS-desktop (НЕ NE, НЕ iOS).
 if(APPLE AND NOT IOS AND NOT MACOS_NE)

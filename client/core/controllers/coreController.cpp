@@ -17,6 +17,7 @@
     #include "core/serviceEngine/AvpnEngineQml.h"
     #include "core/serviceEngine/AvpnPushBridge.h" // AVPN (Task 9): мост пушей → QML
     #include "core/serviceEngine/TribeSupportChat.h" // AVPN (Support): чат поддержки → QML
+    #include "core/serviceEngine/TribeJournal.h" // AVPN (волна-2): лог службы не гасить при включённом журнале
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
     #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
     #include "core/serviceEngine/TribeHaptics.h" // AVPN (haptics): тактильный отклик → QML
@@ -336,7 +337,13 @@ void CoreController::initAppleController()
 void CoreController::initLogging()
 {
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // AVPN (волна-2, 2026-09-28): журнал тестирования уже включил лог службы (TribeJournal::setActive
+    // → setServiceLogsEnabled(true)); выключенное «сохранять логи» через 130 мс гасило его обратно —
+    // лог демона молчал сутками (/var/log/AVPN/Tribe-service.log с 16:08Z 28.09).
     bool enabled = m_appSettingsRepository->isSaveLogs();
+#ifdef AVPN_ENGINE_ENABLED
+    enabled = enabled || avpn::TribeJournal::active();
+#endif
     if (enabled) {
         if (!Logger::init(false)) {
             qWarning() << "Initialization of debug subsystem failed";

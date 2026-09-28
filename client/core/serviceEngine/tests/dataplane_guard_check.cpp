@@ -226,6 +226,38 @@ int main(int argc, char **argv)
         CHECK(eng.state() == EngineState::Connected);
     }
 
+    // --- 6a) Волна-2 (ревью 5.1.95): рост rx на текущей ноде возвращает бюджет без пробы фасада ---
+    {
+        TuningStore::set({{QStringLiteral("data_plane_fail_max_tries"), 2}},
+                         {{QStringLiteral("rebind_heal"), false}}, {}, {});
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                             awgNodeJson("2:awg", 2, "PL", 1.0),
+                                             awgNodeJson("5:awg", 5, "US", 1.0) }), err));
+        CHECK(eng.connect(err));
+        CHECK(eng.onTunnelConnected());
+        CHECK(deadRound(eng));
+        CHECK(eng.dataPlaneFailStreak() == 1);
+        // Два тика с растущим rx: первый задаёт базу, второй доказывает живой data-plane.
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        tun.st.valid = true; tun.st.rxBytes = 1000; tun.st.txBytes = 5000; tun.st.latestHandshakeEpoch = now;
+        CHECK(!eng.tick(now));
+        CHECK(eng.dataPlaneFailStreak() == 1);    // база только записана
+        tun.st.rxBytes = 4096;
+        CHECK(!eng.tick(now + 4));
+        CHECK(eng.dataPlaneFailStreak() == 0 && !eng.dataPlaneExhausted());
+        // Тик без роста rx бюджет не трогает (простой — не доказательство).
+        CHECK(deadRound(eng));
+        CHECK(eng.dataPlaneFailStreak() == 1);
+        tun.st.valid = true; tun.st.rxBytes = 4096;
+        CHECK(!eng.tick(now + 8));
+        CHECK(!eng.tick(now + 12));
+        CHECK(eng.dataPlaneFailStreak() == 1);
+    }
+
     // --- 6) MAJOR-1: удачная проба через туннель возвращает бюджет (оба транспорта) ---
     {
         TuningStore::set({{QStringLiteral("data_plane_fail_max_tries"), 2}},

@@ -813,6 +813,14 @@ void ServiceEngine::noteHealthyTick(const TunnelStats &stats, qint64 nowEpoch)
     const qint64 prevRx = m_tickPrevRx;
     if (stats.valid)
         m_tickPrevRx = stats.rxBytes;
+    // Волна-2 (ревью 5.1.95): рост rx на текущей ноде — доказательство живого data-plane, не
+    // зависящее от окна/пробы фасада. Раньше стрик провалов сбрасывала только удачная проба
+    // (feedProbeResult), а она с 5.1.95 в фоне редкая: 4 failover за долгую сессию накапливались в
+    // «сдаёмся» при исправном туннеле.
+    if (stats.valid && prevRx > 0 && stats.rxBytes > prevRx && m_dataPlaneFailStreak > 0) {
+        m_dataPlaneFailStreak = 0;
+        m_dataPlaneExhausted = false;
+    }
     // GAPFIX-2: отсрочки rebind "offline" — тоже часть сессии лечения (попытка возвращена, отказ не
     // поставлен, но кап kRebindOfflineDeferMax на эпизод копился бы всю сессию на ноде: через N часов
     // здорового туннеля очередной offline засчитывался отказом → переподъём/failover EE→US).

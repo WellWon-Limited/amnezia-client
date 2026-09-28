@@ -1,4 +1,5 @@
 #include "vpnConnection.h"
+#include "core/serviceEngine/DebugSnapshot.h" // AVPN (волна-3): decideReconnectWatchdog
 
 #include <QDebug>
 #include <QEventLoop>
@@ -60,6 +61,8 @@ VpnConnection::~VpnConnection()
 
 void VpnConnection::onBytesChanged(quint64 receivedBytes, quint64 sentBytes)
 {
+    if (m_reconnectProbing)
+        m_reconnectProbeAnswered = true; // AVPN (волна-3): демон ответил на status — жив
     emit bytesChanged(receivedBytes, sentBytes);
 }
 
@@ -125,9 +128,10 @@ void VpnConnection::onConnectionStateChanged(Vpn::ConnectionState state)
         break;
     }
     // AVPN (волна «как апстрим»): сервера Tribe в репозитории нет — берём контейнер коннекта.
-    // Только macOS: там ветка «не-AWG» — чистый шум (RouterMac::routeAdd отвергает пустой шлюз,
-    // маршруты байпаса ставит монитор демона); на Windows/Linux поведение не трогаем без замера.
-#ifdef Q_OS_MACOS
+    // macOS и Windows: там ветка «не-AWG» — чистый шум (RouterMac::routeAdd / RouterWin::routeAddList
+    // отвергают пустой шлюз, routeDeleteList с пустым шлюзом ничего не удаляет; маршруты байпаса
+    // ставит демон — монитор на macOS, bulk-окно §15 на Windows). Linux не трогаем без замера.
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
     if (container == DockerContainer::None)
         container = m_connectContainer;
 #endif
@@ -622,16 +626,14 @@ void VpnConnection::reconnectToVpn() {
     // состояние, её сторож не взведён — операция не её). Сторож: не вышли из Reconnecting за 20с
     // (штатный реконнект — секунды; iOS-хендшейк-окно 12с сюда не ходит, слот десктоп-only) →
     // честный Disconnected, машина разблокирована, подключение — вручную (§13, авто-коннекта нет).
+    // AVPN (волна-3, 2026-09-28): сторож больше не рисует «Отключено» вслепую. Разбор Mac 26–28.09:
+    // 4 из 4 срабатываний были при ЖИВОМ демоне, который ждал рукопожатия в сети без default route
+    // (blockAll держался, а UI показывал OFF и §13 снимал намерение). Теперь: 20 с → спросить демона
+    // (status); ответил — остаёмся в Reconnecting как апстрим (перевзвод ≤ 3 раз); молчит 3 с —
+    // мёртв → Disconnected + daemonLost() (движок держит намерение и ждёт службу).
     const quint64 generation = ++m_reconnectGeneration;
-    QTimer::singleShot(20000, this, [this, generation]() {
-        if (generation != m_reconnectGeneration)
-            return;  // за 20с начался следующий реконнект — это не наше окно
-        if (m_connectionState != Vpn::ConnectionState::Reconnecting)
-            return;
-        qWarning() << "reconnect watchdog: still Reconnecting after 20s — forcing Disconnected";
-        m_connectionState = Vpn::ConnectionState::Disconnected;  // выйти из свалло-состояния ДО set
-        setConnectionState(Vpn::ConnectionState::Disconnected);
-    });
+    m_reconnectRearms = 0;
+    armReconnectWatchdog(generation);
 
     m_vpnProtocol->stop();
     if (ErrorCode err = m_vpnProtocol->start(); err != ErrorCode::NoError) {
@@ -679,6 +681,43 @@ void VpnConnection::disconnectFromVpn()
 #endif
 
     m_vpnProtocol = nullptr;
+}
+
+void VpnConnection::armReconnectWatchdog(quint64 generation)
+{
+    QTimer::singleShot(20000, this, [this, generation]() {
+        if (generation != m_reconnectGeneration)
+            return;  // начался следующий реконнект — это не наше окно
+        if (m_connectionState != Vpn::ConnectionState::Reconnecting)
+            return;
+        m_reconnectProbing = true;
+        m_reconnectProbeAnswered = false;
+        if (auto *wg = qobject_cast<WireguardProtocol *>(m_vpnProtocol.data()))
+            wg->requestStatus();
+        QTimer::singleShot(3000, this, [this, generation]() {
+            if (generation != m_reconnectGeneration || !m_reconnectProbing)
+                return;
+            m_reconnectProbing = false;
+            if (m_connectionState != Vpn::ConnectionState::Reconnecting)
+                return;
+            switch (avpn::decideReconnectWatchdog(m_reconnectProbeAnswered, m_reconnectRearms)) {
+            case avpn::ReconnectWatchdog::Rearm:
+                ++m_reconnectRearms;
+                qInfo() << "reconnect watchdog: daemon alive, still Reconnecting — rearm" << m_reconnectRearms;
+                armReconnectWatchdog(generation);
+                return;
+            case avpn::ReconnectWatchdog::ForceDisconnectedAlive:
+                qWarning() << "reconnect watchdog: daemon alive but no terminal after rearms — forcing Disconnected";
+                break;
+            case avpn::ReconnectWatchdog::ForceDisconnectedDead:
+                qWarning() << "reconnect watchdog: daemon did not answer status — forcing Disconnected (daemon lost)";
+                emit daemonLost();
+                break;
+            }
+            m_connectionState = Vpn::ConnectionState::Disconnected;  // выйти из свалло-состояния ДО set
+            setConnectionState(Vpn::ConnectionState::Disconnected);
+        });
+    });
 }
 
 void VpnConnection::setConnectionState(Vpn::ConnectionState state) {

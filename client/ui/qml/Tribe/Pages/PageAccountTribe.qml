@@ -1041,6 +1041,29 @@ PageType {
             }
         }
 
+        // ── ВЕРСИЯ ПРИЛОЖЕНИЯ ────────────────────────────────────────────────
+        // Волна-3 (2026-09-28): маркетинговая версия и номер сборки видны в настройках на всех
+        // платформах (запрос владельца: сверять сборку TestFlight без App Store Connect).
+        Text {
+            visible: root.hasEngine
+            text: qsTr("ПРИЛОЖЕНИЕ")
+            color: Theme.color.text3
+            font.family: Theme.font.body; font.pixelSize: Theme.font.caption
+            font.weight: Theme.font.wSemibold; font.letterSpacing: 1.4
+            Layout.topMargin: Theme.space.sm
+        }
+        TribeListRow {
+            visible: root.hasEngine
+            Layout.fillWidth: true
+            title: qsTr("Версия")
+            rightItem: Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.hasEngine ? qsTr("%1 (сборка %2)").arg(TribeEngine.appVersion).arg(TribeEngine.appBuild) : ""
+                color: Theme.color.text3
+                font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
+            }
+        }
+
         // ── ДИАГНОСТИКА: журнал тестирования ─────────────────────────────────
         // Виден сборкам TestFlight, админ-устройствам и при удалённом включении из /panel
         // (Tribe-Backend docs/specs/2026-09-23-tester-journal-design.md). // AVPN
