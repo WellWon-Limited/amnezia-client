@@ -32,6 +32,11 @@ PageType {
     readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property int  daysLeftN:     hasEngine ? TribeEngine.daysLeft : -1
+    // AVPN (жалоба 2026-09-29): до первого разобранного тела подписки лимит 0 / дни -1 = «не знаем»,
+    // а не «Безлимит»/«Активен» (как PageConnectTribe.subLoadedNow). Превью без движка — загружено.
+    readonly property bool subLoadedNow: !hasEngine || TribeEngine.subLoaded === true
+    readonly property string subPendingText: (hasEngine && TribeEngine.subOffline === true)
+                                             ? qsTr("Нет данных") : qsTr("Загружаем…")
     readonly property real usedFrac: trafficLimitB > 0 ? Math.min(1, trafficUsedB / trafficLimitB) : 0
     // AVPN (group-aware, 2026-07-21): «истекла» решают device-часы /v1/subscription (бэк учитывает
     // группы: unlimited/bonus_days/bonus_traffic), КАК на Connect (subExpired). account.status —
@@ -575,13 +580,14 @@ PageType {
                     Text { text: qsTr("Действует"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
                     Text {
                         text: {
+                            if (!root.subLoadedNow) return root.subPendingText
                             var parts = []
                             if (root.daysLeftN >= 0) parts.push(qsTr("%1 дн.").arg(root.daysLeftN))
                             var d = root.fmtDate(root.hasEngine ? TribeEngine.subExpiresAt : "")
                             if (d !== "") parts.push(qsTr("до ") + d)
                             return parts.length ? parts.join(" · ") : qsTr("Активен")
                         }
-                        color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
+                        color: root.subLoadedNow ? Theme.color.text1 : Theme.color.text2; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
                     }
                 }
 
@@ -592,13 +598,14 @@ PageType {
                     Text { text: qsTr("Осталось трафика"); color: Theme.color.text2; font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS; Layout.fillWidth: true }
                     Text {
                         text: {
+                            if (!root.subLoadedNow) return root.subPendingText
                             if (!(root.trafficLimitB > 0)) return qsTr("Безлимит")
                             var gib = Math.max(0, root.trafficLimitB - root.trafficUsedB) / 1073741824
                             if (isNaN(gib)) return qsTr("Безлимит")
                             if (gib >= 1024) return (gib / 1024).toFixed(1).replace(/\.0$/, "") + qsTr(" ТБ")
                             return gib.toFixed(1).replace(/\.0$/, "") + qsTr(" ГБ")
                         }
-                        color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
+                        color: root.subLoadedNow ? Theme.color.text1 : Theme.color.text2; font.family: Theme.font.mono; font.pixelSize: Theme.font.monoData
                     }
                 }
                 // полоса — тоже остаток (полная = весь трафик на месте), в тон тексту выше

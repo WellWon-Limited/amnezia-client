@@ -33,7 +33,12 @@ Item {
     readonly property int visibleTabCount: referralVisible ? tabs.length : tabs.length - 1
     readonly property real tabWidth: nav.width / nav.visibleTabCount
 
-    implicitHeight: 72 + bottomInset
+    // AVPN (девайс-фидбек 2026-09-29, iPhone 15 Pro): на iOS ряд вкладок 52 (штатный UITabBar — 49)
+    // вместо 72 — под подписями было ~50pt пустоты (16 паддинга + safe-area 34). Иконки и подписи
+    // опускаются к низу, safe-area (home-индикатор) не занимаем; освободившиеся 20pt уходят
+    // карточке/чипам/кнопкам Главной (bottomBlock привязан к навбару). macOS/Android — как было.
+    readonly property int rowHeight: Qt.platform.os === "ios" ? 52 : 72
+    implicitHeight: rowHeight + bottomInset
     property real bottomInset: 0   // wired to safe-area by host
 
     // AVPN (haptics, жалоба 2026-07-12): тактильный отклик на ВХОДЯЩЕЕ сообщение поддержки
@@ -68,7 +73,7 @@ Item {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 72
+        height: nav.rowHeight
         Repeater {
             model: nav.tabs
             delegate: Item {

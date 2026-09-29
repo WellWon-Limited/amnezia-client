@@ -42,6 +42,21 @@ inline BootstrapBodyAction decideBootstrapBody(bool parseOk, bool poolNonEmpty)
                         : BootstrapBodyAction::KeepPollingEmptyPool;
 }
 
+// Состояние подписки для UI (жалоба 2026-09-29): пока первое тело /v1/subscription не разобрано,
+// лимит трафика 0, а дни -1 — UI рисовал это как «∞ · ∞» и «Безлимит», и пустой пул выглядел как
+// «безлимит без серверов». «Не загружено» — отдельное состояние: Loading, пока ретраи свежие;
+// Offline после kBootstrapOfflineAfterFailures провалов подряд (сеть/вход недоступны). Разобранное
+// тело (живое или LKG с диска) — Ready: настоящий безлимит (лимит 0 у группы) виден только тут.
+inline constexpr int kBootstrapOfflineAfterFailures = 2;
+enum class SubUiState { Loading, Offline, Ready };
+inline SubUiState decideSubUiState(bool subLoaded, int failedAttempts)
+{
+    if (subLoaded)
+        return SubUiState::Ready;
+    return failedAttempts >= kBootstrapOfflineAfterFailures ? SubUiState::Offline
+                                                            : SubUiState::Loading;
+}
+
 // Задержка перед попыткой №(attempt+1). attempt — сколько попыток уже провалилось (0-based).
 inline int nextBootstrapDelayMs(int attempt)
 {

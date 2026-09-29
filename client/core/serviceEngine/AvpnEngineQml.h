@@ -89,6 +89,11 @@ class AvpnEngineQml : public QObject {
     // снапшота (degraded + пустой пул), без липкого стейта (ревью: sticky-флаг давал ложную CTA
     // платящему юзеру при транзиентно пустом пуле со status=active — все ноды в дренаже).
     Q_PROPERTY(bool subMissing READ subMissing NOTIFY changed)
+    // AVPN (жалоба 2026-09-29 «пишет безлимит, а серверов нет»): тело подписки ещё НИ РАЗУ не
+    // разобрано (ни живое, ни LKG) — лимит 0 и дни -1 тут значат «не знаем», а не «безлимит».
+    // subOffline — не загружено И провалов подряд >= kBootstrapOfflineAfterFailures (BootstrapRetry.h).
+    Q_PROPERTY(bool subLoaded READ subLoaded NOTIFY changed)
+    Q_PROPERTY(bool subOffline READ subOffline NOTIFY changed)
     // AVPN (белые списки, спека 2026-07-12): РКН-режим «работает только whitelist» на сотовой —
     // детект дифф-пробами (control мертвы ВСЕ + >=2 whitelist живы, вкл. маркетплейс). UI кажет
     // центрированный попап «подключитесь к Wi-Fi» вместо вечного Connecting (subMissing этот
@@ -325,6 +330,9 @@ public:
     // (все ноды в дренаже у подписанного юзера) сюда НЕ попадает. Без липкого члена — правда
     // пересчитывается из текущего снапшота на каждом changed().
     bool subMissing() const;
+    // AVPN: см. Q_PROPERTY subLoaded/subOffline выше (решатель decideSubUiState).
+    bool subLoaded() const;
+    bool subOffline() const;
     // AVPN (белые списки): см. Q_PROPERTY whitelistMode/whitelistAcked выше.
     bool whitelistMode() const;
     bool whitelistAcked() const { return m_whitelistAcked; }
