@@ -1127,6 +1127,7 @@ private:
     qint64                      m_lastAdoptMs = -1;              // волна-4 (P1-4): момент адопта живой сессии
     int                         m_startWatchdogDeferrals = 0;    // волна-4 (P1-5): перевзводы сторожа старта при живой NE-сессии
     qint64                      m_lastTunnelTransitionMs = -1;   // волна-4: момент последнего наблюдённого перехода туннеля
+    qint64                      m_lastOwnOpMs = -1;              // волна-4: момент своего guardedStart/guardedStop (окно «своего» события сети)
     qint64                      m_lastResumeMs = -1;             // волна-4: последний выход на экран
     qint64                      m_lastHiddenMs = -1;             // волна-4: последний уход в фон/скрытие
     qint64                      m_lastInactiveMs = -1;           // волна-4: начало текущего Inactive

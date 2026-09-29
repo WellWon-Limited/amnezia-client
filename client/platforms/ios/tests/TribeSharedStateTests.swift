@@ -92,7 +92,17 @@ enum SharedStateTests {
         precondition(flaps[3]["repeat"] == nil && flaps[4]["repeat"] == nil, "no merge across another event or the window")
         journal.record(source: "ne", event: "stall_denied", now: t0.addingTimeInterval(300))
         journal.record(source: "ne", event: "stall_denied", now: t0.addingTimeInterval(301))
-        precondition((journal.read("TribeNELifecycle.json")["entries"] as! [[String: Any]]).count == 7, "only path_change is merged")
+        precondition((journal.read("TribeNELifecycle.json")["entries"] as! [[String: Any]]).count == 7, "only coalescable labels are merged")
+        // awg-apple tribe.9+: path_change and roam_fresh_port alternate on a flapping path; each label
+        // merges into its own last entry across the other coalescable label (2 entries, not 4).
+        journal.record(source: "ne", event: "path_change", now: t0.addingTimeInterval(400))
+        journal.record(source: "ne", event: "roam_fresh_port", now: t0.addingTimeInterval(401))
+        journal.record(source: "ne", event: "path_change", now: t0.addingTimeInterval(402))
+        journal.record(source: "ne", event: "roam_fresh_port", now: t0.addingTimeInterval(403))
+        let interleaved = journal.read("TribeNELifecycle.json")["entries"] as! [[String: Any]]
+        precondition(interleaved.count == 9, "interleaved coalescable labels merge per label: \(interleaved.count)")
+        precondition(interleaved[7]["event"] as? String == "path_change" && interleaved[7]["repeat"] as? Int == 2, "path_change merged across roam_fresh_port")
+        precondition(interleaved[8]["event"] as? String == "roam_fresh_port" && interleaved[8]["repeat"] as? Int == 2, "roam_fresh_port merged across path_change")
 
         // D8: honest labels for adapter log lines (only fixed labels are ever persisted).
         let labels: [(String, String?)] = [
@@ -118,6 +128,13 @@ enum SharedStateTests {
             ("softRestartBackend: denied by recovery budget (episode)", "gui_soft_restart_denied"),
             ("softRestartBackend: denied (backend restart failed)", "gui_soft_restart_denied"),
             ("softRestartBackend: adapter not started (state=stopped)", "gui_soft_restart_not_started"),
+            // awg-apple tribe.9/tribe.10: exact adapter strings from patches 0007/0008.
+            ("Tribe roaming: path returned, fresh local port + keepalive on the live device (x)", "roam_fresh_port"),
+            ("Tribe roaming: path restored after 900 ms, fresh local port on the live device (x)", "path_change"),
+            ("Tribe roaming: inbound stalled (tx=1 rx=2), fresh local port + keepalive (x)", "stall_fresh_port"),
+            ("Tribe roaming: still stalled after the fresh port, soft restart of the backend (x)", "stall_soft_restart"),
+            ("Tribe roaming: persistent heal step 2 (fresh port) after backoff, inbound frozen (tx=1 rx=2) (x)", "stall_persistent"),
+            ("Tribe roaming: stall recovery denied by budget (step=fresh port reason=cooldown) (x)", "stall_denied"),
         ]
         for (message, expected) in labels {
             precondition(TribeNEJournal.event(forAdapterLog: message) == expected, "label for \(message)")

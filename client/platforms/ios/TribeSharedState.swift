@@ -110,13 +110,25 @@ struct TribeSharedState {
                                         "utc_ms": utcMs,
                                         "monotonic_ms": Int64(ProcessInfo.processInfo.systemUptime * 1000),
                                         "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"]
-            if TribeNEJournal.coalescedEvents.contains(event), let last = entries.last,
-               last["event"] as? String == event, last["source"] as? String == source,
-               let lastMs = last["utc_ms"] as? Int64, utcMs - lastMs >= 0,
+            // Coalescable labels merge into the last entry of the SAME label as long as only other
+            // coalescable entries (path_change / roam_fresh_port alternating on a flapping path,
+            // awg-apple tribe.9+) lie in between; otherwise every loss/return wrote two entries and
+            // the 128-entry ring was flushed within minutes.
+            var target: Int? = nil
+            if TribeNEJournal.coalescedEvents.contains(event) {
+                var idx = entries.count - 1
+                while idx >= 0, let e = entries[idx]["event"] as? String,
+                      TribeNEJournal.coalescedEvents.contains(e), entries[idx]["source"] as? String == source {
+                    if e == event { target = idx; break }
+                    idx -= 1
+                }
+            }
+            if let t = target, let lastMs = entries[t]["utc_ms"] as? Int64, utcMs - lastMs >= 0,
                utcMs - lastMs < TribeSharedState.coalesceWindowMs {
+                let last = entries[t]
                 entry["repeat"] = (last["repeat"] as? Int ?? 1) + 1
                 entry["first_utc_ms"] = last["first_utc_ms"] as? Int64 ?? lastMs
-                entries[entries.count - 1] = entry
+                entries[t] = entry
             } else {
                 entries.append(entry)
             }
@@ -135,7 +147,7 @@ struct TribeSharedState {
 /// Which adapter log lines become NE journal events, and under what name. Only these fixed labels
 /// are persisted; the native log text itself (endpoints, config values) never is.
 enum TribeNEJournal {
-    static let coalescedEvents: Set<String> = ["path_change"]
+    static let coalescedEvents: Set<String> = ["path_change", "roam_fresh_port"]
 
     static func event(forAdapterLog message: String) -> String? {
         if message.hasPrefix("rebindListenPort:") {

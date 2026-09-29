@@ -441,12 +441,13 @@ inline bool stopTapIgnored(bool busy, bool ownOpInFlight, bool preparingStart, b
     return sinceAdoptMs >= 0 && sinceAdoptMs < kAdoptTapGraceMs;
 }
 
-// P1-5: сторож старта на iOS/NE. Натив держит свои бюджеты (дедлайн коннекта 10 с, рукопожатие
-// 3×12 с → Error+stop) и всегда отдаёт терминал; 15-секундный сторож фасада гасил живую NE-сессию
-// посреди медленного рукопожатия на сотовой (12 watchdog_start за 9 у-сут). Пока натив сообщает,
-// что сессия есть (Connecting/Reconnecting), сторож перевзводится (≤ maxDeferrals), а не гасит.
+// P1-5: сторож старта на iOS/NE. 15-секундный сторож фасада гасил живую NE-сессию посреди
+// медленного рукопожатия на сотовой (12 watchdog_start за 9 у-сут). Пока натив сообщает, что
+// сессия есть (Connecting/Reconnecting), сторож перевзводится, но не дольше бюджета рукопожатия
+// натива (3×12 с): для СВОЕГО старта натив Error не отдаёт (m_connectPending снят до
+// startVPNTunnel, после 36 с — только Reconnecting), поэтому потолок держит фасад: 3×15 с.
 enum class StartWatchdog { Stop, Defer };
-inline StartWatchdog decideStartWatchdog(bool nativeSessionAlive, int deferrals, int maxDeferrals = 4)
+inline StartWatchdog decideStartWatchdog(bool nativeSessionAlive, int deferrals, int maxDeferrals = 2)
 {
     return (nativeSessionAlive && deferrals < maxDeferrals) ? StartWatchdog::Defer : StartWatchdog::Stop;
 }
@@ -496,21 +497,22 @@ inline bool restartRequestStale(qint64 requestedMs, qint64 nowMs)
     return requestedMs > 0 && nowMs - requestedMs > kRestartRequestTtlMs;
 }
 
-// P1-5: исчерпан дедлайн внутреннего свитча. Раньше: intent_off + гашение живого туннеля. Теперь:
-// туннель поднят — остаёмся на нём (свитч не удался, связь есть); опущен — пауза с ростом
-// (start_retry_backoff), намерение не снимаем (как апстрим/Mullvad).
-enum class SwitchGiveUp { KeepTunnel, BackoffRetry };
-inline SwitchGiveUp decideSwitchGiveUp(bool tunnelConnected)
+// P1-5: исчерпан дедлайн внутреннего свитча. Раньше: intent_off + гашение туннеля навсегда. Теперь:
+// намерение держим; поднятый/переходный туннель гасим через сторожевой guardedStop (down() свитча
+// уже мог уйти — адоптировать его нельзя), опущенный — сразу в паузу с ростом (start_retry_backoff).
+inline bool switchGiveUpNeedsStop(bool tunnelDownOrUnknown, bool ownOpInFlight)
 {
-    return tunnelConnected ? SwitchGiveUp::KeepTunnel : SwitchGiveUp::BackoffRetry;
+    return !tunnelDownOrUnknown && !ownOpInFlight;
 }
 
 // P2-6: собственные up/down utun приходят как reachability/transportMedium changed и инвалидировали
 // замер RTT (257 инвалидаций за 4,5 сут у одного устройства) → следующий Connect ждал ICMP-раунд.
-// В окне своей операции или 5 с после своего перехода туннеля событие сети — своё.
-inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastTunnelTransitionMs, qint64 nowMs)
+// «Своё» событие — в окне своей операции (guardedStart/guardedStop, свой свитч) или 5 с после
+// неё; наблюдённые переходы туннеля от чужих причин (роуминг NE) окно НЕ открывают. Подавляется
+// только сброс кэша RTT — grace-окно HealthLoop и отмена пробы остаются (иначе ложный DEAD).
+inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qint64 nowMs)
 {
-    return ownOpInFlight || (lastTunnelTransitionMs > 0 && nowMs - lastTunnelTransitionMs < kApiTransitionWindowMs);
+    return ownOpInFlight || (lastOwnOpMs > 0 && nowMs - lastOwnOpMs < kApiTransitionWindowMs);
 }
 
 // P2-4: один координатор выхода на экран. Реагируем на возврат после реальной заморозки/скрытия
