@@ -33,12 +33,14 @@ Item {
     readonly property int visibleTabCount: referralVisible ? tabs.length : tabs.length - 1
     readonly property real tabWidth: nav.width / nav.visibleTabCount
 
-    // AVPN (девайс-фидбек 2026-09-29, iPhone 15 Pro): на iOS ряд вкладок 52 (штатный UITabBar — 49)
-    // вместо 72 — под подписями было ~50pt пустоты (16 паддинга + safe-area 34). Иконки и подписи
-    // опускаются к низу, safe-area (home-индикатор) не занимаем; освободившиеся 20pt уходят
-    // карточке/чипам/кнопкам Главной (bottomBlock привязан к навбару). macOS/Android — как было.
-    readonly property int rowHeight: Qt.platform.os === "ios" ? 52 : 72
-    implicitHeight: rowHeight + bottomInset
+    // AVPN (девайс-фидбек 2026-09-29, iPhone 15 Pro / Air): на iOS меню ОПУЩЕНО целиком на 20pt —
+    // ряд 72 и иконки/подписи того же размера, но нижний пустой паддинг ряда заходит в safe-area:
+    // подписи в 30pt от низа экрана (над home-индикатором ~17pt, как у соседних приложений владельца),
+    // навбар ниже на 20pt — и bottomBlock Главной (карточка/чипы/кнопки) опускается вместе с ним.
+    // Без home-индикатора (inset 0, SE) и на macOS/Android — как было.
+    readonly property int rowHeight: 72
+    readonly property int insetOverlap: Qt.platform.os === "ios" ? 20 : 0
+    implicitHeight: rowHeight + Math.max(0, bottomInset - insetOverlap)
     property real bottomInset: 0   // wired to safe-area by host
 
     // AVPN (haptics, жалоба 2026-07-12): тактильный отклик на ВХОДЯЩЕЕ сообщение поддержки
