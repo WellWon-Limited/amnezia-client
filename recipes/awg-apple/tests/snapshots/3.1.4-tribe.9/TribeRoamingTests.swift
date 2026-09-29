@@ -284,8 +284,8 @@ do {
     }
     check(run.performed.prefix(2).map { $0.1 } == [.rebindPort, .softRestart], "cap refusal retried, both steps run: \(run.performed)")
     check(run.performed.first?.0 == 120, "fresh port as soon as the t=0 intervention leaves the window: \(run.performed)")
-    check(run.performed.count > 1 && run.performed[1].0 == 130, "soft restart a full second stage after the fresh port (the window has freed by then): \(run.performed)")
-    check(run.arbiter.budget.denied == 1, "one denial streak (cap on the fresh port), not one per tick: \(run.arbiter.budget.denied)")
+    check(run.performed.count > 1 && run.performed[1].0 == 130, "soft restart as soon as the t=10 intervention leaves the window: \(run.performed)")
+    check(run.arbiter.budget.denied == 2, "two denial streaks, not one per tick: \(run.arbiter.budget.denied)")
 }
 
 // A refusal leaves the stage in place: the outcome says so, the next tick proposes again.
@@ -349,61 +349,6 @@ do {
     check(performed.map { $0.0 } == [5, 15, 45], "fresh port 4 s, soft restart 14 s, stage-3 fresh port +30 s after the last progress (tick 1): \(performed)")
 }
 
-// tribe.10: outage then return. The watchdog's own fresh port ran before the outage; on return the
-// roam fresh port gets a full second stage (10 s) before the soft restart, and the GUI `rebind`
-// right after it is refused as the episode's fresh port.
-do {
-    var arbiter = TribeRecoveryArbiter()
-    var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...60 {
-        let at = Double(tick)
-        let sample = s(UInt64(at * 5000), 5000, 100, at)
-        let satisfied = !(6...22).contains(tick)
-        if tick == 23 {
-            arbiter.noteRoamRebind(sample, freshPort: true)
-            check(arbiter.requestFreshPort(sample, pathSatisfied: true) == .budget(.episode), "GUI rebind after the roam fresh port is refused: episode spent")
-        }
-        if case .perform(let action) = arbiter.tick(sample, pathSatisfied: satisfied, policy: seamless) { performed.append((at, action)) }
-    }
-    check(performed.map { $0.1 } == [.rebindPort, .softRestart], "fresh port before the outage, soft restart after the roam fresh port: \(performed)")
-    check(performed.first?.0 == 5 && performed.last?.0 == 33, "soft restart 10 s after the roam fresh port (23 s), not 3 s: \(performed)")
-}
-
-// tribe.10: a roam fresh port every 4 s (flapping cellular path) does not starve the ladder: the
-// soft restart follows 10 s after the first fresh port; at stage 3 the next roam fresh port counts
-// as the due fresh-port step (no second new port for a socket that just got one), and the next
-// soft restart comes after its 60 s backoff.
-do {
-    var arbiter = TribeRecoveryArbiter()
-    var performed: [(Double, TribeStallAction)] = []
-    for tick in 1...80 {
-        let at = Double(tick)
-        let sample = s(UInt64(at * 5000), 5000, 100, at)
-        if tick % 4 == 0 { arbiter.noteRoamRebind(sample, freshPort: true) }
-        if case .perform(let action) = arbiter.tick(sample, pathSatisfied: true, policy: seamless) { performed.append((at, action)) }
-    }
-    check(performed.map { $0.1 } == [.softRestart, .softRestart], "roam fresh ports, soft restart, roam fresh port as the stage-3 step, soft restart: \(performed)")
-    check(performed.map { $0.0 } == [15, 76], "soft restart 10 s after the first roam fresh port (4 s), next soft restart 60 s after the roam step at 16 s: \(performed)")
-    check(arbiter.tracker?.persistentSteps == 4, "roam fresh ports took the stage-3 fresh-port steps (16 s and 80 s): \(String(describing: arbiter.tracker?.persistentSteps))")
-}
-
-// tribe.10: an `.episode` refusal below stage 3 re-syncs the tracker with the budget (counters
-// dropped without a rebase reset the tracker) instead of asking forever.
-do {
-    var arbiter = TribeRecoveryArbiter()
-    _ = arbiter.tick(s(0, 5000, 100, 1), pathSatisfied: true, policy: seamless)
-    check(arbiter.requestFreshPort(s(5000, 5000, 100, 2), pathSatisfied: true) == .performed, "GUI fresh port")
-    arbiter.resetTracker() // watchdog restarted: tracker forgets the step, budget remembers
-    var outcomes: [(Double, TribeWatchdogOutcome)] = []
-    for tick in 3...40 {
-        let at = Double(tick)
-        let o = arbiter.tick(s(UInt64(at * 5000), 5000, 100, at), pathSatisfied: true, policy: seamless)
-        if o != .none { outcomes.append((at, o)) }
-    }
-    check(outcomes.first.map { if case .denied(.rebindPort, .episode) = $0.1 { return true } else { return false } } ?? false, "first: refused as spent: \(outcomes)")
-    check(outcomes.contains { if case .perform(.softRestart) = $0.1 { return true } else { return false } }, "then the ladder continues with the soft restart: \(outcomes)")
-}
-
 // Late fresh port (after a refusal) still gives the keepalive a few seconds before the soft restart.
 do {
     var t = TribeStallTracker(first: s(0, 0, 100, 0))
@@ -414,7 +359,7 @@ do {
         let a = t.observe(s(UInt64(i * 5000), 0, 100, Double(i)), pathSatisfied: true, policy: seamless, persistent: true) { step in step == .rebindPort ? allowFresh : true }
         if a != .none { fired.append((Double(i), a)) }
     }
-    check(fired.count == 2 && fired[0].0 == 20 && fired[1].0 == 30, "a full second stage after a late fresh port (tribe.10): \(fired)")
+    check(fired.count == 2 && fired[0].0 == 20 && fired[1].0 == 23, "min gap after a late fresh port: \(fired)")
 }
 
 // --- D7: every recovery step ends with a keepalive (server learns the new endpoint at once) ---
@@ -478,7 +423,7 @@ do {
     print("  persistent 1 KB/s: \(run.performed.map { "\($0.1)@\(Int($0.0))s" }.joined(separator: " "))")
     check(run.performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort, .softRestart, .rebindPort, .softRestart, .rebindPort, .softRestart],
           "fresh port -> soft restart -> alternating cycle: \(run.performed)")
-    check(run.performed.count > 1 && run.performed[0].0 == 6 && run.performed[1].0 == 16, "fresh port at 6 s (4 KB demand), soft restart 10 s later: \(run.performed)")
+    check(run.performed.count > 1 && run.performed[0].0 == 6 && run.performed[1].0 == 15, "fresh port at 6 s (4 KB demand), soft restart at 15 s: \(run.performed)")
     check(Array(gaps(run.performed).dropFirst()) == [30, 60, 120, 120, 120, 120], "backoff 30/60/120 s, capped at 120 s: \(gaps(run.performed))")
     check(run.arbiter.budget.denied == 0, "stage-3 pacing stays inside the rolling cap: denied=\(run.arbiter.budget.denied)")
     check(run.arbiter.tracker?.stage == 3 && run.arbiter.tracker?.persistentSteps == 7, "stage 3 with 7 steps past the fresh port")
@@ -510,7 +455,7 @@ do {
     let idleRun = runPersistent(rate: 1000, horizon: 200, idle: 15...150)
     check(idleRun.performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "idle: no stage-3 step: \(idleRun.performed)")
     check(idleRun.performed.last.map { $0.0 >= 151 && $0.0 <= 156 } ?? false, "step as soon as outbound grows again: \(idleRun.performed)")
-    let offlineRun = runPersistent(rate: 1000, horizon: 200, offline: 17...150)
+    let offlineRun = runPersistent(rate: 1000, horizon: 200, offline: 16...150)
     check(offlineRun.performed.map { $0.1 } == [.rebindPort, .softRestart, .rebindPort], "offline: no stage-3 step: \(offlineRun.performed)")
     check(offlineRun.performed.last?.0 == 151, "step on the first satisfied tick: \(offlineRun.performed)")
 }
@@ -531,7 +476,7 @@ do {
         }
     }
     check(guiRefusedAt.isEmpty, "GUI fresh ports performed: \(guiRefusedAt)")
-    let persistent = run.performed.filter { $0.0 > 40 }
+    let persistent = run.performed.filter { $0.0 > 30 }
     check(run.performed.prefix(2).map { $0.1 } == [.rebindPort, .softRestart], "episode: \(run.performed)")
     check(persistent.first.map { $0.0 == 121 && $0.1 == .rebindPort } ?? false, "stage-3 fresh port as soon as the t=1 intervention leaves the window: \(run.performed)")
     check(persistent.count > 1 && persistent[1].0 == 181 && persistent[1].1 == .softRestart, "next step 60 s after the late one: \(run.performed)")

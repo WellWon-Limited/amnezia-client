@@ -386,8 +386,8 @@ static void wave4UpstreamBehaviour()
     CHECK(!stopTapIgnored(false, false, false, false, -1));   // адопта не было
     // P1-5: сторож старта ждёт натив, пока тот сообщает живую сессию, но не дольше 4 перевзводов.
     CHECK(decideStartWatchdog(true, 0) == StartWatchdog::Defer);
-    CHECK(decideStartWatchdog(true, 3) == StartWatchdog::Defer);
-    CHECK(decideStartWatchdog(true, 4) == StartWatchdog::Stop);
+    CHECK(decideStartWatchdog(true, 1) == StartWatchdog::Defer);   // 3×15 с = бюджет рукопожатия натива
+    CHECK(decideStartWatchdog(true, 2) == StartWatchdog::Stop);
     CHECK(decideStartWatchdog(false, 0) == StartWatchdog::Stop); // натив молчит (Unknown/Disconnected)
     // P2-2: классификация отказа API.
     const qint64 now = 1'000'000;
@@ -409,9 +409,10 @@ static void wave4UpstreamBehaviour()
     CHECK(!restartRequestStale(now - 5000, now));
     CHECK(restartRequestStale(now - kRestartRequestTtlMs - 1, now));
     CHECK(!restartRequestStale(-1, now));
-    // P1-5: give-up свитча — держим живой туннель, лежачий — бэкофф, намерение не снимаем.
-    CHECK(decideSwitchGiveUp(true) == SwitchGiveUp::KeepTunnel);
-    CHECK(decideSwitchGiveUp(false) == SwitchGiveUp::BackoffRetry);
+    // P1-5: give-up свитча — поднятый/переходный туннель гасим (намерение держим), лежачий — бэкофф.
+    CHECK(switchGiveUpNeedsStop(false, false));
+    CHECK(!switchGiveUpNeedsStop(true, false));
+    CHECK(!switchGiveUpNeedsStop(false, true));
     // P2-6: своё событие сети.
     CHECK(networkChangeIsOwnTunnel(true, -1, now));
     CHECK(networkChangeIsOwnTunnel(false, now - 2000, now));

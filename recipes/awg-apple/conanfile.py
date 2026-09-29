@@ -26,7 +26,9 @@ class AwgApple(ConanFile):
     # (_roaming_snapshots), so tribe.5/tribe.7 rebuilt from this recipe behave as shipped.
     # tribe.9: tribe.8 + 0007 fresh port on a returning path / interface change, ladder
     # fresh port -> soft restart -> backoff cycle, no stall-clock reset on path events.
-    version = "3.1.4-tribe.9"
+    # tribe.10: tribe.9 + 0008 immortal logger context (the real NE crash), real-loss gate for
+    # the roam fresh port, no stale fresh-port flag; roam fresh port spends the budget's fresh port.
+    version = "3.1.4-tribe.10"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -39,6 +41,7 @@ class AwgApple(ConanFile):
         "3.1.4-tribe.5": "3.1.4-tribe.5",
         "3.1.4-tribe.7": "3.1.4-tribe.7",
         "3.1.4-tribe.8": "3.1.4-tribe.8",
+        "3.1.4-tribe.9": "3.1.4-tribe.9",
     }
 
     def _roaming_sources(self):

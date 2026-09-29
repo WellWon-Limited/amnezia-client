@@ -86,8 +86,6 @@ PageType {
         : Qt.application.state === Qt.ApplicationActive
     // AVPN (оплата): гард двойного тапа по золотой CTA — ждём cabinetLinkReady (приходит всегда).
     property bool ctaLinking: false
-    // AVPN (оплата): троттл foreground-рефреша статуса подписки (мс, Date.now()).
-    property double lastFgRefreshMs: 0
     readonly property real trafficUsedB:  hasEngine ? Number(TribeEngine.trafficUsed)  : 0
     readonly property real trafficLimitB: hasEngine ? Number(TribeEngine.trafficLimit) : 0
     readonly property bool subActive:     (hasEngine && TribeEngine.subActive !== undefined) ? TribeEngine.subActive : true
