@@ -15,14 +15,6 @@
 // never restarts the stall clock (tribe.4-8 zeroed it on every event, ~200/h on cellular, so the
 // fresh-port step was almost never reached: 14 s + 8 KB without a path event).
 //
-// tribe.10 (review of tribe.9): a roam fresh port is also the episode's fresh port in the BUDGET
-// (the GUI `rebind` then gets `.episode` and moves on to its soft restart); at stage 2 an external
-// fresh port postpones the soft restart only when the previous step is older than the second stage
-// (so a path flapping every 4 s cannot starve the ladder), at stage 3 it never touches the backoff;
-// the second stage keeps a full `stallRebindSeconds` after the last step (a fresh port right after a
-// long outage got 3 s before the soft restart); an `.episode` refusal below stage 3 re-syncs the
-// tracker with the budget instead of asking forever.
-//
 // This file has NO NetworkExtension/Go dependency: the conan recipe compiles it together with
 // tests/TribeRoamingTests.swift under plain swiftc, so the package cannot ship with broken logic.
 import Foundation
@@ -223,34 +215,16 @@ public struct TribeStallTracker: Equatable {
         txAtLastStep = sample.txBytes
     }
 
-    /// tribe.10: an external fresh port at stage 2 moves the second-stage clock only when the previous
-    /// step is at least this old (roam fresh ports every 4 s must not postpone the soft restart forever).
-    public static let externalStepMinGap: TimeInterval = 10
-
     /// A step done outside the watchdog: a GUI fresh port / soft restart (provider messages) or a
     /// roam fresh port (path returned after a loss). It counts as the episode's step of that kind
     /// and the next watchdog step counts its gap/backoff from it. The stall clock is NOT touched
     /// (rule of tribe.9: only inbound progress restarts it). A same-port bump is not a step.
-    /// tribe.10: at stage 2 a fresh port postpones the soft restart only if the previous step is
-    /// >= `externalStepMinGap` old; at stage 3 it counts as the due fresh-port step when that is the
-    /// next one in the cycle (a socket that just got a new port needs no second one; the same-kind
-    /// cooldown would otherwise refuse the watchdog's fresh port forever on a flapping path and the
-    /// soft restart would never come), and is ignored when the next step is the soft restart.
     public mutating func noteExternalStep(_ kind: TribeRecoveryKind, at: TimeInterval, tx: UInt64) {
         switch kind {
         case .bump:
             return
         case .freshPort:
-            if stage < 2 {
-                stage = 2
-                persistentSteps = 0
-            } else if stage >= 3 {
-                let next = TribeStallTracker.persistentSequence[persistentSteps % TribeStallTracker.persistentSequence.count]
-                guard next == .rebindPort else { return }
-                persistentSteps += 1
-            } else if let last = lastStepAt, at - last < TribeStallTracker.externalStepMinGap {
-                return
-            }
+            if stage < 2 { stage = 2; persistentSteps = 0 }
         case .softRestart:
             stage = 3
             persistentSteps = Swift.max(persistentSteps, 1)
@@ -276,11 +250,10 @@ public struct TribeStallTracker: Equatable {
              minGapAfterStep: TribeStallTracker.minGapAfterStep(policy), persistent: persistent, permit: permit)
     }
 
-    /// tribe.10: the soft restart waits a full second stage after the LAST step (watchdog, GUI or
-    /// roam fresh port), not only after the last inbound progress: after a 20 s outage the roam
-    /// fresh port on return got 3 s before the soft restart (tribe.9 used min(3, rebind)).
+    /// A soft restart right after a late (budget-delayed) fresh port would give its keepalive no
+    /// chance to be answered; keep a small gap, never longer than the configured second stage.
     public static func minGapAfterStep(_ policy: TribeRoamingPolicy) -> TimeInterval {
-        policy.stallRebindSeconds
+        min(3, policy.stallRebindSeconds)
     }
 
     private mutating func step(_ sample: TribeStallSample, pathSatisfied: Bool, policy: TribeRoamingPolicy,
@@ -321,7 +294,7 @@ public struct TribeStallTracker: Equatable {
         case 2:
             guard persistent, policy.stallRebindSeconds > 0, let last = lastStepAt else { return .none }
             if stalledFor >= probeSeconds + rebindSeconds && txSince >= requiredTx * 2
-                && sample.at - last >= max(minGapAfterStep, rebindSeconds), permit(.softRestart) {
+                && sample.at - last >= minGapAfterStep, permit(.softRestart) {
                 stage = 3
                 persistentSteps = 1
                 lastStepAt = sample.at
@@ -463,16 +436,6 @@ public struct TribeRecoveryBudget: Equatable {
     public mutating func permit(at: TimeInterval, freshPort: Bool) -> Bool {
         request(at: at, kind: freshPort ? .freshPort : .bump) == nil
     }
-
-    /// tribe.10: a roam fresh port (path returned after a loss / interface change) is not gated by
-    /// the cap, but it IS the episode's fresh port: the GUI `rebind` afterwards gets `.episode` and
-    /// the engine moves on to its next step instead of rebinding the socket a second time.
-    public mutating func noteExternalFreshPort(at: TimeInterval) {
-        bumpSpent = true
-        freshPortSpent = true
-        lastFreshPortAt = at
-        inDenialStreak = false
-    }
 }
 
 /// Outcome of one stall-watchdog tick after budget arbitration.
@@ -582,7 +545,6 @@ public struct TribeRecoveryArbiter: Equatable {
             tracker = TribeStallTracker(first: sample)
         }
         if freshPort {
-            budget.noteExternalFreshPort(at: sample.at) // tribe.10: the episode's fresh port
             tracker?.noteExternalStep(.freshPort, at: sample.at, tx: sample.txBytes)
         }
     }
@@ -605,12 +567,6 @@ public struct TribeRecoveryArbiter: Equatable {
             return denial == nil
         }
         self.budget = budget
-        if action == .none, let denial, denial == .episode, current.stage < 3 {
-            // tribe.10: the budget already spent this step (counters dropped without a rebase reset
-            // the tracker to stage 0): re-sync so the ladder continues instead of asking forever.
-            current.noteExternalStep(budget.softRestartSpent ? .softRestart : .freshPort,
-                                     at: sample.at, tx: sample.txBytes)
-        }
         tracker = current
         if action != .none { return .perform(action) }
         guard proposed != .none, let denial else { return .none }

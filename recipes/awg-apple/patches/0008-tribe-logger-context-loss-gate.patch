@@ -1,0 +1,85 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index 7864344..6ce7d65 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -166,9 +166,10 @@ public class WireGuardAdapter {
+     }
+ 
+     deinit {
+-        // Force remove logger to make sure that no further calls to the instance of this class
+-        // can happen after deallocation.
+-        wgSetLogger(nil, nil)
++        // tribe.10: the logger context handed to Go is an immortal box (see setupLogHandler), so a
++        // late Go log line after deallocation reaches only the closure, never this instance.
++        // Resetting the global logger here raced with Go reading loggerFunc/loggerCtx and was the
++        // wrong tool anyway: deinit runs only after the last reference is gone.
+ 
+         // Cancel network monitor
+         networkMonitor?.cancel()
+@@ -403,18 +404,30 @@ public class WireGuardAdapter {
+     // MARK: - Private methods
+ 
+     /// Setup WireGuard log handler.
++    /// tribe.10: Go keeps a raw pointer to the logger context and calls it from its own goroutines,
++    /// also while (or after) the adapter is being released on workQueue. Upstream passed `self`
++    /// unretained and re-retained it inside the callback: when that temporary strong reference was
++    /// the last one, the adapter was deallocated inside Go's callLogger (2 NE crashes in the field,
++    /// `WireGuardAdapter.__deallocating_deinit <- closure in setupLogHandler <- callLogger`). The
++    /// context is now a small box that holds only the log closure and is retained forever (one per
++    /// adapter start, a few dozen bytes); the closure itself must not hold the adapter strongly.
++    private final class LoggerContext {
++        let handler: LogHandler
++        init(_ handler: @escaping LogHandler) { self.handler = handler }
++    }
++
+     private func setupLogHandler() {
+-        let context = Unmanaged.passUnretained(self).toOpaque()
++        let box = LoggerContext(self.logHandler)
++        let context = Unmanaged.passRetained(box).toOpaque()
+         wgSetLogger(context) { context, logLevel, message in
+             guard let context = context, let message = message else { return }
+ 
+-            let unretainedSelf = Unmanaged<WireGuardAdapter>.fromOpaque(context)
+-                .takeUnretainedValue()
++            let box = Unmanaged<LoggerContext>.fromOpaque(context).takeUnretainedValue()
+ 
+             let swiftString = String(cString: message).trimmingCharacters(in: .newlines)
+             let tunnelLogLevel = WireGuardLogLevel(rawValue: logLevel) ?? .verbose
+ 
+-            unretainedSelf.logHandler(tunnelLogLevel, swiftString)
++            box.handler(tunnelLogLevel, swiftString)
+         }
+     }
+ 
+@@ -568,8 +581,12 @@ public class WireGuardAdapter {
+                 // the server updates our endpoint on the first authenticated packet, no handshake.
+                 self.lastPathSatisfiable = true
+                 self.cancelPendingPause()
+-                let realLoss = self.pathLostAt != nil
+-                let interfaceChanged = self.notePathInterface(path)
++                // tribe.10: the route flip right after setNetworkSettings (upstream grace window)
++                // and any loss before the first handshake are not a real loss: a fresh port there
++                // would send the handshake response to a closed socket (+5 s REKEY_TIMEOUT).
++                let realLoss = self.pathLostAt != nil && self.everHadHandshake
++                    && self.remainingUnsatisfiedGraceSeconds() == 0
++                let interfaceChanged = self.notePathInterface(path) && self.everHadHandshake
+                 if let lostAt = self.pathLostAt {
+                     self.pathLostAt = nil
+                     self.roamCounters.pathRestored += 1
+@@ -679,14 +696,14 @@ public class WireGuardAdapter {
+         self.workQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+             guard let self = self else { return }
+             self.roamRebindPending = false
++            let freshPort = self.roamWantsFreshPort
++            self.roamWantsFreshPort = false // tribe.10: cleared even when not .started (no stale flag)
+             guard case .started(let handle, let settingsGenerator) = self.state else { return }
+             let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
+             self.logEndpointResolutionResults(resolutionResults)
+ 
+             wgSetConfig(handle, wgConfig)
+             wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+-            let freshPort = self.roamWantsFreshPort
+-            self.roamWantsFreshPort = false
+             if freshPort {
+                 // tribe.9: new local port (new 5-tuple through the carrier NAT) + keepalive, so the
+                 // server learns the new outer address at once. Device, keys and TUN untouched.

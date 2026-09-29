@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.9` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 | current; 0007 = fresh port on a returning path, ladder fresh port -> soft restart |
+| `3.1.4-tribe.10` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 | current; 0008 = immortal logger context (NE crash), real-loss gate, no stale flag |
+| `3.1.4-tribe.9` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 | built for iOS 5.1.97 (127, not released to users); 0007 = fresh port on a returning path, ladder fresh port -> soft restart |
 | `3.1.4-tribe.8` | 0001 + 0002 + 0003 + 0005 + 0006 | shipped (iOS 5.1.90-5.1.96); 0006 = persistent heal (stage 3) + in-place soft restart |
 | `3.1.4-tribe.7` | 0001 + 0002 + 0003 + 0005 | rollback target; 0005 = bounded GUI/NE recovery (see below) |
 | `3.1.4-tribe.5` | 0001 + 0002 + 0003 | shipped (AWG core v3.1.20260828) |
@@ -111,6 +112,30 @@ whole device with a new port.
   `still stalled after the fresh port, soft restart` (second), `persistent heal step N` (stage 3),
   `path returned, fresh local port` (roam).
 
+## tribe.10 behaviour (patch 0008 + TribeRoaming.swift)
+
+- **Logger context (the real NE crash).** Upstream `setupLogHandler` passed `self` unretained to
+  `wgSetLogger` and re-retained it inside Go's callback; when that temporary reference was the last
+  one (stop() releasing the adapter on workQueue while a goroutine still logs), the adapter was
+  deallocated inside `callLogger` (MetricKit 121/122: `WireGuardAdapter.__deallocating_deinit <-
+  closure in setupLogHandler <- callLogger`). `wgSetLogger(nil, nil)` in deinit could not help
+  (deinit runs after the refcount is zero; Go reads the pointers unsynchronised). Now the context
+  is a `LoggerContext` box holding only the log closure, retained forever (one per adapter start);
+  deinit no longer touches the global logger. The app's closure must not hold the adapter strongly
+  (it reads counters through a weak box on its journal queue).
+- **Real loss only.** The roam fresh port needs `everHadHandshake` and an elapsed upstream grace
+  window (12 s after `setNetworkSettings`): the route flip right after applying routes is not a loss,
+  and a fresh port during the first handshake would lose its response (+5 s REKEY_TIMEOUT).
+- **No stale flag.** `roamWantsFreshPort` is read and cleared before the `.started` guard.
+- **Budget.** A roam fresh port marks the budget's fresh port spent (`noteExternalFreshPort`), so the
+  GUI `rebind` right after it is refused (`episode`) and the engine moves on to `soft_restart`. At
+  stage 2 an external fresh port postpones the soft restart only when the previous step is >= 10 s
+  old; at stage 3 it never touches the backoff. The soft restart waits a full `stallRebindSeconds`
+  after the last step. An `.episode` refusal below stage 3 re-syncs the tracker with the budget.
+- Rebuilding a released version from this recipe: set `version` in `conanfile.py` to that version
+  first (Conan 2 refuses `--version` that differs from the recipe); the snapshot rule then gives the
+  shipped `TribeRoaming.swift`.
+
 ## Tests
 
 ```sh
@@ -146,7 +171,7 @@ conan create recipes/awg-apple \
 ```
 
 macOS Network Extension (`-DMACOS_NE=ON`): the root `conanfile.py` requires
-`awg-apple/3.1.4-tribe.9` there too (tribe.9 has not been built for macOS yet; the macOS app does not use the NE), and `cmake/platform_settings.cmake` configures it as universal
+`awg-apple/3.1.4-tribe.10` there too (tribe.9/tribe.10 have not been built for macOS; the macOS app does not use the NE), and `cmake/platform_settings.cmake` configures it as universal
 `arm64;x86_64` with deployment target 12.0. tribe.8 was built for macOS with the profile below
 (universal `x86_64 arm64` `libwg-go.a`, `minos 12.0`, `_wgSendKeepalives` in both slices; package id
 `744edb127c3ec4851841205920a44fb06d950e81`); the macOS NE Swift sources were typechecked against the
@@ -188,10 +213,10 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.9")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.10")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
-pin the root requirement back to `awg-apple/3.1.4-tribe.8` (iOS; its binary is still in the
-release cache), `3.1.4-tribe.7` (the NE sources then lose the `soft_restart` provider message:
+pin the root requirement back to `awg-apple/3.1.4-tribe.9` or `3.1.4-tribe.8` (iOS; both binaries are
+in the release cache), `3.1.4-tribe.7` (the NE sources then lose the `soft_restart` provider message:
 revert `PacketTunnelProvider*.swift` to their tribe.7 state) or `3.1.4-tribe.5`. Both can be resolved from a cache that holds their binaries or rebuilt from this
 recipe: their `TribeRoaming.swift` and test are frozen snapshots (rule above), their patch lists are
 unchanged. The rebuilt recipe revision differs from the original one (the recipe files changed), the

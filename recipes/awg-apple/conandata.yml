@@ -1,4 +1,18 @@
 patches:
+  "3.1.4-tribe.10":
+    # tribe.9 (all unchanged) + 0008: the logger context handed to Go is an immortal box holding
+    # only the log closure (upstream re-retained the adapter inside Go's callback and, when that
+    # reference was the last one, deallocated it inside callLogger: 2 NE crashes 121/122); the
+    # roam fresh port needs a real loss (first handshake seen, upstream grace window elapsed);
+    # the pending fresh-port flag is cleared even when the adapter is not started.
+    # TribeRoaming.swift for this version = tribe/TribeRoaming.swift (conanfile.py).
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
   "3.1.4-tribe.9":
     # tribe.8 (0001+0002+0003+0005+0006, all unchanged) + 0007: a path that returns after a real
     # loss or moves to another interface gets a FRESH local port + keepalive instead of the
