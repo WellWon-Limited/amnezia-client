@@ -1063,6 +1063,26 @@ PageType {
                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
             }
         }
+        // 2026-10-01 (запрос владельца): тумблер автообновления виден всегда, а не только на экране
+        // «Доступна новая версия». Только там, где приложение ставит себя само (десктопный macOS).
+        // Тот же AvpnSettings/autoUpdate, что у тумблера в TribeUpdateSheet; после клика биндинг
+        // восстанавливается, чтобы оба тумблера показывали одно значение.
+        TribeListRow {
+            visible: root.hasEngine && TribeEngine.canSelfUpdate === true
+            Layout.fillWidth: true
+            interactive: false
+            title: qsTr("Обновлять автоматически")
+            subtitle: qsTr("Новые версии ставятся сами")
+            rightItem: TribeToggle {
+                id: autoUpdateToggle
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.hasEngine ? TribeEngine.autoUpdate : true
+                onToggled: {
+                    if (root.hasEngine) TribeEngine.setAutoUpdate(checked)
+                    checked = Qt.binding(function() { return root.hasEngine ? TribeEngine.autoUpdate : true })
+                }
+            }
+        }
 
         // ── ДИАГНОСТИКА: журнал тестирования ─────────────────────────────────
         // Виден сборкам TestFlight, админ-устройствам и при удалённом включении из /panel
