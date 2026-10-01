@@ -615,10 +615,134 @@ void IosController::disconnectVpn()
         m_localStopRequested = false;
         emitDisconnectReason(QStringLiteral("expected_app_stop"), false);
         emitConnectionStateForced(Vpn::ConnectionState::Disconnected);
+        // On-Demand: туннель опущен, но правило может быть взведено (iOS погасила его сама и
+        // вот-вот поднимет). «Выключить» обязано снять и правило.
+        stopTunnelHonoringOnDemand(true);
         return;
     }
     noteAppStopForCurrentSession();
-    [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
+    stopTunnelHonoringOnDemand(false);
+}
+
+// On-Demand (2026-09-30): единственная точка стопа приложения. Правило взведено — сначала снять
+// и дождаться сохранения, потом stopTunnel; иначе iOS поднимет туннель заново. Правило не
+// взведено — stopTunnel сразу, как раньше. sessionWasDown — туннель уже опущен: только снять
+// правило, а погасить — лишь если iOS успела поднять его за время сохранения.
+void IosController::stopTunnelHonoringOnDemand(bool sessionWasDown)
+{
+    NETunnelProviderManager *tunnel = m_currentTunnel;
+    if (!tunnel) return;
+    bool disarm = false;
+#if defined(Q_OS_IOS)
+    disarm = avpn_ios::stopNeedsOnDemandDisarm(tunnel.onDemandEnabled, m_onDemandArmed, m_onDemandChangePending);
+#endif
+    if (!disarm) {
+        if (!sessionWasDown) [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+        return;
+    }
+    const uint64_t operation = m_operationGeneration;
+    const auto finished = std::make_shared<bool>(false);
+    // Сохранение настроек — вызов в системный демон; его молчание не должно съесть стоп.
+    const auto finish = [this, operation, sessionWasDown, finished](const char *how) {
+        if (*finished) return;
+        *finished = true;
+        NETunnelProviderManager *current = m_currentTunnel;
+        const bool stillCurrent = operation == m_operationGeneration;
+        const avpn_ios::SessionPhase phase =
+                current ? sessionPhase(current.connection.status) : avpn_ios::SessionPhase::Down;
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(QStringLiteral("on_demand_disarmed"), {{QStringLiteral("how"), QString::fromLatin1(how)},
+            {QStringLiteral("was_down"), sessionWasDown}, {QStringLiteral("current"), stillCurrent}, {QStringLiteral("phase"), int(phase)}});
+#endif
+        if (!avpn_ios::stopAfterOnDemandDisarm(stillCurrent, phase)) return;
+        if (sessionWasDown) {
+            // iOS подняла туннель по правилу, пока мы его снимали: это всё ещё наш стоп.
+            markLocalStopRequested();
+            noteAppStopForCurrentSession();
+        }
+        [(NETunnelProviderSession *)current.connection stopTunnel];
+    };
+    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [finish] { finish("timeout"); });
+    [tunnel retain];
+    // Сначала свежая загрузка: если туннель погас из-за другого VPN-приложения, наш профиль уже не
+    // активный, а у экземпляра в памяти isEnabled ещё YES — его сохранение отобрало бы «активный
+    // VPN» у чужого приложения. Отказ сохранения (экземпляр устарел) — один повтор.
+    const auto attempt = std::make_shared<std::function<void(int)>>();
+    *attempt = [this, tunnel, finish, attempt](int round) {
+        [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
+            const bool loadFailed = loadError != nil;
+            QMetaObject::invokeMethod(this, [this, tunnel, finish, attempt, round, loadFailed] {
+                if (loadFailed) {
+                    qWarning() << "[ios lifecycle] on-demand disarm: load failed";
+                    finish("load_failed");
+                    [tunnel release];
+                    *attempt = nullptr;
+                    return;
+                }
+                tunnel.onDemandEnabled = NO;
+                [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
+                    const bool saveFailed = saveError != nil;
+                    QMetaObject::invokeMethod(this, [this, tunnel, finish, attempt, round, saveFailed] {
+                        if (saveFailed && round == 0) {
+                            qWarning() << "[ios lifecycle] on-demand disarm: save failed, retrying";
+                            (*attempt)(1);
+                            return;
+                        }
+                        if (!saveFailed) m_onDemandArmed = false;
+                        finish(saveFailed ? "failed" : (round ? "saved_retry" : "saved"));
+                        [tunnel release];
+                        *attempt = nullptr;
+                    }, Qt::QueuedConnection);
+                }];
+            }, Qt::QueuedConnection);
+        }];
+    };
+    (*attempt)(0);
+}
+
+// On-Demand (2026-09-30): рукопожатие подтверждено — сессия доказанно рабочая, взводим правило
+// «подключать всегда». Дальше системную остановку туннеля (internalError при убийстве
+// nesessionmanager, перезагрузка телефона) iOS чинит сама, без открытия приложения.
+void IosController::armOnDemandForConfirmedSession()
+{
+#if defined(Q_OS_IOS)
+    NETunnelProviderManager *tunnel = m_currentTunnel;
+    const bool connected = tunnel && tunnel.connection.status == NEVPNStatusConnected;
+    if (!avpn_ios::shouldArmOnDemand(tunnel != nil, connected, tunnel.onDemandEnabled, m_localStopRequested,
+                                     m_onDemandChangePending))
+        return;
+    const uint64_t operation = m_operationGeneration;
+    m_onDemandChangePending = true;
+    [tunnel retain];
+    // Свежая загрузка: экземпляр мог устареть после сохранений старта/реконсила.
+    [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
+        const bool loadFailed = loadError != nil;
+        QMetaObject::invokeMethod(this, [this, tunnel, loadFailed, operation] {
+            const bool proceed = !loadFailed && operation == m_operationGeneration && !m_localStopRequested
+                    && tunnel.connection.status == NEVPNStatusConnected;
+            if (!proceed) {
+                m_onDemandChangePending = false;
+                [tunnel release];
+                return;
+            }
+            NEOnDemandRuleConnect *rule = [[NEOnDemandRuleConnect alloc] init];
+            rule.interfaceTypeMatch = NEOnDemandRuleInterfaceTypeAny;
+            tunnel.onDemandRules = @[rule];
+            [rule release];
+            tunnel.onDemandEnabled = YES;
+            m_onDemandArmed = true; // с этого момента любой стоп обязан снять правило
+            [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
+                const bool saveFailed = saveError != nil;
+                QMetaObject::invokeMethod(this, [this, tunnel, saveFailed] {
+                    m_onDemandChangePending = false;
+                    Avpn_recordLifecycle(saveFailed ? QStringLiteral("on_demand_arm_failed") : QStringLiteral("on_demand_armed"),
+                        {{QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
+                    [tunnel release];
+                }, Qt::QueuedConnection);
+            }];
+        }, Qt::QueuedConnection);
+    }];
+#endif
 }
 
 // AVPN (C1): менеджер ещё не найден (холодный старт GUI при живой Settings/Intent-сессии).
@@ -1008,6 +1132,7 @@ void IosController::checkStatus()
                     m_handshakeTimeouts = 0;
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
+                    armOnDemandForConfirmedSession();
                 } else if (m_handshakeTimer.isValid() &&
                            m_handshakeTimer.elapsed() > handshakeTimeoutMs) {
                     m_handshakeTimer.restart();
@@ -1034,7 +1159,7 @@ void IosController::checkStatus()
                             // .userInitiated, но Disconnected должен прийти как expected_app_stop.
                             markLocalStopRequested();
                             noteAppStopForCurrentSession();
-                            [(NETunnelProviderSession *)m_currentTunnel.connection stopTunnel];
+                            stopTunnelHonoringOnDemand(false);
                         }
                     } else {
                         qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive"
@@ -1697,6 +1822,12 @@ void IosController::startTunnel()
     NETunnelProviderManager *tunnel = m_currentTunnel;
     if (!tunnel || !operationCurrent(operation)) return;
     [tunnel setEnabled:YES];
+#if defined(Q_OS_IOS)
+    // On-Demand: новая сессия (возможно, другая нода) правило ещё не заслужила — взведём после
+    // подтверждённого рукопожатия. Сохранение здесь и так идёт, отдельного вызова не добавляем.
+    tunnel.onDemandEnabled = NO;
+    m_onDemandArmed = false;
+#endif
     [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
         [tunnel retain]; [saveError retain];
         QMetaObject::invokeMethod(this, [this, tunnel, saveError, operation] {
@@ -1738,7 +1869,7 @@ void IosController::startTunnel()
                                     BOOL started = NO;
 #if defined(Q_OS_IOS)
                                     const AvpnIntentPerform performed = Avpn_performIfCurrent(m_operationIntentGeneration, [&] {
-                                        started = [tunnel.connection startVPNTunnelWithOptions:nil andReturnError:&startError];
+                                        started = [tunnel.connection startVPNTunnelWithOptions:@{@"tribeStartSource": @"app"} andReturnError:&startError];
                                     });
                                     if (performed == AvpnIntentPerform::NotCurrent) {
                                         // Намерение сменилось до старта (Shortcut/NE): это не ошибка коннекта.

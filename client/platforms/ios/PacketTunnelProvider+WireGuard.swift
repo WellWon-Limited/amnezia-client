@@ -66,6 +66,7 @@ extension PacketTunnelProvider {
 
             wg_log(.info, message: "Starting tunnel from the " +
                    (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
+            wg_log(.info, message: "Tribe split: type=\(wgConfig.splitTunnelType) routes=\(wgConfig.splitTunnelSites.count)")
 
             // Start the tunnel
             let generation = tribeRuntimeGeneration
@@ -357,7 +358,19 @@ extension PacketTunnelProvider {
             let now = UInt64(Date().timeIntervalSince1970)
             let age = handshake > 0 && now >= handshake ? "\(now - handshake)s" : "never"
             let uplink = self?.tribeUplinkDescription() ?? "?"
-            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink)")
+            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink) mem=\(PacketTunnelProvider.tribeFootprintMB())")
         }
+    }
+
+    /// Память расширения в МБ (phys_footprint — та же величина, по которой iOS держит лимит 50 МБ).
+    private static func tribeFootprintMB() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? UInt64(info.phys_footprint) / 1_048_576 : 0
     }
 }

@@ -192,6 +192,10 @@ private:
     // AVPN (ревью REV-3): флаг стопа приложения привязан к сессии; снимаем при доказательстве новой.
     void markLocalStopRequested();
     void clearLocalStopIfNewSession(bool observedConnecting);
+    // On-Demand (2026-09-30): правило взводится для сессии с подтверждённым рукопожатием и
+    // снимается перед любым стопом приложения (см. IosNativePolicy.h).
+    void armOnDemandForConfirmedSession();
+    void stopTunnelHonoringOnDemand(bool sessionWasDown);
     // AVPN (ревью REV-2): connectVpn застал свой профиль в Disconnecting — ждём терминал.
     enum class TeardownStep { NotAwaiting, Waiting, StartContinued, LiveFound };
     void beginAwaitTeardown(uint64_t operation);
@@ -242,6 +246,8 @@ private:
     bool m_localStopRequested = false;
     avpn_ios::LocalStopInfo m_localStopInfo;        // AVPN (REV-3): чью сессию гасили
     uint64_t m_connectAwaitingTeardown = 0;         // AVPN (REV-2): операция ждёт Disconnected
+    bool m_onDemandArmed = false;                   // On-Demand: этот процесс взвёл правило
+    bool m_onDemandChangePending = false;           // On-Demand: идёт load/save взвода
     avpn_ios::DisconnectReasonGate m_disconnectGate; // AVPN (K2)
     uint64_t m_connectDeadlineToken = 0;            // AVPN (C4)
     bool m_creatingProfile = false;                 // AVPN (C4): ждём save нового профиля
