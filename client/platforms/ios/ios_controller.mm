@@ -617,81 +617,137 @@ void IosController::disconnectVpn()
         emitConnectionStateForced(Vpn::ConnectionState::Disconnected);
         // On-Demand: туннель опущен, но правило может быть взведено (iOS погасила его сама и
         // вот-вот поднимет). «Выключить» обязано снять и правило.
-        stopTunnelHonoringOnDemand(true);
+        stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStopWasDown);
         return;
     }
     noteAppStopForCurrentSession();
-    stopTunnelHonoringOnDemand(false);
+    stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);
 }
 
-// On-Demand (2026-09-30): единственная точка стопа приложения. Правило взведено — сначала снять
-// и дождаться сохранения, потом stopTunnel; иначе iOS поднимет туннель заново. Правило не
-// взведено — stopTunnel сразу, как раньше. sessionWasDown — туннель уже опущен: только снять
-// правило, а погасить — лишь если iOS успела поднять его за время сохранения.
-void IosController::stopTunnelHonoringOnDemand(bool sessionWasDown)
+// On-Demand: намерение «выкл/пауза» в общем состоянии (приложение или команда из другого процесса).
+static bool onDemandIntentOff()
 {
+#if defined(Q_OS_IOS)
+    const QString action = Avpn_currentIntent().value(QStringLiteral("action")).toString();
+    return action == QLatin1String("off") || action == QLatin1String("pause");
+#else
+    return false;
+#endif
+}
+
+// On-Demand (2026-09-30): единственная точка стопа приложения. Правило может быть взведено —
+// свежая загрузка профиля, снять, дождаться сохранения, потом stopTunnel; иначе iOS поднимет
+// туннель заново. Правил в профиле нет — stopTunnel сразу, как раньше. Режимы — OnDemandStop.
+void IosController::stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop mode)
+{
+    using avpn_ios::OnDemandStop;
     NETunnelProviderManager *tunnel = m_currentTunnel;
     if (!tunnel) return;
-    bool disarm = false;
+    bool roundTrip = false;
 #if defined(Q_OS_IOS)
-    disarm = avpn_ios::stopNeedsOnDemandDisarm(tunnel.onDemandEnabled, m_onDemandArmed, m_onDemandChangePending);
+    roundTrip = avpn_ios::stopNeedsOnDemandDisarm(tunnel.onDemandEnabled, tunnel.onDemandRules.count > 0,
+                                                  m_onDemandArmed, m_onDemandChangePending);
 #endif
-    if (!disarm) {
-        if (!sessionWasDown) [(NETunnelProviderSession *)tunnel.connection stopTunnel];
+    if (!roundTrip) {
+        if (mode == OnDemandStop::AppStop) [(NETunnelProviderSession *)tunnel.connection stopTunnel];
         return;
     }
     const uint64_t operation = m_operationGeneration;
-    const auto finished = std::make_shared<bool>(false);
-    // Сохранение настроек — вызов в системный демон; его молчание не должно съесть стоп.
-    const auto finish = [this, operation, sessionWasDown, finished](const char *how) {
-        if (*finished) return;
-        *finished = true;
+    const std::string stopGeneration = m_sessionMetadata.value(QStringLiteral("generation")).toString().toStdString();
+    struct Progress { bool decided = false; bool stopPerformed = false; bool counted = true; };
+    const auto progress = std::make_shared<Progress>();
+    ++m_onDemandDisarmsInFlight;
+
+    // Гасит сессию, если стоп ещё нужен. late — правило снялось уже ПОСЛЕ стопа по дедлайну:
+    // сессия, которую iOS успела поднять по ещё взведённому правилу, — всё ещё наш стоп.
+    const auto stopIfWanted = [this, operation, mode, progress](bool late) {
         NETunnelProviderManager *current = m_currentTunnel;
-        const bool stillCurrent = operation == m_operationGeneration;
+        const bool wanted = mode == OnDemandStop::IntentCleanup ? onDemandIntentOff()
+                                                                : operation == m_operationGeneration;
         const avpn_ios::SessionPhase phase =
                 current ? sessionPhase(current.connection.status) : avpn_ios::SessionPhase::Down;
-#if defined(Q_OS_IOS)
-        Avpn_recordLifecycle(QStringLiteral("on_demand_disarmed"), {{QStringLiteral("how"), QString::fromLatin1(how)},
-            {QStringLiteral("was_down"), sessionWasDown}, {QStringLiteral("current"), stillCurrent}, {QStringLiteral("phase"), int(phase)}});
-#endif
-        if (!avpn_ios::stopAfterOnDemandDisarm(stillCurrent, phase)) return;
-        if (sessionWasDown) {
-            // iOS подняла туннель по правилу, пока мы его снимали: это всё ещё наш стоп.
+        if (!avpn_ios::stopAfterOnDemandDisarm(wanted, phase)) return;
+        if (mode != OnDemandStop::IntentCleanup && (mode == OnDemandStop::AppStopWasDown || late)) {
             markLocalStopRequested();
             noteAppStopForCurrentSession();
         }
+        progress->stopPerformed = true;
         [(NETunnelProviderSession *)current.connection stopTunnel];
     };
-    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [finish] { finish("timeout"); });
+    // Исход снятия. Первый вызов решает стоп; сохранение, дошедшее после дедлайна, — второй проход.
+    const auto settle = [this, mode, progress, stopIfWanted](const char *how, bool disarmed) {
+        const bool late = progress->decided;
+        if (late && !disarmed) return;
+        progress->decided = true;
+#if defined(Q_OS_IOS)
+        Avpn_recordLifecycle(disarmed ? QStringLiteral("on_demand_disarmed") : QStringLiteral("on_demand_disarm_failed"),
+            {{QStringLiteral("how"), QString::fromLatin1(how)}, {QStringLiteral("mode"), int(mode)}, {QStringLiteral("late"), late}});
+#endif
+        if (!disarmed) qWarning() << "[ios lifecycle] on-demand disarm failed:" << how;
+        stopIfWanted(late);
+    };
+    // Запрос к системному демону завершён (успехом или отказом): счётчик, отменённый стоп.
+    const auto done = [this, operation, mode, progress, stopGeneration] {
+        if (progress->counted) {
+            progress->counted = false;
+            --m_onDemandDisarmsInFlight;
+        }
+        if (mode == OnDemandStop::IntentCleanup || progress->stopPerformed) return;
+        if (operation == m_operationGeneration) return; // стоп актуален, просто гасить было нечего
+        // Стоп отменён более новой операцией. Если это Connect, адоптировавший сессию (других
+        // снятий в полёте нет — новый стоп шёл бы тем же путём), флаг стопа ей не принадлежит.
+        if (m_onDemandDisarmsInFlight == 0) {
+            m_localStopRequested = false;
+            m_localStopInfo = {};
+            m_disconnectGate.forgetAppStop(stopGeneration);
+        }
+        NETunnelProviderManager *current = m_currentTunnel;
+        const bool connected = current && current.connection.status == NEVPNStatusConnected;
+        if (avpn_ios::rearmAfterCancelledStop(progress->stopPerformed, m_handshakeConfirmed, connected))
+            armOnDemandForConfirmedSession();
+    };
+    // Молчание демона не должно съесть стоп: по дедлайну гасим и с ещё взведённым правилом.
+    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [settle] { settle("timeout", false); });
+    // Ответ не пришёл вовсе (демон убит посреди запроса): снятие перестаём считать «в полёте»,
+    // иначе оно навсегда запретило бы взвод правила.
+    QTimer::singleShot(5 * avpn_ios::nativeTimings().reconcileDeadlineMs, this, [this, progress] {
+        if (!progress->counted) return;
+        progress->counted = false;
+        --m_onDemandDisarmsInFlight;
+    });
     [tunnel retain];
-    // Сначала свежая загрузка: если туннель погас из-за другого VPN-приложения, наш профиль уже не
-    // активный, а у экземпляра в памяти isEnabled ещё YES — его сохранение отобрало бы «активный
-    // VPN» у чужого приложения. Отказ сохранения (экземпляр устарел) — один повтор.
+    // Свежая загрузка обязательна: (1) правило мог взвести другой процесс; (2) если туннель погас
+    // из-за другого VPN-приложения, наш профиль уже не активный, а у экземпляра в памяти isEnabled
+    // ещё YES — его сохранение отобрало бы «активный VPN» у чужого приложения. Отказ сохранения
+    // (экземпляр устарел) — один повтор.
     const auto attempt = std::make_shared<std::function<void(int)>>();
-    *attempt = [this, tunnel, finish, attempt](int round) {
+    *attempt = [this, tunnel, settle, done, attempt](int round) {
         [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
             const bool loadFailed = loadError != nil;
-            QMetaObject::invokeMethod(this, [this, tunnel, finish, attempt, round, loadFailed] {
+            QMetaObject::invokeMethod(this, [this, tunnel, settle, done, attempt, round, loadFailed] {
+                const auto finish = [tunnel, done, attempt] { done(); [tunnel release]; *attempt = nullptr; };
                 if (loadFailed) {
-                    qWarning() << "[ios lifecycle] on-demand disarm: load failed";
-                    finish("load_failed");
-                    [tunnel release];
-                    *attempt = nullptr;
+                    settle("load_failed", false);
+                    finish();
+                    return;
+                }
+                if (!tunnel.onDemandEnabled) { // правило не взведено: сохранять нечего
+                    m_onDemandArmed = false;
+                    settle("not_armed", true);
+                    finish();
                     return;
                 }
                 tunnel.onDemandEnabled = NO;
                 [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
                     const bool saveFailed = saveError != nil;
-                    QMetaObject::invokeMethod(this, [this, tunnel, finish, attempt, round, saveFailed] {
+                    QMetaObject::invokeMethod(this, [this, settle, finish, attempt, round, saveFailed] {
                         if (saveFailed && round == 0) {
-                            qWarning() << "[ios lifecycle] on-demand disarm: save failed, retrying";
                             (*attempt)(1);
                             return;
                         }
                         if (!saveFailed) m_onDemandArmed = false;
-                        finish(saveFailed ? "failed" : (round ? "saved_retry" : "saved"));
-                        [tunnel release];
-                        *attempt = nullptr;
+                        settle(saveFailed ? "save_failed" : (round ? "saved_retry" : "saved"), !saveFailed);
+                        finish();
                     }, Qt::QueuedConnection);
                 }];
             }, Qt::QueuedConnection);
@@ -708,20 +764,31 @@ void IosController::armOnDemandForConfirmedSession()
 #if defined(Q_OS_IOS)
     NETunnelProviderManager *tunnel = m_currentTunnel;
     const bool connected = tunnel && tunnel.connection.status == NEVPNStatusConnected;
-    if (!avpn_ios::shouldArmOnDemand(tunnel != nil, connected, tunnel.onDemandEnabled, m_localStopRequested,
-                                     m_onDemandChangePending))
+    if (!avpn_ios::shouldStartOnDemandArm(tunnel != nil, connected, isWireGuardBasedProto(m_proto),
+                                          m_localStopRequested, m_onDemandChangePending))
         return;
     const uint64_t operation = m_operationGeneration;
+    const uint64_t token = ++m_onDemandArmToken;
     m_onDemandChangePending = true;
+    // Ответ демона может не прийти (его как раз и убивает jetsam): попытка не должна навсегда
+    // запретить следующие.
+    QTimer::singleShot(avpn_ios::nativeTimings().reconcileDeadlineMs, this, [this, token] {
+        if (token != m_onDemandArmToken || !m_onDemandChangePending) return;
+        m_onDemandChangePending = false;
+        Avpn_recordLifecycle(QStringLiteral("on_demand_arm_timeout"), QVariantMap());
+    });
     [tunnel retain];
-    // Свежая загрузка: экземпляр мог устареть после сохранений старта/реконсила.
     [tunnel loadFromPreferencesWithCompletionHandler:^(NSError *loadError) {
         const bool loadFailed = loadError != nil;
-        QMetaObject::invokeMethod(this, [this, tunnel, loadFailed, operation] {
-            const bool proceed = !loadFailed && operation == m_operationGeneration && !m_localStopRequested
-                    && tunnel.connection.status == NEVPNStatusConnected;
-            if (!proceed) {
-                m_onDemandChangePending = false;
+        QMetaObject::invokeMethod(this, [this, tunnel, loadFailed, operation, token] {
+            const bool live = token == m_onDemandArmToken; // иначе попытка списана дедлайном
+            const avpn_ios::OnDemandArm decision = avpn_ios::decideOnDemandArm(
+                    loadFailed || !live, operation == m_operationGeneration,
+                    tunnel.connection.status == NEVPNStatusConnected, m_localStopRequested, onDemandIntentOff(),
+                    m_onDemandDisarmsInFlight > 0, tunnel.onDemandEnabled);
+            if (decision != avpn_ios::OnDemandArm::Arm) {
+                if (decision == avpn_ios::OnDemandArm::AlreadyArmed) m_onDemandArmed = true;
+                if (live) m_onDemandChangePending = false;
                 [tunnel release];
                 return;
             }
@@ -733,11 +800,13 @@ void IosController::armOnDemandForConfirmedSession()
             m_onDemandArmed = true; // с этого момента любой стоп обязан снять правило
             [tunnel saveToPreferencesWithCompletionHandler:^(NSError *saveError) {
                 const bool saveFailed = saveError != nil;
-                QMetaObject::invokeMethod(this, [this, tunnel, saveFailed] {
-                    m_onDemandChangePending = false;
+                QMetaObject::invokeMethod(this, [this, tunnel, saveFailed, token] {
+                    if (token == m_onDemandArmToken) m_onDemandChangePending = false;
                     Avpn_recordLifecycle(saveFailed ? QStringLiteral("on_demand_arm_failed") : QStringLiteral("on_demand_armed"),
                         {{QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
                     [tunnel release];
+                    if (avpn_ios::armNeedsCleanup(saveFailed, onDemandIntentOff()))
+                        stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::IntentCleanup);
                 }, Qt::QueuedConnection);
             }];
         }, Qt::QueuedConnection);
@@ -1159,7 +1228,7 @@ void IosController::checkStatus()
                             // .userInitiated, но Disconnected должен прийти как expected_app_stop.
                             markLocalStopRequested();
                             noteAppStopForCurrentSession();
-                            stopTunnelHonoringOnDemand(false);
+                            stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);
                         }
                     } else {
                         qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive"

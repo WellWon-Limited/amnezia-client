@@ -110,6 +110,9 @@ static SaveMode g_saveMode = SaveMode::Deliver;
 static std::vector<std::string> g_nativeLog;
 static std::vector<bool> g_savedEnabled;  // isEnabled экземпляра в момент каждого сохранения
 static int g_prefsEnabled = -1;           // -1 — load ничего не меняет; 0/1 — «в системе профиль (не)активен»
+// Правило «в системе» (как его видят другие процессы и свежая загрузка): -1 — не моделируем;
+// 0/1 — save записывает сюда значение в момент ЗАВЕРШЕНИЯ, load читает отсюда в экземпляр.
+static int g_sysOnDemand = -1;
 
 // ------------------------------------------------------------------------------------------------
 // Фейковая сессия NE.
@@ -258,8 +261,10 @@ static void installSwizzles()
         if (g_saveMode == SaveMode::Never) return;
         const bool fail = g_saveMode == SaveMode::ErrorOnce;
         if (fail) g_saveMode = SaveMode::Deliver;
+        const bool onDemand = [(NETunnelProviderManager *)manager isOnDemandEnabled];
         void (^c)(NSError *) = [completion copy];
-        QTimer::singleShot(g_saveDelayMs, qApp, [c, fail] {
+        QTimer::singleShot(g_saveDelayMs, qApp, [c, fail, onDemand] {
+            if (!fail && g_sysOnDemand >= 0) g_sysOnDemand = onDemand ? 1 : 0;
             c(fail ? [NSError errorWithDomain:@"harness" code:5 userInfo:nil] : nil);
             [c release];
         });
@@ -269,6 +274,7 @@ static void installSwizzles()
 
     IMP load = imp_implementationWithBlock(^(id manager, void (^completion)(NSError *)) {
         if (g_prefsEnabled >= 0) [(NETunnelProviderManager *)manager setEnabled:(g_prefsEnabled == 1)];
+        if (g_sysOnDemand >= 0) [(NETunnelProviderManager *)manager setOnDemandEnabled:(g_sysOnDemand == 1)];
         void (^c)(NSError *) = [completion copy];
         QTimer::singleShot(5, qApp, [c] { c(nil); [c release]; });
     });
@@ -568,6 +574,7 @@ static void test_handshake_timeout_stop_not_intentional()
 static NETunnelProviderManager *managerWithOnDemand(HarnessSession *s, BOOL enabled)
 {
     NETunnelProviderManager *m = newManager(@"mgr-1", @"cfg-1", s);
+    m.onDemandRules = @[[[[NEOnDemandRuleConnect alloc] init] autorelease]];
     m.onDemandEnabled = enabled;
     g_managers = [@[m] retain];
     g_loadMode = LoadMode::Deliver;
@@ -703,6 +710,7 @@ static void test_stop_after_disarm_save_error_retries()
 {
     NETunnelProviderManager *m = nil;
     HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_sysOnDemand = 1; // отклонённое сохранение правило в системе не снимает — перезагрузка вернёт YES
     g_saveMode = SaveMode::ErrorOnce;
     IosController::Instance()->disconnectVpn();
     spin(150);
@@ -728,6 +736,150 @@ static void test_stop_when_down_does_not_steal_active_vpn()
     if (!g_savedEnabled.empty())
         CHECK(!g_savedEnabled[0], "снятие правила сохранило наш профиль активным — чужой VPN будет отключён");
     CHECK(s.stopCalls == 0, "stopTunnel по опущенному туннелю");
+}
+
+// Правило взвёл другой процесс (команда «включить», переключатель в Настройках): экземпляр в
+// памяти говорит «не взведено», система — «взведено». Стоп обязан идти через свежую загрузку.
+static void test_stop_disarms_rule_armed_elsewhere()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    m.onDemandEnabled = NO; // устаревший экземпляр
+    g_sysOnDemand = 1;
+    IosController::Instance()->disconnectVpn();
+    CHECK(s.stopCalls == 0, "стоп без свежей загрузки профиля: правило другого процесса осталось взведённым");
+    spin(100);
+    CHECK(s.stopCalls == 1, "stopTunnel не вызван");
+    CHECK(g_sysOnDemand == 0, "правило в системе осталось взведённым");
+    CHECK(g_nativeLog.size() == 2 && g_nativeLog[0] == "save:od=0" && g_nativeLog[1] == "stop", "порядок: снять правило → stop");
+}
+
+// Правила в профиле есть, но в системе правило снято (после паузы/выключения): стоп — после
+// свежей загрузки, без лишнего сохранения.
+static void test_stop_with_disarmed_rules_skips_save()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    m.onDemandEnabled = NO;
+    g_sysOnDemand = 0;
+    IosController::Instance()->disconnectVpn();
+    spin(60);
+    CHECK(s.stopCalls == 1, "stopTunnel не вызван");
+    CHECK(g_nativeLog.size() == 1 && g_nativeLog[0] == "stop", "лишнее сохранение профиля при снятом правиле");
+}
+
+// «Выключить» и сразу «включить», пока снятие правила ещё сохраняется: Connect адоптирует живую
+// сессию, стоп отменён — правило обязано вернуться (иначе сессия осталась бы без защиты).
+static void test_quick_off_on_rearms_adopted_session()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_sysOnDemand = 1;
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll.start(30);
+    spin(80); // runtime-поколение сессии известно, рукопожатие подтверждено, правило взведено
+    g_saveDelayMs = 80;
+    g_nativeLog.clear();
+    SignalTap tap;
+    tap.attach();
+    IosController::Instance()->disconnectVpn();
+    spin(20);
+    setIntent("i-resume-2", "resume");
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig());
+    spin(500);
+    CHECK(s.stopCalls == 0, "стоп выполнен поверх более нового Connect");
+    CHECK(obs.live == 1, "живая сессия не адоптирована");
+    CHECK(g_sysOnDemand == 1, "адоптированная сессия осталась без правила On-Demand");
+    // Внешний обрыв адоптированной сессии — не «наш стоп» (флаг отменённого стопа снят).
+    obs.clear();
+    s.hStatus = NEVPNStatusDisconnected;
+    notifyStatus(s);
+    spin(20);
+    CHECK(obs.reasons.size() == 1, "нет причины обрыва");
+    if (!obs.reasons.empty())
+        CHECK(obs.reasons[0].first != QStringLiteral("expected_app_stop"), "обрыв адоптированной сессии помечен отменённым стопом приложения");
+}
+
+// Сохранение снятия дошло ПОСЛЕ дедлайна: стоп уже был выполнен с ещё взведённым правилом, iOS
+// подняла туннель заново — опоздавшее снятие гасит и эту сессию как стоп приложения.
+static void test_late_disarm_stops_revived_session()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_sysOnDemand = 1;
+    g_saveDelayMs = W(450, 3600);
+    IosController::Instance()->disconnectVpn();
+    spin(W(300, 3300));
+    CHECK(s.stopCalls == 1, "по дедлайну сохранения стоп не выполнен");
+    CHECK(g_sysOnDemand == 1, "модель: правило ещё взведено");
+    s.hStatus = NEVPNStatusConnecting; // On-Demand поднял туннель заново
+    notifyStatus(s);
+    s.hStatus = NEVPNStatusConnected;
+    notifyStatus(s);
+    obs.clear();
+    spin(350);
+    CHECK(g_sysOnDemand == 0, "опоздавшее снятие правила не дошло");
+    CHECK(s.stopCalls == 2, "сессия, поднятая iOS до снятия правила, не погашена");
+    CHECK(obs.reasons.size() == 1, "нет причины стопа");
+    if (!obs.reasons.empty()) {
+        CHECK(obs.reasons[0].first == QStringLiteral("expected_app_stop"), "стоп поднятой iOS сессии не expected_app_stop");
+        CHECK(!obs.reasons[0].second, "стоп приложения помечен intentional");
+    }
+}
+
+static HarnessSession *startedSessionAwaitingHandshake(NETunnelProviderManager **manager, QTimer *poll)
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(NEVPNStatusDisconnected);
+    s.runtimeGeneration = @"run-1";
+    s.statusReply = statusReply(@"run-1", @"cfg-1", 0, 0);
+    *manager = managerWithOnDemand(s, NO);
+    g_sysOnDemand = 0;
+    QObject::connect(poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll->start(30);
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig(5000, 3));
+    spin(260);
+    return s;
+}
+
+// Пауза/выключение из другого процесса раньше подтверждения рукопожатия: правило не взводим.
+static void test_arm_skipped_when_intent_paused()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    HarnessSession *s = startedSessionAwaitingHandshake(&m, &poll);
+    CHECK(s.startCalls == 1, "туннель не стартовал");
+    setIntent("i-pause", "pause");
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(200);
+    CHECK(g_sysOnDemand == 0, "правило взведено при намерении «пауза»");
+}
+
+// Пауза пришла, пока сохранялся взвод (команда прочитала профиль до нашего сохранения и правило
+// не сняла): после сохранения правило снимается, сессию своим стопом не помечаем.
+static void test_arm_cleanup_when_pause_lands_during_save()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    HarnessSession *s = startedSessionAwaitingHandshake(&m, &poll);
+    g_saveDelayMs = 100;
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(70);  // рукопожатие подтверждено, сохранение взвода в полёте
+    poll.stop();
+    setIntent("i-pause", "pause");
+    s.hStatus = NEVPNStatusDisconnected; // команда «пауза» погасила туннель сама
+    notifyStatus(s);
+    obs.clear();
+    s.hStatus = NEVPNStatusConnecting;   // взвод сохранился → iOS подняла туннель по правилу
+    QTimer::singleShot(120, qApp, [s] { notifyStatus(s); });
+    spin(400);
+    CHECK(g_sysOnDemand == 0, "правило осталось взведённым после паузы");
+    CHECK(s.stopCalls == 1, "сессия, поднятая iOS после паузы, не погашена");
+    CHECK(obs.reasons.size() == 1, "нет причины стопа");
+    if (!obs.reasons.empty())
+        CHECK(obs.reasons[0].first != QStringLiteral("expected_app_stop"), "уборка после паузы помечена стопом приложения");
 }
 
 // Connect пришёл, пока снималось правило для стопа: стоп отменён, живая сессия адоптируется.
@@ -1206,6 +1358,12 @@ static const Test kTests[] = {
     {"stop_after_disarm_save_error_retries", test_stop_after_disarm_save_error_retries},
     {"connect_during_disarm_cancels_stop", test_connect_during_disarm_cancels_stop},
     {"stop_when_down_does_not_steal_active_vpn", test_stop_when_down_does_not_steal_active_vpn},
+    {"stop_disarms_rule_armed_elsewhere", test_stop_disarms_rule_armed_elsewhere},
+    {"stop_with_disarmed_rules_skips_save", test_stop_with_disarmed_rules_skips_save},
+    {"quick_off_on_rearms_adopted_session", test_quick_off_on_rearms_adopted_session},
+    {"late_disarm_stops_revived_session", test_late_disarm_stops_revived_session},
+    {"arm_skipped_when_intent_paused", test_arm_skipped_when_intent_paused},
+    {"arm_cleanup_when_pause_lands_during_save", test_arm_cleanup_when_pause_lands_during_save},
 };
 
 int main(int argc, char **argv)

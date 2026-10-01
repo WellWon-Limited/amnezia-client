@@ -142,6 +142,13 @@ public:
         m_appStopped.push_back(generation);
         while (m_appStopped.size() > 16) m_appStopped.pop_front();
     }
+    // Стоп приложения отменён до stopTunnel (новый Connect адоптировал сессию, пока снималось
+    // правило On-Demand): её будущий внешний обрыв — не «наш стоп».
+    void forgetAppStop(const std::string &generation)
+    {
+        for (auto it = m_appStopped.begin(); it != m_appStopped.end(); ++it)
+            if (*it == generation) { m_appStopped.erase(it); return; }
+    }
     bool isAppStopped(const std::string &generation) const
     {
         if (generation.empty()) return false;
@@ -239,25 +246,64 @@ inline bool localStopSupersededByNewSession(const LocalStopInfo &stop, bool obse
 //   * стоп при уже опущенном туннеле тоже снимает правило (пользователь нажал «выключить», пока
 //     iOS собиралась поднять туннель сама).
 // Так же делают Mullvad и WireGuard для iOS; у апстрима Amnezia правила нет.
-inline bool shouldArmOnDemand(bool haveTunnel, bool sessionConnected, bool managerSaysEnabled,
-                              bool localStopRequested, bool changePending)
+// Попытку взвода начинаем всегда со свежей загрузки профиля: экземпляр менеджера в памяти мог быть
+// загружен до того, как дошло наше же снятие правила, и его onDemandEnabled верить нельзя.
+// Xray-путь не взводим: его расширение само гасит туннель при отказе ядра, iOS поднимала бы заново.
+inline bool shouldStartOnDemandArm(bool haveTunnel, bool sessionConnected, bool wireGuardBased,
+                                   bool localStopRequested, bool changePending)
 {
-    return haveTunnel && sessionConnected && !managerSaysEnabled && !localStopRequested && !changePending;
+    return haveTunnel && sessionConnected && wireGuardBased && !localStopRequested && !changePending;
 }
 
-// Экземпляр менеджера после реконсила может быть загружен ДО того, как наше сохранение дошло до
-// системы, поэтому кроме его свойства учитываем и собственное знание процесса.
-inline bool stopNeedsOnDemandDisarm(bool managerSaysEnabled, bool armedByThisProcess, bool changePending)
+// Решение по СВЕЖЕЙ загрузке. intentOff — в общем состоянии намерение «выкл/пауза» (приложение или
+// команда из другого процесса): взводить нельзя. disarmInFlight — наше снятие ещё не дошло до
+// системы: свежая загрузка покажет старое YES; взвод повторит завершение снятия.
+enum class OnDemandArm { Arm, AlreadyArmed, Skip };
+inline OnDemandArm decideOnDemandArm(bool loadFailed, bool operationStillCurrent, bool sessionConnected,
+                                     bool localStopRequested, bool intentOff, bool disarmInFlight,
+                                     bool freshSaysEnabled)
 {
-    return managerSaysEnabled || armedByThisProcess || changePending;
+    if (loadFailed || !operationStillCurrent || !sessionConnected || localStopRequested || intentOff
+        || disarmInFlight)
+        return OnDemandArm::Skip;
+    return freshSaysEnabled ? OnDemandArm::AlreadyArmed : OnDemandArm::Arm;
 }
 
-// После снятия правила: гасим, только если стоп всё ещё актуален (не пришла новая операция) и
-// сессия не опущена сама. Для ветки «туннель уже был опущен» это же условие означает «iOS успела
-// поднять его по правилу, пока мы сохраняли».
-inline bool stopAfterOnDemandDisarm(bool operationStillCurrent, SessionPhase phase)
+// Пока сохранялся взвод, пришла пауза/выключение (команда читает профиль до нашего сохранения и
+// правила не видит): правило снять сразу, поднятую по нему сессию погасить.
+inline bool armNeedsCleanup(bool saveFailed, bool intentOff)
 {
-    return operationStillCurrent && phase != SessionPhase::Down;
+    return !saveFailed && intentOff;
+}
+
+// Стоп идёт через загрузку/сохранение профиля, если правило МОЖЕТ быть взведено: так говорит
+// экземпляр, так помнит процесс, взвод в полёте — или в профиле вообще есть правила (взвести мог
+// другой процесс: команда «включить», переключатель в Настройках iOS). Правил нет и не было —
+// stopTunnel сразу, как до On-Demand.
+inline bool stopNeedsOnDemandDisarm(bool managerSaysEnabled, bool profileHasRules, bool armedByThisProcess,
+                                    bool changePending)
+{
+    return managerSaysEnabled || profileHasRules || armedByThisProcess || changePending;
+}
+
+// AppStop — гасим живую сессию; AppStopWasDown — туннель уже опущен, снять правило и погасить
+// только сессию, которую iOS подняла за время сохранения; IntentCleanup — правило взвелось уже
+// после паузы/выключения из другого процесса: снять и погасить, НЕ помечая стоп своим (причина
+// обрыва остаётся решением пользователя).
+enum class OnDemandStop { AppStop, AppStopWasDown, IntentCleanup };
+
+// После снятия правила: гасим, только если стоп всё ещё актуален (не пришла новая операция; для
+// IntentCleanup — намерение всё ещё «выкл») и сессия не опущена сама.
+inline bool stopAfterOnDemandDisarm(bool stopStillWanted, SessionPhase phase)
+{
+    return stopStillWanted && phase != SessionPhase::Down;
+}
+
+// Стоп отменён более новым Connect (сессию адоптировали), а правило мы уже сняли: вернуть его
+// доказанно рабочей сессии.
+inline bool rearmAfterCancelledStop(bool stopPerformed, bool handshakeConfirmed, bool sessionConnected)
+{
+    return !stopPerformed && handshakeConfirmed && sessionConnected;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -195,7 +195,7 @@ private:
     // On-Demand (2026-09-30): правило взводится для сессии с подтверждённым рукопожатием и
     // снимается перед любым стопом приложения (см. IosNativePolicy.h).
     void armOnDemandForConfirmedSession();
-    void stopTunnelHonoringOnDemand(bool sessionWasDown);
+    void stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop mode);
     // AVPN (ревью REV-2): connectVpn застал свой профиль в Disconnecting — ждём терминал.
     enum class TeardownStep { NotAwaiting, Waiting, StartContinued, LiveFound };
     void beginAwaitTeardown(uint64_t operation);
@@ -248,6 +248,8 @@ private:
     uint64_t m_connectAwaitingTeardown = 0;         // AVPN (REV-2): операция ждёт Disconnected
     bool m_onDemandArmed = false;                   // On-Demand: этот процесс взвёл правило
     bool m_onDemandChangePending = false;           // On-Demand: идёт load/save взвода
+    uint64_t m_onDemandArmToken = 0;                // On-Demand: поколение попытки взвода (дедлайн)
+    int m_onDemandDisarmsInFlight = 0;              // On-Demand: снятий правила в полёте
     avpn_ios::DisconnectReasonGate m_disconnectGate; // AVPN (K2)
     uint64_t m_connectDeadlineToken = 0;            // AVPN (C4)
     bool m_creatingProfile = false;                 // AVPN (C4): ждём save нового профиля

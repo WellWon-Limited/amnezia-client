@@ -79,6 +79,10 @@ private struct AvpnIntentOperation {
 @MainActor
 private func avpnPerform(pause: Bool) async throws {
     guard let store = TribeSharedState.appGroup else { throw AvpnTunnelError.unavailable }
+    // On-Demand: прошлая запись намерения — до того, как begin() её заменит. «Включить» возвращает
+    // правило только после паузы, которая его сняла; выключение в приложении запись перезаписывает.
+    let previous = store.read("TribeIntentState.json")
+    let pausedWithRule = previous["action"] as? String == "pause" && previous["rearm_on_demand"] as? Bool == true
     let generation = try store.begin(action: pause ? "pause" : "resume")
     let operation = AvpnIntentOperation(store: store, generation: generation)
     do {
@@ -124,14 +128,29 @@ private func avpnPerform(pause: Bool) async throws {
                 try operation.check()
             }
         }
+        if pause && (manager.isOnDemandEnabled || pausedWithRule) {
+            // Повторная пауза сохраняет отметку первой (правило уже снято, вернуть его всё ещё надо).
+            _ = try? store.update(generation, fields: ["rearm_on_demand": true])
+        }
         if pause && manager.isOnDemandEnabled {
             // On-Demand (2026-09-30): сначала снять правило и дождаться сохранения, иначе iOS
-            // поднимет туннель обратно сразу после паузы.
+            // поднимет туннель обратно сразу после паузы. Отказ сохранения (профиль устарел) —
+            // перечитать и повторить; паузу сбой сохранения не отменяет.
             manager.isOnDemandEnabled = false
-            let _: Void = try await operation.wait { finish in
+            var disarmed: Void? = try? await operation.wait { finish in
                 manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
             }
-            store.record(source: "intent", event: "on_demand_disarmed", fields: ["generation": generation])
+            if disarmed == nil {
+                let _: Void? = try? await operation.wait { finish in
+                    manager.loadFromPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+                }
+                manager.isOnDemandEnabled = false
+                disarmed = try? await operation.wait { finish in
+                    manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+                }
+            }
+            store.record(source: "intent", event: disarmed == nil ? "on_demand_disarm_failed" : "on_demand_disarmed",
+                         fields: ["generation": generation])
         }
         try store.locked {
             try operation.check()
@@ -140,9 +159,12 @@ private func avpnPerform(pause: Bool) async throws {
                 try manager.connection.startVPNTunnel(options: ["tribeStartSource": "intent" as NSString])
             }
         }
-        if !pause && !(manager.onDemandRules ?? []).isEmpty && !manager.isOnDemandEnabled {
-            // Правила есть — приложение уже взводило On-Demand для этого профиля (рабочая сессия),
-            // пауза его сняла. Возвращаем вместе с туннелем; сбой сохранения команду не роняет.
+        let wireGuardProfile = (manager.protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerConfiguration?["wireguard"] != nil
+        if !pause && pausedWithRule && wireGuardProfile && !manager.isOnDemandEnabled {
+            // Правило было взведено приложением для рабочей сессии и снято паузой: возвращаем вместе
+            // с туннелем (тот же профиль). Сбой сохранения команду не роняет — приложение взведёт
+            // правило само при следующем подтверждённом рукопожатии.
             manager.isOnDemandEnabled = true
             let armed: Void? = try? await operation.wait { finish in
                 manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
