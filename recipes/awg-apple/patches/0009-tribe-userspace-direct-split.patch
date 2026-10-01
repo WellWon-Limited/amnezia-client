@@ -12,10 +12,10 @@ index cde7c19..e104403 100644
  	err = dev.IpcSet(C.GoString(settings))
 diff --git a/Sources/WireGuardKitGo/directsplit.go b/Sources/WireGuardKitGo/directsplit.go
 new file mode 100644
-index 0000000..2f6007f
+index 0000000..d0a5c35
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/directsplit.go
-@@ -0,0 +1,863 @@
+@@ -0,0 +1,1049 @@
 +/* AVPN (Tribe): разделение «РФ мимо туннеля» внутри расширения, без системных маршрутов.
 + *
 + * Раньше список адресов РФ (10 850 префиксов) уходил в iOS как excludedRoutes и лежал в
@@ -51,9 +51,11 @@ index 0000000..2f6007f
 +	"strings"
 +	"sync"
 +	"sync/atomic"
++	"syscall"
 +	"time"
 +
 +	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++	"golang.org/x/sys/unix"
 +	"gvisor.dev/gvisor/pkg/buffer"
 +	"gvisor.dev/gvisor/pkg/tcpip"
 +	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -201,20 +203,32 @@ index 0000000..2f6007f
 +
 +// ── конфиг (ставится из Swift до wgTurnOn) ────────────────────────────────────────────────────
 +
++// Пределы подобраны под 50 МБ расширения: в худшем случае (все соединения стоят с полными
++// буферами) TCP занимает около 25 МБ, обычный режим — единицы мегабайт.
 +const (
-+	directListMaxBytes = 4 << 20
-+	directNICID        = 1
-+	directQueueDepth   = 1024
-+	directDialTimeout  = 8 * time.Second
-+	directTCPBuf       = 16 << 10
-+	directTCPMaxFlows  = 384
-+	directHalfCloseTTL = 2 * time.Minute
-+	directUDPIdle      = 2 * time.Minute
-+	directUDPBuf       = 16 << 10
-+	directUDPMaxSess   = 256
-+	directMemoryLimit  = 36 << 20
-+	directFallbackMTU  = 1280
++	directListMaxBytes    = 4 << 20
++	directNICID           = 1
++	directQueueDepth      = 1024
++	directDialTimeout     = 8 * time.Second
++	directTCPBuf          = 16 << 10
++	directTCPSockBuf      = 64 << 10 // потолок буфера стека на соединение в каждую сторону
++	directTCPMaxFlows     = 192      // вместе с ещё устанавливаемыми
++	directTCPMaxInFlight  = 64
++	directTCPTimeWait     = 5 * time.Second
++	directUDPMaxSess      = 256
++	directUDPFlowsPerSess = 64
++	directUDPMaxFlows     = 512
++	directMemoryLimit     = 36 << 20
++	directFallbackMTU     = 1280
 +)
++
++// directUDPIdle: простой потока UDP до закрытия.
++const directUDPIdle = 2 * time.Minute
++
++// mono: монотонные наносекунды для отметок активности (перевод часов их не сдвигает).
++var monoBase = time.Now()
++
++func mono() int64 { return int64(time.Since(monoBase)) }
 +
 +var (
 +	directMu     sync.Mutex
@@ -294,19 +308,35 @@ index 0000000..2f6007f
 +	return C.CString(engine.statsLine())
 +}
 +
-+// wrapDirectSplitIfEnabled: точка входа из wgTurnOn (// AVPN в api-apple.go).
-+func wrapDirectSplitIfEnabled(inner tun.Device, logf func(format string, args ...interface{})) tun.Device {
++// wgDirectSplitPathChanged: физическая сеть сменилась (Wi-Fi <-> сотовая). Наружные сокеты TCP
++// остались на прежнем интерфейсе, а приложение этого не видит: его сторона идёт через TUN.
++// Сбрасываем прямые соединения TCP — приложение пересоздаёт их сразу, как без VPN. UDP не
++// трогаем: его сокеты не привязаны к адресу. Возвращает число сброшенных соединений.
++//
++//export wgDirectSplitPathChanged
++func wgDirectSplitPathChanged() int32 {
 +	directMu.Lock()
-+	set := directSet
 +	engine := directEngine
 +	directMu.Unlock()
-+	if set == nil {
-+		return inner
++	if engine == nil {
++		return 0
 +	}
++	return int32(engine.resetTCPFlows())
++}
++
++// wrapDirectSplitIfEnabled: точка входа из wgTurnOn (// AVPN в api-apple.go).
++func wrapDirectSplitIfEnabled(inner tun.Device, logf func(format string, args ...interface{})) tun.Device {
 +	mtu, err := inner.MTU()
 +	if err != nil || mtu < directFallbackMTU {
 +		mtu = directFallbackMTU
 +	}
++	directMu.Lock()
++	set := directSet
++	if set == nil {
++		directMu.Unlock()
++		return inner
++	}
++	engine := directEngine
 +	if engine == nil {
 +		engine = newSplitEngine(set, uint32(mtu))
 +		// Мягкий предел кучи Go: расширение живёт в 50 МБ, предел заставляет сборщик работать
@@ -314,10 +344,9 @@ index 0000000..2f6007f
 +		if debug.SetMemoryLimit(-1) > directMemoryLimit {
 +			debug.SetMemoryLimit(directMemoryLimit)
 +		}
-+		directMu.Lock()
 +		directEngine = engine
-+		directMu.Unlock()
 +	}
++	directMu.Unlock()
 +	w := &splitTun{inner: inner, engine: engine}
 +	engine.attach(inner)
 +	if logf != nil {
@@ -329,9 +358,9 @@ index 0000000..2f6007f
 +// ── движок ────────────────────────────────────────────────────────────────────────────────────
 +
 +type splitStats struct {
-+	tcpOpen, tcpTotal, tcpFail atomic.Int64
-+	udpOpen, udpTotal          atomic.Int64
-+	bytesUp, bytesDown         atomic.Int64
++	tcpOpen, tcpTotal, tcpFail, tcpReset atomic.Int64
++	udpOpen, udpTotal, udpFlows          atomic.Int64
++	bytesUp, bytesDown                   atomic.Int64
 +}
 +
 +type splitEngine struct {
@@ -345,6 +374,11 @@ index 0000000..2f6007f
 +	outMu sync.Mutex // текущая обёртка TUN для пакетов от стека к системе
 +	out   tun.Device
 +
++	tcpMu    sync.Mutex
++	tcpFlows map[*tcpFlow]struct{}
++
++	udpIdle time.Duration // простой потока UDP до закрытия (тесты ставят меньше)
++
 +	udpMu   sync.Mutex
 +	udpSess map[netip.AddrPort]*udpSession
 +
@@ -356,7 +390,8 @@ index 0000000..2f6007f
 +}
 +
 +func newSplitEngine(set *prefixSet, mtu uint32) *splitEngine {
-+	e := &splitEngine{udpSess: make(map[netip.AddrPort]*udpSession)}
++	e := &splitEngine{udpSess: make(map[netip.AddrPort]*udpSession), tcpFlows: make(map[*tcpFlow]struct{}),
++		udpIdle: directUDPIdle}
 +	e.set.Store(set)
 +	e.ctx, e.cancel = context.WithCancel(context.Background())
 +	e.dialTCP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
@@ -386,12 +421,16 @@ index 0000000..2f6007f
 +	moderate := tcpip.TCPModerateReceiveBufferOption(true)
 +	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &moderate)
 +	// Буферы меньше умолчаний gVisor (1 МиБ): «сеть» между ядром iOS и стеком — память процесса,
-+	// большие окна ничего не дают, а расширение ограничено 50 МБ. Потолок на соединение —
-+	// 256 КиБ в каждую сторону: два десятка одновременно загруженных соединений остаются в 10 МБ.
-+	rcv := tcpip.TCPReceiveBufferSizeRangeOption{Min: 4 << 10, Default: 64 << 10, Max: 256 << 10}
++	// большие окна ничего не дают, а расширение ограничено 50 МБ. Замер: при потолке 256 КиБ
++	// соединение, из которого приложение перестало читать, держит около 218 КиБ.
++	rcv := tcpip.TCPReceiveBufferSizeRangeOption{Min: 4 << 10, Default: 32 << 10, Max: directTCPSockBuf}
 +	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &rcv)
-+	snd := tcpip.TCPSendBufferSizeRangeOption{Min: 4 << 10, Default: 64 << 10, Max: 256 << 10}
++	snd := tcpip.TCPSendBufferSizeRangeOption{Min: 4 << 10, Default: 32 << 10, Max: directTCPSockBuf}
 +	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &snd)
++	// Закрытые сервером соединения не должны минуту занимать память (умолчание 60 с): пути между
++	// ядром и стеком нет, запоздавших сегментов не бывает.
++	timeWait := tcpip.TCPTimeWaitTimeoutOption(directTCPTimeWait)
++	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &timeWait)
 +
 +	e.ep = channel.New(directQueueDepth, mtu, "")
 +	e.st.CreateNIC(directNICID, e.ep)
@@ -403,7 +442,7 @@ index 0000000..2f6007f
 +		{Destination: header.IPv6EmptySubnet, NIC: directNICID},
 +	})
 +	e.st.SetTransportProtocolHandler(tcp.ProtocolNumber,
-+		tcp.NewForwarder(e.st, 0, directTCPMaxFlows, e.handleTCP).HandlePacket)
++		tcp.NewForwarder(e.st, 0, directTCPMaxInFlight, e.handleTCP).HandlePacket)
 +	e.st.SetTransportProtocolHandler(udp.ProtocolNumber,
 +		udp.NewForwarder(e.st, e.handleUDP).HandlePacket)
 +	go e.pumpToSystem()
@@ -441,9 +480,24 @@ index 0000000..2f6007f
 +
 +func (e *splitEngine) statsLine() string {
 +	s := &e.stats
-+	return fmt.Sprintf("tcp=%d/%d fail=%d udp=%d/%d up=%d down=%d",
-+		s.tcpOpen.Load(), s.tcpTotal.Load(), s.tcpFail.Load(),
-+		s.udpOpen.Load(), s.udpTotal.Load(), s.bytesUp.Load(), s.bytesDown.Load())
++	return fmt.Sprintf("tcp=%d/%d fail=%d reset=%d udp=%d/%d flows=%d up=%d down=%d",
++		s.tcpOpen.Load(), s.tcpTotal.Load(), s.tcpFail.Load(), s.tcpReset.Load(),
++		s.udpOpen.Load(), s.udpTotal.Load(), s.udpFlows.Load(), s.bytesUp.Load(), s.bytesDown.Load())
++}
++
++// resetTCPFlows: сбросить все прямые соединения TCP (приложению уходит RST).
++func (e *splitEngine) resetTCPFlows() int {
++	e.tcpMu.Lock()
++	flows := make([]*tcpFlow, 0, len(e.tcpFlows))
++	for f := range e.tcpFlows {
++		flows = append(flows, f)
++	}
++	e.tcpMu.Unlock()
++	for _, f := range flows {
++		f.abort()
++	}
++	e.stats.tcpReset.Add(int64(len(flows)))
++	return len(flows)
 +}
 +
 +// inject: пакет приложения — в стек (стек забирает копию).
@@ -488,17 +542,28 @@ index 0000000..2f6007f
 +
 +var tcpBufPool = sync.Pool{New: func() any { b := make([]byte, directTCPBuf); return &b }}
 +
++// tcpFlow: ручка для сброса соединения снаружи (смена сети).
++type tcpFlow struct {
++	kill chan struct{}
++	once sync.Once
++}
++
++func (f *tcpFlow) abort() { f.once.Do(func() { close(f.kill) }) }
++
 +// handleTCP: SYN приложения к прямому адресу. Сначала наружное соединение, потом ответ
 +// приложению: отказ снаружи приложение видит как обычный отказ (RST), а не как зависание.
 +func (e *splitEngine) handleTCP(r *tcp.ForwarderRequest) {
 +	id := r.ID()
 +	dst := addrPortOf(id.LocalAddress, id.LocalPort)
 +	e.stats.tcpTotal.Add(1)
-+	if e.stats.tcpOpen.Load() >= directTCPMaxFlows {
++	// Предел считает и соединения, которые ещё устанавливаются.
++	if e.stats.tcpOpen.Add(1) > directTCPMaxFlows {
++		e.stats.tcpOpen.Add(-1)
 +		e.stats.tcpFail.Add(1)
 +		r.Complete(true)
 +		return
 +	}
++	defer e.stats.tcpOpen.Add(-1)
 +	ctx, cancel := context.WithTimeout(e.ctx, directDialTimeout)
 +	remote, err := e.dialTCP(ctx, e.mapOut(dst))
 +	cancel()
@@ -515,27 +580,36 @@ index 0000000..2f6007f
 +		remote.Close()
 +		return
 +	}
-+	// Приложение исчезло без FIN — соединение не висит вечно.
++	// Приложение исчезло без FIN — пробы это обнаружат, соединение не висит вечно.
 +	ep.SocketOptions().SetKeepAlive(true)
 +	idle := tcpip.KeepaliveIdleOption(10 * time.Minute)
 +	ep.SetSockOpt(&idle)
++	interval := tcpip.KeepaliveIntervalOption(30 * time.Second)
++	ep.SetSockOpt(&interval)
++	ep.SetSockOptInt(tcpip.KeepaliveCountOption, 4)
 +	local := gonet.NewTCPConn(&wq, ep)
-+	e.stats.tcpOpen.Add(1)
-+	e.relayTCP(local, ep, &wq, remote)
-+	e.stats.tcpOpen.Add(-1)
++	flow := &tcpFlow{kill: make(chan struct{})}
++	e.tcpMu.Lock()
++	e.tcpFlows[flow] = struct{}{}
++	e.tcpMu.Unlock()
++	e.relayTCP(flow, local, ep, &wq, remote)
++	e.tcpMu.Lock()
++	delete(e.tcpFlows, flow)
++	e.tcpMu.Unlock()
 +}
 +
 +type closeWriter interface{ CloseWrite() error }
 +
-+func (e *splitEngine) relayTCP(local *gonet.TCPConn, ep tcpip.Endpoint, wq *waiter.Queue, remote net.Conn) {
-+	type result struct {
-+		up  bool
-+		err error
-+	}
-+	done := make(chan result, 2)
++// relayEnd: чем закончилось одно направление. err == nil — сторона штатно закрыла запись.
++// outer — ошибку дала наружная сторона (сеть), иначе сторона приложения.
++type relayEnd struct {
++	err   error
++	outer bool
++}
++
++func (e *splitEngine) relayTCP(flow *tcpFlow, local *gonet.TCPConn, ep tcpip.Endpoint, wq *waiter.Queue, remote net.Conn) {
++	done := make(chan relayEnd, 2)
 +	stop := make(chan struct{})
-+	var last atomic.Int64 // время последнего байта в любую сторону
-+	last.Store(time.Now().UnixNano())
 +
 +	// приложение -> сеть: буфер берём только когда есть что читать (простой не держит память)
 +	go func() {
@@ -550,11 +624,10 @@ index 0000000..2f6007f
 +				_, werr := remote.Write((*bp)[:res.Count])
 +				tcpBufPool.Put(bp)
 +				if werr != nil {
-+					done <- result{true, werr}
++					done <- relayEnd{werr, true}
 +					return
 +				}
 +				e.stats.bytesUp.Add(int64(res.Count))
-+				last.Store(time.Now().UnixNano())
 +				continue
 +			}
 +			tcpBufPool.Put(bp)
@@ -564,19 +637,16 @@ index 0000000..2f6007f
 +					continue
 +				case <-stop:
 +					return
-+				case <-e.ctx.Done():
-+					done <- result{true, context.Canceled}
-+					return
 +				}
 +			}
 +			if _, ok := rerr.(*tcpip.ErrClosedForReceive); ok {
 +				if cw, ok := remote.(closeWriter); ok {
 +					cw.CloseWrite()
 +				}
-+				done <- result{true, nil}
++				done <- relayEnd{nil, false}
 +				return
 +			}
-+			done <- result{true, errors.New(rerr.String())}
++			done <- relayEnd{errors.New(rerr.String()), false}
 +			return
 +		}
 +	}()
@@ -589,80 +659,92 @@ index 0000000..2f6007f
 +			n, rerr := remote.Read(*bp)
 +			if n > 0 {
 +				if _, werr := local.Write((*bp)[:n]); werr != nil {
-+					done <- result{false, werr}
++					done <- relayEnd{werr, false}
 +					return
 +				}
 +				e.stats.bytesDown.Add(int64(n))
-+				last.Store(time.Now().UnixNano())
 +			}
 +			if rerr != nil {
 +				if rerr == io.EOF {
 +					local.CloseWrite()
-+					done <- result{false, nil}
++					done <- relayEnd{nil, true}
 +				} else {
-+					done <- result{false, rerr}
++					done <- relayEnd{rerr, true}
 +				}
 +				return
 +			}
 +		}
 +	}()
 +
-+	first := <-done
-+	if first.err == nil {
-+		// Одна сторона закрыла запись штатно — вторая дорабатывает, пока по ней идут данные.
-+		timer := time.NewTimer(directHalfCloseTTL)
-+	wait:
-+		for {
++	// Обрыв передаётся обрывом: сеть оборвала — приложению RST; приложение оборвало — RST серверу.
++	// Штатное закрытие записи одной стороной оставляет вторую работать сколько нужно (у ядра
++	// предела нет); исчезнувшее приложение ловят пробы keepalive.
++	resetApp, resetOuter := false, false
++	blame := func(end relayEnd) {
++		if end.err == nil {
++			return
++		}
++		if end.outer {
++			resetApp = true
++		} else {
++			resetOuter = true
++		}
++	}
++	select {
++	case first := <-done:
++		blame(first)
++		if first.err == nil {
 +			select {
 +			case second := <-done:
-+				if second.err != nil && !second.up {
-+					abortTCP(ep)
-+				}
-+				break wait
-+			case <-timer.C:
-+				idle := time.Duration(time.Now().UnixNano() - last.Load())
-+				if idle >= directHalfCloseTTL {
-+					break wait
-+				}
-+				timer.Reset(directHalfCloseTTL - idle)
++				blame(second)
++			case <-flow.kill:
++				resetApp = true
 +			case <-e.ctx.Done():
-+				break wait
 +			}
 +		}
-+		timer.Stop()
-+	} else if !first.up {
-+		// Сеть оборвала соединение — приложению RST, а не «чистое» закрытие.
-+		abortTCP(ep)
++	case <-flow.kill:
++		resetApp = true
++	case <-e.ctx.Done():
 +	}
 +	close(stop)
++	if resetApp {
++		ep.SocketOptions().SetLinger(tcpip.LingerOption{Enabled: true, Timeout: 0})
++	}
++	if tc, ok := remote.(*net.TCPConn); ok && resetOuter {
++		tc.SetLinger(0)
++	}
 +	remote.Close()
 +	local.Close()
 +}
 +
-+func abortTCP(ep tcpip.Endpoint) {
-+	ep.SocketOptions().SetLinger(tcpip.LingerOption{Enabled: true, Timeout: 0})
-+}
-+
 +// ── UDP ───────────────────────────────────────────────────────────────────────────────────────
 +
++// udpFlow: конечная точка стека для одной пары «порт приложения — адрес сервера»: от её имени
++// приложению уходят ответы этого сервера.
++type udpFlow struct {
++	conn *gonet.UDPConn
++	last atomic.Int64
++	done chan struct{}
++	once sync.Once
++}
++
++func (f *udpFlow) stop() {
++	f.once.Do(func() { close(f.done) })
++	f.conn.Close()
++}
++
 +// udpSession: один наружный сокет на порт приложения (как NAT с отображением, не зависящим от
-+// адреса назначения). flows: адрес сервера -> конечная точка стека, от имени которой приложению
-+// уходят ответы этого сервера.
++// адреса назначения).
 +type udpSession struct {
 +	engine *splitEngine
 +	key    netip.AddrPort
 +	out    *net.UDPConn
++	raw    syscall.RawConn
 +	last   atomic.Int64
 +
 +	mu     sync.Mutex
-+	flows  map[netip.AddrPort]*gonet.UDPConn
++	flows  map[netip.AddrPort]*udpFlow
 +	closed bool
-+}
-+
-+func (s *udpSession) touch() { s.last.Store(time.Now().UnixNano()) }
-+
-+func (s *udpSession) idleFor() time.Duration {
-+	return time.Duration(time.Now().UnixNano() - s.last.Load())
 +}
 +
 +func (s *udpSession) close() {
@@ -681,22 +763,24 @@ index 0000000..2f6007f
 +	}
 +	s.engine.udpMu.Unlock()
 +	s.out.Close()
-+	for _, c := range flows {
-+		c.Close()
++	for _, f := range flows {
++		f.stop()
 +	}
++	s.engine.stats.udpFlows.Add(-int64(len(flows)))
 +	s.engine.stats.udpOpen.Add(-1)
 +}
 +
 +// removeFlow: поток закрыт; сессия без потоков закрывается целиком.
-+func (s *udpSession) removeFlow(dst netip.AddrPort, c *gonet.UDPConn) {
++func (s *udpSession) removeFlow(dst netip.AddrPort, f *udpFlow) {
 +	s.mu.Lock()
 +	empty := false
-+	if !s.closed && s.flows[dst] == c {
++	if !s.closed && s.flows[dst] == f {
 +		delete(s.flows, dst)
++		s.engine.stats.udpFlows.Add(-1)
 +		empty = len(s.flows) == 0
 +	}
 +	s.mu.Unlock()
-+	c.Close()
++	f.stop()
 +	if empty {
 +		s.close()
 +	}
@@ -725,8 +809,16 @@ index 0000000..2f6007f
 +	if err != nil {
 +		return nil
 +	}
-+	s := &udpSession{engine: e, key: src, out: out, flows: make(map[netip.AddrPort]*gonet.UDPConn)}
-+	s.touch()
++	raw, err := out.SyscallConn()
++	if err != nil {
++		out.Close()
++		return nil
++	}
++	// У darwin датаграмм по умолчанию не длиннее 9216 байт (net.inet.udp.maxdgram); приложение,
++	// поднявшее свой предел, должно пройти и через наш сокет. Это предел, а не выделение памяти.
++	out.SetWriteBuffer(128 << 10)
++	s := &udpSession{engine: e, key: src, out: out, raw: raw, flows: make(map[netip.AddrPort]*udpFlow)}
++	s.last.Store(mono())
 +	e.udpSess[src] = s
 +	e.stats.udpOpen.Add(1)
 +	e.stats.udpTotal.Add(1)
@@ -745,38 +837,73 @@ index 0000000..2f6007f
 +	if terr != nil {
 +		return true
 +	}
-+	local := gonet.NewUDPConn(&wq, ep)
++	flow := &udpFlow{conn: gonet.NewUDPConn(&wq, ep), done: make(chan struct{})}
++	flow.last.Store(mono())
 +	sess := e.udpSessionFor(src)
 +	if sess == nil {
-+		local.Close()
++		flow.stop()
 +		return true
 +	}
++	var victims []*udpFlow
 +	sess.mu.Lock()
 +	if sess.closed {
 +		sess.mu.Unlock()
-+		local.Close()
++		flow.stop()
 +		return true
 +	}
-+	old := sess.flows[dst]
-+	sess.flows[dst] = local
-+	sess.mu.Unlock()
-+	if old != nil {
-+		old.Close()
++	if old := sess.flows[dst]; old != nil {
++		delete(sess.flows, dst)
++		e.stats.udpFlows.Add(-1)
++		victims = append(victims, old)
 +	}
-+	go sess.pumpUp(dst, local, ep, &wq)
++	if len(sess.flows) >= directUDPFlowsPerSess {
++		// Один сокет приложения пишет на много адресов (DHT, перебор кандидатов): место
++		// освобождает самый давний по активности поток этого сокета.
++		var oldestDst netip.AddrPort
++		var oldest *udpFlow
++		for d, f := range sess.flows {
++			if oldest == nil || f.last.Load() < oldest.last.Load() {
++				oldestDst, oldest = d, f
++			}
++		}
++		delete(sess.flows, oldestDst)
++		e.stats.udpFlows.Add(-1)
++		victims = append(victims, oldest)
++	}
++	refused := e.stats.udpFlows.Load() >= directUDPMaxFlows
++	if !refused {
++		sess.flows[dst] = flow
++		e.stats.udpFlows.Add(1)
++	}
++	empty := refused && len(sess.flows) == 0
++	sess.mu.Unlock()
++	for _, v := range victims {
++		v.stop()
++	}
++	if refused {
++		flow.stop()
++		if empty {
++			sess.close()
++		}
++		return true
++	}
++	sess.last.Store(mono())
++	go sess.pumpUp(dst, flow, ep, &wq)
 +	return true
 +}
 +
 +var udpBufPool = sync.Pool{New: func() any { b := make([]byte, 65535); return &b }}
 +
 +// pumpUp: приложение -> сервер. Буфер на полный датаграмм берётся только на время чтения.
-+func (s *udpSession) pumpUp(dst netip.AddrPort, local *gonet.UDPConn, ep tcpip.Endpoint, wq *waiter.Queue) {
-+	defer s.removeFlow(dst, local)
++// Простой считается по потоку: молчащий адрес не живёт за счёт соседей по сокету.
++func (s *udpSession) pumpUp(dst netip.AddrPort, f *udpFlow, ep tcpip.Endpoint, wq *waiter.Queue) {
++	defer s.removeFlow(dst, f)
 +	entry, notify := waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventHUp | waiter.EventErr)
 +	wq.EventRegister(&entry)
 +	defer wq.EventUnregister(&entry)
 +	target := net.UDPAddrFromAddrPort(s.engine.mapOut(dst))
-+	timer := time.NewTimer(directUDPIdle)
++	idleLimit := s.engine.udpIdle
++	timer := time.NewTimer(idleLimit)
 +	defer timer.Stop()
 +	for {
 +		bp := udpBufPool.Get().(*[]byte)
@@ -786,9 +913,16 @@ index 0000000..2f6007f
 +			_, werr := s.out.WriteToUDP((*bp)[:res.Count], target)
 +			udpBufPool.Put(bp)
 +			if werr != nil {
-+				return
++				if errors.Is(werr, net.ErrClosed) {
++					return
++				}
++				// Разовый отказ отправки (смена сети, переполнение) — потерянный датаграмм, а не
++				// конец потока: наружный порт обязан остаться тем же.
++				continue
 +			}
-+			s.touch()
++			now := mono()
++			f.last.Store(now)
++			s.last.Store(now)
 +			s.engine.stats.bytesUp.Add(int64(res.Count))
 +			continue
 +		}
@@ -799,39 +933,91 @@ index 0000000..2f6007f
 +		select {
 +		case <-notify:
 +		case <-timer.C:
-+			if s.idleFor() >= directUDPIdle {
++			idle := time.Duration(mono() - f.last.Load())
++			if idle >= idleLimit {
 +				return
 +			}
-+			timer.Reset(directUDPIdle)
++			timer.Reset(idleLimit - idle)
++		case <-f.done:
++			return
 +		case <-s.engine.ctx.Done():
 +			return
 +		}
 +	}
 +}
 +
++func addrPortOfSockaddr(sa unix.Sockaddr) (netip.AddrPort, bool) {
++	switch a := sa.(type) {
++	case *unix.SockaddrInet4:
++		return netip.AddrPortFrom(netip.AddrFrom4(a.Addr), uint16(a.Port)), true
++	case *unix.SockaddrInet6:
++		return netip.AddrPortFrom(netip.AddrFrom16(a.Addr).Unmap(), uint16(a.Port)), true
++	}
++	return netip.AddrPort{}, false
++}
++
 +// pumpDown: сервер -> приложение. Ответ принимается только от адреса, на который приложение
-+// уже писало с этого порта.
++// уже писало с этого порта. Буфер на полный датаграмм берётся, когда сокет готов к чтению:
++// простаивающая сессия памяти не держит, большой ответ не обрезается.
 +func (s *udpSession) pumpDown() {
 +	defer s.close()
-+	buf := make([]byte, directUDPBuf)
++	failures := 0
 +	for {
-+		n, from, err := s.out.ReadFromUDPAddrPort(buf)
++		var (
++			bp   *[]byte
++			n    int
++			sa   unix.Sockaddr
++			rerr error
++		)
++		err := s.raw.Read(func(fd uintptr) bool {
++			bp = udpBufPool.Get().(*[]byte)
++			for {
++				n, sa, rerr = unix.Recvfrom(int(fd), *bp, 0)
++				if rerr != unix.EINTR {
++					break
++				}
++			}
++			if rerr == unix.EAGAIN {
++				udpBufPool.Put(bp)
++				bp = nil
++				return false
++			}
++			return true
++		})
 +		if err != nil {
++			if bp != nil {
++				udpBufPool.Put(bp)
++			}
 +			return
 +		}
-+		from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
-+		remote := s.engine.mapIn(from)
-+		s.mu.Lock()
-+		local := s.flows[remote]
-+		s.mu.Unlock()
-+		if local == nil {
++		if rerr != nil {
++			// Ошибка приёма без закрытия сокета — например, отложенный отказ от закрытого порта
++			// сервера. Сессию она не рвёт (наружный порт обязан остаться тем же); серия подряд
++			// притормаживается, чтобы не крутиться вхолостую.
++			udpBufPool.Put(bp)
++			if failures++; failures > 32 {
++				time.Sleep(20 * time.Millisecond)
++			}
 +			continue
 +		}
-+		if _, werr := local.Write(buf[:n]); werr != nil {
-+			continue
++		failures = 0
++		if rerr == nil {
++			if from, ok := addrPortOfSockaddr(sa); ok {
++				remote := s.engine.mapIn(from)
++				s.mu.Lock()
++				f := s.flows[remote]
++				s.mu.Unlock()
++				if f != nil {
++					if _, werr := f.conn.Write((*bp)[:n]); werr == nil {
++						now := mono()
++						f.last.Store(now)
++						s.last.Store(now)
++						s.engine.stats.bytesDown.Add(int64(n))
++					}
++				}
++			}
 +		}
-+		s.touch()
-+		s.engine.stats.bytesDown.Add(int64(n))
++		udpBufPool.Put(bp)
 +	}
 +}
 +
@@ -881,10 +1067,10 @@ index 0000000..2f6007f
 +}
 diff --git a/Sources/WireGuardKitGo/directsplit_test.go b/Sources/WireGuardKitGo/directsplit_test.go
 new file mode 100644
-index 0000000..4ebdc37
+index 0000000..ea6a4db
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/directsplit_test.go
-@@ -0,0 +1,613 @@
+@@ -0,0 +1,766 @@
 +/* AVPN (Tribe): тесты разделения в расширении (directsplit.go). «Телефон» — второй стек gVisor
 + * с адресом клиента туннеля; между ним и обёрткой стоит поддельный TUN. Наружные серверы —
 + * обычные сокеты на 127.0.0.1 / ::1, адреса назначения переводятся швами mapOut/mapIn.
@@ -1160,6 +1346,7 @@ index 0000000..4ebdc37
 +	if err != nil {
 +		t.Fatalf("udp listen: %v", err)
 +	}
++	c.SetWriteBuffer(128 << 10) // darwin: датаграмм по умолчанию не длиннее 9216 байт
 +	e := &udpEcho{conn: c}
 +	t.Cleanup(func() { c.Close() })
 +	go func() {
@@ -1292,11 +1479,12 @@ index 0000000..4ebdc37
 +		c.Close()
 +		t.Fatal("dial to a refusing destination succeeded")
 +	}
-+	if d := time.Since(start); d > 2*time.Second {
++	if d := time.Since(start); d > 3*time.Second {
 +		t.Fatalf("refusal took %v: the app must see a reset, not a hang", d)
 +	}
-+	if got := b.engine.stats.tcpFail.Load(); got != 1 {
-+		t.Fatalf("tcpFail = %d, want 1", got)
++	// Под нагрузкой телефон успевает повторить SYN — отказов может быть два.
++	if got := b.engine.stats.tcpFail.Load(); got < 1 {
++		t.Fatalf("tcpFail = %d, want at least 1", got)
 +	}
 +}
 +
@@ -1398,7 +1586,7 @@ index 0000000..4ebdc37
 +		t.Fatalf("phone udp socket: %v", err)
 +	}
 +	defer c.Close()
-+	msg := make([]byte, 6000) // больше MTU: фрагменты на входе и на выходе
++	msg := make([]byte, 20000) // больше MTU и больше 16 КиБ: фрагменты в обе стороны, без обрезки
 +	rand.Read(msg)
 +	if _, err := c.WriteTo(msg, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("77.88.8.1:9000"))); err != nil {
 +		t.Fatalf("write: %v", err)
@@ -1408,6 +1596,157 @@ index 0000000..4ebdc37
 +	n, _, err := c.ReadFrom(buf)
 +	if err != nil || !bytes.Equal(buf[:n], msg) {
 +		t.Fatalf("large datagram echo: n=%d err=%v", n, err)
++	}
++}
++
++// Сервер оборвал соединение — приложение должно увидеть обрыв, а не штатное закрытие.
++func TestDirectTCPServerResetReachesApp(t *testing.T) {
++	b := newBench(t)
++	ln, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	go func() {
++		c, err := ln.Accept()
++		if err != nil {
++			return
++		}
++		buf := make([]byte, 16)
++		c.Read(buf)
++		c.(*net.TCPConn).SetLinger(0)
++		c.Close()
++	}()
++	b.route("5.255.255.13:443", ln.Addr())
++	c, err := b.ph.dialTCP(t, "5.255.255.13:443", 5*time.Second)
++	if err != nil {
++		t.Fatalf("dial: %v", err)
++	}
++	defer c.Close()
++	c.Write([]byte("hello"))
++	c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	_, rerr := io.ReadAll(c)
++	if rerr == nil {
++		t.Fatal("server reset reached the app as a clean close")
++	}
++	if !strings.Contains(rerr.Error(), "reset") {
++		t.Fatalf("app saw %v, want a connection reset", rerr)
++	}
++}
++
++// Смена сети: прямые соединения TCP сбрасываются, приложение узнаёт об этом сразу.
++func TestDirectTCPPathChangeResetsFlows(t *testing.T) {
++	b := newBench(t)
++	ln := echoTCP(t, "tcp4", "127.0.0.1:0")
++	b.route("5.255.255.14:443", ln.Addr())
++	c, err := b.ph.dialTCP(t, "5.255.255.14:443", 5*time.Second)
++	if err != nil {
++		t.Fatalf("dial: %v", err)
++	}
++	defer c.Close()
++	c.Write([]byte("x"))
++	buf := make([]byte, 1)
++	c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	if _, err := io.ReadFull(c, buf); err != nil {
++		t.Fatalf("echo before the path change: %v", err)
++	}
++	if n := b.engine.resetTCPFlows(); n != 1 {
++		t.Fatalf("reset %d flows, want 1", n)
++	}
++	c.SetReadDeadline(time.Now().Add(3 * time.Second))
++	_, rerr := c.Read(buf)
++	if rerr == nil || !strings.Contains(rerr.Error(), "reset") {
++		t.Fatalf("after the path change the app saw %v, want a connection reset", rerr)
++	}
++	deadline := time.Now().Add(2 * time.Second)
++	for b.engine.stats.tcpOpen.Load() != 0 && time.Now().Before(deadline) {
++		time.Sleep(10 * time.Millisecond)
++	}
++	if got := b.engine.stats.tcpOpen.Load(); got != 0 {
++		t.Fatalf("tcpOpen = %d after reset", got)
++	}
++}
++
++// Один сокет приложения пишет на много адресов: потоки ограничены и истекают по своему простою.
++func TestDirectUDPFlowCapAndIdle(t *testing.T) {
++	b := newBench(t)
++	b.engine.udpIdle = 300 * time.Millisecond
++	local, _ := fullAddr(netip.AddrPortFrom(phoneV4, 40002))
++	c, err := gonet.DialUDP(b.ph.st, &local, nil, ipv4.ProtocolNumber)
++	if err != nil {
++		t.Fatalf("phone udp socket: %v", err)
++	}
++	defer c.Close()
++	for i := 0; i < directUDPFlowsPerSess+40; i++ {
++		dst := netip.AddrPortFrom(netip.AddrFrom4([4]byte{77, 88, 1, byte(i + 1)}), 9000)
++		if _, err := c.WriteTo([]byte("x"), net.UDPAddrFromAddrPort(dst)); err != nil {
++			t.Fatalf("write %d: %v", i, err)
++		}
++	}
++	// Датаграммы идут через два стека, под детектором гонок это заметно медленнее: следим за
++	// счётчиками всё время, а не в один момент.
++	maxFlows, maxSess := int64(0), int64(0)
++	deadline := time.Now().Add(15 * time.Second)
++	for time.Now().Before(deadline) {
++		flows, sess := b.engine.stats.udpFlows.Load(), b.engine.stats.udpOpen.Load()
++		maxFlows, maxSess = max(maxFlows, flows), max(maxSess, sess)
++		if b.engine.stats.udpTotal.Load() > 0 && sess == 0 && flows == 0 {
++			break
++		}
++		time.Sleep(2 * time.Millisecond)
++	}
++	if maxFlows < 1 || maxFlows > directUDPFlowsPerSess {
++		t.Fatalf("max udp flows = %d, want 1..%d (%s)", maxFlows, directUDPFlowsPerSess, b.engine.statsLine())
++	}
++	if maxSess != 1 || b.engine.stats.udpTotal.Load() != 1 {
++		t.Fatalf("udp sessions: max %d, total %d, want 1 and 1", maxSess, b.engine.stats.udpTotal.Load())
++	}
++	if flows, sess := b.engine.stats.udpFlows.Load(), b.engine.stats.udpOpen.Load(); flows != 0 || sess != 0 {
++		t.Fatalf("after idle: flows=%d sessions=%d, want 0 and 0", flows, sess)
++	}
++}
++
++// Разовый отказ отправки не должен менять наружный порт сокета приложения.
++func TestDirectUDPSendErrorKeepsOuterPort(t *testing.T) {
++	b := newBench(t)
++	s := echoUDP(t)
++	b.route("77.88.8.3:9000", s.conn.LocalAddr())
++	// Адрес, на который сокет udp4 отправить не может: отправка вернёт ошибку.
++	bad := netip.MustParseAddrPort("77.88.8.4:9000")
++	b.mu.Lock()
++	b.out[bad] = netip.MustParseAddrPort("[2001:db8::1]:9")
++	b.mu.Unlock()
++	local, _ := fullAddr(netip.AddrPortFrom(phoneV4, 40003))
++	c, err := gonet.DialUDP(b.ph.st, &local, nil, ipv4.ProtocolNumber)
++	if err != nil {
++		t.Fatalf("phone udp socket: %v", err)
++	}
++	defer c.Close()
++	good := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("77.88.8.3:9000"))
++	roundTrip := func() {
++		t.Helper()
++		if _, err := c.WriteTo([]byte("ping"), good); err != nil {
++			t.Fatalf("write: %v", err)
++		}
++		buf := make([]byte, 64)
++		c.SetReadDeadline(time.Now().Add(5 * time.Second))
++		if _, _, err := c.ReadFrom(buf); err != nil {
++			t.Fatalf("no reply: %v", err)
++		}
++	}
++	roundTrip()
++	c.WriteTo([]byte("lost"), net.UDPAddrFromAddrPort(bad))
++	c.WriteTo([]byte("lost"), net.UDPAddrFromAddrPort(bad))
++	time.Sleep(100 * time.Millisecond)
++	roundTrip()
++	s.mu.Lock()
++	first, last := s.from[0], s.from[len(s.from)-1]
++	s.mu.Unlock()
++	if first.Port() != last.Port() {
++		t.Fatalf("outer port changed after a failed send: %d -> %d", first.Port(), last.Port())
++	}
++	if got := b.engine.stats.udpOpen.Load(); got != 1 {
++		t.Fatalf("udp sessions = %d, want 1", got)
 +	}
 +}
 +
@@ -1499,10 +1838,10 @@ index 0000000..4ebdc37
 +	}
 +}
 diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
-index e4b7d14..35caca7 100644
+index e4b7d14..9f6a601 100644
 --- a/Sources/WireGuardKitGo/wireguard.h
 +++ b/Sources/WireGuardKitGo/wireguard.h
-@@ -40,4 +40,11 @@ extern int32_t wgSetSplitDns(const char *suffixesCsv, const char *directServer,
+@@ -40,4 +40,14 @@ extern int32_t wgSetSplitDns(const char *suffixesCsv, const char *directServer,
                               const char *tunnelServer, const char *clientIp, int32_t enabled,
                               int32_t warmup);
  
@@ -1512,5 +1851,8 @@ index e4b7d14..35caca7 100644
 +extern int32_t wgSetDirectSplit(const char *listPath, int32_t enabled);
 +/* Счётчики прямых соединений для журнала; строку освобождает вызывающий. */
 +extern char *wgDirectSplitStats();
++/* Физическая сеть сменилась (Wi-Fi <-> сотовая): сбросить прямые соединения TCP, чтобы приложения
++ * пересоздали их сразу. Возвращает число сброшенных соединений; без движка — 0. */
++extern int32_t wgDirectSplitPathChanged();
 +
  #endif

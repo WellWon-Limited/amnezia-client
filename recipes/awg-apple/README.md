@@ -151,22 +151,40 @@ one line in `wgTurnOn`.
   untouched. gVisor is already vendored through xray-core; no new module is added.
 - TCP: the forwarder dials the real destination from an ordinary extension socket first and
   completes the app's handshake only after that, so an outside refusal reaches the app as a reset.
-  An outside reset is passed on as a reset. A half-closed flow lives while data moves.
+  A break is passed on as a break in both directions (outside reset -> reset to the app, app reset
+  -> reset to the server); a clean half-close leaves the other direction open with no time limit,
+  as the kernel does. An app that vanished is found by keepalive (10 min idle, 4 probes 30 s apart).
 - UDP: one outer socket per app source address and port (the mapping does not depend on the
-  destination); replies are accepted only from addresses the app has written to; idle 2 min.
+  destination); replies are accepted only from addresses the app has written to. Idle is counted
+  per flow (2 min); a failed send or a deferred receive error drops a datagram, never the session,
+  so the outer port stays the same. The outer socket's datagram limit is raised to 128 KiB (darwin
+  defaults to 9216 bytes) and replies are read into a full-size buffer taken only when the socket
+  is readable.
+- `wgDirectSplitPathChanged()` resets all direct TCP flows (the app gets a reset and reconnects at
+  once). The provider calls it when the physical uplink changes (Wi-Fi <-> cellular): the outer
+  sockets stay on the old interface while the app's side, which runs over the TUN, sees nothing.
 - The engine outlives the device: `wgTurnOff` + `wgTurnOn` on the same TUN (soft restart) keeps
   direct flows. `wgSetDirectSplit(_, 0)` shuts it down.
-- Limits (the extension has 50 MB): 384 TCP flows, 256 UDP sessions (the least recently active one
-  is evicted), TCP buffers 64 KiB default / 256 KiB max per direction, Go soft memory limit 36 MiB
-  (set only when no lower limit is already in place).
-- `wgDirectSplitStats()` returns `tcp=open/total fail=N udp=open/total up=bytes down=bytes` or `off`.
+- Limits (the extension has 50 MB): 192 TCP flows including those still connecting, 64 SYNs in
+  flight, TCP buffers 32 KiB default / 64 KiB max per direction, TIME_WAIT 5 s (default 60 s keeps
+  ~8 KiB per closed flow), 256 UDP sessions (the least recently active one is evicted), 64 flows
+  per session (the least recently active one is evicted), 512 UDP flows in total, Go soft memory
+  limit 36 MiB (set only when no lower limit is already in place).
+- `wgDirectSplitStats()` returns
+  `tcp=open/total fail=N reset=N udp=sessions/total flows=N up=bytes down=bytes` or `off`.
 - The basis is the same as for `dnsfwd.go` and WireGuard's own socket: iOS does not route the
   provider's sockets into its tunnel.
+- Not covered: ICMP to listed addresses stays in the tunnel; the engine keeps the MTU of the first
+  device.
 
 Build gate: `go test -run '^(TestDirect|TestForeign)'` (a second gVisor stack plays the phone; real
 loopback sockets play the servers): range set, classification, TCP echo over IPv4 and IPv6 (2 MiB),
-fast failure on refusal, foreign traffic reaching the tunnel, one outer UDP port for two servers
-with correct reply sources, a datagram above the MTU, a flow surviving a device restart, toggle.
+fast failure on refusal, a server reset reaching the app as a reset, a path change resetting flows,
+foreign traffic reaching the tunnel, one outer UDP port for two servers with correct reply sources,
+a 20 KiB datagram, the per-session flow cap and per-flow idle, the outer port surviving a failed
+send, a flow surviving a device restart, toggle. An independent review (Opus) preceded the merge:
+its three blocking findings (unbounded UDP flows, TCP memory sizing, session torn down by a send
+error) and the reset, path-change, buffer and clock findings are fixed in this patch.
 
 ## Tests
 

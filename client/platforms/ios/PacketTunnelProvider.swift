@@ -71,6 +71,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var didReceiveInitialPathUpdate = false
     private var currentPath: Network.NWPath?
     private var currentPathSignature: String?
+    // AVPN разделение РФ в расширении (§28): последний физический аплинк, для сброса прямых
+    // соединений при его смене. Читается и пишется только на pathMonitorQueue.
+    private var directSplitUplink: String?
     private var pendingOpenVPNReconnectWorkItem: DispatchWorkItem?
     private var pendingNetworkChangeWorkItem: DispatchWorkItem?
     private var isApplyingNetworkChange = false
@@ -135,6 +138,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let hasMeaningfulChange = self.currentPathSignature != signature
             self.currentPathSignature = signature
             self.updateActiveInterfaceIndex(for: path)
+
+            // AVPN разделение РФ в расширении (§28): при смене физического аплинка (Wi-Fi <->
+            // сотовая) наружные сокеты прямых соединений остаются на прежнем интерфейсе, а
+            // приложение этого не видит — его сторона идёт через TUN. Сбрасываем их, приложение
+            // пересоздаёт соединения сразу, как без VPN. «Тот же Wi-Fi пропал и вернулся» подпись
+            // не меняет. Без движка разделения вызов ничего не делает.
+            let uplink = self.uplinkSignature(for: path)
+            if uplink != "none" {
+                if let previous = self.directSplitUplink, previous != uplink {
+                    let reset = wgDirectSplitPathChanged()
+                    if reset > 0 {
+                        wg_log(.info, message: "Tribe direct split: uplink changed, reset \(reset) tcp flows")
+                    }
+                }
+                self.directSplitUplink = uplink
+            }
 
             guard self.didReceiveInitialPathUpdate else {
                 self.didReceiveInitialPathUpdate = true
