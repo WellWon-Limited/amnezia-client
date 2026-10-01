@@ -85,6 +85,23 @@ int main()
               "200 с непустым пулом -> защёлка успеха (дедуп цепочки)");
     }
 
+    // Состояние подписки для UI (жалоба 2026-09-29: до первой подписки шапка писала «∞ · ∞»,
+    // аккаунт — «Безлимит», серверов нет). «Не загружено» ≠ «безлимит»: пока тела нет — Loading,
+    // после kBootstrapOfflineAfterFailures провалов подряд — Offline; любое тело (в т.ч. LKG) — Ready.
+    {
+        using avpn::SubUiState;
+        using avpn::decideSubUiState;
+        CHECK(avpn::kBootstrapOfflineAfterFailures == 2, "нет связи — после 2 провалов подряд");
+        CHECK(decideSubUiState(false, 0) == SubUiState::Loading, "первый запуск, попыток нет -> грузим");
+        CHECK(decideSubUiState(false, 1) == SubUiState::Loading, "один провал -> ещё грузим (холодное радио)");
+        CHECK(decideSubUiState(false, 2) == SubUiState::Offline, "два провала подряд -> нет связи");
+        CHECK(decideSubUiState(false, 50) == SubUiState::Offline, "вечный медленный цикл -> нет связи");
+        CHECK(decideSubUiState(true, 0) == SubUiState::Ready, "тело разобрано -> готово");
+        CHECK(decideSubUiState(true, 7) == SubUiState::Ready,
+              "LKG есть, а сеть падает -> готово (стейл-данные честнее «нет связи»)");
+        CHECK(decideSubUiState(false, -3) == SubUiState::Loading, "мусорный счётчик -> грузим");
+    }
+
     if (failures) {
         std::printf(">>> bootstrap_retry_check: %d FAILURE(S)\n", failures);
         return 1;

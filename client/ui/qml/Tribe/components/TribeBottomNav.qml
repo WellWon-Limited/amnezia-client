@@ -33,7 +33,14 @@ Item {
     readonly property int visibleTabCount: referralVisible ? tabs.length : tabs.length - 1
     readonly property real tabWidth: nav.width / nav.visibleTabCount
 
-    implicitHeight: 72 + bottomInset
+    // AVPN (девайс-фидбек 2026-09-29, iPhone 15 Pro / Air): на iOS меню ОПУЩЕНО целиком на 20pt —
+    // ряд 72 и иконки/подписи того же размера, но нижний пустой паддинг ряда заходит в safe-area:
+    // подписи в 30pt от низа экрана (над home-индикатором ~17pt, как у соседних приложений владельца),
+    // навбар ниже на 20pt — и bottomBlock Главной (карточка/чипы/кнопки) опускается вместе с ним.
+    // Без home-индикатора (inset 0, SE) и на macOS/Android — как было.
+    readonly property int rowHeight: 72
+    readonly property int insetOverlap: Qt.platform.os === "ios" ? 20 : 0
+    implicitHeight: rowHeight + Math.max(0, bottomInset - insetOverlap)
     property real bottomInset: 0   // wired to safe-area by host
 
     // AVPN (haptics, жалоба 2026-07-12): тактильный отклик на ВХОДЯЩЕЕ сообщение поддержки
@@ -68,7 +75,7 @@ Item {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 72
+        height: nav.rowHeight
         Repeater {
             model: nav.tabs
             delegate: Item {

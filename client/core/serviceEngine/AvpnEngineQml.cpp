@@ -1865,6 +1865,17 @@ bool AvpnEngineQml::subMissing() const
            && !m_engine.hasSubscription();
 }
 
+// AVPN (жалоба 2026-09-29): subStatus пуст ровно до первого разобранного тела (живого или LKG).
+bool AvpnEngineQml::subLoaded() const
+{
+    return !m_engine.debugSnapshot().subStatus.isEmpty();
+}
+
+bool AvpnEngineQml::subOffline() const
+{
+    return decideSubUiState(subLoaded(), m_bootstrapRetries) == SubUiState::Offline;
+}
+
 QString AvpnEngineQml::localDeviceId() const
 {
     // installation-UUID из secure-store — стабильный, генерится на первом запуске, тот же уходит
@@ -4415,7 +4426,10 @@ void AvpnEngineQml::bootstrap() // AVPN: Task 11 — живой бейдж (ГБ
     if (m_bootstrapped || m_bootstrapInFlight)
         return;
     m_bootstrapInFlight = true;
+    const bool wasOffline = m_bootstrapRetries >= kBootstrapOfflineAfterFailures;
     m_bootstrapRetries = 0;
+    if (wasOffline)
+        emit changed(); // новая цепочка: «Нет связи» -> «Загрузка…» (subOffline)
 
     // Ключи клиента (zero-knowledge) — для enroll и последующего connect; ошибка не фатальна для бейджа.
     QString err;
@@ -4698,6 +4712,10 @@ void AvpnEngineQml::onBootstrapAttemptFailed()
                               QStringLiteral("whitelist_retry_stretch"), 4)), 20);
     m_bootstrapRetryTimer.start(delayMs);
     ++m_bootstrapRetries;
+    // AVPN (жалоба 2026-09-29): порог «нет связи» пересечён — UI меняет «Загрузка…» на «Нет связи»
+    // (subOffline). Только на переходе: вечный медленный цикл не дёргает биндинги раз в минуту.
+    if (m_bootstrapRetries == kBootstrapOfflineAfterFailures)
+        emit changed();
 }
 
 // AVPN: терминальный исход (410 transferred / невосстановимый 401) — вечный ретрай тут ВРЕДЕН

@@ -108,6 +108,12 @@ PageType {
     // Без него устройство с expires_at:null (daysLeft = -1) не проходило гейт daysLeft >= 0 и
     // вместо CTA видело вечную «загрузку» (ни серверов, ни оффера) до перезахода.
     readonly property bool subMissingNow: root.hasEngine && TribeEngine.subMissing === true
+    // AVPN (жалоба 2026-09-29 «пишет безлимит, а серверов нет»): «не загружено» ≠ «безлимит».
+    // До первого разобранного тела подписки лимит 0 и дни -1 значат «не знаем» — шапка и карточка
+    // говорят «Загрузка…» / «Нет связи»; «∞» остаётся только у ЗАГРУЖЕННОЙ подписки с лимитом 0
+    // (unlimited-группы). dev-превью без движка — как загруженная (литеральные фолбэки).
+    readonly property bool subLoadedNow: !root.hasEngine || TribeEngine.subLoaded === true
+    readonly property bool subOfflineNow: root.hasEngine && TribeEngine.subOffline === true
     // AVPN (sub-grace): движок сам погасил туннель «подписка истекла и грейс прошёл» —
     // подпись у орба показывает причину вместо обычного «Подключиться…». Флаг живёт в движке
     // (сбрасывается явным start()), поэтому переживает пересоздание страницы.
@@ -132,7 +138,8 @@ PageType {
     // иначе «N GB»; хвост «.0» убираем (чтобы влезало в узкое macOS-окно). Двоичная база (ГиБ, бэк подтвердил).
     function fmtTrafficLeft() {
         if (!hasEngine) return "3.2 GB"                // dev-превью: литеральный фолбэк
-        if (!(trafficLimitB > 0)) return "∞"           // безлимит / ещё не загружено (0 или NaN)
+        if (!subLoadedNow) return subOfflineNow ? qsTr("Нет связи") : qsTr("Загрузка…")
+        if (!(trafficLimitB > 0)) return "∞"           // безлимит (подписка загружена, лимит 0)
         var leftB = Math.max(0, trafficLimitB - trafficUsedB)
         if (isNaN(leftB)) return "∞"
         var gib = leftB / 1073741824                   // 1024³
@@ -160,6 +167,8 @@ PageType {
     readonly property bool isMobile: Qt.platform.os === "ios" || Qt.platform.os === "android"
     readonly property real sceneShift: {
         if (!isMobile) return 0
+        // невысокие экраны (15 Pro / 14 и ниже): места под сцену не хватает — сжатие вверх (ниже)
+        if (sceneDeficit > 0) return -sceneOrbSqueeze
         // орб теперь под баннером АнтиВПН: header (safeTop+16+40) + отступ lg (24) + баннер (68)
         // + 56 (кольцо 32 + зазор lg) — база на 72 ниже старой (76)
         var orbBase = safeTop + 16 + 40 + 24 + 68 + 56
@@ -169,6 +178,17 @@ PageType {
         // уже опустил баннер сверху (итого −116)
         return Math.max(0, Math.min(Math.round(root.height * 0.20) - 116, maxShift))
     }
+    // AVPN (девайс-фидбек 2026-09-29, iPhone 15 Pro): подпись «Защита активна…» наезжала на
+    // карточку — формула выше умеет только опускать сцену и при нехватке места давала 0. По РЕАЛЬНОЙ
+    // геометрии: между баннером АнтиВПН и bottomBlock должны влезть отступ орба (32 + lg), орб,
+    // отступ подписи (30), подпись и минимум 16 до карточки. Не влезает — сначала поджимаем отступ
+    // над орбом (до 16), затем отступ подписи (до 16). Большие экраны сюда не попадают (дефицит 0).
+    readonly property real sceneRoom: bottomBlock.y - (autoVpnCard.y + autoVpnCard.height)
+                                      - (32 + Theme.space.lg) - orb.height - 30
+                                      - connectCaption.implicitHeight - 16
+    readonly property real sceneDeficit: isMobile ? Math.max(0, -sceneRoom) : 0
+    readonly property real sceneOrbSqueeze: Math.min(sceneDeficit, 32 + Theme.space.lg - 16)
+    readonly property real sceneCaptionSqueeze: Math.min(sceneDeficit - sceneOrbSqueeze, 30 - 16)
 
     function onOrbClicked() {
         // AVPN (haptics): весомый medium на включение, мягкий light на выключение; arm() взводит
@@ -461,15 +481,17 @@ PageType {
                 radius: Theme.radius.pill
                 color: statMa.containsMouse ? Theme.color.surface2 : Theme.color.surface1
                 border.width: 1
-                border.color: root.subActive ? Theme.color.border : Theme.color.warning
+                // до загрузки подписки рамка нейтральная («Загрузка…»), жёлтая — «Нет связи» и истёкшая
+                border.color: root.subOfflineNow ? Theme.color.warning
+                            : (!root.subLoadedNow || root.subActive) ? Theme.color.border : Theme.color.warning
                 Behavior on color { ColorAnimation { duration: 160 } }
                 Row {
                     id: statRow
                     anchors.centerIn: parent
                     spacing: Theme.space.sm
-                    Text { text: root.fmtTrafficLeft(); color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
-                    Rectangle { width: 3; height: 3; radius: 1.5; color: root.slate500; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: root.daysLeftText; color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: root.fmtTrafficLeft(); color: root.subLoadedNow ? Theme.color.text1 : Theme.color.text2; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                    Rectangle { visible: root.subLoadedNow; width: 3; height: 3; radius: 1.5; color: root.slate500; anchors.verticalCenter: parent.verticalCenter }
+                    Text { visible: root.subLoadedNow; text: root.daysLeftText; color: Theme.color.text1; font.family: Theme.font.mono; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
                 }
                 MouseArea { id: statMa; anchors.fill: parent; hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor; onClicked: root.requestSettings() }
@@ -776,7 +798,7 @@ PageType {
         anchors.horizontalCenter: parent.horizontalCenter
         // мобайл: чуть ниже орба; десктоп: ровно на lg ВЫШЕ карточки — тот же зазор, что чипы↔карточка // AVPN
         anchors.top: root.isMobile ? orb.bottom : undefined
-        anchors.topMargin: 30
+        anchors.topMargin: 30 - root.sceneCaptionSqueeze
         anchors.bottom: root.isMobile ? undefined : bottomBlock.top
         anchors.bottomMargin: Theme.space.lg
         z: 30; horizontalAlignment: Text.AlignHCenter
@@ -884,7 +906,10 @@ PageType {
                             spacing: Theme.space.sm
                             Text {
                                 id: nodeName
-                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region) : qsTr("Умный выбор сервера")
+                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region)
+                                      : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Нет связи с Tribe")
+                                                                                 : qsTr("Загружаем серверы…"))
+                                      : qsTr("Умный выбор сервера")
                                 color: "white"; elide: Text.ElideRight
                                 // оставляем место под бейдж, чтобы имя не наезжало на него
                                 width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
@@ -942,7 +967,10 @@ PageType {
                                            : (msText.visible ? msText.left : parent.right)
                             anchors.rightMargin: (transportBadge.visible || msText.visible) ? Theme.space.md : 0
                             elide: Text.ElideRight
-                            text: root.curNode.hasNode ? ("IP: " + root.curNode.ip) : qsTr("Сервис запускает узел")
+                            text: root.curNode.hasNode ? ("IP: " + root.curNode.ip)
+                                  : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
+                                                                             : qsTr("Секунду…"))
+                                  : qsTr("Сервис запускает узел")
                             color: root.slate500
                             font.family: Theme.font.mono; font.pixelSize: 10
                         }
@@ -965,7 +993,12 @@ PageType {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.requestServerPicker()
+                onClicked: {
+                    // AVPN (жалоба 2026-09-29): без подписки список серверов пуст — тап = «повторить
+                    // сейчас» (kickBootstrap поджимает таймер ретрая), а не переход в пустой пикер.
+                    if (root.subOfflineNow) { Haptic.play("light"); TribeEngine.kickBootstrap(); return }
+                    root.requestServerPicker()
+                }
             }
         }
 

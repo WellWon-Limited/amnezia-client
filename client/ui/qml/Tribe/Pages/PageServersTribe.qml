@@ -550,20 +550,41 @@ PageType {
 
             // пустые состояния: пул не загружен / поиск без результатов (сиблинг ListView —
             // центрируется по вьюпорту, не по нулевому contentItem)
-            Text {
+            Column {
                 anchors.centerIn: parent
+                width: parent.width - 2 * Theme.space.xl
                 visible: list.count === 0
-                // AVPN (баг 2026-07-10): «нет подписки» ≠ «грузится» — при авторитетном пустом
-                // пуле (subMissing: бэк ответил 200 с nodes:[]) честный текст вместо вечной «загрузки».
-                text: root.pool.length === 0
-                          ? ((root.hasEngine && TribeEngine.subMissing === true)
-                                 ? qsTr("Нет активного доступа")
-                                 : qsTr("Локации загружаются…"))
-                          : qsTr("Ничего не найдено")
-                textFormat: Text.PlainText
-                color: Theme.color.text3
-                font.family: Theme.font.body
-                font.pixelSize: Theme.font.bodyS
+                spacing: Theme.space.md
+                // AVPN (жалоба 2026-09-29): подписка ещё не пришла и попытки проваливаются —
+                // честное «нет связи» + ручной повтор вместо вечного «загружаются».
+                readonly property bool offline: root.pool.length === 0 && root.hasEngine
+                                                && TribeEngine.subMissing !== true
+                                                && TribeEngine.subOffline === true
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    // AVPN (баг 2026-07-10): «нет подписки» ≠ «грузится» — при авторитетном пустом
+                    // пуле (subMissing: бэк ответил 200 с nodes:[]) честный текст вместо вечной «загрузки».
+                    text: root.pool.length === 0
+                              ? ((root.hasEngine && TribeEngine.subMissing === true)
+                                     ? qsTr("Нет активного доступа")
+                                     : parent.offline
+                                           ? qsTr("Нет связи с сервером Tribe. Повторяем автоматически")
+                                           : qsTr("Загружаем серверы…"))
+                              : qsTr("Ничего не найдено")
+                    textFormat: Text.PlainText
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS
+                }
+                TribeButton {
+                    visible: parent.offline
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    variant: "glass"
+                    text: qsTr("Повторить")
+                    onClicked: TribeEngine.kickBootstrap()
+                }
             }
         }
     }
