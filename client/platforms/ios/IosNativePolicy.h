@@ -228,6 +228,39 @@ inline bool localStopSupersededByNewSession(const LocalStopInfo &stop, bool obse
 }
 
 // ---------------------------------------------------------------------------------------------
+// On-Demand (2026-09-30, план docs/plans/2026-09-30-ios-internal-error-stop-plan.md). iOS сама
+// останавливает туннель с причиной internalError (17): jetsam убивает системный nesessionmanager.
+// Приложение в этот момент приостановлено и поднять туннель не может; поднять его может только
+// сама iOS по правилу On-Demand. Правило — это сохранённое в системе намерение «VPN включён»:
+//   * взводим ТОЛЬКО для сессии с подтверждённым рукопожатием (иначе iOS бесконечно поднимала бы
+//     туннель к мёртвой ноде, а приложение в фоне его не переключит);
+//   * снимаем ПЕРЕД любым стопом приложения и ждём сохранения — иначе iOS тут же поднимет туннель
+//     заново (документация NEVPNConnection.stopVPNTunnel);
+//   * стоп при уже опущенном туннеле тоже снимает правило (пользователь нажал «выключить», пока
+//     iOS собиралась поднять туннель сама).
+// Так же делают Mullvad и WireGuard для iOS; у апстрима Amnezia правила нет.
+inline bool shouldArmOnDemand(bool haveTunnel, bool sessionConnected, bool managerSaysEnabled,
+                              bool localStopRequested, bool changePending)
+{
+    return haveTunnel && sessionConnected && !managerSaysEnabled && !localStopRequested && !changePending;
+}
+
+// Экземпляр менеджера после реконсила может быть загружен ДО того, как наше сохранение дошло до
+// системы, поэтому кроме его свойства учитываем и собственное знание процесса.
+inline bool stopNeedsOnDemandDisarm(bool managerSaysEnabled, bool armedByThisProcess, bool changePending)
+{
+    return managerSaysEnabled || armedByThisProcess || changePending;
+}
+
+// После снятия правила: гасим, только если стоп всё ещё актуален (не пришла новая операция) и
+// сессия не опущена сама. Для ветки «туннель уже был опущен» это же условие означает «iOS успела
+// поднять его по правилу, пока мы сохраняли».
+inline bool stopAfterOnDemandDisarm(bool operationStillCurrent, SessionPhase phase)
+{
+    return operationStillCurrent && phase != SessionPhase::Down;
+}
+
+// ---------------------------------------------------------------------------------------------
 // K4: ответ NE на {"action":"rebind"}.
 //   {"rebind":"performed"} → true; {"rebind":"denied","reason":...} → false.
 //   Совместимость со старым NE того же бандла: {"ok":Bool} без ключа rebind.

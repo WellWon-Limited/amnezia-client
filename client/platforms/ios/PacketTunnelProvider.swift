@@ -285,12 +285,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                               completionHandler: @escaping ((any Error)?) -> Void) {
         tribeRuntimeGeneration = UUID().uuidString
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
-        TribeSharedState.appGroup?.record(source: "ne", event: "start", fields: ["generation": tribeRuntimeGeneration, "configuration_generation": metadata["generation"] ?? "legacy", "node_id": metadata["node_id"] ?? "unknown", "proto": metadata["proto"] ?? "unknown"])
+        // Кто поднял туннель: приложение и наши команды передают tribeStartSource, iOS (Настройки,
+        // On-Demand после системной остановки) — нет.
+        let startSource = (options?["tribeStartSource"] as? String) ?? "os"
+        TribeSharedState.appGroup?.record(source: "ne", event: "start", fields: ["generation": tribeRuntimeGeneration, "configuration_generation": metadata["generation"] ?? "legacy", "node_id": metadata["node_id"] ?? "unknown", "proto": metadata["proto"] ?? "unknown", "start_source": startSource])
 
         let activationAttemptId = options?[Constants.kActivationAttemptId] as? String
         let errorNotifier = ErrorNotifier(activationAttemptId: activationAttemptId)
 
-        neLog(.info, message: "Start tunnel")
+        neLog(.info, message: "Start tunnel source=\(startSource)")
         if let vpnProto = protocolConfiguration as? NEVPNProtocol {
             if #available(iOS 14.0, macOS 11.0, *) {
                 var details = "includeAllNetworks=\(vpnProto.includeAllNetworks)"

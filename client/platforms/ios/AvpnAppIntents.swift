@@ -124,12 +124,31 @@ private func avpnPerform(pause: Bool) async throws {
                 try operation.check()
             }
         }
+        if pause && manager.isOnDemandEnabled {
+            // On-Demand (2026-09-30): сначала снять правило и дождаться сохранения, иначе iOS
+            // поднимет туннель обратно сразу после паузы.
+            manager.isOnDemandEnabled = false
+            let _: Void = try await operation.wait { finish in
+                manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+            }
+            store.record(source: "intent", event: "on_demand_disarmed", fields: ["generation": generation])
+        }
         try store.locked {
             try operation.check()
             if pause { manager.connection.stopVPNTunnel() }
             else if manager.connection.status == .disconnected || manager.connection.status == .invalid {
-                try manager.connection.startVPNTunnel()
+                try manager.connection.startVPNTunnel(options: ["tribeStartSource": "intent" as NSString])
             }
+        }
+        if !pause && !(manager.onDemandRules ?? []).isEmpty && !manager.isOnDemandEnabled {
+            // Правила есть — приложение уже взводило On-Demand для этого профиля (рабочая сессия),
+            // пауза его сняла. Возвращаем вместе с туннелем; сбой сохранения команду не роняет.
+            manager.isOnDemandEnabled = true
+            let armed: Void? = try? await operation.wait { finish in
+                manager.saveToPreferences { error in finish(error.map { .failure($0) } ?? .success(())) }
+            }
+            store.record(source: "intent", event: armed == nil ? "on_demand_arm_failed" : "on_demand_armed",
+                         fields: ["generation": generation])
         }
         if pause {
             while manager.connection.status != .disconnected && manager.connection.status != .invalid {

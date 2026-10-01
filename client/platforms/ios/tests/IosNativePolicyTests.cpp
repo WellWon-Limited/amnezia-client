@@ -282,8 +282,32 @@ static void testEstablishedSession()
     assert(!showEstablishedAsConnected(false, false, -1));             // время подключения неизвестно
 }
 
+// On-Demand (2026-09-30): правило — только для доказанно рабочей сессии; любой стоп его снимает.
+static void testOnDemandPolicy()
+{
+    using namespace avpn_ios;
+    assert(shouldArmOnDemand(true, true, false, false, false));
+    assert(!shouldArmOnDemand(false, true, false, false, false)); // нет профиля
+    assert(!shouldArmOnDemand(true, false, false, false, false)); // сессия уже не Connected
+    assert(!shouldArmOnDemand(true, true, true, false, false));   // уже взведено
+    assert(!shouldArmOnDemand(true, true, false, true, false));   // приложение гасит туннель
+    assert(!shouldArmOnDemand(true, true, false, false, true));   // взвод уже идёт
+
+    assert(!stopNeedsOnDemandDisarm(false, false, false));        // правила нет — стоп сразу, как раньше
+    assert(stopNeedsOnDemandDisarm(true, false, false));          // взведено прошлым запуском приложения
+    assert(stopNeedsOnDemandDisarm(false, true, false));          // экземпляр менеджера устарел, но мы взводили
+    assert(stopNeedsOnDemandDisarm(false, false, true));          // взвод в полёте
+
+    assert(stopAfterOnDemandDisarm(true, SessionPhase::Live));
+    assert(stopAfterOnDemandDisarm(true, SessionPhase::Starting)); // iOS подняла туннель, пока снимали правило
+    assert(stopAfterOnDemandDisarm(true, SessionPhase::TearingDown));
+    assert(!stopAfterOnDemandDisarm(true, SessionPhase::Down));    // гасить нечего
+    assert(!stopAfterOnDemandDisarm(false, SessionPhase::Live));   // пришла новая операция (Connect)
+}
+
 int main()
 {
+    testOnDemandPolicy();
     testRetryBudget();
     testDisconnectDecision();
     testDisconnectGate();

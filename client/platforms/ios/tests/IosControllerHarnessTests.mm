@@ -104,6 +104,13 @@ QString key_proto_config_data(Proto) { return QStringLiteral("awg_config_data");
 - (void)fetchProductsWithIdentifiers:(NSSet *)ids completion:(void (^)(NSArray *, NSArray *, NSError *))c {}
 @end
 
+// On-Demand: лента вызовов натива ("save:od=0|1", "stop") и программируемый исход сохранения.
+enum class SaveMode { Deliver, Never, ErrorOnce };
+static SaveMode g_saveMode = SaveMode::Deliver;
+static std::vector<std::string> g_nativeLog;
+static std::vector<bool> g_savedEnabled;  // isEnabled экземпляра в момент каждого сохранения
+static int g_prefsEnabled = -1;           // -1 — load ничего не меняет; 0/1 — «в системе профиль (не)активен»
+
 // ------------------------------------------------------------------------------------------------
 // Фейковая сессия NE.
 static void notifyStatus(NETunnelProviderSession *session);
@@ -131,6 +138,7 @@ static void notifyStatus(NETunnelProviderSession *session);
 - (void)stopTunnel
 {
     self.stopCalls = self.stopCalls + 1;
+    g_nativeLog.push_back("stop");
     if (self.stopWritesUserInitiated) {
         // NE записывает .userInitiated и на stopVPNTunnel самого приложения.
         g_lastStop = {{QStringLiteral("generation"), QString::fromNSString(self.runtimeGeneration ?: @"")},
@@ -244,14 +252,23 @@ static void installSwizzles()
     SEL loadAllSel = @selector(loadAllFromPreferencesWithCompletionHandler:);
     class_replaceMethod(meta, loadAllSel, loadAll, method_getTypeEncoding(class_getClassMethod(cls, loadAllSel)));
 
-    IMP save = imp_implementationWithBlock(^(id, void (^completion)(NSError *)) {
+    IMP save = imp_implementationWithBlock(^(id manager, void (^completion)(NSError *)) {
+        g_nativeLog.push_back([(NETunnelProviderManager *)manager isOnDemandEnabled] ? "save:od=1" : "save:od=0");
+        g_savedEnabled.push_back([(NETunnelProviderManager *)manager isEnabled]);
+        if (g_saveMode == SaveMode::Never) return;
+        const bool fail = g_saveMode == SaveMode::ErrorOnce;
+        if (fail) g_saveMode = SaveMode::Deliver;
         void (^c)(NSError *) = [completion copy];
-        QTimer::singleShot(g_saveDelayMs, qApp, [c] { c(nil); [c release]; });
+        QTimer::singleShot(g_saveDelayMs, qApp, [c, fail] {
+            c(fail ? [NSError errorWithDomain:@"harness" code:5 userInfo:nil] : nil);
+            [c release];
+        });
     });
     SEL saveSel = @selector(saveToPreferencesWithCompletionHandler:);
     class_replaceMethod(cls, saveSel, save, method_getTypeEncoding(class_getInstanceMethod(cls, saveSel)));
 
-    IMP load = imp_implementationWithBlock(^(id, void (^completion)(NSError *)) {
+    IMP load = imp_implementationWithBlock(^(id manager, void (^completion)(NSError *)) {
+        if (g_prefsEnabled >= 0) [(NETunnelProviderManager *)manager setEnabled:(g_prefsEnabled == 1)];
         void (^c)(NSError *) = [completion copy];
         QTimer::singleShot(5, qApp, [c] { c(nil); [c release]; });
     });
@@ -537,12 +554,197 @@ static void test_handshake_timeout_stop_not_intentional()
     IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig(150, 2));
     spin(1200);
     CHECK(s.startCalls == 1, "туннель не стартовал");
-    CHECK(s.stopCalls == 1, "после таймаутов рукопожатия нет stopTunnel");
-    CHECK(obs.reasons.size() == 1, "нет причины обрыва");
+    // Волна-3 (5.1.96): натив после фазы старта туннель по таймаутам рукопожатия не гасит — только
+    // Reconnecting; решение (переключить ноду, погасить) принимает фасад. Ожидание этого теста
+    // оставалось от поведения до волны-3.
+    CHECK(s.stopCalls == 0, "натив сам погасил туннель по таймаутам рукопожатия");
+    CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "после таймаутов рукопожатия нет Reconnecting");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "таймауты рукопожатия дали Error");
+    CHECK(obs.reasons.empty(), "причина обрыва при живом туннеле");
+}
+
+// ------------------------------------------------------------------------------------------------
+// On-Demand (2026-09-30).
+static NETunnelProviderManager *managerWithOnDemand(HarnessSession *s, BOOL enabled)
+{
+    NETunnelProviderManager *m = newManager(@"mgr-1", @"cfg-1", s);
+    m.onDemandEnabled = enabled;
+    g_managers = [@[m] retain];
+    g_loadMode = LoadMode::Deliver;
+    return m;
+}
+
+// Сохранение старта идёт БЕЗ правила (даже если оно осталось от прошлой сессии); правило
+// взводится только после подтверждённого рукопожатия.
+static void test_on_demand_armed_after_handshake()
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(NEVPNStatusDisconnected);
+    s.runtimeGeneration = @"run-1";
+    s.statusReply = statusReply(@"run-1", @"cfg-1", 0, 0); // рукопожатия ещё нет
+    NETunnelProviderManager *m = managerWithOnDemand(s, YES);
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll.start(30);
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig(5000, 3));
+    spin(260);
+    CHECK(s.startCalls == 1, "туннель не стартовал");
+    CHECK(!g_nativeLog.empty() && g_nativeLog.front() == "save:od=0", "старт сохранил профиль со взведённым правилом");
+    CHECK(!m.isOnDemandEnabled, "правило взведено до подтверждения рукопожатия");
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(200);
+    CHECK(m.isOnDemandEnabled, "после рукопожатия правило не взведено");
+    CHECK(m.onDemandRules.count == 1 && [m.onDemandRules.firstObject isKindOfClass:[NEOnDemandRuleConnect class]],
+          "нет правила «подключать всегда»");
+    CHECK(!g_nativeLog.empty() && g_nativeLog.back() == "save:od=1", "взвод правила не сохранён");
+    CHECK(s.stopCalls == 0, "взвод правила погасил туннель");
+    const size_t saves = g_nativeLog.size();
+    spin(200);
+    CHECK(g_nativeLog.size() == saves, "правило сохраняется повторно на каждом опросе");
+}
+
+static HarnessSession *liveSessionWithOnDemand(NETunnelProviderManager **manager, NEVPNStatus status = NEVPNStatusConnected)
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(status);
+    s.runtimeGeneration = @"run-1";
+    s.stopWritesUserInitiated = YES;
+    *manager = managerWithOnDemand(s, YES);
+    IosController::Instance()->requestReconcileStatus();
+    spin(60);
+    obs.clear();
+    g_nativeLog.clear();
+    return s;
+}
+
+// Стоп приложения при взведённом правиле: сначала сохранить «правило снято», потом stopTunnel.
+static void test_stop_disarms_on_demand_before_stop()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_saveDelayMs = 80;
+    setIntent("i-off", "off");
+    IosController::Instance()->disconnectVpn();
+    spin(40);
+    CHECK(s.stopCalls == 0, "stopTunnel раньше, чем снято правило: iOS поднимет туннель заново");
+    spin(160);
+    CHECK(s.stopCalls == 1, "stopTunnel не вызван после снятия правила");
+    CHECK(g_nativeLog.size() == 2 && g_nativeLog[0] == "save:od=0" && g_nativeLog[1] == "stop", "порядок: снять правило → stop");
+    CHECK(!m.isOnDemandEnabled, "правило осталось взведённым после стопа");
+    CHECK(obs.has(Vpn::ConnectionState::Disconnected), "нет Disconnected");
+    CHECK(obs.reasons.size() == 1, "причина стопа не одна");
     if (!obs.reasons.empty()) {
-        CHECK(obs.reasons[0].first == QStringLiteral("expected_app_stop"), "стоп по таймаутам не expected_app_stop");
-        CHECK(!obs.reasons[0].second, "стоп по таймаутам рукопожатия помечен intentional");
+        CHECK(obs.reasons[0].first == QStringLiteral("expected_app_stop"), "стоп приложения помечен не expected_app_stop");
+        CHECK(!obs.reasons[0].second, "стоп приложения помечен intentional");
     }
+}
+
+// Правило не взведено — стоп синхронный, без сохранений (поведение до On-Demand).
+static void test_stop_without_on_demand_is_immediate()
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = adoptLiveSession();
+    g_nativeLog.clear();
+    IosController::Instance()->disconnectVpn();
+    CHECK(s.stopCalls == 1, "без правила стоп перестал быть синхронным");
+    spin(80);
+    CHECK(g_nativeLog.size() == 1 && g_nativeLog[0] == "stop", "лишнее сохранение профиля при стопе без правила");
+}
+
+// «Выключить» при уже опущенном туннеле и взведённом правиле (iOS погасила сама): правило снять,
+// гасить нечего.
+static void test_stop_when_down_disarms_on_demand()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m, NEVPNStatusDisconnected);
+    IosController::Instance()->disconnectVpn();
+    CHECK(obs.has(Vpn::ConnectionState::Disconnected), "терминал стопа при опущенном туннеле не отдан сразу");
+    spin(80);
+    CHECK(g_nativeLog.size() == 1 && g_nativeLog[0] == "save:od=0", "правило не снято при опущенном туннеле");
+    CHECK(!m.isOnDemandEnabled, "правило осталось взведённым");
+    CHECK(s.stopCalls == 0, "stopTunnel по опущенному туннелю");
+}
+
+// То же, но iOS успела поднять туннель по правилу, пока сохранялось его снятие: гасим.
+static void test_stop_when_down_stops_revived_session()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m, NEVPNStatusDisconnected);
+    g_saveDelayMs = 80;
+    IosController::Instance()->disconnectVpn();
+    spin(20);
+    s.hStatus = NEVPNStatusConnecting; // On-Demand
+    notifyStatus(s);
+    obs.clear();
+    spin(200);
+    CHECK(s.stopCalls == 1, "туннель, поднятый iOS во время снятия правила, не погашен");
+    CHECK(obs.reasons.size() == 1, "нет причины стопа");
+    if (!obs.reasons.empty()) {
+        CHECK(obs.reasons[0].first == QStringLiteral("expected_app_stop"), "стоп поднятой iOS сессии не expected_app_stop");
+        CHECK(!obs.reasons[0].second, "стоп приложения помечен intentional");
+    }
+}
+
+// Системный демон не ответил на сохранение: стоп всё равно выполняется (по дедлайну).
+static void test_stop_not_lost_when_disarm_save_silent()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_saveMode = SaveMode::Never;
+    IosController::Instance()->disconnectVpn();
+    spin(100);
+    CHECK(s.stopCalls == 0, "стоп не дождался дедлайна сохранения");
+    spin(W(300, 3300));
+    CHECK(s.stopCalls == 1, "молчание сохранения съело стоп");
+}
+
+// Сохранение отклонено (экземпляр устарел): перечитать, повторить, погасить — ровно один стоп.
+static void test_stop_after_disarm_save_error_retries()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_saveMode = SaveMode::ErrorOnce;
+    IosController::Instance()->disconnectVpn();
+    spin(150);
+    CHECK(s.stopCalls == 1, "после ошибки сохранения стоп не выполнен ровно один раз");
+    CHECK(g_nativeLog.size() == 3 && g_nativeLog[0] == "save:od=0" && g_nativeLog[1] == "save:od=0" && g_nativeLog[2] == "stop",
+          "нет повтора сохранения перед стопом");
+    CHECK(!m.isOnDemandEnabled, "правило осталось взведённым");
+}
+
+// Туннель погас, потому что включили другой VPN: наш профиль в системе уже не активный, а у
+// экземпляра в памяти isEnabled ещё YES. Снятие правила не должно сохранить его «активным» —
+// иначе «выключить» в Tribe отключало бы чужой VPN.
+static void test_stop_when_down_does_not_steal_active_vpn()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m, NEVPNStatusDisconnected);
+    m.enabled = YES;       // устаревший экземпляр
+    g_prefsEnabled = 0;    // система: активен другой VPN
+    g_savedEnabled.clear();
+    IosController::Instance()->disconnectVpn();
+    spin(80);
+    CHECK(g_savedEnabled.size() == 1, "правило не снято");
+    if (!g_savedEnabled.empty())
+        CHECK(!g_savedEnabled[0], "снятие правила сохранило наш профиль активным — чужой VPN будет отключён");
+    CHECK(s.stopCalls == 0, "stopTunnel по опущенному туннелю");
+}
+
+// Connect пришёл, пока снималось правило для стопа: стоп отменён, живая сессия адоптируется.
+static void test_connect_during_disarm_cancels_stop()
+{
+    NETunnelProviderManager *m = nil;
+    HarnessSession *s = liveSessionWithOnDemand(&m);
+    g_saveDelayMs = 80;
+    SignalTap tap;
+    tap.attach();
+    IosController::Instance()->disconnectVpn();
+    spin(20);
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig());
+    spin(250);
+    CHECK(s.stopCalls == 0, "стоп выполнен поверх более нового Connect");
+    CHECK(obs.live == 1, "живая сессия не адоптирована");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "Error при живой сессии");
 }
 
 // C3/K3: Connect поверх живого своего профиля — без Error, liveSessionFound ДО статуса.
@@ -995,6 +1197,15 @@ static const Test kTests[] = {
     {"rebind_superseded_result_dropped", test_rebind_superseded_result_dropped},
     {"cold_start_established_session_connected", test_cold_start_established_session_connected},
     {"fresh_session_waits_handshake", test_fresh_session_waits_handshake},
+    {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
+    {"stop_disarms_on_demand_before_stop", test_stop_disarms_on_demand_before_stop},
+    {"stop_without_on_demand_is_immediate", test_stop_without_on_demand_is_immediate},
+    {"stop_when_down_disarms_on_demand", test_stop_when_down_disarms_on_demand},
+    {"stop_when_down_stops_revived_session", test_stop_when_down_stops_revived_session},
+    {"stop_not_lost_when_disarm_save_silent", test_stop_not_lost_when_disarm_save_silent},
+    {"stop_after_disarm_save_error_retries", test_stop_after_disarm_save_error_retries},
+    {"connect_during_disarm_cancels_stop", test_connect_during_disarm_cancels_stop},
+    {"stop_when_down_does_not_steal_active_vpn", test_stop_when_down_does_not_steal_active_vpn},
 };
 
 int main(int argc, char **argv)
