@@ -286,23 +286,51 @@ static void testEstablishedSession()
 static void testOnDemandPolicy()
 {
     using namespace avpn_ios;
-    assert(shouldArmOnDemand(true, true, false, false, false));
-    assert(!shouldArmOnDemand(false, true, false, false, false)); // нет профиля
-    assert(!shouldArmOnDemand(true, false, false, false, false)); // сессия уже не Connected
-    assert(!shouldArmOnDemand(true, true, true, false, false));   // уже взведено
-    assert(!shouldArmOnDemand(true, true, false, true, false));   // приложение гасит туннель
-    assert(!shouldArmOnDemand(true, true, false, false, true));   // взвод уже идёт
+    // Начало попытки: только живая WireGuard-сессия, без стопа и без уже идущей попытки.
+    assert(shouldStartOnDemandArm(true, true, true, false, false));
+    assert(!shouldStartOnDemandArm(false, true, true, false, false)); // нет профиля
+    assert(!shouldStartOnDemandArm(true, false, true, false, false)); // сессия уже не Connected
+    assert(!shouldStartOnDemandArm(true, true, false, false, false)); // Xray: расширение само гасит туннель
+    assert(!shouldStartOnDemandArm(true, true, true, true, false));   // приложение гасит туннель
+    assert(!shouldStartOnDemandArm(true, true, true, false, true));   // попытка уже идёт
 
-    assert(!stopNeedsOnDemandDisarm(false, false, false));        // правила нет — стоп сразу, как раньше
-    assert(stopNeedsOnDemandDisarm(true, false, false));          // взведено прошлым запуском приложения
-    assert(stopNeedsOnDemandDisarm(false, true, false));          // экземпляр менеджера устарел, но мы взводили
-    assert(stopNeedsOnDemandDisarm(false, false, true));          // взвод в полёте
+    // Решение по свежей загрузке.
+    assert(decideOnDemandArm(false, true, true, false, false, false, false) == OnDemandArm::Arm);
+    assert(decideOnDemandArm(false, true, true, false, false, false, true) == OnDemandArm::AlreadyArmed);
+    assert(decideOnDemandArm(true, true, true, false, false, false, false) == OnDemandArm::Skip);  // загрузка не удалась
+    assert(decideOnDemandArm(false, false, true, false, false, false, false) == OnDemandArm::Skip); // новая операция
+    assert(decideOnDemandArm(false, true, false, false, false, false, false) == OnDemandArm::Skip); // сессия упала
+    assert(decideOnDemandArm(false, true, true, true, false, false, false) == OnDemandArm::Skip);   // стоп приложения
+    assert(decideOnDemandArm(false, true, true, false, true, false, false) == OnDemandArm::Skip);   // пауза/выкл из другого процесса
+    // Наше снятие ещё не дошло до системы: «уже взведено» в свежей загрузке — старое значение.
+    assert(decideOnDemandArm(false, true, true, false, false, true, true) == OnDemandArm::Skip);
+
+    assert(armNeedsCleanup(false, true));   // взвод сохранился после паузы — снять
+    assert(!armNeedsCleanup(false, false));
+    assert(!armNeedsCleanup(true, true));   // взвод не сохранился — снимать нечего
+
+    assert(!stopNeedsOnDemandDisarm(false, false, false, false)); // правил нет и не было — стоп сразу
+    assert(stopNeedsOnDemandDisarm(true, false, false, false));
+    assert(stopNeedsOnDemandDisarm(false, true, false, false));   // правила есть: взвести мог другой процесс
+    assert(stopNeedsOnDemandDisarm(false, false, true, false));
+    assert(stopNeedsOnDemandDisarm(false, false, false, true));
 
     assert(stopAfterOnDemandDisarm(true, SessionPhase::Live));
     assert(stopAfterOnDemandDisarm(true, SessionPhase::Starting)); // iOS подняла туннель, пока снимали правило
     assert(stopAfterOnDemandDisarm(true, SessionPhase::TearingDown));
     assert(!stopAfterOnDemandDisarm(true, SessionPhase::Down));    // гасить нечего
-    assert(!stopAfterOnDemandDisarm(false, SessionPhase::Live));   // пришла новая операция (Connect)
+    assert(!stopAfterOnDemandDisarm(false, SessionPhase::Live));   // стоп уже не нужен (новый Connect)
+
+    DisconnectReasonGate gate;
+    gate.noteAppStop("run-1");
+    gate.noteAppStop("run-2");
+    gate.forgetAppStop("run-1"); // стоп отменён новым Connect
+    assert(!gate.isAppStopped("run-1") && gate.isAppStopped("run-2"));
+
+    assert(rearmAfterCancelledStop(false, true, true));
+    assert(!rearmAfterCancelledStop(true, true, true));   // стоп выполнен
+    assert(!rearmAfterCancelledStop(false, false, true)); // рукопожатие ещё не подтверждено — взведёт checkStatus
+    assert(!rearmAfterCancelledStop(false, true, false));
 }
 
 int main()
