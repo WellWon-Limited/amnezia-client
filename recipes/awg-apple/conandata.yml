@@ -1,4 +1,19 @@
 patches:
+  "3.1.4-tribe.11":
+    # tribe.10 (all unchanged) + 0009: userspace direct split. The TUN wrapper hands TCP/UDP packets
+    # whose destination is in the list (wgSetDirectSplit, a CIDR file) to a gVisor stack that
+    # terminates the app's connection and opens an ordinary extension socket outside the tunnel;
+    # everything else goes to the WireGuard device untouched. The engine outlives a device
+    # restart (soft restart keeps direct flows). Off unless the app configures it.
+    # TribeRoaming.swift for this version = tribe/TribeRoaming.swift (same file as tribe.10).
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
   "3.1.4-tribe.10":
     # tribe.9 (all unchanged) + 0008: the logger context handed to Go is an immortal box holding
     # only the log closure (upstream re-retained the adapter inside Go's callback and, when that

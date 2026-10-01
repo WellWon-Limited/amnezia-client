@@ -28,7 +28,10 @@ class AwgApple(ConanFile):
     # fresh port -> soft restart -> backoff cycle, no stall-clock reset on path events.
     # tribe.10: tribe.9 + 0008 immortal logger context (the real NE crash), real-loss gate for
     # the roam fresh port, no stale fresh-port flag; roam fresh port spends the budget's fresh port.
-    version = "3.1.4-tribe.10"
+    # tribe.11: tribe.10 + 0009 userspace direct split (directsplit.go): destinations from a list
+    # file leave through the extension's own sockets instead of 10.8k system excluded routes.
+    # Swift sources and TribeRoaming.swift are those of tribe.10.
+    version = "3.1.4-tribe.11"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -176,6 +179,12 @@ class AwgApple(ConanFile):
                 "-run '^TestTribeXraySockCallbackSlot' "
                 "api-xray.go api-xray_testhelper.go api-xray_callback_test.go"
             )
+            # tribe.11: the userspace direct split is a build gate too (absent before 0009).
+            if os.path.exists(os.path.join(self.build_folder, "directsplit.go")):
+                self.run(
+                    "go test -count=1 -run '^(TestDirect|TestForeign)' "
+                    "api-apple.go api-xray.go dnsfwd.go directsplit.go directsplit_test.go"
+                )
             autotools = Autotools(self)
             autotools.make()
             autotools.make("version-header")

@@ -1559,6 +1559,36 @@ bool IosController::setupOpenVPN()
     return startOpenVPN(openVPNConfigStr);
 }
 
+// AVPN разделение РФ в расширении (§28): список «мимо туннеля» — файлом в общий контейнер.
+// Запись атомарная; защита файла снята, потому что iOS может поднять расширение до первой
+// разблокировки телефона (On-Demand после перезагрузки), а список не секретный.
+static bool writeDirectSplitList(const QJsonArray &sites)
+{
+    NSURL *dir = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:@"group.hk.wellwon.tribe"];
+    if (!dir) {
+        qWarning() << "avpn: direct split list not written — no app group container";
+        return false;
+    }
+    QByteArray text;
+    text.reserve(sites.count() * 20);
+    for (const QJsonValue &site : sites) {
+        text.append(site.toString().toUtf8());
+        text.append('\n');
+    }
+    NSData *data = [NSData dataWithBytes:text.constData() length:text.size()];
+    NSURL *url = [dir URLByAppendingPathComponent:[NSString stringWithUTF8String:avpn_ios::kDirectSplitFileName]];
+    NSDataWritingOptions options = NSDataWritingAtomic;
+#if defined(Q_OS_IOS)
+    options |= NSDataWritingFileProtectionNone;
+#endif
+    NSError *error = nil;
+    if (![data writeToURL:url options:options error:&error]) {
+        qWarning() << "avpn: direct split list not written:" << QString::fromNSString(error.localizedDescription);
+        return false;
+    }
+    return true;
+}
+
 static void insertNonEmptyAwgParams(QJsonObject &wgConfig, const QJsonObject &config)
 {
     const QStringList awgProtocolKeys = configKey::awgProtocolKeys();
@@ -1729,7 +1759,18 @@ bool IosController::setupAwg()
         splitTunnelSites[index] = splitTunnelSites[index].toString().remove(" ");
     }
 
-    wgConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
+    // AVPN разделение РФ в расширении (§28): список не кладём ни в профиль VPN, ни в маршруты.
+    // Файл не записался — остаётся путь апстрима (маршруты), туннель от этого не зависит.
+    const bool userspaceSplit = avpn_ios::useUserspaceSplit(
+        m_rawConfig.value(QStringLiteral("directSplit")).toString() == QLatin1String("1"),
+        m_rawConfig[configKey::splitTunnelType].toInt(), splitTunnelSites.count());
+    if (userspaceSplit && writeDirectSplitList(splitTunnelSites)) {
+        wgConfig.insert(configKey::splitTunnelType, 0);
+        wgConfig.insert(configKey::splitTunnelSites, QJsonArray());
+        wgConfig.insert(QStringLiteral("directSplitFile"), QString::fromLatin1(avpn_ios::kDirectSplitFileName));
+    } else {
+        wgConfig.insert(configKey::splitTunnelSites, splitTunnelSites);
+    }
 
     // AVPN split-DNS форвардер: корневые ключи cfg (VpnConnectionTunnelControl::up) → JSON для NE
     // (WGConfig.swift; значения — СТРОКИ). Отсутствуют = форвардер выключен.

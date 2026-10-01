@@ -385,6 +385,13 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
                                       .arg(avpn::roamStallRebindSTuned()));
     }
 #endif
+#if defined(Q_OS_IOS)
+    // AVPN разделение РФ внутри расширения (CONNECT-INVARIANTS §28): ключ в КОРЕНЬ cfg ->
+    // ios_controller::setupAwg. Флаг features.ios_userspace_split по умолчанию выключен: тогда
+    // список идёт системными маршрутами, как у апстрима. Значение СТРОКОЙ (JSONDecoder-грабля).
+    if (avpn::TuningStore::flag(QStringLiteral("ios_userspace_split"), false))
+        cfg.insert(QStringLiteral("directSplit"), QStringLiteral("1"));
+#endif
     // AVPN backend-first: пороги «нода мертва» для iOS NE (numbers.*; фолбэк = константы NE).
     // Клампы ОБЯЗАТЕЛЬНЫ (ревью 2026-07-11): timeout=0 с бэка = каждый iOS-коннект умирает
     // на первом тике checkStatus; связка с watchdog — ConnectTunables.h.
@@ -415,6 +422,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
     m_lastConfigReport.insert(QStringLiteral("split_dns"), splitDns);
     m_lastConfigReport.insert(QStringLiteral("dns_fwd"), cfg.contains(QStringLiteral("dnsFwdOn")));
+    m_lastConfigReport.insert(QStringLiteral("userspace_split"), cfg.contains(QStringLiteral("directSplit")));
 
     if (!invokeConnect(cfg, primary.nodeId, DockerContainer::Awg))
         return TunnelResult::fail(QStringLiteral("connectToVpn invoke failed"));

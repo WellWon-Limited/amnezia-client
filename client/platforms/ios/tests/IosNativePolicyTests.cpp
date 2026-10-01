@@ -333,9 +333,19 @@ static void testOnDemandPolicy()
     assert(!rearmAfterCancelledStop(false, true, false));
 }
 
+static void testUserspaceSplitPolicy()
+{
+    assert(useUserspaceSplit(true, kSplitTunnelExceptSites, 10850));
+    assert(!useUserspaceSplit(false, kSplitTunnelExceptSites, 10850)); // флаг с сервера выключен
+    assert(!useUserspaceSplit(true, 0, 0));                            // разделение выключено
+    assert(!useUserspaceSplit(true, 1, 12));                           // «только эти сайты» — маршрутами
+    assert(!useUserspaceSplit(true, kSplitTunnelExceptSites, 0));      // список пуст
+}
+
 int main()
 {
     testOnDemandPolicy();
+    testUserspaceSplitPolicy();
     testRetryBudget();
     testDisconnectDecision();
     testDisconnectGate();
