@@ -319,6 +319,21 @@ inline bool rebindPerformed(bool hasResponse, bool hasRebindKey, const std::stri
 }
 
 // ---------------------------------------------------------------------------------------------
+// Разделение «РФ мимо туннеля» внутри расширения (CONNECT-INVARIANTS §28, awg-apple tribe.11).
+// Список исключений (режим VpnAllExceptSites = 2) уходит расширению файлом в общем контейнере:
+// в профиль VPN и в системные маршруты он не попадает — и то и другое держит системный демон
+// nesessionmanager, который iOS убивает по памяти (причина остановки 17). Решение «напрямую или
+// в туннель» принимает само расширение по адресу назначения пакета, как клиенты на xray.
+// Флаг с сервера (features.ios_userspace_split, по умолчанию выключен); без списка или в других
+// режимах разделения остаётся путь апстрима — маршруты.
+constexpr int kSplitTunnelExceptSites = 2;
+constexpr const char *kDirectSplitFileName = "direct-split.txt";
+inline bool useUserspaceSplit(bool flagOn, int splitTunnelType, int siteCount)
+{
+    return flagOn && splitTunnelType == kSplitTunnelExceptSites && siteCount > 0;
+}
+
+// ---------------------------------------------------------------------------------------------
 // C8: какие события lifecycle-журнала схлопываются, если идут подряд (счётчик повторов вместо
 // новых записей — иначе status_timeout вымывает 128-записное кольцо за пару минут роуминга).
 inline bool lifecycleCollapsible(const std::string &previousEvent, const std::string &event)

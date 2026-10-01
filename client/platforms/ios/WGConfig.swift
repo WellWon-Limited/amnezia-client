@@ -34,6 +34,10 @@ struct WGConfig: Decodable {
   let roamPauseAfterS: String?
   let roamStallProbeS: String?
   let roamStallRebindS: String?
+  // AVPN разделение РФ внутри расширения (awg-apple tribe.11, directsplit.go): имя файла со
+  // списком «мимо туннеля» в общем контейнере. Есть ключ — splitTunnelSites пуст, маршруты
+  // системе не отдаём. Нет ключа = прежнее поведение.
+  let directSplitFile: String?
 
   enum CodingKeys: String, CodingKey {
     case initPacketMagicHeader = "H1", responsePacketMagicHeader = "H2"
@@ -68,6 +72,7 @@ struct WGConfig: Decodable {
     case roamPauseAfterS
     case roamStallProbeS
     case roamStallRebindS
+    case directSplitFile
   }
 
   var roamingPolicy: TribeRoamingPolicy {

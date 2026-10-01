@@ -1,0 +1,1516 @@
+diff --git a/Sources/WireGuardKitGo/api-apple.go b/Sources/WireGuardKitGo/api-apple.go
+index cde7c19..e104403 100644
+--- a/Sources/WireGuardKitGo/api-apple.go
++++ b/Sources/WireGuardKitGo/api-apple.go
+@@ -108,6 +108,7 @@ func wgTurnOn(settings *C.char, tunFd int32) int32 {
+ 	}
+ 	logger.Verbosef("Attaching to interface")
+ 	tun = wrapTunIfEnabled(tun, logger.Verbosef) // AVPN split-DNS форвардер (dnsfwd.go); no-op если выключен
++	tun = wrapDirectSplitIfEnabled(tun, logger.Verbosef) // AVPN разделение РФ в расширении (directsplit.go); no-op если выключено
+ 	dev := device.NewDevice(tun, conn.NewStdNetBind(), logger)
+ 
+ 	err = dev.IpcSet(C.GoString(settings))
+diff --git a/Sources/WireGuardKitGo/directsplit.go b/Sources/WireGuardKitGo/directsplit.go
+new file mode 100644
+index 0000000..2f6007f
+--- /dev/null
++++ b/Sources/WireGuardKitGo/directsplit.go
+@@ -0,0 +1,863 @@
++/* AVPN (Tribe): разделение «РФ мимо туннеля» внутри расширения, без системных маршрутов.
++ *
++ * Раньше список адресов РФ (10 850 префиксов) уходил в iOS как excludedRoutes и лежал в
++ * сохранённом профиле VPN: и то и другое держит системный демон nesessionmanager. Здесь система
++ * получает один маршрут по умолчанию, а решение «напрямую или в туннель» принимается по адресу
++ * назначения каждого пакета, прочитанного из TUN — так же делают клиенты на xray и sing-box
++ * (правило geoip:ru -> direct).
++ *
++ * Пакет к адресу из списка (TCP или UDP) отдаётся пользовательскому сетевому стеку gVisor: он
++ * завершает соединение приложения, а наружу открывается обычный сокет расширения. Сокеты
++ * расширения iOS в туннель не заворачивает (на этом же стоит dnsfwd.go и сокет самого WireGuard).
++ * Всё остальное проходит в устройство WireGuard без копирования, как раньше.
++ *
++ * Движок живёт дольше одного устройства: мягкий перезапуск туннеля (wgTurnOff + wgTurnOn на том
++ * же TUN) не рвёт прямые соединения, они переезжают на новую обёртку.
++ *
++ * amneziawg-go не патчится: обёртка реализует tun.Device и вставляется в wgTurnOn.
++ */
++package main
++
++import "C"
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"os"
++	"runtime/debug"
++	"sort"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++	"gvisor.dev/gvisor/pkg/buffer"
++	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
++	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
++	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
++	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
++	"gvisor.dev/gvisor/pkg/tcpip/stack"
++	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
++	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
++	"gvisor.dev/gvisor/pkg/waiter"
++)
++
++// ── множество префиксов ───────────────────────────────────────────────────────────────────────
++
++type u128 struct{ hi, lo uint64 }
++
++func (a u128) less(b u128) bool { return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo) }
++
++type range4 struct{ lo, hi uint32 }
++type range6 struct{ lo, hi u128 }
++
++// prefixSet: отсортированные непересекающиеся диапазоны; поиск двоичный (8,6 тыс. записей —
++// 14 сравнений на пакет).
++type prefixSet struct {
++	v4 []range4
++	v6 []range6
++}
++
++func be32(b []byte) uint32 {
++	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
++}
++
++func be64(b []byte) uint64 {
++	return uint64(be32(b[0:4]))<<32 | uint64(be32(b[4:8]))
++}
++
++func u128From(b []byte) u128 { return u128{be64(b[0:8]), be64(b[8:16])} }
++
++// parsePrefixSet: по одному CIDR (или адресу) в строке; пустые строки и строки с # пропускаются.
++// Возвращает множество и число строк, которые не удалось разобрать.
++func parsePrefixSet(text string) (*prefixSet, int) {
++	set := &prefixSet{}
++	bad := 0
++	for _, line := range strings.Split(text, "\n") {
++		line = strings.TrimSpace(line)
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		p, err := netip.ParsePrefix(line)
++		if err != nil {
++			a, aerr := netip.ParseAddr(line)
++			if aerr != nil {
++				bad++
++				continue
++			}
++			p = netip.PrefixFrom(a, a.BitLen())
++		}
++		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()).Masked()
++		if !p.IsValid() {
++			bad++
++			continue
++		}
++		if p.Addr().Is4() {
++			a := p.Addr().As4()
++			lo := be32(a[:])
++			hi := lo | uint32(uint64(1)<<(32-p.Bits())-1)
++			set.v4 = append(set.v4, range4{lo, hi})
++		} else {
++			a := p.Addr().As16()
++			lo := u128From(a[:])
++			hi := lo
++			host := 128 - p.Bits()
++			if host >= 64 {
++				hi.lo = ^uint64(0)
++				if host == 128 {
++					hi.hi = ^uint64(0)
++				} else {
++					hi.hi |= uint64(1)<<(host-64) - 1
++				}
++			} else {
++				hi.lo |= uint64(1)<<host - 1
++			}
++			set.v6 = append(set.v6, range6{lo, hi})
++		}
++	}
++	sort.Slice(set.v4, func(i, j int) bool { return set.v4[i].lo < set.v4[j].lo })
++	out4 := set.v4[:0]
++	for _, r := range set.v4 {
++		if n := len(out4); n > 0 && r.lo <= out4[n-1].hi {
++			if r.hi > out4[n-1].hi {
++				out4[n-1].hi = r.hi
++			}
++			continue
++		}
++		out4 = append(out4, r)
++	}
++	set.v4 = out4
++	sort.Slice(set.v6, func(i, j int) bool { return set.v6[i].lo.less(set.v6[j].lo) })
++	out6 := set.v6[:0]
++	for _, r := range set.v6 {
++		if n := len(out6); n > 0 && !out6[n-1].hi.less(r.lo) {
++			if out6[n-1].hi.less(r.hi) {
++				out6[n-1].hi = r.hi
++			}
++			continue
++		}
++		out6 = append(out6, r)
++	}
++	set.v6 = out6
++	return set, bad
++}
++
++func (s *prefixSet) size() int { return len(s.v4) + len(s.v6) }
++
++func (s *prefixSet) contains4(a uint32) bool {
++	i := sort.Search(len(s.v4), func(i int) bool { return s.v4[i].hi >= a })
++	return i < len(s.v4) && s.v4[i].lo <= a
++}
++
++func (s *prefixSet) contains6(a u128) bool {
++	i := sort.Search(len(s.v6), func(i int) bool { return !s.v6[i].hi.less(a) })
++	return i < len(s.v6) && !a.less(s.v6[i].lo)
++}
++
++// directProto: пакет TCP или UDP к адресу из множества — номер сетевого протокола для gVisor;
++// 0 = пакет идёт в туннель. Остальные протоколы (ICMP и т. п.) остаются в туннеле: стек их
++// наружу не выведет.
++func (s *prefixSet) directProto(pkt []byte) tcpip.NetworkProtocolNumber {
++	if len(pkt) < 20 {
++		return 0
++	}
++	switch pkt[0] >> 4 {
++	case 4:
++		if (pkt[9] == 6 || pkt[9] == 17) && s.contains4(be32(pkt[16:20])) {
++			return header.IPv4ProtocolNumber
++		}
++	case 6:
++		if len(pkt) >= 40 && (pkt[6] == 6 || pkt[6] == 17) && s.contains6(u128From(pkt[24:40])) {
++			return header.IPv6ProtocolNumber
++		}
++	}
++	return 0
++}
++
++// ── конфиг (ставится из Swift до wgTurnOn) ────────────────────────────────────────────────────
++
++const (
++	directListMaxBytes = 4 << 20
++	directNICID        = 1
++	directQueueDepth   = 1024
++	directDialTimeout  = 8 * time.Second
++	directTCPBuf       = 16 << 10
++	directTCPMaxFlows  = 384
++	directHalfCloseTTL = 2 * time.Minute
++	directUDPIdle      = 2 * time.Minute
++	directUDPBuf       = 16 << 10
++	directUDPMaxSess   = 256
++	directMemoryLimit  = 36 << 20
++	directFallbackMTU  = 1280
++)
++
++var (
++	directMu     sync.Mutex
++	directSet    *prefixSet   // nil = выключено
++	directEngine *splitEngine // nil до первого wgTurnOn со включённым разделением
++)
++
++// wgSetDirectSplit: путь к файлу со списком (CIDR построчно). Возвращает число диапазонов,
++// 0 при выключении, -1 если файл не прочитан или пуст (разделение тогда выключено — весь
++// трафик идёт в туннель).
++//
++//export wgSetDirectSplit
++func wgSetDirectSplit(listPath *C.char, enabled int32) int32 {
++	path := C.GoString(listPath)
++	if enabled == 0 {
++		setDirectSet(nil)
++		return 0
++	}
++	data, err := readLimited(path, directListMaxBytes)
++	if err != nil {
++		setDirectSet(nil)
++		return -1
++	}
++	set, _ := parsePrefixSet(string(data))
++	if set.size() == 0 {
++		setDirectSet(nil)
++		return -1
++	}
++	setDirectSet(set)
++	return int32(set.size())
++}
++
++func readLimited(path string, limit int64) ([]byte, error) {
++	f, err := os.Open(path)
++	if err != nil {
++		return nil, err
++	}
++	defer f.Close()
++	data, err := io.ReadAll(io.LimitReader(f, limit+1))
++	if err != nil {
++		return nil, err
++	}
++	if int64(len(data)) > limit {
++		return nil, errors.New("direct list too large")
++	}
++	return data, nil
++}
++
++func setDirectSet(set *prefixSet) {
++	directMu.Lock()
++	directSet = set
++	engine := directEngine
++	if set == nil {
++		directEngine = nil
++	}
++	directMu.Unlock()
++	if engine == nil {
++		return
++	}
++	if set == nil {
++		engine.shutdown()
++		return
++	}
++	engine.set.Store(set)
++}
++
++// wgDirectSplitStats: счётчики для строки `Tribe stats` (вызывающий освобождает строку).
++//
++//export wgDirectSplitStats
++func wgDirectSplitStats() *C.char {
++	directMu.Lock()
++	engine := directEngine
++	directMu.Unlock()
++	if engine == nil {
++		return C.CString("off")
++	}
++	return C.CString(engine.statsLine())
++}
++
++// wrapDirectSplitIfEnabled: точка входа из wgTurnOn (// AVPN в api-apple.go).
++func wrapDirectSplitIfEnabled(inner tun.Device, logf func(format string, args ...interface{})) tun.Device {
++	directMu.Lock()
++	set := directSet
++	engine := directEngine
++	directMu.Unlock()
++	if set == nil {
++		return inner
++	}
++	mtu, err := inner.MTU()
++	if err != nil || mtu < directFallbackMTU {
++		mtu = directFallbackMTU
++	}
++	if engine == nil {
++		engine = newSplitEngine(set, uint32(mtu))
++		// Мягкий предел кучи Go: расширение живёт в 50 МБ, предел заставляет сборщик работать
++		// чаще возле границы, а не расти до неё. Чужой предел (xray) не трогаем.
++		if debug.SetMemoryLimit(-1) > directMemoryLimit {
++			debug.SetMemoryLimit(directMemoryLimit)
++		}
++		directMu.Lock()
++		directEngine = engine
++		directMu.Unlock()
++	}
++	w := &splitTun{inner: inner, engine: engine}
++	engine.attach(inner)
++	if logf != nil {
++		logf("AVPN directsplit: userspace split enabled (%d ranges, mtu %d)", set.size(), mtu)
++	}
++	return w
++}
++
++// ── движок ────────────────────────────────────────────────────────────────────────────────────
++
++type splitStats struct {
++	tcpOpen, tcpTotal, tcpFail atomic.Int64
++	udpOpen, udpTotal          atomic.Int64
++	bytesUp, bytesDown         atomic.Int64
++}
++
++type splitEngine struct {
++	set    atomic.Pointer[prefixSet]
++	st     *stack.Stack
++	ep     *channel.Endpoint
++	ctx    context.Context
++	cancel context.CancelFunc
++	stats  splitStats
++
++	outMu sync.Mutex // текущая обёртка TUN для пакетов от стека к системе
++	out   tun.Device
++
++	udpMu   sync.Mutex
++	udpSess map[netip.AddrPort]*udpSession
++
++	// Швы для тестов: в бою обычные сокеты расширения и тождественное отображение адресов.
++	dialTCP   func(ctx context.Context, dst netip.AddrPort) (net.Conn, error)
++	listenUDP func(v4 bool) (*net.UDPConn, error)
++	mapOut    func(dst netip.AddrPort) netip.AddrPort
++	mapIn     func(from netip.AddrPort) netip.AddrPort
++}
++
++func newSplitEngine(set *prefixSet, mtu uint32) *splitEngine {
++	e := &splitEngine{udpSess: make(map[netip.AddrPort]*udpSession)}
++	e.set.Store(set)
++	e.ctx, e.cancel = context.WithCancel(context.Background())
++	e.dialTCP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
++		network := "tcp6"
++		if dst.Addr().Is4() {
++			network = "tcp4"
++		}
++		// KeepAlive -1: своих проб не шлём — соединение ведёт себя как прямое.
++		d := net.Dialer{Timeout: directDialTimeout, KeepAlive: -1}
++		return d.DialContext(ctx, network, dst.String())
++	}
++	e.listenUDP = func(v4 bool) (*net.UDPConn, error) {
++		if v4 {
++			return net.ListenUDP("udp4", nil)
++		}
++		return net.ListenUDP("udp6", nil)
++	}
++	e.mapOut = func(dst netip.AddrPort) netip.AddrPort { return dst }
++	e.mapIn = func(from netip.AddrPort) netip.AddrPort { return from }
++
++	e.st = stack.New(stack.Options{
++		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
++		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
++	})
++	sack := tcpip.TCPSACKEnabled(true)
++	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &sack)
++	moderate := tcpip.TCPModerateReceiveBufferOption(true)
++	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &moderate)
++	// Буферы меньше умолчаний gVisor (1 МиБ): «сеть» между ядром iOS и стеком — память процесса,
++	// большие окна ничего не дают, а расширение ограничено 50 МБ. Потолок на соединение —
++	// 256 КиБ в каждую сторону: два десятка одновременно загруженных соединений остаются в 10 МБ.
++	rcv := tcpip.TCPReceiveBufferSizeRangeOption{Min: 4 << 10, Default: 64 << 10, Max: 256 << 10}
++	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &rcv)
++	snd := tcpip.TCPSendBufferSizeRangeOption{Min: 4 << 10, Default: 64 << 10, Max: 256 << 10}
++	e.st.SetTransportProtocolOption(tcp.ProtocolNumber, &snd)
++
++	e.ep = channel.New(directQueueDepth, mtu, "")
++	e.st.CreateNIC(directNICID, e.ep)
++	// Адреса назначения чужие: принимаем любой и отвечаем от его имени.
++	e.st.SetPromiscuousMode(directNICID, true)
++	e.st.SetSpoofing(directNICID, true)
++	e.st.SetRouteTable([]tcpip.Route{
++		{Destination: header.IPv4EmptySubnet, NIC: directNICID},
++		{Destination: header.IPv6EmptySubnet, NIC: directNICID},
++	})
++	e.st.SetTransportProtocolHandler(tcp.ProtocolNumber,
++		tcp.NewForwarder(e.st, 0, directTCPMaxFlows, e.handleTCP).HandlePacket)
++	e.st.SetTransportProtocolHandler(udp.ProtocolNumber,
++		udp.NewForwarder(e.st, e.handleUDP).HandlePacket)
++	go e.pumpToSystem()
++	return e
++}
++
++func (e *splitEngine) attach(out tun.Device) {
++	e.outMu.Lock()
++	e.out = out
++	e.outMu.Unlock()
++}
++
++func (e *splitEngine) detach(out tun.Device) {
++	e.outMu.Lock()
++	if e.out == out {
++		e.out = nil
++	}
++	e.outMu.Unlock()
++}
++
++func (e *splitEngine) shutdown() {
++	e.cancel()
++	e.udpMu.Lock()
++	sessions := make([]*udpSession, 0, len(e.udpSess))
++	for _, s := range e.udpSess {
++		sessions = append(sessions, s)
++	}
++	e.udpMu.Unlock()
++	for _, s := range sessions {
++		s.close()
++	}
++	e.ep.Close()
++	go e.st.Close()
++}
++
++func (e *splitEngine) statsLine() string {
++	s := &e.stats
++	return fmt.Sprintf("tcp=%d/%d fail=%d udp=%d/%d up=%d down=%d",
++		s.tcpOpen.Load(), s.tcpTotal.Load(), s.tcpFail.Load(),
++		s.udpOpen.Load(), s.udpTotal.Load(), s.bytesUp.Load(), s.bytesDown.Load())
++}
++
++// inject: пакет приложения — в стек (стек забирает копию).
++func (e *splitEngine) inject(proto tcpip.NetworkProtocolNumber, pkt []byte) {
++	pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pkt)})
++	e.ep.InjectInbound(proto, pkb)
++	pkb.DecRef()
++}
++
++// pumpToSystem: пакеты стека — приложению через TUN. Один читатель, один буфер: Write у TUN
++// синхронный. Пока устройство перезапускается (обёртки нет), пакеты теряются — TCP их повторит.
++func (e *splitEngine) pumpToSystem() {
++	const offset = 4 // darwin utun: 4 байта семейства перед пакетом, их заполняет сам TUN
++	buf := make([]byte, offset+65535)
++	for {
++		pkb := e.ep.ReadContext(e.ctx)
++		if pkb == nil {
++			return
++		}
++		view := pkb.ToView()
++		pkb.DecRef()
++		n := copy(buf[offset:], view.AsSlice())
++		view.Release()
++		e.outMu.Lock()
++		out := e.out
++		e.outMu.Unlock()
++		if out == nil {
++			continue
++		}
++		out.Write([][]byte{buf[:offset+n]}, offset)
++	}
++}
++
++func addrPortOf(a tcpip.Address, port uint16) netip.AddrPort {
++	if a.Len() == 4 {
++		return netip.AddrPortFrom(netip.AddrFrom4(a.As4()), port)
++	}
++	return netip.AddrPortFrom(netip.AddrFrom16(a.As16()), port)
++}
++
++// ── TCP ───────────────────────────────────────────────────────────────────────────────────────
++
++var tcpBufPool = sync.Pool{New: func() any { b := make([]byte, directTCPBuf); return &b }}
++
++// handleTCP: SYN приложения к прямому адресу. Сначала наружное соединение, потом ответ
++// приложению: отказ снаружи приложение видит как обычный отказ (RST), а не как зависание.
++func (e *splitEngine) handleTCP(r *tcp.ForwarderRequest) {
++	id := r.ID()
++	dst := addrPortOf(id.LocalAddress, id.LocalPort)
++	e.stats.tcpTotal.Add(1)
++	if e.stats.tcpOpen.Load() >= directTCPMaxFlows {
++		e.stats.tcpFail.Add(1)
++		r.Complete(true)
++		return
++	}
++	ctx, cancel := context.WithTimeout(e.ctx, directDialTimeout)
++	remote, err := e.dialTCP(ctx, e.mapOut(dst))
++	cancel()
++	if err != nil {
++		e.stats.tcpFail.Add(1)
++		r.Complete(true)
++		return
++	}
++	var wq waiter.Queue
++	ep, terr := r.CreateEndpoint(&wq)
++	r.Complete(false)
++	if terr != nil {
++		e.stats.tcpFail.Add(1)
++		remote.Close()
++		return
++	}
++	// Приложение исчезло без FIN — соединение не висит вечно.
++	ep.SocketOptions().SetKeepAlive(true)
++	idle := tcpip.KeepaliveIdleOption(10 * time.Minute)
++	ep.SetSockOpt(&idle)
++	local := gonet.NewTCPConn(&wq, ep)
++	e.stats.tcpOpen.Add(1)
++	e.relayTCP(local, ep, &wq, remote)
++	e.stats.tcpOpen.Add(-1)
++}
++
++type closeWriter interface{ CloseWrite() error }
++
++func (e *splitEngine) relayTCP(local *gonet.TCPConn, ep tcpip.Endpoint, wq *waiter.Queue, remote net.Conn) {
++	type result struct {
++		up  bool
++		err error
++	}
++	done := make(chan result, 2)
++	stop := make(chan struct{})
++	var last atomic.Int64 // время последнего байта в любую сторону
++	last.Store(time.Now().UnixNano())
++
++	// приложение -> сеть: буфер берём только когда есть что читать (простой не держит память)
++	go func() {
++		entry, notify := waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventHUp | waiter.EventErr)
++		wq.EventRegister(&entry)
++		defer wq.EventUnregister(&entry)
++		for {
++			bp := tcpBufPool.Get().(*[]byte)
++			w := tcpip.SliceWriter(*bp)
++			res, rerr := ep.Read(&w, tcpip.ReadOptions{})
++			if rerr == nil {
++				_, werr := remote.Write((*bp)[:res.Count])
++				tcpBufPool.Put(bp)
++				if werr != nil {
++					done <- result{true, werr}
++					return
++				}
++				e.stats.bytesUp.Add(int64(res.Count))
++				last.Store(time.Now().UnixNano())
++				continue
++			}
++			tcpBufPool.Put(bp)
++			if _, ok := rerr.(*tcpip.ErrWouldBlock); ok {
++				select {
++				case <-notify:
++					continue
++				case <-stop:
++					return
++				case <-e.ctx.Done():
++					done <- result{true, context.Canceled}
++					return
++				}
++			}
++			if _, ok := rerr.(*tcpip.ErrClosedForReceive); ok {
++				if cw, ok := remote.(closeWriter); ok {
++					cw.CloseWrite()
++				}
++				done <- result{true, nil}
++				return
++			}
++			done <- result{true, errors.New(rerr.String())}
++			return
++		}
++	}()
++
++	// сеть -> приложение
++	go func() {
++		bp := tcpBufPool.Get().(*[]byte)
++		defer tcpBufPool.Put(bp)
++		for {
++			n, rerr := remote.Read(*bp)
++			if n > 0 {
++				if _, werr := local.Write((*bp)[:n]); werr != nil {
++					done <- result{false, werr}
++					return
++				}
++				e.stats.bytesDown.Add(int64(n))
++				last.Store(time.Now().UnixNano())
++			}
++			if rerr != nil {
++				if rerr == io.EOF {
++					local.CloseWrite()
++					done <- result{false, nil}
++				} else {
++					done <- result{false, rerr}
++				}
++				return
++			}
++		}
++	}()
++
++	first := <-done
++	if first.err == nil {
++		// Одна сторона закрыла запись штатно — вторая дорабатывает, пока по ней идут данные.
++		timer := time.NewTimer(directHalfCloseTTL)
++	wait:
++		for {
++			select {
++			case second := <-done:
++				if second.err != nil && !second.up {
++					abortTCP(ep)
++				}
++				break wait
++			case <-timer.C:
++				idle := time.Duration(time.Now().UnixNano() - last.Load())
++				if idle >= directHalfCloseTTL {
++					break wait
++				}
++				timer.Reset(directHalfCloseTTL - idle)
++			case <-e.ctx.Done():
++				break wait
++			}
++		}
++		timer.Stop()
++	} else if !first.up {
++		// Сеть оборвала соединение — приложению RST, а не «чистое» закрытие.
++		abortTCP(ep)
++	}
++	close(stop)
++	remote.Close()
++	local.Close()
++}
++
++func abortTCP(ep tcpip.Endpoint) {
++	ep.SocketOptions().SetLinger(tcpip.LingerOption{Enabled: true, Timeout: 0})
++}
++
++// ── UDP ───────────────────────────────────────────────────────────────────────────────────────
++
++// udpSession: один наружный сокет на порт приложения (как NAT с отображением, не зависящим от
++// адреса назначения). flows: адрес сервера -> конечная точка стека, от имени которой приложению
++// уходят ответы этого сервера.
++type udpSession struct {
++	engine *splitEngine
++	key    netip.AddrPort
++	out    *net.UDPConn
++	last   atomic.Int64
++
++	mu     sync.Mutex
++	flows  map[netip.AddrPort]*gonet.UDPConn
++	closed bool
++}
++
++func (s *udpSession) touch() { s.last.Store(time.Now().UnixNano()) }
++
++func (s *udpSession) idleFor() time.Duration {
++	return time.Duration(time.Now().UnixNano() - s.last.Load())
++}
++
++func (s *udpSession) close() {
++	s.mu.Lock()
++	if s.closed {
++		s.mu.Unlock()
++		return
++	}
++	s.closed = true
++	flows := s.flows
++	s.flows = nil
++	s.mu.Unlock()
++	s.engine.udpMu.Lock()
++	if s.engine.udpSess[s.key] == s {
++		delete(s.engine.udpSess, s.key)
++	}
++	s.engine.udpMu.Unlock()
++	s.out.Close()
++	for _, c := range flows {
++		c.Close()
++	}
++	s.engine.stats.udpOpen.Add(-1)
++}
++
++// removeFlow: поток закрыт; сессия без потоков закрывается целиком.
++func (s *udpSession) removeFlow(dst netip.AddrPort, c *gonet.UDPConn) {
++	s.mu.Lock()
++	empty := false
++	if !s.closed && s.flows[dst] == c {
++		delete(s.flows, dst)
++		empty = len(s.flows) == 0
++	}
++	s.mu.Unlock()
++	c.Close()
++	if empty {
++		s.close()
++	}
++}
++
++func (e *splitEngine) udpSessionFor(src netip.AddrPort) *udpSession {
++	e.udpMu.Lock()
++	defer e.udpMu.Unlock()
++	if s := e.udpSess[src]; s != nil {
++		return s
++	}
++	if len(e.udpSess) >= directUDPMaxSess {
++		// Место освобождает самая давняя по активности сессия.
++		var oldest *udpSession
++		for _, s := range e.udpSess {
++			if oldest == nil || s.last.Load() < oldest.last.Load() {
++				oldest = s
++			}
++		}
++		if oldest != nil {
++			delete(e.udpSess, oldest.key)
++			go oldest.close()
++		}
++	}
++	out, err := e.listenUDP(src.Addr().Is4())
++	if err != nil {
++		return nil
++	}
++	s := &udpSession{engine: e, key: src, out: out, flows: make(map[netip.AddrPort]*gonet.UDPConn)}
++	s.touch()
++	e.udpSess[src] = s
++	e.stats.udpOpen.Add(1)
++	e.stats.udpTotal.Add(1)
++	go s.pumpDown()
++	return s
++}
++
++// handleUDP вызывается стеком синхронно: конечную точку создаём сразу (она забирает первый
++// датаграмм), ввод-вывод — в горутинах.
++func (e *splitEngine) handleUDP(r *udp.ForwarderRequest) bool {
++	id := r.ID()
++	src := addrPortOf(id.RemoteAddress, id.RemotePort)
++	dst := addrPortOf(id.LocalAddress, id.LocalPort)
++	var wq waiter.Queue
++	ep, terr := r.CreateEndpoint(&wq)
++	if terr != nil {
++		return true
++	}
++	local := gonet.NewUDPConn(&wq, ep)
++	sess := e.udpSessionFor(src)
++	if sess == nil {
++		local.Close()
++		return true
++	}
++	sess.mu.Lock()
++	if sess.closed {
++		sess.mu.Unlock()
++		local.Close()
++		return true
++	}
++	old := sess.flows[dst]
++	sess.flows[dst] = local
++	sess.mu.Unlock()
++	if old != nil {
++		old.Close()
++	}
++	go sess.pumpUp(dst, local, ep, &wq)
++	return true
++}
++
++var udpBufPool = sync.Pool{New: func() any { b := make([]byte, 65535); return &b }}
++
++// pumpUp: приложение -> сервер. Буфер на полный датаграмм берётся только на время чтения.
++func (s *udpSession) pumpUp(dst netip.AddrPort, local *gonet.UDPConn, ep tcpip.Endpoint, wq *waiter.Queue) {
++	defer s.removeFlow(dst, local)
++	entry, notify := waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventHUp | waiter.EventErr)
++	wq.EventRegister(&entry)
++	defer wq.EventUnregister(&entry)
++	target := net.UDPAddrFromAddrPort(s.engine.mapOut(dst))
++	timer := time.NewTimer(directUDPIdle)
++	defer timer.Stop()
++	for {
++		bp := udpBufPool.Get().(*[]byte)
++		w := tcpip.SliceWriter(*bp)
++		res, rerr := ep.Read(&w, tcpip.ReadOptions{})
++		if rerr == nil {
++			_, werr := s.out.WriteToUDP((*bp)[:res.Count], target)
++			udpBufPool.Put(bp)
++			if werr != nil {
++				return
++			}
++			s.touch()
++			s.engine.stats.bytesUp.Add(int64(res.Count))
++			continue
++		}
++		udpBufPool.Put(bp)
++		if _, ok := rerr.(*tcpip.ErrWouldBlock); !ok {
++			return
++		}
++		select {
++		case <-notify:
++		case <-timer.C:
++			if s.idleFor() >= directUDPIdle {
++				return
++			}
++			timer.Reset(directUDPIdle)
++		case <-s.engine.ctx.Done():
++			return
++		}
++	}
++}
++
++// pumpDown: сервер -> приложение. Ответ принимается только от адреса, на который приложение
++// уже писало с этого порта.
++func (s *udpSession) pumpDown() {
++	defer s.close()
++	buf := make([]byte, directUDPBuf)
++	for {
++		n, from, err := s.out.ReadFromUDPAddrPort(buf)
++		if err != nil {
++			return
++		}
++		from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
++		remote := s.engine.mapIn(from)
++		s.mu.Lock()
++		local := s.flows[remote]
++		s.mu.Unlock()
++		if local == nil {
++			continue
++		}
++		if _, werr := local.Write(buf[:n]); werr != nil {
++			continue
++		}
++		s.touch()
++		s.engine.stats.bytesDown.Add(int64(n))
++	}
++}
++
++// ── tun.Device ────────────────────────────────────────────────────────────────────────────────
++
++// splitTun стоит между TUN (или обёрткой dnsfwd) и устройством WireGuard.
++type splitTun struct {
++	inner  tun.Device
++	engine *splitEngine
++}
++
++func (t *splitTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
++	for {
++		n, err := t.inner.Read(bufs, sizes, offset)
++		if err != nil {
++			return n, err
++		}
++		set := t.engine.set.Load()
++		kept := 0
++		for i := 0; i < n; i++ {
++			pkt := bufs[i][offset : offset+sizes[i]]
++			if proto := set.directProto(pkt); proto != 0 {
++				t.engine.inject(proto, pkt)
++				continue
++			}
++			if kept != i {
++				copy(bufs[kept][offset:], pkt)
++				sizes[kept] = sizes[i]
++			}
++			kept++
++		}
++		if kept > 0 {
++			return kept, nil
++		}
++	}
++}
++
++func (t *splitTun) Write(bufs [][]byte, offset int) (int, error) { return t.inner.Write(bufs, offset) }
++func (t *splitTun) MTU() (int, error)                            { return t.inner.MTU() }
++func (t *splitTun) Name() (string, error)                        { return t.inner.Name() }
++func (t *splitTun) File() *os.File                               { return t.inner.File() }
++func (t *splitTun) Events() <-chan tun.Event                     { return t.inner.Events() }
++func (t *splitTun) BatchSize() int                               { return t.inner.BatchSize() }
++func (t *splitTun) Close() error {
++	t.engine.detach(t.inner)
++	return t.inner.Close()
++}
+diff --git a/Sources/WireGuardKitGo/directsplit_test.go b/Sources/WireGuardKitGo/directsplit_test.go
+new file mode 100644
+index 0000000..4ebdc37
+--- /dev/null
++++ b/Sources/WireGuardKitGo/directsplit_test.go
+@@ -0,0 +1,613 @@
++/* AVPN (Tribe): тесты разделения в расширении (directsplit.go). «Телефон» — второй стек gVisor
++ * с адресом клиента туннеля; между ним и обёрткой стоит поддельный TUN. Наружные серверы —
++ * обычные сокеты на 127.0.0.1 / ::1, адреса назначения переводятся швами mapOut/mapIn.
++ */
++package main
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"io"
++	"net"
++	"net/netip"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++	"gvisor.dev/gvisor/pkg/buffer"
++	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
++	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
++	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
++	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
++	"gvisor.dev/gvisor/pkg/tcpip/stack"
++	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
++	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
++)
++
++const testMTU = 1420
++
++var (
++	phoneV4 = netip.MustParseAddr("10.8.0.2")
++	phoneV6 = netip.MustParseAddr("fd00::2")
++)
++
++// ── телефон ───────────────────────────────────────────────────────────────────────────────────
++
++type phone struct {
++	st *stack.Stack
++	ep *channel.Endpoint
++}
++
++func newPhone(t *testing.T) *phone {
++	t.Helper()
++	st := stack.New(stack.Options{
++		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
++		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
++	})
++	ep := channel.New(1024, testMTU, "")
++	if err := st.CreateNIC(1, ep); err != nil {
++		t.Fatalf("phone nic: %v", err)
++	}
++	for _, a := range []netip.Addr{phoneV4, phoneV6} {
++		proto := tcpip.NetworkProtocolNumber(ipv4.ProtocolNumber)
++		addr := tcpip.AddrFromSlice(a.AsSlice())
++		if a.Is6() {
++			proto = ipv6.ProtocolNumber
++		}
++		if err := st.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: proto,
++			AddressWithPrefix: addr.WithPrefix()}, stack.AddressProperties{}); err != nil {
++			t.Fatalf("phone addr: %v", err)
++		}
++	}
++	st.SetRouteTable([]tcpip.Route{
++		{Destination: header.IPv4EmptySubnet, NIC: 1},
++		{Destination: header.IPv6EmptySubnet, NIC: 1},
++	})
++	t.Cleanup(func() { ep.Close(); go st.Close() })
++	return &phone{st: st, ep: ep}
++}
++
++func fullAddr(ap netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
++	proto := tcpip.NetworkProtocolNumber(ipv4.ProtocolNumber)
++	if ap.Addr().Is6() {
++		proto = ipv6.ProtocolNumber
++	}
++	return tcpip.FullAddress{Addr: tcpip.AddrFromSlice(ap.Addr().AsSlice()), Port: ap.Port()}, proto
++}
++
++func (p *phone) dialTCP(t *testing.T, dst string, timeout time.Duration) (*gonet.TCPConn, error) {
++	t.Helper()
++	addr, proto := fullAddr(netip.MustParseAddrPort(dst))
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	return gonet.DialContextTCP(ctx, p.st, addr, proto)
++}
++
++// ── поддельный TUN ────────────────────────────────────────────────────────────────────────────
++
++type fakeTun struct {
++	ph     *phone
++	ctx    context.Context
++	cancel context.CancelFunc
++	events chan tun.Event
++}
++
++func newFakeTun(ph *phone) *fakeTun {
++	ctx, cancel := context.WithCancel(context.Background())
++	return &fakeTun{ph: ph, ctx: ctx, cancel: cancel, events: make(chan tun.Event)}
++}
++
++func (f *fakeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
++	pkb := f.ph.ep.ReadContext(f.ctx)
++	if pkb == nil {
++		return 0, os.ErrClosed
++	}
++	view := pkb.ToView()
++	pkb.DecRef()
++	sizes[0] = copy(bufs[0][offset:], view.AsSlice())
++	view.Release()
++	return 1, nil
++}
++
++func (f *fakeTun) Write(bufs [][]byte, offset int) (int, error) {
++	for _, b := range bufs {
++		pkt := b[offset:]
++		proto := tcpip.NetworkProtocolNumber(ipv4.ProtocolNumber)
++		if pkt[0]>>4 == 6 {
++			proto = ipv6.ProtocolNumber
++		}
++		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pkt)})
++		f.ph.ep.InjectInbound(proto, pkb)
++		pkb.DecRef()
++	}
++	return len(bufs), nil
++}
++
++func (f *fakeTun) MTU() (int, error)        { return testMTU, nil }
++func (f *fakeTun) Name() (string, error)    { return "fake", nil }
++func (f *fakeTun) File() *os.File           { return nil }
++func (f *fakeTun) Events() <-chan tun.Event { return f.events }
++func (f *fakeTun) BatchSize() int           { return 1 }
++func (f *fakeTun) Close() error             { f.cancel(); return nil }
++
++// ── стенд ─────────────────────────────────────────────────────────────────────────────────────
++
++type bench struct {
++	ph       *phone
++	engine   *splitEngine
++	wrapped  tun.Device
++	tunneled chan []byte // пакеты, которые обёртка отдала «устройству WireGuard»
++
++	mu   sync.Mutex
++	out  map[netip.AddrPort]netip.AddrPort // адрес назначения -> локальный сервер
++	back map[netip.AddrPort]netip.AddrPort
++}
++
++const testPrefixes = "# test\n5.255.255.0/24\n77.88.0.0/18\n2a02:6b8::/32\nnot-a-prefix\n"
++
++func newBench(t *testing.T) *bench {
++	t.Helper()
++	set, bad := parsePrefixSet(testPrefixes)
++	if bad != 1 {
++		t.Fatalf("bad lines = %d, want 1", bad)
++	}
++	b := &bench{ph: newPhone(t), tunneled: make(chan []byte, 256),
++		out: map[netip.AddrPort]netip.AddrPort{}, back: map[netip.AddrPort]netip.AddrPort{}}
++	b.engine = newSplitEngine(set, testMTU)
++	b.engine.mapOut = func(dst netip.AddrPort) netip.AddrPort {
++		b.mu.Lock()
++		defer b.mu.Unlock()
++		if m, ok := b.out[dst]; ok {
++			return m
++		}
++		return netip.MustParseAddrPort("127.0.0.1:1") // закрытый порт
++	}
++	b.engine.mapIn = func(from netip.AddrPort) netip.AddrPort {
++		b.mu.Lock()
++		defer b.mu.Unlock()
++		return b.back[from]
++	}
++	t.Cleanup(b.engine.shutdown)
++	b.attach(newFakeTun(b.ph))
++	return b
++}
++
++// attach: новая обёртка над новым TUN + читатель, изображающий устройство WireGuard.
++func (b *bench) attach(ft *fakeTun) {
++	w := &splitTun{inner: ft, engine: b.engine}
++	b.engine.attach(ft)
++	b.wrapped = w
++	go func() {
++		bufs := [][]byte{make([]byte, 2048)}
++		sizes := make([]int, 1)
++		for {
++			n, err := w.Read(bufs, sizes, 16)
++			if err != nil {
++				return
++			}
++			for i := 0; i < n; i++ {
++				cp := append([]byte(nil), bufs[i][16:16+sizes[i]]...)
++				select {
++				case b.tunneled <- cp:
++				default:
++				}
++			}
++		}
++	}()
++}
++
++func (b *bench) route(dst string, server net.Addr) {
++	d := netip.MustParseAddrPort(dst)
++	s := netip.MustParseAddrPort(server.String())
++	s = netip.AddrPortFrom(s.Addr().Unmap(), s.Port())
++	b.mu.Lock()
++	b.out[d] = s
++	b.back[s] = d
++	b.mu.Unlock()
++}
++
++func (b *bench) expectNothingTunneled(t *testing.T, dstPrefix string) {
++	t.Helper()
++	p := netip.MustParsePrefix(dstPrefix)
++	for {
++		select {
++		case pkt := <-b.tunneled:
++			if dst, ok := packetDst(pkt); ok && p.Contains(dst) {
++				t.Fatalf("packet to direct destination %v leaked into the tunnel", dst)
++			}
++		default:
++			return
++		}
++	}
++}
++
++func packetDst(pkt []byte) (netip.Addr, bool) {
++	switch {
++	case len(pkt) >= 20 && pkt[0]>>4 == 4:
++		return netip.AddrFrom4([4]byte(pkt[16:20])), true
++	case len(pkt) >= 40 && pkt[0]>>4 == 6:
++		return netip.AddrFrom16([16]byte(pkt[24:40])), true
++	}
++	return netip.Addr{}, false
++}
++
++func echoTCP(t *testing.T, network, addr string) net.Listener {
++	t.Helper()
++	ln, err := net.Listen(network, addr)
++	if err != nil {
++		t.Skipf("listen %s %s: %v", network, addr, err)
++	}
++	t.Cleanup(func() { ln.Close() })
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func() {
++				io.Copy(c, c)
++				c.(*net.TCPConn).CloseWrite()
++				time.Sleep(50 * time.Millisecond)
++				c.Close()
++			}()
++		}
++	}()
++	return ln
++}
++
++type udpEcho struct {
++	conn *net.UDPConn
++	mu   sync.Mutex
++	from []netip.AddrPort
++}
++
++func echoUDP(t *testing.T) *udpEcho {
++	t.Helper()
++	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatalf("udp listen: %v", err)
++	}
++	e := &udpEcho{conn: c}
++	t.Cleanup(func() { c.Close() })
++	go func() {
++		buf := make([]byte, 65535)
++		for {
++			n, from, err := c.ReadFromUDPAddrPort(buf)
++			if err != nil {
++				return
++			}
++			e.mu.Lock()
++			e.from = append(e.from, from)
++			e.mu.Unlock()
++			c.WriteToUDPAddrPort(buf[:n], from)
++		}
++	}()
++	return e
++}
++
++// ── тесты ─────────────────────────────────────────────────────────────────────────────────────
++
++func TestDirectPrefixSet(t *testing.T) {
++	set, bad := parsePrefixSet("10.0.0.0/8\n10.1.0.0/16\n192.168.1.0/24\n192.168.2.0/24\n1.2.3.4\n" +
++		"2001:db8::/32\n2001:db8:1::/48\n::1\n\n# c\njunk\n")
++	if bad != 1 {
++		t.Fatalf("bad = %d", bad)
++	}
++	if len(set.v4) != 4 || len(set.v6) != 2 {
++		t.Fatalf("ranges v4=%d v6=%d, want 4 and 2 (nested prefixes merged)", len(set.v4), len(set.v6))
++	}
++	in4 := func(s string) bool { a := netip.MustParseAddr(s).As4(); return set.contains4(be32(a[:])) }
++	in6 := func(s string) bool { a := netip.MustParseAddr(s).As16(); return set.contains6(u128From(a[:])) }
++	for addr, want := range map[string]bool{
++		"10.0.0.0": true, "10.255.255.255": true, "9.255.255.255": false, "11.0.0.0": false,
++		"192.168.1.255": true, "192.168.3.0": false, "192.168.0.255": false,
++		"1.2.3.4": true, "1.2.3.5": false, "0.0.0.0": false, "255.255.255.255": false,
++	} {
++		if in4(addr) != want {
++			t.Errorf("contains4(%s) = %v, want %v", addr, !want, want)
++		}
++	}
++	for addr, want := range map[string]bool{
++		"2001:db8::1": true, "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff": true, "2001:db9::": false,
++		"2001:db7:ffff:ffff:ffff:ffff:ffff:ffff": false, "::1": true, "::2": false, "::": false,
++	} {
++		if in6(addr) != want {
++			t.Errorf("contains6(%s) = %v, want %v", addr, !want, want)
++		}
++	}
++}
++
++func rawIPv4(proto byte, dst string) []byte {
++	p := make([]byte, 40)
++	p[0] = 0x45
++	p[9] = proto
++	d := netip.MustParseAddr(dst).As4()
++	copy(p[16:20], d[:])
++	return p
++}
++
++func rawIPv6(next byte, dst string) []byte {
++	p := make([]byte, 60)
++	p[0] = 0x60
++	p[6] = next
++	d := netip.MustParseAddr(dst).As16()
++	copy(p[24:40], d[:])
++	return p
++}
++
++func TestDirectProtoClassification(t *testing.T) {
++	set, _ := parsePrefixSet(testPrefixes)
++	cases := []struct {
++		name string
++		pkt  []byte
++		want tcpip.NetworkProtocolNumber
++	}{
++		{"tcp4 direct", rawIPv4(6, "5.255.255.9"), header.IPv4ProtocolNumber},
++		{"udp4 direct", rawIPv4(17, "77.88.8.8"), header.IPv4ProtocolNumber},
++		{"icmp4 direct stays in tunnel", rawIPv4(1, "5.255.255.9"), 0},
++		{"tcp4 foreign", rawIPv4(6, "8.8.8.8"), 0},
++		{"tcp6 direct", rawIPv6(6, "2a02:6b8::feed:ff"), header.IPv6ProtocolNumber},
++		{"udp6 direct", rawIPv6(17, "2a02:6b8::1"), header.IPv6ProtocolNumber},
++		{"icmp6 direct stays in tunnel", rawIPv6(58, "2a02:6b8::1"), 0},
++		{"tcp6 foreign", rawIPv6(6, "2606:4700::1111"), 0},
++		{"short", []byte{0x45, 0, 0}, 0},
++		{"truncated v6", rawIPv6(6, "2a02:6b8::1")[:30], 0},
++	}
++	for _, c := range cases {
++		if got := set.directProto(c.pkt); got != c.want {
++			t.Errorf("%s: proto = %d, want %d", c.name, got, c.want)
++		}
++	}
++}
++
++func TestDirectTCPEcho(t *testing.T) {
++	b := newBench(t)
++	ln := echoTCP(t, "tcp4", "127.0.0.1:0")
++	b.route("5.255.255.10:443", ln.Addr())
++
++	c, err := b.ph.dialTCP(t, "5.255.255.10:443", 5*time.Second)
++	if err != nil {
++		t.Fatalf("dial through direct split: %v", err)
++	}
++	defer c.Close()
++	payload := make([]byte, 2<<20) // больше любых буферов: проверяет и управление потоком
++	rand.Read(payload)
++	go func() {
++		c.Write(payload)
++		c.CloseWrite()
++	}()
++	c.SetReadDeadline(time.Now().Add(20 * time.Second))
++	got, err := io.ReadAll(c)
++	if err != nil {
++		t.Fatalf("read echo: %v (got %d bytes)", err, len(got))
++	}
++	if !bytes.Equal(got, payload) {
++		t.Fatalf("echo mismatch: got %d bytes, want %d", len(got), len(payload))
++	}
++	b.expectNothingTunneled(t, "5.255.255.0/24")
++	line := b.engine.statsLine()
++	if !strings.Contains(line, "tcp=") || strings.Contains(line, "up=0 ") {
++		t.Fatalf("stats line does not show the flow: %q", line)
++	}
++}
++
++func TestDirectTCPRefusedFailsFast(t *testing.T) {
++	b := newBench(t) // маршрута нет -> шов ведёт на закрытый порт
++	start := time.Now()
++	c, err := b.ph.dialTCP(t, "5.255.255.11:443", 5*time.Second)
++	if err == nil {
++		c.Close()
++		t.Fatal("dial to a refusing destination succeeded")
++	}
++	if d := time.Since(start); d > 2*time.Second {
++		t.Fatalf("refusal took %v: the app must see a reset, not a hang", d)
++	}
++	if got := b.engine.stats.tcpFail.Load(); got != 1 {
++		t.Fatalf("tcpFail = %d, want 1", got)
++	}
++}
++
++func TestForeignTrafficGoesToTunnel(t *testing.T) {
++	b := newBench(t)
++	go b.ph.dialTCP(t, "8.8.8.8:443", 300*time.Millisecond)
++	deadline := time.After(3 * time.Second)
++	for {
++		select {
++		case pkt := <-b.tunneled:
++			dst, ok := packetDst(pkt)
++			if ok && dst == netip.MustParseAddr("8.8.8.8") {
++				if pkt[9] != 6 {
++					t.Fatalf("unexpected protocol %d", pkt[9])
++				}
++				if b.engine.stats.tcpTotal.Load() != 0 {
++					t.Fatal("foreign destination reached the direct engine")
++				}
++				return
++			}
++		case <-deadline:
++			t.Fatal("SYN to a foreign destination did not reach the tunnel")
++		}
++	}
++}
++
++func TestDirectTCPEchoIPv6(t *testing.T) {
++	b := newBench(t)
++	ln := echoTCP(t, "tcp6", "[::1]:0")
++	b.route("[2a02:6b8::feed:ff]:443", ln.Addr())
++	c, err := b.ph.dialTCP(t, "[2a02:6b8::feed:ff]:443", 5*time.Second)
++	if err != nil {
++		t.Fatalf("dial v6 through direct split: %v", err)
++	}
++	defer c.Close()
++	c.Write([]byte("привет"))
++	c.CloseWrite()
++	c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	got, err := io.ReadAll(c)
++	if err != nil || string(got) != "привет" {
++		t.Fatalf("v6 echo = %q, %v", got, err)
++	}
++}
++
++func TestDirectUDPOneSocketManyServers(t *testing.T) {
++	b := newBench(t)
++	s1, s2 := echoUDP(t), echoUDP(t)
++	b.route("77.88.8.8:53", s1.conn.LocalAddr())
++	b.route("5.255.255.20:3478", s2.conn.LocalAddr())
++
++	local, _ := fullAddr(netip.AddrPortFrom(phoneV4, 40000))
++	c, err := gonet.DialUDP(b.ph.st, &local, nil, ipv4.ProtocolNumber)
++	if err != nil {
++		t.Fatalf("phone udp socket: %v", err)
++	}
++	defer c.Close()
++	for _, dst := range []string{"77.88.8.8:53", "5.255.255.20:3478"} {
++		ap := netip.MustParseAddrPort(dst)
++		msg := []byte("ping " + dst)
++		if _, err := c.WriteTo(msg, net.UDPAddrFromAddrPort(ap)); err != nil {
++			t.Fatalf("write to %s: %v", dst, err)
++		}
++		buf := make([]byte, 2048)
++		c.SetReadDeadline(time.Now().Add(5 * time.Second))
++		n, from, err := c.ReadFrom(buf)
++		if err != nil {
++			t.Fatalf("no reply from %s: %v", dst, err)
++		}
++		if string(buf[:n]) != string(msg) {
++			t.Fatalf("reply from %s = %q", dst, buf[:n])
++		}
++		// Ответ должен прийти от имени настоящего адресата, а не локального сервера.
++		if got := netip.MustParseAddrPort(from.String()); got != ap {
++			t.Fatalf("reply source = %v, want %v", got, ap)
++		}
++	}
++	s1.mu.Lock()
++	a := s1.from[0]
++	s1.mu.Unlock()
++	s2.mu.Lock()
++	c2 := s2.from[0]
++	s2.mu.Unlock()
++	if a.Port() != c2.Port() {
++		t.Fatalf("one app socket used two outer ports (%d, %d): mapping depends on destination", a.Port(), c2.Port())
++	}
++	if got := b.engine.stats.udpOpen.Load(); got != 1 {
++		t.Fatalf("udp sessions = %d, want 1", got)
++	}
++	b.expectNothingTunneled(t, "77.88.0.0/18")
++}
++
++func TestDirectUDPLargeDatagram(t *testing.T) {
++	b := newBench(t)
++	s := echoUDP(t)
++	b.route("77.88.8.1:9000", s.conn.LocalAddr())
++	local, _ := fullAddr(netip.AddrPortFrom(phoneV4, 40001))
++	c, err := gonet.DialUDP(b.ph.st, &local, nil, ipv4.ProtocolNumber)
++	if err != nil {
++		t.Fatalf("phone udp socket: %v", err)
++	}
++	defer c.Close()
++	msg := make([]byte, 6000) // больше MTU: фрагменты на входе и на выходе
++	rand.Read(msg)
++	if _, err := c.WriteTo(msg, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("77.88.8.1:9000"))); err != nil {
++		t.Fatalf("write: %v", err)
++	}
++	buf := make([]byte, 65535)
++	c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	n, _, err := c.ReadFrom(buf)
++	if err != nil || !bytes.Equal(buf[:n], msg) {
++		t.Fatalf("large datagram echo: n=%d err=%v", n, err)
++	}
++}
++
++// Мягкий перезапуск туннеля: устройство закрывает TUN и открывает новый, прямое соединение
++// приложения при этом не рвётся.
++func TestDirectFlowSurvivesDeviceRestart(t *testing.T) {
++	b := newBench(t)
++	ln := echoTCP(t, "tcp4", "127.0.0.1:0")
++	b.route("5.255.255.12:443", ln.Addr())
++	c, err := b.ph.dialTCP(t, "5.255.255.12:443", 5*time.Second)
++	if err != nil {
++		t.Fatalf("dial: %v", err)
++	}
++	defer c.Close()
++	roundTrip := func(msg string) {
++		t.Helper()
++		if _, err := c.Write([]byte(msg)); err != nil {
++			t.Fatalf("write %q: %v", msg, err)
++		}
++		buf := make([]byte, len(msg))
++		c.SetReadDeadline(time.Now().Add(10 * time.Second))
++		if _, err := io.ReadFull(c, buf); err != nil || string(buf) != msg {
++			t.Fatalf("echo %q = %q, %v", msg, buf, err)
++		}
++	}
++	roundTrip("before")
++	b.wrapped.Close()
++	time.Sleep(100 * time.Millisecond)
++	b.attach(newFakeTun(b.ph))
++	roundTrip("after")
++	if got := b.engine.stats.tcpTotal.Load(); got != 1 {
++		t.Fatalf("flow was re-established (%d dials): it must survive the restart", got)
++	}
++}
++
++func TestDirectSplitToggle(t *testing.T) {
++	dir := t.TempDir()
++	path := dir + "/list.txt"
++	if err := os.WriteFile(path, []byte(testPrefixes), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	data, err := readLimited(path, directListMaxBytes)
++	if err != nil {
++		t.Fatalf("read list: %v", err)
++	}
++	set, _ := parsePrefixSet(string(data))
++	if set.size() != 3 {
++		t.Fatalf("ranges = %d, want 3", set.size())
++	}
++	if _, err := readLimited(dir+"/missing.txt", directListMaxBytes); err == nil {
++		t.Fatal("missing list must be an error")
++	}
++	if _, err := readLimited(path, 8); err == nil {
++		t.Fatal("oversized list must be an error")
++	}
++
++	ph := newPhone(t)
++	ft := newFakeTun(ph)
++	setDirectSet(nil)
++	if got := wrapDirectSplitIfEnabled(ft, nil); got != tun.Device(ft) {
++		t.Fatal("disabled split must not wrap the TUN")
++	}
++	setDirectSet(set)
++	w := wrapDirectSplitIfEnabled(ft, nil)
++	if _, ok := w.(*splitTun); !ok {
++		t.Fatal("enabled split must wrap the TUN")
++	}
++	directMu.Lock()
++	engine := directEngine
++	directMu.Unlock()
++	if engine == nil {
++		t.Fatal("engine not created")
++	}
++	// Повторный старт устройства берёт тот же движок.
++	if w2 := wrapDirectSplitIfEnabled(newFakeTun(ph), nil).(*splitTun); w2.engine != engine {
++		t.Fatal("device restart must reuse the engine")
++	}
++	setDirectSet(nil)
++	directMu.Lock()
++	gone := directEngine == nil
++	directMu.Unlock()
++	if !gone {
++		t.Fatal("disabling the split must drop the engine")
++	}
++	select {
++	case <-engine.ctx.Done():
++	case <-time.After(time.Second):
++		t.Fatal("engine not shut down")
++	}
++}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index e4b7d14..35caca7 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -40,4 +40,11 @@ extern int32_t wgSetSplitDns(const char *suffixesCsv, const char *directServer,
+                              const char *tunnelServer, const char *clientIp, int32_t enabled,
+                              int32_t warmup);
+ 
++/* AVPN разделение «РФ мимо туннеля» в расширении (directsplit.go): настроить ДО wgTurnOn.
++ * listPath — файл со списком CIDR построчно; enabled=0 = сброс. Возвращает число диапазонов,
++ * 0 при сбросе, -1 если список не прочитан (разделение выключено, весь трафик идёт в туннель). */
++extern int32_t wgSetDirectSplit(const char *listPath, int32_t enabled);
++/* Счётчики прямых соединений для журнала; строку освобождает вызывающий. */
++extern char *wgDirectSplitStats();
++
+ #endif

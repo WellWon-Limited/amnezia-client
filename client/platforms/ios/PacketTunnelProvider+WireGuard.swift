@@ -31,6 +31,21 @@ extension PacketTunnelProvider {
                 _ = wgSetSplitDns("", "", "", "", 0, 0)
             }
 
+            // AVPN разделение РФ внутри расширения (directsplit.go): настроить Go-слой ДО старта
+            // адаптера. Нет ключа → явный сброс (переподключения). Список не прочитан → весь
+            // трафик идёт в туннель, туннель при этом поднимается как обычно.
+            var directSplitRanges: Int32 = 0
+            if let fileName = wgConfig.directSplitFile,
+               fileName == (fileName as NSString).lastPathComponent,
+               let container = FileManager.default.containerURL(
+                   forSecurityApplicationGroupIdentifier: "group.hk.wellwon.tribe") {
+                directSplitRanges = wgSetDirectSplit(container.appendingPathComponent(fileName).path, 1)
+                TribeSharedState.appGroup?.recordAsync(source: "ne", event: "direct_split",
+                    fields: ["ranges": Int(directSplitRanges)])
+            } else {
+                _ = wgSetDirectSplit("", 0)
+            }
+
             let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgConfigStr)
 
             if tunnelConfiguration.peers.first!.allowedIPs
@@ -66,7 +81,7 @@ extension PacketTunnelProvider {
 
             wg_log(.info, message: "Starting tunnel from the " +
                    (activationAttemptId == nil ? "OS directly, rather than the app" : "app"))
-            wg_log(.info, message: "Tribe split: type=\(wgConfig.splitTunnelType) routes=\(wgConfig.splitTunnelSites.count)")
+            wg_log(.info, message: "Tribe split: type=\(wgConfig.splitTunnelType) routes=\(wgConfig.splitTunnelSites.count) userspace=\(directSplitRanges)")
 
             // Start the tunnel
             let generation = tribeRuntimeGeneration
@@ -358,8 +373,15 @@ extension PacketTunnelProvider {
             let now = UInt64(Date().timeIntervalSince1970)
             let age = handshake > 0 && now >= handshake ? "\(now - handshake)s" : "never"
             let uplink = self?.tribeUplinkDescription() ?? "?"
-            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink) mem=\(PacketTunnelProvider.tribeFootprintMB())")
+            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink) mem=\(PacketTunnelProvider.tribeFootprintMB()) direct=[\(PacketTunnelProvider.tribeDirectSplitStats())]")
         }
+    }
+
+    /// Счётчики прямых соединений разделения в расширении: tcp=открыто/всего fail= udp= up= down=.
+    private static func tribeDirectSplitStats() -> String {
+        guard let raw = wgDirectSplitStats() else { return "?" }
+        defer { free(raw) }
+        return String(cString: raw)
     }
 
     /// Память расширения в МБ (phys_footprint — та же величина, по которой iOS держит лимит 50 МБ).

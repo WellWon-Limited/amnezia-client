@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.10` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 | current; 0008 = immortal logger context (NE crash), real-loss gate, no stale flag |
+| `3.1.4-tribe.11` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 | current; 0009 = userspace direct split (`directsplit.go`), off unless the app configures it |
+| `3.1.4-tribe.10` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 | shipped (iOS 5.1.98-5.1.99); 0008 = immortal logger context (NE crash), real-loss gate, no stale flag |
 | `3.1.4-tribe.9` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 | built for iOS 5.1.97 (127, not released to users); 0007 = fresh port on a returning path, ladder fresh port -> soft restart |
 | `3.1.4-tribe.8` | 0001 + 0002 + 0003 + 0005 + 0006 | shipped (iOS 5.1.90-5.1.96); 0006 = persistent heal (stage 3) + in-place soft restart |
 | `3.1.4-tribe.7` | 0001 + 0002 + 0003 + 0005 | rollback target; 0005 = bounded GUI/NE recovery (see below) |
@@ -136,6 +137,37 @@ whole device with a new port.
   first (Conan 2 refuses `--version` that differs from the recipe); the snapshot rule then gives the
   shipped `TribeRoaming.swift`.
 
+## tribe.11 behaviour (patch 0009, Go only)
+
+Swift sources and `TribeRoaming.swift` are those of tribe.10. The patch adds `directsplit.go` and
+one line in `wgTurnOn`.
+
+- `wgSetDirectSplit(listPath, enabled)` (before `wgTurnOn`) loads a CIDR list (one per line, IPv4
+  and IPv6) into a sorted range set. Returns the number of ranges, 0 on reset, -1 when the list
+  cannot be read: the split is then off and all traffic goes into the tunnel.
+- `wrapDirectSplitIfEnabled` wraps the TUN device (outside the `dnsfwd` wrapper). `Read` classifies
+  every packet by destination: TCP/UDP to an address in the set is injected into a gVisor stack,
+  everything else (other destinations, ICMP to listed addresses) is returned to the WireGuard device
+  untouched. gVisor is already vendored through xray-core; no new module is added.
+- TCP: the forwarder dials the real destination from an ordinary extension socket first and
+  completes the app's handshake only after that, so an outside refusal reaches the app as a reset.
+  An outside reset is passed on as a reset. A half-closed flow lives while data moves.
+- UDP: one outer socket per app source address and port (the mapping does not depend on the
+  destination); replies are accepted only from addresses the app has written to; idle 2 min.
+- The engine outlives the device: `wgTurnOff` + `wgTurnOn` on the same TUN (soft restart) keeps
+  direct flows. `wgSetDirectSplit(_, 0)` shuts it down.
+- Limits (the extension has 50 MB): 384 TCP flows, 256 UDP sessions (the least recently active one
+  is evicted), TCP buffers 64 KiB default / 256 KiB max per direction, Go soft memory limit 36 MiB
+  (set only when no lower limit is already in place).
+- `wgDirectSplitStats()` returns `tcp=open/total fail=N udp=open/total up=bytes down=bytes` or `off`.
+- The basis is the same as for `dnsfwd.go` and WireGuard's own socket: iOS does not route the
+  provider's sockets into its tunnel.
+
+Build gate: `go test -run '^(TestDirect|TestForeign)'` (a second gVisor stack plays the phone; real
+loopback sockets play the servers): range set, classification, TCP echo over IPv4 and IPv6 (2 MiB),
+fast failure on refusal, foreign traffic reaching the tunnel, one outer UDP port for two servers
+with correct reply sources, a datagram above the MTU, a flow surviving a device restart, toggle.
+
 ## Tests
 
 ```sh
@@ -213,9 +245,10 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.10")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.11")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
-pin the root requirement back to `awg-apple/3.1.4-tribe.9` or `3.1.4-tribe.8` (iOS; both binaries are
+pin the root requirement back to `awg-apple/3.1.4-tribe.10` (then drop the `wgSetDirectSplit` /
+`wgDirectSplitStats` calls from `PacketTunnelProvider+WireGuard.swift`), `3.1.4-tribe.9` or `3.1.4-tribe.8` (iOS; all binaries are
 in the release cache), `3.1.4-tribe.7` (the NE sources then lose the `soft_restart` provider message:
 revert `PacketTunnelProvider*.swift` to their tribe.7 state) or `3.1.4-tribe.5`. Both can be resolved from a cache that holds their binaries or rebuilt from this
 recipe: their `TribeRoaming.swift` and test are frozen snapshots (rule above), their patch lists are
