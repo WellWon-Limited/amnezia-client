@@ -324,40 +324,47 @@ void ServiceProbe::runReachVoice(const QString &url, int timeoutMs,
     req.setRawHeader("Cache-Control", "no-cache");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    auto *clock = new QElapsedTimer();
-    auto *ttfb = new qint64(-1);
-    auto *timedOut = new bool(false);
-    auto *gotBytes = new bool(false);
-    clock->start();
+    // Состояние голоса живёт, пока жив последний его обработчик: таймаут-таймер (ребёнок reply) может
+    // сработать ПОСЛЕ finished — до отложенного удаления reply. Так бывает после сна macOS (просроченный
+    // таймер и ответ приходят одной пачкой). С ручным delete в finished таймер писал в освобождённую
+    // память; её успевал занять QTcpSocket пробы Telegram — краш 5.1.99 (129) на abort().
+    struct VoiceState {
+        QElapsedTimer clock;
+        qint64 ttfb = -1;
+        bool timedOut = false;
+        bool gotBytes = false;
+    };
+    auto vs = std::make_shared<VoiceState>();
+    vs->clock.start();
     QNetworkReply *reply = m_nam->get(req);
 
     auto *timer = new QTimer(reply);
     timer->setSingleShot(true);
-    connect(timer, &QTimer::timeout, reply, [reply, timedOut]() {
-        *timedOut = true;
+    connect(timer, &QTimer::timeout, reply, [reply, vs]() {
+        vs->timedOut = true;
         reply->abort();
     });
     timer->start(timeoutMs);
 
-    connect(reply, &QNetworkReply::metaDataChanged, reply, [clock, ttfb]() {
-        if (*ttfb < 0) *ttfb = clock->elapsed();
+    connect(reply, &QNetworkReply::metaDataChanged, reply, [vs]() {
+        if (vs->ttfb < 0) vs->ttfb = vs->clock.elapsed();
     });
-    connect(reply, &QNetworkReply::readyRead, reply, [reply, clock, ttfb, gotBytes]() {
-        if (*ttfb < 0) *ttfb = clock->elapsed();
-        *gotBytes = true;
+    connect(reply, &QNetworkReply::readyRead, reply, [reply, vs]() {
+        if (vs->ttfb < 0) vs->ttfb = vs->clock.elapsed();
+        vs->gotBytes = true;
         reply->readAll(); // тело не нужно (favicon/крошечный JSON) — только факт ответа
     });
     connect(reply, &QNetworkReply::finished, reply,
-            [reply, clock, ttfb, timedOut, gotBytes, done]() {
+            [reply, timer, vs, done]() {
+                timer->stop(); // ответ уже есть — поздний таймаут не нужен
                 const bool netError = (reply->error() != QNetworkReply::NoError);
-                const bool tOut = *timedOut
+                const bool tOut = vs->timedOut
                                   || (reply->error() == QNetworkReply::OperationCanceledError);
                 const int httpStatus =
                         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                const bool anySign = *gotBytes || *ttfb >= 0;
+                const bool anySign = vs->gotBytes || vs->ttfb >= 0;
                 const VoiceOutcome o = classifyReachVoice(netError, tOut, httpStatus, anySign);
-                const int rtt = (*ttfb >= 0) ? int(*ttfb) : -1;
-                delete clock; delete ttfb; delete timedOut; delete gotBytes;
+                const int rtt = (vs->ttfb >= 0) ? int(vs->ttfb) : -1;
                 reply->deleteLater();
                 done(o, rtt);
             });
