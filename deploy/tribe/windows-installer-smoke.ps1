@@ -25,10 +25,17 @@ function ServiceExists($name) { [bool](Get-Service -Name $name -ErrorAction Sile
 
 function RunTool($exe, [string[]]$argList, [int]$timeoutSec = 900) {
     Write-Host "> $exe $($argList -join ' ')"
-    $p = Start-Process -FilePath $exe -ArgumentList $argList -PassThru -NoNewWindow
+    $out = Join-Path $work ("run-{0}.log" -f [guid]::NewGuid())
+    $p = Start-Process -FilePath $exe -ArgumentList $argList -PassThru -NoNewWindow `
+        -RedirectStandardOutput $out -RedirectStandardError "$out.err"
     $null = $p.Handle  # без этого ExitCode у Start-Process бывает пустым
-    if (-not $p.WaitForExit($timeoutSec * 1000)) {
-        $p.Kill()
+    $finished = $p.WaitForExit($timeoutSec * 1000)
+    if (-not $finished) { $p.Kill() }
+    $text = ((Get-Content $out -Raw -ErrorAction SilentlyContinue) + (Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue))
+    Write-Host $text
+    # Исключение в скрипте инсталлера = сломанный сценарий, даже если код выхода «правильный».
+    Check ($text -notmatch 'Exception while loading') "без исключений в скриптах инсталлера: $(Split-Path $exe -Leaf) $($argList[0])"
+    if (-not $finished) {
         Write-Host "TIMEOUT after $timeoutSec s"
         return 'timeout'
     }

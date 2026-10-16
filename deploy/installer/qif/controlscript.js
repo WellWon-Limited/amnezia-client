@@ -4,6 +4,9 @@ var desktopAppProcessRunning = false;
 var appInstalledUninstallerPath;
 var appInstalledUninstallerPath_x86;
 
+// AVPN: отмена в IFW 4.x — installer.setCanceled(). Upstream звал setCancelled() (нет такого метода):
+// любая отмена (Cancel в «уже установлено», отказ деинсталлятора) падала исключением скрипта.
+
 function appName()
 {
     return installer.value("Name");
@@ -185,7 +188,7 @@ function requestToQuit(installer,gui)
     gui.clickButton(buttons.CancelButton);
 
     if (runningOnWindows()) {
-        installer.setCancelled();
+        installer.setCanceled();
     }
 }
 
@@ -323,7 +326,7 @@ function Controller () {
                                  "Файл установщика называется " + appName() + ".exe — старая версия Tribe VPN примет его за " +
                                  "запущенное приложение и не даст себя удалить. Переименуйте файл, например в " +
                                  appName() + "-Setup.exe, и запустите установку снова.", QMessageBox.Ok);
-            installer.setCancelled();
+            installer.setCanceled();
             return;
         }
 
@@ -352,7 +355,7 @@ function Controller () {
 
                     if (Number(resultArray[1]) !== 0) {
                         console.log("Uninstallation aborted by user");
-                        installer.setCancelled();
+                        installer.setCanceled();
                         return;
                     } else {
                         for (var i = 0; i < 300; i++) {
@@ -368,7 +371,7 @@ function Controller () {
 
             } else {
                 console.log("Request to quit from user");
-                installer.setCancelled();
+                installer.setCanceled();
                 return;
             }
         } else {
