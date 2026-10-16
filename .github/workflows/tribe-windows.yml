@@ -77,3 +77,18 @@ jobs:
       run: |
         $exe = (Get-ChildItem deploy/build/*_windows_x64.exe | Select-Object -First 1).FullName
         ./deploy/tribe/windows-installer-smoke.ps1 -Installer $exe
+
+    # Первый запуск после установки: онбординг на маленьком экране раннера (1024x768) — окно
+    # целиком в рабочей области. Снимок экрана — артефакт tribe-windows-first-run.
+    - name: 'First-run UI screenshot'
+      shell: pwsh
+      timeout-minutes: 5
+      run: ./deploy/tribe/windows-ui-screenshot.ps1 -OutDir "${{ runner.temp }}/ui-shot"
+
+    - name: 'Upload first-run screenshot'
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: tribe-windows-first-run
+        path: ${{ runner.temp }}/ui-shot/first-run.png
+        retention-days: 7
