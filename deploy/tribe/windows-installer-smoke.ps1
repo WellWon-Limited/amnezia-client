@@ -109,6 +109,14 @@ Start-Sleep -Seconds 3
 Check ((Install $setup) -eq 0) 'повторная установка прошла'
 CheckInstalledFresh 'после повторной установки'
 
+Step 'Обновление при запущенном Tribe (как у пользователя: окно спрятано в трей)'
+$gui = Start-Process -FilePath (Join-Path $installDir 'AmneziaVPN.exe') -PassThru
+Start-Sleep -Seconds 15
+Check (-not $gui.HasExited) 'GUI Tribe запущен перед обновлением'
+Check ((Install $setup) -eq 0) 'обновление при запущенном Tribe прошло без зависания на «TribeVPN is active»'
+CheckInstalledFresh 'после обновления при запущенном Tribe'
+Get-Process -Name AmneziaVPN -ErrorAction SilentlyContinue | Stop-Process -Force
+
 Step 'Удаление'
 Check ((Uninstall) -eq 0) 'удаление прошло'
 Start-Sleep -Seconds 3

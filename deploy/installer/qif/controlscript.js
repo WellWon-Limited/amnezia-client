@@ -129,6 +129,13 @@ function stopTribeServicesBeforeInstall()
     installer.dropAdminRights();
 }
 
+// AVPN: закрыть GUI Tribe (AmneziaVPN.exe из нашей папки); AmneziaVPN.exe оригинальной Amnezia не трогаем.
+function closeOurAppWindows()
+{
+    installer.execute("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+        "Get-Process -Name AmneziaVPN -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\\" + appName() + "\\*' } | Stop-Process -Force"]);
+}
+
 // AVPN: старую версию удаляем без окон мастера (IFW CLI): юзер уже подтвердил удаление в диалоге
 // выше, а тихий режим проверяется смоук-тестом инсталлера в CI (deploy/tribe/windows-installer-smoke.ps1).
 function uninstallerArgs()
@@ -410,6 +417,27 @@ isDesktopAppProcessRunningMessageLoop = function ()
         }
     }
     desktopAppProcessRunning = appProcessIsRunning();
+
+    if (desktopAppProcessRunning && runningOnWindows()) {
+        // AVPN: на Windows крестик окна Tribe НЕ выходит из приложения — прячет его в трей
+        // (PageController::closeWindow → hideMainWindow). Upstream-просьба «закройте и нажмите Retry»
+        // зацикливалась: юзер закрывал окно, процесс жил. Закрываем наш GUI сами (только из нашей папки).
+        var answer = QMessageBox.question("QMessageBox", appName() + " installer",
+                                          "Tribe VPN сейчас запущен (окно или значок у часов). " +
+                                          "Закрыть его и продолжить установку?",
+                                          QMessageBox.Ok | QMessageBox.Cancel);
+        if (answer !== QMessageBox.Ok) {
+            requestToQuitFromApp = true;
+            return;
+        }
+        closeOurAppWindows();
+        for (var w = 0; w < 30 && appProcessIsRunning(); w++) {
+            sleep(200);
+        }
+        if (!appProcessIsRunning()) {
+            return;
+        }
+    }
 
     if (desktopAppProcessRunning) {
         var result = QMessageBox.warning("QMessageBox", appName() + " installer",
