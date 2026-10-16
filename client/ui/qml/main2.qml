@@ -58,11 +58,32 @@ Window  {
 
     visible: !GC.isDesktop()
     width: GC.screenWidth
-    height: GC.screenHeight
+    height: winFit ? Math.min(GC.screenHeight, winClientMax) : GC.screenHeight
     minimumWidth: GC.isDesktop() ? 380 : 0
     // AVPN: подняли высоту окна на десктопе — на главном экране появилась карточка «АвтоVPN» над
     // «Умный выбор сервера»; при 640 контент (орб+кольца+2 карточки+кнопки) наезжал (экран без скролла).
-    minimumHeight: GC.isDesktop() ? 760 : 0
+    minimumHeight: GC.isDesktop() ? (winFit ? Math.min(layoutMinHeight, winClientMax) : layoutMinHeight) : 0
+    readonly property int layoutMinHeight: 760
+    // AVPN (Windows): окно не выше рабочей области экрана. На ноутбуках 1366x768 и 1080p@150% рабочая
+    // область ~650–700 — окно 820 (мин. 760) уходило низом за край вместе с кнопками онбординга
+    // (жалоба 16.10.2026: «нет кнопки Далее»). Теперь окно влезает в экран, а нехватку высоты до
+    // вёрстки 760 добирает пропорциональный масштаб appContent (страницы Tribe без скролла).
+    // Только Windows: на macOS окно frameless со своей геометрией (PLATFORM-SCOPING).
+    readonly property bool winFit: Qt.platform.os === "windows" && GC.isDesktop()
+    // клиентская высота, которая точно влезает: рабочая область минус заголовок и рамки (~48)
+    readonly property int winClientMax: Math.min(Screen.desktopAvailableHeight, Screen.height - 40) - 48
+    readonly property real fitScale: (winFit && height < layoutMinHeight) ? height / layoutMinHeight : 1
+    property bool winPlaced: false
+    // Windows ставит новое окно со сдвигом вниз (каскад) — при первом показе поднимаем, если низ
+    // окна ниже рабочей области.
+    onVisibleChanged: {
+        if (!visible || !winFit || winPlaced)
+            return
+        winPlaced = true
+        const workBottom = Screen.virtualY + Math.min(Screen.desktopAvailableHeight, Screen.height - 40)
+        if (y + height + 8 > workBottom)
+            y = Math.max(Screen.virtualY + 40, workBottom - height - 8)
+    }
     // AVPN: клампить окно только на десктопе — на iPhone (высота > 800pt) кламп даёт letterbox
     maximumWidth: GC.isDesktop() ? 600 : 16777215
     maximumHeight: GC.isDesktop() ? 1000 : 16777215
@@ -123,7 +144,11 @@ Window  {
     // у всего сразу (страницы, шторки, тосты). Функции/FileDialog остаются на root (scope-вызовы).
     Item {
         id: appContent
-        anchors.fill: parent
+        // AVPN (Windows fit): при fitScale < 1 контент живёт в высоте вёрстки и уменьшается целиком
+        width: root.width / root.fitScale
+        height: root.height / root.fitScale
+        scale: root.fitScale
+        transformOrigin: Item.TopLeft
         layer.enabled: root.roundedMac
         layer.effect: Fx.OpacityMask {
             maskSource: Rectangle { width: appContent.width; height: appContent.height; radius: 24 }
@@ -195,10 +220,10 @@ Window  {
 
     PageStart {
         objectName: "pageStart"
-        width: root.width
+        width: appContent.width
         // AVPN (desktop bar): контент — ПОД верхней полосой (macOS: кастомный тайтлбар; Win: версия)
         y: root.desktopBar ? macTitleBar.height : 0
-        height: root.height - (root.desktopBar ? macTitleBar.height : 0)
+        height: appContent.height - (root.desktopBar ? macTitleBar.height : 0)
     }
 
     // AVPN (macOS rounded): кастомный тайтлбар — светофоры (закрыть/свернуть/развернуть) в капсуле
@@ -388,7 +413,7 @@ Window  {
             property bool isCloseByUser: false
 
             anchors.fill: parent
-            expandedHeight: root.height * 0.35 + PageController.safeAreaBottomMargin + PageController.imeHeight
+            expandedHeight: appContent.height * 0.35 + PageController.safeAreaBottomMargin + PageController.imeHeight
 
             expandedStateContent: ColumnLayout {
                 anchors.top: parent.top
