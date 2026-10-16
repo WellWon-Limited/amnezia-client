@@ -371,6 +371,18 @@ function Controller () {
                                 break;
                             }
                         }
+                        // AVPN: maintenancetool не может удалить себя сам — после выхода отложенная
+                        // зачистка сносит папку установки целиком (REMOVE_TARGET_DIR). Если новая
+                        // установка уже пишет туда файлы, зачистка стирала их (CI 16.10.2026: после
+                        // переустановки нет AmneziaVPN.exe). Ждём, пока старая папка исчезнет.
+                        if (runningOnWindows()) {
+                            var oldDir = String(appInstalledUninstallerPath).replace("/maintenancetool.exe", "");
+                            for (var k = 0; k < 600 && installer.fileExists(oldDir); k++) {
+                                sleep(100);
+                            }
+                            console.log("Old install dir gone: " + !installer.fileExists(oldDir));
+                            sleep(1000);
+                        }
                     }
                 }
 

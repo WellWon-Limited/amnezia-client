@@ -52,6 +52,13 @@ function ExpectedServiceHashes() {
 }
 
 function CheckInstalledFresh($label) {
+    # отложенная зачистка старого деинсталлятора может стереть файлы ПОСЛЕ выхода инсталлера
+    Start-Sleep -Seconds 20
+    $files = @(Get-ChildItem -Path $installDir -Recurse -File -ErrorAction SilentlyContinue)
+    Write-Host "${label}: файлов в $installDir — $($files.Count)"
+    Check (Test-Path (Join-Path $installDir 'AmneziaVPN.exe')) "${label}: приложение AmneziaVPN.exe на месте"
+    Check (Test-Path (Join-Path $installDir 'Tribe-service.exe')) "${label}: Tribe-service.exe на месте"
+    Check ($files.Count -ge 50) "${label}: установка полная (файлов $($files.Count))"
     Check (Test-Path $maintenance) "${label}: maintenancetool.exe на месте"
     Check (ServiceExists 'Tribe-service') "${label}: служба Tribe-service зарегистрирована"
     $bin = (Get-CimInstance Win32_Service -Filter "Name='Tribe-service'" -ErrorAction SilentlyContinue).PathName
@@ -110,9 +117,10 @@ Check ((Install $setup) -eq 0) 'повторная установка прошл
 CheckInstalledFresh 'после повторной установки'
 
 Step 'Обновление при запущенном Tribe (как у пользователя: окно спрятано в трей)'
-$gui = Start-Process -FilePath (Join-Path $installDir 'AmneziaVPN.exe') -PassThru
-Start-Sleep -Seconds 15
-Check (-not $gui.HasExited) 'GUI Tribe запущен перед обновлением'
+$guiExe = Join-Path $installDir 'AmneziaVPN.exe'
+$gui = $null
+if (Test-Path $guiExe) { $gui = Start-Process -FilePath $guiExe -PassThru; Start-Sleep -Seconds 15 }
+Check ($gui -and -not $gui.HasExited) 'GUI Tribe запущен перед обновлением'
 Check ((Install $setup) -eq 0) 'обновление при запущенном Tribe прошло без зависания на «TribeVPN is active»'
 CheckInstalledFresh 'после обновления при запущенном Tribe'
 Get-Process -Name AmneziaVPN -ErrorAction SilentlyContinue | Stop-Process -Force
