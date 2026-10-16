@@ -9,10 +9,13 @@ function appName()
     return installer.value("Name");
 }
 
+// AVPN: на Windows GUI = AmneziaVPN.exe (upstream-имя цели клиента), а Name = TribeVPN — как в
+// componentscript.js. "TribeVPN.exe" искать нельзя: так называется сам скачанный инсталлер
+// (/dl/TribeVPN.exe) — он находил себя в tasklist и бесконечно показывал «TribeVPN is active».
 function appExecutableFileName()
 {
     if (runningOnWindows()) {
-        return appName() + ".exe";
+        return "AmneziaVPN.exe";
     } else {
         return appName();
     }
@@ -21,8 +24,10 @@ function appExecutableFileName()
 function appInstalled()
 {
     if (runningOnWindows()) {
-        appInstalledUninstallerPath = installer.value("RootDir") + "Program Files/AmneziaVPN/maintenancetool.exe";
-        appInstalledUninstallerPath_x86 = installer.value("RootDir") + "Program Files (x86)/AmneziaVPN/maintenancetool.exe";
+        // AVPN: ставимся в Program Files/TribeVPN (CPACK_PACKAGE_INSTALL_DIRECTORY). Upstream-папка
+        // AmneziaVPN — чужое приложение: старую установку Tribe мы не видели, а Amnezia предлагали снести.
+        appInstalledUninstallerPath = installer.value("RootDir") + "Program Files/" + appName() + "/maintenancetool.exe";
+        appInstalledUninstallerPath_x86 = installer.value("RootDir") + "Program Files (x86)/" + appName() + "/maintenancetool.exe";
     } else if (runningOnMacOS()){
         appInstalledUninstallerPath = "/Applications/" + appName() + ".app/maintenancetool.app/Contents/MacOS/maintenancetool";
     } else if (runningOnLinux()){
@@ -76,7 +81,13 @@ function raiseInstallerWindow()
 function appProcessIsRunning()
 {
     if (runningOnWindows()) {
-        var result = installer.execute("tasklist");
+        // AVPN: считаем только GUI из нашей папки — AmneziaVPN.exe оригинальной Amnezia не наш.
+        var ps = installer.execute("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+            "@(Get-Process -Name AmneziaVPN -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\\" + appName() + "\\*' }).Count"]);
+        if (Number(ps[1]) === 0) {
+            return Number(String(ps[0]).trim()) > 0;
+        }
+        var result = installer.execute("tasklist", ["/FI", "IMAGENAME eq " + appExecutableFileName(), "/NH"]);
         if ( Number(result[1]) === 0 ) {
             if (result[0].indexOf(appExecutableFileName()) !== -1) {
                 return true;
@@ -87,6 +98,61 @@ function appProcessIsRunning()
     }
 
     return false;
+}
+
+// AVPN: перед установкой гасим и снимаем НАШИ службы. Деинсталляторы Tribe до 5.1.100 несли upstream
+// post_uninstall.cmd: он удалял AmneziaVPN-service (служба оригинальной Amnezia) и чистил её логи, а
+// Tribe-service оставлял запущенной — залоченный Tribe-service.exe не перезаписывался, «sc create»
+// новой установки падал (служба уже есть). Поэтому: стоп + удаление служб Tribe, а старый
+// post_uninstall.cmd заменяем пустым, чтобы деинсталлятор старой версии не тронул Amnezia.
+function stopTribeServicesBeforeInstall()
+{
+    if (!runningOnWindows()) {
+        return;
+    }
+    if (!installer.gainAdminRights()) {
+        console.log("No admin rights: Tribe services are not stopped before install");
+        return;
+    }
+    var cmd = "$ErrorActionPreference = 'SilentlyContinue'; " +
+              "sc.exe stop 'AmneziaWGTunnel$" + appName() + "' | Out-Null; sc.exe stop Tribe-service | Out-Null; " +
+              "Start-Sleep -Seconds 2; Stop-Process -Name Tribe-service -Force; Start-Sleep -Seconds 1; " +
+              "sc.exe delete 'AmneziaWGTunnel$" + appName() + "' | Out-Null; sc.exe delete Tribe-service | Out-Null; " +
+              "foreach ($d in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) { if ($d) { " +
+              "$f = Join-Path (Join-Path $d '" + appName() + "') 'post_uninstall.cmd'; " +
+              "if (Test-Path -LiteralPath $f) { Set-Content -LiteralPath $f -Value 'exit /b 0' -Encoding ASCII } } }";
+    var result = installer.execute("powershell", ["-NoProfile", "-NonInteractive", "-Command", cmd]);
+    console.log("Tribe services stopped before install, code: " + result[1]);
+    installer.dropAdminRights();
+}
+
+// AVPN: старую версию удаляем без окон мастера (IFW CLI): юзер уже подтвердил удаление в диалоге
+// выше, а тихий режим проверяется смоук-тестом инсталлера в CI (deploy/tribe/windows-installer-smoke.ps1).
+function uninstallerArgs()
+{
+    return runningOnWindows() ? ["purge", "--confirm-command", "--default-answer"] : [];
+}
+
+// AVPN: деинсталлятор Tribe до 5.1.100 (upstream post_uninstall.cmd с AmneziaVPN-service) считает
+// «приложение запущено», если в tasklist есть TribeVPN.exe, — а так назван и этот инсталлер, если его
+// скачали со старой ссылки как есть. Тогда старая версия не даёт себя удалить.
+function installedUninstallerIsLegacy()
+{
+    var paths = [appInstalledUninstallerPath, appInstalledUninstallerPath_x86];
+    for (var i = 0; i < paths.length; i++) {
+        var script = String(paths[i]).replace("maintenancetool.exe", "post_uninstall.cmd");
+        if (installer.fileExists(script) && String(installer.readFile(script, "UTF-8")).indexOf("AmneziaVPN-service") !== -1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function installerFileIsNamedLikeOldApp()
+{
+    var path = String(installer.value("InstallerFilePath") || "").replace(/\\/g, "/");
+    var name = path.substring(path.lastIndexOf("/") + 1).toLowerCase();
+    return name === (appName() + ".exe").toLowerCase();
 }
 
 function checkProcessIsRunning(arg)
@@ -252,24 +318,34 @@ function Controller () {
             installer.setMessageBoxAutomaticAnswer("OverwriteTargetDirectory", QMessageBox.Yes);
         }
 
+        if (runningOnWindows() && appInstalled() && installedUninstallerIsLegacy() && installerFileIsNamedLikeOldApp()) {
+            QMessageBox.critical("os.information", appName(),
+                                 "Файл установщика называется " + appName() + ".exe — старая версия Tribe VPN примет его за " +
+                                 "запущенное приложение и не даст себя удалить. Переименуйте файл, например в " +
+                                 appName() + "-Setup.exe, и запустите установку снова.", QMessageBox.Ok);
+            installer.setCancelled();
+            return;
+        }
+
         if (appInstalled()) {
             if (QMessageBox.Ok === QMessageBox.information("os.information", appName(),
                                                            qsTr("The application is already installed.") + " " +
                                                            qsTr("We need to remove the old installation first. Do you wish to proceed?"),
                                                            QMessageBox.Ok | QMessageBox.Cancel)) {
 
+                stopTribeServicesBeforeInstall();
 
                 if (appInstalled()) {
                     var resultArray = [];
 
                     if (installer.fileExists(appInstalledUninstallerPath_x86)) {
                         console.log("Starting uninstallation " + appInstalledUninstallerPath_x86);
-                        resultArray = installer.execute(appInstalledUninstallerPath_x86);
+                        resultArray = installer.execute(appInstalledUninstallerPath_x86, uninstallerArgs());
                     }
 
                     if (installer.fileExists(appInstalledUninstallerPath)) {
                         console.log("Starting uninstallation " + appInstalledUninstallerPath);
-                        resultArray = installer.execute(appInstalledUninstallerPath);
+                        resultArray = installer.execute(appInstalledUninstallerPath, uninstallerArgs());
                     }
 
                     console.log("Uninstaller finished with code: " + resultArray[1])
@@ -295,6 +371,9 @@ function Controller () {
                 installer.setCancelled();
                 return;
             }
+        } else {
+            // AVPN: установки нет, но служба могла остаться от старого деинсталлятора — снимаем.
+            stopTribeServicesBeforeInstall();
         }
 
     } else if (installer.isUninstaller()) {

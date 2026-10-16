@@ -9,6 +9,8 @@ on:
   push:
     branches:
       - ci-build
+  # ручной запуск: пересобрать exe, если артефакт (живёт 7 дней) истёк невыложенным
+  workflow_dispatch:
 
 env:
   QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/
@@ -66,3 +68,12 @@ jobs:
         path: deploy/build/*_windows_x64.exe
         archive: false
         retention-days: 7
+
+    # Смоук инсталлера: обновление поверх версии с сайта, переустановка, удаление, имя TribeVPN.exe;
+    # служба оригинальной Amnezia рядом не трогается. Красный шаг = exe НЕ выкладывать на /dl/.
+    - name: 'Installer smoke test'
+      shell: pwsh
+      timeout-minutes: 45
+      run: |
+        $exe = (Get-ChildItem deploy/build/*_windows_x64.exe | Select-Object -First 1).FullName
+        ./deploy/tribe/windows-installer-smoke.ps1 -Installer $exe
