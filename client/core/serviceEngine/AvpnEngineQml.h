@@ -571,9 +571,9 @@ public:
     Q_INVOKABLE void kickBootstrap();                // AVPN: поджать ретрай bootstrap (сеть появилась/foreground). No-op когда подписка загружена; туннель НЕ трогает
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
-    // Orb tap: decideOrbTap (a shown "Connected" stops; only "Checking…" ignores the tap);
-    // programmatic stop() calls (Doctor, rotation) do not go through the policy.
-    Q_INVOKABLE void stopFromUi();
+    // Orb tap: decideOrbTap (start / stop / ignored, journaled as orb_tap); programmatic
+    // start()/stop() calls (Doctor, rotation) do not go through the policy.
+    Q_INVOKABLE void orbTap();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
     Q_INVOKABLE void resetLkg();                     // очистить кэш токена/подписки (re-enroll при start)

@@ -193,8 +193,7 @@ PageType {
     function onOrbClicked() {
         // AVPN (haptics): весомый medium на включение, мягкий light на выключение; arm() взводит
         // гард терминальных откликов (success/light/error по фактическому переходу — onIsOnChanged).
-        // engineStopping: клик = «включи обратно» → это включение.
-        Haptic.play((root.engineStopping || !(isOn || isBusy)) ? "medium" : "light")
+        Haptic.play(!(isOn || isBusy) ? "medium" : "light")
         Haptic.arm()
         if (previewSim) {
             if (simConnected) { simConnected = false; return }
@@ -205,15 +204,10 @@ PageType {
             // вдруг детект устарел — попытка идёт своим чередом).
             if (TribeEngine.whitelistMode === true)
                 TribeEngine.setWhitelistAcked(false)
-            // сервисная модель: enroll → /v1/subscription → выбор ноды → туннель (E2E №1)
-            // Во время нашего же стопа орб показывает «Connect» — клик по нему трактуем буквально:
-            // «включи обратно» (start задаёт намерение, reconcile доведёт из терминала). Раньше клик
-            // уходил в stop() и глотался reconcile-дебаунсом (ревью 2026-07-03).
-            if (root.engineStopping) { TribeEngine.start(); return }
-            // Orb tap policy lives in the engine (stopFromUi -> decideOrbTap): a shown "Connected"
-            // stops, only the "Checking…" window ignores the tap.
-            if (isOn || isBusy) TribeEngine.stopFromUi()
-            else TribeEngine.start()
+            // The tap policy lives in the engine (orbTap -> decideOrbTap, journaled as orb_tap):
+            // off -> start, a shown "Connected" -> stop, "Checking…" and our own stop in flight
+            // ("Disconnecting…") -> ignored, as upstream (a tap never restarts a stopping tunnel).
+            TribeEngine.orbTap()
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
             // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
@@ -737,7 +731,8 @@ PageType {
 
         Text {
             anchors.centerIn: parent; z: 40
-            text: root.showBusy ? (root.adopting ? "Checking…" : "Connecting…") : (root.isOn ? "Connected" : "Connect")
+            text: root.engineStopping ? "Disconnecting…"
+                  : root.showBusy ? (root.adopting ? "Checking…" : "Connecting…") : (root.isOn ? "Connected" : "Connect")
             color: root.isOn ? "white" : root.slate900
             font.family: Theme.font.display; font.pixelSize: 26; font.weight: Theme.font.wBold
         }

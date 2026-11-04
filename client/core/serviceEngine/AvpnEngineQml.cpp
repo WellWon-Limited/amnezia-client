@@ -4773,18 +4773,29 @@ void AvpnEngineQml::start()
     emit changed();
 }
 
-// Orb tap (connect audit 2026-11-04, revised P1-4): the tap does what the orb shows, as upstream.
-// A shown "Connected" always stops; only the "Checking…" window (live session pending, status not
-// yet arrived) ignores the tap: the orb has not shown "Connected", the user is repeating "turn on".
-void AvpnEngineQml::stopFromUi()
+// Orb tap (connect audit 2026-11-04, revised P1-4): the single entry point of the orb. The tap does
+// what the orb shows, as upstream (decideOrbTap); every tap is journaled (orb_tap) so a double tap
+// can be told apart from an app-side restart. Programmatic start()/stop() (Doctor, rotation, test
+// tools) do not go through this policy.
+void AvpnEngineQml::orbTap()
 {
-    if (decideOrbTap(m_engine.state() == avpn::EngineState::Connected, m_busy, m_op != Op::None,
-                     m_preparingStart, m_liveSessionPending) == OrbTap::Ignore) {
-        reliabilityEvent(QStringLiteral("stop_tap_ignored pending=%1").arg(m_liveSessionPending));
+    const QString st = state();
+    const OrbTap d = decideOrbTap(st == QLatin1String("connected"), m_busy, stopping(), m_op != Op::None,
+                                  m_preparingStart, m_liveSessionPending);
+    reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4")
+                         .arg(st).arg(int(m_busy)).arg(QLatin1String(orbTapName(d)))
+                         .arg(int(m_liveSessionPending)));
+    switch (d) {
+    case OrbTap::Start:
+        start();
+        return;
+    case OrbTap::Stop:
+        stop();
+        return;
+    case OrbTap::Ignore:
         emit changed();
         return;
     }
-    stop();
 }
 
 void AvpnEngineQml::stop()

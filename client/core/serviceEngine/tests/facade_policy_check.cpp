@@ -378,14 +378,21 @@ static void wave3StartAndLossPolicy()
 static void wave4UpstreamBehaviour()
 {
     // P1-4 (revised 2026-11-04): the tap does what the orb shows. Args: engineConnected, busy,
-    // ownOpInFlight, preparingStart, liveSessionPending.
-    CHECK(decideOrbTap(false, true, false, false, true) == OrbTap::Ignore); // "Checking…", status not yet in
-    CHECK(decideOrbTap(true, true, false, false, true) == OrbTap::Ignore);  // still pending while busy
-    // Tap 1 s after adoption with the orb showing "Connected" stops (the old 2.5 s grace swallowed it).
-    CHECK(decideOrbTap(true, false, false, false, false) == OrbTap::Stop);
-    CHECK(decideOrbTap(false, true, false, true, false) == OrbTap::Stop);   // cancel our own start preparation
-    CHECK(decideOrbTap(false, true, true, true, true) == OrbTap::Stop);     // our op in flight: stop is legitimate
-    CHECK(decideOrbTap(false, true, false, false, false) == OrbTap::Stop);  // "Connecting…" (upstream: in progress -> close)
+    // stopping, ownOpInFlight, preparingStart, liveSessionPending.
+    CHECK(decideOrbTap(false, false, false, false, false, false) == OrbTap::Start); // "Connect"
+    CHECK(decideOrbTap(false, true, false, false, false, true) == OrbTap::Ignore);  // "Checking…", status not yet in
+    CHECK(decideOrbTap(true, true, false, false, false, true) == OrbTap::Ignore);   // still pending while busy
+    // Tap 1 s after adoption with the orb showing "Connected" stops (the old 2.5 s grace swallowed it;
+    // a dead data path is still "Connected" on the orb).
+    CHECK(decideOrbTap(true, false, false, false, false, false) == OrbTap::Stop);
+    CHECK(decideOrbTap(false, true, false, false, true, false) == OrbTap::Stop);   // cancel our own start preparation
+    CHECK(decideOrbTap(false, true, false, true, true, true) == OrbTap::Stop);     // our op in flight: stop is legitimate
+    CHECK(decideOrbTap(false, true, false, false, false, false) == OrbTap::Stop);  // "Connecting…" (upstream: in progress -> close)
+    // A second tap during our own stop ("Disconnecting…") never restarts the tunnel (device journals:
+    // pinned_location_ready + NE start 0.2-1.0 s after guarded_stop why=user).
+    CHECK(decideOrbTap(false, true, true, true, false, false) == OrbTap::Ignore);
+    CHECK(decideOrbTap(true, true, true, false, false, false) == OrbTap::Ignore);
+    CHECK(QByteArray(orbTapName(OrbTap::Ignore)) == "ignored");
     // P1-5: сторож старта ждёт натив, пока тот сообщает живую сессию, но не дольше 4 перевзводов.
     CHECK(decideStartWatchdog(true, 0) == StartWatchdog::Defer);
     CHECK(decideStartWatchdog(true, 1) == StartWatchdog::Defer);   // 3×15 с = бюджет рукопожатия натива

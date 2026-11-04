@@ -426,23 +426,45 @@ inline bool prepRefreshOnNetworkChange(bool haveSubscription)
 // ── Волна-4 «как апстрим» (2026-09-29, аудит iOS против апстрима + журнал 24–28.09) ────────
 
 // P1-4 (revised 2026-11-04, connect audit): the orb tap does what the orb shows, as in upstream
-// Amnezia (ConnectionUiController::toggleConnection: Connected or in progress -> closeConnection).
-// The only ignored tap is the "Checking…" window (busy && liveSessionPending): the orb has not shown
-// "Connected" yet, so the tap is a repeated "turn on". The former 2.5 s grace after adoption
-// (kAdoptTapGraceMs) is removed: with a dead data path the orb showed "Connected", the user tapped
-// it to turn the VPN off and the tap was dropped ("tap does not disconnect, it connects again").
-// Cancelling our own start (preparation, op in flight) stays a legitimate stop.
-enum class OrbTap { Stop, Ignore };
-inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool ownOpInFlight, bool preparingStart,
-                           bool liveSessionPending)
+// Amnezia (ConnectionUiController::toggleConnection: Connected or in progress -> closeConnection,
+// otherwise connect). The former 2.5 s grace after adoption (kAdoptTapGraceMs) is removed: with a
+// dead data path the orb showed "Connected", the user tapped it to turn the VPN off and the tap was
+// dropped ("tap does not disconnect, it connects again").
+//  - off and idle -> Start;
+//  - our own stop in flight (stopping = busy && !wantConnected, orb "Disconnecting…") -> Ignore.
+//    Upstream treats Disconnecting as in progress and closes again; it never restarts. The former
+//    "tap while stopping = start" rule restarted the tunnel 0.2-1.0 s after a user stop (device
+//    journals 2026-10-21..11-04: 91 of 218 user stops followed by a reconnect within 60 s, the start
+//    being pinned_location_ready right after Disconnected with no adoption in between);
+//  - cancelling our own start (preparation, op in flight) -> Stop;
+//  - a shown "Connected" (engine connected, not busy) -> Stop;
+//  - "Checking…" (busy && liveSessionPending: the orb has not shown "Connected" yet, the tap repeats
+//    "turn on") -> Ignore;
+//  - any other busy state ("Connecting…") -> Stop.
+enum class OrbTap { Start, Stop, Ignore };
+inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool stopping, bool ownOpInFlight,
+                           bool preparingStart, bool liveSessionPending)
 {
+    if (stopping)
+        return OrbTap::Ignore;
+    if (!engineConnected && !busy)
+        return OrbTap::Start;
     if (preparingStart || ownOpInFlight)
         return OrbTap::Stop;
     if (engineConnected && !busy)
-        return OrbTap::Stop; // the orb shows "Connected"
+        return OrbTap::Stop;
     if (busy && liveSessionPending)
-        return OrbTap::Ignore; // the orb shows "Checking…"
+        return OrbTap::Ignore;
     return OrbTap::Stop;
+}
+inline const char *orbTapName(OrbTap d)
+{
+    switch (d) {
+    case OrbTap::Start: return "start";
+    case OrbTap::Stop: return "stop";
+    case OrbTap::Ignore: return "ignored";
+    }
+    return "?";
 }
 
 // P1-5: сторож старта на iOS/NE. 15-секундный сторож фасада гасил живую NE-сессию посреди
