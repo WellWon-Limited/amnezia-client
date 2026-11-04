@@ -430,27 +430,37 @@ inline bool prepRefreshOnNetworkChange(bool haveSubscription)
 // otherwise connect). The former 2.5 s grace after adoption (kAdoptTapGraceMs) is removed: with a
 // dead data path the orb showed "Connected", the user tapped it to turn the VPN off and the tap was
 // dropped ("tap does not disconnect, it connects again").
-//  - off and idle -> Start;
-//  - our own stop in flight (stopping = busy && !wantConnected, orb "Disconnecting…") -> Ignore.
-//    Upstream treats Disconnecting as in progress and closes again; it never restarts. The former
-//    "tap while stopping = start" rule restarted the tunnel 0.2-1.0 s after a user stop (device
-//    journals 2026-10-21..11-04: 91 of 218 user stops followed by a reconnect within 60 s, the start
-//    being pinned_location_ready right after Disconnected with no adoption in between);
+//  - our own stop in flight (ownStopInFlight, orb "Disconnecting…") -> StopAgain: the idempotent
+//    stop path is re-issued, as upstream re-calls closeConnection() on Disconnecting, so a stuck
+//    stop has a way out; it never restarts. The former "tap while stopping = start" rule restarted
+//    the tunnel 0.2-1.0 s after a user stop (device journals 2026-10-21..11-04: 91 of 218 user
+//    stops followed by a reconnect within 60 s, the start being pinned_location_ready right after
+//    Disconnected with no adoption in between);
+//  - off and idle -> Start. "Busy with intent off" that is NOT our stop (a tunnel brought up from
+//    iOS/macOS Settings or by the system while our intent is off, redeem/transfer flows) is not
+//    "Disconnecting…": the orb reads "Connect" and the tap starts;
 //  - cancelling our own start (preparation, op in flight) -> Stop;
 //  - a shown "Connected" (engine connected, not busy) -> Stop;
 //  - "Checking…" (busy && liveSessionPending: the orb has not shown "Connected" yet, the tap repeats
 //    "turn on") -> Ignore;
 //  - any other busy state ("Connecting…") -> Stop.
-enum class OrbTap { Start, Stop, Ignore };
-inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool stopping, bool ownOpInFlight,
-                           bool preparingStart, bool liveSessionPending)
+// ownStopInFlight: we asked for a stop and it is not confirmed yet (op Stopping or the latch awaits
+// the Disconnected), with intent off. Drives both decideOrbTap and the "Disconnecting…" label.
+inline bool ownStopInFlight(bool wantConnected, bool opStopping, bool awaitingStopConfirm)
 {
-    if (stopping)
-        return OrbTap::Ignore;
-    if (!engineConnected && !busy)
-        return OrbTap::Start;
+    return !wantConnected && (opStopping || awaitingStopConfirm);
+}
+enum class OrbTap { Start, Stop, StopAgain, Ignore };
+inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool wantConnected, bool ownStopping,
+                           bool ownOpInFlight, bool preparingStart, bool liveSessionPending)
+{
+    if (ownStopping)
+        return OrbTap::StopAgain;
     if (preparingStart || ownOpInFlight)
         return OrbTap::Stop;
+    // Not connected and either idle or busy with intent off (a foreign transition): orb "Connect".
+    if (!engineConnected && (!busy || !wantConnected))
+        return OrbTap::Start;
     if (engineConnected && !busy)
         return OrbTap::Stop;
     if (busy && liveSessionPending)
@@ -462,6 +472,7 @@ inline const char *orbTapName(OrbTap d)
     switch (d) {
     case OrbTap::Start: return "start";
     case OrbTap::Stop: return "stop";
+    case OrbTap::StopAgain: return "stop_again";
     case OrbTap::Ignore: return "ignored";
     }
     return "?";

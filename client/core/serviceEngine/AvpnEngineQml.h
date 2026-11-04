@@ -58,6 +58,7 @@ class AvpnEngineQml : public QObject {
     // Источник правды для «не показывать Connecting… при выключении»: живёт в движке (не в странице),
     // поэтому переживает пересоздание страницы и покрывает ВСЕ пути teardown (орб/шторка/отмена коннекта).
     Q_PROPERTY(bool stopping READ stopping NOTIFY changed)
+    Q_PROPERTY(bool ownStopping READ ownStopping NOTIFY changed)
     // AVPN (macOS, beachball-фикс 2026-07-21): идёт установка root-демона Tribe-service (фоновый
     // поток, GUI живой) — QML показывает «Устанавливаем службу VPN…» вместо «Подбираем сервер…».
     // На остальных платформах всегда false.
@@ -305,6 +306,12 @@ public:
     bool adopting() const { return m_liveSessionPending; }
     // busy при намерении «офлайн» = идёт teardown (вкл. отмену недоехавшего коннекта). // AVPN
     bool stopping() const { return m_busy && !m_wantConnected; }
+    // Our own stop is in flight (op Stopping or the stop awaits Disconnected): orb "Disconnecting…"
+    // and decideOrbTap. Unlike stopping(), a foreign transition with intent off is not included.
+    bool ownStopping() const
+    {
+        return ownStopInFlight(m_wantConnected, m_op == Op::Stopping, m_latch.awaitingStopConfirm);
+    }
     bool lastSelectionMeasured() const { return m_lastSelectionMeasured; }
     // AVPN (macOS): идёт фоновая установка root-демона (см. Q_PROPERTY выше). Прочие ОС — false.
     bool svcInstalling() const { return m_svcInstalling; }
@@ -573,7 +580,7 @@ public:
     Q_INVOKABLE void stop();
     // Orb tap: decideOrbTap (start / stop / ignored, journaled as orb_tap); programmatic
     // start()/stop() calls (Doctor, rotation) do not go through the policy.
-    Q_INVOKABLE void orbTap();
+    Q_INVOKABLE QString orbTap();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
     Q_INVOKABLE void resetLkg();                     // очистить кэш токена/подписки (re-enroll при start)

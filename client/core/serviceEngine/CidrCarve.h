@@ -1,7 +1,9 @@
 // AVPN RU-direct: carve-out «свой control plane НИКОГДА не в байпасе».
-// api.tribevpn.com хостится в RU (тогда Beget 159.194.214.36, с 11.2026 Timeweb 201.34.134.103) и
-// накрывается рунет-списком ru_prefixes → сев уводил запросы движка к API мимо туннеля, где их
-// режет оператор (ТСПУ): пустое приложение без подписки/нод (инцидент 2026-07-05).
+// In July 2026 api.tribevpn.com was hosted on Beget (RU, 159.194.214.36), inside the RU list
+// ru_prefixes (159.194.208.0/20): the seed sent the engine's API requests around the tunnel, where
+// the operator (TSPU) cuts them — an empty app without subscription/nodes (incident 2026-07-05).
+// Since 2026-11 the API is on Timeweb 201.34.134.103, which is in no CIDR of the compiled
+// ru_prefixes.h; carving it is a no-op unless a server-driven list covers it.
 // Инвариант — расширение урока «серых чипов» (2026-07-03): эндпоинты, критичные для работы
 // приложения (пробы, control plane), не должны пересекаться с байпас-CIDR.
 // Здесь — чистая логика без Qt-сети (тестируется tests/build_cidr_carve.sh).

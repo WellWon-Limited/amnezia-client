@@ -1617,6 +1617,9 @@ QString AvpnEngineQml::storeUrl() const
     // backend always sends urls.store_windows since PR #570). Before, Windows got the App Store link.
     return m_remoteCfg.urls.value(QStringLiteral("store_windows"),
         QStringLiteral("https://tribevpn.com/dl/TribeVPN.exe"));
+#elif defined(Q_OS_LINUX)
+    // No Linux build is published (no urls key for it): the site's download section, not the App Store.
+    return QStringLiteral("https://tribevpn.com/#download");
 #elif defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // Desktop macOS updates itself (SelfUpdate); the link is the same image the self-update uses.
     return configUrl(QStringLiteral("macos_dmg_url"), avpn::SelfUpdate::defaultDmgUrl());
@@ -1637,7 +1640,8 @@ QStringList AvpnEngineQml::apiCarveIps() const
 {
     // Built-in fallback: the live RU edge of api.tribevpn.com (Timeweb, DNS-only; Beget 159.194.214.36
     // is gone). The current address is also carved at runtime: m_apiHostIps holds what the API hosts
-    // resolve to (resolveApiCarveHosts), so a later move is covered without a release.
+    // resolve to (resolveApiCarveHosts), so a later move is covered without a release. It matters
+    // only if a server-driven bypass list covers the address (the compiled ru_prefixes does not).
     QStringList ips{QStringLiteral("201.34.134.103")};
     for (const QHostAddress &ip : std::as_const(m_apiHostIps))
         ips << ip.toString();
@@ -1646,11 +1650,12 @@ QStringList AvpnEngineQml::apiCarveIps() const
 
 void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QStringList> &sites) const
 {
-    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится в RU (тогда Beget, с 11.2026
-    // Timeweb 201.34.134.103) и накрывается ru_prefixes → control plane уходил мимо туннеля, где его режет оператор:
-    // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
-    // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
-    // Вкомпиленный фолбэк + актуальные IP из async-резолва — единый список apiCarveIps().
+    // AVPN carve-out (incident 2026-07-05): the API host was then on Beget, inside ru_prefixes, so the
+    // control plane went around the tunnel and the operator cut it: an empty app without subscription
+    // or nodes while the WG tunnel was alive. The API IPs are carved out of the seed (covering CIDRs
+    // split without the /32; the rest of the RU net stays direct). The current Timeweb address
+    // 201.34.134.103 is in no compiled ru_prefixes CIDR: the carve is a no-op unless a server-driven
+    // list covers it. Compiled fallback + async-resolved IPs = the single list apiCarveIps().
     const QStringList ips = apiCarveIps();
     for (const QString &ip : ips)
         carveOutIpFromSites(sites, QHostAddress(ip));
@@ -4786,27 +4791,29 @@ void AvpnEngineQml::start()
 
 // Orb tap (connect audit 2026-11-04, revised P1-4): the single entry point of the orb. The tap does
 // what the orb shows, as upstream (decideOrbTap); every tap is journaled (orb_tap) so a double tap
-// can be told apart from an app-side restart. Programmatic start()/stop() (Doctor, rotation, test
-// tools) do not go through this policy.
-void AvpnEngineQml::orbTap()
+// can be told apart from an app-side restart. Returns the decision name for the QML haptic.
+// Programmatic start()/stop() (Doctor, rotation, test tools) do not go through this policy.
+QString AvpnEngineQml::orbTap()
 {
     const QString st = state();
-    const OrbTap d = decideOrbTap(st == QLatin1String("connected"), m_busy, stopping(), m_op != Op::None,
-                                  m_preparingStart, m_liveSessionPending);
+    const OrbTap d = decideOrbTap(st == QLatin1String("connected"), m_busy, m_wantConnected, ownStopping(),
+                                  m_op != Op::None, m_preparingStart, m_liveSessionPending);
     reliabilityEvent(QStringLiteral("orb_tap state=%1 busy=%2 decision=%3 pending=%4")
                          .arg(st).arg(int(m_busy)).arg(QLatin1String(orbTapName(d)))
                          .arg(int(m_liveSessionPending)));
     switch (d) {
     case OrbTap::Start:
         start();
-        return;
+        break;
     case OrbTap::Stop:
+    case OrbTap::StopAgain: // idempotent: an in-flight stop is not restarted (stop() checks m_op)
         stop();
-        return;
+        break;
     case OrbTap::Ignore:
         emit changed();
-        return;
+        break;
     }
+    return QLatin1String(orbTapName(d));
 }
 
 void AvpnEngineQml::stop()
@@ -6620,11 +6627,11 @@ void AvpnEngineQml::applyRuBypassSplit()
             sites.insert(cidr, {cidr});
     }
 
-    // AVPN carve-out (инцидент 2026-07-05, вынесено в T6 — rebuildApiCarveOut(sites) выше в файле):
-    // api.tribevpn.com хостится на Beget (RU) и накрывается ru_prefixes (159.194.208.0/20) →
-    // control plane уходил мимо туннеля, где его режет оператор. Исключаем IP API/активного edge
-    // из сева ЗДЕСЬ ЖЕ, где раньше был инлайн-блок (behaviour-preserving — тот же порядок операций
-    // над тем же `sites`, тот же вызов carveOutIpFromSites, просто вынесен в метод).
+    // AVPN carve-out (incident 2026-07-05, extracted in T6 — rebuildApiCarveOut(sites) above): the API
+    // host was then on Beget, inside ru_prefixes (159.194.208.0/20), and the control plane went around
+    // the tunnel. The API / active edge IPs are carved out of the seed HERE, where the inline block
+    // used to be (same order of operations on the same `sites`). See rebuildApiCarveOut for the
+    // current address.
     rebuildApiCarveOut(sites);
 
     // AVPN Task 10 (per-group fallback): источник — ПО ГРУППАМ, не одним общим useRemote — с тех пор
@@ -7013,7 +7020,8 @@ void AvpnEngineQml::onForegroundDebounced()
     reliabilityEvent(QStringLiteral("foreground_return sub=%1").arg(plan.refreshSubscription));
     kickBootstrap();
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
-    // Connect audit 2026-11-04 (VPN-SELF-OFF-ANALYSIS-2026-09-27 plan item 6): while the app was
+    // Connect audit 2026-11-04 (VPN-SELF-OFF-ANALYSIS-2026-09-27 plan item 6, partial: status refresh
+    // only; re-arming the watchdog while an operation is in flight is not done): while the app was
     // suspended the extension may have stopped, restarted or replaced the session; ask the
     // NetworkExtension for the real status once per return instead of showing the pre-suspend state.
     // The answer comes through the usual observation path (vpnStatusDidChange ->

@@ -42,6 +42,8 @@ PageType {
     // Гард на undefined — старый бинарь без свойства ведёт себя как раньше (busy = Connecting).
     readonly property bool engineStopping: hasEngine && TribeEngine.stopping === true
     readonly property bool showBusy: isBusy && !engineStopping
+    // Our own stop in flight (not a foreign transition with intent off): orb "Disconnecting…".
+    readonly property bool engineOwnStopping: hasEngine && TribeEngine.ownStopping === true
     // Волна-4 (P1-4): подхват уже живой сессии — «Проверяем…», а не «Connecting…».
     readonly property bool adopting: hasEngine && TribeEngine.adopting === true
     // Connect audit 2026-11-04: the engine confirmed the live probe fails (red bars, no ms) while the
@@ -194,23 +196,29 @@ PageType {
     readonly property real sceneCaptionSqueeze: Math.min(sceneDeficit - sceneOrbSqueeze, 30 - 16)
 
     function onOrbClicked() {
-        // AVPN (haptics): весомый medium на включение, мягкий light на выключение; arm() взводит
-        // гард терминальных откликов (success/light/error по фактическому переходу — onIsOnChanged).
-        Haptic.play(!(isOn || isBusy) ? "medium" : "light")
-        Haptic.arm()
-        if (previewSim) {
-            if (simConnected) { simConnected = false; return }
-            simConnecting = true; simTimer.restart()
-        } else if (typeof TribeEngine !== "undefined") {
+        if (!previewSim && typeof TribeEngine !== "undefined") {
             // AVPN (белые списки): тап по коннекту при активном режиме — вернуть попап-объяснение
             // (юзер мог забыть, почему не работает), саму попытку НЕ блокируем (§3.5 спеки:
             // вдруг детект устарел — попытка идёт своим чередом).
             if (TribeEngine.whitelistMode === true)
                 TribeEngine.setWhitelistAcked(false)
             // The tap policy lives in the engine (orbTap -> decideOrbTap, journaled as orb_tap):
-            // off -> start, a shown "Connected" -> stop, "Checking…" and our own stop in flight
-            // ("Disconnecting…") -> ignored, as upstream (a tap never restarts a stopping tunnel).
-            TribeEngine.orbTap()
+            // off -> start, a shown "Connected" -> stop, "Checking…" -> ignored, our own stop in
+            // flight ("Disconnecting…") -> the stop is re-issued, never a restart (as upstream).
+            // Haptics only for a real start/stop: medium on, light off; arm() guards the terminal
+            // feedback (success/light/error on the actual transition).
+            const decision = String(TribeEngine.orbTap())
+            if (decision === "start" || decision === "stop") {
+                Haptic.play(decision === "start" ? "medium" : "light")
+                Haptic.arm()
+            }
+            return
+        }
+        Haptic.play(!(isOn || isBusy) ? "medium" : "light")
+        Haptic.arm()
+        if (previewSim) {
+            if (simConnected) { simConnected = false; return }
+            simConnecting = true; simTimer.restart()
         } else if (ServersUiController.getServersCount() === 0) {
             // нет ни движка, ни конфигурации — не уводим в ванильный wizard.
             // Гостевой trial (без аккаунта) подключится вместе с control plane (POST /v1/trial).
@@ -734,7 +742,7 @@ PageType {
 
         Text {
             anchors.centerIn: parent; z: 40
-            text: root.engineStopping ? "Disconnecting…"
+            text: root.engineOwnStopping ? "Disconnecting…"
                   : root.showBusy ? (root.adopting ? "Checking…" : "Connecting…") : (root.isOn ? "Connected" : "Connect")
             color: root.isOn ? "white" : root.slate900
             font.family: Theme.font.display; font.pixelSize: 26; font.weight: Theme.font.wBold
