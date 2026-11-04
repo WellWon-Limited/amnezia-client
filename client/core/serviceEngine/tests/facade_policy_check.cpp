@@ -377,13 +377,15 @@ static void wave3StartAndLossPolicy()
 
 static void wave4UpstreamBehaviour()
 {
-    // P1-4: второй тап во время подхвата / сразу после адопта — не стоп; отмена своего старта — стоп.
-    CHECK(stopTapIgnored(true, false, false, true, -1));      // «Проверяем…», статус ещё не пришёл
-    CHECK(stopTapIgnored(false, false, false, false, 900));   // адопт 0,9 с назад (журнал: 0,6–1,5 с)
-    CHECK(!stopTapIgnored(false, false, false, false, 2600)); // грация вышла — обычный стоп
-    CHECK(!stopTapIgnored(true, false, true, false, 500));    // отмена подготовки своего старта
-    CHECK(!stopTapIgnored(true, true, false, true, 500));     // своя операция в полёте — стоп законен
-    CHECK(!stopTapIgnored(false, false, false, false, -1));   // адопта не было
+    // P1-4 (revised 2026-11-04): the tap does what the orb shows. Args: engineConnected, busy,
+    // ownOpInFlight, preparingStart, liveSessionPending.
+    CHECK(decideOrbTap(false, true, false, false, true) == OrbTap::Ignore); // "Checking…", status not yet in
+    CHECK(decideOrbTap(true, true, false, false, true) == OrbTap::Ignore);  // still pending while busy
+    // Tap 1 s after adoption with the orb showing "Connected" stops (the old 2.5 s grace swallowed it).
+    CHECK(decideOrbTap(true, false, false, false, false) == OrbTap::Stop);
+    CHECK(decideOrbTap(false, true, false, true, false) == OrbTap::Stop);   // cancel our own start preparation
+    CHECK(decideOrbTap(false, true, true, true, true) == OrbTap::Stop);     // our op in flight: stop is legitimate
+    CHECK(decideOrbTap(false, true, false, false, false) == OrbTap::Stop);  // "Connecting…" (upstream: in progress -> close)
     // P1-5: сторож старта ждёт натив, пока тот сообщает живую сессию, но не дольше 4 перевзводов.
     CHECK(decideStartWatchdog(true, 0) == StartWatchdog::Defer);
     CHECK(decideStartWatchdog(true, 1) == StartWatchdog::Defer);   // 3×15 с = бюджет рукопожатия натива

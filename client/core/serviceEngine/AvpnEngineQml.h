@@ -571,8 +571,8 @@ public:
     Q_INVOKABLE void kickBootstrap();                // AVPN: поджать ретрай bootstrap (сеть появилась/foreground). No-op когда подписка загружена; туннель НЕ трогает
     Q_INVOKABLE void start();                        // «одна кнопка»: enroll→subscription→connect (async)
     Q_INVOKABLE void stop();
-    // Волна-4 (P1-4): стоп ПО ТАПУ — с политикой stopTapIgnored (подхват/свежий адопт = повторный
-    // «включить»); программные вызовы stop() (Доктор, ротация) политику не проходят.
+    // Orb tap: decideOrbTap (a shown "Connected" stops; only "Checking…" ignores the tap);
+    // programmatic stop() calls (Doctor, rotation) do not go through the policy.
     Q_INVOKABLE void stopFromUi();
     Q_INVOKABLE void reprobe();                      // повторный выбор ноды (re-pick)
     Q_INVOKABLE void manualSwitch();                 // принудительный свитч (как DEAD)
@@ -1132,7 +1132,6 @@ private:
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;
     QTimer                      m_liveSessionTimer;
-    qint64                      m_lastAdoptMs = -1;              // волна-4 (P1-4): момент адопта живой сессии
     int                         m_startWatchdogDeferrals = 0;    // волна-4 (P1-5): перевзводы сторожа старта при живой NE-сессии
     qint64                      m_lastTunnelTransitionMs = -1;   // волна-4: момент последнего наблюдённого перехода туннеля
     qint64                      m_lastOwnOpMs = -1;              // волна-4: момент своего guardedStart/guardedStop (окно «своего» события сети)

@@ -2516,11 +2516,6 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
         m_stopRetryTimer.stop();
     }
     m_wantConnected = true;
-    // Волна-4 (P1-4, ревью): грация тапа — только для НАСТОЯЩЕГО адопта (движок не был Connected;
-    // повод — наблюдённый Connected или подхват), не для каждого Reconnecting→Connected.
-    if (m_engine.state() != avpn::EngineState::Connected
-        && (qstrcmp(why, "connected") == 0 || qstrcmp(why, "live_session_found") == 0))
-        m_lastAdoptMs = QDateTime::currentMSecsSinceEpoch();
     m_latch.needStatusBeforeStart = false;
     m_statusRequestAttempts = 0;
     m_statusRetryTimer.stop();
@@ -2545,11 +2540,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     if (m_op != Op::None)
         return false;
     m_wantConnected = true;
-    const bool wasConnected = m_engine.state() == avpn::EngineState::Connected;
-    const bool adopted = m_engine.adoptTunnelConnected();
-    if (adopted && !wasConnected && (qstrcmp(why, "connected") == 0 || qstrcmp(why, "live_session_found") == 0))
-        m_lastAdoptMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-4)
-    return adopted;
+    return m_engine.adoptTunnelConnected();
 #endif
 }
 
@@ -4782,16 +4773,14 @@ void AvpnEngineQml::start()
     emit changed();
 }
 
-// Волна-4 (P1-4): стоп по тапу. Во время подхвата живой сессии («Проверяем…») и в первые 2,5 с
-// после адопта тап — это повторный «включить» пользователя, увидевшего «выкл» на холодном старте
-// (журнал 24–28.09: 8 стопов why=user через 0,6–1,5 с после adopt_connected), а не «выключить».
+// Orb tap (connect audit 2026-11-04, revised P1-4): the tap does what the orb shows, as upstream.
+// A shown "Connected" always stops; only the "Checking…" window (live session pending, status not
+// yet arrived) ignores the tap: the orb has not shown "Connected", the user is repeating "turn on".
 void AvpnEngineQml::stopFromUi()
 {
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const qint64 sinceAdopt = m_lastAdoptMs > 0 ? now - m_lastAdoptMs : -1;
-    if (stopTapIgnored(m_busy, m_op != Op::None, m_preparingStart, m_liveSessionPending, sinceAdopt)) {
-        reliabilityEvent(QStringLiteral("stop_tap_ignored adopt_age_ms=%1 pending=%2")
-                             .arg(sinceAdopt).arg(m_liveSessionPending));
+    if (decideOrbTap(m_engine.state() == avpn::EngineState::Connected, m_busy, m_op != Op::None,
+                     m_preparingStart, m_liveSessionPending) == OrbTap::Ignore) {
+        reliabilityEvent(QStringLiteral("stop_tap_ignored pending=%1").arg(m_liveSessionPending));
         emit changed();
         return;
     }

@@ -210,8 +210,8 @@ PageType {
             // «включи обратно» (start задаёт намерение, reconcile доведёт из терминала). Раньше клик
             // уходил в stop() и глотался reconcile-дебаунсом (ревью 2026-07-03).
             if (root.engineStopping) { TribeEngine.start(); return }
-            // Волна-4 (P1-4): тап во время подхвата живой сессии / сразу после адопта движок
-            // трактует как повторный «включить», а не «выключить» (stopFromUi → stopTapIgnored).
+            // Orb tap policy lives in the engine (stopFromUi -> decideOrbTap): a shown "Connected"
+            // stops, only the "Checking…" window ignores the tap.
             if (isOn || isBusy) TribeEngine.stopFromUi()
             else TribeEngine.start()
         } else if (ServersUiController.getServersCount() === 0) {

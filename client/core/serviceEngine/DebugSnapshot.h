@@ -425,20 +425,24 @@ inline bool prepRefreshOnNetworkChange(bool haveSubscription)
 // A11: результат замера не затирает прошлый RTT ноды «нет ответа» (заменяем по приходу нового).
 // ── Волна-4 «как апстрим» (2026-09-29, аудит iOS против апстрима + журнал 24–28.09) ────────
 
-// P1-4: тап по орбу во время подхвата живой сессии (liveSessionFound → ждём статус, m_busy) или в
-// первые секунды после адопта — это второй тап пользователя, который хотел ВКЛЮЧИТЬ (орб ещё
-// показывал «выкл»/«Проверяем…»), а не выключить. 8 из 33 быстрых стопов по журналу — ровно эта
-// последовательность (journal_on → adopt_connected → guarded_stop why=user за 0,6–1,5 с). Отмена
-// СВОЕГО старта (подготовка, Op в полёте) остаётся законной.
-constexpr qint64 kAdoptTapGraceMs = 2500;
-inline bool stopTapIgnored(bool busy, bool ownOpInFlight, bool preparingStart, bool liveSessionPending,
-                           qint64 sinceAdoptMs)
+// P1-4 (revised 2026-11-04, connect audit): the orb tap does what the orb shows, as in upstream
+// Amnezia (ConnectionUiController::toggleConnection: Connected or in progress -> closeConnection).
+// The only ignored tap is the "Checking…" window (busy && liveSessionPending): the orb has not shown
+// "Connected" yet, so the tap is a repeated "turn on". The former 2.5 s grace after adoption
+// (kAdoptTapGraceMs) is removed: with a dead data path the orb showed "Connected", the user tapped
+// it to turn the VPN off and the tap was dropped ("tap does not disconnect, it connects again").
+// Cancelling our own start (preparation, op in flight) stays a legitimate stop.
+enum class OrbTap { Stop, Ignore };
+inline OrbTap decideOrbTap(bool engineConnected, bool busy, bool ownOpInFlight, bool preparingStart,
+                           bool liveSessionPending)
 {
     if (preparingStart || ownOpInFlight)
-        return false;
+        return OrbTap::Stop;
+    if (engineConnected && !busy)
+        return OrbTap::Stop; // the orb shows "Connected"
     if (busy && liveSessionPending)
-        return true;
-    return sinceAdoptMs >= 0 && sinceAdoptMs < kAdoptTapGraceMs;
+        return OrbTap::Ignore; // the orb shows "Checking…"
+    return OrbTap::Stop;
 }
 
 // P1-5: сторож старта на iOS/NE. 15-секундный сторож фасада гасил живую NE-сессию посреди
