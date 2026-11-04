@@ -1612,6 +1612,14 @@ QString AvpnEngineQml::storeUrl() const
 #if defined(Q_OS_ANDROID)
     return m_remoteCfg.urls.value(QStringLiteral("store_android"),
         QStringLiteral("https://play.google.com/store/apps/details?id=com.tribevpn.client"));
+#elif defined(Q_OS_WIN)
+    // Connect audit 2026-11-04: Windows has no store; the installer is served from /dl/ (the
+    // backend always sends urls.store_windows since PR #570). Before, Windows got the App Store link.
+    return m_remoteCfg.urls.value(QStringLiteral("store_windows"),
+        QStringLiteral("https://tribevpn.com/dl/TribeVPN.exe"));
+#elif defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // Desktop macOS updates itself (SelfUpdate); the link is the same image the self-update uses.
+    return configUrl(QStringLiteral("macos_dmg_url"), avpn::SelfUpdate::defaultDmgUrl());
 #else
     return m_remoteCfg.urls.value(QStringLiteral("store_ios"),
         QStringLiteral("https://apps.apple.com/app/id6778394015"));
