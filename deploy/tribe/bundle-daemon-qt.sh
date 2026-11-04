@@ -14,7 +14,7 @@ DAEMON="$SRVDIR/Tribe-service"
 [ -x "$DAEMON" ] || { echo "нет $DAEMON"; exit 1; }
 
 APP_FW="$SRVDIR/../../client/TribeVPN.app/Contents/Frameworks"
-QT_LIB="$HOME/Qt/6.10.2/macos/lib"
+QT_LIB="${QT_ROOT_PATH:-$HOME/Qt/6.10.2}/macos/lib"   # mac-release.sh exports QT_ROOT_PATH (installed kit)
 FW="$SRVDIR/Frameworks"
 rm -rf "$FW"; mkdir -p "$FW"
 

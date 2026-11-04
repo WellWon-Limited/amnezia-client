@@ -18,7 +18,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD="${TRIBE_RELEASE_BUILD:-$REPO/deploy/build-macos-desktop}"
 APP="$BUILD/client/TribeVPN.app"
 SRV="$BUILD/service/server"
-QTBIN="$HOME/Qt/6.10.2/macos/bin"
+QTBIN="${QT_ROOT_PATH:-$HOME/Qt/6.10.2}/macos/bin"   # mac-release.sh exports QT_ROOT_PATH (installed kit)
 DEVID="Developer ID Application: WellWon Limited (Q7DVH5MCWF)"
 ENTS="$REPO/deploy/tribe/tribe-app.entitlements"
 DIST="${TRIBE_RELEASE_DIST:-$HOME/avpn-build/dist}"; DMG="$DIST/Tribe VPN.dmg"
