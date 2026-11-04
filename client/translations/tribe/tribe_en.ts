@@ -1047,6 +1047,11 @@
     </message>
     <message>
         <location line="+1"/>
+        <source>Подключено, трафик не проходит</source>
+        <translation>Connected, but traffic is not getting through</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>Доступ приостановлен — подписка истекла</source>
         <translation type="unfinished"></translation>
     </message>

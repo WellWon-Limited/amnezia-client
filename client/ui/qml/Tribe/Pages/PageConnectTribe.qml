@@ -44,6 +44,9 @@ PageType {
     readonly property bool showBusy: isBusy && !engineStopping
     // Волна-4 (P1-4): подхват уже живой сессии — «Проверяем…», а не «Connecting…».
     readonly property bool adopting: hasEngine && TribeEngine.adopting === true
+    // Connect audit 2026-11-04: the engine confirmed the live probe fails (red bars, no ms) while the
+    // tunnel is up. The caption says so instead of promising a secure connection; orb unchanged.
+    readonly property bool liveDeadNow: hasEngine && TribeEngine.liveDead === true
 
     // AVPN awg31-xray-v1: фаза «туннель поднят, но трафик ещё не подтверждён» (xray: «Подключено»
     // только после DNS+HTTPS через туннель — инвариант волны). Гард `=== true` — старый бинарь без
@@ -805,10 +808,11 @@ PageType {
         // подпись честно объясняет, чего ждём; иначе экран врал бы «Подключиться — нажмите кнопку».
         text: root.verifyingNow ? qsTr("Проверяем трафик…")
               : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
-              : root.isOn ? qsTr("Защита активна — ваше соединение безопасно")
+              : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
+                                              : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
-        color: root.whitelistModeNow ? Theme.color.warning : root.slate400
+        color: (root.whitelistModeNow || (root.isOn && root.liveDeadNow)) ? Theme.color.warning : root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
     }
 
