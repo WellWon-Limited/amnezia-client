@@ -1635,7 +1635,10 @@ QString AvpnEngineQml::storeUrl() const
 // реально изменившемся севе (стале-маршрут для control plane = инцидент 2026-07-05).
 QStringList AvpnEngineQml::apiCarveIps() const
 {
-    QStringList ips{QStringLiteral("159.194.214.36")}; // вкомпиленный фолбэк (Beget, api.tribevpn.com)
+    // Built-in fallback: the live RU edge of api.tribevpn.com (Timeweb, DNS-only; Beget 159.194.214.36
+    // is gone). The current address is also carved at runtime: m_apiHostIps holds what the API hosts
+    // resolve to (resolveApiCarveHosts), so a later move is covered without a release.
+    QStringList ips{QStringLiteral("201.34.134.103")};
     for (const QHostAddress &ip : std::as_const(m_apiHostIps))
         ips << ip.toString();
     return ips;
@@ -1643,8 +1646,8 @@ QStringList AvpnEngineQml::apiCarveIps() const
 
 void AvpnEngineQml::rebuildApiCarveOut(QMap<QString, QStringList> &sites) const
 {
-    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится на Beget (RU) и накрывается
-    // ru_prefixes (159.194.208.0/20) → control plane уходил мимо туннеля, где его режет оператор:
+    // AVPN carve-out (инцидент 2026-07-05): api.tribevpn.com хостится в RU (тогда Beget, с 11.2026
+    // Timeweb 201.34.134.103) и накрывается ru_prefixes → control plane уходил мимо туннеля, где его режет оператор:
     // пустое приложение без подписки/нод, а WG-туннель при этом жив. Исключаем IP API из сева
     // (дихотомическое разбиение накрывающих CIDR без /32 — остальной рунет по-прежнему direct).
     // Вкомпиленный фолбэк + актуальные IP из async-резолва — единый список apiCarveIps().
