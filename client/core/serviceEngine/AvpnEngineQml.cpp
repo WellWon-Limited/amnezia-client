@@ -7001,6 +7001,18 @@ void AvpnEngineQml::onForegroundDebounced()
     const ForegroundPlan plan = planForeground(m_lastFgRefreshMs > 0 ? now - m_lastFgRefreshMs : -1, -1);
     reliabilityEvent(QStringLiteral("foreground_return sub=%1").arg(plan.refreshSubscription));
     kickBootstrap();
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    // Connect audit 2026-11-04 (VPN-SELF-OFF-ANALYSIS-2026-09-27 plan item 6): while the app was
+    // suspended the extension may have stopped, restarted or replaced the session; ask the
+    // NetworkExtension for the real status once per return instead of showing the pre-suspend state.
+    // The answer comes through the usual observation path (vpnStatusDidChange ->
+    // onConnectionStateChanged): adoption and the §13 loss rules decide, nothing here touches the
+    // tunnel. Our own start/stop in flight observes the status itself.
+    if (m_op == Op::None) {
+        reliabilityEvent(QStringLiteral("foreground_status_refresh"));
+        IosController::Instance()->requestReconcileStatus();
+    }
+#endif
     if (plan.refreshSubscription) {
         m_lastFgRefreshMs = now;
         refreshSubscription();
