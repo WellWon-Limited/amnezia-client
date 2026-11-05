@@ -150,6 +150,16 @@ qint64 ServiceEngine::lastKnownRttAgeMs(const QString &nodeId) const
     return qMax<qint64>(0, nowMs() - m_rttLastKnown.value(nodeId).atMs);
 }
 
+QHash<QString, int> ServiceEngine::rankingRtt(const QHash<QString, int> &raw) const
+{
+    return avpn::rankingRtt(m_pool.nodes(), raw, xrayExitRttPenaltyMsTuned());
+}
+
+QHash<QString, int> ServiceEngine::exitRtt(const QHash<QString, int> &raw) const
+{
+    return avpn::exitRtt(m_pool.nodes(), raw);
+}
+
 // Failover: свежий замер поверх последнего известного (без TTL). В connected замеры запрещены
 // (пакет к чужой ноде ушёл бы в туннель), и за 120 с свежий кэш пустеет — без этого failover
 // выбирал бы локацию монетой по весам.
@@ -251,6 +261,7 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
 const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, const QString &exclB) const
 {
     const QList<SubscriptionNode> &nodes = m_pool.nodes();
+    const QHash<QString, int> rank = rankingRtt(measuredRtt()); // an Xray listener ranks by its exit
     QList<RankRow> rows, ruRows;
     for (const SubscriptionNode &n : nodes) {
         if (!exclA.isEmpty() && n.nodeId == exclA)
@@ -261,7 +272,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
-        (isManualOnlyNode(n) ? ruRows : rows).append({ n.nodeId, measuredRtt().value(n.nodeId, -1) });
+        (isManualOnlyNode(n) ? ruRows : rows).append({ n.nodeId, rank.value(n.nodeId, -1) });
     }
     const QString id = fastestMeasuredNodeId(rows.isEmpty() ? ruRows : rows); // fallback на RU если не-RU нет
     if (id.isEmpty())
@@ -288,7 +299,8 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     const auto randomIndex = [](int size) {
         return static_cast<int>(QRandomGenerator::global()->bounded(size));
     };
-    return pickTransportNode(m_pool.nodes(), useLastKnownRtt ? failoverRtt() : measuredRtt(),
+    // Decision 2026-11-05: an Xray listener ranks by its exit host, not by the shared RU entry.
+    return pickTransportNode(m_pool.nodes(), rankingRtt(useLastKnownRtt ? failoverRtt() : measuredRtt()),
                              m_transportHistory, in, randomIndex);
 }
 

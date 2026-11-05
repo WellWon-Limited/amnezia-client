@@ -128,6 +128,13 @@ int main(int argc, char **argv)
         CHECK(avpn::xrayVerifyTimeoutMsTuned() == 60000, "connecttunables: xray_verify_timeout_ms-гигант => потолок 60000");
         CHECK(avpn::xrayProbeFailCyclesTuned() == 10, "connecttunables: xray_probe_fail_cycles-гигант => потолок 10");
         avpn::TuningStore::reset();
+        // Decision 2026-11-05: ranking penalty of an Xray listener without a measured exit.
+        CHECK(avpn::xrayExitRttPenaltyMsTuned() == 150, "connecttunables: xray_exit_rtt_penalty_ms default 150");
+        avpn::TuningStore::set({{"xray_exit_rtt_penalty_ms", -5.0}}, {}, {}, {});
+        CHECK(avpn::xrayExitRttPenaltyMsTuned() == 0, "connecttunables: xray_exit_rtt_penalty_ms<0 => floor 0");
+        avpn::TuningStore::set({{"xray_exit_rtt_penalty_ms", 9e9}}, {}, {}, {});
+        CHECK(avpn::xrayExitRttPenaltyMsTuned() == 5000, "connecttunables: xray_exit_rtt_penalty_ms huge => ceiling 5000");
+        avpn::TuningStore::reset();
     }
 
     // --- localizedOr (Task 3, 2026-07-12): язык-суффиксные строки с цепочкой фолбэков

@@ -13,6 +13,7 @@
 
 #include "../CidrValidate.h"
 #include "../ServiceEngine.h"
+#include "../TuningStore.h"
 #include "../ru_prefixes.h"
 
 #include <QCoreApplication>
@@ -269,6 +270,47 @@ int main(int argc, char **argv)
         CHECK(v4 > 8000);
         CHECK(v6 > 2000); // раньше ВСЕ они выбрасывались фильтром IPv4-only
         CHECK(lost == 0);
+    }
+
+    // --- 4) decision 2026-11-05: failover ranks an Xray listener by its exit host, not by the shared
+    //        RU entry: DE Xray (entry 10 ms, DE AWG silent) must not beat EE AWG (40 ms).
+    {
+        TuningStore::set({}, {{QStringLiteral("xray_client"), true}, {QStringLiteral("transport_auto_pick"), true}}, {}, {});
+        const QByteArray body = R"({ "version": 1, "address": ["10.7.0.5/32"], "status": "active",
+          "expires_at": "2026-09-01T00:00:00Z", "traffic": { "used": 0, "limit": 0 },
+          "nodes": [
+            { "node_id": "cur", "host_id": 1, "endpoint": "10.255.255.1:51820", "server_pubkey": "K=", "proto": "awg",
+              "weight": 5.0, "country_code": "FI", "allowed_ips": ["0.0.0.0/0", "::/0"] },
+            { "node_id": "de", "host_id": 2, "endpoint": "10.255.255.2:51820", "server_pubkey": "K=", "proto": "awg",
+              "weight": 1.0, "country_code": "DE", "allowed_ips": ["0.0.0.0/0", "::/0"] },
+            { "node_id": "de:xray", "host_id": 2, "transport_rank": 20, "endpoint": "10.255.255.9:2096", "proto": "xray",
+              "weight": 1.0, "country_code": "DE",
+              "xray_params": { "uuid": "8f14e45f-ceea-4a7c-9d6b-2a1b3c4d5e6f",
+                               "public_key": "SbVjZ9Yl3dR3QpG1v8k2Wx0aU7Hq4Nn6Tt5Bc8Jd1mE",
+                               "short_id": "a1b2c3d4", "server_name": "vision.example.com",
+                               "fingerprint": "chrome", "flow": "xtls-rprx-vision",
+                               "network": "tcp", "security": "reality" } },
+            { "node_id": "ee", "host_id": 3, "endpoint": "10.255.255.3:51820", "server_pubkey": "K=", "proto": "awg",
+              "weight": 1.0, "country_code": "EE", "allowed_ips": ["0.0.0.0/0", "::/0"] }
+          ] })";
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(body, err));
+        CHECK(eng.setPinnedNode(QStringLiteral("cur"), err));
+        CHECK(eng.connect(err));
+        eng.onTunnelConnected();
+        CHECK(tun.lastUpNodeId == QLatin1String("cur"));
+        eng.clearPin();
+        QHash<QString, int> rtt;
+        rtt.insert(QStringLiteral("de:xray"), 10); // the RU entry, shared by every listener
+        rtt.insert(QStringLiteral("ee"), 40);
+        eng.setMeasuredRtt(rtt);
+        CHECK(eng.notifyConnectionLost());
+        printf("failover xray-exit: candidate=%s\n", tun.lastUpNodeId.toUtf8().constData());
+        CHECK(tun.lastUpNodeId == QLatin1String("ee"));
+        TuningStore::reset();
     }
 
     if (g_failed) {

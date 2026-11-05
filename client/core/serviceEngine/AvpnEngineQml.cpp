@@ -8927,20 +8927,24 @@ void AvpnEngineQml::docStartAltNodes()
     // рабочую EE на US). RTT сравниваем одной мерой — последний известный off-tunnel ICMP.
     const QVariantMap cur = currentNode();
     const QString curId = cur.value(QStringLiteral("nodeId")).toString();
+    // Fresh measurement over the last known one (as failover). Decision 2026-11-05: an Xray
+    // listener's own ICMP is the shared RU entry - the queue is ordered by the ranking RTT (exit
+    // host, TransportPick.h::rankingRtt) and every compared/shown value is the honest exit RTT.
+    QHash<QString, int> rawRtt = m_engine.lastKnownRtt();
     const QHash<QString, int> freshRtt = m_engine.measuredRtt();
-    const QHash<QString, int> knownRtt = m_engine.lastKnownRtt();
-    auto nodeRtt = [&freshRtt, &knownRtt](const QString &id) {
-        const int fresh = freshRtt.value(id, -1);
-        return fresh >= 0 ? fresh : knownRtt.value(id, -1);
-    };
-    m_docAltCurRtt = nodeRtt(curId);
+    for (auto it = freshRtt.constBegin(); it != freshRtt.constEnd(); ++it)
+        rawRtt.insert(it.key(), it.value());
+    const QHash<QString, int> exitRtt = m_engine.exitRtt(rawRtt);
+    const QHash<QString, int> rankRtt = m_engine.rankingRtt(rawRtt);
+    m_docAltCurRtt = exitRtt.value(curId, -1);
     if (m_docAltCurRtt < 0) {
         for (const auto &st : m_docStages)
             if (st.id == QLatin1String("servers"))
                 m_docAltCurRtt = st.data.value(QStringLiteral("rtt_ms")).toInt(-1);
     }
-    // очередь: живые поддерживаемые ноды, отсортированные по измеренному RTT (кеш), != текущей
-    QList<QPair<int, QVariantMap>> cand;
+    // очередь: живые поддерживаемые ноды, отсортированные по RTT выхода (кеш), != текущей
+    QStringList candIds;
+    QHash<QString, QVariantMap> candById;
     const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
     for (const QVariant &v : pool) {
         const QVariantMap n = v.toMap();
@@ -8955,11 +8959,13 @@ void AvpnEngineQml::docStartAltNodes()
         // manual_only на случай, если флаг у RU-ноды когда-нибудь снимут на бэке.
         if (n.value(QStringLiteral("countryCode")).toString()
                 .compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0) continue;
-        const int rtt = nodeRtt(id);
-        cand.append({rtt >= 0 ? rtt : 99999, n});
+        candIds << id;
+        candById.insert(id, n);
     }
-    std::sort(cand.begin(), cand.end(),
-              [](const auto &a, const auto &b) { return a.first < b.first; });
+    // first = honest exit RTT (99999 = unknown), order = ranking RTT (stable).
+    QList<QPair<int, QVariantMap>> cand;
+    for (const QString &id : orderByRankingRtt(candIds, rankRtt))
+        cand.append({exitRtt.value(id, 99999), candById.value(id)});
     const int bestAltRtt = (!cand.isEmpty() && cand.first().first < 99999) ? cand.first().first : -1;
     m_docAltHadProblem = doctorNodeProblem(m_docStages, m_docAltCurRtt, bestAltRtt);
     m_docAltFarOnly = m_docAltHadProblem && !doctorDataPlaneProblem(m_docStages);

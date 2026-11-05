@@ -64,6 +64,11 @@ public:
     qint64 measuredRttAgeMs() const;
     QHash<QString, int> measuredRtt() const;
     QHash<QString, int> lastKnownRtt() const;
+    // Decision 2026-11-05: what ranks and what an Xray listener's exit measures (TransportPick.h).
+    // rankingRtt(raw) - for every "fastest" choice (auto location, failover, Doctor alternatives);
+    // exitRtt(raw) - the honest exit RTT only (unknown = absent), for comparisons that need a real value.
+    QHash<QString, int> rankingRtt(const QHash<QString, int> &raw) const;
+    QHash<QString, int> exitRtt(const QHash<QString, int> &raw) const;
     qint64 lastKnownRttAgeMs(const QString &nodeId) const; // -1 = замера не было
 
     // Первый вход: genkey (Identity, reuse форка) → POST /v1/trial → сохранить токен. [IN-FORK]

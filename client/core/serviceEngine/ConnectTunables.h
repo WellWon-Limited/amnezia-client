@@ -128,6 +128,15 @@ inline int wakeRestartMaxTriesTuned()
 // успех. Бюджет верификации (numbers.xray_verify_timeout_ms): пол 3с (ниже — ложные провалы на
 // любой сотовой: Reality-рукопожатие + маршруты), потолок 60с (выше — вечный «Проверяем трафик»).
 // По истечении — провал data-plane → другой транспорт той же локации (failover).
+// Ranking penalty of an Xray listener whose exit RTT is unknown (decision 2026-11-05 after the
+// owner test of 5.1.102): its own ICMP measures the RU entry shared by every listener (~14 ms), so
+// it ranks as entry + penalty, never ahead of a measured exit (TransportPick.h::rankingRtt).
+// numbers.xray_exit_rtt_penalty_ms: floor 0, ceiling 5000 ms, default 150.
+inline int xrayExitRttPenaltyMsTuned()
+{
+    return qBound(0, int(TuningStore::numberOr(QStringLiteral("xray_exit_rtt_penalty_ms"), 150)), 5000);
+}
+
 inline int xrayVerifyTimeoutMsTuned()
 {
     return qBound(3000, int(TuningStore::numberOr(QStringLiteral("xray_verify_timeout_ms"), 12000)), 60000);

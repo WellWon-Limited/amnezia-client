@@ -1012,6 +1012,74 @@ int main(int argc, char **argv)
         CHECK(labels.at(0).name == QLatin1String("X label"));
     }
 
+    // §12. Decision 2026-11-05: an Xray listener RANKS by its exit host (the AWG sibling on the same
+    // host_id), not by the shared RU entry. 4 AWG + 4 Xray, every listener's ICMP = entry 14 ms;
+    // AWG EE 27 / FI 35 / US 150 / DE no answer -> automatic order EE, FI, US, DE, and the Doctor's
+    // alternatives in the same order. Before: every location ranked 14 ms (entry jitter decided).
+    {
+        setFlags(true, true);
+        const QByteArray pool = subJson({ awgNodeJson("15", 15, "EE", 1.0), awgNodeJson("11", 11, "FI", 1.0),
+                                          awgNodeJson("12", 12, "DE", 1.0), awgNodeJson("10", 10, "US", 1.0),
+                                          xrayNodeJson("15:xray", 15, "EE", 1.0, 20, "201.34.134.103:443"),
+                                          xrayNodeJson("11:xray", 11, "FI", 1.0, 20, "201.34.134.103:2087"),
+                                          xrayNodeJson("12:xray", 12, "DE", 1.0, 20, "201.34.134.103:2096"),
+                                          xrayNodeJson("10:xray", 10, "US", 1.0, 20, "201.34.134.103:2082") });
+        const QList<SubscriptionNode> nodes = parseNodes(pool);
+        const QHash<QString, int> raw{{QStringLiteral("15"), 27}, {QStringLiteral("11"), 35}, {QStringLiteral("10"), 150},
+                                      {QStringLiteral("15:xray"), 14}, {QStringLiteral("11:xray"), 14},
+                                      {QStringLiteral("12:xray"), 13}, {QStringLiteral("10:xray"), 14}};
+        const QHash<QString, int> exits = exitRtt(nodes, raw);
+        CHECK(exits.value(QStringLiteral("15:xray")) == 27 && exits.value(QStringLiteral("11:xray")) == 35);
+        CHECK(exits.value(QStringLiteral("10:xray")) == 150);
+        CHECK(!exits.contains(QStringLiteral("12:xray")) && !exits.contains(QStringLiteral("12")));
+        const QHash<QString, int> rank = rankingRtt(nodes, raw, 150);
+        CHECK(rank.value(QStringLiteral("12:xray")) == 163);  // entry 13 + 150 > worst measured exit 150
+        CHECK(!rank.contains(QStringLiteral("12")));          // AWG DE: no answer at all -> unmeasured
+        CHECK(rankingRtt(nodes, raw, 0).value(QStringLiteral("12:xray")) == 151); // never ahead of a measured exit
+        CHECK(rank.value(QStringLiteral("15:xray")) != rank.value(QStringLiteral("11:xray"))); // no tie on the entry
+
+        // Automatic order: pick, take the location out, pick again (as failover/rotation do).
+        QStringList autoOrder;
+        TransportPickInput in;
+        for (int i = 0; i < 4; ++i) {
+            const SubscriptionNode *n = pickTransportNode(nodes, rank, TransportHistory(), in);
+            if (!n) break;
+            autoOrder << n->countryCode;
+            for (const SubscriptionNode &m : nodes)
+                if (locationKeyOf(m) == locationKeyOf(*n))
+                    in.excluded.insert(m.nodeId);
+        }
+        CHECK(autoOrder == QStringList({QStringLiteral("EE"), QStringLiteral("FI"), QStringLiteral("US"), QStringLiteral("DE")}));
+        // The raw entry RTT would have started on DE (13 ms, the entry's jitter) - the owner's case.
+        CHECK(pickTransportNode(nodes, raw, TransportHistory(), TransportPickInput())->countryCode == QLatin1String("DE"));
+
+        // The engine applies the same ranking (connect in Auto starts on EE AWG).
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(raw);
+            CHECK(eng.rankingRtt(eng.measuredRtt()) == rank);
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("15"));
+        }
+
+        // Doctor alternatives (current = none): ordered by ranking RTT, stable within a location.
+        QStringList ids;
+        for (const SubscriptionNode &n : nodes)
+            ids << n.nodeId;
+        QStringList doctorCountries;
+        for (const QString &id : orderByRankingRtt(ids, rank)) {
+            const QString cc = byId(nodes, id.toUtf8().constData())->countryCode;
+            if (doctorCountries.isEmpty() || doctorCountries.constLast() != cc)
+                doctorCountries << cc;
+        }
+        CHECK(doctorCountries == QStringList({QStringLiteral("EE"), QStringLiteral("FI"), QStringLiteral("US"), QStringLiteral("DE")}));
+        CHECK(orderByRankingRtt(ids, rank).constLast() == QLatin1String("12")); // unmeasured last
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;
