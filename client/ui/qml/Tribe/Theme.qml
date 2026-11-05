@@ -49,6 +49,11 @@ QtObject {
         readonly property color badgeOn: Qt.rgba(0x41 / 255, 0xC2 / 255, 0x8C / 255, 0.16)
         readonly property color badgeWarn: Qt.rgba(0xE2 / 255, 0xA5 / 255, 0x3C / 255, 0.16)
         readonly property color badgeOff: Qt.rgba(0xE2 / 255, 0x62 / 255, 0x5C / 255, 0.16)
+        // transport identity on the Connect card (owner, 2026-11-05): Amnezia = accent; Xray Reality =
+        // pink-violet at the accent's lightness/saturation (#7CA2D0 = HSL 213°/47%/65% → 295°/47%/65%)
+        readonly property color xray: "#C97CD0"
+        readonly property color badgeAccent: Qt.rgba(0x7C / 255, 0xA2 / 255, 0xD0 / 255, 0.16)
+        readonly property color badgeXray: Qt.rgba(0xC9 / 255, 0x7C / 255, 0xD0 / 255, 0.16)
         readonly property color chipSelected: Qt.rgba(0x3E / 255, 0x80 / 255, 0xED / 255, 0.12)
         readonly property color focusRing: Qt.rgba(0x3E / 255, 0x80 / 255, 0xED / 255, 0.18)
         // nav bar (translucent + blur)

@@ -66,6 +66,33 @@ PageType {
                                         && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
     readonly property string curProtoVersion: String(root.curNode.protoVersion || "")
 
+    // Владелец, тест 5.1.102 (2026-11-05): бейдж карточки сервера — ONLINE (проверка данных
+    // пройдена) и активный протокол (цвет протокола: Amnezia — accent, Xray Reality — xray).
+    component CardBadge: Rectangle {
+        id: cardBadge
+        property string label: ""
+        property color fg: Theme.color.accent
+        property color fill: Theme.color.badgeAccent
+        implicitHeight: 17
+        implicitWidth: cardBadgeText.implicitWidth + 2 * Theme.space.sm
+        radius: Theme.radius.pill
+        color: cardBadge.fill
+        border.width: 1
+        border.color: cardBadge.fg
+        Accessible.role: Accessible.StaticText
+        Accessible.name: cardBadge.label
+        Text {
+            id: cardBadgeText
+            anchors.centerIn: parent
+            text: cardBadge.label
+            textFormat: Text.PlainText
+            color: cardBadge.fg
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.caption - 1
+            font.weight: Theme.font.wBold
+        }
+    }
+
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
     // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
     // если взведено действием пользователя и app активно (Haptic.playArmed) — автофейловер и
@@ -823,16 +850,16 @@ PageType {
         // «Подключиться…», когда сеть зарезана оператором (попап мог быть уже закрыт).
         // AVPN awg31-xray-v1: фаза проверки трафика (xray поднят, «Подключено» ещё не объявлено) —
         // подпись честно объясняет, чего ждём; иначе экран врал бы «Подключиться — нажмите кнопку».
-        // Plan v3 step 5: подпись следует вердикту проверки пути — «данные идут» только после
-        // пройденной проверки; не прошла — честно говорим, что пробуем следующий путь.
+        // Plan v3 step 5: подпись следует вердикту проверки пути; не прошла — честно говорим, что
+        // пробуем следующий путь. Пройденная проверка — бейдж ONLINE на карточке сервера, не текст
+        // (владелец, тест 5.1.102).
         text: root.verifyingNow ? qsTr("Проверяем трафик…")
               : root.nextPathNow ? (root.pathCheckNow === "bypass"
                                     ? qsTr("Трафик шёл мимо VPN — пробуем другой путь")
                                     : qsTr("Сервер не пропускает данные — пробуем другой путь"))
               : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
-                             : root.dataFlowingNow ? qsTr("Защита активна — данные идут через VPN")
-                                                   : qsTr("Защита активна — ваше соединение безопасно"))
+                                              : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
         color: (root.whitelistModeNow || root.nextPathNow || (root.isOn && root.liveDeadNow))
@@ -901,110 +928,140 @@ PageType {
                         }
                     }
                 }
-                // имя+бары (верхняя строка) и IP+мс (нижняя строка) — ДВЕ выровненные строки:
-                // бары РОВНО над именем, мс РОВНО на линии IP и ТОГО ЖЕ размера (mono 10). // AVPN
-                Column {
+                // Слева имя (+«Авто» / статус второй строкой), справа компактный кластер: столбик
+                // бейджей (ONLINE над протоколом) вплотную к палочкам (сверху) и мс (снизу). // AVPN
+                // Владелец, тест 5.1.102 (2026-11-05): строки «IP: …» больше нет — на её месте бейдж
+                // активного протокола; «данные идут» стало бейджем ONLINE (только после пройденной
+                // проверки данных, вердикт works; во время проверки — подпись под орбом).
+                Item {
                     id: infoCol
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left: regionFlag.right; anchors.leftMargin: Theme.space.lg
                     anchors.right: parent.right
-                    spacing: 3
+                    height: Math.max(textCol.implicitHeight, cluster.height)
 
                     // палочки/мс показываем ТОЛЬКО когда подключены к живому узлу. // AVPN
                     readonly property bool sig: root.isOn && root.curNode.hasNode
                     readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
                     // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд). // AVPN
                     readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
+                    // бейдж протокола — пока туннель поднят (в т. ч. на проверке трафика)
+                    readonly property bool showProto: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
+                    readonly property real cellH: protoBadge.implicitHeight
 
-                    // ── верхняя строка: имя сервера (+бейдж auto) слева, палочки справа ──
                     Item {
-                        width: parent.width
-                        height: nameRow.implicitHeight
-                        Row {
-                            id: nameRow
-                            anchors.left: parent.left
+                        id: cluster
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: (sigCol.visible ? sigCol.width : 0)
+                               + (badgeCol.visible ? badgeCol.width : 0)
+                               + (sigCol.visible && badgeCol.visible ? Theme.space.sm : 0)
+                        height: 2 * infoCol.cellH + 3
+
+                        // ── столбик бейджей: ONLINE (верх, у палочек) и протокол (низ, у мс) ──
+                        Column {
+                            id: badgeCol
+                            visible: infoCol.showProto
+                            anchors.right: sigCol.visible ? sigCol.left : parent.right
+                            anchors.rightMargin: sigCol.visible ? Theme.space.sm : 0
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.right: infoCol.sig ? topBars.left : parent.right
-                            anchors.rightMargin: infoCol.sig ? Theme.space.md : 0
-                            spacing: Theme.space.sm
-                            Text {
-                                id: nodeName
-                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.countryCode || "")
-                                      : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Нет связи с Tribe")
-                                                                                 : qsTr("Загружаем серверы…"))
-                                      : qsTr("Умный выбор сервера")
-                                color: "white"; elide: Text.ElideRight
-                                // оставляем место под бейдж, чтобы имя не наезжало на него
-                                width: Math.min(implicitWidth, parent.width - (autoBadge.visible ? autoBadge.width + Theme.space.sm : 0))
-                                font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
+                            spacing: 3
+                            // ширина столбика — по более широкому бейджу: ONLINE появляется без сдвига
+                            readonly property real cellW: Math.max(onlineBadge.implicitWidth, protoBadge.implicitWidth)
+                            Item {
+                                width: badgeCol.cellW; height: infoCol.cellH
+                                CardBadge {
+                                    id: onlineBadge
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: root.dataFlowingNow
+                                    label: qsTr("ONLINE")
+                                    fg: Theme.color.connected
+                                    fill: Theme.color.badgeOn
+                                }
                             }
-                            // AVPN (реш. владельца 2026-09-02): у ИМЕНИ — бейдж транспорта
-                            // («Amnezia v3.1» / «Xray»), а режим «Авто» ушёл текстом на строку IP.
-                            // Транспорт — главное про соединение, режим выбора — второстепенное.
-                            TribeTransportBadge {
-                                id: autoBadge   // id сохранён: на него завязана ширина имени выше
-                                visible: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
-                                anchors.verticalCenter: nodeName.verticalCenter
-                                transport: root.activeProtoNow
-                                version: root.curProtoVersion
-                                active: true
-                                verifying: root.verifyingNow
-                                dataFlowing: root.dataFlowingNow
+                            Item {
+                                width: badgeCol.cellW; height: infoCol.cellH
+                                CardBadge {
+                                    id: protoBadge
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    readonly property bool xray: root.activeProtoNow === "xray"
+                                    label: xray ? qsTr("Xray Reality")
+                                                : (root.curProtoVersion.length > 0
+                                                   ? qsTr("Amnezia v%1").arg(root.curProtoVersion)
+                                                   : qsTr("Amnezia"))
+                                    fg: xray ? Theme.color.xray : Theme.color.accent
+                                    fill: xray ? Theme.color.badgeXray : Theme.color.badgeAccent
+                                }
                             }
                         }
-                        LoadBars {
-                            id: topBars
+
+                        // ── палочки (верх) и мс (низ) — на линиях бейджей ──
+                        Column {
+                            id: sigCol
                             visible: infoCol.sig
                             anchors.right: parent.right
-                            anchors.verticalCenter: nameRow.verticalCenter
-                            // мёртвая связь → 0 зелёных + красные; иначе мин. 1 зелёная, reachable уточняет 1..5. // AVPN
-                            failed: infoCol.dead
-                            level: infoCol.dead ? 0 : (infoCol.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 3
+                            readonly property real cellW: Math.max(topBars.width, msText.implicitWidth)
+                            Item {
+                                width: sigCol.cellW; height: infoCol.cellH
+                                LoadBars {
+                                    id: topBars
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    // мёртвая связь → 0 зелёных + красные; иначе мин. 1 зелёная, reachable уточняет 1..5. // AVPN
+                                    failed: infoCol.dead
+                                    level: infoCol.dead ? 0 : (infoCol.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
+                                }
+                            }
+                            Item {
+                                width: sigCol.cellW; height: infoCol.cellH
+                                // число мс — виден, когда проба дошла. // AVPN
+                                Text {
+                                    id: msText
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
+                                    text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                                    color: root.slate500
+                                    font.family: Theme.font.mono; font.pixelSize: 10
+                                }
+                            }
                         }
                     }
 
-                    // ── нижняя строка: IP слева, бейдж транспорта и мс справа (одна линия) ──
-                    Item {
-                        width: parent.width
-                        // обе части строки — mono-10; высота по самой высокой (страховка на будущее)
-                        height: Math.max(ipText.implicitHeight,
-                                         transportBadge.visible ? transportBadge.implicitHeight : 0)
-                        // AVPN (реш. владельца 2026-09-02): режим выбора сервера — обычным
-                        // текстом на строке IP, тем же кеглем/цветом, что IP и мс. Бейджем
-                        // осталась только суть соединения (транспорт) — он у имени выше.
+                    // ── слева: имя сервера и вторая строка (режим «Авто» или статус без узла) ──
+                    Column {
+                        id: textCol
+                        anchors.left: parent.left
+                        anchors.right: cluster.left
+                        anchors.rightMargin: cluster.width > 0 ? Theme.space.md : 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 3
                         Text {
-                            id: transportBadge   // id сохранён: на него завязаны якоря IP/мс
-                            visible: root.curNode.auto === true
-                            anchors.right: msText.visible ? msText.left : parent.right
-                            anchors.rightMargin: msText.visible ? Theme.space.md : 0
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("Авто")
-                            textFormat: Text.PlainText
-                            color: root.slate500
-                            font.family: Theme.font.mono; font.pixelSize: 10
+                            id: nodeName
+                            width: parent.width
+                            text: root.curNode.hasNode ? (root.curNode.name || root.curNode.countryCode || "")
+                                  : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Нет связи с Tribe")
+                                                                             : qsTr("Загружаем серверы…"))
+                                  : qsTr("Умный выбор сервера")
+                            color: "white"; elide: Text.ElideRight
+                            font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                         }
+                        // AVPN (реш. владельца 2026-09-02): режим выбора сервера — обычным текстом,
+                        // тем же кеглем/цветом, что мс; без узла — статус подбора.
                         Text {
-                            id: ipText
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.right: transportBadge.visible ? transportBadge.left
-                                           : (msText.visible ? msText.left : parent.right)
-                            anchors.rightMargin: (transportBadge.visible || msText.visible) ? Theme.space.md : 0
+                            id: subText
+                            width: parent.width
+                            visible: text.length > 0
                             elide: Text.ElideRight
-                            text: root.curNode.hasNode ? ("IP: " + root.curNode.ip)
+                            text: root.curNode.hasNode ? (root.curNode.auto === true ? qsTr("Авто") : "")
                                   : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
                                                                              : qsTr("Секунду…"))
                                   : qsTr("Сервис запускает узел")
-                            color: root.slate500
-                            font.family: Theme.font.mono; font.pixelSize: 10
-                        }
-                        // число мс — на линии IP, того же размера; виден, когда проба дошла. // AVPN
-                        Text {
-                            id: msText
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            visible: infoCol.sig && infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
-                            text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                            textFormat: Text.PlainText
                             color: root.slate500
                             font.family: Theme.font.mono; font.pixelSize: 10
                         }
