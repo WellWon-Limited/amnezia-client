@@ -106,4 +106,23 @@ inline QByteArray networkMemoryForget(const QByteArray &json, const QString &key
     return removed ? netmemory_detail::save(out) : json;
 }
 
+// Explicit «Авто» tap: the user asked for the fastest by measurement - drop the entry of this network
+// whatever node it holds, until a later user connect proves a path again.
+inline QByteArray networkMemoryClear(const QByteArray &json, const QString &key)
+{
+    if (key.isEmpty())
+        return json;
+    QJsonArray out;
+    bool removed = false;
+    for (const QJsonValue &v : netmemory_detail::load(json)) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QStringLiteral("k")).toString() == key) {
+            removed = true;
+            continue;
+        }
+        out.append(o);
+    }
+    return removed ? netmemory_detail::save(out) : json;
+}
+
 } // namespace avpn

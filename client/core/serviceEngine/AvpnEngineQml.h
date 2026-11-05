@@ -990,15 +990,18 @@ private:
     void startDataPathVerification();
     void startWhoamiVerification();
     void whoamiAttempt(int epoch);
-    void finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts);
+    // tiebreakDone: the verdict came from the generate_204 tiebreak and is final.
+    void finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts, bool tiebreakDone = false);
     void finishVerifyInconclusive(int epoch);
-    // Network memory (NetworkMemory.h, QSettings avpn/netMemory): the key is computed when it is
-    // used (read at start, written at the verdict), so a Wi-Fi -> cellular move inside an attempt
-    // is written under the network it happened on.
+    // Network memory (NetworkMemory.h, QSettings avpn/netMemory): the key is computed at the start of
+    // each attempt (tunnel down - the medium is the real one; with the tunnel up macOS reports the
+    // utun route and iOS Wi-Fi the SIM radio) and carried through it for the read, the write at the
+    // verdict and the forget on failure. An explicit «Авто» tap clears the entry of this network.
     QString currentNetworkMemoryKey() const;
     bool networkMemoryAllowed() const;
     void rememberNetworkPath(const QString &nodeId);
     void forgetNetworkPath(const QString &nodeId);
+    void clearNetworkMemoryForAutoTap();
     // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
     // data-plane (ServiceEngine::dataPlaneExhausted) — показать честную ошибку, снять намерение
     // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
@@ -1436,7 +1439,6 @@ private:
     // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
-    QHash<QString, QStringList>  m_apiHostIpsByHost;              // plan v3 step 5: per-host view for the whoami edge
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит
@@ -1485,6 +1487,7 @@ private:
     // current attempt (guardedStart); the engine's own heals inside the attempt inherit it.
     StartOrigin                  m_startOrigin = StartOrigin::User;
     StartOrigin                  m_attemptOrigin = StartOrigin::User;
+    QString                      m_attemptNetKey;                  // network-memory key of the current attempt
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного

@@ -180,10 +180,57 @@ int main()
         o.node = -1;
         CHECK(avpn::whoamiVerdict(o) == WhoamiVerdict::Inconclusive, "garbage X-Whoami-Node -> inconclusive");
     }
-    CHECK(avpn::whoamiTiebreakVerdict(true) == WhoamiVerdict::CheckLimited,
+    CHECK(avpn::whoamiTiebreakVerdict(true, 2) == WhoamiVerdict::CheckLimited,
           "tiebreak: generate_204 passed -> check limited (Connected, no green mark)");
-    CHECK(avpn::whoamiTiebreakVerdict(false) == WhoamiVerdict::NoData,
+    CHECK(avpn::whoamiTiebreakVerdict(false, 2) == WhoamiVerdict::NoData,
           "tiebreak: generate_204 failed too -> no data (next path)");
+    // N2: the tiebreak ran out of budget without one request ever sent (app suspended, timers fired
+    // late on return): no evidence - no verdict, never NoData.
+    CHECK(avpn::whoamiTiebreakVerdict(false, 0) == WhoamiVerdict::CheckLimited,
+          "tiebreak: zero budget and zero requests sent -> check limited, not no data");
+
+    // --- N2: the attempt gate - budget already spent before any request ---
+    {
+        CHECK(avpn::whoamiAttemptGate(0, 5000, 9000) == avpn::WhoamiGate::Send, "budget left -> send whoami");
+        CHECK(avpn::whoamiAttemptGate(1, 500, 4000) == avpn::WhoamiGate::Tiebreak,
+              "whoami budget spent, verify budget left -> tiebreak");
+        CHECK(avpn::whoamiAttemptGate(0, 500, 4000) == avpn::WhoamiGate::Tiebreak,
+              "nothing sent yet, generate_204 still has budget -> tiebreak");
+        CHECK(avpn::whoamiAttemptGate(0, -20000, -12000) == avpn::WhoamiGate::NoEvidence,
+              "elapsed >= budget at verification start, no request sent -> no evidence (limited)");
+        CHECK(avpn::whoamiAttemptGate(0, -7200, 0) == avpn::WhoamiGate::NoEvidence,
+              "verify budget exactly spent, no request -> no evidence");
+        CHECK(avpn::whoamiAttemptGate(1, -1000, -500) == avpn::WhoamiGate::Tiebreak,
+              "a request was sent -> the tiebreak decides (its own guard)");
+        // no evidence must neither fail the path nor erase the network memory
+        CHECK(!avpn::whoamiFailsPath(avpn::whoamiTiebreakVerdict(false, 0)),
+              "no-evidence result does not move to the next path / does not forget the memory");
+    }
+
+    // --- N1: what each verdict does; xray never connects on a bare 429/404 ---
+    {
+        using avpn::WhoamiAction;
+        CHECK(avpn::whoamiAction(WhoamiVerdict::Works, false, false) == WhoamiAction::Succeed, "awg works -> succeed");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::Works, true, false) == WhoamiAction::Succeed, "xray works -> succeed");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::NoData, true, false) == WhoamiAction::FailPath, "no data -> next path");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::BypassVpn, false, true) == WhoamiAction::FailPath, "bypass -> next path");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, false, false) == WhoamiAction::ConnectUnproven,
+              "awg 429/404 -> Connected without the mark");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, true, false) == WhoamiAction::Tiebreak,
+              "xray 429/404 -> generate_204 tiebreak first (Connected only after a probe)");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, true, true) == WhoamiAction::ConnectUnproven,
+              "xray after the tiebreak passed -> Connected without the mark (no second tiebreak)");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::Inconclusive, false, false) == WhoamiAction::Tiebreak,
+              "awg inconclusive -> tiebreak");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::Inconclusive, true, false) == WhoamiAction::Tiebreak,
+              "xray inconclusive -> tiebreak");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::Inconclusive, true, true) == WhoamiAction::ConnectUnproven,
+              "inconclusive after the tiebreak cannot loop");
+        CHECK(avpn::whoamiAction(avpn::whoamiTiebreakVerdict(true, 1), true, true) == WhoamiAction::ConnectUnproven,
+              "xray 429 then 204 passed -> Connected without the mark");
+        CHECK(avpn::whoamiAction(avpn::whoamiTiebreakVerdict(false, 2), true, true) == WhoamiAction::FailPath,
+              "xray 429 then 204 failed -> next path");
+    }
 
     // --- next step: retry / tiebreak / finish (review items 3 and 7) ---
     {
@@ -248,32 +295,19 @@ int main()
               && avpn::whoamiFailoverReason(WhoamiVerdict::BypassVpn) != QLatin1String("dead (failover)"),
           "failover reason skips rebind/re-up of the same node");
 
-    // --- whoami edge (review item 6): never ask the tunnel's own server address ---
+    // --- whoami edge (#8): xray -> always the alternate edge, awg -> the active API address ---
     {
-        const QStringList edges{QStringLiteral("https://api.tribevpn.com"), QStringLiteral("https://vpn.wellwon.hk")};
-        QHash<QString, QStringList> ips;
-        ips.insert(QStringLiteral("api.tribevpn.com"), {QStringLiteral("201.34.134.103")});
-        ips.insert(QStringLiteral("vpn.wellwon.hk"), {QStringLiteral("104.21.1.1")});
-        const QString active = QStringLiteral("https://api.tribevpn.com");
-        CHECK(avpn::whoamiBaseUrl(active, edges, ips, QStringLiteral("79.110.48.13")) == active,
-              "tunnel endpoint is not the API address -> the active edge");
-        CHECK(avpn::whoamiBaseUrl(active, edges, ips, QStringLiteral("201.34.134.103"))
-                  == QLatin1String("https://vpn.wellwon.hk"),
-              "API resolves to the xray entry -> the other edge");
-        CHECK(avpn::whoamiBaseUrl(active, edges, ips, QString()) == active, "endpoint unknown -> the active edge");
-        QHash<QString, QStringList> both = ips;
-        both.insert(QStringLiteral("vpn.wellwon.hk"), {QStringLiteral("201.34.134.103")});
-        CHECK(avpn::whoamiBaseUrl(active, edges, both, QStringLiteral("201.34.134.103")) == active,
-              "every edge is the endpoint -> the active edge (nothing better known)");
-        QHash<QString, QStringList> unresolved;
-        unresolved.insert(QStringLiteral("api.tribevpn.com"), {QStringLiteral("201.34.134.103")});
-        CHECK(avpn::whoamiBaseUrl(active, edges, unresolved, QStringLiteral("201.34.134.103"))
-                  == QLatin1String("https://vpn.wellwon.hk"),
-              "other edge not resolved yet -> still better than the known-bad one");
-        CHECK(avpn::whoamiBaseUrl(QStringLiteral("https://201.34.134.103"), edges, ips,
-                                  QStringLiteral("201.34.134.103"))
-                  == QLatin1String("https://vpn.wellwon.hk"),
-              "literal-IP base equal to the endpoint -> first edge that does not resolve to it");
+        const QString api = QStringLiteral("https://api.tribevpn.com");
+        const QString alt = QStringLiteral("https://vpn.wellwon.hk");
+        CHECK(avpn::whoamiBaseUrl(api, /*xray=*/true, /*devBackend=*/false) == alt,
+              "xray: whoami never goes to api.tribevpn.com (= the xray entry, routed past the tunnel)");
+        CHECK(avpn::whoamiBaseUrl(alt, true, false) == alt, "xray: already on the alternate edge -> it");
+        CHECK(avpn::whoamiBaseUrl(api, false, false) == api, "awg: the active API address");
+        CHECK(avpn::whoamiBaseUrl(alt, false, false) == alt, "awg: the active API address (edge-walked)");
+        CHECK(avpn::whoamiBaseUrl(QStringLiteral("https://dev.example:8443"), true, true)
+                  == QLatin1String("https://dev.example:8443"),
+              "xray on a dev backend (AVPN_API_URL) -> the dev base, not the prod edge");
+        CHECK(QString::fromLatin1(avpn::kWhoamiXrayEdge) == alt, "alternate edge = the baked vpn.wellwon.hk");
     }
 
     // --- network memory ---
@@ -320,6 +354,13 @@ int main()
         CHECK(avpn::networkMemoryLookup(f, QStringLiteral("cellular:250-02"), now) == QLatin1String("9:xray"),
               "other networks untouched");
         CHECK(avpn::networkMemoryRemember(m, QString(), QStringLiteral("x"), now) == m, "no key -> no write");
+        // #6: explicit «Авто» tap clears the entry of the current network, whatever node it holds
+        QByteArray c = avpn::networkMemoryClear(m, QStringLiteral("wifi"));
+        CHECK(avpn::networkMemoryLookup(c, QStringLiteral("wifi"), now).isEmpty(), "«Авто» clears the wifi entry");
+        CHECK(avpn::networkMemoryLookup(c, QStringLiteral("cellular:250-02"), now) == QLatin1String("9:xray"),
+              "«Авто» on Wi-Fi keeps the operator entries");
+        CHECK(avpn::networkMemoryClear(m, QStringLiteral("cellular:250-01")) == m, "nothing to clear -> blob unchanged");
+        CHECK(avpn::networkMemoryClear(m, QString()) == m, "no key -> no write");
         CHECK(avpn::networkMemoryLookup("not json", QStringLiteral("wifi"), now).isEmpty(), "corrupt blob -> empty");
         QByteArray big;
         for (int i = 0; i < avpn::kNetworkMemoryMax + 5; ++i)

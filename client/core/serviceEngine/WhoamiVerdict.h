@@ -20,8 +20,9 @@
 //                  answer). Next path of the same attempt.
 //   BypassVpn    - data passed, but X-Whoami-Node == 0: the request left past the tunnel. Next path
 //                  of the same attempt (after one retry: the early-answer race before routes settle).
-//   CheckLimited - 429 or 404 only: the server refused to run the check. Connected, no green mark,
-//                  and NOT counted as proven data (the give-up streak is not reset).
+//   CheckLimited - 429 or 404 only: the server refused to run the check. AWG: Connected, no green
+//                  mark, NOT counted as proven data (the give-up streak is not reset). Xray: the
+//                  generate_204 tiebreak first - Xray is Connected only after a probe (§22.5).
 //   Inconclusive - nothing decided: no HTTP answer, any other status, or a 200 without a usable node
 //                  header. The existing generate_204 check decides with the rest of the verify
 //                  budget (whoamiTiebreakVerdict): passes -> CheckLimited, fails -> NoData.
@@ -29,16 +30,18 @@
 //                  counts as Works too (slow link); the hash is checked only on a complete body.
 
 #include <QByteArray>
-#include <QHash>
 #include <QString>
-#include <QStringList>
-#include <QUrl>
 #include <QtGlobal>
 
 namespace avpn {
 
 enum class WhoamiVerdict { Works, NoData, BypassVpn, CheckLimited, Inconclusive };
 enum class WhoamiStep { Finish, Retry, Tiebreak };
+// Before a whoami request: send it, hand over to the tiebreak, or - nothing was sent and the whole
+// verify budget is already gone (the app was suspended, timers fired late) - no evidence at all.
+enum class WhoamiGate { Send, Tiebreak, NoEvidence };
+// What a verdict does to the attempt.
+enum class WhoamiAction { Succeed, FailPath, ConnectUnproven, Tiebreak };
 
 // The contract's minimum body is 64 KiB; less than 16 KiB is "data does not pass" (plan step 5).
 constexpr qint64 kWhoamiMinBodyBytes = 16 * 1024;
@@ -103,9 +106,43 @@ inline WhoamiStep whoamiNextStep(WhoamiVerdict v, int httpStatus, int attemptsDo
 }
 
 // The tiebreak is the existing generate_204 verification with the rest of the verify budget.
-inline WhoamiVerdict whoamiTiebreakVerdict(bool generate204Passed)
+// requestsSent counts every request of this verification (whoami and generate_204): a failure with
+// none sent is a spent budget, not evidence - no verdict, never NoData.
+inline WhoamiVerdict whoamiTiebreakVerdict(bool generate204Passed, int requestsSent)
 {
-    return generate204Passed ? WhoamiVerdict::CheckLimited : WhoamiVerdict::NoData;
+    if (generate204Passed || requestsSent == 0)
+        return WhoamiVerdict::CheckLimited;
+    return WhoamiVerdict::NoData;
+}
+
+// Gate before each whoami request (whoamiLeftMs = whoami share of the budget left, totalLeftMs = the
+// whole verify budget left).
+inline WhoamiGate whoamiAttemptGate(int requestsSent, qint64 whoamiLeftMs, qint64 totalLeftMs)
+{
+    if (whoamiLeftMs >= kWhoamiMinAttemptMs)
+        return WhoamiGate::Send;
+    if (requestsSent == 0 && totalLeftMs <= 0)
+        return WhoamiGate::NoEvidence;
+    return WhoamiGate::Tiebreak;
+}
+
+// What the verdict does. tiebreakDone = the generate_204 tiebreak already produced this verdict
+// (it is final then - no second tiebreak).
+inline WhoamiAction whoamiAction(WhoamiVerdict v, bool xrayTransport, bool tiebreakDone)
+{
+    switch (v) {
+    case WhoamiVerdict::Works:
+        return WhoamiAction::Succeed;
+    case WhoamiVerdict::NoData:
+    case WhoamiVerdict::BypassVpn:
+        return WhoamiAction::FailPath;
+    case WhoamiVerdict::CheckLimited:
+        // Xray is Connected only after a probe through the tunnel (§22.5): a bare 429/404 is not one.
+        return (xrayTransport && !tiebreakDone) ? WhoamiAction::Tiebreak : WhoamiAction::ConnectUnproven;
+    case WhoamiVerdict::Inconclusive:
+        return tiebreakDone ? WhoamiAction::ConnectUnproven : WhoamiAction::Tiebreak;
+    }
+    return WhoamiAction::ConnectUnproven;
 }
 
 // whoami may use at most ~60 % of the verify budget (xray_verify_timeout_ms); the rest is reserved
@@ -135,30 +172,20 @@ inline qint64 parseWhoamiNode(const QByteArray &header, bool *present)
     return (ok && n >= 0) ? n : -1;
 }
 
-// A request to the tunnel's own server address leaves outside the tunnel: the endpoint route is
-// excluded on every platform, and macOS xray with the RU split routes it directly
-// (client/vpnconnection.cpp, VpnAllExceptSites). api.tribevpn.com resolves to the xray entry
-// (201.34.134.103), so whoami there would read "past the VPN" on every such path. If the active API
-// base resolves to the current tunnel endpoint, whoami goes to another known edge whose known
-// addresses do not include it (an edge not resolved yet still beats the known-bad one); otherwise,
-// and when nothing better is known, the active base. Only whoami uses this - other API calls keep
-// their base.
-inline QString whoamiBaseUrl(const QString &activeBase, const QStringList &edgeBases,
-                             const QHash<QString, QStringList> &hostIps, const QString &tunnelEndpointIp)
+// The alternate API edge for whoami on Xray (the second baked edge, AvpnEngineQml kBakedEdges).
+constexpr const char kWhoamiXrayEdge[] = "https://vpn.wellwon.hk";
+
+// Where whoami goes. Xray: always the alternate edge - api.tribevpn.com resolves to the Xray entry
+// (201.34.134.103), and a request to the tunnel's own server address leaves outside the tunnel
+// (macOS xray with the RU split routes it directly, client/vpnconnection.cpp VpnAllExceptSites), so
+// it would read "past the VPN" on every Xray path. AWG: the active API address. A dev backend
+// (AVPN_API_URL) keeps its own base - its tokens are not valid on the prod edge. Only whoami uses
+// this; other API calls keep their base.
+inline QString whoamiBaseUrl(const QString &activeBase, bool xrayTransport, bool devBackend)
 {
-    if (tunnelEndpointIp.isEmpty())
+    if (!xrayTransport || devBackend)
         return activeBase;
-    const auto hitsEndpoint = [&](const QString &base) {
-        const QString host = QUrl(base).host();
-        return host == tunnelEndpointIp || hostIps.value(host).contains(tunnelEndpointIp);
-    };
-    if (!hitsEndpoint(activeBase))
-        return activeBase;
-    const QString activeHost = QUrl(activeBase).host();
-    for (const QString &e : edgeBases)
-        if (QUrl(e).host() != activeHost && !hitsEndpoint(e))
-            return e;
-    return activeBase;
+    return QString::fromLatin1(kWhoamiXrayEdge);
 }
 
 // Name for the journal, the bench report and the QML property pathCheck.
