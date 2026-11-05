@@ -302,6 +302,27 @@ inline StageResult speedStage(double downMbit, int idleRttMs, int loadedRttMs,
     return r;
 }
 
+// Plan v3 step 5: the speed stage runs only over a working connection. The connect stage failed
+// (Bad: could not connect, or connected without data) or the tunnel is not up now -> the bench
+// would measure the path past the tunnel or wait out its guard for nothing: Skip with a reason.
+inline bool speedStageApplicable(const QList<StageResult> &stagesSoFar, bool tunnelUp)
+{
+    if (!tunnelUp)
+        return false;
+    for (const StageResult &s : stagesSoFar)
+        if (s.id == QLatin1String("connect") && s.status == Bad)
+            return false;
+    return true;
+}
+
+inline StageResult speedStageSkippedNoConnection()
+{
+    StageResult r = speedStage(-1, 0, 0);
+    r.data.insert(QStringLiteral("skipped"), QStringLiteral("no_connection"));
+    r.note = QStringLiteral("Скорость не проверялась — нет рабочего подключения");
+    return r;
+}
+
 // Стадия 4a (опциональная): ДОСТУП К САЙТАМ РФ (РФ-сплит). Пробы RU-корпуса (server-driven
 // lists.rusplit_watch, фолбэк rusentinel::defaultWatch — Яндекс/Ozon/WB/Госуслуги) текущим
 // путём — сплит обязан вести их напрямую. names/oks — параллельные списки проверенных сайтов.

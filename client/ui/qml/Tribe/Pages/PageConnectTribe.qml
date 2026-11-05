@@ -55,6 +55,15 @@ PageType {
     // свойства ведёт себя как раньше. activeProtoNow/curProtoVersion — бейдж транспорта на карточке.
     readonly property bool verifyingNow: hasEngine && TribeEngine.verifying === true
     readonly property string activeProtoNow: hasEngine ? String(TribeEngine.activeProto || "") : ""
+    // Plan v3 step 5 (features.node_scan): итог проверки пути через выход (GET /v1/whoami) —
+    // "" | "checking" | "works" | "no_data" | "bypass" | "limited" (см. AvpnEngineQml pathCheck).
+    // Гард String(... || "") — старый бинарь без свойства ведёт себя как раньше.
+    readonly property string pathCheckNow: hasEngine ? String(TribeEngine.pathCheck || "") : ""
+    // «Данные идут» — только после пройденной проверки и пока живая проба не говорит обратное.
+    readonly property bool dataFlowingNow: isOn && pathCheckNow === "works" && !liveDeadNow
+    // Проверка не прошла, движок уже поднимает следующий путь той же попытки.
+    readonly property bool nextPathNow: showBusy && !verifyingNow
+                                        && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
     readonly property string curProtoVersion: String(root.curNode.protoVersion || "")
 
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
@@ -814,13 +823,20 @@ PageType {
         // «Подключиться…», когда сеть зарезана оператором (попап мог быть уже закрыт).
         // AVPN awg31-xray-v1: фаза проверки трафика (xray поднят, «Подключено» ещё не объявлено) —
         // подпись честно объясняет, чего ждём; иначе экран врал бы «Подключиться — нажмите кнопку».
+        // Plan v3 step 5: подпись следует вердикту проверки пути — «данные идут» только после
+        // пройденной проверки; не прошла — честно говорим, что пробуем следующий путь.
         text: root.verifyingNow ? qsTr("Проверяем трафик…")
+              : root.nextPathNow ? (root.pathCheckNow === "bypass"
+                                    ? qsTr("Трафик шёл мимо VPN — пробуем другой путь")
+                                    : qsTr("Сервер не пропускает данные — пробуем другой путь"))
               : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
-                                              : qsTr("Защита активна — ваше соединение безопасно"))
+                             : root.dataFlowingNow ? qsTr("Защита активна — данные идут через VPN")
+                                                   : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
                                                      : qsTr("Подключиться — нажмите кнопку выше"))
-        color: (root.whitelistModeNow || (root.isOn && root.liveDeadNow)) ? Theme.color.warning : root.slate400
+        color: (root.whitelistModeNow || root.nextPathNow || (root.isOn && root.liveDeadNow))
+               ? Theme.color.warning : root.slate400
         font.family: Theme.font.body; font.pixelSize: Theme.font.monoData; font.weight: Theme.font.wMedium
     }
 
@@ -933,6 +949,7 @@ PageType {
                                 version: root.curProtoVersion
                                 active: true
                                 verifying: root.verifyingNow
+                                dataFlowing: root.dataFlowingNow
                             }
                         }
                         LoadBars {

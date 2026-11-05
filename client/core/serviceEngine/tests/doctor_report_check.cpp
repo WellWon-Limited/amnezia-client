@@ -139,6 +139,26 @@ int main()
     CHECK(!speedStage(48.0, 40, 60).data.contains(QStringLiteral("direct_mbit")),
           "speed: без direct замера поле не пишется");
 
+    // Plan v3 step 5: speed only over a working connection
+    {
+        QList<StageResult> st;
+        st.append(connectStage(true, true, 3));
+        CHECK(speedStageApplicable(st, true), "speed: подключение работает -> замер идёт");
+        CHECK(!speedStageApplicable(st, false), "speed: туннель не поднят сейчас -> пропуск");
+        QList<StageResult> noConn;
+        noConn.append(connectStage(false, false, -1));
+        CHECK(!speedStageApplicable(noConn, true), "speed: подключиться не удалось -> пропуск");
+        QList<StageResult> noData;
+        noData.append(connectStage(true, false, 5));
+        CHECK(!speedStageApplicable(noData, true), "speed: подключено без данных -> пропуск");
+        CHECK(speedStageApplicable({}, true), "speed: стадии connect нет (старый порядок) -> по туннелю");
+        const StageResult sk = speedStageSkippedNoConnection();
+        CHECK(sk.status == Skip && sk.id == QLatin1String("speed"), "speed: пропуск = Skip стадии speed");
+        CHECK(sk.data.value(QStringLiteral("skipped")).toString() == QLatin1String("no_connection"),
+              "speed: причина пропуска в отчёте");
+        CHECK(sk.note.contains(QStringLiteral("нет рабочего подключения")), "speed: причина пропуска человеку");
+    }
+
     // стадия скорости
     CHECK(speedStage(-1, 0, 0).status == Skip, "speed: не мерялась -> Skip");
     CHECK(speedStage(48.0, 40, 60).status == Ok, "speed: быстро без блоата -> Ok");

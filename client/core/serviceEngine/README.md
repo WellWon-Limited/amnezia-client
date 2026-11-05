@@ -60,6 +60,12 @@ WhitelistDetector.{h,cpp}     — драйвер проб вердикта: HTTP
                                 соц-значимые) при Cellular+опущенном туннеле, по триггерам (не поллинг),
                                 gen-инвалидация раундов, exit-пробы; kill-switch features.whitelist_detector;
                                 UI = TribeWhitelistSheet.qml (попап на PageStart)
+WhoamiVerdict.h               — plan v3 step 5: verdict of GET /v1/whoami through the fresh tunnel (works /
+                                no data / past the VPN / check limited); features.node_scan puts every
+                                transport into Verifying ✅ tested (build_whoami_verdict.sh)
+NetworkMemory.h               — plan v3 step 5: "last server that carried data on this network" (key wifi /
+                                cellular:<MCC-MNC>, QSettings avpn/netMemory) — first candidate after the
+                                manual choice ✅ tested (build_whoami_verdict.sh, build_transport_pick.sh §10)
 TribeSupportChat.{h,cpp}      — чат поддержки (context property "TribeSupport"): поллинг /v1/support/*
                                 (device-Bearer), оптимистичные эхо, QHttpMultiPart-аплоад фото/видео
                                 (JPEG-рекомпресс, HEIC→JPEG), превью data:-URL, ручной 302→R2 без Bearer,

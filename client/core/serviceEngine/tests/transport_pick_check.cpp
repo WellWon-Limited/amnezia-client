@@ -704,6 +704,235 @@ int main(int argc, char **argv)
         CHECK(tun.upCalls == ups);
         CHECK(eng.state() != EngineState::Switching);
     }
+    // --- 9) plan v3 step 5: honest "Connected" (features.node_scan) ---
+    // With the flag every transport verifies; a failed whoami on awg goes straight to step 3 of the
+    // ladder: xray of the same location, then another location; without the flag awg is Connected
+    // at once, exactly as before.
+    {
+        TuningStore::set({}, {{QStringLiteral("xray_client"), true},
+                              {QStringLiteral("transport_auto_pick"), true},
+                              {QStringLiteral("rebind_heal"), true}}, {}, {});
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                             xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                             awgNodeJson("2:awg", 2, "PL", 1.0) }), err));
+        eng.setMeasuredRtt({{QStringLiteral("9:awg"), 40}, {QStringLiteral("9:xray"), 40},
+                            {QStringLiteral("2:awg"), 80}});
+        CHECK(!eng.verifyEveryTransport()); // default off
+        eng.setVerifyEveryTransport(true);
+        CHECK(eng.connect(err));
+        CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
+        CHECK(eng.onTunnelConnected());
+        CHECK(eng.state() == EngineState::Verifying); // awg too: no "Connected" before the check
+        CHECK(eng.debugSnapshot().state == QLatin1String("verifying"));
+        CHECK(!eng.tick(1000)); // health does not tick while verifying
+        // whoami: no data through awg -> same location, other transport (no rebind, no re-up)
+        CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+        CHECK(eng.state() == EngineState::Switching);
+        CHECK(tun.downCalls == 1);
+        CHECK(eng.transportHistory().entry(QStringLiteral("h:9"), QStringLiteral("awg")).successEwma == 0.0);
+        CHECK(eng.onTunnelDisconnected());
+        CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+        CHECK(eng.onTunnelConnected() && eng.state() == EngineState::Verifying);
+        // whoami: past the VPN on xray -> another location
+        CHECK(eng.verifyFailed(QStringLiteral("whoami bypass (failover)")));
+        CHECK(eng.state() == EngineState::Switching);
+        CHECK(eng.onTunnelDisconnected());
+        CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        CHECK(eng.onTunnelConnected() && eng.state() == EngineState::Verifying);
+        CHECK(eng.dataPlaneFailStreak() == 2);
+        CHECK(eng.verifySucceeded() && eng.state() == EngineState::Connected);
+        CHECK(eng.dataPlaneFailStreak() == 0); // proven data flow resets the give-up counter
+        // flag off again: awg is Connected at once (previous behaviour)
+        eng.requestStop();
+        eng.setVerifyEveryTransport(false);
+        CHECK(eng.connect(err));
+        CHECK(eng.onTunnelConnected());
+        CHECK(eng.state() == EngineState::Connected);
+    }
+    // Give-up cap still applies: every path fails the check -> honest Error, no endless carousel.
+    {
+        ServiceEngine eng;
+        FakeTunnel tun;
+        eng.setTunnel(&tun);
+        QString err;
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                             xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                             awgNodeJson("2:awg", 2, "PL", 1.0),
+                                             awgNodeJson("5:awg", 5, "US", 1.0) }), err));
+        eng.setVerifyEveryTransport(true);
+        CHECK(eng.connect(err));
+        int rounds = 0;
+        while (rounds < 20 && eng.onTunnelConnected() && eng.isVerifying()) {
+            ++rounds;
+            eng.verifyFailed(QStringLiteral("whoami no data (failover)"));
+            if (eng.state() != EngineState::Switching)
+                break;
+            eng.onTunnelDisconnected();
+        }
+        CHECK(eng.state() == EngineState::Error);
+        CHECK(eng.dataPlaneExhausted());
+        CHECK(rounds <= 10);
+    }
+
+    // --- 9b) review item 1: whoami "limited" on a dead network must not make the carousel endless ---
+    // verifyInconclusive (429/404, or no answer + generate_204 passed) connects without resetting the
+    // give-up streak, so dead health walks the ladder to the cap exactly as with the flag off.
+    // (verifySucceeded here reset the streak each round: 30 rounds, no give-up.)
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("5:awg", 5, "US", 1.0),
+                                          awgNodeJson("6:awg", 6, "DE", 1.0) });
+        struct Run { bool exhausted = false; int ups = 0; int rounds = 0; QStringList seq; };
+        auto deadNetwork = [&](bool nodeScan) {
+            Run run;
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("9:awg"), 40}, {QStringLiteral("9:xray"), 40},
+                                {QStringLiteral("2:awg"), 50}, {QStringLiteral("5:awg"), 60},
+                                {QStringLiteral("6:awg"), 70}});
+            eng.setVerifyEveryTransport(nodeScan);
+            CHECK(eng.connect(err));
+            qint64 t = 1000, tx = 100;
+            while (run.rounds < 60) {
+                ++run.rounds;
+                eng.onTunnelConnected();
+                if (eng.isVerifying())
+                    CHECK(eng.verifyInconclusive()); // whoami always "limited"
+                if (eng.state() != EngineState::Connected)
+                    break;
+                // dead data-plane: tx grows, rx stands, no handshake
+                for (int i = 0; i < 12 && eng.state() == EngineState::Connected; ++i) {
+                    tx += 100;
+                    t += 4;
+                    tun.st = mkStats(0, 100, tx);
+                    eng.tick(t);
+                }
+                if (eng.state() == EngineState::Error)
+                    break;
+                if (eng.state() != EngineState::Switching)
+                    break;
+                eng.onTunnelDisconnected(); // continuePendingSwitch -> up(next)
+            }
+            run.exhausted = eng.dataPlaneExhausted() && eng.state() == EngineState::Error;
+            run.ups = tun.upCalls;
+            run.seq = tun.ups;
+            return run;
+        };
+        const Run off = deadNetwork(false);
+        const Run on = deadNetwork(true);
+        CHECK(off.exhausted);                 // baseline: the cap gives up
+        CHECK(on.exhausted);                  // flag on + "limited": gives up too
+        CHECK(on.rounds < 60);
+        CHECK(on.ups == off.ups);             // exactly the same number of raised paths
+        CHECK(on.seq == off.seq);             // and the same order
+        // the negative: proven data (Works) does reset the streak - only Works may
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            CHECK(eng.dataPlaneFailStreak() == 1);
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyInconclusive());
+            CHECK(eng.state() == EngineState::Connected);
+            CHECK(eng.dataPlaneFailStreak() == 1);   // limited: not a proof of data
+            CHECK(!eng.verifyInconclusive());        // outside Verifying: no-op
+        }
+    }
+
+    // --- 10) plan v3 step 5: network memory is the first candidate after the manual choice ---
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("ru", 4, "RU", 9.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("ru"), 5}};
+        QString err;
+        {   // remembered xray of EE beats the fastest location (PL) and the rank (awg first)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setNetworkMemoryNode(QStringLiteral("9:xray"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+        }
+        {   // manual choice wins over the memory
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("2:awg"), err));
+            eng.setNetworkMemoryNode(QStringLiteral("9:xray"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        }
+        {   // no memory -> the usual automatic choice (fastest non-RU location)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        }
+        {   // remembered node gone from the pool -> automatic choice
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setNetworkMemoryNode(QStringLiteral("7:gone"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        }
+        {   // RU / manual_only never enters automatic choice (§14.3), memory included
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setNetworkMemoryNode(QStringLiteral("ru"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        }
+        {   // manual transport mode filters the memory (xray remembered, mode "Amnezia")
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportMode(TransportMode::Awg);
+            eng.setNetworkMemoryNode(QStringLiteral("9:xray"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+        }
+        {   // remembered node failed in this session -> not taken again on the next start
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setVerifyEveryTransport(true);
+            eng.setNetworkMemoryNode(QStringLiteral("9:xray"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(tun.lastUpNodeId == QLatin1String("9:awg")); // same location, other transport
+            CHECK(eng.onTunnelError());                         // the attempt dies elsewhere
+            CHECK(eng.connect(err));                            // a new start within the session
+            CHECK(tun.lastUpNodeId != QLatin1String("9:xray"));
+        }
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

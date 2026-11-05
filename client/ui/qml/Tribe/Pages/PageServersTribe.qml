@@ -487,6 +487,11 @@ PageType {
                                         // xray «Подключено» только после пробы — пока идёт проверка,
                                         // бейдж честно жёлтый, а не зелёный/акцентный
                                         verifying: root.hasEngine && TribeEngine.verifying === true
+                                        // Plan v3 step 5: «данные идут» у активного транспорта —
+                                        // только после пройденной проверки через выход
+                                        dataFlowing: root.hasEngine && TribeEngine.pathCheck === "works"
+                                                     && TribeEngine.state === "connected"
+                                                     && TribeEngine.liveDead !== true
                                     }
                                 }
                             }
