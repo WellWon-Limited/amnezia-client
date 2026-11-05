@@ -194,11 +194,17 @@ public:
     // reason: failover reason for onDead; any non-health-DEAD reason goes straight to step 3 of
     // the ladder (other transport of the same location, then another location).
     bool verifyFailed(const QString &reason = QStringLiteral("verify failed (failover)"));
+    // Plan v3 step 5 (review): the data-path check could not decide (whoami 429/404, or no answer
+    // and generate_204 passed). Connected exactly as without the check, but nothing is proven: the
+    // give-up streak (data_plane_fail_max_tries) and the dead flag stay as they are - a reset here
+    // made the failover carousel endless on a dead network.
+    bool verifyInconclusive();
     bool feedProbeResult(bool ok);
 
     // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every
     // transport, not only xray, enters Verifying after the platform reports the tunnel up; the
-    // facade verifies the data path with GET /v1/whoami and calls verifySucceeded/verifyFailed.
+    // facade verifies the data path with GET /v1/whoami and calls verifySucceeded (data proven),
+    // verifyFailed (next path) or verifyInconclusive (not decided: connected, streak untouched).
     // Off (default) = the previous behaviour: awg is Connected at once, xray verifies.
     void setVerifyEveryTransport(bool on) { m_verifyEveryTransport = on; }
     bool verifyEveryTransport() const { return m_verifyEveryTransport; }

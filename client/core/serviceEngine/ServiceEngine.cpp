@@ -1015,6 +1015,17 @@ bool ServiceEngine::verifySucceeded() // AVPN awg31-xray-v1
     return true;
 }
 
+bool ServiceEngine::verifyInconclusive() // plan v3 step 5 (review)
+{
+    if (m_state != EngineState::Verifying)
+        return false;
+    m_state = EngineState::Connected;
+    m_health.reset();
+    m_probeFailStreak = 0;
+    // m_dataPlaneFailStreak / m_dataPlaneExhausted deliberately untouched: no proof of data.
+    return true;
+}
+
 bool ServiceEngine::verifyFailed(const QString &reason) // AVPN awg31-xray-v1
 {
     if (m_state != EngineState::Verifying)

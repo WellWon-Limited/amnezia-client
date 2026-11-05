@@ -9,7 +9,7 @@
 // "cellular" when the code is unknown, e.g. iOS 16+ without a manual choice). Unknown medium ->
 // empty key -> the memory is neither read nor written.
 // Stored value: JSON array [{"k":key,"n":nodeId,"t":epochSec}], newest first, at most
-// kNetworkMemoryMax entries.
+// kNetworkMemoryMax entries; entries older than 7 days are ignored on lookup.
 
 #include <QByteArray>
 #include <QJsonArray>
@@ -20,6 +20,8 @@
 namespace avpn {
 
 constexpr int kNetworkMemoryMax = 16;
+// An entry older than this is ignored (the network or the fleet has likely changed since).
+constexpr qint64 kNetworkMemoryMaxAgeSec = 7 * 24 * 3600;
 
 inline QString networkMemoryKey(const QString &netType, const QString &carrierCode)
 {
@@ -44,14 +46,21 @@ inline QByteArray save(const QJsonArray &a)
 }
 } // namespace netmemory_detail
 
-inline QString networkMemoryLookup(const QByteArray &json, const QString &key)
+// The remembered node for the key, or empty when there is none or it is older than maxAgeSec
+// (an entry without a timestamp counts as old).
+inline QString networkMemoryLookup(const QByteArray &json, const QString &key, qint64 nowSec,
+                                   qint64 maxAgeSec = kNetworkMemoryMaxAgeSec)
 {
     if (key.isEmpty())
         return {};
     for (const QJsonValue &v : netmemory_detail::load(json)) {
         const QJsonObject o = v.toObject();
-        if (o.value(QStringLiteral("k")).toString() == key)
-            return o.value(QStringLiteral("n")).toString();
+        if (o.value(QStringLiteral("k")).toString() != key)
+            continue;
+        const QJsonValue t = o.value(QStringLiteral("t"));
+        if (!t.isDouble() || nowSec - qint64(t.toDouble()) > maxAgeSec)
+            return {};
+        return o.value(QStringLiteral("n")).toString();
     }
     return {};
 }

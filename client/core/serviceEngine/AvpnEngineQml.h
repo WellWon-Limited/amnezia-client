@@ -955,7 +955,11 @@ private:
     void switchToNodeImpl(const QString &nodeId, bool persist);
     // forceConnect — держать/поднять туннель даже если он сейчас не поднят (Доктор: туннель лежит,
     // потому что его остановил сам Доктор; пикер передаёт false — «офлайн = только цель»).
-    void pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect = false);
+    // Plan v3 step 5 (review): who asked for the start - network memory is read/written only for
+    // starts the user asked for (see StartOrigin).
+    enum class StartOrigin { User, AutoTap, Rotate, Doctor };
+    void pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect = false,
+                             StartOrigin origin = StartOrigin::User);
     void selectAutoImpl(bool persist);
     void docRestoreSelection(); // Доктор: вернуть исходный выбор (pin или авто), не гася VPN
     // AVPN awg31-xray-v1 (спека §2.3):
@@ -975,19 +979,24 @@ private:
     // failReason: reason for ServiceEngine::verifyFailed (empty = the xray probe's own reason).
     void finishVerify(int epoch, bool ok, const QString &failReason = QString());
     // Plan v3 step 5 (features.node_scan): the engine puts every transport into Verifying and the
-    // verification step is ONE GET /v1/whoami through the tunnel (same API client as every /v1
-    // call: m_nam, m_baseUrl, Bearer, armTimeout; same budget xray_verify_timeout_ms; one retry
-    // only when no HTTP answer came). Verdict (WhoamiVerdict.h): Works -> verifySucceeded + network
-    // memory; NoData/BypassVpn -> verifyFailed = next path of the same attempt via step 3 of the
-    // §20 ladder (no new timer, no new watchdog); CheckLimited -> awg: Connected as before, xray:
-    // the existing generate_204 verification decides. Without the flag only xray verifies, as before.
+    // verification step is GET /v1/whoami through the tunnel (same API client as every /v1 call:
+    // m_nam, Bearer, armTimeout; whoami uses at most 60 % of xray_verify_timeout_ms, at most 2
+    // requests). Verdict (WhoamiVerdict.h): Works -> verifySucceeded + network memory;
+    // NoData/BypassVpn -> verifyFailed = next path of the same attempt via step 3 of the §20 ladder
+    // (no new timer, no new watchdog); CheckLimited (429/404) -> finishVerifyInconclusive: Connected
+    // without the mark and without resetting the give-up streak; Inconclusive (no answer, other
+    // statuses) -> the existing generate_204 check with the rest of the budget is the tiebreak
+    // (passes -> CheckLimited, fails -> NoData). Without the flag only xray verifies, as before.
     void startDataPathVerification();
     void startWhoamiVerification();
     void whoamiAttempt(int epoch);
     void finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts);
-    // Network memory (NetworkMemory.h, QSettings avpn/netMemory): key of the network the current
-    // attempt started on (fixed at guardedStart, when the tunnel is down and the medium is honest).
+    void finishVerifyInconclusive(int epoch);
+    // Network memory (NetworkMemory.h, QSettings avpn/netMemory): the key is computed when it is
+    // used (read at start, written at the verdict), so a Wi-Fi -> cellular move inside an attempt
+    // is written under the network it happened on.
     QString currentNetworkMemoryKey() const;
+    bool networkMemoryAllowed() const;
     void rememberNetworkPath(const QString &nodeId);
     void forgetNetworkPath(const QString &nodeId);
     // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
@@ -1321,6 +1330,7 @@ private:
     QString     m_docOrigNode;        // nodeId на момент старта AltNodes (для возврата)
     QString     m_docOrigPin;         // исходный pin (пуст = был авто-режим)
     bool        m_docFull = false;    // «Полная диагностика»: обзор всех нод (кроме RU/manual_only)
+    bool        m_docNodeScan = false; // plan v3 step 5: features.node_scan at Doctor start (services/speed trims)
     bool        m_docAltHadProblem = false; // была ли проблема ДО обзора альтернатив (решает пересадку)
     // Критик полноты (U1): проблема только «далеко» (data-plane цел) — пересадка лишь на ноду с
     // RTT лучше текущего на 30 %+ (doctorAltRttBetterEnough); m_docAltCurRtt — RTT текущей.
@@ -1426,6 +1436,7 @@ private:
     // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
+    QHash<QString, QStringList>  m_apiHostIpsByHost;              // plan v3 step 5: per-host view for the whoami edge
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит
@@ -1469,7 +1480,11 @@ private:
     // answer for the journal/bench report, network-memory key of the current attempt.
     QString                      m_pathCheck;
     QString                      m_lastWhoamiFacts;
-    QString                      m_netMemoryKey;
+    bool                         m_whoamiTiebreak = false;         // generate_204 runs as the whoami tiebreak
+    // Who asked for the next start (set by start/reprobe/rotate/pin/Doctor) and the snapshot for the
+    // current attempt (guardedStart); the engine's own heals inside the attempt inherit it.
+    StartOrigin                  m_startOrigin = StartOrigin::User;
+    StartOrigin                  m_attemptOrigin = StartOrigin::User;
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного

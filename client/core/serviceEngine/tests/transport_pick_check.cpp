@@ -778,6 +778,84 @@ int main(int argc, char **argv)
         CHECK(rounds <= 10);
     }
 
+    // --- 9b) review item 1: whoami "limited" on a dead network must not make the carousel endless ---
+    // verifyInconclusive (429/404, or no answer + generate_204 passed) connects without resetting the
+    // give-up streak, so dead health walks the ladder to the cap exactly as with the flag off.
+    // (verifySucceeded here reset the streak each round: 30 rounds, no give-up.)
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("5:awg", 5, "US", 1.0),
+                                          awgNodeJson("6:awg", 6, "DE", 1.0) });
+        struct Run { bool exhausted = false; int ups = 0; int rounds = 0; QStringList seq; };
+        auto deadNetwork = [&](bool nodeScan) {
+            Run run;
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("9:awg"), 40}, {QStringLiteral("9:xray"), 40},
+                                {QStringLiteral("2:awg"), 50}, {QStringLiteral("5:awg"), 60},
+                                {QStringLiteral("6:awg"), 70}});
+            eng.setVerifyEveryTransport(nodeScan);
+            CHECK(eng.connect(err));
+            qint64 t = 1000, tx = 100;
+            while (run.rounds < 60) {
+                ++run.rounds;
+                eng.onTunnelConnected();
+                if (eng.isVerifying())
+                    CHECK(eng.verifyInconclusive()); // whoami always "limited"
+                if (eng.state() != EngineState::Connected)
+                    break;
+                // dead data-plane: tx grows, rx stands, no handshake
+                for (int i = 0; i < 12 && eng.state() == EngineState::Connected; ++i) {
+                    tx += 100;
+                    t += 4;
+                    tun.st = mkStats(0, 100, tx);
+                    eng.tick(t);
+                }
+                if (eng.state() == EngineState::Error)
+                    break;
+                if (eng.state() != EngineState::Switching)
+                    break;
+                eng.onTunnelDisconnected(); // continuePendingSwitch -> up(next)
+            }
+            run.exhausted = eng.dataPlaneExhausted() && eng.state() == EngineState::Error;
+            run.ups = tun.upCalls;
+            run.seq = tun.ups;
+            return run;
+        };
+        const Run off = deadNetwork(false);
+        const Run on = deadNetwork(true);
+        CHECK(off.exhausted);                 // baseline: the cap gives up
+        CHECK(on.exhausted);                  // flag on + "limited": gives up too
+        CHECK(on.rounds < 60);
+        CHECK(on.ups == off.ups);             // exactly the same number of raised paths
+        CHECK(on.seq == off.seq);             // and the same order
+        // the negative: proven data (Works) does reset the streak - only Works may
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            CHECK(eng.dataPlaneFailStreak() == 1);
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyInconclusive());
+            CHECK(eng.state() == EngineState::Connected);
+            CHECK(eng.dataPlaneFailStreak() == 1);   // limited: not a proof of data
+            CHECK(!eng.verifyInconclusive());        // outside Verifying: no-op
+        }
+    }
+
     // --- 10) plan v3 step 5: network memory is the first candidate after the manual choice ---
     {
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);
