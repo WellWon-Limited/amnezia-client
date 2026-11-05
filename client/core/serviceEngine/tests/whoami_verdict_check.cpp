@@ -207,6 +207,45 @@ int main()
               "no-evidence result does not move to the next path / does not forget the memory");
     }
 
+    // --- N2 leftover: the request's timer fired late = the app was suspended, not a dead path ---
+    {
+        const qint64 scheduled = 6400; // whoami timeout armed with 6.4 s
+        // on-time timer: the existing behaviour (no data / tiebreak stays as it was)
+        CHECK(!avpn::timerFiredLate(scheduled + 50, scheduled), "timer on time -> not late");
+        CHECK(!avpn::timerFiredLate(scheduled + avpn::kWhoamiLateTimerSlackMs, scheduled), "within 2 s slack -> not late");
+        CHECK(avpn::timerFiredLate(scheduled + avpn::kWhoamiLateTimerSlackMs + 1, scheduled), "beyond 2 s slack -> late");
+        // whoami: cut before the headers, timer late -> no evidence
+        WhoamiObservation none;
+        none.timedOut = true;
+        CHECK(avpn::whoamiCutBySuspension(avpn::whoamiVerdict(none), none, 60000, scheduled),
+              "no answer, timer 54 s late -> suspended (limited, no request counted)");
+        CHECK(!avpn::whoamiCutBySuspension(avpn::whoamiVerdict(none), none, scheduled + 30, scheduled),
+              "no answer, timer on time -> the existing tiebreak");
+        // whoami: headers came, body < 16 KiB, timer late -> no evidence (was: no data)
+        WhoamiObservation part = cutByOurTimeout(5 * 1024);
+        CHECK(avpn::whoamiVerdict(part) == WhoamiVerdict::NoData, "control: < 16 KiB is no data");
+        CHECK(avpn::whoamiCutBySuspension(avpn::whoamiVerdict(part), part, 60000, scheduled),
+              "< 16 KiB with a late timer -> suspended, not no data");
+        CHECK(!avpn::whoamiCutBySuspension(avpn::whoamiVerdict(part), part, scheduled + 10, scheduled),
+              "< 16 KiB with an on-time timer -> no data as before");
+        // evidence survives a late timer: >= 16 KiB arrived (works), a full answer, a full bypass
+        WhoamiObservation slow = cutByOurTimeout(40 * 1024);
+        CHECK(!avpn::whoamiCutBySuspension(avpn::whoamiVerdict(slow), slow, 60000, scheduled),
+              ">= 16 KiB then a late timer -> still works (data did flow)");
+        WhoamiObservation full = good();
+        CHECK(!avpn::whoamiCutBySuspension(avpn::whoamiVerdict(full), full, 60000, scheduled),
+              "a complete answer is evidence whatever the clock says");
+        WhoamiObservation limited = good();
+        limited.httpStatus = 429;
+        limited.complete = false;
+        CHECK(!avpn::whoamiCutBySuspension(avpn::whoamiVerdict(limited), limited, 60000, scheduled),
+              "a 429 that arrived is an answer, not a suspension cut");
+        // the suspended result is limited: no next path, no forget, no streak
+        CHECK(!avpn::whoamiFailsPath(WhoamiVerdict::CheckLimited)
+                  && avpn::whoamiAction(WhoamiVerdict::CheckLimited, true, true) == avpn::WhoamiAction::ConnectUnproven,
+              "suspended -> Connected without the mark on both transports (verifyInconclusive)");
+    }
+
     // --- N1: what each verdict does; xray never connects on a bare 429/404 ---
     {
         using avpn::WhoamiAction;

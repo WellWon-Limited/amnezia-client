@@ -115,6 +115,27 @@ inline WhoamiVerdict whoamiTiebreakVerdict(bool generate204Passed, int requestsS
     return WhoamiVerdict::NoData;
 }
 
+// A request's timer that fires more than this after it was due means the process was suspended
+// (iOS froze the app, timers ran on return) - evidence of suspension, not of a dead path.
+constexpr qint64 kWhoamiLateTimerSlackMs = 2000;
+
+inline bool timerFiredLate(qint64 sinceArmMs, qint64 scheduledTimeoutMs)
+{
+    return sinceArmMs > scheduledTimeoutMs + kWhoamiLateTimerSlackMs;
+}
+
+// The whoami request was cut (no HTTP answer, or a 200 whose body stopped) and its timer fired late:
+// the would-be NoData/Inconclusive is a suspension artefact - no evidence, the attempt connects
+// without the mark (CheckLimited), the request is not counted, memory and streak are untouched.
+// Evidence that did arrive stands: >= 16 KiB (Works), a complete answer, a bypass, a 429/404.
+inline bool whoamiCutBySuspension(WhoamiVerdict v, const WhoamiObservation &o, qint64 sinceArmMs,
+                                  qint64 scheduledTimeoutMs)
+{
+    const bool cut = o.httpStatus == 0 || (o.httpStatus == 200 && !o.complete);
+    const bool failing = v == WhoamiVerdict::NoData || v == WhoamiVerdict::Inconclusive;
+    return cut && failing && timerFiredLate(sinceArmMs, scheduledTimeoutMs);
+}
+
 // Gate before each whoami request (whoamiLeftMs = whoami share of the budget left, totalLeftMs = the
 // whole verify budget left).
 inline WhoamiGate whoamiAttemptGate(int requestsSent, qint64 whoamiLeftMs, qint64 totalLeftMs)

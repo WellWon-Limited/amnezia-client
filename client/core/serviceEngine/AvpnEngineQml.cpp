@@ -6068,14 +6068,29 @@ void AvpnEngineQml::verifyAttempt(int epoch)
                                        QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")))};
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     const qint64 remaining = budget - elapsed;
-    req.setTransferTimeout(int(remaining < 1500 ? 1500 : (remaining > 4000 ? 4000 : remaining)));
+    const int transferTimeout = int(remaining < 1500 ? 1500 : (remaining > 4000 ? 4000 : remaining));
+    req.setTransferTimeout(transferTimeout);
     QNetworkReply *r = m_nam->head(req);
-    connect(r, &QNetworkReply::finished, this, [this, r, epoch]() {
+    const qint64 armedMono = m_verifyClock.elapsed();
+    const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch, transferTimeout, armedMono, armedWall]() {
         r->deleteLater();
         if (epoch != m_verifyEpoch || !m_engine.isVerifying())
             return;
         const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const bool ok = (r->error() == QNetworkReply::NoError && (code == 204 || code == 200));
+        // Plan v3 step 5 (review N2): the whoami tiebreak's probe got no answer and its timer fired
+        // late - the app was suspended mid-request: no evidence, Connected without the mark.
+        if (m_whoamiTiebreak && !ok && code == 0
+            && avpn::timerFiredLate(std::max(m_verifyClock.elapsed() - armedMono,
+                                             QDateTime::currentMSecsSinceEpoch() - armedWall),
+                                    transferTimeout)) {
+            --m_verifyAttempts; // not a sent request for the verdict
+            m_whoamiTiebreak = false;
+            finishWhoami(epoch, avpn::WhoamiVerdict::CheckLimited,
+                         m_lastWhoamiFacts + QStringLiteral(" tiebreak=suspended"), /*tiebreakDone=*/true);
+            return;
+        }
         // AVPN (независимое ревью волны, MAJOR-3; инвариант §22.5): 204/200 доказывает ИНТЕРНЕТ,
         // а не туннель — если tun2socks/маршруты не встали, проба ушла НАПРЯМУЮ мимо xray. Второе
         // условие — реальный rx через туннель (счётчики уже поллятся: macOS — IPC xrayRuntimeStatus,
@@ -6239,8 +6254,9 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     };
     connect(r, &QNetworkReply::readyRead, r, drain);
     const qint64 t0 = m_verifyClock.elapsed();
+    const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
     const bool otherEdge = base != m_baseUrl;
-    connect(r, &QNetworkReply::finished, this, [this, r, epoch, nonce, rx, drain, t0, otherEdge]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch, nonce, rx, drain, t0, armedWall, left, otherEdge]() {
         r->deleteLater();
         drain();
         if (epoch != m_verifyEpoch || !m_engine.isVerifying())
@@ -6270,6 +6286,16 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
                 .arg(m_verifyClock.elapsed() - t0)
                 .arg(m_verifyAttempts)
                 .arg(otherEdge ? QStringLiteral("other") : QStringLiteral("active"));
+        // Review N2: cut before a decisive answer and the timer fired late (monotonic or wall clock -
+        // the latter also covers device sleep) = the app was suspended mid-request: no evidence.
+        // Not counted as a sent request; Connected without the mark; memory and streak untouched.
+        const qint64 sinceArm = std::max(m_verifyClock.elapsed() - t0, QDateTime::currentMSecsSinceEpoch() - armedWall);
+        if (avpn::whoamiCutBySuspension(v, o, sinceArm, left)) {
+            --m_verifyAttempts;
+            finishWhoami(epoch, avpn::WhoamiVerdict::CheckLimited, facts + QStringLiteral(" suspended=1"),
+                         /*tiebreakDone=*/true);
+            return;
+        }
         const qint64 leftNow = avpn::whoamiBudgetMs(avpn::xrayVerifyTimeoutMsTuned()) - m_verifyClock.elapsed();
         if (avpn::whoamiNextStep(v, o.httpStatus, m_verifyAttempts, leftNow) == avpn::WhoamiStep::Retry) {
             // One retry: no answer at all, or "past the VPN" on the first answer (routes of a fresh
