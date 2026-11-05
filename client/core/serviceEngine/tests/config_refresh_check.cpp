@@ -58,6 +58,48 @@ private slots:
         QVERIFY(service.config().features.value("xray_client", false));
         QCOMPARE(avpn::savedConfigs, 1);
     }
+    // Owner test of 5.1.102 (2026-11-05): a cold start with the tunnel off - the engine's abort of
+    // in-flight requests on Disconnected cancelled the startup /v1/config, nothing re-issued it, and
+    // the LKG freeze (xray_client=false) hid the Amnezia/Xray switch for the whole run.
+    void cachedXrayThawsAfterOwnAbortOfStartupFetch()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        int requests = 0;
+        bool answer = false;
+        connect(&server, &QTcpServer::newConnection, this, [&]() {
+            while (auto *socket = server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket]() {
+                    const bool config = socket->readAll().startsWith("GET /v1/config ");
+                    if (config) {
+                        ++requests;
+                        if (!answer)
+                            return; // in flight until the abort
+                    }
+                    const QByteArray body = config ? QByteArray(R"({"features":{"xray_client":true}})") : QByteArray("{}");
+                    socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QNetworkAccessManager network;
+        const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
+        avpn::ConfigService service(&network, base, "fixture-key", {base});
+        service.start();
+        QVERIFY(!service.config().features.value("xray_client", true)); // frozen LKG
+        QTRY_COMPARE(requests, 1);
+        answer = true;
+        // AvpnEngineQml::onConnectionStateChanged(Disconnected): abort every running request.
+        for (QNetworkReply *r : network.findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly))
+            if (r->isRunning())
+                r->abort();
+        QTRY_VERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(requests, 2);
+        QVERIFY(service.isFresh());
+    }
     void refreshesWithoutApplicationRestart()
     {
         runScenario(false);

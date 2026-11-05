@@ -4152,7 +4152,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // Волна-2: запросы, УЖЕ летящие через погашенный туннель, кэш не спасает — они висели до
     // таймаута 15 с (журнал 28.09 19:00:34Z). Обрываем их сами (отложенно — finished-лямбды не
     // должны крутиться внутри обработчика состояния); вызывающие получают обычный сетевой отказ.
-    if (m_nam && s == Vpn::Disconnected && s != m_lastTunnelState) {
+    // Owner test of 5.1.102 (2026-11-05): not on the first status this process observes (Unknown ->
+    // Disconnected at a cold start with the tunnel off) - no tunnel of ours carried those requests,
+    // and the abort used to cancel every startup call, /v1/config included (Xray stayed frozen).
+    if (m_nam && s == Vpn::Disconnected && s != m_lastTunnelState && m_lastTunnelState != Vpn::Unknown) {
         QTimer::singleShot(0, m_nam, [nam = m_nam]() {
             const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
             for (QNetworkReply *r : replies)

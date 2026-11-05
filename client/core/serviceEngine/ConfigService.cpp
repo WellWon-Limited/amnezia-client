@@ -74,8 +74,18 @@ void ConfigService::fetchConfig()
         reply->deleteLater();
         // Волна-4 (P2-2, регресс 126): запрос оборвали мы сами (смена ноды/стоп гасит летящие
         // запросы), а не вход — ни отказ, ни успех; таймаут (avpn_timed_out) — честный отказ.
-        if (reply->error() == QNetworkReply::OperationCanceledError && !reply->property("avpn_timed_out").toBool())
+        if (reply->error() == QNetworkReply::OperationCanceledError && !reply->property("avpn_timed_out").toBool()) {
+            // Owner test of 5.1.102 (2026-11-05): our own abort of in-flight requests on a tunnel
+            // transition (AvpnEngineQml::onConnectionStateChanged) also cancels this fetch. A
+            // cancelled fetch is not a fetch: the foreground refresh must not be throttled by it,
+            // and while this process still runs on the LKG copy (xray_client frozen to false in
+            // start()) it is re-issued once - otherwise Xray stays hidden until the app restarts
+            // (iOS has no periodic config refresh). Bounded: our aborts happen only on transitions.
+            m_lastFetchMs = -1;
+            if (!m_fresh)
+                QTimer::singleShot(0, this, &ConfigService::fetchConfig);
             return;
+        }
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         // Только транспортный сбой = проблема ЭТОГО входа → повод шагнуть на другой edge:
         // code==0 (abort/timeout из armTimeout, либо сокет не подключился) или 5xx (серверная авария).
