@@ -216,6 +216,10 @@ class AvpnEngineQml : public QObject {
     Q_PROPERTY(QString doctorStage READ doctorStage NOTIFY doctorChanged)
     Q_PROPERTY(int doctorPercent READ doctorPercent NOTIFY doctorChanged)
     Q_PROPERTY(QVariantList doctorStages READ doctorStages NOTIFY doctorChanged)
+    // Owner test of 5.1.102: progress of the alternatives stage while it runs - {total, number,
+    // name, cc, proto (the one being checked now), done: [{name, cc, proto, result}]} with result
+    // "ok" | "no_data" | "unreachable" (DoctorReport.h::altNodeResult). Empty outside the stage.
+    Q_PROPERTY(QVariantMap doctorAltProgress READ doctorAltProgress NOTIFY doctorChanged)
     Q_PROPERTY(QString doctorSummary READ doctorSummary NOTIFY doctorChanged)
     Q_PROPERTY(bool doctorHasProblem READ doctorHasProblem NOTIFY doctorChanged)
     // AVPN remote-config (T6): вердикт force-update (0 Ok/1 Recommend/2 Block, из ConfigService::configApplied)
@@ -568,6 +572,7 @@ public:
     QString doctorStage() const;                   // connect|servers|services|speed|send
     int doctorPercent() const { return m_docPercent; }
     QVariantList doctorStages() const;             // [{id,status,note,country_code}] для попапа
+    QVariantMap doctorAltProgress() const;         // see Q_PROPERTY doctorAltProgress
     QString doctorSummary() const { return m_docSummary; }
     bool doctorHasProblem() const { return m_docHasProblem; } // есть Bad/Warn → слать в поддержку
 
@@ -1326,6 +1331,7 @@ private:
     QList<bool> m_docAltOks;          // итог per-альтернатива (стабильна = обе пробы прошли)
     QVariantList m_docAltDetails;     // per-нода факты: name/cc/handshake/rx/rtt/обе пробы/verdict
     QVariantList m_docAltCand;        // очередь-кандидаты (nodeId+name+cc) для деталей
+    bool        m_docAltUp = false;   // owner test of 5.1.102: the current alternative's tunnel came up
     qint64      m_docAltRx0 = 0;      // rx на момент connected альтернативы (рост = данные идут)
     int         m_docAltIcmpMs = -1;  // ICMP 1.1.1.1 через туннель на альтернативе
     qint64      m_docAltHsSec = -1;   // возраст handshake на альтернативе

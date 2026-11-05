@@ -562,6 +562,69 @@ Item {
                     }
                 }
 
+                // ── стадия «другие серверы» идёт: что проверяем сейчас и итог каждого сразу ──
+                // (владелец, тест 5.1.102: минуту висело «Проверяю другие серверы» без деталей).
+                // Стадия последняя в stageDefs — блок встаёт прямо под её строкой. Что и сколько
+                // проверяется — прежнее (движок, doctorAltProgress).
+                ColumnLayout {
+                    id: altProgress
+                    readonly property var info: root.hasEngine ? (TribeEngine.doctorAltProgress || ({})) : ({})
+                    readonly property var done: altProgress.info.done || []
+                    function nodeLabel(d) {
+                        const nm = String(d.name || String(d.cc || "").toUpperCase())
+                        return d.proto === "xray" ? nm + " · Xray" : nm
+                    }
+                    visible: root.mode === "running" && root.hasEngine
+                             && TribeEngine.doctorStage === "altnodes" && (altProgress.info.total || 0) > 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 20 + Theme.space.sm   // под текстом строки стадии
+                    spacing: Theme.space.xs
+
+                    Repeater {
+                        model: altProgress.done
+                        delegate: RowLayout {
+                            id: altDone
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: Theme.space.sm
+                            readonly property string result: String(altDone.modelData.result || "")
+                            Rectangle {
+                                Layout.preferredWidth: 8; Layout.preferredHeight: 8
+                                radius: 4
+                                color: altDone.result === "ok" ? Theme.color.connected
+                                     : altDone.result === "no_data" ? Theme.color.warning : Theme.color.danger
+                            }
+                            TribeFlag {
+                                Layout.preferredWidth: 14; Layout.preferredHeight: 14
+                                code: String(altDone.modelData.cc || "")
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: qsTr("%1 — %2").arg(altProgress.nodeLabel(altDone.modelData))
+                                          .arg(altDone.result === "ok" ? qsTr("работает")
+                                               : altDone.result === "no_data" ? qsTr("не пропускает данные")
+                                                                             : qsTr("недоступен"))
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                color: Theme.color.text2
+                                font.family: Theme.font.body
+                                font.pixelSize: Theme.font.caption
+                            }
+                        }
+                    }
+                    Text {
+                        visible: (altProgress.info.number || 0) > 0
+                        Layout.fillWidth: true
+                        text: qsTr("Проверяем: %1, %2 из %3").arg(altProgress.nodeLabel(altProgress.info))
+                                  .arg(altProgress.info.number || 0).arg(altProgress.info.total || 0)
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Theme.color.text1
+                        font.family: Theme.font.body
+                        font.pixelSize: Theme.font.caption
+                    }
+                }
+
                 // прогресс-бар + серый таймер справа над ним (ТОЛЬКО во время теста)
                 RowLayout {
                     visible: root.mode === "running"

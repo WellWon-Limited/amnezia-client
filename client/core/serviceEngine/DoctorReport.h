@@ -189,6 +189,16 @@ inline QString countryDisplayName(const QString &code, const QString &lang)
     return t != QLocale::AnyTerritory ? QLocale::territoryToString(t) : cc;
 }
 
+// Result line of one alternative while the Doctor's alternatives stage runs (owner test of
+// 5.1.102): "ok" - both probes passed; "no_data" - the tunnel came up but data did not pass both
+// probes (verdict 1 = dropped after connecting, 0 = none); "unreachable" - the tunnel never came up.
+inline QString altNodeResult(int verdict, bool up)
+{
+    if (verdict >= 2)
+        return QStringLiteral("ok");
+    return up ? QStringLiteral("no_data") : QStringLiteral("unreachable");
+}
+
 // Стадия 2: СЕРВЕРЫ. На каком сервере сидим и его отклик (live RTT через туннель / app-layer).
 //   displayName — человекочитаемое имя («Латвия»); countryCode — ISO для флага в UI;
 //   rttMs — отклик текущего сервера (<0 = не измерен);

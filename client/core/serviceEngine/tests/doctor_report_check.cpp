@@ -203,6 +203,11 @@ int main()
     CHECK(countryDisplayName(QStringLiteral("zz"), QStringLiteral("es")) == QStringLiteral("ZZ"),
           "country display: unknown code -> the code in capitals");
     CHECK(countryDisplayName(QString(), QStringLiteral("ru")).isEmpty(), "country display: no code -> empty");
+    // Owner test of 5.1.102: one line per checked alternative while the stage runs.
+    CHECK(altNodeResult(2, true) == QStringLiteral("ok"), "alt result: both probes -> ok");
+    CHECK(altNodeResult(1, true) == QStringLiteral("no_data"), "alt result: up, data dropped -> no_data");
+    CHECK(altNodeResult(0, true) == QStringLiteral("no_data"), "alt result: up, no data -> no_data");
+    CHECK(altNodeResult(0, false) == QStringLiteral("unreachable"), "alt result: never came up -> unreachable");
     {
         QList<StageResult> st;
         st << connectStage(true, true, 10)

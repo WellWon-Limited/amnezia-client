@@ -8468,6 +8468,7 @@ void AvpnEngineQml::docConnectAdvance()
         const QString st = state();
         if (st == QLatin1String("connected")) {
             m_docConnecting = false;
+            m_docAltUp = true;
             m_docAltRx0 = m_tunnel.readStats().rxBytes; // база для «данные идут» (рост rx)
             m_docAltProbe1 = false; m_docAltIcmpMs = -1; m_docAltHsSec = -1;
             m_docAltEpMs = -1; m_docAltEpBig = -1; m_docAltEpTried = false; // D-6
@@ -8996,6 +8997,7 @@ void AvpnEngineQml::docStartAltNodes()
         meta.insert(QStringLiteral("name"), nm);
         meta.insert(QStringLiteral("cc"), cc);
         meta.insert(QStringLiteral("nodeId"), id);
+        meta.insert(QStringLiteral("proto"), c.second.value(QStringLiteral("proto")).toString());
         meta.insert(QStringLiteral("rtt_ms"), c.first < 99999 ? c.first : -1);
         m_docAltCand.append(meta);
     }
@@ -9067,6 +9069,7 @@ void AvpnEngineQml::docAltNext()
         m_docPercent = 70 + (26 * m_docAltIdx) / m_docAltQueue.size();
     m_docConnecting = true;
     m_docSawProgress = false;
+    m_docAltUp = false;
     m_docGuard.start(40000); // подъём альтернативы
     emit doctorChanged();    // note текущей стадии в UI обновится (docStage прежний)
     // stop→start на выбранную; forceConnect — проверяемая альтернатива поднимается, даже если
@@ -9155,6 +9158,7 @@ void AvpnEngineQml::docAltRecord(bool probe2)
             d.insert(QStringLiteral("ep_icmp_big"), m_docAltEpBig == 1);
     }
     d.insert(QStringLiteral("verdict"), verdict);
+    d.insert(QStringLiteral("up"), m_docAltUp); // owner test of 5.1.102: "unreachable" vs "no data"
     avpn::TribeJournal::append(QStringLiteral("doctor_alt"), QJsonObject::fromVariantMap(d));
     m_docAltDetails.append(d);
     m_docAltOks.append(verdict >= 2); // РАБОЧАЯ только если стабильна (обе пробы)
@@ -9354,6 +9358,35 @@ QString AvpnEngineQml::doctorStage() const
     case DoctorPhase::Idle:     break;
     }
     return {};
+}
+
+// Owner test of 5.1.102 (2026-11-05): the alternatives stage showed only «Проверяю другие
+// серверы» for a minute. The sheet now shows which server is being checked («Проверяем: …, 2 из 4»)
+// and each result as soon as docAltRecord has it. Same checks and timeouts as before.
+QVariantMap AvpnEngineQml::doctorAltProgress() const
+{
+    if (m_docPhase != DoctorPhase::AltNodes || m_docAltQueue.isEmpty())
+        return {};
+    QVariantList done;
+    for (const QVariant &v : m_docAltDetails) {
+        const QVariantMap d = v.toMap();
+        done.append(QVariantMap{
+            {QStringLiteral("name"), d.value(QStringLiteral("name"))},
+            {QStringLiteral("cc"), d.value(QStringLiteral("cc"))},
+            {QStringLiteral("proto"), d.value(QStringLiteral("proto"))},
+            {QStringLiteral("result"), doctor::altNodeResult(d.value(QStringLiteral("verdict")).toInt(),
+                                                             d.value(QStringLiteral("up")).toBool())}});
+    }
+    QVariantMap m{{QStringLiteral("total"), int(m_docAltQueue.size())}, {QStringLiteral("done"), done}};
+    // The alternative being checked now: started (index set) and not recorded yet.
+    if (m_docAltIdx >= 0 && m_docAltIdx < m_docAltCand.size() && m_docAltDetails.size() <= m_docAltIdx) {
+        const QVariantMap c = m_docAltCand.at(m_docAltIdx).toMap();
+        m.insert(QStringLiteral("number"), m_docAltIdx + 1);
+        m.insert(QStringLiteral("name"), c.value(QStringLiteral("name")));
+        m.insert(QStringLiteral("cc"), c.value(QStringLiteral("cc")));
+        m.insert(QStringLiteral("proto"), c.value(QStringLiteral("proto")));
+    }
+    return m;
 }
 
 QVariantList AvpnEngineQml::doctorStages() const
