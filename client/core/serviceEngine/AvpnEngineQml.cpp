@@ -3498,6 +3498,7 @@ void AvpnEngineQml::ccVerify()
     req.setTransferTimeout(kCcGuardVerifyMs - 2000);
     m_ccT.start();
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     connect(r, &QNetworkReply::finished, this, [this, r, epoch, rxBefore] {
         r->deleteLater();
         if (epoch != m_ccEpoch)
@@ -4184,12 +4185,19 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // Owner test of 5.1.102 (2026-11-05): not on the first status this process observes (Unknown ->
     // Disconnected at a cold start with the tunnel off) - no tunnel of ours carried those requests,
     // and the abort used to cancel every startup call, /v1/config included (Xray stayed frozen).
-    if (m_nam && s == Vpn::Disconnected && s != m_lastTunnelState && m_lastTunnelState != Vpn::Unknown) {
-        QTimer::singleShot(0, m_nam, [nam = m_nam]() {
-            const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
-            for (QNetworkReply *r : replies)
-                if (r->isRunning()) r->abort();
-        });
+    // Decision 2026-11-05: the same on Connected - requests sent over the physical path before the
+    // tunnel came up hang once the routes move into it (15 s); their owners re-issue them over the
+    // tunnel. Only the requests running now (snapshot); tunnel probes are kept on Connected.
+    // DebugSnapshot.h::abortInFlightApiOnTransition, NetAwait.h::abortRunningRepliesDeferred.
+    {
+        const auto observedOf = [](Vpn::ConnectionState st) {
+            return st == Vpn::Connected ? ObservedTunnel::Connected
+                 : st == Vpn::Disconnected ? ObservedTunnel::Disconnected
+                 : st == Vpn::Error ? ObservedTunnel::Error
+                 : st == Vpn::Unknown ? ObservedTunnel::Unknown : ObservedTunnel::Transitional;
+        };
+        if (m_nam && abortInFlightApiOnTransition(observedOf(m_lastTunnelState), observedOf(s)))
+            avpn::abortRunningRepliesDeferred(m_nam, /*keepTunnelProbes=*/s == Vpn::Connected);
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
@@ -4594,10 +4602,13 @@ void AvpnEngineQml::bootstrapFetchAsync(const QString &token, bool tokenFromStor
     const quint64 sequence = ++m_subscriptionSequence;
     m_bootstrapSequence = sequence;
     const QString requestToken = token;
+    const QString requestBase = m_baseUrl;
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, tokenFromStore, reEnrolled, sequence, requestToken]() {
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, tokenFromStore, reEnrolled, sequence, requestToken, requestBase]() {
         reply->deleteLater();
+        noteSubscriptionEdgeOutcome(reply, requestBase); // decision 2026-11-05: stale ones count too
         if (sequence != m_subscriptionSequence || requestToken != Enrollment::loadToken()) {
             reliabilityEvent(QStringLiteral("stale_subscription_response_ignored"));
             if (sequence == m_bootstrapSequence && !m_bootstrapped) {
@@ -5307,6 +5318,7 @@ void AvpnEngineQml::wakeLivenessProbe()
     QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
     req.setTransferTimeout(4000);
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     connect(r, &QNetworkReply::finished, this, [this, r]() {
         r->deleteLater();
         m_wakeProbing = false;
@@ -6103,6 +6115,7 @@ void AvpnEngineQml::verifyAttempt(int epoch)
     const int transferTimeout = int(remaining < 1500 ? 1500 : (remaining > 4000 ? 4000 : remaining));
     req.setTransferTimeout(transferTimeout);
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     const qint64 armedMono = m_verifyClock.elapsed();
     const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
     connect(r, &QNetworkReply::finished, this, [this, r, epoch, transferTimeout, armedMono, armedWall]() {
@@ -6269,6 +6282,7 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     req.setRawHeader(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("identity"));
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *r = m_nam->get(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     avpn::armTimeout(r, int(left)); // the whoami budget bounds the request - no timer of its own
     // Count and hash what actually arrives (readyRead), so a transfer cut after the headers still
     // reports its real size: < 16 KiB = data does not pass, >= 16 KiB cut by our timeout = slow link.
@@ -7428,6 +7442,26 @@ void AvpnEngineQml::onForegroundDebounced()
         runConnectEffects();
 }
 
+// Decision 2026-11-05: /v1/subscription has its own per-edge failure streak that small calls do not
+// reset (DebugSnapshot.h::classifySubscriptionEdgeOutcome, EdgeWalk.h::SubscriptionEdgeStreak): two
+// transport failures in a row on the active edge switch it (ConfigService rotation). Owner's journal:
+// 0 of 23 subscriptions on direct cellular to vpn.wellwon.hk while /v1/account passed.
+void AvpnEngineQml::noteSubscriptionEdgeOutcome(QNetworkReply *reply, const QString &requestBase)
+{
+    if (!m_configSvc || !reply)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const SubscriptionEdgeOutcome o = classifySubscriptionEdgeOutcome(
+        int(reply->error()), reply->property("avpn_timed_out").toBool(), reply->property("avpn_t0").toLongLong(),
+        std::max(m_lastResumeMs, m_lastHiddenMs), m_lastTunnelTransitionMs, now);
+    if (o == SubscriptionEdgeOutcome::Ignore)
+        return;
+    const QString before = m_configSvc->activeBaseUrl();
+    if (m_configSvc->reportSubscriptionOutcome(requestBase, o == SubscriptionEdgeOutcome::Failure))
+        reliabilityEvent(QStringLiteral("edge_switch why=subscription_streak from=%1 to=%2")
+                             .arg(QUrl(before).host(), QUrl(m_configSvc->activeBaseUrl()).host()));
+}
+
 // Волна-4 (P2-2/ENG-01): единая классификация исхода запроса к API. Edge-walk: Failure →
 // reportNetworkFailure, Success → reportNetworkSuccess, Ignore → ничего (наш abort при смене
 // ноды, запрос из-под заморозки, окно своего перехода туннеля). Детектор белых списков: любой
@@ -7473,10 +7507,14 @@ void AvpnEngineQml::refreshSubscription()
 
     const quint64 sequence = ++m_subscriptionSequence;
     const QString requestToken = token;
+    const QString requestBase = m_baseUrl;
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, sequence, requestToken]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, sequence, requestToken, requestBase]() {
         reply->deleteLater();
+        // Decision 2026-11-05: the per-edge subscription streak counts a stale response too - only
+        // the response handling below drops it.
+        noteSubscriptionEdgeOutcome(reply, requestBase);
         if (sequence != m_subscriptionSequence || requestToken != Enrollment::loadToken()) {
             reliabilityEvent(QStringLiteral("stale_subscription_response_ignored"));
             return;
@@ -7484,6 +7522,14 @@ void AvpnEngineQml::refreshSubscription()
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         // AVPN remote-config (T6, edge-walk) + белые списки: см. noteApiOutcome (волна-4).
         noteApiOutcome(reply);
+        // Decision 2026-11-05: we aborted it ourselves on a tunnel transition - re-issue it once over
+        // the new path (the next one is a new request with its own sequence).
+        if (reissueAfterOwnAbort(reply->error() == QNetworkReply::OperationCanceledError,
+                                 reply->property("avpn_timed_out").toBool())) {
+            reliabilityEvent(QStringLiteral("subscription_reissue after_own_abort"));
+            QTimer::singleShot(0, this, [this]() { refreshSubscription(); });
+            return;
+        }
         // AVPN (перенос «как SIM»): 410 transferred — подписка уехала на другое устройство.
         // Взводим терминальный флаг для UI («Подписка перенесена»); НЕ ре-энроллим.
         if (code == 410) {
@@ -8574,6 +8620,7 @@ void AvpnEngineQml::docVerifyDataplane()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, hsAge, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::Connect) return;
@@ -9114,6 +9161,7 @@ void AvpnEngineQml::docAltVerify()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;
@@ -9134,6 +9182,7 @@ void AvpnEngineQml::docAltVerify2()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;

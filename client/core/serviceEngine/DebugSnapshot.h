@@ -510,6 +510,55 @@ inline ApiOutcome classifyApiOutcome(int httpCode, bool canceled, bool timedOut,
     return ApiOutcome::Failure;
 }
 
+// Decision 2026-11-05 (owner test of 5.1.102): API requests in flight when the tunnel comes UP were
+// sent over the physical interface and hang once the routes move into the tunnel (journal:
+// /v1/subscription started 2 s before Connected timed out at 15 s); requests in flight when it goes
+// DOWN went through the dead tunnel. Abort them on both transitions so their owners re-issue them
+// over the new path. Not on the first status a process observes (Unknown -> X: no tunnel of ours
+// carried them), not on a repeat of the same state. On Connected the tunnel probes (verification,
+// whoami, Doctor, wake liveness) are kept - they run over the tunnel that just came up.
+inline bool abortInFlightApiOnTransition(ObservedTunnel previous, ObservedTunnel now)
+{
+    if (previous == ObservedTunnel::Unknown || previous == now)
+        return false;
+    return now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected;
+}
+
+// A request we aborted ourselves (OperationCanceled without our timeout mark) is re-issued once by
+// its owner over the new path; a timeout or a server answer is not.
+inline bool reissueAfterOwnAbort(bool canceled, bool timedOut)
+{
+    return canceled && !timedOut;
+}
+
+// Decision 2026-11-05: an edge can pass small answers and still never deliver /v1/subscription (the
+// owner's cellular path to vpn.wellwon.hk: 0 of 23 in 3 days while /v1/account passed; nginx answered
+// each with 200, ~6.7 KB). The edge walk cannot see that - every small success resets its streak - so
+// /v1/subscription has its own streak per edge (EdgeWalk.h::SubscriptionEdgeStreak):
+//  Delivered - the reply ended without a transport error (any HTTP status): resets the streak;
+//  Failure   - transport error (our timeout, connection cut mid-body), not our abort, not across an
+//              iOS freeze, not in our own tunnel-transition window: counts;
+//  Ignore    - our own abort, a freeze, our transition window.
+// networkError = QNetworkReply::NetworkError: 1..99 network layer, 100..199 proxy, 300..399 protocol
+// (transport failures); 200..299 content and 400..499 server errors are HTTP answers (delivered).
+enum class SubscriptionEdgeOutcome { Delivered, Failure, Ignore };
+inline SubscriptionEdgeOutcome classifySubscriptionEdgeOutcome(int networkError, bool timedOut, qint64 startedMs,
+                                                              qint64 lastResumeMs, qint64 lastTunnelTransitionMs,
+                                                              qint64 nowMs)
+{
+    const bool httpAnswer = networkError == 0 || (networkError >= 200 && networkError < 300)
+                            || (networkError >= 400 && networkError < 500);
+    if (httpAnswer)
+        return SubscriptionEdgeOutcome::Delivered;
+    if (networkError == 5 /* OperationCanceledError */ && !timedOut)
+        return SubscriptionEdgeOutcome::Ignore;
+    if (startedMs > 0 && lastResumeMs > 0 && startedMs < lastResumeMs)
+        return SubscriptionEdgeOutcome::Ignore;
+    if (lastTunnelTransitionMs > 0 && nowMs - lastTunnelTransitionMs < kApiTransitionWindowMs)
+        return SubscriptionEdgeOutcome::Ignore;
+    return SubscriptionEdgeOutcome::Failure;
+}
+
 // P2-3: эффекты «Подключено» (сброс чипов, пробы сервисов 2×128 КБ) — только для НОВОЙ сессии
 // (другая нода или прошло ≥ 30 мин) и только на экране; повторный Connected той же сессии
 // (Reconnecting→Connected при смене сети, подхват) их не запускает. Не на экране — откладываем до

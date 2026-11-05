@@ -3,6 +3,7 @@
 // LKG-кеш, edge-фолбэк. Async (armTimeout) — UI не блокируется.
 #pragma once
 #include "ConfigTypes.h"
+#include "EdgeWalk.h"
 #include <QObject>
 #include <QStringList>
 #include <QTimer>
@@ -27,6 +28,11 @@ public:
 
     void reportNetworkFailure();
     void reportNetworkSuccess();
+    // Decision 2026-11-05: /v1/subscription outcome for its own per-edge streak (EdgeWalk.h::
+    // SubscriptionEdgeStreak); requestBase = the edge the request went to. failed = transport failure
+    // (classifySubscriptionEdgeOutcome); ignored outcomes are not reported. true = the active edge
+    // was switched now (2 failures in a row on it).
+    bool reportSubscriptionOutcome(const QString &requestBase, bool failed);
     // Волна-4 (ENG-03): iOS обновлял конфиг только перезапуском процесса (таймер — macOS-only).
     // Координатор выхода на экран зовёт это раз в >= 15 мин; дедуп по m_configInFlight внутри.
     void refreshIfStale(qint64 maxAgeMs);
@@ -44,6 +50,7 @@ private:
     void fetchEdges();
     void applyBody(const QByteArray &body, const QByteArray &sigB64); // verify → parse → cache → emit
     int  failThreshold() const;
+    bool switchToNextEdge(); // existing rotation (cached /v1/edges order, baked fallback); false = no other edge
 
     QNetworkAccessManager *m_nam = nullptr;
     QString      m_activeBase;
@@ -56,6 +63,7 @@ private:
     QTimer       m_refreshTimer;
     bool         m_configInFlight = false;
     bool         m_fresh = false;
+    SubscriptionEdgeStreak m_subscriptionStreak; // decision 2026-11-05, see reportSubscriptionOutcome
 };
 
 } // namespace avpn

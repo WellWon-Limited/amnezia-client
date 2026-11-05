@@ -417,6 +417,29 @@ static void wave4UpstreamBehaviour()
     CHECK(classifyApiOutcome(0, true, true, now - 20000, now - 1000, -1, now) == ApiOutcome::Ignore); // начат до разморозки
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 3000, now) == ApiOutcome::Ignore); // рядом со своим переходом
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 9000, now) == ApiOutcome::Failure); // окно вышло
+    // Decision 2026-11-05: in-flight API requests are aborted on both tunnel transitions (re-issued
+    // over the new path), not on the first observed status, not on a repeat of the same state.
+    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Transitional, ObservedTunnel::Connected));  // tunnel up
+    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Disconnected, ObservedTunnel::Connected));
+    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Disconnected));  // tunnel down
+    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Transitional, ObservedTunnel::Disconnected));
+    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Disconnected));   // cold start
+    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Connected));      // adopted session
+    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Connected));    // repeat
+    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Transitional));
+    CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
+    CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no
+    CHECK(!reissueAfterOwnAbort(false, false)); // answered / failed by the network -> no
+    // Decision 2026-11-05: /v1/subscription per-edge streak classification (QNetworkReply errors).
+    CHECK(classifySubscriptionEdgeOutcome(0, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered);
+    CHECK(classifySubscriptionEdgeOutcome(204, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered); // 401
+    CHECK(classifySubscriptionEdgeOutcome(401, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered); // 500
+    CHECK(classifySubscriptionEdgeOutcome(5, true, now - 15000, -1, -1, now) == SubscriptionEdgeOutcome::Failure);   // our timeout
+    CHECK(classifySubscriptionEdgeOutcome(2, false, now - 3000, -1, -1, now) == SubscriptionEdgeOutcome::Failure);   // body cut
+    CHECK(classifySubscriptionEdgeOutcome(399, false, now - 3000, -1, -1, now) == SubscriptionEdgeOutcome::Failure); // protocol
+    CHECK(classifySubscriptionEdgeOutcome(5, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Ignore);     // our abort
+    CHECK(classifySubscriptionEdgeOutcome(5, true, now - 20000, now - 1000, -1, now) == SubscriptionEdgeOutcome::Ignore); // freeze
+    CHECK(classifySubscriptionEdgeOutcome(5, true, now - 16000, -1, now - 3000, now) == SubscriptionEdgeOutcome::Ignore); // transition
     // P2-3: эффекты Connected — только новая сессия и только на экране.
     CHECK(decideConnectEffects(false, -1, true) == ConnectEffects::RunNow);
     CHECK(decideConnectEffects(true, 60000, true) == ConnectEffects::Skip);      // та же нода, минуту назад

@@ -950,6 +950,8 @@ private:
     void onLiveSessionTimeout();
     // Волна-4: единая классификация исхода запроса к API (edge-walk + детектор белых списков).
     void noteApiOutcome(QNetworkReply *reply);
+    // Decision 2026-11-05: /v1/subscription outcome -> its own per-edge streak (see the .cpp).
+    void noteSubscriptionEdgeOutcome(QNetworkReply *reply, const QString &requestBase);
     void onForegroundDebounced();   // волна-4 (P2-4): одна пачка на возврат на экран
     void runConnectEffects();       // волна-4 (P2-3): чипы + пробы сервисов для новой сессии
     void onSwitchDeadline();

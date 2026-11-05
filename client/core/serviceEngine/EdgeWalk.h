@@ -43,4 +43,33 @@ inline QStringList edgeHosts(const QStringList &edges)
     return out;
 }
 
+// Decision 2026-11-05: per-edge streak of /v1/subscription transport failures (classified by
+// DebugSnapshot.h::classifySubscriptionEdgeOutcome; true = failure, false = delivered). Small calls
+// never touch it. kSubscriptionEdgeFailSwitch failures in a row on the ACTIVE edge -> switch to the
+// next edge (existing rotation); a delivered subscription on it resets; an outcome of a request sent
+// to another edge (the active one changed meanwhile) does not count; a new active edge starts at 0.
+constexpr int kSubscriptionEdgeFailSwitch = 2;
+struct SubscriptionEdgeStreak {
+    QString edge;
+    int failures = 0;
+    // Returns true when the active edge must be switched now.
+    bool note(const QString &activeEdge, const QString &requestEdge, bool failed)
+    {
+        if (edge != activeEdge) {
+            edge = activeEdge;
+            failures = 0;
+        }
+        if (requestEdge != activeEdge)
+            return false;
+        if (!failed) {
+            failures = 0;
+            return false;
+        }
+        if (++failures < kSubscriptionEdgeFailSwitch)
+            return false;
+        failures = 0;
+        return true;
+    }
+};
+
 } // namespace avpn

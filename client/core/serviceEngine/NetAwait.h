@@ -13,7 +13,10 @@
 // но гарантированно разблокирует UI, если бэкенд не ответил.
 
 #include <QEventLoop>
+#include <QList>
+#include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QPointer>
 #include <QDateTime>
 #include <QTimer>
 
@@ -74,4 +77,32 @@ inline void armTimeout(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
     t->start(timeoutMs);
 }
 
+// Decision 2026-11-05: a request that probes the tunnel itself (verification, whoami, Doctor, wake
+// liveness) - kept when the tunnel comes up (DebugSnapshot.h::abortInFlightApiOnTransition).
+inline void markTunnelProbe(QNetworkReply *reply)
+{
+    if (reply)
+        reply->setProperty("avpn_tunnel_probe", true);
+}
+
+// Abort the requests running on `nam` NOW (snapshot), deferred to the next event-loop turn (no
+// finished-lambdas inside the caller's state handler). Requests started later in the same event are
+// not touched. keepTunnelProbes - leave the ones marked by markTunnelProbe running.
+inline void abortRunningRepliesDeferred(QNetworkAccessManager *nam, bool keepTunnelProbes)
+{
+    if (!nam)
+        return;
+    QList<QPointer<QNetworkReply>> running;
+    const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QNetworkReply *r : replies)
+        if (r->isRunning() && !(keepTunnelProbes && r->property("avpn_tunnel_probe").toBool()))
+            running << r;
+    if (running.isEmpty())
+        return;
+    QTimer::singleShot(0, nam, [running]() {
+        for (const QPointer<QNetworkReply> &r : running)
+            if (r && r->isRunning())
+                r->abort();
+    });
+}
 } // namespace avpn

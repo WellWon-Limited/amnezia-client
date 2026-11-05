@@ -183,14 +183,28 @@ void ConfigService::reportNetworkFailure()
     if (++m_failStreak < failThreshold())
         return;
     m_failStreak = 0;
+    switchToNextEdge();
+}
+
+bool ConfigService::reportSubscriptionOutcome(const QString &requestBase, bool failed)
+{
+    if (!m_subscriptionStreak.note(m_activeBase, requestBase, failed))
+        return false;
+    return switchToNextEdge();
+}
+
+bool ConfigService::switchToNextEdge()
+{
     const QStringList cands = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges);
     const QString next = nextEdge(cands, m_activeBase);
     if (next == m_activeBase)
-        return;
+        return false;
+    m_failStreak = 0;
     m_activeBase = next;
     ConfigStore::setActiveEdge(next);
     emit activeEdgeChanged(next);
     fetchConfig(); // немедленно пробуем новый вход
+    return true;
 }
 
 } // namespace avpn

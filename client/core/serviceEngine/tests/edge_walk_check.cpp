@@ -35,6 +35,26 @@ int main(int argc, char **argv)
           "edgeHosts: unique hosts, literal IP kept, junk dropped");
     CHECK(avpn::edgeHosts({}).isEmpty(), "edgeHosts: empty list");
 
+    // Decision 2026-11-05: per-edge /v1/subscription streak (small calls never reach it).
+    {
+        const QString a = "https://vpn.wellwon.hk", b = "https://api.tribevpn.com";
+        avpn::SubscriptionEdgeStreak st;
+        CHECK(!st.note(a, a, true), "subscription streak: 1st failure on the active edge -> stay");
+        CHECK(st.note(a, a, true), "subscription streak: 2nd failure in a row -> switch");
+        CHECK(!st.note(a, a, true), "subscription streak: counting restarts after a switch signal");
+        avpn::SubscriptionEdgeStreak mixed;
+        CHECK(!mixed.note(a, a, true) && !mixed.note(a, a, false) && !mixed.note(a, a, true),
+              "subscription streak: failure, delivered, failure -> stay (delivered resets)");
+        CHECK(mixed.note(a, a, true), "subscription streak: then a 2nd failure in a row -> switch");
+        avpn::SubscriptionEdgeStreak other;
+        CHECK(!other.note(b, a, true) && !other.note(b, a, true),
+              "subscription streak: failures of requests sent to another edge do not count");
+        CHECK(!other.note(b, b, true) && other.note(b, b, true), "subscription streak: the new edge counts from 0");
+        avpn::SubscriptionEdgeStreak moved;
+        CHECK(!moved.note(a, a, true), "subscription streak: one failure on a");
+        CHECK(!moved.note(b, b, true), "subscription streak: active edge changed -> the old count is gone");
+    }
+
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
     return g_fail ? 1 : 0;
 }

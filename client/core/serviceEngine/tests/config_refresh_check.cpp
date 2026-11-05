@@ -23,6 +23,7 @@ bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 #include "../ConfigService.cpp"
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QSignalSpy>
 #include <QTest>
 
 class ConfigRefreshTest : public QObject {
@@ -99,6 +100,29 @@ private slots:
         QTRY_VERIFY(service.config().features.value("xray_client", false));
         QCOMPARE(requests, 2);
         QVERIFY(service.isFresh());
+    }
+    // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
+    // /v1/subscription transport failures in a row on it switch the active edge; a delivered
+    // subscription in between resets that streak.
+    void subscriptionStreakSwitchesEdgeDespiteSmallSuccesses()
+    {
+        QNetworkAccessManager network; // no server: the switch re-fetches /v1/config, which just fails
+        const QString a = "http://127.0.0.1:9", b = "http://127.0.0.1:10";
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.reportNetworkSuccess();                              // /v1/account OK
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));        // subscription timeout #1
+        service.reportNetworkSuccess();                              // /v1/support/unread OK
+        QVERIFY(!service.reportSubscriptionOutcome(a, false));       // delivered -> streak reset
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));        // #1 again
+        QCOMPARE(switched.count(), 0);
+        service.reportNetworkSuccess();
+        QVERIFY(service.reportSubscriptionOutcome(a, true));         // #2 in a row -> next edge
+        QCOMPARE(switched.count(), 1);
+        QCOMPARE(switched.at(0).at(0).toString(), b);
+        QCOMPARE(service.activeBaseUrl(), b);
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));        // late failure from the old edge
+        QCOMPARE(service.activeBaseUrl(), b);
     }
     void refreshesWithoutApplicationRestart()
     {
