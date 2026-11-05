@@ -929,7 +929,7 @@ PageType {
                             spacing: Theme.space.sm
                             Text {
                                 id: nodeName
-                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.region)
+                                text: root.curNode.hasNode ? (root.curNode.name || root.curNode.countryCode || "")
                                       : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Нет связи с Tribe")
                                                                                  : qsTr("Загружаем серверы…"))
                                       : qsTr("Умный выбор сервера")

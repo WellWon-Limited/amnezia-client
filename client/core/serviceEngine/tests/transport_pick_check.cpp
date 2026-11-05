@@ -4,6 +4,7 @@
 // failover «другой транспорт той же локации → соседняя локация», фаза verifying для xray
 // («Подключено» только после пробы через туннель), DEAD по провалу проб, ротация по локациям.
 // Сборка/запуск: core/serviceEngine/tests/build_transport_pick.sh (по образцу build_proto_forward.sh).
+#include "../NodeRanking.h"
 #include "../NodeRotation.h"
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
@@ -931,6 +932,84 @@ int main(int argc, char **argv)
             CHECK(eng.connect(err));                            // a new start within the session
             CHECK(tun.lastUpNodeId != QLatin1String("9:xray"));
         }
+    }
+
+    // §11. Owner test of 5.1.102 (2026-11-05): 4 AWG nodes + 4 Xray listeners (same host_id per
+    // country, every listener behind the same RU entry) - what the server picker shows.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("15", 15, "EE", 1.0), awgNodeJson("11", 11, "FI", 1.0),
+                                          awgNodeJson("12", 12, "DE", 1.0), awgNodeJson("10", 10, "US", 1.0),
+                                          xrayNodeJson("15:xray", 15, "EE", 1.0, 20, "201.34.134.103:443"),
+                                          xrayNodeJson("11:xray", 11, "FI", 1.0, 20, "201.34.134.103:2087"),
+                                          xrayNodeJson("12:xray", 12, "DE", 1.0, 20, "201.34.134.103:2096"),
+                                          xrayNodeJson("10:xray", 10, "US", 1.0, 20, "201.34.134.103:2082") });
+        // (a) fresh /v1/config (xray_client=true): every country has a usable Xray row - the
+        // «Авто / Amnezia / Xray» switch (PageServersTribe.xrayInPool) is shown, both badges per row.
+        setFlags(true, true);
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            QSet<QString> xrayLocations, awgLocations;
+            for (const NodeDebugRow &r : eng.debugSnapshot().pool) {
+                CHECK(r.alive);
+                CHECK(r.transports == QStringList({QStringLiteral("awg"), QStringLiteral("xray")}));
+                if (r.proto == QLatin1String("xray") && r.transportSupported)
+                    xrayLocations.insert(r.location);
+                if (r.proto == QLatin1String("awg") && r.transportSupported)
+                    awgLocations.insert(r.location);
+            }
+            CHECK(xrayLocations.size() == 4);
+            CHECK(awgLocations == xrayLocations);
+        }
+        // (b) only the LKG copy (ConfigService::start freezes xray_client=false until a fresh signed
+        // response): no usable Xray row - this is how the switch disappeared after a cold start whose
+        // /v1/config was cancelled by our own abort (fixed in ConfigService/AvpnEngineQml).
+        setFlags(false, true);
+        {
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(pool, err));
+            int usableXray = 0;
+            for (const NodeDebugRow &r : eng.debugSnapshot().pool)
+                if (r.proto == QLatin1String("xray") && r.transportSupported)
+                    ++usableXray;
+            CHECK(usableXray == 0);
+        }
+        setFlags(true, true);
+        // (c) display: an Xray row shows its exit (the AWG sibling's RTT and label), never the RU
+        // entry's ~14 ms nor the region code; no measured sibling -> -1 ("—").
+        const QList<PickerRow> shown = pickerDisplay({
+            { QStringLiteral("h:15"), QStringLiteral("awg"), QStringLiteral("Estonia 2"), QStringLiteral("Эстония"), 26 },
+            { QStringLiteral("h:11"), QStringLiteral("awg"), QStringLiteral("Finland 1"), QStringLiteral("Финляндия"), 31 },
+            { QStringLiteral("h:12"), QStringLiteral("awg"), QString(), QStringLiteral("Германия"), -1 },
+            { QStringLiteral("h:10"), QString(), QStringLiteral("USA"), QStringLiteral("США"), 150 },
+            { QStringLiteral("h:15"), QStringLiteral("xray"), QString(), QStringLiteral("Эстония"), 14 },
+            { QStringLiteral("h:11"), QStringLiteral("xray"), QString(), QStringLiteral("Финляндия"), 13 },
+            { QStringLiteral("h:12"), QStringLiteral("xray"), QString(), QStringLiteral("Германия"), 14 },
+            { QStringLiteral("h:10"), QStringLiteral("xray"), QStringLiteral("US relay"), QStringLiteral("США"), 17 },
+            { QStringLiteral("h:99"), QStringLiteral("xray"), QString(), QStringLiteral("Латвия"), 12 },
+            { QString(), QStringLiteral("xray"), QString(), QStringLiteral("Польша"), 11 } });
+        CHECK(shown.size() == 10);
+        CHECK(shown.at(4).rttMs == 26 && shown.at(4).name == QLatin1String("Estonia 2"));
+        CHECK(shown.at(5).rttMs == 31 && shown.at(5).name == QLatin1String("Finland 1"));
+        CHECK(shown.at(6).rttMs == -1 && shown.at(6).name == QStringLiteral("Германия")); // sibling unmeasured, unlabeled
+        CHECK(shown.at(7).rttMs == 150 && shown.at(7).name == QLatin1String("US relay")); // own label stays
+        CHECK(shown.at(8).rttMs == -1 && shown.at(8).name == QStringLiteral("Латвия"));   // no AWG sibling
+        CHECK(shown.at(9).rttMs == -1 && shown.at(9).name == QStringLiteral("Польша"));   // no location
+        CHECK(shown.at(0).rttMs == 26 && shown.at(2).name == QStringLiteral("Германия")); // AWG keeps its own RTT
+        CHECK(shown.at(3).rttMs == 150 && shown.at(3).name == QLatin1String("USA"));
+        // An AWG row without a label takes a labeled sibling's name (Xray label only as a last resort).
+        const QList<PickerRow> labels = pickerDisplay({
+            { QStringLiteral("h:1"), QStringLiteral("xray"), QStringLiteral("X label"), QStringLiteral("Эстония"), -1 },
+            { QStringLiteral("h:1"), QStringLiteral("awg"), QString(), QStringLiteral("Эстония"), -1 },
+            { QStringLiteral("h:1"), QStringLiteral("awg"), QStringLiteral("Estonia 2"), QStringLiteral("Эстония"), -1 } });
+        CHECK(labels.at(1).name == QLatin1String("Estonia 2"));
+        CHECK(labels.at(0).name == QLatin1String("X label"));
     }
 
     if (g_failed) {

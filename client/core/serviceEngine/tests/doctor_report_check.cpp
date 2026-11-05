@@ -193,6 +193,16 @@ int main()
           "country: lv -> Латвия (регистронезависимо)");
     CHECK(countryNameRu(QStringLiteral("ZZ")) == QStringLiteral("ZZ"),
           "country: неизвестный код -> код заглавными");
+    // Owner test of 5.1.102: a listener without a label shows a country name, never "ee".
+    CHECK(countryDisplayName(QStringLiteral("ee"), QStringLiteral("ru")) == QStringLiteral("Эстония"),
+          "country display: ee, ru UI -> Эстония");
+    CHECK(countryDisplayName(QStringLiteral("ee"), QStringLiteral("en")) == QStringLiteral("Estonia"),
+          "country display: ee, en UI -> Estonia");
+    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("ru")) == QStringLiteral("Brazil"),
+          "country display: no Russian name in the table -> English, not the code");
+    CHECK(countryDisplayName(QStringLiteral("zz"), QStringLiteral("es")) == QStringLiteral("ZZ"),
+          "country display: unknown code -> the code in capitals");
+    CHECK(countryDisplayName(QString(), QStringLiteral("ru")).isEmpty(), "country display: no code -> empty");
     {
         QList<StageResult> st;
         st << connectStage(true, true, 10)

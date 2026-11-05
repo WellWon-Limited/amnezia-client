@@ -126,7 +126,9 @@ PageType {
             const disabled = usable.length === 0
             const best = root.bestOf(disabled ? nodes : usable)
             const cc = String(best.countryCode || "??").toUpperCase()
-            const name = best.name || best.region || cc
+            // Имя локации: движок отдаёт подпись самой ноды, иначе подпись соседа по хосту (AWG),
+            // иначе название страны (nodePool, pickerDisplay) — код региона («ee») не показываем.
+            const name = best.name || cc
             if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
                        || String(best.region || "").toLowerCase().includes(q)))
                 continue

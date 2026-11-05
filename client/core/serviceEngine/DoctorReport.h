@@ -10,6 +10,7 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLocale>
 #include <QString>
 #include <QStringList>
 
@@ -168,6 +169,24 @@ inline QString countryNameRu(const QString &code)
     };
     const auto it = t.constFind(cc);
     return it != t.constEnd() ? it.value() : cc;
+}
+
+// Name of a server that came without a label (owner test of 5.1.102, 2026-11-05: Xray listeners
+// showed their region code "ee"/"fi"). Russian UI - the table above; other languages and codes
+// missing from it - the English name from QLocale; an unknown code - the code in capitals. Never
+// the region code.
+inline QString countryDisplayName(const QString &code, const QString &lang)
+{
+    const QString cc = code.trimmed().toUpper();
+    if (cc.isEmpty())
+        return QString();
+    if (lang.startsWith(QLatin1String("ru"))) {
+        const QString ru = countryNameRu(cc);
+        if (ru != cc)
+            return ru;
+    }
+    const QLocale::Territory t = QLocale::codeToTerritory(cc);
+    return t != QLocale::AnyTerritory ? QLocale::territoryToString(t) : cc;
 }
 
 // Стадия 2: СЕРВЕРЫ. На каком сервере сидим и его отклик (live RTT через туннель / app-layer).

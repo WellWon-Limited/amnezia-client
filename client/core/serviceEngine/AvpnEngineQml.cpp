@@ -1967,10 +1967,22 @@ QVariantMap AvpnEngineQml::currentNode() const
             hintOnlyEndpoint = hint.endpoint;
     }
     const bool hintOnly = !pick && !hintOnlyEndpoint.isEmpty();
+    // Owner test of 5.1.102: a listener without a label shows its location's label (the AWG
+    // sibling), else the country name - never the region code (NodeRanking.h::pickerDisplay).
+    QString pickName;
+    if (pick) {
+        QList<PickerRow> loc{{pick->location, pick->proto, pick->name,
+                              doctor::countryDisplayName(pick->countryCode, appLang()), -1}};
+        if (pick->name.isEmpty() && !pick->location.isEmpty())
+            for (const NodeDebugRow &r : s.pool)
+                if (&r != pick && r.location == pick->location)
+                    loc.append({r.location, r.proto, r.name, QString(), -1});
+        pickName = pickerDisplay(loc).constFirst().name;
+    }
     QVariantMap node;
     node["nodeId"]    = pick ? pick->nodeId : QString();
     node["region"]    = pick ? pick->region : QString();
-    node["name"]      = pick ? pick->name : (hintOnly ? tr("Текущий сервер") : QString());
+    node["name"]      = pick ? pickName : (hintOnly ? tr("Текущий сервер") : QString());
     node["countryCode"] = pick ? pick->countryCode : QString(); // AVPN: для флага-эмодзи
     node["endpoint"]  = pick ? pick->endpoint : hintOnlyEndpoint;
     node["ip"]        = endpointHost(pick ? pick->endpoint : hintOnlyEndpoint);
@@ -1996,13 +2008,30 @@ QVariantList AvpnEngineQml::nodePool() const
 {
     QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
 
+    // Owner test of 5.1.102 (2026-11-05): an Xray row shows its exit host - the RTT and the label of
+    // its AWG sibling on the same location, never the shared RU entry's ~14 ms nor the region code
+    // (NodeRanking.h::pickerDisplay). Display only: selection keeps the engine's measurements.
+    const QHash<QString, int> measured = m_engine.measuredRtt();
+    const QString lang = appLang();
+    QList<PickerRow> display;
+    display.reserve(pool.size());
+    for (const QVariant &v : std::as_const(pool)) {
+        const QVariantMap n = v.toMap();
+        display.append({n.value(QStringLiteral("location")).toString(), n.value(QStringLiteral("proto")).toString(),
+                        n.value(QStringLiteral("name")).toString(),
+                        doctor::countryDisplayName(n.value(QStringLiteral("countryCode")).toString(), lang),
+                        measured.value(n.value(QStringLiteral("nodeId")).toString(), -1)});
+    }
+    display = pickerDisplay(display);
+
     QHash<QString, QVariantMap> byId;
     QList<RankRow> rows;
     rows.reserve(pool.size());
-    for (const QVariant &v : pool) {
-        QVariantMap n = v.toMap();
+    for (int i = 0; i < pool.size(); ++i) {
+        QVariantMap n = pool.at(i).toMap();
         const QString id = n.value(QStringLiteral("nodeId")).toString();
-        const int rtt = m_engine.measuredRtt().value(id, -1);
+        const int rtt = display.at(i).rttMs;
+        n[QStringLiteral("name")] = display.at(i).name;
         n[QStringLiteral("measuredRttMs")] = rtt;
         n[QStringLiteral("measuredBars")] = (rtt >= 0) ? barsForNode(rtt) : -1;
         byId.insert(id, n);

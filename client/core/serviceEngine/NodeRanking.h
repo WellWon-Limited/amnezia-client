@@ -9,6 +9,7 @@
 
 #include "SignalQuality.h"
 
+#include <QHash>
 #include <QList>
 #include <QString>
 #include <algorithm>
@@ -55,6 +56,52 @@ inline QString fastestMeasuredNodeId(const QList<RankRow> &rows)
         }
     }
     return best;
+}
+
+// Server picker / Connect card: what a row SHOWS (owner test of 5.1.102, 2026-11-05). An Xray
+// listener shares its exit host (location = host_id) with an AWG node, but its off-tunnel ICMP RTT
+// is measured to the RU entry that relays every listener (~14 ms everywhere), and its label may
+// come empty. A row therefore shows its exit, never the entry and never the raw region code:
+//  - rttMs: an Xray row takes the measured RTT of a non-Xray sibling on the same location;
+//    no measured sibling -> -1 ("—"). Other rows keep their own RTT;
+//  - name: its own label, else the label of a sibling on the same location (non-Xray first),
+//    else fallbackName (the localized country name, filled by the caller).
+// Display only: selection keeps the engine's own measurements.
+struct PickerRow {
+    QString location;     // NodeRotation.h::locationKeyOf ("" = no grouping)
+    QString proto;        // "" = awg
+    QString name;         // label from the subscription (may be empty)
+    QString fallbackName; // localized country name
+    int     rttMs = -1;   // measured off-tunnel RTT, -1 = none
+};
+
+inline QList<PickerRow> pickerDisplay(QList<PickerRow> rows)
+{
+    const auto isXray = [](const PickerRow &r) { return r.proto == QLatin1String("xray"); };
+    QHash<QString, int> exitRtt;        // location -> min measured RTT of a non-Xray row
+    QHash<QString, QString> label;      // location -> label of a non-Xray row
+    QHash<QString, QString> anyLabel;   // location -> label of any row
+    for (const PickerRow &r : rows) {
+        if (r.location.isEmpty())
+            continue;
+        if (!isXray(r) && r.rttMs >= 0 && (!exitRtt.contains(r.location) || r.rttMs < exitRtt.value(r.location)))
+            exitRtt.insert(r.location, r.rttMs);
+        if (r.name.isEmpty())
+            continue;
+        if (!isXray(r) && !label.contains(r.location))
+            label.insert(r.location, r.name);
+        if (!anyLabel.contains(r.location))
+            anyLabel.insert(r.location, r.name);
+    }
+    for (PickerRow &r : rows) {
+        if (isXray(r))
+            r.rttMs = r.location.isEmpty() ? -1 : exitRtt.value(r.location, -1);
+        if (r.name.isEmpty())
+            r.name = label.value(r.location, anyLabel.value(r.location));
+        if (r.name.isEmpty())
+            r.name = r.fallbackName;
+    }
+    return rows;
 }
 
 } // namespace avpn
