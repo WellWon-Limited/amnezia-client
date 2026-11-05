@@ -35,6 +35,7 @@
 #include "WhitelistDetector.h" // AVPN (белые списки): детект РКН-режима «работает только whitelist»
 #include "CrashGuard.h" // AVPN (CR-1): свой краш-репортинг (sentinel+сигналы) -> type:"crash" в /v1/bench/report
 #include "TribeNetInfo.h" // AVPN (Доктор D-3): поколение сотовой/metered/roaming для стадии network
+#include "NetworkMemory.h" // plan v3 step 5: last server that carried data on this network
 #include "UplinkMonitor.h" // AVPN (волна-3): физический аплинк без учёта собственного utun
 #include "RuSplitSentinel.h" // AVPN (Доктор D-3 п.26): фоновый дозор RU-сайтов при вкл. сплите
 #include "TuningStore.h" // AVPN backend-first (T8): потокобезопасный снапшот numbers/features/lists
@@ -101,6 +102,9 @@ extern "C" void AvpnDockBadge_install();
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QUrlQuery> // AVPN (P-ANN): query-параметры GET /v1/announcements
+#include <QCryptographicHash> // plan v3 step 5: sha256 of the /v1/whoami body
+#include <QRandomGenerator>   // plan v3 step 5: whoami nonce
+#include <memory>             // plan v3 step 5: per-request whoami accumulator
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
 #include "platforms/ios/ios_controller.h"
 #include "platforms/ios/IosNativePolicy.h" // AVPN (ревью CL-A r2): потолок диалога «Разрешить VPN»
@@ -2750,6 +2754,12 @@ QJsonObject AvpnEngineQml::benchExtra() const
             // источник статистики молчал, верификацию приняли с оговоркой).
             tr.insert(QStringLiteral("verify_rx_proof"), m_lastVerifyRxProof);
         }
+        // Plan v3 step 5: data-path check (whoami) of the current attempt and its raw facts.
+        if (!m_pathCheck.isEmpty()) {
+            tr.insert(QStringLiteral("path_check"), m_pathCheck);
+            if (!m_lastWhoamiFacts.isEmpty())
+                tr.insert(QStringLiteral("whoami"), m_lastWhoamiFacts);
+        }
         tr.insert(QStringLiteral("probe_fail_streak"), m_liveFailStreak);
         // AVPN (ревью волны, MAJOR-1): подряд идущие провалы data-plane за сессию — паттерн
         // «оператор × сеть × сколько кандидатов не пропустили трафик» ищется по bench_reports.
@@ -4222,10 +4232,16 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // AVPN awg31-xray-v1 (инвариант волны §4.3): xray поднят платформой → движок в Verifying —
         // «Подключено» и все его эффекты (пуши/чипы/живой RTT/история) ТОЛЬКО после первой удачной
         // пробы через туннель (startXrayVerification → finishVerify → onTunnelUpEffects). awg — сразу.
-        if (m_engine.isVerifying())
-            startXrayVerification();
-        else
+        // Plan v3 step 5: with features.node_scan awg verifies too (whoami) - startDataPathVerification.
+        if (m_engine.isVerifying()) {
+            startDataPathVerification();
+        } else {
+            // No check for this Connected (flag off, adopted session): no "data flows" mark. A
+            // repeated Connected of an already connected session keeps the verdict it had.
+            if (engineStateBefore != QLatin1String("connected"))
+                m_pathCheck.clear();
             onTunnelUpEffects();
+        }
         break;
     case Vpn::Error:
         // AVPN awg31-xray-v1: провал подъёма (наш start в полёте) — в локальную историю транспорта
@@ -4302,6 +4318,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
                                  .arg(engineStateBefore, m_engine.interruptedSwitchCause()));
         }
     }
+
+    // Plan v3 step 5: the tunnel is down and nobody wants it up - the check of that session is over.
+    // During the engine's own failover the verdict stays (the caption explains the next path).
+    if (s == Vpn::Disconnected && !m_wantConnected)
+        m_pathCheck.clear();
 
     // AVPN (reconcile-машина): терминальное состояние снимает op-in-flight и разрешает следующий шаг;
     // промежуточные (Connecting/Disconnecting/Reconnecting/Preparing) держим «занято» (UI «подбираем…»).
@@ -5091,6 +5112,26 @@ void AvpnEngineQml::guardedStart()
     // AVPN RU-direct: засеять split-tunnel (рунет CIDR мимо туннеля) ДО подъёма — конфиг должен быть готов
     // к appendSplitTunnelingConfig, который читает routeMode/vpnSites из репозитория при openConnection.
     applyRuBypassSplit();
+
+    // Plan v3 step 5 (features.node_scan, default off): honest "Connected" for every transport and
+    // the network memory as the first candidate after the manual choice. Read once per start (the
+    // tunnel is down here, so the network medium is the physical one); the engine's own failovers
+    // within this attempt keep the setting. QSettings only - no network (§1).
+    {
+        const bool nodeScan = featureEnabled(QStringLiteral("node_scan"), false);
+        m_engine.setVerifyEveryTransport(nodeScan);
+        m_netMemoryKey = nodeScan ? currentNetworkMemoryKey() : QString();
+        const QString remembered = m_netMemoryKey.isEmpty()
+            ? QString()
+            : avpn::networkMemoryLookup(QSettings().value(QStringLiteral("avpn/netMemory")).toByteArray(),
+                                        m_netMemoryKey);
+        m_engine.setNetworkMemoryNode(remembered);
+        m_pathCheck.clear();
+        if (nodeScan)
+            reliabilityEvent(QStringLiteral("node_scan start net=%1 memory=%2")
+                                 .arg(m_netMemoryKey.isEmpty() ? QStringLiteral("-") : m_netMemoryKey,
+                                      remembered.isEmpty() ? QStringLiteral("-") : remembered));
+    }
 
     // AVPN (КОРНЕВОЙ фикс зависания UI + краша на 2-м коннекте): если подписка УЖЕ загружена
     // (bootstrap при старте или прошлый connect) — поднимаем туннель ЛОКАЛЬНО через m_engine.connect(),
@@ -6047,26 +6088,27 @@ void AvpnEngineQml::verifyAttempt(int epoch)
     });
 }
 
-void AvpnEngineQml::finishVerify(int epoch, bool ok)
+void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
 {
     if (epoch != m_verifyEpoch || !m_engine.isVerifying())
         return;
     m_lastVerifyMs = m_verifyClock.elapsed();
     m_lastVerifyOk = ok ? 1 : 0;
     if (ok) {
-        qInfo() << "[avpn xray] data-plane verified in" << m_lastVerifyMs << "ms, attempts"
-                << m_verifyAttempts << "rx-proof" << m_lastVerifyRxProof;
+        qInfo() << "[avpn verify]" << m_engine.currentNodeProto() << "data-plane verified in" << m_lastVerifyMs
+                << "ms, attempts" << m_verifyAttempts << "rx-proof" << m_lastVerifyRxProof;
         m_engine.verifySucceeded();
         m_busy = false;
         onTunnelUpEffects();
         emit changed();
         return;
     }
-    qWarning() << "[avpn xray] data-plane NOT verified after" << m_lastVerifyMs << "ms — failover";
+    qWarning() << "[avpn verify]" << m_engine.currentNodeProto() << "data-plane NOT verified after"
+               << m_lastVerifyMs << "ms — failover" << failReason;
     // Движок: история (провал) + другой транспорт той же локации через двухфазный свитч
     // (down → Disconnected → up), потом соседняя локация; кандидатов нет → Error при поднятом
     // туннеле — гасим честно через reconcile (намерение OFF), как внешний провал.
-    m_engine.verifyFailed();
+    m_engine.verifyFailed(failReason);
     persistTransportHistory();
     // AVPN (независимое ревью волны, MAJOR-1): исчерпан кап подряд идущих провалов data-plane —
     // отдельный текст (дело не в конкретном сервере, а в сети/ТСПУ), намерение снимается там же.
@@ -6079,6 +6121,177 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok)
     m_busy = m_engine.state() == avpn::EngineState::Switching || m_op != Op::None; // волна-4: стоп surrender в пути
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
+}
+
+// Plan v3 step 5: one verification phase, two ways to prove it. features.node_scan (fixed per start
+// in guardedStart -> ServiceEngine::setVerifyEveryTransport): every transport verifies with ONE
+// GET /v1/whoami; flag off: only xray verifies, with the generate_204 loop (as before).
+void AvpnEngineQml::startDataPathVerification()
+{
+    if (m_engine.verifyEveryTransport())
+        startWhoamiVerification();
+    else
+        startXrayVerification();
+}
+
+void AvpnEngineQml::startWhoamiVerification()
+{
+    const int epoch = ++m_verifyEpoch;
+    m_verifyClock.start();
+    m_verifyAttempts = 0;
+    m_lastVerifyRxProof = false;
+    m_busy = true;
+    m_pathCheck = QStringLiteral("checking");
+    qInfo() << "[avpn whoami] tunnel up on" << m_engine.currentNodeId() << m_engine.currentNodeProto()
+            << "— checking the data path";
+    // Same first-attempt delay as the xray verification: routes/DNS of a fresh tunnel settle within
+    // a few hundred ms (chips probed at 0.6 s used to get HostNotFound).
+    QTimer::singleShot(800, this, [this, epoch]() { whoamiAttempt(epoch); });
+}
+
+void AvpnEngineQml::whoamiAttempt(int epoch)
+{
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)
+        return; // the state moved on (stop / loss / switch) - this check is cancelled
+    const QString token = authToken();
+    const qint64 left = avpn::xrayVerifyTimeoutMsTuned() - m_verifyClock.elapsed();
+    if (!m_nam || token.isEmpty() || left < avpn::kWhoamiMinAttemptMs) {
+        finishWhoami(epoch, avpn::WhoamiVerdict::CheckLimited,
+                     QStringLiteral("skipped token=%1 left_ms=%2").arg(int(!token.isEmpty())).arg(left));
+        return;
+    }
+    ++m_verifyAttempts;
+    // Nonce: 128 random bits as hex - inside the contract's [A-Za-z0-9._-]{1,64}.
+    QByteArray nonce;
+    for (int i = 0; i < 4; ++i)
+        nonce += QByteArray::number(QRandomGenerator::system()->generate(), 16).rightJustified(8, '0');
+    // The same API client as every /v1 call (base URL incl. edge-walk, Bearer device token,
+    // armTimeout): while the tunnel is up it goes through the tunnel like them (the API is carved
+    // out of the RU bypass, CONNECT-INVARIANTS §14.5).
+    QUrl url(m_baseUrl + QStringLiteral("/v1/whoami"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("nonce"), QString::fromLatin1(nonce));
+    url.setQuery(q);
+    QNetworkRequest req{url};
+    req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + token.toUtf8());
+    // The body is hashed byte for byte: no transparent decompression, no cache.
+    req.setRawHeader(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("identity"));
+    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+    QNetworkReply *r = m_nam->get(req);
+    avpn::armTimeout(r, int(left)); // the verification budget bounds the request - no timer of its own
+    // Count and hash what actually arrives (readyRead), so a transfer that stalls after the headers
+    // still reports its real size - that is the "data does not pass" case.
+    struct Received {
+        QCryptographicHash hash{QCryptographicHash::Sha256};
+        qint64 bytes = 0;
+    };
+    auto rx = std::make_shared<Received>();
+    auto drain = [r, rx]() {
+        const QByteArray chunk = r->readAll();
+        rx->bytes += chunk.size();
+        rx->hash.addData(chunk);
+        if (rx->bytes > avpn::kWhoamiMaxBodyBytes && r->isRunning())
+            r->abort(); // not our whoami (contract max 256 KiB) - do not download it on metered links
+    };
+    connect(r, &QNetworkReply::readyRead, r, drain);
+    const qint64 t0 = m_verifyClock.elapsed();
+    connect(r, &QNetworkReply::finished, this, [this, r, epoch, nonce, rx, drain, t0]() {
+        r->deleteLater();
+        drain();
+        if (epoch != m_verifyEpoch || !m_engine.isVerifying())
+            return;
+        avpn::WhoamiObservation o;
+        o.httpStatus = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        o.bodyBytes = rx->bytes;
+        o.bodySha256Hex = rx->hash.result().toHex();
+        o.headerSha256 = r->rawHeader(QByteArrayLiteral("X-Whoami-Sha256"));
+        o.sentNonce = nonce;
+        o.headerNonce = r->rawHeader(QByteArrayLiteral("X-Whoami-Nonce"));
+        o.node = avpn::parseWhoamiNode(r->rawHeader(QByteArrayLiteral("X-Whoami-Node")), &o.nodeHeaderPresent);
+        // Facts for the journal and the bench report; the client IP is not written (node + country
+        // are enough to tell "which exit", PII stays out of reports).
+        const QString facts = QStringLiteral("http=%1 err=%2 bytes=%3 node=%4 country=%5 ms=%6 attempt=%7")
+                                  .arg(o.httpStatus)
+                                  .arg(int(r->error()))
+                                  .arg(o.bodyBytes)
+                                  .arg(o.nodeHeaderPresent ? QString::number(o.node) : QStringLiteral("-"))
+                                  .arg(QString::fromLatin1(r->rawHeader(QByteArrayLiteral("X-Whoami-Country"))))
+                                  .arg(m_verifyClock.elapsed() - t0)
+                                  .arg(m_verifyAttempts);
+        const qint64 leftNow = avpn::xrayVerifyTimeoutMsTuned() - m_verifyClock.elapsed();
+        if (avpn::whoamiShouldRetry(o, m_verifyAttempts, leftNow)) {
+            reliabilityEvent(QStringLiteral("whoami_retry ") + facts);
+            QTimer::singleShot(1200, this, [this, epoch]() { whoamiAttempt(epoch); });
+            return;
+        }
+        finishWhoami(epoch, avpn::whoamiVerdict(o), facts);
+    });
+}
+
+void AvpnEngineQml::finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts)
+{
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying())
+        return;
+    const QString node = m_engine.currentNodeId();
+    const QString proto = m_engine.currentNodeProto();
+    m_pathCheck = avpn::whoamiVerdictName(v);
+    m_lastWhoamiFacts = facts;
+    reliabilityEvent(QStringLiteral("whoami verdict=%1 node=%2 proto=%3 net=%4 %5")
+                         .arg(m_pathCheck, node, proto,
+                              m_netMemoryKey.isEmpty() ? QStringLiteral("-") : m_netMemoryKey, facts));
+    if (avpn::whoamiFailsPath(v)) {
+        // No data / past the VPN: the next path of the SAME attempt - step 3 of the §20 ladder
+        // (other transport of this location, then another location), give-up cap and honest error
+        // included (finishVerify -> verifyFailed -> onDead).
+        forgetNetworkPath(node);
+        finishVerify(epoch, false, avpn::whoamiFailoverReason(v));
+        return;
+    }
+    if (v == avpn::WhoamiVerdict::CheckLimited && avpn::isXrayProto(proto)) {
+        // xray still has to prove traffic through the tunnel (§22.5): the existing generate_204
+        // verification decides, in the same epoch and budget.
+        verifyAttempt(epoch);
+        emit changed();
+        return;
+    }
+    if (v == avpn::WhoamiVerdict::Works) {
+        rememberNetworkPath(node);
+        const avpn::TunnelStats st = m_tunnel.readStats();
+        m_lastVerifyRxProof = st.valid && st.rxBytes > 0;
+    }
+    // Works: data flows through our exit. CheckLimited on awg: Connected exactly as before the flag,
+    // without the "data flows" mark.
+    finishVerify(epoch, true);
+}
+
+QString AvpnEngineQml::currentNetworkMemoryKey() const
+{
+    return avpn::networkMemoryKey(doctorNetType(), diagCarrier());
+}
+
+void AvpnEngineQml::rememberNetworkPath(const QString &nodeId)
+{
+    if (m_netMemoryKey.isEmpty() || nodeId.isEmpty())
+        return;
+    QSettings s;
+    const QByteArray before = s.value(QStringLiteral("avpn/netMemory")).toByteArray();
+    const QByteArray after = avpn::networkMemoryRemember(before, m_netMemoryKey, nodeId,
+                                                         QDateTime::currentSecsSinceEpoch());
+    if (after != before)
+        s.setValue(QStringLiteral("avpn/netMemory"), after);
+}
+
+void AvpnEngineQml::forgetNetworkPath(const QString &nodeId)
+{
+    if (m_netMemoryKey.isEmpty() || nodeId.isEmpty())
+        return;
+    QSettings s;
+    const QByteArray before = s.value(QStringLiteral("avpn/netMemory")).toByteArray();
+    const QByteArray after = avpn::networkMemoryForget(before, m_netMemoryKey, nodeId);
+    if (after != before) {
+        s.setValue(QStringLiteral("avpn/netMemory"), after);
+        reliabilityEvent(QStringLiteral("network_memory_forget net=%1 node=%2").arg(m_netMemoryKey, nodeId));
+    }
 }
 
 // AVPN (независимое ревью волны, MAJOR-1): движок сдался — data-plane мёртв на всех перепробованных
@@ -8259,7 +8472,9 @@ void AvpnEngineQml::docGuardFired()
         break;
     }
     case DoctorPhase::Services:
-        docStageDone(doctor::servicesStage(0, 0, {}, false, false));
+        // Plan v3 step 5: the series hung past the guard - verdict from the chips that did answer
+        // (was: a blank Skip; before allDone the fixed 9 s wait always beat the guard).
+        docServicesDone();
         break;
     case DoctorPhase::Speed:
         if (m_docBenchStarted) { // сторож добил бенч: cancel молчалив — флаг гасим сами
@@ -8324,29 +8539,52 @@ void AvpnEngineQml::docStartServices()
     // РЕАЛЬНАЯ проверка сервисов ЧЕРЕЗ туннель: WhatsApp/Telegram/YouTube/Instagram (те же
     // чипы, что на главном экране). Запускаем пробу и ждём заполнения m_serviceStatus.
     probeServices();
-    QTimer::singleShot(9000, this, [this, e = m_docEpoch] {
+    // Plan v3 step 5: the stage ends when the probe series ends (ServiceProbe::allDone), not after a
+    // fixed 9 s wait - on a working network that is 1-3 s. A hung series is bounded by the stage
+    // guard (diag_stage_timeout_ms), which now gives the same partial verdict (docGuardFired).
+    // Probes off (service_probes) or nothing to probe -> the verdict from what is known right away.
+    if (!m_svcProbe || !m_svcProbe->inFlight()) {
+        docServicesDone();
+        return;
+    }
+    connect(m_svcProbe, &ServiceProbe::allDone, this, [this, e = m_docEpoch] {
         if (e != m_docEpoch || m_docPhase != DoctorPhase::Services) return;
-        int works = 0, total = 0;
-        QStringList blocked;
-        for (const QVariant &v : std::as_const(m_serviceStatus)) {
-            const QVariantMap m = v.toMap();
-            const int stt = m.value(QStringLiteral("state")).toInt();
-            const QString label = m.value(QStringLiteral("label")).toString();
-            if (stt < 0) continue; // unknown/не измерено — не считаем ни за, ни против
-            ++total;
-            if (stt == 0)      blocked.append(label);  // Blocked
-            else if (stt >= 2) ++works;                // Works (Slow не блок, но и не «недоступно»)
-        }
-        const QString net = benchExtra().value(QStringLiteral("net_type")).toString();
-        const bool wlApplicable = (m_whitelistDetector != nullptr) && net == QLatin1String("cellular");
-        const bool wlActive = m_whitelistDetector && m_whitelistDetector->active();
-        docStageDone(doctor::servicesStage(works, total, blocked, wlApplicable, wlActive));
-    });
+        docServicesDone();
+    }, Qt::SingleShotConnection);
+}
+
+void AvpnEngineQml::docServicesDone()
+{
+    // One verdict per run: the stage guard and allDone can land in the same event-loop turn.
+    if (m_docPhase != DoctorPhase::Services
+        || (!m_docStages.isEmpty() && m_docStages.constLast().id == QLatin1String("services")))
+        return;
+    int works = 0, total = 0;
+    QStringList blocked;
+    for (const QVariant &v : std::as_const(m_serviceStatus)) {
+        const QVariantMap m = v.toMap();
+        const int stt = m.value(QStringLiteral("state")).toInt();
+        const QString label = m.value(QStringLiteral("label")).toString();
+        if (stt < 0) continue; // unknown/не измерено — не считаем ни за, ни против
+        ++total;
+        if (stt == 0)      blocked.append(label);  // Blocked
+        else if (stt >= 2) ++works;                // Works (Slow не блок, но и не «недоступно»)
+    }
+    const QString net = benchExtra().value(QStringLiteral("net_type")).toString();
+    const bool wlApplicable = (m_whitelistDetector != nullptr) && net == QLatin1String("cellular");
+    const bool wlActive = m_whitelistDetector && m_whitelistDetector->active();
+    docStageDone(doctor::servicesStage(works, total, blocked, wlApplicable, wlActive));
 }
 
 void AvpnEngineQml::docStartSpeed()
 {
     docEnter(DoctorPhase::Speed);
+    // Plan v3 step 5: no speed test without a working connection - the bench would measure the
+    // path past the tunnel or wait out its guard (up to 45 s) for nothing.
+    if (!doctor::speedStageApplicable(m_docStages, state() == QLatin1String("connected"))) {
+        docStageDone(doctor::speedStageSkippedNoConnection());
+        return;
+    }
     if (m_benchRunning) { // гонка с админ-панелью — честный Skip, не второй бенч
         docStageDone(doctor::speedStage(-1, 0, 0));
         return;

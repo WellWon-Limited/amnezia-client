@@ -191,8 +191,24 @@ public:
     // Все — без I/O; переходы туннеля, как всегда, приходят колбэками onTunnel*().
     bool isVerifying() const { return m_state == EngineState::Verifying; }
     bool verifySucceeded();
-    bool verifyFailed();
+    // reason: failover reason for onDead; any non-health-DEAD reason goes straight to step 3 of
+    // the ladder (other transport of the same location, then another location).
+    bool verifyFailed(const QString &reason = QStringLiteral("verify failed (failover)"));
     bool feedProbeResult(bool ok);
+
+    // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every
+    // transport, not only xray, enters Verifying after the platform reports the tunnel up; the
+    // facade verifies the data path with GET /v1/whoami and calls verifySucceeded/verifyFailed.
+    // Off (default) = the previous behaviour: awg is Connected at once, xray verifies.
+    void setVerifyEveryTransport(bool on) { m_verifyEveryTransport = on; }
+    bool verifyEveryTransport() const { return m_verifyEveryTransport; }
+
+    // Plan v3 step 5: network memory - the node that last carried data on the current network
+    // (facade: QSettings avpn/netMemory, NetworkMemory.h). connect() takes it as the first
+    // candidate right after the manual choice when it is in the pool, alive, allowed by the
+    // transport mode, not manual_only/RU (§14.3) and not failed in this session. Empty = none.
+    void setNetworkMemoryNode(const QString &nodeId) { m_networkMemoryNodeId = nodeId; }
+    QString networkMemoryNode() const { return m_networkMemoryNodeId; }
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -393,6 +409,7 @@ private:
     QHash<QString, int> failoverRtt() const;
     const SubscriptionNode *findNode(const QString &nodeId) const;
     const SubscriptionNode *pinnedCandidate() const;
+    const SubscriptionNode *networkMemoryCandidate() const; // plan v3 step 5
     bool anySupportedNode() const;
     // Провал data-plane текущей ноды: история + сессионный список провалов.
     void noteDataPlaneFailure();
@@ -476,6 +493,8 @@ private:
     TransportHistory m_transportHistory;
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
+    bool          m_verifyEveryTransport = false; // plan v3 step 5: features.node_scan (see setter)
+    QString       m_networkMemoryNodeId;           // plan v3 step 5: last node that carried data on this network
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
     int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
     bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover

@@ -303,6 +303,20 @@ const SubscriptionNode *ServiceEngine::pinnedCandidate() const
     return candidate;
 }
 
+// Plan v3 step 5: the remembered node (setNetworkMemoryNode) when it can still be raised: in the
+// pool, eligible for automatic choice (supported; xray only with transport_auto_pick), alive,
+// allowed by the transport mode, not manual_only/RU (they never enter automatic choice, §14.3)
+// and not failed in this session.
+const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
+{
+    const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
+    if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, m_transportMode))
+        return nullptr;
+    if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || m_failedThisSession.contains(n->nodeId))
+        return nullptr;
+    return n;
+}
+
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
 {
     Subscription sub;
@@ -647,6 +661,13 @@ bool ServiceEngine::connect(QString &error)
     if (!candidate)
         if (const SubscriptionNode *pinned = pinnedCandidate())
             candidate = *pinned;
+    // Plan v3 step 5: network memory - the node that last carried data on this network goes first
+    // after the manual choice (same eligibility as the automatic paths; no I/O).
+    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto))
+        if (const SubscriptionNode *remembered = networkMemoryCandidate()) {
+            candidate = *remembered;
+            appendSwitchLog(QStringLiteral("network memory: start on %1").arg(remembered->nodeId));
+        }
     if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         // AVPN awg31-xray-v1: локация — по измеренному off-tunnel RTT (кэш AvpnEngineQml::probeNodeRtt),
         // без замеров — weight-ярус (случайно среди равных); транспорт внутри — ранг + история. Без I/O.
@@ -971,7 +992,10 @@ bool ServiceEngine::onTunnelConnected() // AVPN
         // AVPN awg31-xray-v1 (инвариант §4.3): xray поднят платформой (процесс/сокет/маршруты), но
         // «Подключено» — только после первой удачной пробы ЧЕРЕЗ туннель. Фасад ведёт пробу
         // (бюджет xray_verify_timeout_ms) и зовёт verifySucceeded()/verifyFailed().
-        m_state = currentNodeIsXray() ? EngineState::Verifying : EngineState::Connected;
+        // Plan v3 step 5 (features.node_scan): every transport verifies the data path (whoami),
+        // so "Connected" means data flows through our exit, not just a handshake.
+        m_state = (currentNodeIsXray() || m_verifyEveryTransport) ? EngineState::Verifying
+                                                                  : EngineState::Connected;
         return true;
     }
     return false;
@@ -991,13 +1015,15 @@ bool ServiceEngine::verifySucceeded() // AVPN awg31-xray-v1
     return true;
 }
 
-bool ServiceEngine::verifyFailed() // AVPN awg31-xray-v1
+bool ServiceEngine::verifyFailed(const QString &reason) // AVPN awg31-xray-v1
 {
     if (m_state != EngineState::Verifying)
         return false;
     // Туннель платформа считает поднятым → двухфазный свитч (down → Disconnected → up на другой
     // транспорт той же локации, потом соседняя). Ребайнд-heal для xray не имеет смысла (нет WG-сокета).
-    onDead(/*tunnelStillUp=*/true, QStringLiteral("verify failed (failover)"));
+    // Plan v3 step 5: the whoami check passes its own reason ("whoami no data/bypass (failover)");
+    // it is not a health-DEAD reason either, so awg also goes straight to step 3 (data-plane proven dead).
+    onDead(/*tunnelStillUp=*/true, reason.isEmpty() ? QStringLiteral("verify failed (failover)") : reason);
     return true;
 }
 
