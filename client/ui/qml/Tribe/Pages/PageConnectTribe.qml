@@ -66,33 +66,6 @@ PageType {
                                         && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
     readonly property string curProtoVersion: String(root.curNode.protoVersion || "")
 
-    // Владелец, тест 5.1.102 (2026-11-05): бейдж карточки сервера — ONLINE (проверка данных
-    // пройдена) и активный протокол (цвет протокола: Amnezia — accent, Xray Reality — xray).
-    component CardBadge: Rectangle {
-        id: cardBadge
-        property string label: ""
-        property color fg: Theme.color.accent
-        property color fill: Theme.color.badgeAccent
-        implicitHeight: 17
-        implicitWidth: cardBadgeText.implicitWidth + 2 * Theme.space.sm
-        radius: Theme.radius.pill
-        color: cardBadge.fill
-        border.width: 1
-        border.color: cardBadge.fg
-        Accessible.role: Accessible.StaticText
-        Accessible.name: cardBadge.label
-        Text {
-            id: cardBadgeText
-            anchors.centerIn: parent
-            text: cardBadge.label
-            textFormat: Text.PlainText
-            color: cardBadge.fg
-            font.family: Theme.font.body
-            font.pixelSize: Theme.font.caption - 1
-            font.weight: Theme.font.wBold
-        }
-    }
-
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
     // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
     // если взведено действием пользователя и app активно (Haptic.playArmed) — автофейловер и
@@ -970,7 +943,7 @@ PageType {
                             readonly property real cellW: Math.max(onlineBadge.implicitWidth, protoBadge.implicitWidth)
                             Item {
                                 width: badgeCol.cellW; height: infoCol.cellH
-                                CardBadge {
+                                TribeLabelBadge {
                                     id: onlineBadge
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
@@ -982,7 +955,7 @@ PageType {
                             }
                             Item {
                                 width: badgeCol.cellW; height: infoCol.cellH
-                                CardBadge {
+                                TribeLabelBadge {
                                     id: protoBadge
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter

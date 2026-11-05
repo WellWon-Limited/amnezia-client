@@ -34,6 +34,10 @@ PageType {
     // гард undefined currentNode — как в PageLocationsTribe (страница до первой подписки)
     readonly property var cur: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode : ({})
     readonly property bool autoMode: !cur.pinned
+    // ONLINE у строки текущей страны: туннель поднят и проверка данных через выход пройдена
+    // (вердикт works), живая проба не говорит обратное — как бейдж ONLINE на главной.
+    readonly property bool onlineNow: hasEngine && TribeEngine.state === "connected"
+                                      && TribeEngine.pathCheck === "works" && TribeEngine.liveDead !== true
     property string query: ""
 
     // AVPN awg31-xray-v1: режим транспорта — факт из движка (=== undefined на старом бинаре ⇒ "auto").
@@ -489,12 +493,17 @@ PageType {
                                         // xray «Подключено» только после пробы — пока идёт проверка,
                                         // бейдж честно жёлтый, а не зелёный/акцентный
                                         verifying: root.hasEngine && TribeEngine.verifying === true
-                                        // Plan v3 step 5: «данные идут» у активного транспорта —
-                                        // только после пройденной проверки через выход
-                                        dataFlowing: root.hasEngine && TribeEngine.pathCheck === "works"
-                                                     && TribeEngine.state === "connected"
-                                                     && TribeEngine.liveDead !== true
                                     }
+                                }
+                                // Пройденная проверка данных через выход — тот же бейдж ONLINE, что на
+                                // главной (малый вариант), только у строки, где поднят туннель
+                                // (владелец, тест 5.1.102).
+                                TribeLabelBadge {
+                                    visible: row.modelData.isCurrent && root.onlineNow
+                                    small: true
+                                    label: qsTr("ONLINE")
+                                    fg: Theme.color.connected
+                                    fill: Theme.color.badgeOn
                                 }
                             }
 

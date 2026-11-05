@@ -1005,7 +1005,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+192"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+165"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1677,7 +1677,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+167"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+171"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1752,7 +1752,12 @@ A gift for every friend!</translation>
         <translation>ALL LOCATIONS</translation>
     </message>
     <message>
-        <location line="+122"/>
+        <location line="+92"/>
+        <source>ONLINE</source>
+        <translation>ONLINE</translation>
+    </message>
+    <message>
+        <location line="+35"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -2187,7 +2192,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>TribeTransportBadge</name>
     <message>
-        <location filename="../../ui/qml/Tribe/components/TribeTransportBadge.qml" line="+28"/>
+        <location filename="../../ui/qml/Tribe/components/TribeTransportBadge.qml" line="+24"/>
         <source>Xray</source>
         <translation>Xray</translation>
     </message>
@@ -2200,11 +2205,6 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Amnezia</source>
         <translation>Amnezia</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>%1 · данные идут</source>
-        <translation>%1 · data flowing</translation>
     </message>
 </context>
 <context>
