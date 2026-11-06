@@ -3498,6 +3498,7 @@ void AvpnEngineQml::ccVerify()
     req.setTransferTimeout(kCcGuardVerifyMs - 2000);
     m_ccT.start();
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     connect(r, &QNetworkReply::finished, this, [this, r, epoch, rxBefore] {
         r->deleteLater();
         if (epoch != m_ccEpoch)
@@ -4176,12 +4177,18 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // его гашения мертвы, но QNAM их переиспользует — все запросы висели до таймаута 15 с (журнал
     // Mac: /v1/subscription, /v1/account, /v1/devices после каждой смены ноды). Апстрим чистит кэш на
     // Connected (connectionUiController.cpp); чистим и на Disconnected — путь сменился в обе стороны.
-    // Owner test 06.11 (build 134): clearConnectionCache() strands the requests in flight (Qt destroys
-    // its HTTP thread; they ended only by the 15 s timeout - /v1/config included, Xray stayed frozen).
-    // So: our clear only on a real transition (not the first observed status, not a repeat); the
-    // requests in flight are aborted whenever the cache was cleared - by us, or by upstream on every
-    // Connected (adoption included) - and their owners re-issue them over the new path.
-    // DebugSnapshot.h::transitionNetAction, NetAwait.h::resetApiConnections.
+    if (m_nam && s != m_lastTunnelState && (s == Vpn::Connected || s == Vpn::Disconnected))
+        m_nam->clearConnectionCache();
+    // Волна-2: запросы, УЖЕ летящие через погашенный туннель, кэш не спасает — они висели до
+    // таймаута 15 с (журнал 28.09 19:00:34Z). Обрываем их сами (отложенно — finished-лямбды не
+    // должны крутиться внутри обработчика состояния); вызывающие получают обычный сетевой отказ.
+    // Owner test of 5.1.102 (2026-11-05): not on the first status this process observes (Unknown ->
+    // Disconnected at a cold start with the tunnel off) - no tunnel of ours carried those requests,
+    // and the abort used to cancel every startup call, /v1/config included (Xray stayed frozen).
+    // Decision 2026-11-05: the same on Connected - requests sent over the physical path before the
+    // tunnel came up hang once the routes move into it (15 s); their owners re-issue them over the
+    // tunnel. Only the requests running now (snapshot); tunnel probes are kept on Connected.
+    // DebugSnapshot.h::abortInFlightApiOnTransition, NetAwait.h::abortRunningRepliesDeferred.
     {
         const auto observedOf = [](Vpn::ConnectionState st) {
             return st == Vpn::Connected ? ObservedTunnel::Connected
@@ -4189,9 +4196,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
                  : st == Vpn::Error ? ObservedTunnel::Error
                  : st == Vpn::Unknown ? ObservedTunnel::Unknown : ObservedTunnel::Transitional;
         };
-        const TransitionNetAction net = transitionNetAction(observedOf(m_lastTunnelState), observedOf(s));
-        if (m_nam && (net.clearCache || net.abortInFlight))
-            avpn::resetApiConnections(m_nam, net.clearCache, net.abortInFlight);
+        if (m_nam && abortInFlightApiOnTransition(observedOf(m_lastTunnelState), observedOf(s)))
+            avpn::abortRunningRepliesDeferred(m_nam, /*keepTunnelProbes=*/s == Vpn::Connected);
     }
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
@@ -5312,6 +5318,7 @@ void AvpnEngineQml::wakeLivenessProbe()
     QNetworkRequest req{QUrl(QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))};
     req.setTransferTimeout(4000);
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     connect(r, &QNetworkReply::finished, this, [this, r]() {
         r->deleteLater();
         m_wakeProbing = false;
@@ -6108,6 +6115,7 @@ void AvpnEngineQml::verifyAttempt(int epoch)
     const int transferTimeout = int(remaining < 1500 ? 1500 : (remaining > 4000 ? 4000 : remaining));
     req.setTransferTimeout(transferTimeout);
     QNetworkReply *r = m_nam->head(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     const qint64 armedMono = m_verifyClock.elapsed();
     const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
     connect(r, &QNetworkReply::finished, this, [this, r, epoch, transferTimeout, armedMono, armedWall]() {
@@ -6274,6 +6282,7 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     req.setRawHeader(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("identity"));
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *r = m_nam->get(req);
+    avpn::markTunnelProbe(r); // runs over the tunnel that is up: kept on Connected
     avpn::armTimeout(r, int(left)); // the whoami budget bounds the request - no timer of its own
     // Count and hash what actually arrives (readyRead), so a transfer cut after the headers still
     // reports its real size: < 16 KiB = data does not pass, >= 16 KiB cut by our timeout = slow link.
@@ -8611,6 +8620,7 @@ void AvpnEngineQml::docVerifyDataplane()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, hsAge, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::Connect) return;
@@ -9151,6 +9161,7 @@ void AvpnEngineQml::docAltVerify()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;
@@ -9171,6 +9182,7 @@ void AvpnEngineQml::docAltVerify2()
     req.setTransferTimeout(6000);
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *rep = m_nam->head(req);
+    avpn::markTunnelProbe(rep); // runs over the tunnel that is up: kept on Connected
     connect(rep, &QNetworkReply::finished, this, [this, rep, e = m_docEpoch] {
         rep->deleteLater();
         if (e != m_docEpoch || m_docPhase != DoctorPhase::AltNodes) return;

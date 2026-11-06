@@ -77,24 +77,26 @@ inline void armTimeout(QNetworkReply *reply, int timeoutMs = kNetTimeoutMs)
     t->start(timeoutMs);
 }
 
-// Tunnel transition on the shared QNAM (DebugSnapshot.h::transitionNetAction): take the requests
-// running now (snapshot), drop the cached connections if asked (that strands those requests - Qt
-// destroys its HTTP thread), then abort the snapshot on the next event-loop turn (no finished-lambdas
-// inside the caller's state handler) so their owners re-issue them. Requests started later are not
-// touched. abortInFlight without clearCache: someone else (upstream) has just cleared the cache.
-inline void resetApiConnections(QNetworkAccessManager *nam, bool clearCache, bool abortInFlight)
+// Decision 2026-11-05: a request that probes the tunnel itself (verification, whoami, Doctor, wake
+// liveness) - kept when the tunnel comes up (DebugSnapshot.h::abortInFlightApiOnTransition).
+inline void markTunnelProbe(QNetworkReply *reply)
+{
+    if (reply)
+        reply->setProperty("avpn_tunnel_probe", true);
+}
+
+// Abort the requests running on `nam` NOW (snapshot), deferred to the next event-loop turn (no
+// finished-lambdas inside the caller's state handler). Requests started later in the same event are
+// not touched. keepTunnelProbes - leave the ones marked by markTunnelProbe running.
+inline void abortRunningRepliesDeferred(QNetworkAccessManager *nam, bool keepTunnelProbes)
 {
     if (!nam)
         return;
     QList<QPointer<QNetworkReply>> running;
-    if (abortInFlight) {
-        const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
-        for (QNetworkReply *r : replies)
-            if (r->isRunning())
-                running << r;
-    }
-    if (clearCache)
-        nam->clearConnectionCache();
+    const auto replies = nam->findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QNetworkReply *r : replies)
+        if (r->isRunning() && !(keepTunnelProbes && r->property("avpn_tunnel_probe").toBool()))
+            running << r;
     if (running.isEmpty())
         return;
     QTimer::singleShot(0, nam, [running]() {

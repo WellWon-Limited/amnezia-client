@@ -97,10 +97,6 @@ void ConfigService::fetchConfig()
                 emit transportFailed();
             else
                 emit transportOk();
-            // Owner test 06.11: while this process still runs on the LKG copy (xray_client frozen),
-            // a failed fetch does not throttle the foreground refresh - the next return retries.
-            if (!m_fresh)
-                m_lastFetchMs = -1;
             reportNetworkFailure();
             return;
         }

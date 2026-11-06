@@ -510,28 +510,18 @@ inline ApiOutcome classifyApiOutcome(int httpCode, bool canceled, bool timedOut,
     return ApiOutcome::Failure;
 }
 
-// QNetworkAccessManager::clearConnectionCache() strands every request in flight: Qt destroys its
-// HTTP thread and the reply never finishes - only our 15 s armTimeout ends it (measured on Qt 6.11.1;
-// owner's journal 06.11 10:31:21, build 134: /v1/config, /v1/edges, /v1/bypass-lists, support and
-// announcements started at launch all timed out at 15 s after the adoption of a live tunnel, so the
-// process stayed on the cached config with Xray frozen). Two parties clear the shared QNAM:
-//  - we, on a real tunnel transition to Connected/Disconnected (keep-alive connections of the old
-//    path are dead); not on the first status a process observes (Unknown -> X: no tunnel of ours
-//    carried them), not on a repeat of the same state;
-//  - upstream ConnectionUiController, on EVERY Connected (adoption and repeats included).
-// Whoever cleared, the requests in flight at that moment are aborted right away (their owners
-// re-issue them over the new path) instead of hanging for 15 s. Decision 2026-11-05 + owner test 06.11.
-struct TransitionNetAction {
-    bool clearCache = false;
-    bool abortInFlight = false;
-};
-inline TransitionNetAction transitionNetAction(ObservedTunnel previous, ObservedTunnel now)
+// Decision 2026-11-05 (owner test of 5.1.102): API requests in flight when the tunnel comes UP were
+// sent over the physical interface and hang once the routes move into the tunnel (journal:
+// /v1/subscription started 2 s before Connected timed out at 15 s); requests in flight when it goes
+// DOWN went through the dead tunnel. Abort them on both transitions so their owners re-issue them
+// over the new path. Not on the first status a process observes (Unknown -> X: no tunnel of ours
+// carried them), not on a repeat of the same state. On Connected the tunnel probes (verification,
+// whoami, Doctor, wake liveness) are kept - they run over the tunnel that just came up.
+inline bool abortInFlightApiOnTransition(ObservedTunnel previous, ObservedTunnel now)
 {
-    TransitionNetAction a;
-    a.clearCache = previous != ObservedTunnel::Unknown && previous != now
-                   && (now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected);
-    a.abortInFlight = a.clearCache || now == ObservedTunnel::Connected;
-    return a;
+    if (previous == ObservedTunnel::Unknown || previous == now)
+        return false;
+    return now == ObservedTunnel::Connected || now == ObservedTunnel::Disconnected;
 }
 
 // A request we aborted ourselves (OperationCanceled without our timeout mark) is re-issued once by
