@@ -69,6 +69,33 @@ jobs:
         archive: false
         retention-days: 7
 
+    # The next two steps launch the built GUI (update smoke and first-run screenshot). A launched
+    # Tribe enrols on its own (POST /v1/trial) and later uploads crash reports; against production
+    # every push created a real trial account and an os=server2025 device plus a dirty_exit report
+    # (incident review 06.11). From here on the runner is cut off from the control plane:
+    #  - AVPN_API_URL (via GITHUB_ENV: every later step and every process it starts inherits it)
+    #    points the app at a closed loopback port, so enrolment and crash upload have nowhere to go;
+    #  - the compiled-in API entries (kBakedEdges in AvpnEngineQml.cpp) are sunk in hosts: after
+    #    three failures ConfigService edge-walks to them even with AVPN_API_URL set, and an app
+    #    started without this env (installer, old build) would use them directly.
+    # The first screen (onboarding) needs no network: the screenshot and the window check work offline.
+    # The site tribevpn.com stays reachable: the smoke test downloads the published installer from it.
+    - name: 'Cut the runner off the production API'
+      shell: pwsh
+      run: |
+        $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+        $names = 'api.tribevpn.com', 'vpn.wellwon.hk'
+        $lines = foreach ($n in $names) { "0.0.0.0 $n"; "::1 $n" }
+        Add-Content -Path $hosts -Encoding ascii -Value (@('', '# tribe-windows CI: no production API') + $lines)
+        ipconfig /flushdns | Out-Null
+        foreach ($n in $names) {
+          try { $ips = @([System.Net.Dns]::GetHostAddresses($n) | ForEach-Object { $_.ToString() }) } catch { $ips = @() }
+          Write-Host "$n -> $($ips -join ', ')"
+          $leak = @($ips | Where-Object { $_ -notin '0.0.0.0', '::1' })
+          if ($leak.Count -gt 0) { throw "$n still resolves to $($leak -join ', ')" }
+        }
+        Add-Content -Path $env:GITHUB_ENV -Value 'AVPN_API_URL=http://127.0.0.1:9'
+
     # Смоук инсталлера: обновление поверх версии с сайта, переустановка, удаление, имя TribeVPN.exe;
     # служба оригинальной Amnezia рядом не трогается. Красный шаг = exe НЕ выкладывать на /dl/.
     - name: 'Installer smoke test'
