@@ -111,12 +111,26 @@ inline bool showEstablishedAsConnected(bool connectPending, bool previouslyLive,
 // Such an adopted session is stopped as the app's own stop (expected_app_stop) once the budget is out.
 // Only a session the cold-start rule showed Connected before any handshake check (adopted): our own
 // start of this process stays with the facade's start watchdog and ladder (wave-3).
-inline bool stopNeverConnectedAdoptedSession(bool shownConnectedBeforeHandshake, bool connectPending,
-                                             bool statsAnswered, long long lastHandshakeSec,
-                                             unsigned long long rxBytes, unsigned long long rxThreshold)
+// Review of 136: also only when the same status reply shows the session was never revived - awg-apple
+// tribe.11 soft restart (wgTurnOff/On after ~225 s stall) recreates the engine and resets handshake/rx
+// to 0 inside a session that worked before (roam.soft_restarts > 0 / roam.resumes > 0; counters absent
+// = unknown = keep) - and while the device has a network path (a session On-Demand raised while offline
+// never handshook because there was no network).
+struct DeadAdoptedSession {
+    bool shownConnectedBeforeHandshake = false;
+    bool connectPending = false;
+    bool statsAnswered = false;               // the NE answered the status with handshake data
+    long long lastHandshakeSec = -1;          // last_handshake_time_sec (0 = never)
+    unsigned long long rxBytes = 0;
+    unsigned long long rxThreshold = 0;
+    long long softRestarts = -1;              // roam.soft_restarts of the same reply, -1 = absent
+    long long resumes = -1;                   // roam.resumes of the same reply, -1 = absent
+    bool uplinkUp = false;                    // a physical network path exists (unknown = false)
+};
+inline bool stopNeverConnectedAdoptedSession(const DeadAdoptedSession &s)
 {
-    return shownConnectedBeforeHandshake && !connectPending && statsAnswered && lastHandshakeSec == 0
-        && rxBytes < rxThreshold;
+    return s.shownConnectedBeforeHandshake && !s.connectPending && s.statsAnswered && s.lastHandshakeSec == 0
+        && s.rxBytes < s.rxThreshold && s.softRestarts == 0 && s.resumes == 0 && s.uplinkUp;
 }
 
 inline DisconnectDecision decideDisconnect(const DisconnectInputs &in)

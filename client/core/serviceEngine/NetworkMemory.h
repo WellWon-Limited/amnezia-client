@@ -15,6 +15,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QString>
 
 namespace avpn {
@@ -123,6 +124,25 @@ inline QByteArray networkMemoryClear(const QByteArray &json, const QString &key)
         out.append(o);
     }
     return removed ? netmemory_detail::save(out) : json;
+}
+
+// Stored copy (QSettings key avpn/netMemory) - the facade reads it at the start of each attempt
+// (guardedStart) and forgets a node after a failed start or a failed data check. One place for the
+// key so a test can prove "forgotten -> the next start reads nothing" on the same code.
+inline constexpr char kNetworkMemorySettingsKey[] = "avpn/netMemory";
+inline QString networkMemoryReadStored(QSettings &s, const QString &key, qint64 nowSec)
+{
+    return networkMemoryLookup(s.value(QLatin1String(kNetworkMemorySettingsKey)).toByteArray(), key, nowSec);
+}
+// true = the stored copy changed (the node was remembered for this key and is gone now).
+inline bool networkMemoryForgetStored(QSettings &s, const QString &key, const QString &nodeId)
+{
+    const QByteArray before = s.value(QLatin1String(kNetworkMemorySettingsKey)).toByteArray();
+    const QByteArray after = networkMemoryForget(before, key, nodeId);
+    if (after == before)
+        return false;
+    s.setValue(QLatin1String(kNetworkMemorySettingsKey), after);
+    return true;
 }
 
 } // namespace avpn

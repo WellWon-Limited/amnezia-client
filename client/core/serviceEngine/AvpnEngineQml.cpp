@@ -792,6 +792,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_watchdog.setInterval(startWatchdogMs()); // true — потолок диалога; false — обычный бюджет
         m_watchdog.start();
     });
+    // Review of 136: the native stops an adopted session that never completed a handshake only while
+    // the device has a physical network path (an On-Demand session raised offline is not dead) - and
+    // tells us, so the journal names the real reason instead of external_loss.
+    IosController::Instance()->setUplinkProbe([] { return avpn::UplinkMonitor::instance()->up(); });
+    connect(IosController::Instance(), &IosController::adoptedDeadSessionStopped, this, [this]() {
+        m_adoptedDeadStop = true;
+        reliabilityEvent(QStringLiteral("adopted_dead_session_stop node=%1").arg(m_engine.currentNodeId()));
+    }, Qt::QueuedConnection);
     // AVPN (A13/K4): итог rebind в NE → шаг лечения движка (performed=false = провал шага 1).
     connect(IosController::Instance(), &IosController::rebindFinished, this, [this](bool performed) {
         reliabilityEvent(QStringLiteral("rebind_result performed=%1").arg(performed));
@@ -4338,7 +4346,9 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
                                             interrupted, componentLost, uplinkUp());
         if (loss == LossClass::External) {
             m_wantConnected = false;
-            reliabilityEvent(QStringLiteral("intent_off why=external_loss")); // U10: кто снял намерение
+            // U10: кто снял намерение. Review of 136: our own native stop of a dead adopted session.
+            reliabilityEvent(m_adoptedDeadStop ? QStringLiteral("intent_off why=adopted_dead_session")
+                                               : QStringLiteral("intent_off why=external_loss"));
         } else if (loss == LossClass::NoNetwork && m_wantConnected) {
             m_waitUplink = true;
             reliabilityEvent(QStringLiteral("loss class=no_network intent kept"));
@@ -4351,6 +4361,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
             reliabilityEvent(QStringLiteral("engine_switch_lost state_before=%1 cause=%2")
                                  .arg(engineStateBefore, m_engine.interruptedSwitchCause()));
         }
+        m_adoptedDeadStop = false; // review of 136: the reason belongs to this one terminal state
     }
 
     // Plan v3 step 5: the tunnel is down and nobody wants it up - the check of that session is over.
@@ -5170,10 +5181,11 @@ void AvpnEngineQml::guardedStart()
         // Read the memory only for a start the user asked for with automatic choice: not on the
         // explicit «Авто» tap (fastest by measurement), «Заменить сервер», Doctor or the node sweep.
         const QString key = networkMemoryAllowed() ? m_attemptNetKey : QString();
-        const QString remembered = key.isEmpty()
-            ? QString()
-            : avpn::networkMemoryLookup(QSettings().value(QStringLiteral("avpn/netMemory")).toByteArray(), key,
-                                        QDateTime::currentSecsSinceEpoch());
+        QString remembered;
+        if (!key.isEmpty()) {
+            QSettings st;
+            remembered = avpn::networkMemoryReadStored(st, key, QDateTime::currentSecsSinceEpoch());
+        }
         m_engine.setNetworkMemoryNode(remembered);
         m_pathCheck.clear();
         // Owner test 06.11: a remembered node without a fresh RTT (not in the selection pool) is not
@@ -6454,12 +6466,8 @@ void AvpnEngineQml::forgetNetworkPath(const QString &nodeId)
     if (key.isEmpty())
         return;
     QSettings s;
-    const QByteArray before = s.value(QStringLiteral("avpn/netMemory")).toByteArray();
-    const QByteArray after = avpn::networkMemoryForget(before, key, nodeId);
-    if (after != before) {
-        s.setValue(QStringLiteral("avpn/netMemory"), after);
+    if (avpn::networkMemoryForgetStored(s, key, nodeId))
         reliabilityEvent(QStringLiteral("network_memory_forget net=%1 node=%2").arg(key, nodeId));
-    }
 }
 
 // Owner test 06.11 (device 36, build 135): a start the network memory chose never came up (native

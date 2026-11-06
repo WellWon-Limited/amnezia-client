@@ -54,7 +54,7 @@ if [ -n "${BASE:-}" ]; then
     DEFS+=(-DHARNESS_OLD=1)
 fi
 
-COMMON=(-std=c++17 -DQ_OS_IOS -DMACOS_NE=1 '-DVPN_NE_BUNDLEID="x.ne"' '-DSWIFT_BRIDGE_OBJC_HEADER="HarnessSwift.h"'
+COMMON=(-std=c++17 -DQ_OS_IOS -DMACOS_NE=1 -DAVPN_IOS_HARNESS=1 '-DVPN_NE_BUNDLEID="x.ne"' '-DSWIFT_BRIDGE_OBJC_HEADER="HarnessSwift.h"'
         -I"$NATIVE" -I"$OUT/shim" -I"$CLIENT/platforms/ios" -F"$QT/lib"
         -I"$QT/lib/QtCore.framework/Headers" -I"$QT/lib/QtQml.framework/Headers" -I"$QT/include"
         -I"$CLIENT" ${DEFS[@]+"${DEFS[@]}"})

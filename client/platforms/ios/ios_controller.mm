@@ -1138,7 +1138,14 @@ void IosController::checkStatus()
         // pauses) — в Qt-лог приложения при изменении, чтобы диагностика видела роуминг даже
         // при выключенном файловом логе NE (ne.log пишется только при isLoggingEnabled).
         QString roamSummary;
+        // AVPN (review of 136): soft restarts / resumes of this session (-1 = the reply has no counters).
+        long long roamSoftRestarts = -1;
+        long long roamResumes = -1;
         if (NSDictionary *roam = [response[@"roam"] isKindOfClass:[NSDictionary class]] ? response[@"roam"] : nil) {
+            if ([roam[@"soft_restarts"] respondsToSelector:@selector(longLongValue)])
+                roamSoftRestarts = [roam[@"soft_restarts"] longLongValue];
+            if ([roam[@"resumes"] respondsToSelector:@selector(longLongValue)])
+                roamResumes = [roam[@"resumes"] longLongValue];
             QStringList parts;
             for (NSString *k in [[roam allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
                 id v = roam[k];
@@ -1150,7 +1157,7 @@ void IosController::checkStatus()
         }
 
         QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
-                                         startFailure, ifaceName, coreLogTail, roamSummary,
+                                         startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             // AVPN (C5/H7): владение заявкой (complete — exactly-once) и применение полезной нагрузки
@@ -1221,17 +1228,26 @@ void IosController::checkStatus()
                         // API шёл в него. Только сессия, показанная Connected правилом холодного старта
                         // (адопт, не наш старт этого процесса — тот ведёт лестница фасада). Гасим как
                         // свой стоп приложения (expected_app_stop), без Error.
-                        if (avpn_ios::stopNeverConnectedAdoptedSession(m_shownConnectedBeforeHandshake,
-                                                                       m_connectPending, hasHandshakeData,
-                                                                       (long long)last_handshake_time_sec,
-                                                                       (unsigned long long)rxBytes,
-                                                                       (unsigned long long)handshakeRxThreshold)
+                        // Review of 136: not a session a soft restart/resume revived (it worked before)
+                        // and not while the device has no network (On-Demand raised it offline).
+                        avpn_ios::DeadAdoptedSession dead;
+                        dead.shownConnectedBeforeHandshake = m_shownConnectedBeforeHandshake;
+                        dead.connectPending = m_connectPending;
+                        dead.statsAnswered = hasHandshakeData;
+                        dead.lastHandshakeSec = (long long)last_handshake_time_sec;
+                        dead.rxBytes = (unsigned long long)rxBytes;
+                        dead.rxThreshold = (unsigned long long)handshakeRxThreshold;
+                        dead.softRestarts = roamSoftRestarts;
+                        dead.resumes = roamResumes;
+                        dead.uplinkUp = m_uplinkProbe ? m_uplinkProbe() : false;
+                        if (avpn_ios::stopNeverConnectedAdoptedSession(dead)
                             && m_currentTunnel
                             && [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
                             qWarning() << "IosController::checkStatus : adopted session never completed a handshake"
                                        << "(rx" << rxBytes << ") — stopping it";
                             m_handshakeAwaiting = false;
                             m_handshakeTimer.invalidate();
+                            emit adoptedDeadSessionStopped();
                             markLocalStopRequested();
                             noteAppStopForCurrentSession();
                             stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);

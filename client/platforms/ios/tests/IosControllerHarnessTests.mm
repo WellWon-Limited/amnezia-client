@@ -1284,6 +1284,84 @@ static void test_rebind_superseded_result_dropped()
     if (!obs.rebinds.empty()) CHECK(obs.rebinds.back(), "итог нового rebind не performed");
 }
 
+#ifndef HARNESS_OLD
+// Review of 136: a session iOS has kept Connected for 10 min (the cold-start rule shows it Connected,
+// it is adopted) whose NE answers "never handshook". Handshake budget 150 ms x 2 for the test.
+static int g_deadSignals = 0;
+static NSDictionary *stalledReply(id softRestarts, id resumes) // nil counter = absent from the reply
+{
+    NSMutableDictionary *r = [[statusReply(@"run-1", @"cfg-1", 0, 0) mutableCopy] autorelease];
+    NSMutableDictionary *roam = [NSMutableDictionary dictionary];
+    if (softRestarts) roam[@"soft_restarts"] = softRestarts;
+    if (resumes) roam[@"resumes"] = resumes;
+    r[@"roam"] = roam;
+    return r;
+}
+static HarnessSession *adoptStalledSession(NSDictionary *reply, bool uplinkUp)
+{
+    IosController *c = IosController::Instance();
+    c->setRawConfigForTest(awgConfig(150, 2));
+    c->setUplinkProbe([uplinkUp] { return uplinkUp; });
+    QObject::connect(c, &IosController::adoptedDeadSessionStopped, [] { ++g_deadSignals; });
+    HarnessSession *s = newSession(NEVPNStatusConnected);
+    s.runtimeGeneration = @"run-1";
+    s.hConnectedDate = [NSDate dateWithTimeIntervalSinceNow:-600];
+    s.statusReply = reply;
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    g_loadMode = LoadMode::Deliver;
+    c->requestReconcileStatus();
+    return s;
+}
+static void runStatusPolls(int ms)
+{
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll.start(30);
+    spin(ms);
+}
+static void test_adopted_dead_session_stopped()
+{
+    HarnessSession *s = adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/true);
+    runStatusPolls(1500);
+    CHECK(obs.has(Vpn::ConnectionState::Connected), "cold-start rule did not show the adopted session");
+    CHECK(s.stopCalls == 1, "dead adopted session not stopped");
+    CHECK(g_deadSignals == 1, "adoptedDeadSessionStopped not emitted");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "dead adopted session stop emitted Error");
+    bool appStop = false;
+    for (const auto &r : obs.reasons)
+        if (r.first == QStringLiteral("expected_app_stop") && !r.second) appStop = true;
+    CHECK(appStop, "stop reason is not expected_app_stop intentional=false");
+}
+static void expectAdoptedKept(HarnessSession *s, const char *what)
+{
+    runStatusPolls(1500);
+    CHECK(s.stopCalls == 0, what);
+    CHECK(g_deadSignals == 0, "adoptedDeadSessionStopped emitted for a kept session");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "kept adopted session got Error");
+}
+static void test_adopted_soft_restarted_session_kept()
+{
+    expectAdoptedKept(adoptStalledSession(stalledReply(@1, @0), true), "soft-restarted session stopped");
+    CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "soft-restarted session is not Reconnecting");
+}
+static void test_adopted_resumed_session_kept()
+{
+    expectAdoptedKept(adoptStalledSession(stalledReply(@0, @2), true), "resumed session stopped");
+}
+static void test_adopted_session_uplink_down_kept()
+{
+    expectAdoptedKept(adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/false), "session stopped while offline");
+}
+static void test_adopted_session_empty_reply_kept()
+{
+    expectAdoptedKept(adoptStalledSession(nil, true), "session stopped without an NE answer");
+}
+static void test_adopted_session_no_counters_kept()
+{
+    expectAdoptedKept(adoptStalledSession(stalledReply(nil, nil), true), "session stopped without roam counters");
+}
+#endif
+
 struct Test { const char *name; void (*fn)(); };
 // Разбор журнала 25.09: холодный старт при сессии, которую iOS держит Connected давно (приложение
 // выгрузили, туннель жил), — Connected сразу, без Connecting до ответа NE на status.
@@ -1349,6 +1427,14 @@ static const Test kTests[] = {
     {"rebind_superseded_result_dropped", test_rebind_superseded_result_dropped},
     {"cold_start_established_session_connected", test_cold_start_established_session_connected},
     {"fresh_session_waits_handshake", test_fresh_session_waits_handshake},
+#ifndef HARNESS_OLD
+    {"adopted_dead_session_stopped", test_adopted_dead_session_stopped},
+    {"adopted_soft_restarted_session_kept", test_adopted_soft_restarted_session_kept},
+    {"adopted_resumed_session_kept", test_adopted_resumed_session_kept},
+    {"adopted_session_uplink_down_kept", test_adopted_session_uplink_down_kept},
+    {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
+    {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
+#endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
     {"stop_disarms_on_demand_before_stop", test_stop_disarms_on_demand_before_stop},
     {"stop_without_on_demand_is_immediate", test_stop_without_on_demand_is_immediate},

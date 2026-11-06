@@ -61,6 +61,11 @@ public:
 
     void getBackendLogs(std::function<void(const QString &)> &&callback);
     void checkStatus();
+    // AVPN (review of 136): the facade provides the physical uplink state (UplinkMonitor).
+    void setUplinkProbe(std::function<bool()> probe) { m_uplinkProbe = std::move(probe); }
+#ifdef AVPN_IOS_HARNESS
+    void setRawConfigForTest(const QJsonObject &config) { m_rawConfig = config; }
+#endif
     void requestReconcileStatus();
     QVariantMap sessionMetadata() const;
 
@@ -140,6 +145,9 @@ signals:
     // это время остаётся в своём Op::Starting. Если за ожидание профиль снова поднялся (Настройки),
     // это уже живая сессия — liveSessionFound.
     void liveSessionFound();
+    // AVPN (owner test 06.11, review of 136): the native stopped an adopted session that never
+    // completed a handshake (stopNeverConnectedAdoptedSession) - the facade logs the real reason.
+    void adoptedDeadSessionStopped();
     // AVPN (контракт K4): итог provider message {"action":"rebind"}. performed=true — NE ответил
     // {"rebind":"performed"}; false — {"rebind":"denied",...}, нет живого туннеля, ошибка отправки
     // или ответ не пришёл за 3 с. Эмитится ровно один раз на каждый вызов rebindTunnel(), вернувший
@@ -238,6 +246,9 @@ private:
     // AVPN (owner test 06.11): the cold-start rule (showEstablishedAsConnected) showed this session
     // Connected before any handshake check - it is adopted, not our start of this process.
     bool m_shownConnectedBeforeHandshake = false;
+    // AVPN (review of 136): "a physical network path exists" - set by the facade (UplinkMonitor);
+    // unset = unknown = no stop of a dead adopted session.
+    std::function<bool()> m_uplinkProbe;
     QElapsedTimer m_handshakeTimer;
     int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;

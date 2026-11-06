@@ -6,6 +6,9 @@
 // generate_204 check (tiebreak). A false NoData/BypassVpn sends a healthy user through the failover
 // chain, a false Works shows a green mark on a dead path - both directions are pinned below.
 #include "../NetworkMemory.h"
+#include <QDir>
+#include <QFile>
+#include <QSettings>
 #include "../WhoamiVerdict.h"
 
 #include <QCryptographicHash>
@@ -347,6 +350,29 @@ int main()
                   == QLatin1String("https://dev.example:8443"),
               "xray on a dev backend (AVPN_API_URL) -> the dev base, not the prod edge");
         CHECK(QString::fromLatin1(avpn::kWhoamiXrayEdge) == alt, "alternate edge = the baked vpn.wellwon.hk");
+    }
+
+    // --- network memory: the stored copy (owner test 06.11, review of 136) ---
+    // AvpnEngineQml::forgetNetworkMemoryAfterFailedStart -> forgetNetworkPath -> networkMemoryForgetStored;
+    // guardedStart -> networkMemoryReadStored. Same functions, an isolated settings file.
+    {
+        const QString path = QDir::tempPath() + QStringLiteral("/tribe-netmemory-check.ini");
+        QFile::remove(path);
+        QSettings st(path, QSettings::IniFormat);
+        const qint64 now = 1'800'000'000;
+        st.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey),
+                    avpn::networkMemoryRemember(QByteArray(), QStringLiteral("wifi"), QStringLiteral("15"), now - 60));
+        CHECK(avpn::networkMemoryReadStored(st, QStringLiteral("wifi"), now) == QLatin1String("15"),
+              "stored: the next start reads the remembered node");
+        CHECK(!avpn::networkMemoryForgetStored(st, QStringLiteral("wifi"), QStringLiteral("11")),
+              "stored: forgetting another node changes nothing");
+        CHECK(avpn::networkMemoryForgetStored(st, QStringLiteral("wifi"), QStringLiteral("15")),
+              "stored: the failed start's node is forgotten");
+        st.sync();
+        QSettings reread(path, QSettings::IniFormat); // a new process / the next guardedStart
+        CHECK(avpn::networkMemoryReadStored(reread, QStringLiteral("wifi"), now).isEmpty(),
+              "stored: after a failed start the next start reads nothing");
+        QFile::remove(path);
     }
 
     // --- network memory ---

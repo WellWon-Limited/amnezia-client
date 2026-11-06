@@ -288,13 +288,27 @@ static void testEstablishedSession()
 static void testNeverConnectedAdoptedSession()
 {
     using namespace avpn_ios;
-    assert(stopNeverConnectedAdoptedSession(true, false, true, 0, 0, 1024));      // device 36: tx=1493 rx=0
-    assert(stopNeverConnectedAdoptedSession(true, false, true, 0, 1023, 1024));   // a few bytes, below threshold
-    assert(!stopNeverConnectedAdoptedSession(false, false, true, 0, 0, 1024));    // our start of this process
-    assert(!stopNeverConnectedAdoptedSession(true, true, true, 0, 0, 1024));      // our start in flight
-    assert(!stopNeverConnectedAdoptedSession(true, false, false, -1, 0, 1024));   // NE did not answer: maybe false
-    assert(!stopNeverConnectedAdoptedSession(true, false, true, 1762400000, 0, 1024)); // had a handshake once
-    assert(!stopNeverConnectedAdoptedSession(true, false, true, 0, 4096, 1024));  // data came back
+    DeadAdoptedSession dead; // device 36: adopted by the cold-start rule, tx=1493 rx=0, never revived
+    dead.shownConnectedBeforeHandshake = true;
+    dead.statsAnswered = true;
+    dead.lastHandshakeSec = 0;
+    dead.rxBytes = 0;
+    dead.rxThreshold = 4096;
+    dead.softRestarts = 0;
+    dead.resumes = 0;
+    dead.uplinkUp = true;
+    assert(stopNeverConnectedAdoptedSession(dead));
+    auto with = [&dead](auto edit) { DeadAdoptedSession d = dead; edit(d); return stopNeverConnectedAdoptedSession(d); };
+    assert(with([](DeadAdoptedSession &d) { d.rxBytes = 4095; }));                  // a few bytes, below threshold
+    assert(!with([](DeadAdoptedSession &d) { d.shownConnectedBeforeHandshake = false; })); // our start
+    assert(!with([](DeadAdoptedSession &d) { d.connectPending = true; }));         // our start in flight
+    assert(!with([](DeadAdoptedSession &d) { d.statsAnswered = false; d.lastHandshakeSec = -1; })); // no answer
+    assert(!with([](DeadAdoptedSession &d) { d.lastHandshakeSec = 1762400000; }));  // had a handshake once
+    assert(!with([](DeadAdoptedSession &d) { d.rxBytes = 4096; }));                // data came back
+    assert(!with([](DeadAdoptedSession &d) { d.softRestarts = 1; }));              // tribe.11 soft restart
+    assert(!with([](DeadAdoptedSession &d) { d.resumes = 2; }));                   // resumed after a pause
+    assert(!with([](DeadAdoptedSession &d) { d.softRestarts = -1; d.resumes = -1; })); // counters absent
+    assert(!with([](DeadAdoptedSession &d) { d.uplinkUp = false; }));              // no network (On-Demand offline)
 }
 
 // On-Demand (2026-09-30): правило — только для доказанно рабочей сессии; любой стоп его снимает.

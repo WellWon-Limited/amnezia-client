@@ -1497,6 +1497,7 @@ private:
     StartOrigin                  m_startOrigin = StartOrigin::User;
     StartOrigin                  m_attemptOrigin = StartOrigin::User;
     QString                      m_attemptNetKey;                  // network-memory key of the current attempt
+    bool                         m_adoptedDeadStop = false;        // review of 136: native stopped a dead adopted session
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного
