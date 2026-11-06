@@ -457,6 +457,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     [m_serverAddress release];
     m_serverAddress = [configuration.value(configKey::hostName).toString().toNSString() copy];
     m_handshakeConfirmed = false;
+    m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): our own start from here on
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
     m_handshakeTimeouts = 0;
@@ -1214,8 +1215,30 @@ void IosController::checkStatus()
                         // и VPN выключался через 36 с после открытия приложения. Как апстрим — только
                         // Reconnecting; мёртвую сессию лечит лестница NE/HealthLoop. Таймауты копим
                         // дальше, чтобы не спамить лог.
-                        m_handshakeTimer.restart();
-                        emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                        // AVPN (owner test 06.11): кроме сессии, которая не завершила НИ ОДНОГО
+                        // рукопожатия при ответившем NE (last_handshake_time_sec == 0, rx ниже порога):
+                        // это не ложный таймаут — туннель не работал никогда, а весь трафик телефона и
+                        // API шёл в него. Только сессия, показанная Connected правилом холодного старта
+                        // (адопт, не наш старт этого процесса — тот ведёт лестница фасада). Гасим как
+                        // свой стоп приложения (expected_app_stop), без Error.
+                        if (avpn_ios::stopNeverConnectedAdoptedSession(m_shownConnectedBeforeHandshake,
+                                                                       m_connectPending, hasHandshakeData,
+                                                                       (long long)last_handshake_time_sec,
+                                                                       (unsigned long long)rxBytes,
+                                                                       (unsigned long long)handshakeRxThreshold)
+                            && m_currentTunnel
+                            && [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
+                            qWarning() << "IosController::checkStatus : adopted session never completed a handshake"
+                                       << "(rx" << rxBytes << ") — stopping it";
+                            m_handshakeAwaiting = false;
+                            m_handshakeTimer.invalidate();
+                            markLocalStopRequested();
+                            noteAppStopForCurrentSession();
+                            stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);
+                        } else {
+                            m_handshakeTimer.restart();
+                            emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
+                        }
                     } else if (m_handshakeTimeouts >= handshakeMaxTimeouts) {
                         qWarning() << "IosController::checkStatus : handshake failed after"
                                    << m_handshakeTimeouts << "timeouts — stopping tunnel";
@@ -1507,6 +1530,8 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 nextState = avpn_ios::showEstablishedAsConnected(m_connectPending, previouslyLive, connectedForMs)
                         ? Vpn::ConnectionState::Connected
                         : Vpn::ConnectionState::Connecting;
+                if (nextState == Vpn::ConnectionState::Connected)
+                    m_shownConnectedBeforeHandshake = true; // AVPN (owner test 06.11): adopted session
                 if (!m_handshakeAwaiting) {
                     m_handshakeAwaiting = true;
                     m_handshakeTimer.restart();
@@ -1516,6 +1541,7 @@ void IosController::vpnStatusDidChange(void *pNotification)
         } else if (session.status != NEVPNStatusConnected) {
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
+            m_shownConnectedBeforeHandshake = false;
             m_handshakeTimer.invalidate();
             m_handshakeTimeouts = 0;
             m_statusRequests.invalidate();

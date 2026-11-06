@@ -282,6 +282,21 @@ static void testEstablishedSession()
     assert(!showEstablishedAsConnected(false, false, -1));             // время подключения неизвестно
 }
 
+// Owner test 06.11 (device 36): an adopted session that never completed a handshake (NE answered:
+// last_handshake_time_sec == 0, rx below the threshold) is stopped after the budget; a false timeout
+// (no stats from the NE) or a session that once had a handshake stays Reconnecting (wave-3).
+static void testNeverConnectedAdoptedSession()
+{
+    using namespace avpn_ios;
+    assert(stopNeverConnectedAdoptedSession(true, false, true, 0, 0, 1024));      // device 36: tx=1493 rx=0
+    assert(stopNeverConnectedAdoptedSession(true, false, true, 0, 1023, 1024));   // a few bytes, below threshold
+    assert(!stopNeverConnectedAdoptedSession(false, false, true, 0, 0, 1024));    // our start of this process
+    assert(!stopNeverConnectedAdoptedSession(true, true, true, 0, 0, 1024));      // our start in flight
+    assert(!stopNeverConnectedAdoptedSession(true, false, false, -1, 0, 1024));   // NE did not answer: maybe false
+    assert(!stopNeverConnectedAdoptedSession(true, false, true, 1762400000, 0, 1024)); // had a handshake once
+    assert(!stopNeverConnectedAdoptedSession(true, false, true, 0, 4096, 1024));  // data came back
+}
+
 // On-Demand (2026-09-30): правило — только для доказанно рабочей сессии; любой стоп его снимает.
 static void testOnDemandPolicy()
 {
@@ -356,6 +371,7 @@ int main()
     testStatusAccept();
     testTryLock();
     testEstablishedSession();
+    testNeverConnectedAdoptedSession();
     std::cout << "IosNativePolicyTests: all checks passed\n";
     return 0;
 }

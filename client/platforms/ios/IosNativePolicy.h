@@ -100,6 +100,25 @@ inline bool showEstablishedAsConnected(bool connectPending, bool previouslyLive,
     return !connectPending && !previouslyLive && connectedForMs >= kEstablishedSessionMs;
 }
 
+// Owner test 06.11 (device 36, build 135): the app was relaunched while the NE held a session that
+// had NEVER completed a handshake (node unreachable from that Wi-Fi: tx=1493 rx=0 for ~2 min). iOS
+// reported it Connected, the cold-start rule above showed it Connected, the app adopted it - and every
+// API call and all the phone's traffic went into a dead tunnel ("nothing works"). A session that is
+// not our start (adopted) used to stay Reconnecting forever after the handshake budget (wave-3: do not
+// switch off a live session on a false handshake timeout). Here the NE has ANSWERED the status (stats
+// present) and says the session never completed a handshake (last_handshake_time_sec == 0) and no data
+// came back (rx below the handshake threshold): that is not a false timeout - the tunnel never worked.
+// Such an adopted session is stopped as the app's own stop (expected_app_stop) once the budget is out.
+// Only a session the cold-start rule showed Connected before any handshake check (adopted): our own
+// start of this process stays with the facade's start watchdog and ladder (wave-3).
+inline bool stopNeverConnectedAdoptedSession(bool shownConnectedBeforeHandshake, bool connectPending,
+                                             bool statsAnswered, long long lastHandshakeSec,
+                                             unsigned long long rxBytes, unsigned long long rxThreshold)
+{
+    return shownConnectedBeforeHandshake && !connectPending && statsAnswered && lastHandshakeSec == 0
+        && rxBytes < rxThreshold;
+}
+
 inline DisconnectDecision decideDisconnect(const DisconnectInputs &in)
 {
     // 1. Стоп запросило само приложение для этого поколения: это не решение пользователя.

@@ -235,6 +235,9 @@ private:
     uint64_t m_rxBytes = 0;
     bool m_handshakeAwaiting = false;
     bool m_handshakeConfirmed = false;
+    // AVPN (owner test 06.11): the cold-start rule (showEstablishedAsConnected) showed this session
+    // Connected before any handshake check - it is adopted, not our start of this process.
+    bool m_shownConnectedBeforeHandshake = false;
     QElapsedTimer m_handshakeTimer;
     int m_handshakeTimeouts = 0;
     Vpn::ConnectionState m_lastEmittedState = Vpn::ConnectionState::Unknown;
