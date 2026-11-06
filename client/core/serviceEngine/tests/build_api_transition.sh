@@ -1,6 +1,6 @@
 #!/bin/bash
-# Decision 2026-11-05: in-flight API requests on tunnel transitions (NetAwait.h snapshot abort +
-# DebugSnapshot.h decisions) with a real QNetworkAccessManager and a loopback server.
+# Decision 2026-11-05 + owner test 06.11: tunnel transitions on the shared QNAM (clear + abort of
+# requests in flight, NetAwait.h + DebugSnapshot.h) with a real QNetworkAccessManager and a loopback server.
 set -euo pipefail
 QT="${QT_ROOT:-$HOME/Qt/6.11.1/macos}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

@@ -417,16 +417,23 @@ static void wave4UpstreamBehaviour()
     CHECK(classifyApiOutcome(0, true, true, now - 20000, now - 1000, -1, now) == ApiOutcome::Ignore); // начат до разморозки
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 3000, now) == ApiOutcome::Ignore); // рядом со своим переходом
     CHECK(classifyApiOutcome(0, true, true, now - 16000, -1, now - 9000, now) == ApiOutcome::Failure); // окно вышло
-    // Decision 2026-11-05: in-flight API requests are aborted on both tunnel transitions (re-issued
-    // over the new path), not on the first observed status, not on a repeat of the same state.
-    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Transitional, ObservedTunnel::Connected));  // tunnel up
-    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Disconnected, ObservedTunnel::Connected));
-    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Disconnected));  // tunnel down
-    CHECK(abortInFlightApiOnTransition(ObservedTunnel::Transitional, ObservedTunnel::Disconnected));
-    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Disconnected));   // cold start
-    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Connected));      // adopted session
-    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Connected));    // repeat
-    CHECK(!abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Transitional));
+    // Owner test 06.11: clearConnectionCache() strands requests in flight. Our clear - only on a real
+    // transition; abort whenever someone cleared: we, or upstream on EVERY Connected (adoption too).
+    {
+        const auto act = [](ObservedTunnel p, ObservedTunnel n) {
+            const TransitionNetAction a = transitionNetAction(p, n);
+            return QByteArray(a.clearCache ? "C" : "-") + (a.abortInFlight ? "A" : "-");
+        };
+        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Connected) == "CA");  // tunnel up
+        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Connected) == "CA");
+        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Disconnected) == "CA");  // tunnel down
+        CHECK(act(ObservedTunnel::Transitional, ObservedTunnel::Disconnected) == "CA");
+        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Disconnected) == "--");    // cold start, tunnel off
+        CHECK(act(ObservedTunnel::Unknown, ObservedTunnel::Connected) == "-A");       // adoption: upstream cleared
+        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Connected) == "-A");     // repeat: upstream cleared
+        CHECK(act(ObservedTunnel::Connected, ObservedTunnel::Transitional) == "--");
+        CHECK(act(ObservedTunnel::Disconnected, ObservedTunnel::Disconnected) == "--");
+    }
     CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
     CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no
     CHECK(!reissueAfterOwnAbort(false, false)); // answered / failed by the network -> no
