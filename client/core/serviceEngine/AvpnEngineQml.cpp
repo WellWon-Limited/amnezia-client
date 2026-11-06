@@ -4377,8 +4377,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
                 m_waitUplink = false;
             }
             else if ((s == Vpn::Error && finished == Op::Starting) || engineOwnSwitchLost
-                     || liveSessionLost)
+                     || liveSessionLost) {
                 ++m_startAttempts;                   // connect не удался — считаем попытку (анти-зацикливание)
+                if (finished == Op::Starting)
+                    forgetNetworkMemoryAfterFailedStart("native_error");
+            }
         } else {
             m_busy = true;                           // идёт переход — занято
         }
@@ -4466,8 +4469,10 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     m_opInFlight = false;
     m_busy = false;
     m_watchdog.stop();
-    if (finished == Op::Starting)
+    if (finished == Op::Starting) {
         ++m_startAttempts;
+        forgetNetworkMemoryAfterFailedStart("protocol_error");
+    }
     // AVPN: на iOS «InternalError» (код 101) — ЛОЖНЫЙ: m_vpnProtocol там всегда null (туннель ведёт
     // IosController, это норма), а VpnConnection::lastError() из-за этого отдаёт InternalError. Не пугаем
     // им пользователя (он лез тостом при смене сервера/rotateNext). Реальные ошибки показываем.
@@ -5171,11 +5176,16 @@ void AvpnEngineQml::guardedStart()
                                         QDateTime::currentSecsSinceEpoch());
         m_engine.setNetworkMemoryNode(remembered);
         m_pathCheck.clear();
+        // Owner test 06.11: a remembered node without a fresh RTT (not in the selection pool) is not
+        // used for this attempt - the RTT pick decides (ServiceEngine::networkMemoryCandidate).
+        const QString skip = m_engine.networkMemorySkipReason();
+        const QString memoryLog = remembered.isEmpty() ? QStringLiteral("-")
+            : skip.isEmpty() ? remembered
+                             : QStringLiteral("skipped reason=%1 node=%2").arg(skip, remembered);
         if (nodeScan)
             reliabilityEvent(QStringLiteral("node_scan start origin=%1 net=%2 memory=%3")
                                  .arg(int(m_attemptOrigin))
-                                 .arg(key.isEmpty() ? QStringLiteral("-") : key,
-                                      remembered.isEmpty() ? QStringLiteral("-") : remembered));
+                                 .arg(key.isEmpty() ? QStringLiteral("-") : key, memoryLog));
     }
 
     // AVPN (КОРНЕВОЙ фикс зависания UI + краша на 2-м коннекте): если подписка УЖЕ загружена
@@ -5566,10 +5576,12 @@ void AvpnEngineQml::onWatchdog()
         // Волна-3 (2026-09-28): без физического аплинка попытка НЕ считается — ждём сеть
         // (26.09 12:43: 3×15 с в сеть без default route, маршрут вернулся за секунду до OFF).
         const bool counted = judgeStartFailure(uplinkUp()) == StartFailure::CountAndRetry;
-        if (counted)
+        if (counted) {
             ++m_startAttempts;
-        else
+            forgetNetworkMemoryAfterFailedStart("watchdog_start"); // owner test 06.11
+        } else {
             m_waitUplink = true;
+        }
         // AVPN (фикс-волна 2026-09-22, A1a): это НАШ стоп — через guardedStop (сторож стопа,
         // ограниченные повторы, подтверждение Disconnected), а не голый down() без сторожа.
         m_stopRetries = 0;
@@ -6448,6 +6460,21 @@ void AvpnEngineQml::forgetNetworkPath(const QString &nodeId)
         s.setValue(QStringLiteral("avpn/netMemory"), after);
         reliabilityEvent(QStringLiteral("network_memory_forget net=%1 node=%2").arg(key, nodeId));
     }
+}
+
+// Owner test 06.11 (device 36, build 135): a start the network memory chose never came up (native
+// Error after the handshake budget, protocol error, start watchdog). The retries of this attempt went
+// to the same remembered node again (memory is re-read per start and the session failure list did not
+// cover a failed start), so the ladder never reached the RTT pick. Forget that node for this network:
+// the retry of this attempt and later starts take the RTT pick.
+void AvpnEngineQml::forgetNetworkMemoryAfterFailedStart(const char *why)
+{
+    const QString node = m_engine.networkMemoryStartNode();
+    if (node.isEmpty())
+        return;
+    m_engine.setNetworkMemoryNode(QString());
+    reliabilityEvent(QStringLiteral("network_memory_start_failed why=%1 node=%2").arg(QLatin1String(why), node));
+    forgetNetworkPath(node);
 }
 
 // #6: an explicit «Авто» tap (online reprobe or offline selectAuto) means "the fastest by

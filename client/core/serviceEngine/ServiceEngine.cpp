@@ -326,7 +326,23 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
         return nullptr;
     if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || m_failedThisSession.contains(n->nodeId))
         return nullptr;
+    // Owner test 06.11 (device 36, build 135): the remembered EE2 was unreachable from that Wi-Fi
+    // (ICMP -1 on every round, absent from the selection pool) and every start still raised it - no
+    // handshake, rx=0. The remembered node goes first only with a fresh measured RTT (this round,
+    // TTL kRttTtlMs), i.e. while it is in the current selection pool; otherwise the RTT pick decides.
+    if (!measuredRtt().contains(n->nodeId))
+        return nullptr;
     return n;
+}
+
+QString ServiceEngine::networkMemorySkipReason() const
+{
+    if (m_networkMemoryNodeId.isEmpty() || networkMemoryCandidate())
+        return QString();
+    const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
+    if (n && !measuredRtt().contains(n->nodeId))
+        return QStringLiteral("unreachable");
+    return QStringLiteral("ineligible");
 }
 
 bool ServiceEngine::loadSubscription(const QByteArray &json, QString &error)
@@ -675,11 +691,17 @@ bool ServiceEngine::connect(QString &error)
             candidate = *pinned;
     // Plan v3 step 5: network memory - the node that last carried data on this network goes first
     // after the manual choice (same eligibility as the automatic paths; no I/O).
-    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto))
+    m_networkMemoryStartNodeId.clear();
+    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate()) {
             candidate = *remembered;
+            m_networkMemoryStartNodeId = remembered->nodeId; // owner test 06.11: forgotten if this start fails
             appendSwitchLog(QStringLiteral("network memory: start on %1").arg(remembered->nodeId));
+        } else if (!m_networkMemoryNodeId.isEmpty()) {
+            appendSwitchLog(QStringLiteral("network memory: skipped %1 reason=%2")
+                                .arg(m_networkMemoryNodeId, networkMemorySkipReason()));
         }
+    }
     if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         // AVPN awg31-xray-v1: локация — по измеренному off-tunnel RTT (кэш AvpnEngineQml::probeNodeRtt),
         // без замеров — weight-ярус (случайно среди равных); транспорт внутри — ранг + история. Без I/O.
@@ -992,6 +1014,7 @@ bool ServiceEngine::onTunnelConnected() // AVPN
     // Подтверждаем Connected ТОЛЬКО из фаз подъёма/свитча — не «воскрешаем» Disconnected/Error.
     if (m_state == EngineState::Connecting || m_state == EngineState::Switching
         || m_state == EngineState::Selecting) {
+        m_networkMemoryStartNodeId.clear(); // the remembered node came up: its start did not fail
         m_health.reset();
         // AVPN BUG-4: свежий подъём НОВОЙ ноды = новый бюджет heal-попыток. B6: переподъём той же
         // ноды (шаг 2 лестницы) бюджет НЕ возвращает — иначе rebind→переподъём крутились бы вечно.
@@ -1160,6 +1183,7 @@ void ServiceEngine::requestStop() // AVPN
     m_rebindHealTries = 0; // AVPN BUG-4
     // AVPN awg31-xray-v1: новая сессия пользователя — сессионные провалы транспортов и стрик проб забыты.
     m_failedThisSession.clear();
+    m_networkMemoryStartNodeId.clear();
     m_probeFailStreak = 0;
     m_dataPlaneFailStreak = 0;  // AVPN (ревью волны, MAJOR-1): явный стоп = новая сессия наблюдения
     m_dataPlaneExhausted = false;

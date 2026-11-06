@@ -220,6 +220,13 @@ public:
     // transport mode, not manual_only/RU (§14.3) and not failed in this session. Empty = none.
     void setNetworkMemoryNode(const QString &nodeId) { m_networkMemoryNodeId = nodeId; }
     QString networkMemoryNode() const { return m_networkMemoryNodeId; }
+    // Owner test 06.11: the remembered node is used only with a fresh measured RTT (it is in the
+    // current selection pool). Why it was not used: "" (used or none) | "unreachable" (no fresh RTT)
+    // | "ineligible" (not in the pool/mode/alive/failed this session).
+    QString networkMemorySkipReason() const;
+    // The node the last connect() raised because of the network memory and that has not come up yet
+    // (cleared on the tunnel coming up and on stop). The facade forgets it when that start fails.
+    QString networkMemoryStartNode() const { return m_networkMemoryStartNodeId; }
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
@@ -506,6 +513,7 @@ private:
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
     bool          m_verifyEveryTransport = false; // plan v3 step 5: features.node_scan (see setter)
     QString       m_networkMemoryNodeId;           // plan v3 step 5: last node that carried data on this network
+    QString       m_networkMemoryStartNodeId;      // owner test 06.11: started from memory, not up yet
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
     int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
     bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover

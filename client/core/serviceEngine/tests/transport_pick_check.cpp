@@ -934,6 +934,50 @@ int main(int argc, char **argv)
         }
     }
 
+    // §13. Owner test 06.11 (device 36, build 135): network memory without a reachable node.
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("15", 15, "EE", 2.0), awgNodeJson("11", 11, "FI", 1.0),
+                                          awgNodeJson("10", 10, "US", 1.0) });
+        QString err;
+        {   // remembered EE2 has no fresh RTT (ICMP -1 every round, not in the selection pool) -> RTT pick
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("11"), 35}, {QStringLiteral("10"), 150}, {QStringLiteral("15"), -1}});
+            eng.setNetworkMemoryNode(QStringLiteral("15"));
+            CHECK(eng.networkMemorySkipReason() == QLatin1String("unreachable"));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("11"));
+            CHECK(eng.networkMemoryStartNode().isEmpty());
+        }
+        {   // remembered node measured -> used; its start fails (no handshake) -> the facade forgets the
+            // memory (networkMemoryStartNode) and the retry of the attempt takes the RTT pick
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("11"), 20}, {QStringLiteral("10"), 150}, {QStringLiteral("15"), 30}});
+            eng.setNetworkMemoryNode(QStringLiteral("15"));
+            CHECK(eng.networkMemorySkipReason().isEmpty());
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("15"));
+            CHECK(eng.networkMemoryStartNode() == QLatin1String("15"));
+            CHECK(eng.onTunnelError());                          // native: handshake failed after the budget
+            CHECK(eng.networkMemoryStartNode() == QLatin1String("15")); // still "never came up"
+            eng.setNetworkMemoryNode(QString());                 // AvpnEngineQml::forgetNetworkMemoryAfterFailedStart
+            CHECK(eng.connect(err));                             // the retry of the same attempt
+            CHECK(tun.lastUpNodeId == QLatin1String("11"));
+            CHECK(eng.networkMemoryStartNode().isEmpty());
+        }
+        {   // the remembered node came up -> nothing to forget on a later failure
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("11"), 20}, {QStringLiteral("15"), 30}});
+            eng.setNetworkMemoryNode(QStringLiteral("15"));
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected());
+            CHECK(eng.networkMemoryStartNode().isEmpty());
+        }
+    }
+
     // §11. Owner test of 5.1.102 (2026-11-05): 4 AWG nodes + 4 Xray listeners (same host_id per
     // country, every listener behind the same RU entry) - what the server picker shows.
     {

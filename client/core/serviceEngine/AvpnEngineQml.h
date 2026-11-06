@@ -1009,6 +1009,7 @@ private:
     void rememberNetworkPath(const QString &nodeId);
     void forgetNetworkPath(const QString &nodeId);
     void clearNetworkMemoryForAutoTap();
+    void forgetNetworkMemoryAfterFailedStart(const char *why); // owner test 06.11, see the .cpp
     // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
     // data-plane (ServiceEngine::dataPlaneExhausted) — показать честную ошибку, снять намерение
     // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
