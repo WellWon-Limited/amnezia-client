@@ -1,8 +1,9 @@
-// Decision 2026-11-05 (owner test of 5.1.102): an API request in flight when the tunnel comes up
-// is aborted (snapshot + deferred abort, NetAwait.h) and re-issued by its owner over the new path,
-// instead of hanging for the 15 s timeout; tunnel probes (verification/whoami) are kept; the first
-// status a process observes aborts nothing. Real QNetworkAccessManager + loopback HTTP server.
-// Build/run: tests/build_api_transition.sh
+// Tunnel transitions on the shared QNetworkAccessManager (decision 2026-11-05, owner test 06.11):
+// clearConnectionCache() strands a request in flight (Qt destroys its HTTP thread; only our 15 s
+// armTimeout would end it). The engine clears only on a real transition and aborts the requests in
+// flight whenever the cache was cleared (by us, or by upstream ConnectionUiController on every
+// Connected) so their owners re-issue them. Real QNAM + loopback HTTP server that answers after
+// 500 ms. Build/run: tests/build_api_transition.sh
 #include "../DebugSnapshot.h"
 #include "../NetAwait.h"
 
@@ -18,14 +19,40 @@ using namespace avpn;
 class ApiTransitionTest : public QObject {
     Q_OBJECT
     QTcpServer server;
-    int subscriptionRequests = 0;
-    int probeRequests = 0;
+    int requests = 0;
     QString base;
+
+    // The engine's step (AvpnEngineQml::onConnectionStateChanged).
+    static void onTransition(QNetworkAccessManager *nam, ObservedTunnel previous, ObservedTunnel now)
+    {
+        const TransitionNetAction a = transitionNetAction(previous, now);
+        if (a.clearCache || a.abortInFlight)
+            resetApiConnections(nam, a.clearCache, a.abortInFlight);
+    }
+
+    // An API call with the 15 s deadline every call has and the owner's re-issue after our abort
+    // (refreshSubscription / ConfigService); counts completed answers.
+    void fetch(QNetworkAccessManager *nam, int *completed, int *reissued)
+    {
+        QNetworkReply *r = nam->get(QNetworkRequest(QUrl(base + "/v1/subscription")));
+        armTimeout(r);
+        connect(r, &QNetworkReply::finished, this, [=]() {
+            r->deleteLater();
+            if (reissueAfterOwnAbort(r->error() == QNetworkReply::OperationCanceledError,
+                                     r->property("avpn_timed_out").toBool())) {
+                ++*reissued;
+                QTimer::singleShot(0, this, [=]() { fetch(nam, completed, reissued); });
+                return;
+            }
+            if (r->error() == QNetworkReply::NoError)
+                ++*completed;
+        });
+    }
 
 private slots:
     void init()
     {
-        subscriptionRequests = probeRequests = 0;
+        requests = 0;
         QVERIFY(server.isListening() || server.listen(QHostAddress::LocalHost));
         base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         disconnect(&server, nullptr, this, nullptr);
@@ -33,85 +60,83 @@ private slots:
             while (auto *socket = server.nextPendingConnection()) {
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
                 connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
-                    const QByteArray request = socket->readAll();
-                    if (request.startsWith("GET /v1/whoami")) {
-                        ++probeRequests;
-                        return; // the probe stays in flight (the tunnel answers later)
-                    }
-                    if (!request.startsWith("GET /v1/subscription"))
-                        return;
-                    if (++subscriptionRequests == 1)
-                        return; // sent over the physical path before the tunnel came up: hangs
-                    const QByteArray body = "{}";
-                    socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: "
-                                  + QByteArray::number(body.size()) + "\r\n\r\n" + body);
-                    socket->disconnectFromHost();
+                    socket->readAll();
+                    ++requests;
+                    QTimer::singleShot(500, socket, [socket]() {
+                        socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}");
+                        socket->disconnectFromHost();
+                    });
                 });
             }
         });
     }
 
-    // A subscription in flight when Connected arrives: aborted, re-issued, done - not left for 15 s.
-    void subscriptionInFlightOnConnectedIsAbortedAndReissued()
+    // The Qt behaviour the engine depends on: the server answers, the reply never finishes.
+    void qtClearConnectionCacheStrandsInFlight()
     {
         QNetworkAccessManager nam;
-        int completed = 0, reissued = 0;
-        std::function<void()> fetch = [&]() {
-            QNetworkReply *r = nam.get(QNetworkRequest(QUrl(base + "/v1/subscription")));
-            armTimeout(r); // the 15 s deadline every API call has
-            connect(r, &QNetworkReply::finished, this, [&, r]() {
-                r->deleteLater();
-                if (reissueAfterOwnAbort(r->error() == QNetworkReply::OperationCanceledError,
-                                         r->property("avpn_timed_out").toBool())) {
-                    ++reissued;
-                    QTimer::singleShot(0, this, fetch);
-                    return;
-                }
-                if (r->error() == QNetworkReply::NoError)
-                    ++completed;
-            });
-        };
-        QNetworkReply *probe = nam.get(QNetworkRequest(QUrl(base + "/v1/whoami?nonce=x")));
-        markTunnelProbe(probe);
-        fetch();
-        QTRY_COMPARE(subscriptionRequests, 1);
-        QTRY_COMPARE(probeRequests, 1);
-        QElapsedTimer t;
-        t.start();
-        // AvpnEngineQml::onConnectionStateChanged(Connected) after Connecting.
-        QVERIFY(abortInFlightApiOnTransition(ObservedTunnel::Transitional, ObservedTunnel::Connected));
-        abortRunningRepliesDeferred(&nam, /*keepTunnelProbes=*/true);
-        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 3000);
-        QCOMPARE(reissued, 1);
-        QCOMPARE(subscriptionRequests, 2);
-        QVERIFY(t.elapsed() < 3000);  // not the 15 s timeout
-        QVERIFY(probe->isRunning());  // the verification probe is kept on Connected
-        // On Disconnected the probe goes too (the tunnel it ran over is gone).
-        QVERIFY(abortInFlightApiOnTransition(ObservedTunnel::Connected, ObservedTunnel::Disconnected));
-        abortRunningRepliesDeferred(&nam, /*keepTunnelProbes=*/false);
-        QTRY_VERIFY(probe->isFinished());
-        QCOMPARE(probe->error(), QNetworkReply::OperationCanceledError);
-        delete probe;
-    }
-
-    // The snapshot: a request started after the transition in the same event is not aborted.
-    void requestStartedAfterTheTransitionIsKept()
-    {
-        QNetworkAccessManager nam;
-        abortRunningRepliesDeferred(&nam, true); // nothing running yet: no-op
-        QNetworkReply *r = nam.get(QNetworkRequest(QUrl(base + "/v1/subscription")));
-        QTRY_COMPARE(subscriptionRequests, 1);
-        QTest::qWait(50);
+        QNetworkReply *r = nam.get(QNetworkRequest(QUrl(base + "/v1/config")));
+        QTRY_COMPARE(requests, 1);
+        nam.clearConnectionCache();
+        QTest::qWait(1500); // the answer came at 500 ms
         QVERIFY(r->isRunning());
-        r->abort();
+        r->abort();          // only an abort (or our 15 s timeout) ends it
+        QVERIFY(r->isFinished());
         delete r;
     }
 
-    // Cold start (Unknown -> Disconnected) and adoption (Unknown -> Connected) abort nothing.
-    void firstObservedStatusAbortsNothing()
+    // Owner 06.11 10:31:21: the app starts while the tunnel is up. Upstream clears the cache on that
+    // first Connected; the engine aborts what was in flight and it is re-issued - seconds, not 15 s.
+    void adoptionAfterUpstreamClearIsReissued()
     {
-        QVERIFY(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Disconnected));
-        QVERIFY(!abortInFlightApiOnTransition(ObservedTunnel::Unknown, ObservedTunnel::Connected));
+        QNetworkAccessManager nam;
+        int completed = 0, reissued = 0;
+        fetch(&nam, &completed, &reissued);
+        QTRY_COMPARE(requests, 1);
+        QElapsedTimer t;
+        t.start();
+        nam.clearConnectionCache(); // upstream ConnectionUiController on Connected
+        onTransition(&nam, ObservedTunnel::Unknown, ObservedTunnel::Connected);
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 4000);
+        QCOMPARE(reissued, 1);
+        QVERIFY(t.elapsed() < 4000);
+    }
+
+    // Cold start with the tunnel off (Unknown -> Disconnected): nobody clears, nothing is aborted,
+    // the startup call completes on its own (133/134 cleared here and stranded /v1/config).
+    void coldStartTunnelOffLeavesStartupCallsAlone()
+    {
+        QNetworkAccessManager nam;
+        int completed = 0, reissued = 0;
+        fetch(&nam, &completed, &reissued);
+        QTRY_COMPARE(requests, 1);
+        onTransition(&nam, ObservedTunnel::Unknown, ObservedTunnel::Disconnected);
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 4000);
+        QCOMPARE(reissued, 0);
+    }
+
+    // A real tunnel-up: our clear + abort; a call in flight (sent over the physical path) is re-issued.
+    void realConnectedClearsAndReissues()
+    {
+        QNetworkAccessManager nam;
+        int completed = 0, reissued = 0;
+        fetch(&nam, &completed, &reissued);
+        QTRY_COMPARE(requests, 1);
+        onTransition(&nam, ObservedTunnel::Transitional, ObservedTunnel::Connected);
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 4000);
+        QCOMPARE(reissued, 1);
+        QCOMPARE(requests, 2);
+    }
+
+    // The snapshot: a call started after the transition is not aborted.
+    void callStartedAfterTheTransitionIsKept()
+    {
+        QNetworkAccessManager nam;
+        onTransition(&nam, ObservedTunnel::Transitional, ObservedTunnel::Connected); // nothing in flight
+        int completed = 0, reissued = 0;
+        fetch(&nam, &completed, &reissued);
+        QTRY_COMPARE_WITH_TIMEOUT(completed, 1, 4000);
+        QCOMPARE(reissued, 0);
     }
 };
 

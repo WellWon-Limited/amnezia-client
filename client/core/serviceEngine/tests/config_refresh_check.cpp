@@ -124,6 +124,39 @@ private slots:
         QVERIFY(!service.reportSubscriptionOutcome(a, true));        // late failure from the old edge
         QCOMPARE(service.activeBaseUrl(), b);
     }
+    // Owner test 06.11: a failed /v1/config while the process is still on the cached copy (Xray
+    // frozen) must not throttle the next foreground refresh - it retries and thaws.
+    void failedFetchOnCacheDoesNotThrottleForegroundRefresh()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        int requests = 0;
+        connect(&server, &QTcpServer::newConnection, this, [&]() {
+            while (auto *socket = server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket]() {
+                    const bool config = socket->readAll().startsWith("GET /v1/config ");
+                    const bool fail = config && ++requests == 1;
+                    const QByteArray body = config && !fail ? QByteArray(R"({"features":{"xray_client":true}})") : QByteArray("{}");
+                    socket->write(QByteArray(fail ? "HTTP/1.1 503 Service Unavailable" : "HTTP/1.1 200 OK")
+                                  + "\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QNetworkAccessManager network;
+        const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
+        avpn::ConfigService service(&network, base, "fixture-key", {base});
+        service.start();
+        QTRY_COMPARE(requests, 1);
+        QTest::qWait(100);
+        QVERIFY(!service.config().features.value("xray_client", true)); // still frozen
+        service.refreshIfStale(15 * 60 * 1000);                          // foreground return
+        QTRY_VERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(requests, 2);
+    }
     void refreshesWithoutApplicationRestart()
     {
         runScenario(false);
