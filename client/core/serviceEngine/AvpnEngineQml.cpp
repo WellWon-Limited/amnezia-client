@@ -8748,7 +8748,7 @@ void AvpnEngineQml::docGuardFired()
         const QVariantMap cur = currentNode();
         QString nm = cur.value(QStringLiteral("name")).toString();
         const QString cc = cur.value(QStringLiteral("countryCode")).toString();
-        if (nm.isEmpty()) nm = doctor::countryNameRu(cc);
+        if (nm.isEmpty()) nm = doctor::countryDisplayName(cc, appLang());
         docStageDone(doctor::serverStage(nm, cc, -1));
         break;
     }
@@ -8801,7 +8801,7 @@ void AvpnEngineQml::docStartServers()
         const QVariantMap cur = currentNode();
         QString nm = cur.value(QStringLiteral("name")).toString();
         const QString cc = cur.value(QStringLiteral("countryCode")).toString();
-        if (nm.isEmpty()) nm = doctor::countryNameRu(cc); // «lv» → «Латвия» + флаг по cc в UI
+        if (nm.isEmpty()) nm = doctor::countryDisplayName(cc, appLang()); // «lv» → «Латвия» + флаг по cc в UI
         const int rtt = liveReachable() ? liveRttMs() : -1;
         // порог жёлтого server-driven (пересмотр владельца: до ~секунды — зелёный)
         const int warnMs = qBound(300, int(avpn::TuningStore::numberOr(
@@ -9099,8 +9099,8 @@ void AvpnEngineQml::docStartAltNodes()
         m_docAltQueue.append(id);
         QString nm = c.second.value(QStringLiteral("name")).toString();
         const QString cc = c.second.value(QStringLiteral("countryCode")).toString();
-        if (nm.isEmpty())
-            nm = doctor::countryNameRu(cc);
+        if (nm.isEmpty()) // 5.1.108: on the app's language (was always Russian - an es/en Doctor showed «Эстония»)
+            nm = doctor::countryDisplayName(cc, appLang());
         m_docAltNames.append(nm);
         QVariantMap meta;
         meta.insert(QStringLiteral("name"), nm);
