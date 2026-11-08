@@ -198,6 +198,11 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 
     m_engine.setTunnel(&m_tunnel);
     m_tunnel.setStore(store); // AVPN RU-direct: гейт сплита по фактической ноде — в up() (T2)
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // 5.1.108: no tun2socks in the installed service = no Xray candidates. Silent here (the
+    // reliability ring is restored later in the constructor); guardedStart journals a change.
+    avpn::xrayPlatformRuntimeReady().store(avpn::macXrayRuntimePresent());
+#endif
 
     // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
     // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
@@ -5147,6 +5152,9 @@ void AvpnEngineQml::guardedStart()
         return;                       // продолжение старта — из finishSvcInstall (queued)
         }
     }
+    // 5.1.108: the service is installed/updated by now - Auto must not spend attempts on an Xray path
+    // the installed service cannot start (no tun2socks); a new service with it re-enables Xray here.
+    refreshXrayRuntimeGate();
 #endif
 
     m_op = Op::Starting;
@@ -5257,6 +5265,13 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
     // (нажал «Отключить»), reconcile честно останется no-op. Иначе — штатный guardedStart,
     // теперь по быстрому пути (демон запущен и актуален).
     reconcile();
+}
+
+void AvpnEngineQml::refreshXrayRuntimeGate()
+{
+    const bool present = avpn::macXrayRuntimePresent();
+    if (avpn::xrayPlatformRuntimeReady().exchange(present) != present)
+        reliabilityEvent(QStringLiteral("xray_runtime tun2socks=%1").arg(present ? 1 : 0));
 }
 
 // ---- AVPN macOS wake-реконнект (спека 2026-07-17-macos-wake-reconnect-design.md) --------------

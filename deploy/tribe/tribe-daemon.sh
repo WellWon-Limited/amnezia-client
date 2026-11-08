@@ -19,9 +19,14 @@ set -euo pipefail
 # ---------- Каноническая личность (ОДНО имя везде) ----------
 LABEL="Tribe-service"                              # = SERVICE_NAME (по нему isServiceReady ищет процесс)
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"      # имя файла ВСЕГДА = Label
-HELPER_DIR="/Library/PrivilegedHelperTools/Tribe"  # бинарь живёт ВНЕ .app → апдейты приложения не трогают демон
+# AVPN 5.1.108: каталог — TribeVPN, тот же, что у установщика из приложения (tribe-svc-install.sh) и
+# у приложения (MacServiceInstaller.mm: VERSION, amneziawg-go, tun2socks). Раньше здесь был .../Tribe,
+# а .../TribeVPN числился «старым» и удалялся purge — pkg-путь сносил службу, поставленную приложением,
+# и ставил копию туда, где приложение её не видит.
+HELPER_DIR="/Library/PrivilegedHelperTools/TribeVPN"  # бинарь живёт ВНЕ .app → апдейты приложения не трогают демон
 BIN="${HELPER_DIR}/${LABEL}"
 WG_BIN="${HELPER_DIR}/amneziawg-go"
+T2S_BIN="${HELPER_DIR}/tun2socks"                    # 5.1.108: рантайм Xray-пути
 PF_DIR="${HELPER_DIR}/pf"                           # ResourceDir демона = applicationDirPath()/pf
 GROUP="tribevpn"
 PF_ANCHOR="tribe"
@@ -37,12 +42,16 @@ LEGACY_PLISTS=(
 )
 LEGACY_LABELS=( "Tribe-service" "com.antivpn.helper" )
 LEGACY_DIRS=(
-  "/Library/PrivilegedHelperTools/TribeVPN"   # старый каталог хелпера
+  "/Library/PrivilegedHelperTools/Tribe"      # каталог прежней версии этого скрипта (до 5.1.108)
   "/Library/Application Support/ANTIVPN"       # хелпер удалённого NeVPN
   "/Applications/AntiVPN.app"                  # старое имя приложения
 )
 
 die(){ echo "ОШИБКА: $*" >&2; exit 1; }
+replace_file(){
+  local src="$1" dst="$2" tmp="$2.new.$$"
+  cp -p "$src" "$tmp" && mv -f "$tmp" "$dst" || { rm -f "$tmp"; die "замена $dst не удалась"; }
+}
 [ "$(id -u)" -eq 0 ] || die "нужен sudo"
 
 bootout_one(){
@@ -72,13 +81,15 @@ purge(){
   #    + наш amneziawg-go (имя уникально: upstream = wireguard-go). SIGTERM, затем SIGKILL.
   for l in "${LEGACY_LABELS[@]}"; do pkill -x "$l" 2>/dev/null || true; done
   pkill -f "PrivilegedHelperTools/.*/amneziawg-go" 2>/dev/null || true
+  pkill -f "PrivilegedHelperTools/TribeVPN/tun2socks" 2>/dev/null || true
   sleep 1
   for l in "${LEGACY_LABELS[@]}"; do pkill -9 -x "$l" 2>/dev/null || true; done
   pkill -9 -f "PrivilegedHelperTools/.*/amneziawg-go" 2>/dev/null || true
+  pkill -9 -f "PrivilegedHelperTools/TribeVPN/tun2socks" 2>/dev/null || true
   # 3) снять наш pf-анкор и токен
   flush_anchor
   # 4) удалить старые каталоги бинаря/легаси-приложение
-  for d in "${LEGACY_DIRS[@]}"; do rm -rf "$d"; done
+  for d in "${LEGACY_DIRS[@]}"; do rm -rf "${d:?}"; done
 }
 
 count_our_plists(){
@@ -93,6 +104,7 @@ status(){
   echo "plist:   $([ -f "$PLIST" ] && echo "$PLIST" || echo MISSING)"
   echo "binary:  $([ -x "$BIN" ] && echo "$BIN" || echo MISSING)"
   echo "wg-go:   $([ -x "$WG_BIN" ] && echo "$WG_BIN" || echo '<нет (поставится при сборке)>')"
+  echo "tun2socks: $([ -x "$T2S_BIN" ] && echo "$T2S_BIN" || echo '<нет — Xray на macOS недоступен>')"
   echo -n "launchd: "; launchctl print "system/${LABEL}" >/dev/null 2>&1 && echo loaded || echo "not loaded"
   local pids; pids="$(pgrep -x "$LABEL" 2>/dev/null | tr '\n' ' ' || true)"
   echo "process: $([ -n "$pids" ] && echo "running (pid ${pids})" || echo 'not running')"
@@ -117,11 +129,17 @@ install(){
   purge
 
   # ── разложить свежую копию ──
+  # Бинари — через временное имя + mv (новый inode): ядро держит закэшированную подпись старого
+  # файла, cp поверх давал «SIGKILL (Code Signature Invalid)» до перезагрузки (инцидент 5.1.92).
   mkdir -p "$HELPER_DIR" "$PF_DIR" "$DATA_DIR"
-  cp -f "$src" "$BIN"
-  # amneziawg-go кладём рядом, если лежит рядом с исходным бинарём (демон зовёт applicationDirPath()/amneziawg-go)
+  replace_file "$src" "$BIN"
+  # amneziawg-go и tun2socks кладём рядом, если лежат рядом с исходным бинарём (демон зовёт
+  # applicationDirPath()/amneziawg-go и applicationDirPath()/tun2socks)
   if [ -x "$(dirname "$src")/amneziawg-go" ]; then
-    cp -f "$(dirname "$src")/amneziawg-go" "$WG_BIN"
+    replace_file "$(dirname "$src")/amneziawg-go" "$WG_BIN"
+  fi
+  if [ -x "$(dirname "$src")/tun2socks" ]; then
+    replace_file "$(dirname "$src")/tun2socks" "$T2S_BIN"
   fi
   rm -f "$PF_DIR"/*.conf 2>/dev/null || true
   cp -f "$pfsrc/${PF_ANCHOR}."*.conf "$PF_DIR/"
@@ -130,6 +148,7 @@ install(){
   chmod -R go-w "$HELPER_DIR"
   chmod 755 "$HELPER_DIR" "$PF_DIR" "$BIN"
   [ -e "$WG_BIN" ] && chmod 755 "$WG_BIN" || true
+  [ -e "$T2S_BIN" ] && chmod 755 "$T2S_BIN" || true
   # Снять карантин/provenance xattr → macOS не делает повторный скан подписи при первом
   # запуске демоном (иначе amneziawg-go не успевает создать utun за таймаут → туннель падает).
   xattr -cr "$HELPER_DIR" 2>/dev/null || true
@@ -187,7 +206,7 @@ EOF
 
 uninstall(){
   purge
-  rm -rf "$HELPER_DIR" "$DATA_DIR"
+  rm -rf "${HELPER_DIR:?}" "${DATA_DIR:?}"
   # группу удаляем, только если её не использует ни один пользователь как primary
   if dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
     local gid users

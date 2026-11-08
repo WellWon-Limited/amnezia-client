@@ -1030,6 +1030,10 @@ private:
     // AVPN (beachball-фикс): финиш фоновой установки root-демона (главный поток, queued из worker).
     // ok → reconcile() продолжает старт (намерение живо); fail → error + счёт попытки.
     void finishSvcInstall(bool ok, const QString &err);
+    // 5.1.108: Xray is supported only when the installed service carries tun2socks
+    // (MacServiceInstaller::macXrayRuntimePresent -> NodeRotation.h::xrayPlatformRuntimeReady).
+    // Called at construction and on every start after the service check/install.
+    void refreshXrayRuntimeGate();
 
 #endif
 #if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)

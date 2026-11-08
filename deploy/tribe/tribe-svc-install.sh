@@ -2,7 +2,7 @@
 # tribe-svc-install.sh — ВШИВАЕТСЯ в TribeVPN.app/Contents/Resources/. Запускается приложением
 # через osascript «with administrator privileges» (один системный промпт пароля, без терминала).
 # Распаковывает payload-tarball (аргумент $1: tribe-svc.tar.gz с Tribe-service + amneziawg-go +
-# Frameworks(вшитый Qt) + pf, бинари подписаны Developer ID+runtime) в
+# tun2socks (с 5.1.108, рантайм Xray) + Frameworks(вшитый Qt) + pf, бинари подписаны Developer ID+runtime) в
 # /Library/PrivilegedHelperTools/TribeVPN, пишет LaunchDaemon + bootstrap.
 # Payload — tarball-РЕСУРС (а не loose-файлы в бандле): не ломает подпись app, нотаризация внутрь
 # tar не лезет. НЕ трогает официальную Amnezia (имена: Tribe-service / tribevpn / анкор tribe).
@@ -24,6 +24,7 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 
 [ -x "$SRC/Tribe-service" ] || { echo "нет Tribe-service в tarball"; exit 1; }
 [ -x "$SRC/amneziawg-go" ]  || { echo "нет amneziawg-go в tarball"; exit 1; }
+[ -x "$SRC/tun2socks" ]     || { echo "нет tun2socks в tarball"; exit 1; }
 [ -d "$SRC/Frameworks" ]    || { echo "нет Frameworks в tarball"; exit 1; }
 
 # AVPN (инцидент 5.1.92, 2026-09-25): замена бинарей поверх РАБОТАЮЩЕГО демона через `cp -f` пишет
@@ -33,6 +34,7 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 # временное имя + mv (новый inode — ядро читает подпись заново).
 launchctl bootout "system/${LABEL}" 2>/dev/null || launchctl bootout system "$PLIST" 2>/dev/null || true
 pkill -f "$DEST/amneziawg-go" 2>/dev/null || true
+pkill -f "$DEST/tun2socks" 2>/dev/null || true
 replace_file() {
   local src="$1" dst="$2" tmp="$2.new.$$"
   cp -p "$src" "$tmp" && mv -f "$tmp" "$dst" || { rm -f "$tmp"; echo "замена $dst не удалась"; exit 1; }
@@ -40,6 +42,7 @@ replace_file() {
 mkdir -p "$DEST"
 replace_file "$SRC/Tribe-service" "$DEST/Tribe-service"
 replace_file "$SRC/amneziawg-go"  "$DEST/amneziawg-go"
+replace_file "$SRC/tun2socks"     "$DEST/tun2socks"
 rm -rf "$DEST/Frameworks.new"; cp -aR "$SRC/Frameworks" "$DEST/Frameworks.new" \
   && rm -rf "$DEST/Frameworks" && mv "$DEST/Frameworks.new" "$DEST/Frameworks" \
   || { echo "замена Frameworks не удалась"; exit 1; }
@@ -49,7 +52,7 @@ mkdir -p "$DEST/pf"; cp -f "$SRC/pf/"*.conf "$DEST/pf/" 2>/dev/null || true
 # tarball (старая сборка) → пишем метку "legacy", чтобы след. апдейт всё равно триггернул замену.
 [ -f "$SRC/VERSION" ] && cp -f "$SRC/VERSION" "$DEST/VERSION" || echo "legacy" > "$DEST/VERSION"
 chown -R root:wheel "$DEST"
-chmod 755 "$DEST" "$DEST/Tribe-service" "$DEST/amneziawg-go"
+chmod 755 "$DEST" "$DEST/Tribe-service" "$DEST/amneziawg-go" "$DEST/tun2socks"
 xattr -cr "$DEST" 2>/dev/null || true
 
 # Группа для xray-фильтрации (своя, не amnvpn).
