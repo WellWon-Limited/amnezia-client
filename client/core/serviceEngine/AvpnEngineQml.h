@@ -1163,8 +1163,6 @@ private:
     QHash<QString, int>          m_chipConfirms;      // key → потрачено confirm-переппроб этой серии
     // AVPN (выбор по скорости): прямой RTT до нод (off-tunnel) + кэш измерений по nodeId.
     IRttProbe                   *m_rttProbe = nullptr; // владелец — this (QObject-parent)
-    IRttProbe                   *m_gwProbe = nullptr;  // волна-3: ICMP до шлюза ноды через туннель
-    int                          m_gwRtt = -1;         // волна-3: сглаженный RTT до шлюза (−1 = нет)
     QHash<QString, int>          m_nodeRtt;            // nodeId → измеренный RTT мс (−1/нет = неизвестно)
     quint64                     m_rttEpoch = 0;
     bool                        m_rttInFlight = false;

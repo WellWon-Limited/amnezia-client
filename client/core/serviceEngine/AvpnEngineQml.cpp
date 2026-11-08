@@ -202,7 +202,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // AVPN (выбор по скорости): прямой ICMP-пробер RTT до нод (off-tunnel). Кроссплатформенный за швом
     // IRttProbe; Windows — graceful-стаб (нет измерения → health-фолбэк). Запуск — из probeNodeRtt().
     m_rttProbe = new RttProbeIcmp(this);
-    m_gwProbe = new RttProbeIcmp(this);  // волна-3: RTT до шлюза ноды ЧЕРЕЗ туннель (честные мс на экране)
     // AVPN (Доктор D-3 п.3): отдельный ICMP-инстанс для пробы ЧЕРЕЗ туннель — m_rttProbe
     // гейтится «connected⇒cancel» (off-tunnel семантика), делить нельзя.
     m_docPing = new RttProbeIcmp(this);
@@ -477,9 +476,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (m_engine.state() != EngineState::Connected || m_lastTunnelState != Vpn::Connected)
             return;
         m_liveBars = m_signal.feed(rttMs, reachable);
-        // Волна-3: на экране — RTT до самой ноды (шлюз туннеля), если он измерен; HEAD к API остаётся
-        // сигналом достижимости (палочки), но его миллисекунды — это путь до Хельсинки, не до сервера.
-        m_liveRtt = m_gwRtt >= 0 ? m_gwRtt : m_signal.smoothedRtt();
+        // 5.1.108: the card's ms is this in-tunnel HTTPS probe for every transport (as on Xray). The
+        // ICMP ping to the in-tunnel gateway 100.127.255.254 (wave 3) is gone: on iOS 137 a packet
+        // from the app to a CGNAT address raised the system "Local Network" permission prompt.
+        m_liveRtt = m_signal.smoothedRtt();
         m_liveReachable = reachable;
         if (reachable)
             m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
@@ -2672,22 +2672,6 @@ void AvpnEngineQml::onTick()
     if (m_probe && liveProbeDue(avpn::TuningStore::flag(QStringLiteral("live_rtt")),
                                 state() == QLatin1String("connected"), uiActive, m_bgProbeTick))
         m_probe->measure();
-    // Волна-3 (2026-09-28): миллисекунды на экране = ICMP до шлюза ноды внутри туннеля
-    // (100.127.255.254 — общий адрес awg0 всех нод, bootstrap.py). В списке серверов уже показывается
-    // ICMP до ноды с устройства; теперь обе цифры — «от меня до сервера». Только при видимом окне,
-    // только awg (у xray шлюза внутри туннеля нет).
-    if (m_gwProbe && uiActive && state() == QLatin1String("connected")
-        && m_engine.currentNodeProto() == QLatin1String("awg")) {
-        m_gwProbe->cancel();
-        m_gwProbe->probeAll({ { QStringLiteral("gw"), QStringLiteral("100.127.255.254"), 0 } }, 1500,
-            [this](const QString &, int rttMs) {
-                if (rttMs < 0 || m_lastTunnelState != Vpn::Connected) return;
-                m_gwRtt = m_gwRtt < 0 ? rttMs : (m_gwRtt * 7 + rttMs * 3) / 10;
-                if (m_liveRtt != m_gwRtt) { m_liveRtt = m_gwRtt; emit liveQualityChanged(); }
-            },
-            []() {});
-    }
-
     // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
     // numbers.traffic_sync_ticks) освежаем счётчики.
     // ⚠️ ДВОЕ ЧАСОВ: берём /v1/subscription (ЧАСЫ УСТРОЙСТВА — их продлевает оплата), НЕ /v1/account
@@ -4420,8 +4404,6 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         m_signal.reset();
         m_liveBars = 0;
         m_liveRtt = -1;
-        m_gwRtt = -1;   // волна-3
-        if (m_gwProbe) m_gwProbe->cancel();
         m_liveReachable = false;
         m_liveProven = false;      // 5.1.108: a new Connected session proves data again
         m_liveDead = false;        // обрыв/смена ноды → «мертво» снимаем, при новом Connected мерим заново
