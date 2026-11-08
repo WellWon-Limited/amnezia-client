@@ -278,6 +278,13 @@ public:
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
+    // 5.1.108: the node the next connect() would raise - the same order (pin -> network memory ->
+    // pickTransport; the legacy measured-RTT/weight chain when transport_auto_pick is off) without
+    // any side effect (no switch log, no state change, no I/O). For the Connect card's protocol badge
+    // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
+    // Inside an equal-weight tier without measurements the pick is random - callers that must not
+    // flicker show it only when the choice is deterministic (pin or a manual transport mode).
+    const SubscriptionNode *nextCandidate() const;
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
     // (авто-выбор её исключает) → по этому флагу RU-direct-сплит отключается (full-tunnel через РФ).

@@ -2011,6 +2011,19 @@ QVariantMap AvpnEngineQml::currentNode() const
     // пуст). При ручном выборе (pin задан) бейджа нет. pinned — что показанный узел закреплён вручную.
     node["pinned"]    = (!pinned.isEmpty() && pick && pick->nodeId == pinned);
     node["auto"]      = (s.state == QLatin1String("connected") && pinned.isEmpty());
+    // 5.1.108: the protocol the next start would raise (ServiceEngine::nextCandidate - the order of
+    // connect(), no side effects) for the badge under the node name before connecting. Only when the
+    // choice is deterministic: a pinned country or a manual mode (Amnezia/Xray). Auto without a pin
+    // picks randomly among equal weights - no badge rather than a flickering one.
+    QString nextProto, nextProtoVersion;
+    if (!pinned.isEmpty() || m_engine.transportMode() != avpn::TransportMode::Auto) {
+        if (const avpn::SubscriptionNode *next = m_engine.nextCandidate()) {
+            nextProto = avpn::protoOf(*next);
+            nextProtoVersion = avpn::isXrayProto(nextProto) ? QString() : next->awg.protocolMajor();
+        }
+    }
+    node["nextProto"]        = nextProto;
+    node["nextProtoVersion"] = nextProtoVersion;
     return node;
 }
 

@@ -335,6 +335,24 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
     return n;
 }
 
+const SubscriptionNode *ServiceEngine::nextCandidate() const
+{
+    if (const SubscriptionNode *pinned = pinnedCandidate())
+        return pinned;
+    const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
+    if (autoPick || m_transportMode != TransportMode::Auto) {
+        if (const SubscriptionNode *remembered = networkMemoryCandidate())
+            return remembered;
+        const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true);
+        if (!c && !m_failedThisSession.isEmpty())
+            c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false);
+        return c;
+    }
+    if (const SubscriptionNode *fast = pickByMeasuredRtt(QString(), QString()))
+        return fast;
+    return pickByWeight(QString(), QString());
+}
+
 QString ServiceEngine::networkMemorySkipReason() const
 {
     if (m_networkMemoryNodeId.isEmpty() || networkMemoryCandidate())
