@@ -148,6 +148,15 @@ void installCrashLogTee()
     done = true;
     g_crashPrevHandler = qInstallMessageHandler(crashLogTeeHandler);
 }
+// The tunnel state as the pure decisions see it (DebugSnapshot.h::ObservedTunnel) - the one mapping
+// for the teardown latch and the API-transition rule (audit of 137: there were two copies).
+ObservedTunnel observedTunnelOf(Vpn::ConnectionState st)
+{
+    return st == Vpn::Connected ? ObservedTunnel::Connected
+         : st == Vpn::Disconnected ? ObservedTunnel::Disconnected
+         : st == Vpn::Error ? ObservedTunnel::Error
+         : st == Vpn::Unknown ? ObservedTunnel::Unknown : ObservedTunnel::Transitional;
+}
 } // namespace
 
 AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *store,
@@ -4202,13 +4211,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // Connected (adoption included) - and their owners re-issue them over the new path.
     // DebugSnapshot.h::transitionNetAction, NetAwait.h::resetApiConnections.
     {
-        const auto observedOf = [](Vpn::ConnectionState st) {
-            return st == Vpn::Connected ? ObservedTunnel::Connected
-                 : st == Vpn::Disconnected ? ObservedTunnel::Disconnected
-                 : st == Vpn::Error ? ObservedTunnel::Error
-                 : st == Vpn::Unknown ? ObservedTunnel::Unknown : ObservedTunnel::Transitional;
-        };
-        const TransitionNetAction net = transitionNetAction(observedOf(m_lastTunnelState), observedOf(s));
+        const TransitionNetAction net = transitionNetAction(observedTunnelOf(m_lastTunnelState), observedTunnelOf(s));
         if (m_nam && (net.clearCache || net.abortInFlight))
             avpn::resetApiConnections(m_nam, net.clearCache, net.abortInFlight);
     }
@@ -4222,10 +4225,8 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
 #else
         const bool errorProvesTeardown = true;  // база 3c8cc74e: Error — терминал
 #endif
-        const ObservedTunnel observed = s == Vpn::Connected ? ObservedTunnel::Connected
-            : s == Vpn::Disconnected ? ObservedTunnel::Disconnected
-            : s == Vpn::Error ? ObservedTunnel::Error : ObservedTunnel::Transitional;
-        observeTunnelState(m_latch, observed, errorProvesTeardown);
+        // One mapping for both uses (audit of 137); Unknown and Transitional are the same no-op here.
+        observeTunnelState(m_latch, observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
             m_stopGeneration = SessionGeneration{};
             m_stopRetries = 0;
@@ -6483,10 +6484,10 @@ void AvpnEngineQml::rememberNetworkPath(const QString &nodeId)
     if (key.isEmpty())
         return;
     QSettings s;
-    const QByteArray before = s.value(QStringLiteral("avpn/netMemory")).toByteArray();
+    const QByteArray before = s.value(QLatin1String(avpn::kNetworkMemorySettingsKey)).toByteArray();
     const QByteArray after = avpn::networkMemoryRemember(before, key, nodeId, QDateTime::currentSecsSinceEpoch());
     if (after != before)
-        s.setValue(QStringLiteral("avpn/netMemory"), after);
+        s.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey), after);
 }
 
 void AvpnEngineQml::forgetNetworkPath(const QString &nodeId)
@@ -6529,10 +6530,10 @@ void AvpnEngineQml::clearNetworkMemoryForAutoTap()
     if (key.isEmpty())
         return;
     QSettings s;
-    const QByteArray before = s.value(QStringLiteral("avpn/netMemory")).toByteArray();
+    const QByteArray before = s.value(QLatin1String(avpn::kNetworkMemorySettingsKey)).toByteArray();
     const QByteArray after = avpn::networkMemoryClear(before, key);
     if (after != before) {
-        s.setValue(QStringLiteral("avpn/netMemory"), after);
+        s.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey), after);
         reliabilityEvent(QStringLiteral("network_memory_clear net=%1 why=auto_tap").arg(key));
     }
 }
@@ -8824,24 +8825,11 @@ void AvpnEngineQml::docStartServices()
     // чипы, что на главном экране). Запускаем пробу и ждём заполнения m_serviceStatus.
     probeServices();
     if (!m_docNodeScan) {
-        // features.node_scan off: the previous Doctor - a fixed 9 s wait for the chips.
+        // features.node_scan off: the previous Doctor - a fixed 9 s wait for the chips, then the same
+        // verdict as the flag path (docServicesDone; was a copy of its body).
         QTimer::singleShot(9000, this, [this, e = m_docEpoch] {
             if (e != m_docEpoch || m_docPhase != DoctorPhase::Services) return;
-            int works = 0, total = 0;
-            QStringList blocked;
-            for (const QVariant &v : std::as_const(m_serviceStatus)) {
-                const QVariantMap m = v.toMap();
-                const int stt = m.value(QStringLiteral("state")).toInt();
-                const QString label = m.value(QStringLiteral("label")).toString();
-                if (stt < 0) continue; // unknown/не измерено — не считаем ни за, ни против
-                ++total;
-                if (stt == 0)      blocked.append(label);  // Blocked
-                else if (stt >= 2) ++works;                // Works (Slow не блок, но и не «недоступно»)
-            }
-            const QString net = benchExtra().value(QStringLiteral("net_type")).toString();
-            const bool wlApplicable = (m_whitelistDetector != nullptr) && net == QLatin1String("cellular");
-            const bool wlActive = m_whitelistDetector && m_whitelistDetector->active();
-            docStageDone(doctor::servicesStage(works, total, blocked, wlApplicable, wlActive));
+            docServicesDone();
         });
         return;
     }
