@@ -457,6 +457,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // health-loop driver: периодический tick (3–5с).
     m_healthTimer.setInterval(4000);
     connect(&m_healthTimer, &QTimer::timeout, this, &AvpnEngineQml::onTick);
+    // 5.1.108: ONLINE badge - one cached value for both pages, recomputed whenever its inputs may
+    // have changed (engine/tunnel state and pathCheck ride changed(), the live probe its own signal).
+    connect(this, &AvpnEngineQml::changed, this, &AvpnEngineQml::refreshDataFlowing);
+    connect(this, &AvpnEngineQml::liveQualityChanged, this, &AvpnEngineQml::refreshDataFlowing);
 
     // AVPN backend-first: фоновый LKG-рефреш подписки (H-3 бэклога). Коннект здесь, старт —
     // из configApplied (интервал приходит с сервера; до первого applied — не тикает).
@@ -477,6 +481,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // сигналом достижимости (палочки), но его миллисекунды — это путь до Хельсинки, не до сервера.
         m_liveRtt = m_gwRtt >= 0 ? m_gwRtt : m_signal.smoothedRtt();
         m_liveReachable = reachable;
+        if (reachable)
+            m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
         if (reachable)
             m_startBackoffRound = 0;             // волна-4: данные подтверждены — бэкофф с нуля
         // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
@@ -4410,13 +4416,14 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
     if (state() != QLatin1String("connected")
-        && (m_liveBars != 0 || m_liveReachable || m_liveRtt >= 0 || m_liveDead || m_liveFailStreak)) {
+        && (m_liveBars != 0 || m_liveReachable || m_liveProven || m_liveRtt >= 0 || m_liveDead || m_liveFailStreak)) {
         m_signal.reset();
         m_liveBars = 0;
         m_liveRtt = -1;
         m_gwRtt = -1;   // волна-3
         if (m_gwProbe) m_gwProbe->cancel();
         m_liveReachable = false;
+        m_liveProven = false;      // 5.1.108: a new Connected session proves data again
         m_liveDead = false;        // обрыв/смена ноды → «мертво» снимаем, при новом Connected мерим заново
         m_liveFailStreak = 0;
         emit liveQualityChanged();
@@ -6019,6 +6026,17 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
         reconcile();
     }
     emit changed();
+}
+
+void AvpnEngineQml::refreshDataFlowing()
+{
+    const bool now = avpn::dataFlowingNow(!m_paused && m_engine.state() == EngineState::Connected
+                                              && m_lastTunnelState == Vpn::Connected,
+                                          m_liveDead, m_pathCheck, m_liveProven);
+    if (now == m_dataFlowing)
+        return;
+    m_dataFlowing = now;
+    emit dataFlowingChanged();
 }
 
 void AvpnEngineQml::persistTransportHistory()

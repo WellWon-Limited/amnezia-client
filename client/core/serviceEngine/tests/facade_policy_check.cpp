@@ -437,6 +437,17 @@ static void wave4UpstreamBehaviour()
     CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
     CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no
     CHECK(!reissueAfterOwnAbort(false, false)); // answered / failed by the network -> no
+    // 5.1.108: ONLINE without node_scan - the live in-tunnel probe proves data; whoami only
+    // accelerates (works) or forbids (no_data / bypass); a confirmed dead probe always forbids.
+    CHECK(!dataFlowingNow(true, false, QString(), false));                      // nothing proven yet
+    CHECK(dataFlowingNow(true, false, QString(), true));                        // flag off, live probe ok
+    CHECK(dataFlowingNow(true, false, QStringLiteral("works"), false));         // whoami first
+    CHECK(dataFlowingNow(true, false, QStringLiteral("limited"), true));        // limited + live probe
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("limited"), false));
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("no_data"), true));       // whoami forbids
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("bypass"), true));
+    CHECK(!dataFlowingNow(true, true, QStringLiteral("works"), true));          // dead live probe
+    CHECK(!dataFlowingNow(false, false, QStringLiteral("works"), true));        // tunnel not up
     // Decision 2026-11-05: /v1/subscription per-edge streak classification (QNetworkReply errors).
     CHECK(classifySubscriptionEdgeOutcome(0, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered);
     CHECK(classifySubscriptionEdgeOutcome(204, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered); // 401

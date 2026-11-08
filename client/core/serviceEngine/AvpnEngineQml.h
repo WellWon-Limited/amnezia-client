@@ -77,6 +77,11 @@ class AvpnEngineQml : public QObject {
     // (the attempt moves to the next path) | "limited" (the check could not run; the connection
     // stays as it is, without the mark). See WhoamiVerdict.h.
     Q_PROPERTY(QString pathCheck READ pathCheck NOTIFY changed)
+    // 5.1.108: the ONLINE badge (Connect card and the current country in the server list) - data
+    // flows through the tunnel: tunnel Connected, live probe not confirmed dead, the whoami verdict
+    // (if any) not no_data/bypass, and either whoami said "works" or the live in-tunnel probe
+    // succeeded in this session. Independent of features.node_scan (DebugSnapshot.h::dataFlowingNow).
+    Q_PROPERTY(bool dataFlowing READ dataFlowing NOTIFY dataFlowingChanged)
     // AVPN: статус подписки для бейджа Connect (читается из загруженной Subscription через движок).
     Q_PROPERTY(int daysLeft READ daysLeft NOTIFY changed)
     // AVPN (group-aware, 2026-07-21): ISO-дата конца подписки из /v1/subscription (device-часы,
@@ -331,6 +336,7 @@ public:
     bool verifying() const;
     QString activeProto() const;
     QString pathCheck() const { return m_pathCheck; } // plan v3 step 5, see Q_PROPERTY
+    bool dataFlowing() const { return m_dataFlowing; } // 5.1.108, see Q_PROPERTY
     // Переключатель «Авто / Amnezia / Xray» пикера (mode: "auto"|"awg"|"xray"; kill-switch не
     // нужен — локальная настройка). Режим "xray" при неподдерживаемом xray (платформа/kill-switch
     // xray_client) отклоняется с тостом. На поднятом туннеле, чей транспорт новому режиму не
@@ -858,6 +864,8 @@ signals:
     void legalDocReady(const QString &doc, const QString &lang, const QString &text);
     // AVPN (реальные палочки): прилетел новый замер качества (liveBars/liveRttMs/liveReachable).
     void liveQualityChanged();
+    // 5.1.108: dataFlowing changed (recomputed on changed() and liveQualityChanged()).
+    void dataFlowingChanged();
     // AVPN (чипы доступности): обновился статус сервисов (serviceStatus).
     void serviceStatusChanged();
     // AVPN (панель администратора): смена состояния бенча (benchRunning/benchStage).
@@ -1015,6 +1023,7 @@ private:
     // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
     bool surrenderIfDataPlaneDead();
     void persistTransportHistory();
+    void refreshDataFlowing(); // 5.1.108: recompute m_dataFlowing, emit dataFlowingChanged on change
     void applyReseed(const avpn::Subscription &sub, quint64 sequence, const QString &token);
     void applyPendingReseed();
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
@@ -1135,6 +1144,8 @@ private:
     int                          m_liveBars = 0;      // 0..5
     bool                         m_liveReachable = false;
     bool                         m_liveDead = false;     // проба подтверждённо не доходит → 0 зелёных + все красные
+    bool                         m_liveProven = false;   // 5.1.108: a live probe succeeded in this Connected session
+    bool                         m_dataFlowing = false;  // 5.1.108: cached dataFlowing (refreshDataFlowing)
     int                          m_liveFailStreak = 0;   // неуспешных проб подряд (анти-фликер до «мертво»)
     static constexpr int         kLiveDeadStreak = 2;    // фолбэк; серверный оверрайд numbers.live_dead_streak (TuningStore)
     // AVPN (чипы доступности): проба сервисов через туннель + кэш статусов для QML.

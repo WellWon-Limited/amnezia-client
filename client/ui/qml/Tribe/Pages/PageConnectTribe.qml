@@ -59,8 +59,10 @@ PageType {
     // "" | "checking" | "works" | "no_data" | "bypass" | "limited" (см. AvpnEngineQml pathCheck).
     // Гард String(... || "") — старый бинарь без свойства ведёт себя как раньше.
     readonly property string pathCheckNow: hasEngine ? String(TribeEngine.pathCheck || "") : ""
-    // «Данные идут» — только после пройденной проверки и пока живая проба не говорит обратное.
-    readonly property bool dataFlowingNow: isOn && pathCheckNow === "works" && !liveDeadNow
+    // «Данные идут» (бейдж ONLINE) — одно свойство движка для главной и списка серверов (5.1.108):
+    // туннель поднят, живая проба через туннель прошла или whoami сказал works; no_data/bypass и
+    // подтверждённо мёртвая проба запрещают. От серверного флага node_scan не зависит.
+    readonly property bool dataFlowingNow: isOn && hasEngine && TribeEngine.dataFlowing === true
     // Проверка не прошла, движок уже поднимает следующий путь той же попытки.
     readonly property bool nextPathNow: showBusy && !verifyingNow
                                         && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
