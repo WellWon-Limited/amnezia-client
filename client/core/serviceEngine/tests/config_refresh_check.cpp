@@ -6,14 +6,17 @@
 namespace avpn {
 static QByteArray cachedConfig;
 static int savedConfigs = 0;
+static QString storedActiveEdge;   // 5.1.108: the persisted active edge of an earlier run
+static int savedEdges = 0;
+static int activeEdgeWrites = 0;
 class ConfigStore {
 public:
     static QByteArray loadConfig() { return cachedConfig; }
     static void saveConfig(const QByteArray &body) { cachedConfig = body; ++savedConfigs; }
     static QStringList loadEdges() { return {}; }
-    static void saveEdges(const QStringList &) {}
-    static QString activeEdge(const QString &value) { return value; }
-    static void setActiveEdge(const QString &) {}
+    static void saveEdges(const QStringList &) { ++savedEdges; }
+    static QString activeEdge(const QString &value) { return storedActiveEdge.isEmpty() ? value : storedActiveEdge; }
+    static void setActiveEdge(const QString &value) { storedActiveEdge = value; ++activeEdgeWrites; }
 };
 bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 {
@@ -29,10 +32,69 @@ bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 class ConfigRefreshTest : public QObject {
     Q_OBJECT
 private slots:
-    void init() { avpn::cachedConfig.clear(); avpn::savedConfigs = 0; }
+    void init()
+    {
+        avpn::cachedConfig.clear();
+        avpn::savedConfigs = 0;
+        avpn::storedActiveEdge.clear();
+        avpn::savedEdges = 0;
+        avpn::activeEdgeWrites = 0;
+    }
+    // 5.1.108: AVPN_API_URL pins the control plane. Before, the stored active edge of an earlier run
+    // won over the env var, the edge walk moved the dev session to the compiled-in prod edges, and the
+    // dev backend's edge list was stored into the prod cache.
+    void pinnedEdgeIgnoresStoredEdgeAndNeverWalks()
+    {
+        const QString other = "http://127.0.0.1:11";
+        avpn::storedActiveEdge = other;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        int configs = 0, edges = 0;
+        connect(&server, &QTcpServer::newConnection, this, [&]() {
+            while (auto *socket = server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket]() {
+                    const QByteArray request = socket->readAll();
+                    if (request.startsWith("GET /v1/config "))
+                        ++configs;
+                    if (request.startsWith("GET /v1/edges "))
+                        ++edges;
+                    const QByteArray body = R"({"edges":["http://127.0.0.1:12"],"recommended_version":{"macos":"dev"}})";
+                    socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
+                                  + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QNetworkAccessManager network;
+        const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
+        {
+            // Unpinned (prod): the stored edge of the earlier run is taken - unchanged behaviour.
+            avpn::ConfigService prod(&network, base, "fixture-key", {base, other});
+            QCOMPARE(prod.activeBaseUrl(), other);
+        }
+        avpn::ConfigService service(&network, base, "fixture-key", {"https://api.tribevpn.com", other},
+                                    nullptr, /*pinned=*/true);
+        QVERIFY(service.isPinned());
+        QCOMPARE(service.activeBaseUrl(), base);
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("dev"));
+        QTRY_COMPARE(edges, 1);
+        QTest::qWait(50);
+        QCOMPARE(avpn::savedEdges, 0);                               // neither /v1/edges nor config edges stored
+        QVERIFY(!service.reportSubscriptionOutcome(base, true));
+        QVERIFY(!service.reportSubscriptionOutcome(base, true));     // 2 in a row: unpinned would switch
+        for (int i = 0; i < 5; ++i)
+            service.reportNetworkFailure();                          // threshold 3: unpinned would walk
+        QCOMPARE(switched.count(), 0);
+        QCOMPARE(service.activeBaseUrl(), base);
+        QCOMPARE(avpn::activeEdgeWrites, 0);
+        QCOMPARE(configs, 1);                                        // no re-fetch on a "new" edge
+    }
     void cachedXrayDoesNotThawUntilFreshSignedResponse()
     {
-        const QByteArray cached = R"({"features":{"xray_client":true}})";
+        const QByteArray cached = R"({"features":{"xray_client":true,"node_scan":true}})";
         avpn::cachedConfig = cached;
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost));
@@ -41,7 +103,7 @@ private slots:
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
                 connect(socket, &QTcpSocket::readyRead, socket, [socket]() {
                     socket->readAll();
-                    const QByteArray body = R"({"features":{"xray_client":true},"recommended_version":{"macos":"fresh"}})";
+                    const QByteArray body = R"({"features":{"xray_client":true,"node_scan":true},"recommended_version":{"macos":"fresh"}})";
                     socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
                                   + QByteArray::number(body.size()) + "\r\n\r\n" + body);
                     socket->disconnectFromHost();
@@ -53,10 +115,12 @@ private slots:
         avpn::ConfigService service(&network, base, "fixture-key", {base});
         service.start();
         QVERIFY(!service.config().features.value("xray_client", true));
+        QVERIFY(!service.config().features.value("node_scan", true)); // 5.1.108: frozen like xray_client
         QCOMPARE(avpn::cachedConfig, cached); // no forged write of the modified signed LKG.
         QCOMPARE(avpn::savedConfigs, 0);
         QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("fresh"));
         QVERIFY(service.config().features.value("xray_client", false));
+        QVERIFY(service.config().features.value("node_scan", false));   // fresh signed answer authorizes it
         QCOMPARE(avpn::savedConfigs, 1);
     }
     // Owner test of 5.1.102 (2026-11-05): a cold start with the tunnel off - the engine's abort of

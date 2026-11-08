@@ -15,12 +15,16 @@ namespace avpn {
 
 ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
                              const QString &pubKeyHex, const QStringList &bakedEdges,
-                             QObject *parent)
-    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this)
+                             QObject *parent, bool pinned)
+    : QObject(parent), m_nam(nam), m_pubKeyHex(pubKeyHex), m_bakedEdges(bakedEdges), m_refreshTimer(this),
+      m_pinned(pinned && !baseUrl.isEmpty())
 {
-    m_activeBase = ConfigStore::activeEdge(baseUrl.isEmpty() && !bakedEdges.isEmpty()
-                                               ? bakedEdges.first()
-                                               : baseUrl);
+    // 5.1.108: a pinned control plane (AVPN_API_URL) is used as is. Before, the stored active edge of
+    // an earlier run won over the env var, and the edge walk moved a dev session to the prod edges.
+    m_activeBase = m_pinned ? baseUrl
+                            : ConfigStore::activeEdge(baseUrl.isEmpty() && !bakedEdges.isEmpty()
+                                                          ? bakedEdges.first()
+                                                          : baseUrl);
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // macOS часто работает неделями без выхода: обновления должны обнаруживаться
     // и в уже открытом приложении. После сна Qt доставит просроченный timeout.
@@ -42,6 +46,10 @@ void ConfigService::start()
             // This is an in-memory safety policy only: never rewrite the signed payload.
             // A future freshly verified response may explicitly authorize Xray again.
             c.features.insert(QStringLiteral("xray_client"), false);
+            // Same rule for the honest-Connected / network-memory mechanism (5.1.108): a server-side
+            // node_scan=false (06.11.2026 incident) must not be overridden by a stale cache that still
+            // says true - until a fresh verified response authorizes it again.
+            c.features.insert(QStringLiteral("node_scan"), false);
             m_config = c;
             emit configApplied(m_config);
         }
@@ -138,7 +146,7 @@ void ConfigService::fetchEdges()
         RemoteConfig tmp;
         QString err;
         // /v1/edges — то же тело-форма {edges:[...], ttl_s}; переиспользуем парсер (edges field).
-        if (parseConfig(body, tmp, err) && !tmp.edges.isEmpty())
+        if (!m_pinned && parseConfig(body, tmp, err) && !tmp.edges.isEmpty())
             ConfigStore::saveEdges(tmp.edges);
     });
 }
@@ -154,7 +162,7 @@ void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64)
     m_config = c;
     m_fresh = true;
     ConfigStore::saveConfig(body);
-    if (!c.edges.isEmpty())
+    if (!m_pinned && !c.edges.isEmpty())
         ConfigStore::saveEdges(c.edges);
     emit configApplied(m_config);
 }
@@ -199,6 +207,8 @@ bool ConfigService::reportSubscriptionOutcome(const QString &requestBase, bool f
 
 bool ConfigService::switchToNextEdge()
 {
+    if (m_pinned)
+        return false; // 5.1.108: AVPN_API_URL - the only edge, nowhere to walk
     const QStringList cands = edgeCandidates(ConfigStore::loadEdges(), m_bakedEdges);
     const QString next = nextEdge(cands, m_activeBase);
     if (next == m_activeBase)

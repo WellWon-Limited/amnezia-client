@@ -603,7 +603,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         : QStringLiteral("67bddcb248215a35ee2d8c2145ce415071ba02c5bcf888e35cc4491957aac78f");
     static const QStringList kBakedEdges{QStringLiteral("https://api.tribevpn.com"),
                                          QStringLiteral("https://vpn.wellwon.hk")};
-    m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this);
+    // 5.1.108: AVPN_API_URL pins the control plane - no stored edge, no edge walk to the prod edges.
+    m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
