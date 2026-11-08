@@ -802,7 +802,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Review of 136: the native stops an adopted session that never completed a handshake only while
     // the device has a physical network path (an On-Demand session raised offline is not dead) - and
     // tells us, so the journal names the real reason instead of external_loss.
-    IosController::Instance()->setUplinkProbe([] { return avpn::UplinkMonitor::instance()->up(); });
+    // 5.1.108: the §25 stop needs a physical path KNOWN to exist - the iOS fallback monitor answers
+    // unknown (or a path with no physical medium, e.g. over our own utun) as "no" (physicalUp).
+    IosController::Instance()->setUplinkProbe([] { return avpn::UplinkMonitor::instance()->physicalUp(); });
     connect(IosController::Instance(), &IosController::adoptedDeadSessionStopped, this, [this]() {
         m_adoptedDeadStop = true;
         reliabilityEvent(QStringLiteral("adopted_dead_session_stop node=%1").arg(m_engine.currentNodeId()));

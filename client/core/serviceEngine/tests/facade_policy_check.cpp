@@ -5,6 +5,7 @@
 #include "../DebugSnapshot.h"
 #include "../DoctorReport.h"
 #include "../ReportDelivery.h"
+#include "../UplinkMonitor.h"
 
 #include <QByteArray>
 #include <QJsonArray>
@@ -448,6 +449,13 @@ static void wave4UpstreamBehaviour()
     CHECK(!dataFlowingNow(true, false, QStringLiteral("bypass"), true));
     CHECK(!dataFlowingNow(true, true, QStringLiteral("works"), true));          // dead live probe
     CHECK(!dataFlowingNow(false, false, QStringLiteral("works"), true));        // tunnel not up
+    // 5.1.108: the iOS uplink fallback answers "physical path known" strictly (§25 stop input).
+    CHECK(fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::WiFi));
+    CHECK(fallbackPhysicalUp(UplinkReach::Site, UplinkMedium::Cellular));
+    CHECK(!fallbackPhysicalUp(UplinkReach::Unknown, UplinkMedium::WiFi));      // backend cannot tell
+    CHECK(!fallbackPhysicalUp(UplinkReach::Disconnected, UplinkMedium::WiFi));
+    CHECK(!fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::Unknown));    // e.g. only our utun
+    CHECK(!fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::Bluetooth));
     // Decision 2026-11-05: /v1/subscription per-edge streak classification (QNetworkReply errors).
     CHECK(classifySubscriptionEdgeOutcome(0, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered);
     CHECK(classifySubscriptionEdgeOutcome(204, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered); // 401
