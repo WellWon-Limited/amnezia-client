@@ -200,13 +200,22 @@ constexpr const char kWhoamiXrayEdge[] = "https://vpn.wellwon.hk";
 // (201.34.134.103), and a request to the tunnel's own server address leaves outside the tunnel
 // (macOS xray with the RU split routes it directly, client/vpnconnection.cpp VpnAllExceptSites), so
 // it would read "past the VPN" on every Xray path. AWG: the active API address. A dev backend
-// (AVPN_API_URL) keeps its own base - its tokens are not valid on the prod edge. Only whoami uses
-// this; other API calls keep their base.
+// (AVPN_API_URL) keeps its own base - its tokens are not valid on the prod edge. Only whoami and the
+// live probe (liveProbePingUrl) use this; other API calls keep their base.
 inline QString whoamiBaseUrl(const QString &activeBase, bool xrayTransport, bool devBackend)
 {
     if (!xrayTransport || devBackend)
         return activeBase;
     return QString::fromLatin1(kWhoamiXrayEdge);
+}
+
+// The live probe's first-party ping (QualityProbe: the card's ms, ONLINE, the Xray death detector
+// ServiceEngine::feedProbeResult) - on the same edge as whoami, for the same reason: on Xray
+// api.tribevpn.com is the entry host, routed outside the tunnel, so a ping there answers even when
+// the Xray exit is dead. AWG: the active API address, as before.
+inline QString liveProbePingUrl(const QString &activeBase, bool xrayTransport, bool devBackend)
+{
+    return whoamiBaseUrl(activeBase, xrayTransport, devBackend) + QStringLiteral("/v1/ping");
 }
 
 // Name for the journal, the bench report and the QML property pathCheck.

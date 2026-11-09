@@ -1116,6 +1116,11 @@ private:
     // и urls.quality_probe_url; вызывается из activeEdgeChanged и configApplied. Конструкторный
     // setEndpoints (AvpnEngineQml.cpp:268-269) — только сид до первого вызова.
     void refreshQualityEndpoints();
+    // The live probe's first-party ping for the current transport (avpn::liveProbePingUrl: on Xray
+    // the whoami edge, never the Xray entry host). measureLiveProbe() re-targets the probe when the
+    // transport changed since the endpoints were set, then measures.
+    QString livePingUrl() const;
+    void measureLiveProbe();
 
     // AVPN backend-first (Task 4): пер-сервисный kill-switch чипов (lists.service_chips_disabled).
     // Фильтрует m_svcCfgsAll (полный список — ctor-дефолт или remote probeTargets из

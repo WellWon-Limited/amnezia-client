@@ -484,7 +484,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Эндпоинты по приоритету: свой бэкенд-пинг (тот же путь, что и control plane) → публичный фолбэк.
     // Поток RTT → m_signal (EWMA+гистерезис) → liveBars 0..5. Запуск — из onTick(), когда Connected.
     m_probe = new QualityProbe(m_nam, this);
-    m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
+    m_probe->setEndpoints({livePingUrl(),
                            QStringLiteral("https://connectivitycheck.gstatic.com/generate_204")});
     connect(m_probe, &QualityProbe::result, this, [this](int rttMs, bool reachable) {
         if (m_engine.state() != EngineState::Connected || m_lastTunnelState != Vpn::Connected)
@@ -1764,9 +1764,29 @@ void AvpnEngineQml::refreshQualityEndpoints()
 {
     if (!m_probe)
         return;
-    m_probe->setEndpoints({m_baseUrl + QStringLiteral("/v1/ping"),
+    m_probe->setEndpoints({livePingUrl(),
                            configUrl(QStringLiteral("quality_probe_url"),
                                      QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
+}
+
+// The ping follows the transport like whoami does: on Xray api.tribevpn.com is the entry host, routed
+// outside the tunnel, so a ping there answers even when the Xray exit is dead (review of 138).
+QString AvpnEngineQml::livePingUrl() const
+{
+    return avpn::liveProbePingUrl(m_baseUrl, avpn::isXrayProto(m_engine.currentNodeProto()),
+                                  !qgetenv("AVPN_API_URL").isEmpty());
+}
+
+// The transport is known only once a node is up and may change on a switch inside the location, so
+// the target is checked right before each measurement; endpoints() is compared by membership because
+// QualityProbe moves the last good endpoint to the front.
+void AvpnEngineQml::measureLiveProbe()
+{
+    if (!m_probe)
+        return;
+    if (!m_probe->endpoints().contains(livePingUrl()))
+        refreshQualityEndpoints();
+    m_probe->measure();
 }
 
 // AVPN backend-first (Task 4): пер-сервисный kill-switch чипов доступности (lists.service_chips_disabled).
@@ -2701,7 +2721,7 @@ void AvpnEngineQml::onTick()
     m_bgProbeTick = uiActive ? 0 : m_bgProbeTick + 1;
     if (m_probe && liveProbeDue(avpn::TuningStore::flag(QStringLiteral("live_rtt")),
                                 state() == QLatin1String("connected"), uiActive, m_bgProbeTick))
-        m_probe->measure();
+        measureLiveProbe();
     // AVPN (#35 живой трафик): пока подключены — каждый N-й тик (~20с при N=5, server-tunable
     // numbers.traffic_sync_ticks) освежаем счётчики.
     // ⚠️ ДВОЕ ЧАСОВ: берём /v1/subscription (ЧАСЫ УСТРОЙСТВА — их продлевает оплата), НЕ /v1/account
@@ -6117,7 +6137,7 @@ void AvpnEngineQml::onTunnelUpEffects()
     QTimer::singleShot(1800, this, [this]() {
         if (m_probe && avpn::TuningStore::flag(QStringLiteral("live_rtt"))
             && state() == QLatin1String("connected"))
-            m_probe->measure();
+            measureLiveProbe();
     });
 }
 
