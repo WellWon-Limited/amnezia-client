@@ -541,6 +541,21 @@ inline bool reissueAfterOwnAbort(bool canceled, bool timedOut)
     return canceled && !timedOut;
 }
 
+// ONLINE badge (5.1.108): "data flows" no longer depends on the server flag node_scan. Before, the
+// badge needed the whoami verdict "works", and whoami runs only with node_scan on (off since
+// 06.11.2026) - so no build ever showed ONLINE. Now the live in-tunnel probe (QualityProbe:
+// /v1/ping, then generate_204, every tick while connected) proves it as well; whoami only
+// accelerates (works) or forbids (no_data / bypass). A confirmed dead live probe (liveDead) always
+// forbids. liveProven = at least one live probe succeeded in this Connected session.
+inline bool dataFlowingNow(bool tunnelConnected, bool liveDead, const QString &pathCheck, bool liveProven)
+{
+    if (!tunnelConnected || liveDead)
+        return false;
+    if (pathCheck == QLatin1String("no_data") || pathCheck == QLatin1String("bypass"))
+        return false;
+    return pathCheck == QLatin1String("works") || liveProven;
+}
+
 // Decision 2026-11-05: an edge can pass small answers and still never deliver /v1/subscription (the
 // owner's cellular path to vpn.wellwon.hk: 0 of 23 in 3 days while /v1/account passed; nginx answered
 // each with 200, ~6.7 KB). The edge walk cannot see that - every small success resets its streak - so

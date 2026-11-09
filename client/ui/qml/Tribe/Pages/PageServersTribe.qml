@@ -34,10 +34,10 @@ PageType {
     // гард undefined currentNode — как в PageLocationsTribe (страница до первой подписки)
     readonly property var cur: (hasEngine && TribeEngine.currentNode) ? TribeEngine.currentNode : ({})
     readonly property bool autoMode: !cur.pinned
-    // ONLINE у строки текущей страны: туннель поднят и проверка данных через выход пройдена
-    // (вердикт works), живая проба не говорит обратное — как бейдж ONLINE на главной.
+    // ONLINE у строки текущей страны — то же свойство движка, что бейдж ONLINE на главной (5.1.108):
+    // данные идут через туннель (живая проба или whoami works), от флага node_scan не зависит.
     readonly property bool onlineNow: hasEngine && TribeEngine.state === "connected"
-                                      && TribeEngine.pathCheck === "works" && TribeEngine.liveDead !== true
+                                      && TribeEngine.dataFlowing === true
     property string query: ""
 
     // AVPN awg31-xray-v1: режим транспорта — факт из движка (=== undefined на старом бинаре ⇒ "auto").

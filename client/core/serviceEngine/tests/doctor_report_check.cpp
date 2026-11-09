@@ -203,6 +203,13 @@ int main()
     CHECK(countryDisplayName(QStringLiteral("zz"), QStringLiteral("es")) == QStringLiteral("ZZ"),
           "country display: unknown code -> the code in capitals");
     CHECK(countryDisplayName(QString(), QStringLiteral("ru")).isEmpty(), "country display: no code -> empty");
+    // 5.1.108: Spanish UI gets Spanish names (QLocale only gives English ones).
+    CHECK(countryDisplayName(QStringLiteral("fi"), QStringLiteral("es")) == QStringLiteral("Finlandia"),
+          "country display: fi, es UI -> Finlandia");
+    CHECK(countryDisplayName(QStringLiteral("DE"), QStringLiteral("es_ES")) == QStringLiteral("Alemania"),
+          "country display: DE, es_ES UI -> Alemania");
+    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("es")) == QStringLiteral("Brazil"),
+          "country display: no Spanish name in the table -> English, not the code");
     // Owner test of 5.1.102: one line per checked alternative while the stage runs.
     CHECK(altNodeResult(2, true) == QStringLiteral("ok"), "alt result: both probes -> ok");
     CHECK(altNodeResult(1, true) == QStringLiteral("no_data"), "alt result: up, data dropped -> no_data");

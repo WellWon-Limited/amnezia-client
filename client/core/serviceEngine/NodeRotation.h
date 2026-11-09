@@ -13,6 +13,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <atomic>
 
 namespace avpn {
 
@@ -79,10 +80,21 @@ inline bool isXrayProto(const QString &proto)
 //    xray-пути там нет (HealthLoop слеп), поэтому клиент xray не выбирает; сервер им xray и так
 //    не выдаёт (per-platform min_app_version на листенере, спека §2.2);
 //  • kill-switch features.xray_client (default ВЫКЛ: заморожен) — бэк гасит xray на клиентах без релиза.
+//  • 5.1.108: the platform runtime is present. macOS root service: Xray starts tun2socks next to
+//    Tribe-service (/Library/PrivilegedHelperTools/TribeVPN/tun2socks), and the service tarball never
+//    shipped it up to 137 - every Xray attempt failed at start and Auto spent attempts on it. The
+//    facade sets this from the installed service (AvpnEngineQml::refreshXrayRuntimeGate); default
+//    true (iOS NE carries Xray in the extension; tests).
+inline std::atomic<bool> &xrayPlatformRuntimeReady()
+{
+    static std::atomic<bool> ready{true};
+    return ready;
+}
+
 inline bool xrayClientSupported()
 {
 #if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
-    return TuningStore::flag(QStringLiteral("xray_client"), false);
+    return TuningStore::flag(QStringLiteral("xray_client"), false) && xrayPlatformRuntimeReady().load();
 #else
     return false;
 #endif

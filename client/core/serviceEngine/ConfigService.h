@@ -16,14 +16,18 @@ class ConfigService : public QObject
 {
     Q_OBJECT
 public:
+    // pinned (5.1.108) = the control plane is pinned by AVPN_API_URL (dev/E2E backend): baseUrl is the
+    // only edge - the stored active edge is not taken, the edge walk never moves, /v1/edges and the
+    // config's edges are not stored (a dev backend's list must not leak into the prod edge cache).
     ConfigService(QNetworkAccessManager *nam, const QString &baseUrl, const QString &pubKeyHex,
-                  const QStringList &bakedEdges, QObject *parent = nullptr);
+                  const QStringList &bakedEdges, QObject *parent = nullptr, bool pinned = false);
 
     void start();
     const RemoteConfig &config() const { return m_config; }
     // true после первого конфига, пришедшего из сети (подпись проверена); LKG-кеш — false.
     // Тихая установка и подтверждение «жива» опираются только на свежий конфиг (ревью 2026-09-22).
     bool isFresh() const { return m_fresh; }
+    bool isPinned() const { return m_pinned; }
     QString activeBaseUrl() const { return m_activeBase; }
 
     void reportNetworkFailure();
@@ -63,6 +67,7 @@ private:
     QTimer       m_refreshTimer;
     bool         m_configInFlight = false;
     bool         m_fresh = false;
+    bool         m_pinned = false;      // 5.1.108: AVPN_API_URL pins the edge (see the constructor)
     SubscriptionEdgeStreak m_subscriptionStreak; // decision 2026-11-05, see reportSubscriptionOutcome
 };
 

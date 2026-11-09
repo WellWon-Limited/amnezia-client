@@ -5,6 +5,7 @@
 #include "../DebugSnapshot.h"
 #include "../DoctorReport.h"
 #include "../ReportDelivery.h"
+#include "../UplinkMonitor.h"
 
 #include <QByteArray>
 #include <QJsonArray>
@@ -437,6 +438,24 @@ static void wave4UpstreamBehaviour()
     CHECK(reissueAfterOwnAbort(true, false));   // our abort on a transition -> re-issue once
     CHECK(!reissueAfterOwnAbort(true, true));   // our 15 s timeout -> no
     CHECK(!reissueAfterOwnAbort(false, false)); // answered / failed by the network -> no
+    // 5.1.108: ONLINE without node_scan - the live in-tunnel probe proves data; whoami only
+    // accelerates (works) or forbids (no_data / bypass); a confirmed dead probe always forbids.
+    CHECK(!dataFlowingNow(true, false, QString(), false));                      // nothing proven yet
+    CHECK(dataFlowingNow(true, false, QString(), true));                        // flag off, live probe ok
+    CHECK(dataFlowingNow(true, false, QStringLiteral("works"), false));         // whoami first
+    CHECK(dataFlowingNow(true, false, QStringLiteral("limited"), true));        // limited + live probe
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("limited"), false));
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("no_data"), true));       // whoami forbids
+    CHECK(!dataFlowingNow(true, false, QStringLiteral("bypass"), true));
+    CHECK(!dataFlowingNow(true, true, QStringLiteral("works"), true));          // dead live probe
+    CHECK(!dataFlowingNow(false, false, QStringLiteral("works"), true));        // tunnel not up
+    // 5.1.108: the iOS uplink fallback answers "physical path known" strictly (§25 stop input).
+    CHECK(fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::WiFi));
+    CHECK(fallbackPhysicalUp(UplinkReach::Site, UplinkMedium::Cellular));
+    CHECK(!fallbackPhysicalUp(UplinkReach::Unknown, UplinkMedium::WiFi));      // backend cannot tell
+    CHECK(!fallbackPhysicalUp(UplinkReach::Disconnected, UplinkMedium::WiFi));
+    CHECK(!fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::Unknown));    // e.g. only our utun
+    CHECK(!fallbackPhysicalUp(UplinkReach::Online, UplinkMedium::Bluetooth));
     // Decision 2026-11-05: /v1/subscription per-edge streak classification (QNetworkReply errors).
     CHECK(classifySubscriptionEdgeOutcome(0, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered);
     CHECK(classifySubscriptionEdgeOutcome(204, false, now - 100, -1, -1, now) == SubscriptionEdgeOutcome::Delivered); // 401

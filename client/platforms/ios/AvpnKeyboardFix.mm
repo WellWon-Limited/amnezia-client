@@ -235,8 +235,6 @@ extern "C" double Avpn_currentKeyboardHeight(void)
     if (fabs(h - g_avpnKbLastH) > 0.1) {
         g_avpnKbLastH = h;
         g_avpnKbStableSince = CACurrentMediaTime();
-        // AVPN DEV: УБРАТЬ после калибровки — сэмплы реальной траектории клавиатуры
-        NSLog(@"AVPNKB %.3f %.2f", CACurrentMediaTime(), h);
     } else if (CACurrentMediaTime() - g_avpnKbStableSince > 0.6) {
         [link invalidate]; // высота устоялась — до следующего клавиатурного события
         g_avpnKbLink = nil;

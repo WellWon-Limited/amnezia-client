@@ -36,4 +36,9 @@ bool macInstallServiceRun(QString *errOut);
 // наш собственный поднятый туннель за чужой. Вызывать ДО старта коннекта.
 QString macForeignVpnName();
 
+// 5.1.108: the installed service carries the Xray runtime - tun2socks next to Tribe-service
+// (/Library/PrivilegedHelperTools/TribeVPN/tun2socks, executable). Services up to 5.1.107 never shipped
+// it: without it the Xray path cannot start, so the client treats Xray as unsupported (NodeRotation.h).
+bool macXrayRuntimePresent();
+
 }

@@ -59,12 +59,21 @@ PageType {
     // "" | "checking" | "works" | "no_data" | "bypass" | "limited" (см. AvpnEngineQml pathCheck).
     // Гард String(... || "") — старый бинарь без свойства ведёт себя как раньше.
     readonly property string pathCheckNow: hasEngine ? String(TribeEngine.pathCheck || "") : ""
-    // «Данные идут» — только после пройденной проверки и пока живая проба не говорит обратное.
-    readonly property bool dataFlowingNow: isOn && pathCheckNow === "works" && !liveDeadNow
+    // «Данные идут» (бейдж ONLINE) — одно свойство движка для главной и списка серверов (5.1.108):
+    // туннель поднят, живая проба через туннель прошла или whoami сказал works; no_data/bypass и
+    // подтверждённо мёртвая проба запрещают. От серверного флага node_scan не зависит.
+    readonly property bool dataFlowingNow: isOn && hasEngine && TribeEngine.dataFlowing === true
     // Проверка не прошла, движок уже поднимает следующий путь той же попытки.
     readonly property bool nextPathNow: showBusy && !verifyingNow
                                         && (pathCheckNow === "no_data" || pathCheckNow === "bypass")
     readonly property string curProtoVersion: String(root.curNode.protoVersion || "")
+    // 5.1.108: протокол под именем узла — активный, пока туннель поднят (в т. ч. на проверке трафика),
+    // иначе тот, что поднимет следующий старт (страна или режим Amnezia/Xray выбраны; при «Авто» без
+    // выбранной страны движок отдаёт пусто — бейджа нет, чтобы он не мигал между равными узлами).
+    readonly property bool protoLive: (isOn || verifyingNow) && activeProtoNow.length > 0
+    readonly property string shownProto: protoLive ? activeProtoNow : String(root.curNode.nextProto || "")
+    readonly property string shownProtoVersion: protoLive ? curProtoVersion
+                                                          : String(root.curNode.nextProtoVersion || "")
 
     // AVPN (haptics): терминальные отклики коннекта — по ФАЗЕ, не по isOn: при реконнекте из
     // пикера isOn мигает false→true, а фаза идёт on→busy→on (одна success в конце). Играет ТОЛЬКО
@@ -901,11 +910,11 @@ PageType {
                         }
                     }
                 }
-                // Слева имя (+«Авто» / статус второй строкой), справа компактный кластер: столбик
-                // бейджей (ONLINE над протоколом) вплотную к палочкам (сверху) и мс (снизу). // AVPN
-                // Владелец, тест 5.1.102 (2026-11-05): строки «IP: …» больше нет — на её месте бейдж
-                // активного протокола; «данные идут» стало бейджем ONLINE (только после пройденной
-                // проверки данных, вердикт works; во время проверки — подпись под орбом).
+                // Слева имя, под ним бейдж протокола и мелкая подпись («Авто» / статус без узла);
+                // справа компактный кластер: ONLINE вплотную к палочкам (сверху) и мс (снизу). // AVPN
+                // Владелец, тест 5.1.102 (2026-11-05): строки «IP: …» больше нет; «данные идут» — бейдж
+                // ONLINE. 5.1.108: протокол переехал под имя и виден до подключения (shownProto),
+                // ONLINE — по свойству движка dataFlowing (живая проба через туннель или whoami works).
                 Item {
                     id: infoCol
                     anchors.verticalCenter: parent.verticalCenter
@@ -918,9 +927,7 @@ PageType {
                     readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
                     // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд). // AVPN
                     readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
-                    // бейдж протокола — пока туннель поднят (в т. ч. на проверке трафика)
-                    readonly property bool showProto: (root.isOn || root.verifyingNow) && root.activeProtoNow.length > 0
-                    readonly property real cellH: protoBadge.implicitHeight
+                    readonly property real cellH: onlineBadge.implicitHeight
 
                     Item {
                         id: cluster
@@ -929,45 +936,28 @@ PageType {
                         width: (sigCol.visible ? sigCol.width : 0)
                                + (badgeCol.visible ? badgeCol.width : 0)
                                + (sigCol.visible && badgeCol.visible ? Theme.space.sm : 0)
-                        height: 2 * infoCol.cellH + 3
+                        height: 2 * infoCol.cellH + Theme.badge.stackGap
 
-                        // ── столбик бейджей: ONLINE (верх, у палочек) и протокол (низ, у мс) ──
+                        // ── ONLINE (на линии палочек) ──
                         Column {
                             id: badgeCol
-                            visible: infoCol.showProto
+                            visible: root.dataFlowingNow
                             anchors.right: sigCol.visible ? sigCol.left : parent.right
                             anchors.rightMargin: sigCol.visible ? Theme.space.sm : 0
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 3
-                            // ширина столбика — по более широкому бейджу: ONLINE появляется без сдвига
-                            readonly property real cellW: Math.max(onlineBadge.implicitWidth, protoBadge.implicitWidth)
+                            spacing: Theme.badge.stackGap
                             Item {
-                                width: badgeCol.cellW; height: infoCol.cellH
+                                width: onlineBadge.implicitWidth; height: infoCol.cellH
                                 TribeLabelBadge {
                                     id: onlineBadge
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
-                                    visible: root.dataFlowingNow
                                     label: qsTr("ONLINE")
                                     fg: Theme.color.connected
                                     fill: Theme.color.badgeOn
                                 }
                             }
-                            Item {
-                                width: badgeCol.cellW; height: infoCol.cellH
-                                TribeLabelBadge {
-                                    id: protoBadge
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    readonly property bool xray: root.activeProtoNow === "xray"
-                                    label: xray ? qsTr("Xray Reality")
-                                                : (root.curProtoVersion.length > 0
-                                                   ? qsTr("Amnezia v%1").arg(root.curProtoVersion)
-                                                   : qsTr("Amnezia"))
-                                    fg: xray ? Theme.color.xray : Theme.color.accent
-                                    fill: xray ? Theme.color.badgeXray : Theme.color.badgeAccent
-                                }
-                            }
+                            Item { width: onlineBadge.implicitWidth; height: infoCol.cellH } // линия мс
                         }
 
                         // ── палочки (верх) и мс (низ) — на линиях бейджей ──
@@ -976,7 +966,7 @@ PageType {
                             visible: infoCol.sig
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 3
+                            spacing: Theme.badge.stackGap
                             readonly property real cellW: Math.max(topBars.width, msText.implicitWidth)
                             Item {
                                 width: sigCol.cellW; height: infoCol.cellH
@@ -999,7 +989,7 @@ PageType {
                                     visible: infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
                                     text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
                                     color: root.slate500
-                                    font.family: Theme.font.mono; font.pixelSize: 10
+                                    font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                                 }
                             }
                         }
@@ -1012,7 +1002,7 @@ PageType {
                         anchors.right: cluster.left
                         anchors.rightMargin: cluster.width > 0 ? Theme.space.md : 0
                         anchors.verticalCenter: parent.verticalCenter
-                        spacing: 3
+                        spacing: Theme.badge.stackGap
                         Text {
                             id: nodeName
                             width: parent.width
@@ -1023,20 +1013,40 @@ PageType {
                             color: "white"; elide: Text.ElideRight
                             font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
                         }
-                        // AVPN (реш. владельца 2026-09-02): режим выбора сервера — обычным текстом,
-                        // тем же кеглем/цветом, что мс; без узла — статус подбора.
-                        Text {
-                            id: subText
+                        // Вторая строка: бейдж протокола (5.1.108 — под именем, до подключения тоже) и
+                        // мелкая подпись. AVPN (реш. владельца 2026-09-02): «Авто» — только когда сервер
+                        // выбрал движок, тем же кеглем/цветом, что мс; без узла — статус подбора.
+                        Row {
+                            id: subRow
                             width: parent.width
-                            visible: text.length > 0
-                            elide: Text.ElideRight
-                            text: root.curNode.hasNode ? (root.curNode.auto === true ? qsTr("Авто") : "")
-                                  : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
-                                                                             : qsTr("Секунду…"))
-                                  : qsTr("Сервис запускает узел")
-                            textFormat: Text.PlainText
-                            color: root.slate500
-                            font.family: Theme.font.mono; font.pixelSize: 10
+                            visible: protoBadge.visible || subText.text.length > 0
+                            spacing: Theme.space.sm
+                            TribeLabelBadge {
+                                id: protoBadge
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.shownProto.length > 0
+                                readonly property bool xray: root.shownProto === "xray"
+                                label: xray ? qsTr("Xray Reality")
+                                            : (root.shownProtoVersion.length > 0
+                                               ? qsTr("Amnezia v%1").arg(root.shownProtoVersion)
+                                               : qsTr("Amnezia"))
+                                fg: xray ? Theme.color.xray : Theme.color.accent
+                                fill: xray ? Theme.color.badgeXray : Theme.color.badgeAccent
+                            }
+                            Text {
+                                id: subText
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: subRow.width - (protoBadge.visible ? protoBadge.width + subRow.spacing : 0)
+                                visible: text.length > 0
+                                elide: Text.ElideRight
+                                text: root.curNode.hasNode ? (root.curNode.auto === true ? qsTr("Авто") : "")
+                                      : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Повторяем автоматически")
+                                                                                 : qsTr("Секунду…"))
+                                      : qsTr("Сервис запускает узел")
+                                textFormat: Text.PlainText
+                                color: root.slate500
+                                font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
+                            }
                         }
                     }
                 }

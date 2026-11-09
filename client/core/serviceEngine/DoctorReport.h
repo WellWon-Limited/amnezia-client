@@ -171,10 +171,45 @@ inline QString countryNameRu(const QString &code)
     return it != t.constEnd() ? it.value() : cc;
 }
 
+// 5.1.108: Spanish names for the same countries (QLocale::territoryToString is English only, so an
+// es UI showed "Estonia"/"Finland"/"Germany" next to Spanish text). Fallback - the code in capitals.
+inline QString countryNameEs(const QString &code)
+{
+    const QString cc = code.trimmed().toUpper();
+    static const QHash<QString, QString> t{
+        {QStringLiteral("LV"), QStringLiteral("Letonia")},
+        {QStringLiteral("FI"), QStringLiteral("Finlandia")},
+        {QStringLiteral("NL"), QStringLiteral("Países Bajos")},
+        {QStringLiteral("DE"), QStringLiteral("Alemania")},
+        {QStringLiteral("US"), QStringLiteral("EE. UU.")},
+        {QStringLiteral("GB"), QStringLiteral("Reino Unido")},
+        {QStringLiteral("FR"), QStringLiteral("Francia")},
+        {QStringLiteral("SE"), QStringLiteral("Suecia")},
+        {QStringLiteral("PL"), QStringLiteral("Polonia")},
+        {QStringLiteral("RU"), QStringLiteral("Rusia")},
+        {QStringLiteral("TR"), QStringLiteral("Turquía")},
+        {QStringLiteral("CH"), QStringLiteral("Suiza")},
+        {QStringLiteral("AT"), QStringLiteral("Austria")},
+        {QStringLiteral("CA"), QStringLiteral("Canadá")},
+        {QStringLiteral("JP"), QStringLiteral("Japón")},
+        {QStringLiteral("SG"), QStringLiteral("Singapur")},
+        {QStringLiteral("HK"), QStringLiteral("Hong Kong")},
+        {QStringLiteral("ES"), QStringLiteral("España")},
+        {QStringLiteral("IT"), QStringLiteral("Italia")},
+        {QStringLiteral("EE"), QStringLiteral("Estonia")},
+        {QStringLiteral("LT"), QStringLiteral("Lituania")},
+        {QStringLiteral("NO"), QStringLiteral("Noruega")},
+        {QStringLiteral("DK"), QStringLiteral("Dinamarca")},
+        {QStringLiteral("CZ"), QStringLiteral("Chequia")},
+    };
+    const auto it = t.constFind(cc);
+    return it != t.constEnd() ? it.value() : cc;
+}
+
 // Name of a server that came without a label (owner test of 5.1.102, 2026-11-05: Xray listeners
-// showed their region code "ee"/"fi"). Russian UI - the table above; other languages and codes
-// missing from it - the English name from QLocale; an unknown code - the code in capitals. Never
-// the region code.
+// showed their region code "ee"/"fi"). Russian and Spanish UI - the tables above (5.1.108: es);
+// other languages and codes missing from them - the English name from QLocale; an unknown code -
+// the code in capitals. Never the region code.
 inline QString countryDisplayName(const QString &code, const QString &lang)
 {
     const QString cc = code.trimmed().toUpper();
@@ -184,6 +219,11 @@ inline QString countryDisplayName(const QString &code, const QString &lang)
         const QString ru = countryNameRu(cc);
         if (ru != cc)
             return ru;
+    }
+    if (lang.startsWith(QLatin1String("es"))) {
+        const QString es = countryNameEs(cc);
+        if (es != cc)
+            return es;
     }
     const QLocale::Territory t = QLocale::codeToTerritory(cc);
     return t != QLocale::AnyTerritory ? QLocale::territoryToString(t) : cc;

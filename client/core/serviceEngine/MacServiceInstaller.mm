@@ -55,6 +55,12 @@ static bool pgrepFull(const QString &pattern)
     return p.exitCode() == 0;
 }
 
+bool macXrayRuntimePresent()
+{
+    return [[NSFileManager defaultManager]
+            isExecutableFileAtPath:@"/Library/PrivilegedHelperTools/TribeVPN/tun2socks"];
+}
+
 QString macForeignVpnName()
 {
     // Наш туннель уже поднят (наш amneziawg-go жив)? Тогда utun-egress = НАШ → не конфликт (reconnect).

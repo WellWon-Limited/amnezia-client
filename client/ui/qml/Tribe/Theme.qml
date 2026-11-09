@@ -83,6 +83,7 @@ QtObject {
         readonly property int bodyS: 14
         readonly property int caption: 12
         readonly property int monoData: 13
+        readonly property int micro: 10      // dense secondary captions: card ms, «Авто» under the node name
         // weights
         readonly property int wRegular: Font.Normal      // 400
         readonly property int wMedium: Font.Medium       // 500
@@ -104,6 +105,17 @@ QtObject {
         readonly property int xxl: 32
         readonly property int x3: 48
         readonly property int x4: 64
+    }
+
+    // ─── Label badge (TribeLabelBadge: ONLINE, Amnezia / Xray Reality) ───────────
+    readonly property QtObject badge: QtObject {
+        readonly property int height: 17
+        readonly property int heightSmall: 15     // dense variant (server-list rows)
+        readonly property int padX: 8             // = space.sm
+        readonly property int padXSmall: 6
+        readonly property int text: 11            // caption − 1
+        readonly property int textSmall: 10       // caption − 2
+        readonly property int stackGap: 3         // vertical gap between stacked badges / text lines on a card
     }
 
     // ─── Radii ────────────────────────────────────────────────────────────────
