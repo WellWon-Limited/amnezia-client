@@ -350,6 +350,22 @@ int main()
                   == QLatin1String("https://dev.example:8443"),
               "xray on a dev backend (AVPN_API_URL) -> the dev base, not the prod edge");
         CHECK(QString::fromLatin1(avpn::kWhoamiXrayEdge) == alt, "alternate edge = the baked vpn.wellwon.hk");
+
+        // The live probe (QualityProbe: card ms, ONLINE, the Xray death detector feedProbeResult) pings
+        // the edge whoami uses: on Xray api.tribevpn.com is the entry host, routed outside the tunnel,
+        // so a ping there answers even when the Xray exit is dead (review of 138).
+        const QString ping = QStringLiteral("/v1/ping");
+        const QString dev = QStringLiteral("https://dev.example:8443");
+        CHECK(avpn::liveProbePingUrl(api, true, false) == avpn::whoamiBaseUrl(api, true, false) + ping
+                  && avpn::liveProbePingUrl(api, true, false) == alt + ping,
+              "xray: live probe pings the whoami edge, not api.tribevpn.com (= the xray entry)");
+        CHECK(avpn::liveProbePingUrl(alt, true, false) == alt + ping, "xray: already on the alternate edge -> it");
+        CHECK(avpn::liveProbePingUrl(api, false, false) == api + ping, "awg: live probe keeps the active API address");
+        CHECK(avpn::liveProbePingUrl(alt, false, false) == alt + ping,
+              "awg: live probe keeps the active API address (edge-walked)");
+        CHECK(avpn::liveProbePingUrl(dev, true, true) == avpn::whoamiBaseUrl(dev, true, true) + ping
+                  && avpn::liveProbePingUrl(dev, true, true) == dev + ping,
+              "xray on a dev backend (AVPN_API_URL) -> the dev base, as whoami");
     }
 
     // --- network memory: the stored copy (owner test 06.11, review of 136) ---
