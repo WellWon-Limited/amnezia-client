@@ -1769,8 +1769,8 @@ void AvpnEngineQml::refreshQualityEndpoints()
                                      QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
 }
 
-// The ping follows the transport like whoami does: on Xray api.tribevpn.com is the entry host, routed
-// outside the tunnel, so a ping there answers even when the Xray exit is dead (review of 138).
+// The ping follows the transport like whoami does: on Xray api.tribevpn.com is the entry host of the
+// same path (review of 138; routing per platform - WhoamiVerdict.h whoamiBaseUrl).
 QString AvpnEngineQml::livePingUrl() const
 {
     return avpn::liveProbePingUrl(m_baseUrl, avpn::isXrayProto(m_engine.currentNodeProto()),
