@@ -1200,7 +1200,7 @@
     <message>
         <location line="-128"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+244"/>
@@ -1289,7 +1289,7 @@
     <message>
         <location line="+0"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1332,7 +1332,7 @@
     <message>
         <location line="+1"/>
         <source>Поддержка</source>
-        <translation type="unfinished">Soporte</translation>
+        <translation>Soporte</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1362,17 +1362,17 @@
     <message>
         <location line="+90"/>
         <source>Уведомления</source>
-        <translation type="unfinished">Notificaciones</translation>
+        <translation>Notificaciones</translation>
     </message>
     <message>
         <location line="+119"/>
         <source>+%1 дней</source>
-        <translation type="unfinished">+%1 días</translation>
+        <translation>+%1 días</translation>
     </message>
     <message>
         <location line="+70"/>
         <source>Прочитал</source>
-        <translation type="unfinished">Entendido</translation>
+        <translation>Entendido</translation>
     </message>
 </context>
 <context>
@@ -1709,7 +1709,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     <message>
         <location line="+0"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+11"/>
@@ -1779,7 +1779,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     <message>
         <location line="+11"/>
         <source>Повторить</source>
-        <translation type="unfinished">Reintentar</translation>
+        <translation>Reintentar</translation>
     </message>
     <message>
         <location line="-10"/>
@@ -1808,7 +1808,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     <message>
         <location line="+51"/>
         <source>Поддержка</source>
-        <translation type="unfinished">Soporte</translation>
+        <translation>Soporte</translation>
     </message>
     <message>
         <location line="+7"/>
@@ -1823,7 +1823,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     <message>
         <location line="+17"/>
         <source>ID аккаунта скопирован</source>
-        <translation type="unfinished">ID de cuenta copiado</translation>
+        <translation>ID de cuenta copiado</translation>
     </message>
     <message>
         <location line="+79"/>
@@ -1875,7 +1875,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+9"/>
         <source>Отмена</source>
-        <translation type="unfinished">Cancelar</translation>
+        <translation>Cancelar</translation>
     </message>
 </context>
 <context>
@@ -2022,7 +2022,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+134"/>
         <source>Запустить диагностику?</source>
-        <translation type="unfinished">¿Ejecutar diagnóstico?</translation>
+        <translation>¿Ejecutar diagnóstico?</translation>
     </message>
     <message>
         <location line="+13"/>
@@ -2077,7 +2077,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+16"/>
         <source> мс</source>
-        <translation type="unfinished"> ms</translation>
+        <translation> ms</translation>
     </message>
     <message>
         <location line="+56"/>
@@ -2117,7 +2117,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+35"/>
         <source>Запустить диагностику</source>
-        <translation type="unfinished">Ejecutar diagnóstico</translation>
+        <translation>Ejecutar diagnóstico</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2250,7 +2250,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+2"/>
         <source>Доступна версия %1</source>
-        <translation type="unfinished">Versión %1 disponible</translation>
+        <translation>Versión %1 disponible</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2260,12 +2260,12 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+37"/>
         <source>Скрыть</source>
-        <translation type="unfinished">Ocultar</translation>
+        <translation>Ocultar</translation>
     </message>
     <message>
         <location line="+1"/>
         <source>Вернуть %1</source>
-        <translation type="unfinished">Restaurar %1</translation>
+        <translation>Restaurar %1</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2350,7 +2350,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeUpdateSheet.qml" line="+31"/>
         <source>Доступна новая версия</source>
-        <translation type="unfinished">Hay una nueva versión disponible</translation>
+        <translation>Hay una nueva versión disponible</translation>
     </message>
     <message>
         <location line="+15"/>
@@ -2390,7 +2390,7 @@ Puedes adjuntar una foto o un video.</translation>
     <message>
         <location line="+0"/>
         <source>Обновить</source>
-        <translation type="unfinished">Actualizar</translation>
+        <translation>Actualizar</translation>
     </message>
     <message>
         <location line="+38"/>
@@ -2439,7 +2439,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2908"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2928"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -2539,7 +2539,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-2299"/>
+        <location line="-2319"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -2569,7 +2569,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando y verificando la firma…</translation>
     </message>
     <message>
-        <location line="+380"/>
+        <location line="+400"/>
         <source>Текущий сервер</source>
         <translation>Servidor actual</translation>
     </message>
@@ -2732,7 +2732,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+233"/>
+        <location line="+244"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>El servidor no deja pasar el tráfico: prueba con otro servidor</translation>
     </message>
