@@ -1156,7 +1156,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1551,16 +1551,16 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 if (!m_handshakeAwaiting) {
                     m_handshakeAwaiting = true;
                     m_handshakeTimer.restart();
-                    m_handshakeTimeouts = 0;
+                    m_handshakeTimeouts = 0; // AVPN: handshake budget starts per awaited session
                 }
             }
         } else if (session.status != NEVPNStatusConnected) {
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
-            m_shownConnectedBeforeHandshake = false;
+            m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): the adopted-session flag ends with the session
             m_handshakeTimer.invalidate();
-            m_handshakeTimeouts = 0;
-            m_statusRequests.invalidate();
+            m_handshakeTimeouts = 0; // AVPN: handshake budget resets with the session
+            m_statusRequests.invalidate(); // AVPN (C5/H7): replaces upstream m_statusRequestInFlight = false
         }
         emitConnectionStateIfChanged(nextState);
 }
