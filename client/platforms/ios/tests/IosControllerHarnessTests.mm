@@ -19,6 +19,8 @@
 #include <QDateTime>
 #include <QEventLoop>
 #include <QJsonObject>
+#include <QLoggingCategory>
+#include <QStringList>
 #include <QTimer>
 #include <atomic>
 #include <cstdio>
@@ -1312,6 +1314,31 @@ static HarnessSession *adoptStalledSession(NSDictionary *reply, bool uplinkUp)
     c->requestReconcileStatus();
     return s;
 }
+// 5.1.109 (IOS-UP35): the journal line with the decision inputs. main() mutes warnings through
+// QT_LOGGING_RULES, which outranks setFilterRules - a category filter re-enables the default warnings.
+static QStringList g_warnings;
+static void captureWarnings()
+{
+    QLoggingCategory::installFilter([](QLoggingCategory *category) {
+        if (qstrcmp(category->categoryName(), "default") == 0) category->setEnabled(QtWarningMsg, true);
+    });
+    qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &, const QString &msg) {
+        if (type == QtWarningMsg) g_warnings << msg;
+    });
+}
+static bool warned(const char *needle)
+{
+    for (const QString &w : g_warnings)
+        if (w.contains(QLatin1String(needle))) return true;
+    return false;
+}
+static int warnedCount(const char *needle)
+{
+    int n = 0;
+    for (const QString &w : g_warnings)
+        if (w.contains(QLatin1String(needle))) ++n;
+    return n;
+}
 static void runStatusPolls(int ms)
 {
     QTimer poll;
@@ -1321,8 +1348,11 @@ static void runStatusPolls(int ms)
 }
 static void test_adopted_dead_session_stopped()
 {
+    captureWarnings();
     HarnessSession *s = adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/true);
     runStatusPolls(1500);
+    CHECK(warned("adopted_dead_check stop=1 why=- shown=1 pending=0 answered=1 hs=0 rx=0 rx_threshold=4096 "
+                 "soft_restarts=0 resumes=0 physical_up=1"), "decision inputs of the stop are not journaled");
     CHECK(obs.has(Vpn::ConnectionState::Connected), "cold-start rule did not show the adopted session");
     CHECK(s.stopCalls == 1, "dead adopted session not stopped");
     CHECK(g_deadSignals == 1, "adoptedDeadSessionStopped not emitted");
@@ -1341,8 +1371,11 @@ static void expectAdoptedKept(HarnessSession *s, const char *what)
 }
 static void test_adopted_soft_restarted_session_kept()
 {
+    captureWarnings();
     expectAdoptedKept(adoptStalledSession(stalledReply(@1, @0), true), "soft-restarted session stopped");
     CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "soft-restarted session is not Reconnecting");
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 1,
+          "kept decision not journaled exactly once (re-checked every timeout, logged on change)");
 }
 static void test_adopted_resumed_session_kept()
 {
@@ -1350,7 +1383,9 @@ static void test_adopted_resumed_session_kept()
 }
 static void test_adopted_session_uplink_down_kept()
 {
+    captureWarnings();
     expectAdoptedKept(adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/false), "session stopped while offline");
+    CHECK(warned("adopted_dead_check stop=0 why=no_physical_uplink "), "offline decision not journaled");
 }
 static void test_adopted_session_empty_reply_kept()
 {

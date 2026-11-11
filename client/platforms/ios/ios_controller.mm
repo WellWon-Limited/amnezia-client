@@ -1240,6 +1240,13 @@ void IosController::checkStatus()
                         dead.softRestarts = roamSoftRestarts;
                         dead.resumes = roamResumes;
                         dead.uplinkUp = m_uplinkProbe ? m_uplinkProbe() : false;
+                        // AVPN 5.1.109 (device check IOS-UP35): every input of the decision and the first
+                        // unmet condition, logged when it changes (the budget is re-checked each timeout).
+                        const QString deadCheck = QString::fromStdString(avpn_ios::describeDeadAdoptedSession(dead));
+                        if (deadCheck != m_lastAdoptedDeadCheck) {
+                            m_lastAdoptedDeadCheck = deadCheck;
+                            qWarning().noquote() << "IosController::checkStatus :" << deadCheck;
+                        }
                         if (avpn_ios::stopNeverConnectedAdoptedSession(dead)
                             && m_currentTunnel
                             && [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {

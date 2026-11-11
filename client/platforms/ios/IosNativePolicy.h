@@ -133,6 +133,43 @@ inline bool stopNeverConnectedAdoptedSession(const DeadAdoptedSession &s)
         && s.rxBytes < s.rxThreshold && s.softRestarts == 0 && s.resumes == 0 && s.uplinkUp;
 }
 
+// 5.1.109 (device check IOS-UP35): why the rule above did not fire - the first unmet condition, in
+// the rule's order; "" when it fires. Journal only: the decision stays stopNeverConnectedAdoptedSession.
+inline const char *deadAdoptedSessionBlocker(const DeadAdoptedSession &s)
+{
+    if (!s.shownConnectedBeforeHandshake) return "not_adopted";
+    if (s.connectPending) return "connect_pending";
+    if (!s.statsAnswered) return "no_answer";
+    if (s.lastHandshakeSec != 0) return "had_handshake";
+    if (s.rxBytes >= s.rxThreshold) return "rx_above_threshold";
+    if (s.softRestarts < 0 || s.resumes < 0) return "no_roam_counters";
+    if (s.softRestarts != 0) return "soft_restarted";
+    if (s.resumes != 0) return "resumed";
+    if (!s.uplinkUp) return "no_physical_uplink";
+    return "";
+}
+
+// One journal line with every input of the decision (ios_controller.mm logs it where the rule is
+// evaluated). physical_up = UplinkMonitor::physicalUp() through setUplinkProbe.
+inline std::string describeDeadAdoptedSession(const DeadAdoptedSession &s)
+{
+    const char *why = deadAdoptedSessionBlocker(s);
+    std::string line = "adopted_dead_check stop=";
+    line += stopNeverConnectedAdoptedSession(s) ? "1" : "0";
+    line += " why=";
+    line += *why ? why : "-";
+    line += " shown=" + std::to_string(s.shownConnectedBeforeHandshake ? 1 : 0);
+    line += " pending=" + std::to_string(s.connectPending ? 1 : 0);
+    line += " answered=" + std::to_string(s.statsAnswered ? 1 : 0);
+    line += " hs=" + std::to_string(s.lastHandshakeSec);
+    line += " rx=" + std::to_string(s.rxBytes);
+    line += " rx_threshold=" + std::to_string(s.rxThreshold);
+    line += " soft_restarts=" + std::to_string(s.softRestarts);
+    line += " resumes=" + std::to_string(s.resumes);
+    line += " physical_up=" + std::to_string(s.uplinkUp ? 1 : 0);
+    return line;
+}
+
 inline DisconnectDecision decideDisconnect(const DisconnectInputs &in)
 {
     // 1. Стоп запросило само приложение для этого поколения: это не решение пользователя.
