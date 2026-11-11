@@ -289,8 +289,8 @@ static void lateDeadlineTick()
     const qint64 night = 11LL * 3600 * 1000 + 36LL * 60 * 1000;    // device 35: 21:02 -> 08:38
     t = decideDeadlineTick(night, 1000);
     CHECK(!t.evaluate && t.frozenMs == night - 1000);
-    t = decideDeadlineTick(-5000, 1000);                          // wall clock went backwards
-    CHECK(!t.evaluate && t.frozenMs == 0);
+    t = decideDeadlineTick(-5000, 1000);                          // wall clock went backwards (R7c):
+    CHECK(t.evaluate && t.frozenMs == 0);                         // judged; expireSwitch clamps the start
     t = decideDeadlineTick(0, 1000);                              // two ticks at once (coalesced)
     CHECK(t.evaluate);
     // start watchdog (one-shot, 15 s): on time -> judge; late -> re-arm once without spending the grace

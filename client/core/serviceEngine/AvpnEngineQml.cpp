@@ -736,11 +736,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_lastTransitionTickMs = now;
         const avpn::DeadlineTick tick = avpn::decideDeadlineTick(since, m_transitionTimer.interval());
         if (!tick.evaluate) {
-            if (m_engine.shiftSwitchClock(tick.frozenMs)) {
-                reliabilityEvent(QStringLiteral("switch_deadline_resync frozen_ms=%1").arg(tick.frozenMs));
+            switch (m_engine.shiftSwitchClock(tick.frozenMs)) {
+            case avpn::SwitchClockResync::Shifted: // once per phase (R7a) - one journal line (R7b)
+                reliabilityEvent(QStringLiteral("switch_deadline_frozen_shift frozen_ms=%1").arg(tick.frozenMs));
                 requestFreshTunnelStatus();
+                return;
+            case avpn::SwitchClockResync::NoPhase:
+                return;
+            case avpn::SwitchClockResync::AlreadyShifted:
+                break; // slowed timers, not a new freeze: judge the deadline as before
             }
-            return;
         }
         if (!m_engine.expireSwitch(avpn::reconcileWatchdogMsTuned())) return;
         onSwitchDeadline();
@@ -4360,7 +4365,18 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // onTunnelDisconnected САМ продолжит НАМЕРЕННЫЙ свитч ноды (Switching+pendingSwitch → up());
         // если это не свитч — просто «отключено». БЕЗ реактивного failover на внешний обрыв (см. Error).
         ++m_verifyEpoch; // AVPN awg31-xray-v1: верификация xray старой сессии отменена
+    {
+        const QString pinBefore = m_engine.pinnedNodeId();
         m_engine.onTunnelDisconnected();
+        // 5.1.109 (R7e): the engine applied a deferred pool body between the runtimes of its own switch
+        // (GAP-1) - the same post-processing as applyPendingReseed: RTT view and the pin (a pin the mode
+        // cannot serve is persisted as cleared, pin_cleared why=reseed; a migrated one - its new id).
+        if (m_engine.takeReseedAppliedInSwitch()) {
+            m_nodeRtt = m_engine.measuredRtt();
+            restorePin(pinBefore);
+            qInfo() << "[avpn reseed] pool revision" << m_engine.poolRevision() << "applied inside a switch";
+        }
+    }
         break;
     case Vpn::Reconnecting:
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
@@ -5624,8 +5640,9 @@ void AvpnEngineQml::onWatchdog()
         const avpn::DeadlineTick tick = avpn::decideDeadlineTick(
             QDateTime::currentMSecsSinceEpoch() - m_watchdogArmedMs, m_watchdog.interval());
         if (avpn::rearmStartWatchdogAfterFreeze(tick, m_watchdogFreezeRearmed)) {
-            reliabilityEvent(QStringLiteral("watchdog_start_resync frozen_ms=%1 native=%2")
+            reliabilityEvent(QStringLiteral("watchdog_start_frozen_rearm frozen_ms=%1 native=%2")
                                  .arg(tick.frozenMs).arg(int(m_lastTunnelState)));
+            m_engine.noteAppFrozenDuringUp(); // R7d: no time-to-traffic sample for this start
             const int interval = m_watchdog.interval();
             armWatchdog(interval, /*freezeRearm=*/true);
             m_watchdogFreezeRearmed = true;

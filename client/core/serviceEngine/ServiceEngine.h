@@ -38,6 +38,9 @@ enum class EngineState { Disconnected, Selecting, Connecting, Verifying, Connect
 // трогаем (равная ревизия каждые ~20 с вымывала его), фасаду — ни changed(), ни persistPin, ни проб.
 enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
 
+// 5.1.109 (R7): result of ServiceEngine::shiftSwitchClock.
+enum class SwitchClockResync { NoPhase, Shifted, AlreadyShifted };
+
 class ServiceEngine {
 public:
     ServiceEngine() : m_switcher(nullptr) {}
@@ -352,7 +355,12 @@ public:
     // the running switch phase did not pass for us: its clock moves forward by the freeze (never past
     // now) so the deadline is judged on time we could observe. The facade calls it from a late tick
     // (DebugSnapshot.h::decideDeadlineTick) and asks for a fresh status. false = no phase clock runs.
-    bool shiftSwitchClock(qint64 frozenMs);
+    // At most once per phase (R7a): later late ticks of the same phase return AlreadyShifted and the
+    // deadline is judged normally - worst case one extra interval. A shift in the up phase also marks
+    // the up() as frozen (R7d: no time-to-traffic sample). expireSwitch clamps a future start (R7c).
+    SwitchClockResync shiftSwitchClock(qint64 frozenMs);
+    // R7d: the start watchdog re-armed after a freeze - the current up() has no honest time to traffic.
+    void noteAppFrozenDuringUp() { m_upFrozen = true; }
     bool switchInUpPhase() const { return m_state == EngineState::Switching && m_switchUpPhase; }
 
     // AVPN (фикс-волна 2026-09-22, K5/B4/B5): внутренний свитч/failover движка прерван (Error или
@@ -550,6 +558,8 @@ private:
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
     int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
     bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover
+    bool          m_upFrozen = false;          // R7d: the app froze during this up() (no time to traffic)
+    bool          m_switchClockShifted = false; // R7a: the phase clock was shifted for a freeze once
     qint64        m_upStartedMs = 0;     // момент последнего up() — время до «реального трафика» для истории
     bool          m_okRecorded = false;  // один успех / один провал на сессию подъёма
     bool          m_failRecorded = false;

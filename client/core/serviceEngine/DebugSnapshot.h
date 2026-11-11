@@ -350,7 +350,9 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
 // does not judge the deadline: the facade shifts the running switch-phase clock by frozenMs
 // (ServiceEngine::shiftSwitchClock) and asks for a fresh status; the normal path then decides (a
 // confirmed Connected ends the switch, a dead session meets the unchanged deadline after thaw).
-// sinceLastTickMs < 0 (wall clock went backwards) - skip this tick, nothing to shift.
+// sinceLastTickMs < 0 (wall clock went backwards) - judge normally: ServiceEngine::expireSwitch clamps a
+// phase start that is now in the future (R7c). The engine shifts at most once per phase (R7a): with
+// timers the OS only slows (App Nap, EcoQoS) every tick is late, later ones are judged normally.
 // Was: 11.6 h overdue 1 s tick -> expireSwitch -> guardedStop of a session the extension had healed.
 struct DeadlineTick {
     bool evaluate = true;
@@ -359,7 +361,7 @@ struct DeadlineTick {
 inline DeadlineTick decideDeadlineTick(qint64 sinceLastTickMs, qint64 periodMs)
 {
     if (sinceLastTickMs < 0)
-        return {false, 0};
+        return {true, 0};
     if (!timerFiredLate(sinceLastTickMs, periodMs))
         return {true, 0};
     return {false, sinceLastTickMs - periodMs};

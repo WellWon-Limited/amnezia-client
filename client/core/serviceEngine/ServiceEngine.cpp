@@ -174,7 +174,8 @@ QHash<QString, int> ServiceEngine::failoverRtt() const
 
 void ServiceEngine::markUpStarted()
 {
-    m_upStartedMs = QDateTime::currentMSecsSinceEpoch();
+    m_upStartedMs = nowMs(); // 5.1.109: the engine clock (tests) - QDateTime in the app
+    m_upFrozen = false;
     m_okRecorded = false;
     m_failRecorded = false;
     m_probeFailStreak = 0;
@@ -190,9 +191,11 @@ bool ServiceEngine::recordTransportOutcome(bool ok)
         return false;
     if (!ok && m_failRecorded)
         return false;
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 now = nowMs();
     const qint64 elapsed = now - m_upStartedMs;
-    const int ttf = (ok && m_upStartedMs > 0)
+    // R7d: an up() that spanned a freeze of the app has no honest time to traffic (traffic started
+    // somewhere inside the freeze) - success is recorded, the time is not (no 120 s ceiling penalty).
+    const int ttf = (ok && m_upStartedMs > 0 && !m_upFrozen)
         ? int(elapsed < 0 ? 0 : (elapsed > qint64(TransportHistory::kMaxTtfMs) ? qint64(TransportHistory::kMaxTtfMs) : elapsed))
         : -1;
     m_transportHistory.record(locationKeyOf(*n), protoOf(*n), ok, ttf, now);
@@ -1388,6 +1391,7 @@ bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, co
     m_state = EngineState::Switching;       // гард: transient Disconnected/Error от down() не триггерит failover
     // AVPN (фикс-волна 2026-09-22, B4): часы фазы down (до реального Disconnected старого рантайма).
     m_switchStartedMs = nowMs();
+    m_switchClockShifted = false; // R7a: one freeze shift per phase
     m_switchUpPhase = false;
     m_rebindAwaiting = false;
     m_interrupted = InterruptedSwitch{};
@@ -1466,6 +1470,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
     // AVPN (фикс-волна 2026-09-22, B4/H8): часы перезапускаются на фазу up — её бюджет не меньше
     // сторожа коннекта (раньше 15 с делили обе фазы, и легальный медленный failover на сотовой рвался).
     m_switchStartedMs = nowMs();
+    m_switchClockShifted = false; // R7a: one freeze shift per phase
     m_switchUpPhase = true;
     m_upPhaseReason = reason;
     markUpStarted();
@@ -1491,6 +1496,10 @@ bool ServiceEngine::expireSwitch(int timeoutMs)
     // AVPN (фикс-волна 2026-09-22, K5/B4): бюджет — на ТЕКУЩУЮ фазу; фаза up — не меньше сторожа коннекта.
     const qint64 budget = m_switchUpPhase ? qMax<qint64>(timeoutMs, reconcileWatchdogMsTuned())
                                           : qMax<qint64>(0, timeoutMs);
+    // R7c: the wall clock went backwards - a phase start in the future would hang the switch for the
+    // size of the jump; the phase is counted from now.
+    if (m_switchStartedMs > nowMs())
+        m_switchStartedMs = nowMs();
     if (nowMs() - m_switchStartedMs < budget)
         return false;
     const QString phase = m_switchUpPhase ? QStringLiteral("up") : QStringLiteral("down");
@@ -1505,16 +1514,23 @@ bool ServiceEngine::expireSwitch(int timeoutMs)
     return true;
 }
 
-bool ServiceEngine::shiftSwitchClock(qint64 frozenMs)
+SwitchClockResync ServiceEngine::shiftSwitchClock(qint64 frozenMs)
 {
     if (m_state != EngineState::Switching || m_switchStartedMs < 0)
-        return false;
+        return SwitchClockResync::NoPhase;
+    // R7a: at most ONE shift per phase. Timers that the OS only slows (macOS App Nap, Windows EcoQoS)
+    // make every tick late; crediting each would stretch the 15 s deadline ~tenfold on a dead node.
+    if (m_switchClockShifted)
+        return SwitchClockResync::AlreadyShifted;
+    m_switchClockShifted = true;
+    if (m_switchUpPhase)
+        m_upFrozen = true; // R7d: the time to traffic of this up() is unknown
     if (frozenMs > 0) {
         m_switchStartedMs = qMin(m_switchStartedMs + frozenMs, nowMs());
         appendSwitchLog(QStringLiteral("switch clock shifted by app freeze %1 s (%2 phase): awaiting native status")
                             .arg(frozenMs / 1000).arg(m_switchUpPhase ? QStringLiteral("up") : QStringLiteral("down")));
     }
-    return true;
+    return SwitchClockResync::Shifted;
 }
 
 DebugSnapshot ServiceEngine::debugSnapshot() const
