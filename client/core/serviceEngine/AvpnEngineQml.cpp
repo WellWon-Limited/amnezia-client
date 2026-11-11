@@ -727,6 +727,21 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_watchdog, &QTimer::timeout, this, &AvpnEngineQml::onWatchdog);
     m_transitionTimer.setInterval(1000);
     connect(&m_transitionTimer, &QTimer::timeout, this, [this]() {
+        // 5.1.109 (R7): a tick far later than its 1 s period = the process was frozen; the freeze is not
+        // spent switch time and no evidence about the tunnel (device 35, 138: an 11.6 h overdue tick
+        // stopped a session the extension had healed). Shift the phase clock, ask for status; the
+        // next ticks judge the deadline as before.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 since = m_lastTransitionTickMs < 0 ? m_transitionTimer.interval() : now - m_lastTransitionTickMs;
+        m_lastTransitionTickMs = now;
+        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(since, m_transitionTimer.interval());
+        if (!tick.evaluate) {
+            if (m_engine.shiftSwitchClock(tick.frozenMs)) {
+                reliabilityEvent(QStringLiteral("switch_deadline_resync frozen_ms=%1").arg(tick.frozenMs));
+                requestFreshTunnelStatus();
+            }
+            return;
+        }
         if (!m_engine.expireSwitch(avpn::reconcileWatchdogMsTuned())) return;
         onSwitchDeadline();
     });
@@ -810,8 +825,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         reliabilityEvent(QStringLiteral("permission_prompt pending=%1 op=%2").arg(pending).arg(int(m_op)));
         if (m_op != Op::Starting)
             return;
-        m_watchdog.setInterval(startWatchdogMs()); // true — потолок диалога; false — обычный бюджет
-        m_watchdog.start();
+        armWatchdog(startWatchdogMs(), /*freezeRearm=*/true); // same start; true — потолок диалога, false — обычный бюджет
     });
     // Review of 136: the native stops an adopted session that never completed a handshake only while
     // the device has a physical network path (an On-Demand session raised offline is not dead) - and
@@ -5199,8 +5213,7 @@ void AvpnEngineQml::guardedStart()
     // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
     m_startWatchdogDeferrals = 0;              // волна-4 (P1-5): новый старт — новый бюджет перевзводов
     m_lastOwnOpMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P2-6): окно «своего» события сети
-    m_watchdog.setInterval(startWatchdogMs()); // ревью CL-A r2: диалог «Разрешить VPN» продлевает
-    m_watchdog.start();
+    armWatchdog(startWatchdogMs()); // ревью CL-A r2: диалог «Разрешить VPN» продлевает
     emit changed();
 
     QString err;
@@ -5559,8 +5572,7 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
     // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (см. guardedStart).
     // Пол связан с handshake-бюджетом (ConnectTunables.h): watchdog ВСЕГДА > handshake_timeout,
     // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
-    m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
-    m_watchdog.start();
+    armWatchdog(avpn::reconcileWatchdogMsTuned());
     m_healthTimer.stop();
     // Критик полноты (жалобы 1/2): повтор после дедлайна свитча — без requestStop(), иначе он
     // стирал цель повтора (в том числе переподъём EE), бюджет лечения и стрик data-plane движка.
@@ -5584,10 +5596,43 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
 
 // AVPN: сторож reconcile — терминальный колбэк не пришёл за таймаут (iOS NE иногда «молчит» при
 // teardown или connect завис). Разблокируем машину, чтобы не залипнуть навсегда.
+void AvpnEngineQml::armWatchdog(int intervalMs, bool freezeRearm)
+{
+    if (!freezeRearm)
+        m_watchdogFreezeRearmed = false;
+    m_watchdogArmedMs = QDateTime::currentMSecsSinceEpoch();
+    m_watchdog.setInterval(intervalMs);
+    m_watchdog.start();
+}
+
+void AvpnEngineQml::requestFreshTunnelStatus()
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    IosController::Instance()->requestReconcileStatus();
+#endif
+}
+
 void AvpnEngineQml::onWatchdog()
 {
     if (!m_opInFlight)
         return;
+    // 5.1.109 (R7): the start watchdog fired late - the app was frozen past its deadline (device 269,
+    // builds 128/138: a working session stopped by an overdue start watchdog). Re-arm once for the same
+    // operation without spending a deferral or an attempt and ask for status; a Connected in between
+    // completes the start, a second late firing is judged as before.
+    if (m_op == Op::Starting && m_lastTunnelState != Vpn::Connected && m_watchdogArmedMs >= 0) {
+        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(
+            QDateTime::currentMSecsSinceEpoch() - m_watchdogArmedMs, m_watchdog.interval());
+        if (avpn::rearmStartWatchdogAfterFreeze(tick, m_watchdogFreezeRearmed)) {
+            reliabilityEvent(QStringLiteral("watchdog_start_resync frozen_ms=%1 native=%2")
+                                 .arg(tick.frozenMs).arg(int(m_lastTunnelState)));
+            const int interval = m_watchdog.interval();
+            armWatchdog(interval, /*freezeRearm=*/true);
+            m_watchdogFreezeRearmed = true;
+            requestFreshTunnelStatus();
+            return;
+        }
+    }
     const Op finished = m_op;
     m_op = Op::None;
     m_opInFlight = false;
@@ -5629,8 +5674,7 @@ void AvpnEngineQml::onWatchdog()
             m_busy = true;
             reliabilityEvent(QStringLiteral("watchdog_start_deferred native=%1 n=%2")
                                  .arg(int(m_lastTunnelState)).arg(m_startWatchdogDeferrals));
-            m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
-            m_watchdog.start();
+            armWatchdog(avpn::reconcileWatchdogMsTuned(), /*freezeRearm=*/true); // same operation
             return;
         }
 #endif

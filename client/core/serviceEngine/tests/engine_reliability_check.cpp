@@ -371,6 +371,51 @@ int main(int argc, char **argv)
             CHECK(eng.connect(err));
             CHECK(tun.lastUpNodeId == QLatin1String("9"));         // повтор мимо провалившейся цели
         }
+        {   // 5.1.109 (R7, device 35 build 138, 10-11.11): the re-up of the same node is in the up phase,
+            // the app is frozen for 11 h, the extension heals the session meanwhile. The facade's first
+            // tick after thaw is late (decideDeadlineTick) - it shifts the phase clock by the freeze and
+            // asks for status instead of evaluating the deadline; the status confirms Connected.
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.switchInUpPhase());
+            now += 4'000;                                          // frozen ~4 s into the up phase
+            const qint64 frozen = 11LL * 3600 * 1000;
+            now += frozen;
+            CHECK(eng.shiftSwitchClock(frozen));
+            CHECK(!eng.expireSwitch(15000));                       // the deadline is not spent by the freeze
+            CHECK(eng.state() == EngineState::Switching);
+            CHECK(eng.onTunnelConnected());                        // fresh status: the session works
+            CHECK(eng.state() == EngineState::Connected || eng.state() == EngineState::Verifying);
+            CHECK(!eng.hasInterruptedSwitch());
+            CHECK(!eng.shiftSwitchClock(1000));                    // no switch phase - nothing to shift
+        }
+        {   // the same jump WITHOUT the freeze mark: the 15 s deadline fires exactly as before
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            now += 4'000 + 11LL * 3600 * 1000;
+            CHECK(eng.expireSwitch(15000));
+            CHECK(eng.interruptedSwitchCause() == QLatin1String("deadline_up"));
+        }
+        {   // a truly dead session after thaw: the unchanged deadline ~15 s later
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            now += 4'000;
+            now += 3'600'000;
+            CHECK(eng.shiftSwitchClock(3'600'000));
+            now += 10'000;
+            CHECK(!eng.expireSwitch(15000));                       // 14 s of phase time
+            now += 2'000;
+            CHECK(eng.expireSwitch(15000));                        // 16 s: the deadline as before
+        }
         {   // Error в фазе down внутреннего failover: цель не потеряна (B5)
             ServiceEngine eng;
             FakeTunnel tun;

@@ -348,6 +348,11 @@ public:
     // бюджет max(timeoutMs, reconcileWatchdogMsTuned()) — не меньше сторожа коннекта. Истечение →
     // Error + interruptedSwitch (фасад повторяет старт с анти-зацикливанием, намерение НЕ снимает).
     bool expireSwitch(int timeoutMs = 30000);
+    // 5.1.109 (R7): the app process was frozen (iOS suspension, laptop sleep) for frozenMs - the time of
+    // the running switch phase did not pass for us: its clock moves forward by the freeze (never past
+    // now) so the deadline is judged on time we could observe. The facade calls it from a late tick
+    // (DebugSnapshot.h::decideDeadlineTick) and asks for a fresh status. false = no phase clock runs.
+    bool shiftSwitchClock(qint64 frozenMs);
     bool switchInUpPhase() const { return m_state == EngineState::Switching && m_switchUpPhase; }
 
     // AVPN (фикс-волна 2026-09-22, K5/B4/B5): внутренний свитч/failover движка прерван (Error или

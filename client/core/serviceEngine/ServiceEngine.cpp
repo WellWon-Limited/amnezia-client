@@ -1505,6 +1505,18 @@ bool ServiceEngine::expireSwitch(int timeoutMs)
     return true;
 }
 
+bool ServiceEngine::shiftSwitchClock(qint64 frozenMs)
+{
+    if (m_state != EngineState::Switching || m_switchStartedMs < 0)
+        return false;
+    if (frozenMs > 0) {
+        m_switchStartedMs = qMin(m_switchStartedMs + frozenMs, nowMs());
+        appendSwitchLog(QStringLiteral("switch clock shifted by app freeze %1 s (%2 phase): awaiting native status")
+                            .arg(frozenMs / 1000).arg(m_switchUpPhase ? QStringLiteral("up") : QStringLiteral("down")));
+    }
+    return true;
+}
+
 DebugSnapshot ServiceEngine::debugSnapshot() const
 {
     DebugSnapshot s;

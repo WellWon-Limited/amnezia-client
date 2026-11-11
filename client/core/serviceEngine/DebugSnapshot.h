@@ -2,6 +2,7 @@
 #pragma once
 
 #include "dto/Subscription.h"
+#include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
 #include <QHash>
 #include <QString>
 #include <QStringList>
@@ -341,6 +342,34 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
                           || (mode == QLatin1String("xray") && !currentProto.isEmpty() && !curXray);
     d.restartTunnel = tunnelUp && mismatch;
     return d;
+}
+
+// 5.1.109 (R7, device 35 build 138, 10-11.11.2026): a deadline timer that fires late means the process
+// was frozen (iOS suspended the app in the background, a laptop slept): the time of the freeze is no
+// evidence about the tunnel (§29 п.5 "заморозка — не довод"; same rule as timerFiredLate). Such a tick
+// does not judge the deadline: the facade shifts the running switch-phase clock by frozenMs
+// (ServiceEngine::shiftSwitchClock) and asks for a fresh status; the normal path then decides (a
+// confirmed Connected ends the switch, a dead session meets the unchanged deadline after thaw).
+// sinceLastTickMs < 0 (wall clock went backwards) - skip this tick, nothing to shift.
+// Was: 11.6 h overdue 1 s tick -> expireSwitch -> guardedStop of a session the extension had healed.
+struct DeadlineTick {
+    bool evaluate = true;
+    qint64 frozenMs = 0;
+};
+inline DeadlineTick decideDeadlineTick(qint64 sinceLastTickMs, qint64 periodMs)
+{
+    if (sinceLastTickMs < 0)
+        return {false, 0};
+    if (!timerFiredLate(sinceLastTickMs, periodMs))
+        return {true, 0};
+    return {false, sinceLastTickMs - periodMs};
+}
+// The start watchdog (one-shot) fired late: re-arm it once for the same operation without spending a
+// deferral or an attempt, and ask for status (device 269, builds 128/138: a working session was
+// stopped by an overdue start watchdog). A second late firing of the same operation is judged.
+inline bool rearmStartWatchdogAfterFreeze(const DeadlineTick &tick, bool rearmedThisOperation)
+{
+    return !tick.evaluate && !rearmedThisOperation;
 }
 
 // A10: бюджет подготовки старта. С пулом — мягкий бюджет завершает подготовку; без пула
