@@ -286,7 +286,7 @@ public:
     // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode (which
     // normalizes the stored mode first), without its side effects (setPinnedNode also drops the
     // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
-    // The facade clears such a pin on a mode change.
+    // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
     bool pinLacksTransport(TransportMode mode) const;
     // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
     // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade

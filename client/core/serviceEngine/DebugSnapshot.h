@@ -312,6 +312,37 @@ inline PinRestoreAction decidePinRestore(const QString &saved, const QString &pi
     return pinBefore == saved ? PinRestoreAction::PersistMigrated : PinRestoreAction::Nothing;
 }
 
+// 5.1.109 (review R3): the facade's decision on a transport mode change (AvpnEngineQml::setTransportMode,
+// after the new mode is applied). mode - the effective mode name ("auto" | "awg" | "xray");
+// pinnedNodeId - the engine's pin; pinLacksTransport - ServiceEngine::pinLacksTransport(effective mode);
+// tunnelUp / currentProto - the tunnel now (proto of the identified node, empty = unknown).
+//  clearPin      - a pin the mode cannot serve: clearPin() + persistPin(), journal line below. Auto never
+//                  clears (every connectable location serves Auto).
+//  restartTunnel - a tunnel up on a transport the mode excludes is restarted through reconcile +
+//                  m_needsRestart (stop -> Disconnected -> start, §2/§4), never a direct up(); the start
+//                  then picks without the cleared pin. Unknown proto (adopted, not identified) - no restart.
+struct PinModeDecision {
+    bool clearPin = false;
+    bool restartTunnel = false;
+    QString journal; // empty = nothing to journal
+};
+inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QString &pinnedNodeId,
+                                                bool pinLacksTransport, bool tunnelUp,
+                                                const QString &currentProto)
+{
+    PinModeDecision d;
+    const bool autoMode = mode == QLatin1String("auto");
+    if (!autoMode && !pinnedNodeId.isEmpty() && pinLacksTransport) {
+        d.clearPin = true;
+        d.journal = QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, pinnedNodeId);
+    }
+    const bool curXray = currentProto == QLatin1String("xray");
+    const bool mismatch = (mode == QLatin1String("awg") && curXray)
+                          || (mode == QLatin1String("xray") && !currentProto.isEmpty() && !curXray);
+    d.restartTunnel = tunnelUp && mismatch;
+    return d;
+}
+
 // A10: бюджет подготовки старта. С пулом — мягкий бюджет завершает подготовку; без пула
 // (свежая установка: enroll+fetch) намерение НЕ снимается до общего потолка (~20 с).
 // Волна «как апстрим» (2026-09-28): мягкий бюджет 6 с → 2 с. С пулом подготовка ждёт только

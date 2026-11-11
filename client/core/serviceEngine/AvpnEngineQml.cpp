@@ -6056,23 +6056,21 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     // 5.1.109: a pinned country the new mode cannot serve (Serbia has AmneziaWG only, mode -> Xray)
     // stayed pinned: the card showed it with the new transport's badge and Connect silently raised
     // another country. Such a pin is dropped and persisted (setPinnedNode would refuse it now with
-    // no_transport); the restart below then picks automatically. Auto never drops a pin.
-    if (m_engine.pinLacksTransport(m_engine.transportMode())) {
-        const QString dropped = m_engine.pinnedNodeId();
+    // no_transport); Auto never drops a pin. A tunnel up/coming up on a transport the new mode
+    // excludes is restarted THROUGH reconcile + m_needsRestart (stop -> Disconnected -> start), never a
+    // direct up() over a teardown (CONNECT-INVARIANTS §2/§4); the start then picks without that pin.
+    // The rule - DebugSnapshot.h::decidePinOnTransportMode (facade_policy_check).
+    const avpn::TransportMode effective = m_engine.transportMode();
+    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
+    const avpn::PinModeDecision d = avpn::decidePinOnTransportMode(
+        avpn::transportModeToString(effective), m_engine.pinnedNodeId(), m_engine.pinLacksTransport(effective),
+        avpn::isTunnelUpStateName(st), m_engine.currentNodeProto());
+    if (d.clearPin) {
         m_engine.clearPin();
         persistPin();
-        reliabilityEvent(QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2")
-                             .arg(avpn::transportModeToString(m_engine.transportMode()), dropped));
+        reliabilityEvent(d.journal);
     }
-    // Поднятый/поднимающийся туннель на транспорте, который новому режиму не соответствует, —
-    // переподнять ЧЕРЕЗ reconcile+m_needsRestart (stop→Disconnected→start), никогда прямой up()
-    // поверх teardown (CONNECT-INVARIANTS §2/§4). Авто: текущий транспорт всегда допустим — не трогаем.
-    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    const bool up = avpn::isTunnelUpStateName(st);
-    const QString cur = m_engine.currentNodeProto();
-    const bool mismatch = (m == avpn::TransportMode::Awg && avpn::isXrayProto(cur))
-                          || (m == avpn::TransportMode::Xray && !cur.isEmpty() && !avpn::isXrayProto(cur));
-    if (up && mismatch) {
+    if (d.restartTunnel) {
         m_wantConnected = true;
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)

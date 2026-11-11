@@ -1157,8 +1157,13 @@ int main(int argc, char **argv)
         CHECK(eng.pinLacksTransport(TransportMode::Awg));
         CHECK(!eng.pinLacksTransport(TransportMode::Xray));
         CHECK(!eng.pinLacksTransport(TransportMode::Auto));
-        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0) }), err)); // pinned node gone
-        eng.clearPin();
+        // Review R3: the pinned location (NL, Xray only) leaves the pool - the refresh drops the pin
+        // itself (no node of that location remains), so nothing is left for the mode check to clear.
+        CHECK(eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0) }), err));
+        CHECK(eng.pinnedNodeId().isEmpty());
+        CHECK(eng.takePinDroppedForTransport().isEmpty()); // the location is gone, not its transport
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));
         CHECK(!eng.pinLacksTransport(TransportMode::Xray));
     }
 

@@ -245,6 +245,37 @@ static void a6a7PinPersistence()
     CHECK(decidePinRestore(QString(), us, us) == PinRestoreAction::Nothing);
 }
 
+// 5.1.109 (review R3): the facade's decision on a transport mode change (pin vs mode, live tunnel).
+static void pinOnTransportModeChange()
+{
+    const QString rs = QStringLiteral("16:awg"), de = QStringLiteral("9:xray");
+    // Serbia (AWG only) pinned, mode -> Xray, tunnel down: cleared (+ persisted by the facade), journal
+    PinModeDecision d = decidePinOnTransportMode(QStringLiteral("xray"), rs, true, false, QString());
+    CHECK(d.clearPin && !d.restartTunnel);
+    CHECK(d.journal == QLatin1String("pin_cleared why=transport_mode mode=xray node=16:awg"));
+    // ... tunnel up on Serbia's AWG: cleared and the tunnel restarted (then Auto picks an Xray node)
+    d = decidePinOnTransportMode(QStringLiteral("xray"), rs, true, true, QStringLiteral("awg"));
+    CHECK(d.clearPin && d.restartTunnel);
+    // Auto never clears and never restarts, whatever the predicate says
+    d = decidePinOnTransportMode(QStringLiteral("auto"), rs, true, true, QStringLiteral("awg"));
+    CHECK(!d.clearPin && !d.restartTunnel && d.journal.isEmpty());
+    // no pin: nothing to clear; a live Xray tunnel under "Amnezia" is still restarted (as before)
+    d = decidePinOnTransportMode(QStringLiteral("awg"), QString(), false, true, QStringLiteral("xray"));
+    CHECK(!d.clearPin && d.restartTunnel && d.journal.isEmpty());
+    // pin the mode serves (DE has both): kept; the live Xray tunnel restarts on DE's AWG
+    d = decidePinOnTransportMode(QStringLiteral("awg"), de, false, true, QStringLiteral("xray"));
+    CHECK(!d.clearPin && d.restartTunnel);
+    // the tunnel already on an allowed transport: untouched
+    d = decidePinOnTransportMode(QStringLiteral("xray"), de, false, true, QStringLiteral("xray"));
+    CHECK(!d.clearPin && !d.restartTunnel);
+    // adopted session, node not identified (proto unknown): no restart on a guess
+    d = decidePinOnTransportMode(QStringLiteral("xray"), QString(), false, true, QString());
+    CHECK(!d.restartTunnel);
+    // tunnel down: never a restart
+    d = decidePinOnTransportMode(QStringLiteral("awg"), de, false, false, QStringLiteral("xray"));
+    CHECK(!d.restartTunnel);
+}
+
 static void a8a9a15InternalSwitch()
 {
     // A8: дедлайн свитча — повтор старта, намерение снимается только при исчерпании попыток.
@@ -647,6 +678,7 @@ int main()
     rev3GenerationKinds();
     a2EmptyIssuanceKeepsPoolAndLkg();
     a6a7PinPersistence();
+    pinOnTransportModeChange();
     a8a9a15InternalSwitch();
     a10a11Selection();
     parityConnectDoesNotWaitForNetwork();
