@@ -235,6 +235,9 @@ public:
     // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
     // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
     // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
+    // 5.1.109 (review R2): also at the start of setPinnedNode, rotateNext, continuePendingSwitch and
+    // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
+    // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
     void setTransportMode(TransportMode m) { m_transportMode = effectiveTransportMode(m); }
     TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
     void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
@@ -280,9 +283,10 @@ public:
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
     // 5.1.109: the pinned location has connectable nodes but none of them serves transport mode
-    // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode, without its
-    // side effects (setPinnedNode also drops the interrupted-switch replay). False without a pin, for a
-    // pin no longer in the pool and in Auto. The facade clears such a pin on a mode change.
+    // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode (which
+    // normalizes the stored mode first), without its side effects (setPinnedNode also drops the
+    // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
+    // The facade clears such a pin on a mode change.
     bool pinLacksTransport(TransportMode mode) const;
     // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
     // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade

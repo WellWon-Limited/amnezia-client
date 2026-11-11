@@ -1209,6 +1209,54 @@ int main(int argc, char **argv)
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);
     }
 
+    // §15b. 5.1.109 (review R2): the other entry points read the effective mode too - a stored "Xray"
+    // that is no longer available (xray_client off mid-session, tun2socks gone) is Auto for the pin,
+    // the rotation and the pool refresh, as the UI already shows.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        QString err;
+        auto staleXray = [&](ServiceEngine &eng) {   // "Xray" stored while available, then switched off
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportMode(TransportMode::Xray);
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto); // what the UI shows
+        };
+        {   // a tap on an AWG-only country is accepted (was no_transport)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            staleXray(eng);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        {   // "Обновить подключение": the next live location exists (was empty - Xray filter, Xray off)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            staleXray(eng);
+            CHECK(!eng.nextLiveNodeId().isEmpty());
+            CHECK(eng.rotateNext(err));
+            CHECK(tun.upCalls == 1);
+        }
+        {   // pool refresh while Xray is off, then Xray returns: no pin the mode cannot serve remains
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0), awgNodeJson("9:awg", 9, "DE", 1.0),
+                                                 awgNodeJson("16:awg", 16, "RS", 1.0) }, 2), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));     // Auto while Xray is off
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+
     // §16. 5.1.109 (review R1): the pool refresh re-targets a pin whose node disappeared to a node of the
     // same location ALLOWED by the effective transport mode; none allowed -> the pin is dropped (the
     // facade persists that, journal pin_cleared why=reseed), never migrated to another transport.

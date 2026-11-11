@@ -561,6 +561,7 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     // location (the card showed it, Connect raised another country's Xray). None allowed while the
     // location still has connectable nodes -> the pin is dropped, the facade persists and journals it.
     m_pinDroppedForTransport.clear();
+    normalizeTransportMode(); // review R2: a pin re-targeted under Auto must not meet a revived "Xray"
     if (!m_pinnedNodeId.isEmpty() && !newIds.contains(m_pinnedNodeId)) {
         const TransportMode mode = transportMode();
         QList<const SubscriptionNode *> loc;
@@ -1415,6 +1416,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
 {
     if (m_pendingSwitchNodeId.isEmpty())
         return false;
+    normalizeTransportMode(); // 5.1.109 (review R2): the target check below and pickTransport agree
     // GAP-1 (U7): старый рантайм уже опущен — отложенный reseed (пришёл в фазе down или при Connected
     // с изменённой identity цели/текущей) применяем ДО up(): цель поднимается по актуальному конфигу.
     {
@@ -1526,7 +1528,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     s.lkgStale = m_lkgActive; // AVPN (LKG, C-7): пул из дискового кэша, свежий фетч ещё не доехал
     // AVPN awg31-xray-v1: транспорт/режим/фаза верификации/ревизия пула.
     s.activeProto = currentNodeProto();
-    s.transportMode = transportModeToString(m_transportMode);
+    s.transportMode = transportModeToString(transportMode()); // 5.1.109: effective, as the UI
     s.verifying = (m_state == EngineState::Verifying);
     s.poolRevision = sub.poolRevision;
     s.reseedPending = m_pendingReseed.has_value();
@@ -1592,6 +1594,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 // AVPN awg31-xray-v1: pin — ПО ЛОКАЦИИ (см. ServiceEngine.h).
 bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
+    normalizeTransportMode(); // 5.1.109 (review R2): the mode the UI shows, as connect()
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
@@ -1652,6 +1655,7 @@ bool ServiceEngine::pinLacksTransport(TransportMode mode) const
 // nextLiveNodeId: представитель следующей живой локации; транспорт внутри выбирает connect()).
 bool ServiceEngine::rotateNext(QString &error) // AVPN
 {
+    normalizeTransportMode(); // 5.1.109 (review R2)
     // Ручная ротация ≠ «закрепить»: снимаем закрепление, иначе offline-ветка ниже (m_currentNodeId=target
     // → connect()) перебивается приоритетом m_pinnedNodeId в connect() и ротация молча no-op'ит на pin.
     m_pinnedNodeId.clear(); // AVPN
@@ -1685,7 +1689,7 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
 // RU-нод из кольца — §14.3, ручной режим транспорта) — в NodeRotation.h, тест tests/node_rotation_check.cpp.
 QString ServiceEngine::nextLiveNodeId() const
 {
-    return avpn::nextLiveNodeId(m_pool.nodes(), m_currentNodeId, m_transportMode);
+    return avpn::nextLiveNodeId(m_pool.nodes(), m_currentNodeId, transportMode()); // 5.1.109: effective
 }
 
 } // namespace avpn
