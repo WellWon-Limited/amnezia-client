@@ -556,12 +556,25 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
 
     // Ревалидация pin по ЛОКАЦИИ: узел исчез → сосед той же локации (представитель), иначе снять.
     // Актуальный pin фасад берёт из pinnedNodeId() (A7: персистит его, старый id не восстанавливает).
+    // 5.1.109 (review R1): the representative only among nodes the effective transport mode allows -
+    // a pinned Xray listener removed in mode "Xray" used to move the pin to the AWG node of the same
+    // location (the card showed it, Connect raised another country's Xray). None allowed while the
+    // location still has connectable nodes -> the pin is dropped, the facade persists and journals it.
+    m_pinDroppedForTransport.clear();
     if (!m_pinnedNodeId.isEmpty() && !newIds.contains(m_pinnedNodeId)) {
+        const TransportMode mode = transportMode();
         QList<const SubscriptionNode *> loc;
-        for (const SubscriptionNode &n : m_pool.nodes())
-            if (!oldPinLoc.isEmpty() && locationKeyOf(n) == oldPinLoc && isSupportedProtoNode(n))
+        bool locationConnectable = false;
+        for (const SubscriptionNode &n : m_pool.nodes()) {
+            if (oldPinLoc.isEmpty() || locationKeyOf(n) != oldPinLoc || !isSupportedProtoNode(n))
+                continue;
+            locationConnectable = true;
+            if (transportAllowed(n, mode))
                 loc.append(&n);
+        }
         const SubscriptionNode *rep = locationRepresentative(loc);
+        if (!rep && locationConnectable)
+            m_pinDroppedForTransport = m_pinnedNodeId;
         m_pinnedNodeId = rep ? rep->nodeId : QString();
     }
 

@@ -2420,6 +2420,16 @@ void AvpnEngineQml::persistPin()
 void AvpnEngineQml::restorePin(const QString &pinBefore)
 {
     if (!m_engine.hasSubscription()) return;
+    // 5.1.109 (review R1): the refresh dropped the pin - its listener is gone and the location has no
+    // other node the transport mode allows. Persist the empty pin: re-applying the saved one would be
+    // refused (no_transport) and leave it saved.
+    const QString droppedForTransport = m_engine.takePinDroppedForTransport();
+    if (!droppedForTransport.isEmpty() && m_engine.pinnedNodeId().isEmpty()) {
+        persistPin();
+        reliabilityEvent(QStringLiteral("pin_cleared why=reseed mode=%1 node=%2")
+                             .arg(avpn::transportModeToString(m_engine.transportMode()), droppedForTransport));
+        return;
+    }
     switch (decidePinRestore(m_savedPin, pinBefore, m_engine.pinnedNodeId())) {
     case PinRestoreAction::Nothing:
         return;

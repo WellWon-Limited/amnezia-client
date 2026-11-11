@@ -1209,6 +1209,56 @@ int main(int argc, char **argv)
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);
     }
 
+    // §16. 5.1.109 (review R1): the pool refresh re-targets a pin whose node disappeared to a node of the
+    // same location ALLOWED by the effective transport mode; none allowed -> the pin is dropped (the
+    // facade persists that, journal pin_cleared why=reseed), never migrated to another transport.
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray full = subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0) });
+        const QByteArray noListener = subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), awgNodeJson("2:awg", 2, "PL", 1.0) }, 2);
+        QString err;
+        {   // mode Xray, the pinned DE listener removed -> pin dropped (not 9:awg)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+            CHECK(eng.loadSubscription(noListener, err));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.takePinDroppedForTransport() == QLatin1String("9:xray"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());          // one-shot
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        {   // mode Xray, another listener of the same location remains -> the pin moves to it
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                                 xrayNodeJson("9:xray2", 9, "DE", 1.0, 20, "203.0.113.11:443") }), err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0),
+                                                 xrayNodeJson("9:xray2", 9, "DE", 1.0, 20, "203.0.113.11:443") }, 2), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:xray2"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+        {   // Auto: the location still serves -> the pin moves to 9:awg as before
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.loadSubscription(noListener, err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+        {   // the whole location gone -> pin dropped as before, but not "for transport"
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0) }, 2), err));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

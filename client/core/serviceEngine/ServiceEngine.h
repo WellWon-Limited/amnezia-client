@@ -2,6 +2,7 @@
 // Overlay: НЕ часть апстрима. Интеграция в UI/туннель — через тонкие адаптеры, см. README.md.
 // TODO: сделать QObject в фоновом QThread (как VpnConnection), когда подключим к приложению.
 #pragma once
+#include <utility> // std::exchange
 
 #include "DebugSnapshot.h"
 #include "Enrollment.h"
@@ -283,6 +284,10 @@ public:
     // side effects (setPinnedNode also drops the interrupted-switch replay). False without a pin, for a
     // pin no longer in the pool and in Auto. The facade clears such a pin on a mode change.
     bool pinLacksTransport(TransportMode mode) const;
+    // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
+    // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade
+    // persists the cleared pin and journals pin_cleared why=reseed. Empty = nothing dropped that way.
+    QString takePinDroppedForTransport() { return std::exchange(m_pinDroppedForTransport, QString()); }
     // 5.1.108: the node the next connect() would raise - the same order (pin -> network memory ->
     // pickTransport; the legacy measured-RTT/weight chain when transport_auto_pick is off) without
     // any side effect (no switch log, no state change, no I/O). For the Connect card's protocol badge
@@ -508,6 +513,7 @@ private:
     InterruptedSwitch m_interrupted;     // B4/B5: прерванный внутренний свитч (решает фасад)
     // A5/B3: подсказка identity адоптированной сессии (sessionMetadata), когда нода не опознана.
     QString       m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint;
+    QString       m_pinDroppedForTransport; // 5.1.109 (review R1), takePinDroppedForTransport
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;
