@@ -458,6 +458,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_serverAddress = [configuration.value(configKey::hostName).toString().toNSString() copy];
     m_handshakeConfirmed = false;
     m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): our own start from here on
+    m_lastAdoptedDeadCheck.clear(); // AVPN 5.1.109 (review R4): a new session journals its §25 inputs again
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
     m_handshakeTimeouts = 0;
@@ -1565,6 +1566,7 @@ void IosController::vpnStatusDidChange(void *pNotification)
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
             m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): the adopted-session flag ends with the session
+            m_lastAdoptedDeadCheck.clear(); // AVPN 5.1.109 (review R4): the next session journals its §25 inputs again
             m_handshakeTimer.invalidate();
             m_handshakeTimeouts = 0; // AVPN: handshake budget resets with the session
             m_statusRequests.invalidate(); // AVPN (C5/H7): replaces upstream m_statusRequestInFlight = false

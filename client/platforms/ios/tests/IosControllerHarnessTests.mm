@@ -1377,6 +1377,24 @@ static void test_adopted_soft_restarted_session_kept()
     CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 1,
           "kept decision not journaled exactly once (re-checked every timeout, logged on change)");
 }
+// Review R4: the "log on change" memory ends with the session - the next session of the same process
+// with the same inputs is journaled again.
+static void test_adopted_check_logged_per_session()
+{
+    captureWarnings();
+    HarnessSession *s = adoptStalledSession(stalledReply(@1, @0), true);
+    runStatusPolls(1500);
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 1, "first session not journaled once");
+    s.hStatus = NEVPNStatusDisconnected;
+    notifyStatus(s);
+    spin(50);
+    s.hStatus = NEVPNStatusConnected; // the next session (On-Demand / Settings), same NE answers
+    s.hConnectedDate = [NSDate dateWithTimeIntervalSinceNow:-600];
+    notifyStatus(s);
+    runStatusPolls(1500);
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 2,
+          "second session with the same inputs not journaled");
+}
 static void test_adopted_resumed_session_kept()
 {
     expectAdoptedKept(adoptStalledSession(stalledReply(@0, @2), true), "resumed session stopped");
@@ -1466,6 +1484,7 @@ static const Test kTests[] = {
     {"adopted_dead_session_stopped", test_adopted_dead_session_stopped},
     {"adopted_soft_restarted_session_kept", test_adopted_soft_restarted_session_kept},
     {"adopted_resumed_session_kept", test_adopted_resumed_session_kept},
+    {"adopted_check_logged_per_session", test_adopted_check_logged_per_session},
     {"adopted_session_uplink_down_kept", test_adopted_session_uplink_down_kept},
     {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
