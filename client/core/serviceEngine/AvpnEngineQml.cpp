@@ -6043,6 +6043,17 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     QSettings s;
     s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(m));
     s.sync();
+    // 5.1.109: a pinned country the new mode cannot serve (Serbia has AmneziaWG only, mode -> Xray)
+    // stayed pinned: the card showed it with the new transport's badge and Connect silently raised
+    // another country. Such a pin is dropped and persisted (setPinnedNode would refuse it now with
+    // no_transport); the restart below then picks automatically. Auto never drops a pin.
+    if (m_engine.pinLacksTransport(m_engine.transportMode())) {
+        const QString dropped = m_engine.pinnedNodeId();
+        m_engine.clearPin();
+        persistPin();
+        reliabilityEvent(QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2")
+                             .arg(avpn::transportModeToString(m_engine.transportMode()), dropped));
+    }
     // Поднятый/поднимающийся туннель на транспорте, который новому режиму не соответствует, —
     // переподнять ЧЕРЕЗ reconcile+m_needsRestart (stop→Disconnected→start), никогда прямой up()
     // поверх teardown (CONNECT-INVARIANTS §2/§4). Авто: текущий транспорт всегда допустим — не трогаем.

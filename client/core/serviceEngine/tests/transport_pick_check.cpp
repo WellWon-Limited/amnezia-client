@@ -1124,6 +1124,44 @@ int main(int argc, char **argv)
         CHECK(orderByRankingRtt(ids, rank).constLast() == QLatin1String("12")); // unmeasured last
     }
 
+    // §14. 5.1.109: a pin the new transport mode cannot serve. Serbia has AmneziaWG only; the user pins
+    // it in "Auto" and switches the mode to Xray - the pin used to stay (card "Serbia 1" with an Xray
+    // badge, Connect silently on another country's Xray). The facade clears the pin when
+    // pinLacksTransport(effective mode) - the no_transport rule of setPinnedNode, without its effects.
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("16:awg", 16, "RS", 1.0),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          xrayNodeJson("7:xray", 7, "NL", 1.0) });
+        QString err;
+        ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+        CHECK(eng.loadSubscription(pool, err));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));             // no pin - nothing to clear
+        CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+        CHECK(eng.pinLacksTransport(TransportMode::Xray));              // AWG-only location, Xray -> clear
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));              // it has AWG -> stays
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));             // Auto never clears
+        eng.setTransportMode(TransportMode::Xray);                       // the facade: mode applied first
+        CHECK(eng.pinLacksTransport(eng.transportMode()));
+        CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));           // the check itself changes nothing
+        setFlags(/*xrayClient=*/false, /*autoPick=*/true);              // Xray off on the device: reads as Auto
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        eng.setTransportMode(TransportMode::Auto);
+        CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));        // DE has both transports
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));
+        CHECK(eng.setPinnedNode(QStringLiteral("7:xray"), err));        // Xray-only location
+        CHECK(eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0) }), err)); // pinned node gone
+        eng.clearPin();
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

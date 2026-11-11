@@ -1591,14 +1591,8 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     // узел, разрешённый ручным режимом. Строки ТЕХНИЧЕСКИЕ (лог/тесты); человеческий текст для
     // тоста — на границе фасада (AvpnEngineQml::humanPinError), маппится по стабильному префиксу.
     const QString loc = locationKeyOf(*found);
-    bool anySupported = false, anyAllowed = false;
-    for (const SubscriptionNode &n : m_pool.nodes()) {
-        if (locationKeyOf(n) != loc || !isSupportedProtoNode(n))
-            continue;
-        anySupported = true;
-        if (transportAllowed(n, m_transportMode))
-            anyAllowed = true;
-    }
+    const LocationTransports lt = locationTransportsFor(loc, m_transportMode);
+    const bool anySupported = lt.anySupported, anyAllowed = lt.anyAllowed;
     if (!anySupported) {
         // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
         // manual_only) — коннект к ней невозможен, честная ошибка вместо вечного Connecting.
@@ -1613,6 +1607,30 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     m_pinnedNodeId = nodeId;
     m_interrupted = InterruptedSwitch{}; // явный выбор пользователя важнее повтора прерванного свитча
     return true;
+}
+
+ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QString &loc,
+                                                                      TransportMode mode) const
+{
+    LocationTransports lt;
+    for (const SubscriptionNode &n : m_pool.nodes()) {
+        if (locationKeyOf(n) != loc || !isSupportedProtoNode(n))
+            continue;
+        lt.anySupported = true;
+        if (transportAllowed(n, mode))
+            lt.anyAllowed = true;
+    }
+    return lt;
+}
+
+// 5.1.109: the rule of setPinnedNode's no_transport refusal for an existing pin (see ServiceEngine.h).
+bool ServiceEngine::pinLacksTransport(TransportMode mode) const
+{
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    if (!pinned)
+        return false;
+    const LocationTransports lt = locationTransportsFor(locationKeyOf(*pinned), effectiveTransportMode(mode));
+    return lt.anySupported && !lt.anyAllowed;
 }
 
 // AVPN (live-node picker): round-robin «Обновить подключение» — по ЛОКАЦИЯМ (NodeRotation.h::

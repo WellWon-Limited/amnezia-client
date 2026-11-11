@@ -278,6 +278,11 @@ public:
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
+    // 5.1.109: the pinned location has connectable nodes but none of them serves transport mode
+    // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode, without its
+    // side effects (setPinnedNode also drops the interrupted-switch replay). False without a pin, for a
+    // pin no longer in the pool and in Auto. The facade clears such a pin on a mode change.
+    bool pinLacksTransport(TransportMode mode) const;
     // 5.1.108: the node the next connect() would raise - the same order (pin -> network memory ->
     // pickTransport; the legacy measured-RTT/weight chain when transport_auto_pick is off) without
     // any side effect (no switch log, no state change, no I/O). For the Connect card's protocol badge
@@ -436,6 +441,10 @@ private:
     const SubscriptionNode *pinnedCandidate() const;
     const SubscriptionNode *networkMemoryCandidate() const; // plan v3 step 5
     bool anySupportedNode() const;
+    // 5.1.109: can location `loc` be raised at all / under transport mode `mode` (the rule of
+    // setPinnedNode and pinLacksTransport). anySupported - a connectable node of any proto.
+    struct LocationTransports { bool anySupported = false; bool anyAllowed = false; };
+    LocationTransports locationTransportsFor(const QString &loc, TransportMode mode) const;
     // Провал data-plane текущей ноды: история + сессионный список провалов.
     void noteDataPlaneFailure();
     // AVPN awg31-xray-v1 (reseed): применимо ли тело сейчас (терминал ИЛИ текущая/целевая нода без изменений).
