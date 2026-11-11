@@ -92,15 +92,19 @@ purge(){
   for d in "${LEGACY_DIRS[@]}"; do rm -rf "${d:?}"; done
 }
 
-# Процесс демона поднят и жив секундой позже (тот же признак, что у приложения: pgrep -x); потолок 15 с.
+# Служба в state = running у launchd с тем же pid секундой позже; потолок 15 с. pid — от launchd, а не
+# pgrep: старый экземпляр, ещё не вышедший после bootout, не должен сойти за новый.
+daemon_pid(){
+  launchctl print "system/${LABEL}" 2>/dev/null \
+    | awk '$1=="state" && s=="" {s=$3} $1=="pid" && p=="" {p=$3} END {if (s=="running" && p!="") print p}' || true
+}
 wait_daemon(){
-  local deadline pid
-  deadline=$(( $(date +%s) + 15 ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    pid="$(pgrep -x "$LABEL" | head -1 || true)"
+  local deadline=$((SECONDS + 15)) pid
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    pid="$(daemon_pid)"
     if [ -n "$pid" ]; then
       sleep 1
-      [ "$(pgrep -x "$LABEL" | head -1 || true)" = "$pid" ] && { echo "${LABEL} запущен (pid ${pid})"; return 0; }
+      [ "$(daemon_pid)" = "$pid" ] && { echo "${LABEL} запущен (pid ${pid})"; return 0; }
     else
       sleep 0.5
     fi
