@@ -1162,6 +1162,53 @@ int main(int argc, char **argv)
         CHECK(!eng.pinLacksTransport(TransportMode::Xray));
     }
 
+    // §15. 5.1.109: the "protocol before connect" badge (nextCandidate) and connect() pick the same node.
+    // A stored "Xray" mode that is no longer available (xray_client off, a Mac with an old service)
+    // reads as Auto in connect() (effectiveTransportMode); nextCandidate read the raw mode and showed
+    // nothing or another node. Table: mode x pin x xray supported x network memory x auto pick.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        const TransportMode modes[] = {TransportMode::Auto, TransportMode::Awg, TransportMode::Xray};
+        const char *pins[] = {"", "16:awg", "9:xray"};
+        const char *memories[] = {"", "9:xray", "16:awg"};
+        int cases = 0, mismatches = 0;
+        for (const TransportMode mode : modes)
+            for (const char *pin : pins)
+                for (const bool xrayOn : {true, false})
+                    for (const char *memory : memories)
+                        for (const bool autoPick : {true, false}) {
+                            setFlags(/*xrayClient=*/true, autoPick);
+                            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+                            QString err;
+                            CHECK(eng.loadSubscription(pool, err));
+                            eng.setMeasuredRtt(rtt);
+                            eng.setTransportMode(mode); // stored while Xray was available
+                            if (*pin)
+                                eng.setPinnedNode(QString::fromLatin1(pin), err); // may refuse: still a case
+                            eng.setNetworkMemoryNode(QString::fromLatin1(memory));
+                            setFlags(xrayOn, autoPick);
+                            const SubscriptionNode *next = eng.nextCandidate();
+                            const QString nextId = next ? next->nodeId : QString();
+                            const bool ok = eng.connect(err);
+                            const QString upId = ok ? tun.lastUpNodeId : QString();
+                            ++cases;
+                            if (nextId != upId) {
+                                ++mismatches;
+                                fprintf(stderr, "  §15 mode=%s pin=%s xray=%d memory=%s autoPick=%d: next=%s connect=%s\n",
+                                        qPrintable(transportModeToString(mode)), pin, int(xrayOn), memory,
+                                        int(autoPick), qPrintable(nextId), qPrintable(upId));
+                            }
+                        }
+        CHECK(cases == 108);
+        CHECK(mismatches == 0);
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

@@ -289,6 +289,8 @@ public:
     // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
     // Inside an equal-weight tier without measurements the pick is random - callers that must not
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
+    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
+    // normalizeTransportMode() - test transport_pick_check §15.
     const SubscriptionNode *nextCandidate() const;
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin

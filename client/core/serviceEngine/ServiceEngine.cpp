@@ -230,7 +230,7 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, m_transportMode)) // Task 10 + awg31: авто-пригодность
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -268,7 +268,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, m_transportMode)) // Task 10 + awg31: авто-пригодность
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -289,7 +289,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
                                                      bool useLastKnownRtt) const
 {
     TransportPickInput in;
-    in.mode = m_transportMode;
+    in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
     in.exclA = exclA;
     if (withExclusions)
         in.excluded = m_failedThisSession;
@@ -322,7 +322,7 @@ const SubscriptionNode *ServiceEngine::pinnedCandidate() const
 const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
 {
     const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
-    if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, m_transportMode))
+    if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, transportMode()))
         return nullptr;
     if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || m_failedThisSession.contains(n->nodeId))
         return nullptr;
@@ -340,7 +340,9 @@ const SubscriptionNode *ServiceEngine::nextCandidate() const
     if (const SubscriptionNode *pinned = pinnedCandidate())
         return pinned;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    if (autoPick || m_transportMode != TransportMode::Auto) {
+    // 5.1.109: the effective mode - connect() starts with normalizeTransportMode(), so a stored "Xray"
+    // that is no longer available reads as Auto here too (the badge and the start pick the same node).
+    if (autoPick || transportMode() != TransportMode::Auto) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate())
             return remembered;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true);
