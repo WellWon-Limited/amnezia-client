@@ -43,7 +43,10 @@ EOF
 # -f: включить заголовок по короткому имени (кладём moc-выхлоп вне дерева исходников)
 "$MOC" -f "TribeSupportChat.h" "$HERE/../TribeSupportChat.h" -o /tmp/avpn_e2e_moc_support.cpp
 
-clang++ -std=c++17 -fPIC -include arm_acle.h \
+# -include arm_acle.h (как в соседних скриптах) — только на arm64: на x86_64 такого хедера нет.
+ARCH_FLAGS=()
+[ "$(uname -m)" = "arm64" ] && ARCH_FLAGS=(-include arm_acle.h)
+clang++ -std=c++17 -fPIC ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} \
   -I"$SHIM" \
   -I"$QT/include" -I"$QT/include/QtCore" -I"$QT/include/QtNetwork" -I"$QT/include/QtGui" \
   -I"$QT/lib/QtCore.framework/Headers" -I"$QT/lib/QtNetwork.framework/Headers" \
