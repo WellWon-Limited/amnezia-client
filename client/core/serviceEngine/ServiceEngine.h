@@ -235,21 +235,55 @@ public:
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
     // всех путях выбора (connect/failover/ротация/pin); нет кандидатов → честная ошибка no_transport.
-    // AVPN (independent review of the wave, MAJOR-2): an unavailable Xray (kill-switch
-    // features.xray_client or the platform) always reads as Auto - in the UI and on every pick path.
-    // 5.1.109 (review R2): one rule for every reader - effectiveTransportMode: connect, onDead,
-    // setPinnedNode, rotateNext, continuePendingSwitch, the pool refresh, nextCandidate, the pick
-    // helpers, nextLiveNodeId, pinLacksTransport, debugSnapshot all read transportMode().
-    // 5.1.109 (S4.1, defect of 12.11.2026 on 138): m_transportMode is the user's CHOICE and is never
-    // rewritten by availability. Before, setTransportMode and normalizeTransportMode stored the
-    // effective mode: a stored "Xray" read while Xray was frozen (every cold start on the cached
-    // config) became Auto for the rest of the process and did not come back when the fresh config
-    // allowed Xray again. Now Xray being unavailable only changes what transportMode() returns; when
-    // it is allowed again the choice is back in force by itself. The facade reacts to that moment
-    // (a pin the returned mode cannot serve - DebugSnapshot.h::decideOnTransportAvailability).
-    void setTransportMode(TransportMode m) { m_transportMode = m; }
+    // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
+    // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
+    // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
+    // 5.1.109 (review R2): also at the start of setPinnedNode, rotateNext, continuePendingSwitch and
+    // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
+    // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
+    //
+    // 5.1.109 (S4.1; defect of 12.11.2026 on 138, review of d5d739403): two values.
+    //  m_chosenTransportMode - the user's CHOICE, as stored; availability never rewrites it. On 138
+    //    there was only the mode in force: a stored "Xray" read while Xray was frozen (every cold
+    //    start on the cached config) became Auto and nothing brought it back.
+    //  m_transportMode - the mode IN FORCE (what every pick reads). It changes in three ways only:
+    //    1. a tap (setTransportMode) - at once, whatever is running;
+    //    2. Xray stops being available - it reads as Auto at once and the next pick writes that down
+    //       (normalizeTransportMode, as before): the running session goes on with what is left;
+    //    3. the choice is ADMITTED (admitTransportModeChoice) - only at load and while nothing is
+    //       running; the facade decides that (DebugSnapshot.h::transportModeMayChangeNow).
+    // So a choice "Xray" that was not in force when a start began never comes into force between the
+    // tap and connect() or under the live session: re-up, failover, rotation and the engine's own
+    // switches keep the mode the session started with (or Auto after a loss).
+    void setTransportMode(TransportMode m)
+    {
+        m_chosenTransportMode = m;
+        m_transportMode = effectiveTransportMode(m);
+    }
+    // The stored choice at load: not in force until admitTransportModeChoice().
+    void setTransportModeChoice(TransportMode m) { m_chosenTransportMode = m; }
     TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
-    TransportMode chosenTransportMode() const { return m_transportMode; }
+    TransportMode chosenTransportMode() const { return m_chosenTransportMode; }
+    void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
+    // The choice would be in force if admitted now, and is not (Xray came back under a session).
+    bool transportModeChoicePending() const
+    {
+        return effectiveTransportMode(m_chosenTransportMode) != transportMode();
+    }
+    // Brings the choice into force. A pin the admitted mode cannot serve (pinLacksTransport: a country
+    // pinned while the choice was not in force) is cleared here - the rule of a mode change,
+    // CONNECT-INVARIANTS §22 п. 8а; the facade persists and journals it. Auto never clears a pin.
+    struct ModeAdmission {
+        bool changed = false;
+        TransportMode from = TransportMode::Auto;
+        TransportMode to = TransportMode::Auto;
+        QString pinCleared;
+    };
+    ModeAdmission admitTransportModeChoice();
+    // A live session adopted from an earlier process runs on a transport the mode in force excludes
+    // (it was started while the choice was not in force): the session keeps Auto; the choice stays
+    // and is admitted when the engine is idle again.
+    void suspendTransportMode() { m_transportMode = TransportMode::Auto; }
 
     // AVPN awg31-xray-v1: локальная история транспортов (EWMA успеха/времени до трафика по паре
     // локация×proto, TransportPick.h). Персистит фасад (QSettings avpn/transportHistory):
@@ -307,8 +341,8 @@ public:
     // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
     // Inside an equal-weight tier without measurements the pick is random - callers that must not
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
-    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does -
-    // test transport_pick_check §15.
+    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
+    // normalizeTransportMode() - test transport_pick_check §15.
     const SubscriptionNode *nextCandidate() const;
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
@@ -554,7 +588,8 @@ private:
     qint64        m_healthySinceEpoch = 0;  // начало непрерывного здорового отрезка после шага
     qint64        m_tickPrevRx = -1;        // rx прошлого tick (рост rx = доказательство живого туннеля)
     // AVPN awg31-xray-v1:
-    TransportMode m_transportMode = TransportMode::Auto;
+    TransportMode m_transportMode = TransportMode::Auto;        // the mode in force
+    TransportMode m_chosenTransportMode = TransportMode::Auto;  // 5.1.109: the user's stored choice
     TransportHistory m_transportHistory;
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)

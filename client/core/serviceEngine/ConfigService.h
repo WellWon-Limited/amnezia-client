@@ -11,6 +11,7 @@
 #include <functional>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 namespace avpn {
 
@@ -32,18 +33,26 @@ public:
     bool isPinned() const { return m_pinned; }
     QString activeBaseUrl() const { return m_activeBase; }
     // 5.1.109: why features.xray_client of config() is what it is (ConfigCachePolicy.h::decideXrayClient).
-    // On the cached copy the signed "true" is honoured for a bounded time since it was received; the
-    // bound is re-checked before every config request while the process is still on that copy. A fresh
-    // signed answer wins at once and stays in force for the run, as before.
+    // On the cached copy the signed "true" is honoured for a bounded time since it was received; while
+    // the process is still on that copy the trust is judged again before every config request, on the
+    // foreground refresh (throttled or not) and on every API outcome reported here, and once it has
+    // ended it stays ended for the run. A fresh signed answer wins at once and stays in force.
     XrayPolicy xrayPolicy() const { return m_xrayPolicy; }
     // Age of the cached signed config when it was last judged, minutes; -1 = fresh or unknown.
     qint64 cachedConfigAgeMin() const;
     void setNowMsForTest(std::function<qint64()> nowMs) { m_nowMsFn = std::move(nowMs); }
+    // 5.1.109: "this failed reply says nothing about the edge" - the facade's existing classification
+    // of API outcomes (DebugSnapshot.h::classifyApiOutcome == Ignore: the request outlived a freeze of
+    // the process or fell into the window of our own tunnel transition). Such a config failure does
+    // not vote in the edge walk. Not set (tests) = every transport failure votes, as before.
+    void setFailureIgnoredFn(std::function<bool(QNetworkReply *)> fn) { m_failureIgnoredFn = std::move(fn); }
 
     void reportNetworkFailure();
     // Another API request got an answer on the active edge. 5.1.109 (iOS, macOS): while the process is
-    // still on the cached config and its own last attempt failed in transport, this also asks for
-    // /v1/config again (ConfigCachePolicy.h::refetchConfigOnApiSuccess); true = it was asked for now.
+    // still on the cached config and the config is owed (its own request of the usual kind got no
+    // answer), this also asks for /v1/config - once per owed episode, not closer than the refresh
+    // throttle to the previous refetch (ConfigCachePolicy.h::refetchConfigOnApiSuccess); true = it was
+    // asked for now. The failure of such a refetch does not vote in the edge walk.
     bool reportNetworkSuccess();
     // Decision 2026-11-05: /v1/subscription outcome for its own per-edge streak (EdgeWalk.h::
     // SubscriptionEdgeStreak); requestBase = the edge the request went to. failed = transport failure
@@ -63,7 +72,9 @@ signals:
     void transportOk();
 
 private:
-    void fetchConfig();
+    void fetchConfig();                             // a config request of the usual kind
+    void requestConfig(bool startedByApiSuccess);   // 5.1.109: + the refetch of reportNetworkSuccess
+    void rejudgeCachedXray();                       // 5.1.109: judgeCachedXray + announce a change
     void fetchEdges();
     void applyBody(const QByteArray &body, const QByteArray &sigB64); // verify → parse → cache → emit
     int  failThreshold() const;
@@ -92,7 +103,14 @@ private:
     qint64       m_cachedMaxAgeMs = 0;
     qint64       m_cachedAgeMs = -1;
     XrayPolicy   m_xrayPolicy = XrayPolicy::NoConfig;
+    CachedTrust  m_cachedTrust;         // one-way within a run: ended trust is not revived
     std::function<qint64()> m_nowMsFn;  // test clock (empty = the system clock)
+    // 5.1.109 (review of d5d739403): the config request in flight and the owed refetch.
+    quint64        m_configSeq = 0;       // bumped by an edge switch: the reply in flight is stale
+    QNetworkReply *m_configReply = nullptr; // the request in flight (cleared in its handler / on a switch)
+    bool           m_refetchOwed = false; // a usual request got no answer while on the cached copy
+    qint64         m_lastRefetchMs = -1;  // when reportNetworkSuccess last asked (spacing)
+    std::function<bool(QNetworkReply *)> m_failureIgnoredFn;
 };
 
 } // namespace avpn

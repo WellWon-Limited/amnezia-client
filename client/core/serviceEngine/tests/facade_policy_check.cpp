@@ -276,48 +276,97 @@ static void pinOnTransportModeChange()
     CHECK(!d.restartTunnel);
 }
 
-// 5.1.109 (S4.1, defect of 12.11.2026 on 138): the stored choice "Xray" comes back in force when Xray
-// is allowed again (a fresh signed config, the trusted cached copy, a macOS service with tun2socks) -
-// without a tap. The facade journals it, applies the pin rule of a mode change and never restarts
-// the tunnel. On 138 the mode stayed Auto for the whole run.
-static void storedModeBackInForce()
+// 5.1.109 (S4.1; defect of 12.11.2026 on 138, review of d5d739403): the stored transport-mode choice
+// comes into force only at load and while nothing is running. These are the decisions
+// AvpnEngineQml really calls (transportModeIdle, syncTransportModeChoice, refreshXrayRuntimeGate,
+// keepModeOfAdoptedSession, the constructor); the admission itself is the engine's
+// (transport_pick_check §17).
+static void transportModeChoiceComesIntoForceOnlyWhileIdle()
 {
-    const QString rs = QStringLiteral("16:awg"), de = QStringLiteral("9:xray");
-    const QString cfg = QStringLiteral("config");
-    // nothing changed (the usual config refresh): no journal, no pin work
-    AvailabilityModeDecision d = decideOnTransportAvailability(QStringLiteral("xray"), QStringLiteral("xray"), rs, true, cfg);
-    CHECK(!d.changed && !d.clearPin && d.modeJournal.isEmpty() && d.pinJournal.isEmpty());
-    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("auto"), rs, false, cfg);
-    CHECK(!d.changed && !d.clearPin);
-    // Xray allowed again, no pin: the mode is restored, one journal line
-    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), QString(), false, cfg);
-    CHECK(d.changed && !d.clearPin);
-    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=auto to=xray why=config"));
-    CHECK(d.pinJournal.isEmpty());
-    // ... Serbia (AWG only) was pinned while the stored "Xray" was dormant: the pin does not survive
-    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), rs, true, cfg);
-    CHECK(d.changed && d.clearPin);
-    CHECK(d.pinJournal == QLatin1String("pin_cleared why=transport_mode mode=xray node=16:awg"));
-    // ... a pin the returned mode serves (DE has an Xray listener) stays
-    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), de, false, cfg);
-    CHECK(d.changed && !d.clearPin && d.pinJournal.isEmpty());
-    // Xray went away (the server switched it off, the trust in the cache ran out): reads as Auto;
-    // Auto never clears a pin, whatever the predicate says
-    d = decideOnTransportAvailability(QStringLiteral("xray"), QStringLiteral("auto"), de, true, cfg);
-    CHECK(d.changed && !d.clearPin);
-    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=xray to=auto why=config"));
-    // macOS: the installed service gained tun2socks
-    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), rs, true, QStringLiteral("runtime"));
-    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=auto to=xray why=runtime"));
-    CHECK(d.clearPin);
-    // The decision has no "restart the tunnel" output at all: availability never restarts a working
-    // tunnel (§26), unlike a user's mode change (pinOnTransportModeChange above).
+    const TeardownLatch clean;
+    const ObservedTunnel down = ObservedTunnel::Disconnected;
+    // idle: no intent, nothing in flight, the tunnel observed down (or not observed yet at start)
+    CHECK(transportModeMayChangeNow(false, false, false, false, false, down, clean));
+    CHECK(transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Unknown, clean));
+    // Finding 1 (d5d739403): between the tap and connect(). The tap set the intent; the start is
+    // being prepared, the macOS service is being installed, the start is in flight.
+    CHECK(!transportModeMayChangeNow(true, false, false, false, false, down, clean));
+    CHECK(!transportModeMayChangeNow(true, false, true, false, false, down, clean));
+    CHECK(!transportModeMayChangeNow(true, true, false, false, true, down, clean));
+    // Finding 2 (d5d739403): under a live session - a fresh config that allows Xray arrives
+    CHECK(!transportModeMayChangeNow(true, false, false, false, true, ObservedTunnel::Connected, clean));
+    // ... and between the runtimes of an app-side restart or in the backoff between start attempts:
+    // the tunnel is down, the intent is still set
+    CHECK(!transportModeMayChangeNow(true, false, false, false, false, down, clean));
+    // our stop in flight: the intent is already off, the tunnel is not down yet
+    CHECK(!transportModeMayChangeNow(false, true, false, false, true, ObservedTunnel::Connected, clean));
+    CHECK(!transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Transitional, clean));
+    CHECK(!transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Connected, clean));
+    TeardownLatch stopping;
+    stopping.awaitingStopConfirm = true;                      // stop asked, Disconnected not observed yet
+    CHECK(!transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Unknown, stopping));
+    // pause-for-shopping (the session comes back by itself) and the engine's own switch
+    CHECK(!transportModeMayChangeNow(false, false, false, true, false, down, clean));
+    CHECK(!transportModeMayChangeNow(false, false, false, false, true, down, clean));
+    // Error is a state to act from only when it does not need a status first (iOS)
+    CHECK(transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Error, clean));
+    TeardownLatch afterError;
+    afterError.needStatusBeforeStart = true;
+    CHECK(!transportModeMayChangeNow(false, false, false, false, false, ObservedTunnel::Error, afterError));
 
-    // The saved pin could not be applied: only a refusal by the transport mode drops it.
-    CHECK(savedPinRefusedByMode(QStringLiteral("no_transport: location h:16 has no 'xray' transport")));
-    CHECK(!savedPinRefusedByMode(QStringLiteral("node not in subscription: 16:awg")));   // absent now: kept
-    CHECK(!savedPinRefusedByMode(QStringLiteral("unsupported_proto: node 7:vless proto 'vless'")));
-    CHECK(!savedPinRefusedByMode(QString()));
+    // The plan of AvpnEngineQml::syncTransportModeChoice.
+    ModeSyncPlan p = planTransportModeSync(/*atLoad=*/true, /*mayChangeNow=*/false, /*pending=*/true, false);
+    CHECK(p.admit && !p.journalPending);                      // at load nothing of this process runs
+    p = planTransportModeSync(false, true, true, false);
+    CHECK(p.admit && !p.journalPending);                      // idle: admitted
+    p = planTransportModeSync(false, false, true, false);
+    CHECK(!p.admit && p.journalPending);                      // busy: it waits, one journal line
+    p = planTransportModeSync(false, false, true, true);
+    CHECK(!p.admit && !p.journalPending);                     // ... written once per wait
+    p = planTransportModeSync(false, false, false, false);
+    CHECK(!p.admit && !p.journalPending);                     // busy and nothing waits
+    CHECK(transportModeJournal(QStringLiteral("auto"), QStringLiteral("xray"), QStringLiteral("idle"))
+          == QLatin1String("transport_mode_effective from=auto to=xray why=idle"));
+    CHECK(transportModePendingJournal(QStringLiteral("xray"), QStringLiteral("auto"), QStringLiteral("config"))
+          == QLatin1String("transport_mode_pending choice=xray in_force=auto why=config"));
+    CHECK(pinClearedByModeJournal(QStringLiteral("xray"), QStringLiteral("16:awg"))
+          == QLatin1String("pin_cleared why=transport_mode mode=xray node=16:awg"));
+    // the tap path keeps the same line (decidePinOnTransportMode)
+    CHECK(decidePinOnTransportMode(QStringLiteral("xray"), QStringLiteral("16:awg"), true, false, QString()).journal
+          == pinClearedByModeJournal(QStringLiteral("xray"), QStringLiteral("16:awg")));
+
+    // The stored value at load: a "xray" written by 138 or earlier may be stale (there a tap on
+    // "Auto" while Xray was frozen was not stored, and the selector was hidden) - dropped once.
+    StoredModeChoice c = storedTransportChoice(QStringLiteral("xray"), /*byChoiceBuild=*/false);
+    CHECK(c.mode == QLatin1String("auto") && c.legacyReset);
+    c = storedTransportChoice(QStringLiteral("xray"), true);  // chosen on 139 or later: honoured
+    CHECK(c.mode == QLatin1String("xray") && !c.legacyReset);
+    c = storedTransportChoice(QStringLiteral("awg"), false);  // "awg" was never rewritten: honoured
+    CHECK(c.mode == QLatin1String("awg") && !c.legacyReset);
+    c = storedTransportChoice(QStringLiteral("auto"), false);
+    CHECK(c.mode == QLatin1String("auto") && !c.legacyReset);
+    c = storedTransportChoice(QString(), false);              // first launch
+    CHECK(c.mode == QLatin1String("auto") && !c.legacyReset);
+    c = storedTransportChoice(QStringLiteral("vless"), true); // unknown value
+    CHECK(c.mode == QLatin1String("auto") && !c.legacyReset);
+
+    // macOS runtime gate (tun2socks next to the service): loss at once, gain only while idle.
+    CHECK(xrayRuntimeGateNext(/*readyNow=*/true, /*present=*/true, /*mayChangeNow=*/false));
+    CHECK(!xrayRuntimeGateNext(true, false, false));          // lost in the middle of a start: off at once
+    CHECK(!xrayRuntimeGateNext(true, false, true));
+    CHECK(!xrayRuntimeGateNext(false, true, false));          // finding 1: the service got it inside Connect
+    CHECK(xrayRuntimeGateNext(false, true, true));            // ... Xray is back for the next start
+    CHECK(!xrayRuntimeGateNext(false, false, true));
+
+    // An adopted session (the GUI restarted, the tunnel lived on): Auto if its known transport is
+    // excluded by the loaded mode; an unknown transport is not judged.
+    CHECK(adoptedSessionKeepsMode(QStringLiteral("xray"), QStringLiteral("xray")));
+    CHECK(!adoptedSessionKeepsMode(QStringLiteral("xray"), QStringLiteral("awg")));
+    CHECK(adoptedSessionKeepsMode(QStringLiteral("xray"), QString()));
+    CHECK(adoptedSessionKeepsMode(QStringLiteral("awg"), QStringLiteral("awg")));
+    CHECK(!adoptedSessionKeepsMode(QStringLiteral("awg"), QStringLiteral("xray")));
+    CHECK(adoptedSessionKeepsMode(QStringLiteral("auto"), QStringLiteral("awg")));
+    CHECK(adoptedSessionKeepsMode(QStringLiteral("auto"), QStringLiteral("xray")));
 }
 
 // 5.1.109 (R7): a deadline timer that fires late = the process was frozen (iOS suspended the app, a
@@ -748,7 +797,7 @@ int main()
     a2EmptyIssuanceKeepsPoolAndLkg();
     a6a7PinPersistence();
     pinOnTransportModeChange();
-    storedModeBackInForce();
+    transportModeChoiceComesIntoForceOnlyWhileIdle();
     lateDeadlineTick();
     a8a9a15InternalSwitch();
     a10a11Selection();

@@ -125,19 +125,78 @@ static void journalNames()
     CHECK(std::strcmp(xrayPolicyName(XrayPolicy::CacheExpired), "cache_expired") == 0);
 }
 
-// "An API path works again": ask for the config only while it is owed after a transport failure.
+// Within a run the cached copy can lose the trust and never regain it (review of d5d739403: setting
+// the clock back revived an expired trust).
+static void trustIsOneWayWithinARun()
+{
+    const qint64 at = kNow - 71 * kHour;
+    CachedTrust trust;
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow, kBound), true, XrayPolicy::CacheTrusted));
+    CHECK(!trust.ended);
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow + 30 * 60000, kBound), true, XrayPolicy::CacheTrusted));
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow + 2 * kHour, kBound), false, XrayPolicy::CacheExpired));
+    CHECK(trust.ended && trust.why == XrayPolicy::CacheExpired);
+    // the clock is set back into the bound (not before the receive time): still expired
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow, kBound), false, XrayPolicy::CacheExpired));
+    CHECK(is(decideXrayClient(false, true, at, kNow, kBound), true, XrayPolicy::CacheTrusted)); // the bare rule would revive it
+    // ... and the server raising the bound does not revive it either: only a fresh signed answer does
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow, 168 * kHour), false, XrayPolicy::CacheExpired));
+
+    CachedTrust clockBack;                                    // the clock was behind at start
+    CHECK(is(judgeCachedTrust(clockBack, true, kNow + kHour, kNow, kBound), false, XrayPolicy::CacheClockBack));
+    CHECK(is(judgeCachedTrust(clockBack, true, kNow + kHour, kNow + 2 * kHour, kBound), false, XrayPolicy::CacheClockBack));
+
+    CachedTrust off;                                          // signed "false" stays off
+    CHECK(is(judgeCachedTrust(off, false, kNow, kNow, kBound), false, XrayPolicy::CacheOff));
+    CHECK(off.ended);
+}
+
+// "An API path works again": ask for the config while it is owed - once per owed episode and not
+// closer than the refresh throttle to the previous refetch.
 static void refetchOnApiSuccess()
 {
-    // on the cached copy, the last own attempt failed in transport / was aborted (mark -1), none in flight
-    CHECK(refetchConfigOnApiSuccess(/*fresh=*/false, /*inFlight=*/false, /*lastFetchMs=*/-1));
+    const qint64 spacing = kConfigRefreshThrottleMs;
+    CHECK(spacing == 15 * 60 * 1000);                         // the foreground throttle, one constant
+    // on the cached copy, owed, none in flight, no refetch yet
+    CHECK(refetchConfigOnApiSuccess(/*fresh=*/false, /*inFlight=*/false, /*owed=*/true, /*lastRefetch=*/-1, kNow, spacing));
+    // nothing owed: no usual request has failed since the last refetch (d5d739403 asked on EVERY
+    // API success while /v1/config kept failing - about every 20 s under a live session)
+    CHECK(!refetchConfigOnApiSuccess(false, false, false, -1, kNow, spacing));
+    CHECK(!refetchConfigOnApiSuccess(false, false, false, kNow - 60 * 60000, kNow, spacing));
     // a request is already in flight: no second one
-    CHECK(!refetchConfigOnApiSuccess(false, true, -1));
-    // the edge answered the last attempt (4xx, a bad signature): the foreground throttle handles it
-    CHECK(!refetchConfigOnApiSuccess(false, false, kNow));
-    // a fresh config is in force: every API success would otherwise ask again
-    CHECK(!refetchConfigOnApiSuccess(true, false, -1));
-    CHECK(!refetchConfigOnApiSuccess(true, false, kNow));
-    CHECK(!refetchConfigOnApiSuccess(true, true, -1));
+    CHECK(!refetchConfigOnApiSuccess(false, true, true, -1, kNow, spacing));
+    // a fresh config is in force
+    CHECK(!refetchConfigOnApiSuccess(true, false, true, -1, kNow, spacing));
+    // owed again (the next foreground request failed), but the previous refetch was 5 minutes ago
+    CHECK(!refetchConfigOnApiSuccess(false, false, true, kNow - 5 * 60000, kNow, spacing));
+    CHECK(!refetchConfigOnApiSuccess(false, false, true, kNow - spacing + 1, kNow, spacing));
+    CHECK(refetchConfigOnApiSuccess(false, false, true, kNow - spacing, kNow, spacing));
+    CHECK(refetchConfigOnApiSuccess(false, false, true, kNow - 60 * 60000, kNow, spacing));
+    // the clock went back behind the previous refetch: there is no spacing to keep
+    CHECK(refetchConfigOnApiSuccess(false, false, true, kNow + kHour, kNow, spacing));
+}
+
+// A config request that got no answer: who votes in the edge walk and who arms the next refetch.
+static void configFailureVotesAndOwes()
+{
+    // a usual request (start, a return to the screen, an edge switch, the macOS timer) on the cache
+    ConfigFailure f = classifyConfigFailure(/*fresh=*/false, /*startedByApiSuccess=*/false, /*ignored=*/false);
+    CHECK(f.voteInEdgeWalk && f.refetchOwed);
+    // ... with a fresh config already in force: votes as before, nothing is owed
+    f = classifyConfigFailure(true, false, false);
+    CHECK(f.voteInEdgeWalk && !f.refetchOwed);
+    // the refetch of an API success: no vote ([success, fail, fail] switched the edge on d5d739403,
+    // not on the base) and it does not arm itself again (one refetch per owed episode)
+    f = classifyConfigFailure(false, true, false);
+    CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
+    // a request that outlived a freeze of the process / fell into our own tunnel transition: the
+    // same "Ignore" as every other API request - no vote; the config is still owed
+    f = classifyConfigFailure(false, false, true);
+    CHECK(!f.voteInEdgeWalk && f.refetchOwed);
+    f = classifyConfigFailure(true, false, true);
+    CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
+    f = classifyConfigFailure(false, true, true);
+    CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
 }
 
 int main()
@@ -149,7 +208,9 @@ int main()
     clockMoved();
     boundFromTheServer();
     journalNames();
+    trustIsOneWayWithinARun();
     refetchOnApiSuccess();
+    configFailureVotesAndOwes();
     if (g_fail) {
         std::printf("config_cache_policy_check: %d FAILED of %d\n", g_fail, g_total);
         return 1;

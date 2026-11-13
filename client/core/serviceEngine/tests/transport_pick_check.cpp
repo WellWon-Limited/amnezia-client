@@ -4,7 +4,6 @@
 // failover «другой транспорт той же локации → соседняя локация», фаза verifying для xray
 // («Подключено» только после пробы через туннель), DEAD по провалу проб, ротация по локациям.
 // Сборка/запуск: core/serviceEngine/tests/build_transport_pick.sh (по образцу build_proto_forward.sh).
-#include "../DebugSnapshot.h" // 5.1.109 (S4.1): decideOnTransportAvailability - the facade's rule in §15b
 #include "../NodeRanking.h"
 #include "../NodeRotation.h"
 #include "../ServiceEngine.h"
@@ -1247,11 +1246,7 @@ int main(int argc, char **argv)
             CHECK(eng.rotateNext(err));
             CHECK(tun.upCalls == 1);
         }
-        {   // pool refresh while Xray is off, then Xray returns: no pin the mode cannot serve remains.
-            // 5.1.109 (S4.1): review R2 got that by turning the frozen "Xray" into Auto for good in the
-            // refresh (the choice never came back - the defect of 12.11.2026). Now the choice survives,
-            // the engine reports the pin the returned mode cannot serve, and the facade clears it by
-            // the rule of a mode change (DebugSnapshot.h::decideOnTransportAvailability).
+        {   // pool refresh while Xray is off, then Xray returns: no pin the mode cannot serve remains
             ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
             setFlags(/*xrayClient=*/true, /*autoPick=*/true);
             CHECK(eng.loadSubscription(pool, err));
@@ -1261,96 +1256,8 @@ int main(int argc, char **argv)
             CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0), awgNodeJson("9:awg", 9, "DE", 1.0),
                                                  awgNodeJson("16:awg", 16, "RS", 1.0) }, 2), err));
             CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));     // Auto while Xray is off
-            const TransportMode before = eng.transportMode();
-            CHECK(before == TransportMode::Auto);
-            setFlags(/*xrayClient=*/true, /*autoPick=*/true);        // a fresh config allows Xray again
-            CHECK(eng.transportMode() == TransportMode::Xray);       // the stored choice is back in force
-            CHECK(eng.pinLacksTransport(eng.transportMode()));       // DE has no Xray listener any more
-            const AvailabilityModeDecision d = decideOnTransportAvailability(
-                transportModeToString(before), transportModeToString(eng.transportMode()), eng.pinnedNodeId(),
-                eng.pinLacksTransport(eng.transportMode()), QStringLiteral("config"));
-            CHECK(d.changed && d.clearPin);
-            CHECK(d.pinJournal == QLatin1String("pin_cleared why=transport_mode mode=xray node=9:awg"));
-            eng.clearPin();                                          // what the facade does, then persists
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
             CHECK(!eng.pinLacksTransport(eng.transportMode()));
-        }
-        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-    }
-
-    // §17. 5.1.109 (S4.1, defect of 12.11.2026 on 138): the stored transport mode is the user's choice
-    // and survives Xray being frozen. On 138 a stored "Xray" loaded while the cached config froze Xray
-    // (every cold start) became Auto for the whole run - setTransportMode and every connect/onDead/
-    // pin/rotation/pool refresh rewrote it - and the fresh config did not bring it back.
-    {
-        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
-                                          awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
-                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
-        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
-                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
-        QString err;
-        {   // cold start: the cached config froze Xray, the facade loads the stored "xray"
-            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
-            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
-            CHECK(eng.loadSubscription(pool, err));
-            eng.setMeasuredRtt(rtt);
-            eng.setTransportMode(TransportMode::Xray);
-            CHECK(eng.chosenTransportMode() == TransportMode::Xray);  // kept as chosen
-            CHECK(eng.transportMode() == TransportMode::Auto);        // in force: Auto, the UI shows Auto
-            CHECK(eng.debugSnapshot().transportMode == QLatin1String("auto"));
-            // every entry point that used to rewrite the mode: connect, the pin, the rotation,
-            // the pool refresh, a DEAD failover
-            CHECK(eng.connect(err));
-            CHECK(!isXrayProto(eng.currentNodeProto()));              // frozen Xray is not raised
-            CHECK(eng.onTunnelConnected());
-            CHECK(eng.notifyConnectionLost());                        // failover: onDead -> the next node
-            CHECK(!isXrayProto(eng.currentNodeProto()));
-            CHECK(eng.onTunnelConnected());
-            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));  // accepted under Auto
-            eng.clearPin();
-            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0), awgNodeJson("9:awg", 9, "DE", 1.0),
-                                                 xrayNodeJson("9:xray", 9, "DE", 1.0),
-                                                 awgNodeJson("16:awg", 16, "RS", 1.0) }, 2), err));
-            eng.requestStop();
-            CHECK(eng.rotateNext(err));
-            eng.requestStop();
-            CHECK(eng.chosenTransportMode() == TransportMode::Xray);  // none of them rewrote the choice
-            CHECK(eng.transportMode() == TransportMode::Auto);
-            // the fresh signed config allows Xray: the choice is back in force with no one setting it
-            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-            CHECK(eng.transportMode() == TransportMode::Xray);
-            CHECK(eng.debugSnapshot().transportMode == QLatin1String("xray"));
-            CHECK(!eng.setPinnedNode(QStringLiteral("16:awg"), err)); // Serbia has no Xray: refused again
-            CHECK(err.startsWith(QLatin1String("no_transport")));
-            const SubscriptionNode *next = eng.nextCandidate();
-            CHECK(next && next->nodeId == QLatin1String("9:xray"));   // the badge before connecting
-            CHECK(eng.connect(err));
-            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));       // and Connect raises Xray
-            // the server switches Xray off again mid-run: reads as Auto, the choice still kept
-            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
-            CHECK(eng.transportMode() == TransportMode::Auto);
-            CHECK(eng.chosenTransportMode() == TransportMode::Xray);
-        }
-        {   // a trusted cached config: Xray is allowed from the first moment - the stored mode is in
-            // force at once, the first Connect raises Xray (138: Auto, an AmneziaWG node)
-            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
-            CHECK(eng.loadSubscription(pool, err));
-            eng.setMeasuredRtt(rtt);
-            eng.setTransportMode(TransportMode::Xray);
-            CHECK(eng.transportMode() == TransportMode::Xray);
-            CHECK(eng.connect(err));
-            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
-        }
-        {   // "Amnezia" and "Auto" do not depend on Xray being available
-            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
-            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
-            CHECK(eng.loadSubscription(pool, err));
-            eng.setTransportMode(TransportMode::Awg);
-            CHECK(eng.transportMode() == TransportMode::Awg && eng.chosenTransportMode() == TransportMode::Awg);
-            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-            CHECK(eng.transportMode() == TransportMode::Awg);
-            eng.setTransportMode(TransportMode::Auto);
-            CHECK(eng.transportMode() == TransportMode::Auto && eng.chosenTransportMode() == TransportMode::Auto);
         }
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);
     }
@@ -1403,6 +1310,145 @@ int main(int argc, char **argv)
             CHECK(eng.pinnedNodeId().isEmpty());
             CHECK(eng.takePinDroppedForTransport().isEmpty());
         }
+    }
+
+    // §17. 5.1.109 (S4.1; defect of 12.11.2026 on 138, review of d5d739403): the user's CHOICE of the
+    // transport mode is kept apart from the mode IN FORCE. On 138 there was only the mode in force: a
+    // stored "Xray" loaded while the cached config froze Xray (every cold start) became Auto for the
+    // whole run and never came back. On d5d739403 it came back the moment Xray was allowed - between
+    // the tap and connect() and under a live AmneziaWG session. Now: only admitTransportModeChoice()
+    // brings an available "Xray" back, and the facade calls it at load and while nothing is running.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        QString err;
+        {   // cold start on a cache that froze Xray; the fresh config allows Xray UNDER the live session
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportModeChoice(TransportMode::Xray);          // the facade at load
+            CHECK(eng.transportMode() == TransportMode::Auto);        // a choice is not in force by itself
+            ServiceEngine::ModeAdmission a = eng.admitTransportModeChoice();
+            CHECK(!a.changed && a.pinCleared.isEmpty());              // Xray frozen: Auto stays in force
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray);  // the choice is kept (138: lost)
+            CHECK(eng.transportMode() == TransportMode::Auto);
+            CHECK(eng.debugSnapshot().transportMode == QLatin1String("auto"));
+            CHECK(!eng.transportModeChoicePending());                 // nothing to admit yet
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));  // Serbia, AmneziaWG only: fine under Auto
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("16:awg"));       // what the card showed
+            CHECK(eng.onTunnelConnected());
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);         // the fresh signed config allows Xray
+            CHECK(eng.transportMode() == TransportMode::Auto);        // NOT in force under the session
+            CHECK(eng.transportModeChoicePending());                  // ... it waits
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));     // the pin is not touched
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+            // The first DEAD of that session: the failover has its AmneziaWG fallback (the fastest
+            // other location), it is not confined to another country's Xray.
+            CHECK(eng.notifyConnectionLost());
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));
+            CHECK(eng.onTunnelConnected());
+            CHECK(eng.transportMode() == TransportMode::Auto);        // re-up, failover: still the session's mode
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray);
+            // The user disconnects; the facade is idle and admits the choice. The pin the returned
+            // mode cannot serve is cleared here, before the next tap - not between a tap and connect().
+            eng.requestStop();
+            a = eng.admitTransportModeChoice();
+            CHECK(a.changed && a.from == TransportMode::Auto && a.to == TransportMode::Xray);
+            CHECK(a.pinCleared == QLatin1String("16:awg"));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.transportMode() == TransportMode::Xray && !eng.transportModeChoicePending());
+            CHECK(eng.debugSnapshot().transportMode == QLatin1String("xray"));
+            const SubscriptionNode *next = eng.nextCandidate();
+            CHECK(next && next->nodeId == QLatin1String("9:xray"));   // the card before the tap ...
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));       // ... and what Connect raises
+            a = eng.admitTransportModeChoice();
+            CHECK(!a.changed);                                        // already in force
+        }
+        {   // a pin the admitted mode can serve stays (DE has an Xray listener); Auto never clears
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setTransportModeChoice(TransportMode::Xray);
+            eng.admitTransportModeChoice();
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine::ModeAdmission a = eng.admitTransportModeChoice();
+            CHECK(a.changed && a.to == TransportMode::Xray && a.pinCleared.isEmpty());
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));
+            eng.setTransportModeChoice(TransportMode::Auto);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));
+            a = eng.admitTransportModeChoice();
+            CHECK(a.changed && a.to == TransportMode::Auto && a.pinCleared.isEmpty());
+        }
+        {   // a trusted cached config: Xray is allowed at load - the choice is in force from the first
+            // moment and the first Connect raises Xray (138: Auto, an AmneziaWG node)
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportModeChoice(TransportMode::Xray);
+            const ServiceEngine::ModeAdmission a = eng.admitTransportModeChoice();
+            CHECK(a.changed && a.from == TransportMode::Auto && a.to == TransportMode::Xray);
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+        }
+        {   // Xray goes away under a live Xray session (the server switch): it reads as Auto at once,
+            // the failover has AmneziaWG, and Xray does not come back under that session either
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportMode(TransportMode::Xray);                // a tap: choice and in force at once
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray && eng.transportMode() == TransportMode::Xray);
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+            CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto);        // the switch acts on the next pick
+            CHECK(eng.notifyConnectionLost());
+            CHECK(!isXrayProto(eng.currentNodeProto()));              // an AmneziaWG node, not no_transport
+            CHECK(eng.onTunnelConnected());
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto);        // no return under the session
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray && eng.transportModeChoicePending());
+            eng.requestStop();
+            CHECK(eng.admitTransportModeChoice().changed);
+            CHECK(eng.transportMode() == TransportMode::Xray);
+        }
+        {   // an adopted session of a transport the loaded mode excludes keeps Auto; the choice stays
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setTransportModeChoice(TransportMode::Xray);
+            eng.admitTransportModeChoice();
+            eng.suspendTransportMode();
+            CHECK(eng.transportMode() == TransportMode::Auto);
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray && eng.transportModeChoicePending());
+            CHECK(eng.admitTransportModeChoice().to == TransportMode::Xray);
+        }
+        {   // a tap wins at once; "Amnezia" and "Auto" do not depend on Xray being available
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setTransportMode(TransportMode::Awg);
+            CHECK(eng.transportMode() == TransportMode::Awg && eng.chosenTransportMode() == TransportMode::Awg);
+            CHECK(!eng.transportModeChoicePending());
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Awg);
+            eng.setTransportModeChoice(TransportMode::Xray);          // stored choice, Xray allowed, a session up
+            CHECK(eng.transportModeChoicePending());
+            eng.setTransportMode(TransportMode::Xray);                // the user taps the waiting mode
+            CHECK(eng.transportMode() == TransportMode::Xray && !eng.transportModeChoicePending());
+            eng.setTransportMode(TransportMode::Auto);
+            CHECK(eng.transportMode() == TransportMode::Auto && eng.chosenTransportMode() == TransportMode::Auto);
+        }
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
     }
 
     if (g_failed) {

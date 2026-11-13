@@ -2,6 +2,7 @@
 #pragma once
 
 #include "dto/Subscription.h"
+#include "ConfigCachePolicy.h" // kConfigRefreshThrottleMs - the one throttle of the config refresh
 #include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
 #include <QHash>
 #include <QString>
@@ -313,6 +314,12 @@ inline PinRestoreAction decidePinRestore(const QString &saved, const QString &pi
     return pinBefore == saved ? PinRestoreAction::PersistMigrated : PinRestoreAction::Nothing;
 }
 
+// One format for a pin cleared because the mode cannot serve it (a tap or an admission).
+inline QString pinClearedByModeJournal(const QString &mode, const QString &nodeId)
+{
+    return QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, nodeId);
+}
+
 // 5.1.109 (review R3): the facade's decision on a transport mode change (AvpnEngineQml::setTransportMode,
 // after the new mode is applied). mode - the effective mode name ("auto" | "awg" | "xray");
 // pinnedNodeId - the engine's pin; pinLacksTransport - ServiceEngine::pinLacksTransport(effective mode);
@@ -335,7 +342,7 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
     const bool autoMode = mode == QLatin1String("auto");
     if (!autoMode && !pinnedNodeId.isEmpty() && pinLacksTransport) {
         d.clearPin = true;
-        d.journal = QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, pinnedNodeId);
+        d.journal = pinClearedByModeJournal(mode, pinnedNodeId);
     }
     const bool curXray = currentProto == QLatin1String("xray");
     const bool mismatch = (mode == QLatin1String("awg") && curXray)
@@ -344,50 +351,109 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
     return d;
 }
 
-// 5.1.109 (S4.1, defect of 12.11.2026 on 138): the effective transport mode changed WITHOUT a tap.
-// The engine keeps the user's choice and reads an unavailable Xray as Auto, so the choice "Xray"
-// comes back in force when Xray is allowed again (a fresh signed config, the trusted cached copy,
-// on macOS a service with tun2socks) and reads as Auto when it goes away. modeBefore / modeNow - the
-// effective mode names around such an event (AvpnEngineQml::onTransportAvailabilityMaybeChanged).
-//  changed  - the UI refreshes, journal `transport_mode_effective from= to= why=`;
-//  clearPin - the pin rule of a user's mode change (decidePinOnTransportMode, §22 п. 8а): a pin the
-//             mode now in force cannot serve is cleared and persisted - a country pinned while the
-//             stored "Xray" was dormant (the app showed Auto) does not survive its return. Auto never
-//             clears a pin.
-// The tunnel is NOT restarted here, whatever it runs on: only a tap restarts a working tunnel (§26).
-// A tunnel up on a transport the returned mode excludes stays up; the mode applies from the next
-// connect or failover - as an Xray tunnel stays up when xray_client goes off mid-session.
-struct AvailabilityModeDecision {
-    bool changed = false;
-    bool clearPin = false;
-    QString modeJournal; // empty = nothing changed
-    QString pinJournal;  // empty = the pin stays
-};
-inline AvailabilityModeDecision decideOnTransportAvailability(const QString &modeBefore, const QString &modeNow,
-                                                              const QString &pinnedNodeId, bool pinLacksTransport,
-                                                              const QString &why)
+// ---- 5.1.109 (S4.1; defect of 12.11.2026 on 138, review of d5d739403): the transport mode in force
+// and the user's stored choice. The engine keeps both (ServiceEngine.h): the mode in force changes by
+// a tap, by Xray going away (reads as Auto at once), and by ADMISSION of the stored choice - the only
+// way an available "Xray" comes back. The decisions below are the facade's side of that. ----
+
+// The mode in force changed without a tap: why = start | config | runtime | idle | foreground |
+// adopted_session.
+inline QString transportModeJournal(const QString &from, const QString &to, const QString &why)
 {
-    AvailabilityModeDecision d;
-    if (modeBefore == modeNow)
-        return d;
-    d.changed = true;
-    d.modeJournal = QStringLiteral("transport_mode_effective from=%1 to=%2 why=%3").arg(modeBefore, modeNow, why);
-    const PinModeDecision pin = decidePinOnTransportMode(modeNow, pinnedNodeId, pinLacksTransport,
-                                                         /*tunnelUp=*/false, QString());
-    d.clearPin = pin.clearPin;
-    d.pinJournal = pin.journal;
-    return d;
+    return QStringLiteral("transport_mode_effective from=%1 to=%2 why=%3").arg(from, to, why);
+}
+// The choice could be in force again but something is running: it waits for the engine to be idle.
+inline QString transportModePendingJournal(const QString &choice, const QString &inForce, const QString &why)
+{
+    return QStringLiteral("transport_mode_pending choice=%1 in_force=%2 why=%3").arg(choice, inForce, why);
 }
 
-// 5.1.109 (S4.1): the saved pin could not be applied (decidePinRestore -> ApplySaved, setPinnedNode
-// refused). "no_transport" = its location is in the pool, but the transport mode in force cannot
-// serve it - with the stored "Xray" back in force that is a country pinned while it was dormant. Such
-// a saved pin is dropped and persisted (§22 п. 8а); kept, it would come back by itself on the next
-// pool refresh after the user leaves that mode. Any other refusal (the node is not in the pool now,
-// no connectable node in the location) keeps the saved choice, as before.
-inline bool savedPinRefusedByMode(const QString &setPinnedNodeError)
+// May the stored choice be admitted into force NOW (ServiceEngine::admitTransportModeChoice)? Only
+// while nothing is running and nothing is about to run: no intent to be connected (a start in
+// flight, a live session, an app-side restart and the backoff between attempts all hold the
+// intent), no operation in flight, no start being prepared, no pause-for-shopping, the engine in a
+// terminal phase, the tunnel not up and in a state a start could act from (reconcileActionable; our
+// own stop still unconfirmed is not such a state).
+// Was (d5d739403): the choice "Xray" came into force the moment Xray was allowed again - between the
+// tap and connect() (the macOS service gained tun2socks inside guardedStart: the card showed
+// Serbia - Amnezia, the tunnel came up on another country's Xray) and under a live AmneziaWG session
+// (the pin was cleared and the first DEAD moved the session to another country's Xray with no
+// AmneziaWG fallback). Now such a session keeps the mode it started with; the choice returns when
+// the user is disconnected, and the card changes before the next tap, not after it.
+inline bool transportModeMayChangeNow(bool wantConnected, bool operationInFlight, bool preparingStart, bool paused,
+                                      bool engineBusy, ObservedTunnel tunnel, const TeardownLatch &latch)
 {
-    return setPinnedNodeError.startsWith(QLatin1String("no_transport"));
+    if (wantConnected || operationInFlight || preparingStart || paused || engineBusy)
+        return false;
+    if (latch.awaitingStopConfirm)
+        return false;
+    return tunnel != ObservedTunnel::Connected && reconcileActionable(tunnel, latch);
+}
+
+// What AvpnEngineQml::syncTransportModeChoice does with the stored choice.
+//  admit          - call admitTransportModeChoice(): at load (nothing of this process runs yet) and
+//                   whenever the facade is idle;
+//  journalPending - the choice could be in force (Xray is allowed again) but must wait: one journal
+//                   line per wait.
+struct ModeSyncPlan {
+    bool admit = false;
+    bool journalPending = false;
+};
+inline ModeSyncPlan planTransportModeSync(bool atLoad, bool mayChangeNow, bool choicePending, bool pendingJournaled)
+{
+    ModeSyncPlan p;
+    p.admit = atLoad || mayChangeNow;
+    p.journalPending = !p.admit && choicePending && !pendingJournaled;
+    return p;
+}
+
+// The stored value of avpn/transportMode at load. byChoiceBuild - the marker avpn/transportModeByChoice
+// written next to it by every build that stores the user's CHOICE (>= 139).
+// A "xray" without the marker was written by 138 or earlier and may be stale: there a tap on "Auto"
+// while the engine already read Auto (Xray frozen after a cold start) returned before storing, and
+// the selector was hidden in that state - the user could not take the choice back. Such a value
+// reads as Auto once (legacyReset: the facade stores "auto" with the marker and journals
+// transport_mode_legacy_reset); the user selects Xray again. "awg" was never rewritten by
+// availability and is honoured as it is.
+struct StoredModeChoice {
+    QString mode = QStringLiteral("auto");
+    bool legacyReset = false;
+};
+inline StoredModeChoice storedTransportChoice(const QString &stored, bool byChoiceBuild)
+{
+    StoredModeChoice c;
+    if (stored == QLatin1String("awg")) {
+        c.mode = stored;
+    } else if (stored == QLatin1String("xray")) {
+        if (byChoiceBuild)
+            c.mode = stored;
+        else
+            c.legacyReset = true;
+    }
+    return c;
+}
+
+// macOS service: Xray needs tun2socks next to the installed service (NodeRotation.h::
+// xrayPlatformRuntimeReady). LOSING it takes effect at once - a start must not pick a transport the
+// service cannot raise (the reason the gate exists, 138). GAINING it takes effect only while nothing
+// is running (mayChangeNow): a service updated inside Connect adds Xray for the NEXT start, the one
+// in flight raises what the card showed.
+inline bool xrayRuntimeGateNext(bool readyNow, bool present, bool mayChangeNow)
+{
+    return present && (readyNow || mayChangeNow);
+}
+
+// A live session adopted from an earlier process (the GUI restarted, the tunnel lived on). The mode
+// in force was loaded from the stored choice; the session may have been started while that choice
+// was not in force. If its transport is KNOWN and the mode excludes it, the session keeps Auto
+// (ServiceEngine::suspendTransportMode) and the choice is admitted when the engine is idle again.
+// An unknown transport is not judged (an adopted Xray session usually carries no hint).
+inline bool adoptedSessionKeepsMode(const QString &modeInForce, const QString &sessionProto)
+{
+    if (modeInForce == QLatin1String("auto") || sessionProto.isEmpty())
+        return true;
+    const bool xraySession = sessionProto == QLatin1String("xray");
+    return modeInForce == QLatin1String("xray") ? xraySession : !xraySession;
 }
 
 // 5.1.109 (R7, device 35 build 138, 10-11.11.2026): a deadline timer that fires late means the process
@@ -740,7 +806,7 @@ inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qin
 // раз в 15 мин (ENG-03: iOS обновлял конфиг только перезапуском процесса).
 constexpr qint64 kFgMinInactiveMs = 10000;
 constexpr qint64 kFgSubscriptionThrottleMs = 30000;
-constexpr qint64 kFgConfigThrottleMs = 15 * 60 * 1000;
+constexpr qint64 kFgConfigThrottleMs = kConfigRefreshThrottleMs; // 15 min, ConfigCachePolicy.h (one constant)
 inline bool foregroundIsReturn(bool hiddenSeen, qint64 inactiveForMs)
 {
     return hiddenSeen || inactiveForMs >= kFgMinInactiveMs;

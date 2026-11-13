@@ -292,7 +292,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
                                                      bool useLastKnownRtt) const
 {
     TransportPickInput in;
-    in.mode = transportMode(); // 5.1.109: the effective mode, as connect() reads it
+    in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
     in.exclA = exclA;
     if (withExclusions)
         in.excluded = m_failedThisSession;
@@ -343,8 +343,8 @@ const SubscriptionNode *ServiceEngine::nextCandidate() const
     if (const SubscriptionNode *pinned = pinnedCandidate())
         return pinned;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    // 5.1.109: the effective mode, as connect() reads it - a stored "Xray" that is not available now
-    // reads as Auto here too (the badge and the start pick the same node).
+    // 5.1.109: the effective mode - connect() starts with normalizeTransportMode(), so a stored "Xray"
+    // that is no longer available reads as Auto here too (the badge and the start pick the same node).
     if (autoPick || transportMode() != TransportMode::Auto) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate())
             return remembered;
@@ -564,11 +564,7 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     // location (the card showed it, Connect raised another country's Xray). None allowed while the
     // location still has connectable nodes -> the pin is dropped, the facade persists and journals it.
     m_pinDroppedForTransport.clear();
-    // 5.1.109 (S4.1): the mode is read here, never rewritten (review R2 turned a frozen "Xray" into
-    // Auto for good at this point so that a pin re-targeted under Auto could not meet a revived
-    // "Xray" - and with it lost the user's choice). A pin re-targeted while Xray is frozen can now
-    // meet the returned mode: the facade drops it at that moment by the same rule as on a mode
-    // change (AvpnEngineQml::onTransportAvailabilityMaybeChanged).
+    normalizeTransportMode(); // review R2: a pin re-targeted under Auto must not meet a revived "Xray"
     if (!m_pinnedNodeId.isEmpty() && !newIds.contains(m_pinnedNodeId)) {
         const TransportMode mode = transportMode();
         QList<const SubscriptionNode *> loc;
@@ -696,11 +692,9 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
-    // AVPN (independent review of the wave, MAJOR-2): a stored "Xray" mode with features.xray_client
-    // off would filter out EVERY candidate (no_transport) - it reads as Auto.
-    // 5.1.109 (S4.1): one snapshot of the effective mode for this call; the stored choice is not
-    // rewritten (it is back in force when Xray is allowed again).
-    const TransportMode mode = transportMode();
+    // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном
+    // features.xray_client отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
+    normalizeTransportMode();
     // AVPN (фикс-волна 2026-09-22, B4/B5): повтор после прерванного внутреннего свитча (фасад A8/A9).
     const InterruptedSwitch interrupted = m_interrupted;
     m_interrupted = InterruptedSwitch{};
@@ -725,7 +719,7 @@ bool ServiceEngine::connect(QString &error)
     // failover pin не учитывает — spec §24-26). Одноразово: запись снимается при любом исходе.
     if (interrupted.active && !interrupted.target.isEmpty()) {
         const SubscriptionNode *t = findNode(interrupted.target);
-        if (t && isSupportedProtoNode(*t) && transportAllowed(*t, mode)
+        if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_transportMode)
             && healthAggregate(*t) > 0.0 && !m_failedThisSession.contains(t->nodeId))
             candidate = *t;
     }
@@ -735,7 +729,7 @@ bool ServiceEngine::connect(QString &error)
     // Plan v3 step 5: network memory - the node that last carried data on this network goes first
     // after the manual choice (same eligibility as the automatic paths; no I/O).
     m_networkMemoryStartNodeId.clear();
-    if (!candidate && (autoPick || mode != TransportMode::Auto)) {
+    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate()) {
             candidate = *remembered;
             m_networkMemoryStartNodeId = remembered->nodeId; // owner test 06.11: forgotten if this start fails
@@ -745,7 +739,7 @@ bool ServiceEngine::connect(QString &error)
                                 .arg(m_networkMemoryNodeId, networkMemorySkipReason()));
         }
     }
-    if (!candidate && (autoPick || mode != TransportMode::Auto)) {
+    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
         // AVPN awg31-xray-v1: локация — по измеренному off-tunnel RTT (кэш AvpnEngineQml::probeNodeRtt),
         // без замеров — weight-ярус (случайно среди равных); транспорт внутри — ранг + история. Без I/O.
         // Ревью CL-B (REV-2): повтор прерванного свитча идёт без нового раунда замеров (в connected
@@ -758,7 +752,7 @@ bool ServiceEngine::connect(QString &error)
         if (c)
             candidate = *c;
     }
-    if (!candidate && !autoPick && mode == TransportMode::Auto) {
+    if (!candidate && !autoPick && m_transportMode == TransportMode::Auto) {
         // Легаси-цепочка (как до волны awg31-xray-v1; авто = только awg):
         // AVPN (выбор по скорости): «Авто (быстрейший)» — приоритет ноде с МИНИМАЛЬНЫМ ИЗМЕРЕННЫМ RTT
         // (off-tunnel ICMP, кэш из AvpnEngineQml::probeNodeRtt). Это и есть настоящий «быстрейший». Пусто
@@ -777,9 +771,9 @@ bool ServiceEngine::connect(QString &error)
     if (!candidate) {
         // AVPN awg31-xray-v1: ручной режим отфильтровал всё → честная техническая ошибка
         // (человеческий текст — AvpnEngineQml::humanEngineError); иначе штатное «нет нод».
-        if (mode != TransportMode::Auto && anySupportedNode())
+        if (m_transportMode != TransportMode::Auto && anySupportedNode())
             error = QStringLiteral("no_transport: no '%1' candidates in pool")
-                        .arg(transportModeToString(mode));
+                        .arg(transportModeToString(m_transportMode));
         else
             error = QStringLiteral("no nodes available");
         m_state = EngineState::Error;
@@ -1301,9 +1295,10 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
     if (tunnelStillUp && healthDead && !unknownIdentity
         && TuningStore::flag(QStringLiteral("dead_reup_same_node"), true)
         && m_sameNodeReupTries < deadReupMaxTriesTuned()) {
+        normalizeTransportMode();
         const SubscriptionNode *cur = findNode(m_currentNodeId);
         if (cur && isSupportedProtoNode(*cur) && healthAggregate(*cur) > 0.0
-            && transportAllowed(*cur, transportMode())) {
+            && transportAllowed(*cur, m_transportMode)) {
             ++m_sameNodeReupTries;
             noteHealStep();
             appendSwitchLog(QStringLiteral("re-up same node %1 (dead data-plane, try %2)")
@@ -1330,8 +1325,8 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
         m_state = EngineState::Error;
         return false;
     }
-    // AVPN (review of the wave, MAJOR-2): the xray_client kill-switch may have gone off within this
-    // session - the effective mode is read below (5.1.109 S4.1: the user's choice is not rewritten).
+    // AVPN (ревью волны, MAJOR-2): kill-switch xray_client мог погаснуть уже в этой сессии.
+    normalizeTransportMode();
     m_state = EngineState::Switching;
     // выбрать лучшего кандидата, ИСКЛЮЧАЯ текущую (мёртвую) ноду. СТРОГО БЕЗ I/O (CONNECT-INVARIANTS §1):
     // onDead зовётся из health-tick/notifyConnectionLost на GUI-потоке БЕЗ гарда m_inSyncNetCall —
@@ -1346,7 +1341,7 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
     // B3: identity неизвестна → локации нет, exclA пуст — авто-выбор из всего пула.
     std::optional<SubscriptionNode> candidate;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    if (autoPick || transportMode() != TransportMode::Auto) {
+    if (autoPick || m_transportMode != TransportMode::Auto) {
         const QString loc = deadLocation.isEmpty() ? currentLocation() : deadLocation;
         const SubscriptionNode *c = nullptr;
         if (!loc.isEmpty())
@@ -1425,7 +1420,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
 {
     if (m_pendingSwitchNodeId.isEmpty())
         return false;
-    // 5.1.109 (review R2): the target check below and pickTransport read the same effective mode.
+    normalizeTransportMode(); // 5.1.109 (review R2): the target check below and pickTransport agree
     // GAP-1 (U7): старый рантайм уже опущен — отложенный reseed (пришёл в фазе down или при Connected
     // с изменённой identity цели/текущей) применяем ДО up(): цель поднимается по актуальному конфигу.
     {
@@ -1434,7 +1429,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
         if (applyPendingReseedBetweenRuntimes()) {
             const SubscriptionNode *t = findNode(m_pendingSwitchNodeId);
             if (!t || !isSupportedProtoNode(*t) || healthAggregate(*t) <= 0.0
-                || !transportAllowed(*t, transportMode())) {
+                || !transportAllowed(*t, m_transportMode)) {
                 // Цель исчезла/выведена новым пулом → шаг 3 с предпочтением её локации.
                 const QString gone = m_pendingSwitchNodeId;
                 const SubscriptionNode *c = nullptr;
@@ -1627,7 +1622,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 // AVPN awg31-xray-v1: pin — ПО ЛОКАЦИИ (см. ServiceEngine.h).
 bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
-    const TransportMode mode = transportMode(); // 5.1.109 (review R2): the mode the UI shows, as connect()
+    normalizeTransportMode(); // 5.1.109 (review R2): the mode the UI shows, as connect()
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
@@ -1642,7 +1637,7 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     // узел, разрешённый ручным режимом. Строки ТЕХНИЧЕСКИЕ (лог/тесты); человеческий текст для
     // тоста — на границе фасада (AvpnEngineQml::humanPinError), маппится по стабильному префиксу.
     const QString loc = locationKeyOf(*found);
-    const LocationTransports lt = locationTransportsFor(loc, mode);
+    const LocationTransports lt = locationTransportsFor(loc, m_transportMode);
     const bool anySupported = lt.anySupported, anyAllowed = lt.anyAllowed;
     if (!anySupported) {
         // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
@@ -1652,7 +1647,7 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     }
     if (!anyAllowed) {
         error = QStringLiteral("no_transport: location %1 has no '%2' transport")
-                    .arg(loc, transportModeToString(mode));
+                    .arg(loc, transportModeToString(m_transportMode));
         return false;
     }
     m_pinnedNodeId = nodeId;
@@ -1684,11 +1679,27 @@ bool ServiceEngine::pinLacksTransport(TransportMode mode) const
     return lt.anySupported && !lt.anyAllowed;
 }
 
+// 5.1.109 (S4.1): the stored choice comes into force (see ServiceEngine.h). Only this call brings an
+// available "Xray" back; the facade makes it at load and while nothing is running.
+ServiceEngine::ModeAdmission ServiceEngine::admitTransportModeChoice()
+{
+    ModeAdmission a;
+    a.from = transportMode();
+    m_transportMode = effectiveTransportMode(m_chosenTransportMode);
+    a.to = m_transportMode;
+    a.changed = a.from != a.to;
+    if (a.changed && pinLacksTransport(a.to)) {
+        a.pinCleared = m_pinnedNodeId;
+        m_pinnedNodeId.clear();
+    }
+    return a;
+}
+
 // AVPN (live-node picker): round-robin «Обновить подключение» — по ЛОКАЦИЯМ (NodeRotation.h::
 // nextLiveNodeId: представитель следующей живой локации; транспорт внутри выбирает connect()).
 bool ServiceEngine::rotateNext(QString &error) // AVPN
 {
-    // 5.1.109 (review R2): nextLiveNodeId() and connect() below read the effective mode.
+    normalizeTransportMode(); // 5.1.109 (review R2)
     // Ручная ротация ≠ «закрепить»: снимаем закрепление, иначе offline-ветка ниже (m_currentNodeId=target
     // → connect()) перебивается приоритетом m_pinnedNodeId в connect() и ротация молча no-op'ит на pin.
     m_pinnedNodeId.clear(); // AVPN

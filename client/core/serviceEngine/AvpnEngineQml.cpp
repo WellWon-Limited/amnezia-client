@@ -619,13 +619,24 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                          QStringLiteral("https://vpn.wellwon.hk")};
     // 5.1.108: AVPN_API_URL pins the control plane - no stored edge, no edge walk to the prod edges.
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
+    // 5.1.109 (review of d5d739403): the config request is judged by the same classification as every
+    // other API request (noteApiOutcome): one that outlived a freeze of the process or fell into the
+    // window of our own tunnel transition does not vote against the API edge.
+    m_configSvc->setFailureIgnoredFn([this](QNetworkReply *reply) {
+        return classifyApiOutcome(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                                  reply->error() == QNetworkReply::OperationCanceledError,
+                                  reply->property("avpn_timed_out").toBool(),
+                                  reply->property("avpn_t0").toLongLong(), std::max(m_lastResumeMs, m_lastHiddenMs),
+                                  m_lastTunnelTransitionMs, QDateTime::currentMSecsSinceEpoch())
+               == ApiOutcome::Ignore;
+    });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
-                // 5.1.109 (S4.1): the config may allow or forbid Xray - the effective transport mode
-                // before it is applied (see onTransportAvailabilityMaybeChanged at the end).
+                // 5.1.109 (S4.1): the config may allow or forbid Xray - the transport mode in force
+                // before it is applied (see noteTransportAvailabilityChanged at the end).
                 const avpn::TransportMode modeBeforeConfig = m_engine.transportMode();
                 avpn::TuningStore::set(c.numbers, c.features, c.lists, c.urls); // AVPN backend-first (T19)
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
@@ -673,9 +684,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 }
                 applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
                 refreshQualityEndpoints();  // AVPN (T16): urls.quality_probe_url мог смениться
-                // 5.1.109 (S4.1): Xray allowed again -> the stored choice "Xray" is back in force (the
-                // engine never rewrote it); forbidden -> it reads as Auto. No tunnel restart here.
-                onTransportAvailabilityMaybeChanged(modeBeforeConfig, QStringLiteral("config"));
+                // 5.1.109 (S4.1): Xray forbidden -> the mode in force reads as Auto at once; allowed
+                // again -> the stored choice "Xray" is admitted back, but only while nothing is
+                // running (otherwise it waits for the engine to be idle). No tunnel restart here.
+                noteTransportAvailabilityChanged(modeBeforeConfig, QStringLiteral("config"));
                 journalXrayPolicy();
                 emit changed();
             });
@@ -1027,13 +1039,23 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (avpn/transportMode: auto|awg|xray, незнакомое = auto) и история транспортов по парам
     // локация×proto (avpn/transportHistory, JSON; клампы внутри TransportHistory::fromJson —
     // битое/стейл значение не портит выбор). Без сети/QEventLoop — из конструктора безопасно.
-    // 5.1.109 (S4.1): the engine keeps the stored choice as it is. On 138 a stored "xray" read here
-    // while the cached config froze Xray became Auto for the whole run and never came back; now Xray
-    // being unavailable only changes what the engine reports as the mode in force.
+    // 5.1.109 (S4.1): the engine gets the stored CHOICE here; it comes into force by the admission
+    // at the end of the constructor (syncTransportModeChoice), after the pin is restored. On 138 a
+    // stored "xray" read here while the cached config froze Xray became Auto for the whole run and
+    // never came back. A "xray" written by 138 or earlier may be stale and is dropped once
+    // (DebugSnapshot.h::storedTransportChoice).
+    bool legacyXrayModeDropped = false;
     {
         QSettings s;
-        m_engine.setTransportMode(avpn::transportModeFromString(
-            s.value(QStringLiteral("avpn/transportMode"), QStringLiteral("auto")).toString()));
+        const StoredModeChoice stored = storedTransportChoice(
+            s.value(QStringLiteral("avpn/transportMode"), QStringLiteral("auto")).toString(),
+            s.value(QStringLiteral("avpn/transportModeByChoice"), false).toBool());
+        if (stored.legacyReset) {
+            legacyXrayModeDropped = true;
+            s.setValue(QStringLiteral("avpn/transportMode"), stored.mode);
+            s.setValue(QStringLiteral("avpn/transportModeByChoice"), true);
+        }
+        m_engine.setTransportModeChoice(avpn::transportModeFromString(stored.mode));
         m_engine.loadTransportHistory(s.value(QStringLiteral("avpn/transportHistory")).toByteArray());
         m_savedPin = s.value(QStringLiteral("avpn/pinnedNode")).toString();
         m_reliabilityRing.lines = s.value(QStringLiteral("avpn/reliabilityLog")).toStringList().mid(0, 128);
@@ -1269,10 +1291,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_journalLastState = st;
     });
     syncJournal();
-    // 5.1.109 (S4.1): why Xray is allowed or frozen at this start. Written here, not where the cached
-    // config was applied (m_configSvc->start() above): by now the reliability ring is restored (an
-    // earlier line would have overwritten the stored ring) and the tester journal is switched on.
+    // 5.1.109 (S4.1): the stored transport-mode choice comes into force (nothing of this process is
+    // running yet) and why Xray is allowed or frozen at this start. Here, not where the cached config
+    // and the choice were read above: by now the pin is restored, the reliability ring is restored
+    // (an earlier line would have overwritten the stored ring) and the tester journal is switched on.
+    if (legacyXrayModeDropped)
+        reliabilityEvent(QStringLiteral("transport_mode_legacy_reset stored=xray"));
+    syncTransportModeChoice(QStringLiteral("start"), /*atLoad=*/true);
     journalXrayPolicy(/*atStart=*/true);
+    // The choice waits while something runs: every transition of the facade ends with changed().
+    connect(this, &AvpnEngineQml::changed, this, &AvpnEngineQml::onChangedSyncTransportMode);
 
     // AVPN (белые списки, спека 2026-07-12): детектор дифф-проб «РКН-whitelist на сотовой».
     // Только мобилки (PLATFORM-SCOPING): на десктопе сотовая — экзотика, гейт снимем позже.
@@ -2473,43 +2501,108 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
     case PinRestoreAction::ApplySaved: {
         QString error;
         // Временно отфильтрованная/отсутствующая нода не стирает сохранённый выбор пользователя.
-        if (m_engine.setPinnedNode(m_savedPin, error)) {
+        if (m_engine.setPinnedNode(m_savedPin, error))
             persistPin();
-        } else if (savedPinRefusedByMode(error)) {
-            // 5.1.109 (S4.1): the transport mode in force cannot serve the saved pin's location (the
-            // stored "Xray" is back in force, the country was pinned while it was dormant). Dropped
-            // and persisted by the rule of a mode change (§22 п. 8а); kept, it would come back by
-            // itself after the user leaves that mode.
-            const QString dropped = m_savedPin;
-            persistPin(); // the engine has no pin -> the saved one is cleared
-            reliabilityEvent(QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2")
-                                 .arg(avpn::transportModeToString(m_engine.transportMode()), dropped));
-        }
         return;
     }
     }
 }
 
-// 5.1.109 (S4.1): something that decides whether Xray may be used has just changed (a config was
-// applied; on macOS the installed service gained or lost tun2socks). The engine keeps the user's
-// choice, so the mode in force may have changed without a tap: "Xray" is back, or reads as Auto.
-// The decision - DebugSnapshot.h::decideOnTransportAvailability (facade_policy_check): journal, and
-// a pin the returned mode cannot serve is cleared and persisted. Never touches the tunnel; the
-// callers emit changed() themselves (the configApplied handler, guardedStart).
-void AvpnEngineQml::onTransportAvailabilityMaybeChanged(avpn::TransportMode modeBefore, const QString &why)
+// ---- 5.1.109 (S4.1): the stored transport-mode choice and the mode in force (ServiceEngine.h) ----
+
+// Nothing is running and nothing is about to run - the only moment the stored choice may come into
+// force and the macOS runtime gate may open (DebugSnapshot.h::transportModeMayChangeNow).
+bool AvpnEngineQml::transportModeIdle() const
 {
-    const avpn::TransportMode modeNow = m_engine.transportMode();
-    const AvailabilityModeDecision d = decideOnTransportAvailability(
-        avpn::transportModeToString(modeBefore), avpn::transportModeToString(modeNow),
-        m_engine.pinnedNodeId(), m_engine.pinLacksTransport(modeNow), why);
-    if (!d.changed)
-        return;
-    reliabilityEvent(d.modeJournal);
-    if (d.clearPin) {
-        m_engine.clearPin();
-        persistPin();
-        reliabilityEvent(d.pinJournal);
+    const avpn::EngineState es = m_engine.state();
+    const bool engineBusy = es != avpn::EngineState::Disconnected && es != avpn::EngineState::Error;
+    bool operationInFlight = m_op != Op::None || m_opInFlight;
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    operationInFlight = operationInFlight || m_svcInstallInFlight;
+#endif
+    return transportModeMayChangeNow(m_wantConnected, operationInFlight, m_preparingStart || m_startPrepared,
+                                     m_paused, engineBusy, observedTunnelOf(m_lastTunnelState), m_latch);
+}
+
+// Admits the stored choice into force when that is allowed (planTransportModeSync): at load and
+// while the facade is idle. Otherwise the choice waits - one journal line per wait. The admission
+// itself, with the pin rule, is the engine's (admitTransportModeChoice); here - persistence of a
+// cleared pin and the journal. Never touches the tunnel.
+void AvpnEngineQml::syncTransportModeChoice(const QString &why, bool atLoad)
+{
+    const ModeSyncPlan plan = planTransportModeSync(atLoad, transportModeIdle(),
+                                                    m_engine.transportModeChoicePending(), m_modePendingJournaled);
+    if (plan.journalPending) {
+        m_modePendingJournaled = true;
+        reliabilityEvent(transportModePendingJournal(avpn::transportModeToString(m_engine.chosenTransportMode()),
+                                                     avpn::transportModeToString(m_engine.transportMode()), why));
     }
+    if (!plan.admit)
+        return;
+    m_modePendingJournaled = false;
+    const avpn::ServiceEngine::ModeAdmission a = m_engine.admitTransportModeChoice();
+    if (!a.changed)
+        return;
+    reliabilityEvent(transportModeJournal(avpn::transportModeToString(a.from), avpn::transportModeToString(a.to), why));
+    if (!a.pinCleared.isEmpty()) {
+        persistPin();
+        reliabilityEvent(pinClearedByModeJournal(avpn::transportModeToString(a.to), a.pinCleared));
+    }
+    if (!atLoad)
+        emit changed();
+}
+
+// Something that decides whether Xray may be used has just changed (a config was applied; on macOS
+// the runtime gate). Loss is immediate - the mode in force already reads as Auto; it is written
+// down here (not only at the next pick) and journalled, so that under this session nothing but the
+// admission brings Xray back. The return of the stored choice goes through syncTransportModeChoice.
+void AvpnEngineQml::noteTransportAvailabilityChanged(avpn::TransportMode modeBefore, const QString &why)
+{
+    m_engine.normalizeTransportMode();
+    const avpn::TransportMode modeNow = m_engine.transportMode();
+    if (modeNow != modeBefore)
+        reliabilityEvent(transportModeJournal(avpn::transportModeToString(modeBefore),
+                                              avpn::transportModeToString(modeNow), why));
+    syncTransportModeChoice(why);
+}
+
+// The facade has just become idle (a stop finished, a start gave up, an external loss took the
+// intent away): the choice that waited is admitted, and on macOS the runtime gate may open.
+void AvpnEngineQml::onChangedSyncTransportMode()
+{
+    const bool idle = transportModeIdle();
+    const bool entered = idle && !m_modeIdleSeen;
+    m_modeIdleSeen = idle; // before the work below: it may emit changed() again
+    if (entered)
+        syncTransportAvailabilityWhileIdle(QStringLiteral("idle"));
+}
+
+// Idle-only work, also on a return to the screen: on macOS the runtime gate may open (the service
+// got tun2socks), and the choice that waited is admitted.
+void AvpnEngineQml::syncTransportAvailabilityWhileIdle(const QString &why)
+{
+    if (!transportModeIdle())
+        return;
+    bool gateChanged = false;
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    gateChanged = refreshXrayRuntimeGate(why);
+#endif
+    syncTransportModeChoice(why);
+    if (gateChanged)
+        emit changed(); // Xray nodes became (un)supported: the server list reads it from the pool
+}
+
+// A live session adopted from an earlier process whose transport is known and excluded by the mode
+// in force keeps Auto (DebugSnapshot.h::adoptedSessionKeepsMode); the choice returns when idle.
+void AvpnEngineQml::keepModeOfAdoptedSession()
+{
+    const avpn::TransportMode mode = m_engine.transportMode();
+    if (adoptedSessionKeepsMode(avpn::transportModeToString(mode), m_engine.currentNodeProto()))
+        return;
+    m_engine.suspendTransportMode();
+    reliabilityEvent(transportModeJournal(avpn::transportModeToString(mode),
+                                          avpn::transportModeToString(m_engine.transportMode()),
+                                          QStringLiteral("adopted_session")));
 }
 
 // 5.1.109 (S4.1): why Xray is allowed or frozen by the config in force - one journal line at start
@@ -2741,6 +2834,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
         reliabilityEvent(QStringLiteral("adopt_identity_pending"));
     }
     identifyAdoptedSession();
+    keepModeOfAdoptedSession(); // 5.1.109 (S4.1): a session of a transport the loaded mode excludes
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
     return m_engine.state() == avpn::EngineState::Connected;
@@ -2769,8 +2863,10 @@ void AvpnEngineQml::identifyAdoptedSession()
     m_engine.adoptTunnelConnected(metadata.value(QStringLiteral("node_id")).toString(), proto, endpoint);
     if (!m_engine.currentIdentityKnown())
         m_engine.tryIdentifyCurrentNode(); // по endpoint-подсказке сессии (K5/B3)
-    if (m_engine.currentIdentityKnown())
+    if (m_engine.currentIdentityKnown()) {
         reliabilityEvent(QStringLiteral("adopt_identity_resolved node=%1").arg(m_engine.currentNodeId()));
+        keepModeOfAdoptedSession(); // 5.1.109 (S4.1): the transport of the adopted session is known now
+    }
 #endif
 }
 
@@ -5194,6 +5290,13 @@ void AvpnEngineQml::reconcile()
 // op-in-flight + сторож; m_busy держим до прихода Connected (UI «подбираем…»).
 void AvpnEngineQml::guardedStart()
 {
+#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    // 5.1.109 (S4.1): the runtime gate is looked at BEFORE the start preparation, so the card and
+    // connect() read the same value. A start is in flight here (the intent is set): only the loss of
+    // tun2socks can take effect, a gain waits for the engine to be idle (refreshXrayRuntimeGate).
+    if (!m_startPrepared)
+        refreshXrayRuntimeGate(QStringLiteral("start"));
+#endif
     if (!m_startPrepared) { beginStartPreparation(); return; }
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-6): реальный старт создаст протокол — дальше stop идёт штатным путём.
@@ -5282,8 +5385,10 @@ void AvpnEngineQml::guardedStart()
         }
     }
     // 5.1.108: the service is installed/updated by now - Auto must not spend attempts on an Xray path
-    // the installed service cannot start (no tun2socks); a new service with it re-enables Xray here.
-    refreshXrayRuntimeGate();
+    // the installed service cannot start (no tun2socks).
+    // 5.1.109 (S4.1): a new service WITH tun2socks no longer re-enables Xray here, between the tap and
+    // connect() - that waits for the engine to be idle (the card showed a choice made without Xray).
+    refreshXrayRuntimeGate(QStringLiteral("start"));
 #endif
 
     m_op = Op::Starting;
@@ -5395,15 +5500,21 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
     reconcile();
 }
 
-void AvpnEngineQml::refreshXrayRuntimeGate()
+// 5.1.109 (S4.1, review of d5d739403): losing tun2socks takes effect at once (a start must not pick
+// a transport the service cannot raise); gaining it - only while nothing is running
+// (DebugSnapshot.h::xrayRuntimeGateNext). A service updated inside this Connect adds Xray for the
+// next start; the start in flight raises what the card showed.
+bool AvpnEngineQml::refreshXrayRuntimeGate(const QString &why)
 {
     const avpn::TransportMode modeBefore = m_engine.transportMode();
-    const bool present = avpn::macXrayRuntimePresent();
-    if (avpn::xrayPlatformRuntimeReady().exchange(present) != present) {
-        reliabilityEvent(QStringLiteral("xray_runtime tun2socks=%1").arg(present ? 1 : 0));
-        // 5.1.109 (S4.1): a service with tun2socks puts the stored choice "Xray" back in force.
-        onTransportAvailabilityMaybeChanged(modeBefore, QStringLiteral("runtime"));
-    }
+    const bool readyNow = avpn::xrayPlatformRuntimeReady().load();
+    const bool next = xrayRuntimeGateNext(readyNow, avpn::macXrayRuntimePresent(), transportModeIdle());
+    if (next == readyNow)
+        return false;
+    avpn::xrayPlatformRuntimeReady().store(next);
+    reliabilityEvent(QStringLiteral("xray_runtime tun2socks=%1").arg(next ? 1 : 0));
+    noteTransportAvailabilityChanged(modeBefore, why);
+    return true;
 }
 
 // ---- AVPN macOS wake-реконнект (спека 2026-07-17-macos-wake-reconnect-design.md) --------------
@@ -6180,13 +6291,18 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
         emit error(tr("Xray недоступен в этой версии приложения"));
         return;
     }
-    // 5.1.109 (S4.1): compared with the user's stored CHOICE, not with the mode in force - a tap on
-    // "Auto" while the chosen "Xray" is dormant (reads as Auto) is a new choice and is stored.
-    if (m == m_engine.chosenTransportMode())
+    // 5.1.109 (S4.1): a tap is a no-op only when the mode is both the stored CHOICE and in force. A
+    // tap on "Auto" while the chosen "Xray" is not in force is a new choice and is stored; a tap on
+    // the chosen mode that is still waiting (Xray came back under a live session) puts it in force
+    // now - the user asked for it.
+    if (m == m_engine.chosenTransportMode() && m == m_engine.transportMode())
         return;
     m_engine.setTransportMode(m);
+    m_modePendingJournaled = false;
     QSettings s;
     s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(m));
+    // Written by a build that stores the user's choice (>= 139): storedTransportChoice honours it.
+    s.setValue(QStringLiteral("avpn/transportModeByChoice"), true);
     s.sync();
     // 5.1.109: a pinned country the new mode cannot serve (Serbia has AmneziaWG only, mode -> Xray)
     // stayed pinned: the card showed it with the new transport's badge and Connect silently raised
@@ -7670,6 +7786,7 @@ void AvpnEngineQml::onForegroundDebounced()
     }
     if (m_configSvc)
         m_configSvc->refreshIfStale(kFgConfigThrottleMs);
+    syncTransportAvailabilityWhileIdle(QStringLiteral("foreground")); // 5.1.109 (S4.1)
     if (m_effectsPending && state() == QLatin1String("connected") && uiForeground())
         runConnectEffects();
 }
