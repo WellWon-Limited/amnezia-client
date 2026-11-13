@@ -276,6 +276,50 @@ static void pinOnTransportModeChange()
     CHECK(!d.restartTunnel);
 }
 
+// 5.1.109 (S4.1, defect of 12.11.2026 on 138): the stored choice "Xray" comes back in force when Xray
+// is allowed again (a fresh signed config, the trusted cached copy, a macOS service with tun2socks) -
+// without a tap. The facade journals it, applies the pin rule of a mode change and never restarts
+// the tunnel. On 138 the mode stayed Auto for the whole run.
+static void storedModeBackInForce()
+{
+    const QString rs = QStringLiteral("16:awg"), de = QStringLiteral("9:xray");
+    const QString cfg = QStringLiteral("config");
+    // nothing changed (the usual config refresh): no journal, no pin work
+    AvailabilityModeDecision d = decideOnTransportAvailability(QStringLiteral("xray"), QStringLiteral("xray"), rs, true, cfg);
+    CHECK(!d.changed && !d.clearPin && d.modeJournal.isEmpty() && d.pinJournal.isEmpty());
+    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("auto"), rs, false, cfg);
+    CHECK(!d.changed && !d.clearPin);
+    // Xray allowed again, no pin: the mode is restored, one journal line
+    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), QString(), false, cfg);
+    CHECK(d.changed && !d.clearPin);
+    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=auto to=xray why=config"));
+    CHECK(d.pinJournal.isEmpty());
+    // ... Serbia (AWG only) was pinned while the stored "Xray" was dormant: the pin does not survive
+    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), rs, true, cfg);
+    CHECK(d.changed && d.clearPin);
+    CHECK(d.pinJournal == QLatin1String("pin_cleared why=transport_mode mode=xray node=16:awg"));
+    // ... a pin the returned mode serves (DE has an Xray listener) stays
+    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), de, false, cfg);
+    CHECK(d.changed && !d.clearPin && d.pinJournal.isEmpty());
+    // Xray went away (the server switched it off, the trust in the cache ran out): reads as Auto;
+    // Auto never clears a pin, whatever the predicate says
+    d = decideOnTransportAvailability(QStringLiteral("xray"), QStringLiteral("auto"), de, true, cfg);
+    CHECK(d.changed && !d.clearPin);
+    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=xray to=auto why=config"));
+    // macOS: the installed service gained tun2socks
+    d = decideOnTransportAvailability(QStringLiteral("auto"), QStringLiteral("xray"), rs, true, QStringLiteral("runtime"));
+    CHECK(d.modeJournal == QLatin1String("transport_mode_effective from=auto to=xray why=runtime"));
+    CHECK(d.clearPin);
+    // The decision has no "restart the tunnel" output at all: availability never restarts a working
+    // tunnel (§26), unlike a user's mode change (pinOnTransportModeChange above).
+
+    // The saved pin could not be applied: only a refusal by the transport mode drops it.
+    CHECK(savedPinRefusedByMode(QStringLiteral("no_transport: location h:16 has no 'xray' transport")));
+    CHECK(!savedPinRefusedByMode(QStringLiteral("node not in subscription: 16:awg")));   // absent now: kept
+    CHECK(!savedPinRefusedByMode(QStringLiteral("unsupported_proto: node 7:vless proto 'vless'")));
+    CHECK(!savedPinRefusedByMode(QString()));
+}
+
 // 5.1.109 (R7): a deadline timer that fires late = the process was frozen (iOS suspended the app, a
 // laptop slept) - that tick must not judge the deadline; the start watchdog re-arms once and asks status.
 static void lateDeadlineTick()
@@ -704,6 +748,7 @@ int main()
     a2EmptyIssuanceKeepsPoolAndLkg();
     a6a7PinPersistence();
     pinOnTransportModeChange();
+    storedModeBackInForce();
     lateDeadlineTick();
     a8a9a15InternalSwitch();
     a10a11Selection();

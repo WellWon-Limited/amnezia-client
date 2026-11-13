@@ -624,6 +624,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     resolveApiCarveHosts(avpn::edgeHosts(avpn::edgeCandidates(avpn::ConfigStore::loadEdges(), kBakedEdges)));
     connect(m_configSvc, &avpn::ConfigService::configApplied, this,
             [this](const avpn::RemoteConfig &c) {
+                // 5.1.109 (S4.1): the config may allow or forbid Xray - the effective transport mode
+                // before it is applied (see onTransportAvailabilityMaybeChanged at the end).
+                const avpn::TransportMode modeBeforeConfig = m_engine.transportMode();
                 avpn::TuningStore::set(c.numbers, c.features, c.lists, c.urls); // AVPN backend-first (T19)
                 // AVPN backend-first (T10): health-tick — server-tunable (numbers.health_tick_ms),
                 // фолбэк 4000мс. setInterval на живом QTimer безопасен (Qt перезапускает с новым
@@ -670,6 +673,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 }
                 applyRemoteProbeTargets(c); // переопределить probe-цели, если пришли с сервера
                 refreshQualityEndpoints();  // AVPN (T16): urls.quality_probe_url мог смениться
+                // 5.1.109 (S4.1): Xray allowed again -> the stored choice "Xray" is back in force (the
+                // engine never rewrote it); forbidden -> it reads as Auto. No tunnel restart here.
+                onTransportAvailabilityMaybeChanged(modeBeforeConfig, QStringLiteral("config"));
+                journalXrayPolicy();
                 emit changed();
             });
     connect(m_configSvc, &avpn::ConfigService::activeEdgeChanged, this,
@@ -1020,6 +1027,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // (avpn/transportMode: auto|awg|xray, незнакомое = auto) и история транспортов по парам
     // локация×proto (avpn/transportHistory, JSON; клампы внутри TransportHistory::fromJson —
     // битое/стейл значение не портит выбор). Без сети/QEventLoop — из конструктора безопасно.
+    // 5.1.109 (S4.1): the engine keeps the stored choice as it is. On 138 a stored "xray" read here
+    // while the cached config froze Xray became Auto for the whole run and never came back; now Xray
+    // being unavailable only changes what the engine reports as the mode in force.
     {
         QSettings s;
         m_engine.setTransportMode(avpn::transportModeFromString(
@@ -1259,6 +1269,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         m_journalLastState = st;
     });
     syncJournal();
+    // 5.1.109 (S4.1): why Xray is allowed or frozen at this start. Written here, not where the cached
+    // config was applied (m_configSvc->start() above): by now the reliability ring is restored (an
+    // earlier line would have overwritten the stored ring) and the tester journal is switched on.
+    journalXrayPolicy(/*atStart=*/true);
 
     // AVPN (белые списки, спека 2026-07-12): детектор дифф-проб «РКН-whitelist на сотовой».
     // Только мобилки (PLATFORM-SCOPING): на десктопе сотовая — экзотика, гейт снимем позже.
@@ -2459,11 +2473,65 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
     case PinRestoreAction::ApplySaved: {
         QString error;
         // Временно отфильтрованная/отсутствующая нода не стирает сохранённый выбор пользователя.
-        if (m_engine.setPinnedNode(m_savedPin, error))
+        if (m_engine.setPinnedNode(m_savedPin, error)) {
             persistPin();
+        } else if (savedPinRefusedByMode(error)) {
+            // 5.1.109 (S4.1): the transport mode in force cannot serve the saved pin's location (the
+            // stored "Xray" is back in force, the country was pinned while it was dormant). Dropped
+            // and persisted by the rule of a mode change (§22 п. 8а); kept, it would come back by
+            // itself after the user leaves that mode.
+            const QString dropped = m_savedPin;
+            persistPin(); // the engine has no pin -> the saved one is cleared
+            reliabilityEvent(QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2")
+                                 .arg(avpn::transportModeToString(m_engine.transportMode()), dropped));
+        }
         return;
     }
     }
+}
+
+// 5.1.109 (S4.1): something that decides whether Xray may be used has just changed (a config was
+// applied; on macOS the installed service gained or lost tun2socks). The engine keeps the user's
+// choice, so the mode in force may have changed without a tap: "Xray" is back, or reads as Auto.
+// The decision - DebugSnapshot.h::decideOnTransportAvailability (facade_policy_check): journal, and
+// a pin the returned mode cannot serve is cleared and persisted. Never touches the tunnel; the
+// callers emit changed() themselves (the configApplied handler, guardedStart).
+void AvpnEngineQml::onTransportAvailabilityMaybeChanged(avpn::TransportMode modeBefore, const QString &why)
+{
+    const avpn::TransportMode modeNow = m_engine.transportMode();
+    const AvailabilityModeDecision d = decideOnTransportAvailability(
+        avpn::transportModeToString(modeBefore), avpn::transportModeToString(modeNow),
+        m_engine.pinnedNodeId(), m_engine.pinLacksTransport(modeNow), why);
+    if (!d.changed)
+        return;
+    reliabilityEvent(d.modeJournal);
+    if (d.clearPin) {
+        m_engine.clearPin();
+        persistPin();
+        reliabilityEvent(d.pinJournal);
+    }
+}
+
+// 5.1.109 (S4.1): why Xray is allowed or frozen by the config in force - one journal line at start
+// and one on every change of the reason (ConfigCachePolicy.h::xrayPolicyName). Before the line of
+// the start is written (the reliability ring is restored late in the constructor) nothing is logged.
+// iOS and macOS only: the other platforms cannot raise Xray and their journal stays as it was.
+void AvpnEngineQml::journalXrayPolicy(bool atStart)
+{
+#if defined(Q_OS_IOS) || defined(Q_OS_MACOS)
+    if (!m_configSvc)
+        return;
+    const QString why = QString::fromLatin1(avpn::xrayPolicyName(m_configSvc->xrayPolicy()));
+    if (!atStart && (m_xrayPolicyJournaled.isEmpty() || m_xrayPolicyJournaled == why))
+        return;
+    m_xrayPolicyJournaled = why;
+    reliabilityEvent(QStringLiteral("xray_policy allowed=%1 why=%2 age_min=%3")
+                         .arg(avpn::TuningStore::flag(QStringLiteral("xray_client"), false) ? 1 : 0)
+                         .arg(why)
+                         .arg(m_configSvc->cachedConfigAgeMin()));
+#else
+    Q_UNUSED(atStart)
+#endif
 }
 
 void AvpnEngineQml::reliabilityEvent(const QString &event)
@@ -5329,9 +5397,13 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
 
 void AvpnEngineQml::refreshXrayRuntimeGate()
 {
+    const avpn::TransportMode modeBefore = m_engine.transportMode();
     const bool present = avpn::macXrayRuntimePresent();
-    if (avpn::xrayPlatformRuntimeReady().exchange(present) != present)
+    if (avpn::xrayPlatformRuntimeReady().exchange(present) != present) {
         reliabilityEvent(QStringLiteral("xray_runtime tun2socks=%1").arg(present ? 1 : 0));
+        // 5.1.109 (S4.1): a service with tun2socks puts the stored choice "Xray" back in force.
+        onTransportAvailabilityMaybeChanged(modeBefore, QStringLiteral("runtime"));
+    }
 }
 
 // ---- AVPN macOS wake-реконнект (спека 2026-07-17-macos-wake-reconnect-design.md) --------------
@@ -6108,7 +6180,9 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
         emit error(tr("Xray недоступен в этой версии приложения"));
         return;
     }
-    if (m == m_engine.transportMode())
+    // 5.1.109 (S4.1): compared with the user's stored CHOICE, not with the mode in force - a tap on
+    // "Auto" while the chosen "Xray" is dormant (reads as Auto) is a new choice and is stored.
+    if (m == m_engine.chosenTransportMode())
         return;
     m_engine.setTransportMode(m);
     QSettings s;
@@ -7638,8 +7712,10 @@ void AvpnEngineQml::noteApiOutcome(QNetworkReply *reply)
     if (m_configSvc) {
         if (o == ApiOutcome::Failure)
             m_configSvc->reportNetworkFailure();
-        else if (o == ApiOutcome::Success)
-            m_configSvc->reportNetworkSuccess();
+        // 5.1.109 (S4.1, iOS and macOS): an API path works again while the process is still on the
+        // cached config - the config is asked for now, not on the next return to the screen.
+        else if (o == ApiOutcome::Success && m_configSvc->reportNetworkSuccess())
+            reliabilityEvent(QStringLiteral("config_refetch why=api_path_back"));
     }
     if (m_whitelistDetector) {
         if (code > 0)

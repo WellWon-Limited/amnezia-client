@@ -2,11 +2,13 @@
 // AVPN: оркестратор серверного remote-config (/v1/config + /v1/edges): fetch, verify(ed25519),
 // LKG-кеш, edge-фолбэк. Async (armTimeout) — UI не блокируется.
 #pragma once
+#include "ConfigCachePolicy.h"
 #include "ConfigTypes.h"
 #include "EdgeWalk.h"
 #include <QObject>
 #include <QStringList>
 #include <QTimer>
+#include <functional>
 
 class QNetworkAccessManager;
 
@@ -29,9 +31,20 @@ public:
     bool isFresh() const { return m_fresh; }
     bool isPinned() const { return m_pinned; }
     QString activeBaseUrl() const { return m_activeBase; }
+    // 5.1.109: why features.xray_client of config() is what it is (ConfigCachePolicy.h::decideXrayClient).
+    // On the cached copy the signed "true" is honoured for a bounded time since it was received; the
+    // bound is re-checked before every config request while the process is still on that copy. A fresh
+    // signed answer wins at once and stays in force for the run, as before.
+    XrayPolicy xrayPolicy() const { return m_xrayPolicy; }
+    // Age of the cached signed config when it was last judged, minutes; -1 = fresh or unknown.
+    qint64 cachedConfigAgeMin() const;
+    void setNowMsForTest(std::function<qint64()> nowMs) { m_nowMsFn = std::move(nowMs); }
 
     void reportNetworkFailure();
-    void reportNetworkSuccess();
+    // Another API request got an answer on the active edge. 5.1.109 (iOS, macOS): while the process is
+    // still on the cached config and its own last attempt failed in transport, this also asks for
+    // /v1/config again (ConfigCachePolicy.h::refetchConfigOnApiSuccess); true = it was asked for now.
+    bool reportNetworkSuccess();
     // Decision 2026-11-05: /v1/subscription outcome for its own per-edge streak (EdgeWalk.h::
     // SubscriptionEdgeStreak); requestBase = the edge the request went to. failed = transport failure
     // (classifySubscriptionEdgeOutcome); ignored outcomes are not reported. true = the active edge
@@ -55,6 +68,9 @@ private:
     void applyBody(const QByteArray &body, const QByteArray &sigB64); // verify → parse → cache → emit
     int  failThreshold() const;
     bool switchToNextEdge(); // existing rotation (cached /v1/edges order, baked fallback); false = no other edge
+    qint64 nowMs() const;
+    // The cached copy: features.xray_client by the bounded trust. true = the value in m_config changed.
+    bool judgeCachedXray();
 
     QNetworkAccessManager *m_nam = nullptr;
     QString      m_activeBase;
@@ -69,6 +85,14 @@ private:
     bool         m_fresh = false;
     bool         m_pinned = false;      // 5.1.108: AVPN_API_URL pins the edge (see the constructor)
     SubscriptionEdgeStreak m_subscriptionStreak; // decision 2026-11-05, see reportSubscriptionOutcome
+    // 5.1.109: what the cached signed copy says and when it was received - the inputs of
+    // decideXrayClient while !m_fresh (m_config carries the judged value, never the raw one).
+    bool         m_cachedXraySigned = false;
+    qint64       m_cachedAtMs = 0;
+    qint64       m_cachedMaxAgeMs = 0;
+    qint64       m_cachedAgeMs = -1;
+    XrayPolicy   m_xrayPolicy = XrayPolicy::NoConfig;
+    std::function<qint64()> m_nowMsFn;  // test clock (empty = the system clock)
 };
 
 } // namespace avpn

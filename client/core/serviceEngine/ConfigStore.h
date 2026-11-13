@@ -34,14 +34,20 @@ class ConfigStore
 {
 public:
     static constexpr QLatin1String kLkgConfigKey{"avpn/lkgConfig"};
+    static constexpr QLatin1String kLkgConfigAtKey{"avpn/lkgConfigAtMs"};
     static constexpr QLatin1String kLkgEdgesKey{"avpn/lkgEdges"};
     static constexpr QLatin1String kActiveEdgeKey{"avpn/activeEdge"};
 
-    static void saveConfig(const QByteArray &body)
+    // receivedAtMs (5.1.109) - when this signed body was received and verified: the cached
+    // xray_client=true is honoured only for a bounded time after it (ConfigCachePolicy.h).
+    static void saveConfig(const QByteArray &body, qint64 receivedAtMs)
     {
         settings().setValue(kLkgConfigKey, body);
+        settings().setValue(kLkgConfigAtKey, receivedAtMs);
     }
     static QByteArray loadConfig() { return settings().value(kLkgConfigKey).toByteArray(); }
+    // 0 = unknown: a cache written by a build before 139 carries no receive time.
+    static qint64 configReceivedAtMs() { return settings().value(kLkgConfigAtKey).toLongLong(); }
 
     static void saveEdges(const QStringList &edges)
     {

@@ -174,16 +174,19 @@ int main(int argc, char **argv)
         CHECK(eng.connect(err));                          // коннект есть (awg-нода локации)
         CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
 
-        // Kill-switch вернулся — сохранённый режим снова действует после явной установки.
+        // The kill-switch is back on: the stored mode is in force again BY ITSELF (5.1.109, S4.1: the
+        // engine does not rewrite the user's choice; before 139 the facade had to set it again, and
+        // after a cold start nobody did - the defect of 12.11.2026 on 138).
         TuningStore::set({}, {{QStringLiteral("xray_client"), true}}, {}, {});
-        eng.setTransportMode(TransportMode::Xray);
+        CHECK(eng.chosenTransportMode() == TransportMode::Xray);
         CHECK(eng.transportMode() == TransportMode::Xray);
-        // ...и гаснет прямо в сессии: normalizeTransportMode в connect() снимает мёртвый режим.
+        // ... and it goes off within the session: connect() reads the effective mode, a dead "Xray" = Auto.
         TuningStore::set({}, {{QStringLiteral("xray_client"), false}}, {}, {});
         eng.requestStop();
         CHECK(eng.connect(err));
         CHECK(eng.transportMode() == TransportMode::Auto);
         CHECK(tun.lastUpNodeId == QLatin1String("9:awg"));
+        CHECK(eng.chosenTransportMode() == TransportMode::Xray); // the choice itself is intact
     }
 
     // --- 5) MAJOR-1: кап провалов data-plane — движок сдаётся вместо вечной карусели ---

@@ -82,6 +82,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/Ed25519Verify.h
     ${AVPN_SE}/ConfigStore.h
     ${AVPN_SE}/EdgeWalk.h
+    ${AVPN_SE}/ConfigCachePolicy.h
     ${AVPN_SE}/ConfigService.h
     ${AVPN_SE}/BypassListTypes.h
     ${AVPN_SE}/BypassListLkg.h

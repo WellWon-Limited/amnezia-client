@@ -235,15 +235,21 @@ public:
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
     // всех путях выбора (connect/failover/ротация/pin); нет кандидатов → честная ошибка no_transport.
-    // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
-    // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
-    // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
-    // 5.1.109 (review R2): also at the start of setPinnedNode, rotateNext, continuePendingSwitch and
-    // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
-    // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
-    void setTransportMode(TransportMode m) { m_transportMode = effectiveTransportMode(m); }
+    // AVPN (independent review of the wave, MAJOR-2): an unavailable Xray (kill-switch
+    // features.xray_client or the platform) always reads as Auto - in the UI and on every pick path.
+    // 5.1.109 (review R2): one rule for every reader - effectiveTransportMode: connect, onDead,
+    // setPinnedNode, rotateNext, continuePendingSwitch, the pool refresh, nextCandidate, the pick
+    // helpers, nextLiveNodeId, pinLacksTransport, debugSnapshot all read transportMode().
+    // 5.1.109 (S4.1, defect of 12.11.2026 on 138): m_transportMode is the user's CHOICE and is never
+    // rewritten by availability. Before, setTransportMode and normalizeTransportMode stored the
+    // effective mode: a stored "Xray" read while Xray was frozen (every cold start on the cached
+    // config) became Auto for the rest of the process and did not come back when the fresh config
+    // allowed Xray again. Now Xray being unavailable only changes what transportMode() returns; when
+    // it is allowed again the choice is back in force by itself. The facade reacts to that moment
+    // (a pin the returned mode cannot serve - DebugSnapshot.h::decideOnTransportAvailability).
+    void setTransportMode(TransportMode m) { m_transportMode = m; }
     TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
-    void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
+    TransportMode chosenTransportMode() const { return m_transportMode; }
 
     // AVPN awg31-xray-v1: локальная история транспортов (EWMA успеха/времени до трафика по паре
     // локация×proto, TransportPick.h). Персистит фасад (QSettings avpn/transportHistory):
@@ -301,8 +307,8 @@ public:
     // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
     // Inside an equal-weight tier without measurements the pick is random - callers that must not
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
-    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
-    // normalizeTransportMode() - test transport_pick_check §15.
+    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does -
+    // test transport_pick_check §15.
     const SubscriptionNode *nextCandidate() const;
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin

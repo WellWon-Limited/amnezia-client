@@ -344,6 +344,52 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
     return d;
 }
 
+// 5.1.109 (S4.1, defect of 12.11.2026 on 138): the effective transport mode changed WITHOUT a tap.
+// The engine keeps the user's choice and reads an unavailable Xray as Auto, so the choice "Xray"
+// comes back in force when Xray is allowed again (a fresh signed config, the trusted cached copy,
+// on macOS a service with tun2socks) and reads as Auto when it goes away. modeBefore / modeNow - the
+// effective mode names around such an event (AvpnEngineQml::onTransportAvailabilityMaybeChanged).
+//  changed  - the UI refreshes, journal `transport_mode_effective from= to= why=`;
+//  clearPin - the pin rule of a user's mode change (decidePinOnTransportMode, §22 п. 8а): a pin the
+//             mode now in force cannot serve is cleared and persisted - a country pinned while the
+//             stored "Xray" was dormant (the app showed Auto) does not survive its return. Auto never
+//             clears a pin.
+// The tunnel is NOT restarted here, whatever it runs on: only a tap restarts a working tunnel (§26).
+// A tunnel up on a transport the returned mode excludes stays up; the mode applies from the next
+// connect or failover - as an Xray tunnel stays up when xray_client goes off mid-session.
+struct AvailabilityModeDecision {
+    bool changed = false;
+    bool clearPin = false;
+    QString modeJournal; // empty = nothing changed
+    QString pinJournal;  // empty = the pin stays
+};
+inline AvailabilityModeDecision decideOnTransportAvailability(const QString &modeBefore, const QString &modeNow,
+                                                              const QString &pinnedNodeId, bool pinLacksTransport,
+                                                              const QString &why)
+{
+    AvailabilityModeDecision d;
+    if (modeBefore == modeNow)
+        return d;
+    d.changed = true;
+    d.modeJournal = QStringLiteral("transport_mode_effective from=%1 to=%2 why=%3").arg(modeBefore, modeNow, why);
+    const PinModeDecision pin = decidePinOnTransportMode(modeNow, pinnedNodeId, pinLacksTransport,
+                                                         /*tunnelUp=*/false, QString());
+    d.clearPin = pin.clearPin;
+    d.pinJournal = pin.journal;
+    return d;
+}
+
+// 5.1.109 (S4.1): the saved pin could not be applied (decidePinRestore -> ApplySaved, setPinnedNode
+// refused). "no_transport" = its location is in the pool, but the transport mode in force cannot
+// serve it - with the stored "Xray" back in force that is a country pinned while it was dormant. Such
+// a saved pin is dropped and persisted (§22 п. 8а); kept, it would come back by itself on the next
+// pool refresh after the user leaves that mode. Any other refusal (the node is not in the pool now,
+// no connectable node in the location) keeps the saved choice, as before.
+inline bool savedPinRefusedByMode(const QString &setPinnedNodeError)
+{
+    return setPinnedNodeError.startsWith(QLatin1String("no_transport"));
+}
+
 // 5.1.109 (R7, device 35 build 138, 10-11.11.2026): a deadline timer that fires late means the process
 // was frozen (iOS suspended the app in the background, a laptop slept): the time of the freeze is no
 // evidence about the tunnel (§29 п.5 "заморозка — не довод"; same rule as timerFiredLate). Such a tick
