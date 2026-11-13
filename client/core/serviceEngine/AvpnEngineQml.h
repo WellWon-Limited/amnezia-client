@@ -1051,8 +1051,9 @@ private:
     // (MacServiceInstaller::macXrayRuntimePresent -> NodeRotation.h::xrayPlatformRuntimeReady).
     // Called at construction and on every start after the service check/install.
     // 5.1.109 (S4.1): losing tun2socks takes effect at once, gaining it - only while nothing is
-    // running (DebugSnapshot.h::xrayRuntimeGateNext). true = the gate changed.
-    bool refreshXrayRuntimeGate(const QString &why);
+    // running (DebugSnapshot.h::xrayRuntimeGateNext); never inside a start (startInFlight - the two
+    // calls of guardedStart). true = the gate changed.
+    bool refreshXrayRuntimeGate(const QString &why, bool startInFlight = false);
 
 #endif
 #if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)

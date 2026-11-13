@@ -159,9 +159,11 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             // 5.1.109, trusted for a bounded time; node_scan frozen) it is re-issued once - otherwise
             // the cached policy stays in force until the app restarts (iOS has no periodic config
             // refresh). Bounded: our aborts happen only on transitions.
+            // 5.1.109: the re-issued request keeps its origin - a refetch started by an API success
+            // that we aborted ourselves must not come back as a request whose failure votes.
             m_lastFetchMs = -1;
             if (!m_fresh)
-                QTimer::singleShot(0, this, &ConfigService::fetchConfig);
+                QTimer::singleShot(0, this, [this, startedByApiSuccess]() { requestConfig(startedByApiSuccess); });
             return;
         }
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();

@@ -7,8 +7,8 @@
 #   2. the engine's setTransportMode() (choice + in force at once) is called from the tap handler only;
 #   3. the macOS runtime gate is written from the constructor and from refreshXrayRuntimeGate() only,
 #      and there through xrayRuntimeGateNext() (loss at once, gain only while idle);
-#   4. guardedStart() admits nothing itself (the defect: the choice came into force between the tap
-#      and connect());
+#   4. guardedStart() admits nothing itself and never opens the runtime gate (the defect: the choice
+#      came into force between the tap and connect());
 #   5. restorePin() does not wipe a saved pin that the mode refused (a transient pool state).
 # The decisions themselves: facade_policy_check; the admission: transport_pick_check §17.
 set -eu
@@ -69,6 +69,8 @@ fi
 start_body="$(body_of 'void AvpnEngineQml::guardedStart()')"
 if [ -z "$start_body" ]; then
     echo "FAIL: guardedStart() not found"; fail=1
+elif printf '%s\n' "$start_body" | grep 'refreshXrayRuntimeGate(' | grep -qv 'startInFlight=\*/true'; then
+    echo "FAIL: guardedStart() must call refreshXrayRuntimeGate() with startInFlight=true (no gain inside a start)"; fail=1
 elif printf '%s\n' "$start_body" | grep -Eq 'syncTransportModeChoice\(|admitTransportModeChoice\(|setTransportModeChoice\(|m_engine\.setTransportMode\(|syncTransportAvailabilityWhileIdle\('; then
     echo "FAIL: guardedStart() must not bring a transport mode into force (between the tap and connect()):"
     printf '%s\n' "$start_body" | grep -n -E 'syncTransportModeChoice\(|admitTransportModeChoice\(|setTransportModeChoice\(|m_engine\.setTransportMode\(|syncTransportAvailabilityWhileIdle\('

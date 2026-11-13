@@ -588,6 +588,41 @@ private slots:
         QTRY_VERIFY(service.isFresh());                              // and the new edge delivers the config
         QCOMPARE(edgeB.configRequests, 1);
     }
+    // A refetch that WE aborted (a tunnel transition aborts the requests in flight) is re-issued at
+    // once, as every config request on the cached copy - and keeps its origin: the re-issued request
+    // must not come back as one whose failure votes.
+    void abortedRefetchIsReissuedAndStillDoesNotVote()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        bool hold = false;
+        ConfigServer edgeA([&hold](int) {
+            return hold ? QByteArray() : httpAnswer("503 Service Unavailable", "{}");
+        });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":true}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QTest::qWait(100);                                           // the usual request failed: vote 1, owed
+        hold = true;
+        QVERIFY(service.reportNetworkSuccess());                     // streak 0; the refetch is in flight
+        QTRY_COMPARE(edgeA.configRequests, 2);
+        hold = false;
+        // AvpnEngineQml::onConnectionStateChanged: our own abort of the requests in flight
+        for (QNetworkReply *r : network.findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly))
+            if (r->isRunning() && r->url().path() == QLatin1String("/v1/config"))
+                r->abort();
+        QTRY_COMPARE(edgeA.configRequests, 3);                       // re-issued at once
+        QTest::qWait(100);                                           // ... and it failed: still not a vote
+        service.reportNetworkFailure();
+        service.reportNetworkFailure();
+        QCOMPARE(switched.count(), 0);                               // two votes only
+        QVERIFY(!service.reportNetworkSuccess());                    // and nothing is owed: one refetch per episode
+        QCOMPARE(edgeB.configRequests, 0);
+    }
     // The active edge is switched while a config request is in flight to the old one. Before: the
     // in-flight guard swallowed the immediate request to the new edge (nothing was asked until the old
     // request ended, up to its 15 s timeout) and the old edge's failure was then counted against the

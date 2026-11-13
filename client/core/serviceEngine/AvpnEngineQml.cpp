@@ -5295,7 +5295,7 @@ void AvpnEngineQml::guardedStart()
     // connect() read the same value. A start is in flight here (the intent is set): only the loss of
     // tun2socks can take effect, a gain waits for the engine to be idle (refreshXrayRuntimeGate).
     if (!m_startPrepared)
-        refreshXrayRuntimeGate(QStringLiteral("start"));
+        refreshXrayRuntimeGate(QStringLiteral("start"), /*startInFlight=*/true);
 #endif
     if (!m_startPrepared) { beginStartPreparation(); return; }
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
@@ -5388,7 +5388,7 @@ void AvpnEngineQml::guardedStart()
     // the installed service cannot start (no tun2socks).
     // 5.1.109 (S4.1): a new service WITH tun2socks no longer re-enables Xray here, between the tap and
     // connect() - that waits for the engine to be idle (the card showed a choice made without Xray).
-    refreshXrayRuntimeGate(QStringLiteral("start"));
+    refreshXrayRuntimeGate(QStringLiteral("start"), /*startInFlight=*/true);
 #endif
 
     m_op = Op::Starting;
@@ -5504,11 +5504,13 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
 // a transport the service cannot raise); gaining it - only while nothing is running
 // (DebugSnapshot.h::xrayRuntimeGateNext). A service updated inside this Connect adds Xray for the
 // next start; the start in flight raises what the card showed.
-bool AvpnEngineQml::refreshXrayRuntimeGate(const QString &why)
+bool AvpnEngineQml::refreshXrayRuntimeGate(const QString &why, bool startInFlight)
 {
     const avpn::TransportMode modeBefore = m_engine.transportMode();
     const bool readyNow = avpn::xrayPlatformRuntimeReady().load();
-    const bool next = xrayRuntimeGateNext(readyNow, avpn::macXrayRuntimePresent(), transportModeIdle());
+    // startInFlight: called from guardedStart - a gain is never taken there, whatever the facade state.
+    const bool next = xrayRuntimeGateNext(readyNow, avpn::macXrayRuntimePresent(),
+                                          !startInFlight && transportModeIdle());
     if (next == readyNow)
         return false;
     avpn::xrayPlatformRuntimeReady().store(next);
