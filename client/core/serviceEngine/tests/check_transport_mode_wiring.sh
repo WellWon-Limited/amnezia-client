@@ -1,22 +1,26 @@
 #!/bin/bash
-# AVPN 5.1.109 (S4.1; reviews of d5d739403 and 3dbe0361f): the facade forwards its events to the
-# transport-mode gate at exactly these places and applies what comes back.
+# AVPN 5.1.109 (S4.1; reviews of d5d739403, 3dbe0361f and df7f49db8): the facade forwards its events
+# to the transport-mode gate at exactly these places and applies what comes back.
 #
 # The RULE - when the stored choice is in force, what happens to the pin, what an adopted session
 # keeps, the macOS runtime gate, the legacy value - is TransportModeGate.h and is tested by behaviour:
 # transport_mode_gate_check (the gate alone) and transport_pick_check §17 (on a real engine, with the
 # pin and the sessions the engine adopts). AvpnEngineQml.cpp has no unit harness, so what is left in
 # it - the forwarding - is checked here at source level, and only that:
-#   1. the stored choice is loaded once, in the constructor, BEFORE the pin is restored;
+#   1. the stored choice is loaded once, in the constructor, BEFORE the pin is restored, with the
+#      stored value and its marker as they are in the settings;
 #   2. the gate is told "something changed" from one function (syncTransportMode) with the one
 #      snapshot (modeActivity), and that function is called on every changed(), when a config is
 #      applied, on a return to the screen and when the macOS runtime gate moves;
 #   3. the snapshot carries every field the gate judges "nothing is running" by;
-#   4. the outcome is applied in one function: journal, stored value, a pin stored cleared;
-#   5. the tap goes through the gate; the facade never sets the engine's mode itself;
+#   4. the outcome is applied in one function: journal, stored value - and never the saved pin
+#      (an admission only un-applies a pin in the engine);
+#   5. the tap goes through the gate, stores the choice with its marker, and a tap on "Auto" brings
+#      a saved pin back; the facade never sets the engine's mode itself;
 #   6. the macOS runtime gate is written from the constructor and refreshXrayRuntimeGate() only, and
 #      there by the gate's decision; every way the daemon probe ends reports the startup observation;
-#   7. guardedStart() brings no mode into force itself;
+#   7. guardedStart() brings no mode into force itself, and a declined service install does not
+#      leave its start preparation behind;
 #   8. restorePin() does not wipe a saved pin the mode refused.
 # Run by build_check.sh.
 set -eu
@@ -48,7 +52,14 @@ else
 fi
 ctor_body="$(body_of 'AvpnEngineQml::AvpnEngineQml(')"
 has "$ctor_body" 'm_engine.loadTransportModeChoice(' || bad "the stored choice must be loaded in the constructor"
-has "$ctor_body" 'avpn/transportModeByChoice' || bad "the constructor must read the marker avpn/transportModeByChoice"
+# the two arguments of that call, as written: the stored value and the marker read from the settings
+# (a constant instead of the marker would honour a stale "xray" of 138, or drop every choice)
+if [ -n "$load_line" ]; then
+    load_args="$(awk -v from="$load_line" 'NR > from && NR <= from + 2' "$SRC" | tr -d '\n' | tr -s ' ')"
+    want_args=' s.value(QStringLiteral("avpn/transportMode"), QStringLiteral("auto")).toString(), s.value(QStringLiteral("avpn/transportModeByChoice"), false).toBool());'
+    [ "$load_args" = "$want_args" ] \
+        || bad "loadTransportModeChoice() must get the stored avpn/transportMode and the marker avpn/transportModeByChoice read from the settings"
+fi
 
 # 2. one forwarding function and its call sites
 sync_body="$(body_of 'void AvpnEngineQml::syncTransportMode(')"
@@ -83,9 +94,9 @@ done
 apply_body="$(body_of 'void AvpnEngineQml::applyModeChange(')"
 has "$apply_body" 'm_engine.takeModeJournal()' && has "$apply_body" 'reliabilityEvent(line)' \
     || bad "applyModeChange() must write the gate's journal lines"
-printf '%s\n' "$apply_body" | grep -A1 'if (!c.pinCleared.isEmpty())' | grep -q 'persistPin();' \
-    || bad "applyModeChange() must store a pin the gate cleared (and only that one)"
-[ "$(printf '%s\n' "$apply_body" | grep -c 'persistPin();')" = "1" ] || bad "applyModeChange() must not store an un-applied pin"
+if printf '%s\n' "$apply_body" | grep -q 'persistPin\|avpn/pinnedNode\|clearPin'; then
+    bad "applyModeChange() must not write the saved pin: an admission never erases it (only the user's tap does)"
+fi
 has "$apply_body" 'if (c.storeChoice)' && has "$apply_body" 'avpn/transportModeByChoice' \
     || bad "applyModeChange() must rewrite the stored value with its marker when asked"
 has "$apply_body" 'if (c.idleEntered)' || bad "applyModeChange() must look at the macOS runtime gate when nothing is running any more"
@@ -96,7 +107,14 @@ tap_body="$(body_of 'void AvpnEngineQml::setTransportMode(')"
 [ "$(count 'm_engine.tapTransportMode(')" = "1" ] && has "$tap_body" 'm_engine.tapTransportMode(m)' \
     || bad "the tap handler must go through the gate (m_engine.tapTransportMode), once"
 has "$tap_body" 'if (tap.refused)' && has "$tap_body" 'if (tap.noop)' || bad "the tap handler must honour refused / noop"
-has "$tap_body" 'avpn/transportModeByChoice' || bad "the tap handler must store the marker next to the choice"
+noop_at="$(printf '%s\n' "$tap_body" | grep -n 'if (tap.noop)' | head -1 | cut -d: -f1)"
+store_at="$(printf '%s\n' "$tap_body" | grep -n 's.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(m));' | head -1 | cut -d: -f1)"
+mark_at="$(printf '%s\n' "$tap_body" | grep -n 's.setValue(QStringLiteral("avpn/transportModeByChoice"), true);' | head -1 | cut -d: -f1)"
+if [ -z "$noop_at" ] || [ -z "$store_at" ] || [ -z "$mark_at" ] || [ "$store_at" -le "$noop_at" ] || [ "$mark_at" -le "$noop_at" ]; then
+    bad "the tap handler must store the tapped mode (avpn/transportMode) and the marker (avpn/transportModeByChoice = true)"
+fi
+printf '%s\n' "$tap_body" | grep -A1 'if (m == avpn::TransportMode::Auto)' | grep -q 'restorePin();' \
+    || bad "a tap on \"Auto\" must bring a saved pin back at once (restorePin)"
 [ "$(count 'm_engine.setTransportMode(')" = "0" ] || bad "the facade must not set the engine's mode itself"
 
 # 6. the macOS runtime gate and the startup observation
@@ -124,6 +142,8 @@ if [ -z "$start_body" ]; then
     bad "guardedStart() not found"
 elif printf '%s\n' "$start_body" | grep -Eq 'syncTransportMode\(|applyModeChange\(|tapTransportMode\(|noteStartupTunnelObserved\(|loadTransportModeChoice\('; then
     bad "guardedStart() must not bring a transport mode into force itself (between the tap and connect())"
+elif ! printf '%s\n' "$start_body" | grep -B4 'intent_off why=svc_install_declined' | grep -q 'm_startPrepared = false;'; then
+    bad "a declined service install ends the start: guardedStart() must reset m_startPrepared on that return (else the facade never looks idle)"
 fi
 
 # 8. the pin

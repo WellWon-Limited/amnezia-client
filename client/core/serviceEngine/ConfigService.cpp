@@ -135,23 +135,25 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     m_configInFlight = true;
     m_lastFetchMs = nowMs();
     const quint64 seq = m_configSeq;
+    const quint64 order = ++m_requestOrder;
     QNetworkRequest req{QUrl(m_activeBase + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, startedByApiSuccess]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess]() {
         reply->deleteLater();
         // 5.1.109: the active edge was switched while this request was in flight, and the new edge
         // was asked at once (switchToNextEdge). The FAILURE of this request says nothing about the
         // edge in use now and is ignored (it used to be counted against the new edge). Its ANSWER is
         // as good as any: the body is signed and does not depend on the edge that carried it - it is
         // verified and applied as 138 did (3dbe0361f dropped it: a good answer already on its way was
-        // lost and the device stayed on the cached copy until the new edge answered).
+        // lost and the device stayed on the cached copy until the new edge answered) - unless the
+        // answer of the request to the new edge, started later, is already in force (applyBody).
         if (seq != m_configSeq) {
             const int staleCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             if (staleCode != 0)
                 emit transportOk(); // an HTTP answer: the network is alive (the white-list detector)
             if (staleCode >= 200 && staleCode < 300)
-                applyBody(reply->readAll(), reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig")));
+                applyBody(reply->readAll(), reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig")), order);
             return;
         }
         m_configInFlight = false;
@@ -213,7 +215,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             return;
         const QByteArray body = reply->readAll();
         const QByteArray sig = reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
-        applyBody(body, sig);
+        applyBody(body, sig, order);
     });
 }
 
@@ -241,14 +243,22 @@ void ConfigService::fetchEdges()
     });
 }
 
-void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64)
+void ConfigService::applyBody(const QByteArray &body, const QByteArray &sigB64, quint64 order)
 {
+    // 5.1.109 (review of df7f49db8): a request started later has already been applied - this answer
+    // is older, whatever edge it came from and however late it lands. Without this, after an edge
+    // switch the old edge's answer (xray_client=true, produced before the operator switched Xray
+    // off) overwrote the new edge's "false", was stored and re-stamped, and the next cold start
+    // offline trusted it.
+    if (order < m_appliedOrder)
+        return;
     if (!verifyDetached(m_pubKeyHex, body, sigB64))
         return; // подпись не прошла → игнор, остаёмся на кеше/дефолтах
     RemoteConfig c;
     QString err;
     if (!parseConfig(body, c, err))
         return;
+    m_appliedOrder = order;
     m_config = c;
     m_fresh = true;
     // 5.1.109: the fresh signed value is in force as it is ("off" wins at once, "on" for this run);

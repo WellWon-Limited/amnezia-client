@@ -1054,9 +1054,9 @@ private:
     // 5.1.108: Xray is supported only when the installed service carries tun2socks
     // (MacServiceInstaller::macXrayRuntimePresent -> NodeRotation.h::xrayPlatformRuntimeReady).
     // Called at construction and on every start after the service check/install.
-    // 5.1.109 (S4.1): losing tun2socks takes effect at once, gaining it - only while nothing is
-    // running (TransportModeGate::nextRuntimeGate - the same "nothing is running" as the mode
-    // admission, so a call inside a start can only lose). true = the gate changed.
+    // 5.1.109 (S4.1): losing tun2socks takes effect at once; gaining it while "Xray" is the choice -
+    // only while nothing is running (TransportModeGate::nextRuntimeGate - the same "nothing is
+    // running" as the mode admission); with another choice - at once. true = the gate changed.
     bool refreshXrayRuntimeGate(const QString &why);
 
 #endif

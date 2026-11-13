@@ -1709,16 +1709,14 @@ ServiceEngine::ModeChange ServiceEngine::applyGateOutcome(const TransportModeGat
     c.storeChoice = o.storeChoice;
     c.storedMode = o.storedMode;
     c.idleEntered = o.idleEntered;
-    // A pin the admitted mode cannot serve. Clear - the admission followed a real gain: the facade
-    // stores the pin cleared (the rule of a mode change, §22 п. 8а). Unapply - the choice was usable
-    // since load: the engine drops the pin and the saved one stays, as the order "mode first, then
-    // restorePin" gave before 139 - a cold start must not erase a pin because of the stored pool.
-    if (o.pin != TransportModeGate::Pin::Keep && pinLacksTransport(transportMode())) {
-        const bool clear = o.pin == TransportModeGate::Pin::Clear;
-        (clear ? c.pinCleared : c.pinUnapplied) = m_pinnedNodeId;
-        m_modeGate.note(QStringLiteral("%1 why=transport_mode mode=%2 node=%3")
-                            .arg(clear ? QStringLiteral("pin_cleared") : QStringLiteral("pin_not_applied"),
-                                 transportModeToString(transportMode()), m_pinnedNodeId));
+    // A pin the admitted mode cannot serve is un-applied: the engine drops it and the SAVED one stays
+    // (the facade does not store anything), as the order "mode first, then restorePin" gave before
+    // 139 - it comes back when the pool or the mode can serve it again. An admission never erases
+    // the saved pin: that is the user's tap only (review of df7f49db8).
+    if (o.pin == TransportModeGate::Pin::Unapply && pinLacksTransport(transportMode())) {
+        c.pinUnapplied = m_pinnedNodeId;
+        m_modeGate.note(QStringLiteral("pin_not_applied why=transport_mode mode=%1 node=%2")
+                            .arg(transportModeToString(transportMode()), m_pinnedNodeId));
         m_pinnedNodeId.clear();
     }
     return c;

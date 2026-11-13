@@ -757,6 +757,76 @@ private slots:
         QVERIFY(!service.reportNetworkSuccess());                    // fresh: nothing is owed any more
     }
 
+    // Review of df7f49db8: after an edge switch two requests are in flight, and the body carries no
+    // version - the answers are ordered by when their requests were STARTED. The new edge answers
+    // first with the newer config (the operator switched Xray off); the old edge's answer, produced
+    // before that, lands later: it must not overwrite the newer one (it did: applied as fresh, stored
+    // and re-stamped - the next cold start offline trusted "true").
+    void lateAnswerOfTheOldEdgeDoesNotOverwriteANewerConfig()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        const QByteArray off = R"({"features":{"xray_client":false},"recommended_version":{"macos":"new"}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });        // /v1/config stays in flight
+        ConfigServer edgeB([off](int) { return httpAnswer("200 OK", off); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QCOMPARE(applied, 1);                                        // the cached copy
+        QTRY_COMPARE(edgeA.configRequests, 1);                       // request 1, in flight on a
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));         // switched to b: request 2
+        QTRY_VERIFY(service.isFresh());                              // b answered: Xray is off
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(avpn::savedConfigs, 1);
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs);
+        now += 5000;
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"old"}})"));
+        QTest::qWait(200);                                           // the older answer lands, signed and valid
+        QVERIFY(!service.config().features.value("xray_client", true)); // df7f49db8: true again
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(service.config().recommendedVersion.value("macos"), QString("new"));
+        QCOMPARE(applied, 2);
+        QCOMPARE(avpn::savedConfigs, 1);                             // not stored ...
+        QCOMPARE(avpn::cachedConfig, off);
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs);                // ... and not re-stamped
+    }
+    // The other order: the old edge's answer comes first and is applied (finding D of the review of
+    // 3dbe0361f stays closed); the answer of the request started later then replaces it.
+    void answersAfterAnEdgeSwitchAreAppliedInTheOrderTheRequestsWereStarted()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return QByteArray(); });        // both stay in flight
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000);
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"old"}})"));
+        QTRY_VERIFY(service.isFresh());                              // the earlier request, first to answer: applied
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(service.config().recommendedVersion.value("macos"), QString("old"));
+        edgeB.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":false},"recommended_version":{"macos":"new"}})"));
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("new")); // the later request wins
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(avpn::savedConfigs, 2);
+        service.refreshIfStale(0);                                   // and an ordinary later request applies as always
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 2, 2000);
+        edgeB.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"newest"}})"));
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("newest"));
+        QCOMPARE(avpn::savedConfigs, 3);
+    }
+
     // ---- review of d5d739403 (finding 5): the cached trust is judged on more paths and is one-way. ----
 
     // The trust runs out while the foreground refresh is throttled (the edge ANSWERED the last

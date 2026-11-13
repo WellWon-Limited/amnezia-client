@@ -257,15 +257,14 @@ public:
     void normalizeTransportMode() { m_modeGate.writeDownLoss(xrayClientSupported()); }
     bool transportModeChoicePending() const { return m_modeGate.choicePending(xrayClientSupported()); }
 
-    // What an event did. pinCleared - a pin the admitted mode cannot serve was dropped after a real
-    // gain: the facade stores it cleared. pinUnapplied - dropped from the engine only, the saved pin
-    // stays (as "mode first, then restorePin" gave before 139). storeChoice - write avpn/transportMode
-    // (a legacy "xray" was dropped). idleEntered - nothing is running any more.
+    // What an event did. pinUnapplied - a pin the admitted mode cannot serve was dropped from the
+    // engine; the saved pin stays (as "mode first, then restorePin" gave before 139) - no event of
+    // the gate erases it. storeChoice - write avpn/transportMode (a legacy "xray" was dropped).
+    // idleEntered - nothing is running any more.
     struct ModeChange {
         bool changed = false;
         TransportMode from = TransportMode::Auto;
         TransportMode to = TransportMode::Auto;
-        QString pinCleared;
         QString pinUnapplied;
         bool storeChoice = false;
         TransportMode storedMode = TransportMode::Auto;
@@ -280,7 +279,8 @@ public:
     ModeChange noteStartupObserved(const ModeActivity &a);
     // A tap on the selector: refused (Xray is not usable), a no-op, or the choice and the mode in force.
     TransportModeGate::Tap tapTransportMode(TransportMode m) { return m_modeGate.tap(m, xrayClientSupported()); }
-    // macOS service: the next value of the tun2socks gate (loss at once, gain only while idle).
+    // macOS service: the next value of the tun2socks gate (loss at once; gain at once unless "Xray"
+    // is the choice - then only while nothing is running).
     bool nextXrayRuntimeGate(bool readyNow, bool present, const ModeActivity &a) const;
     // Journal lines of the gate (and of the pin rule) since the last call - the facade writes them.
     QStringList takeModeJournal() { return m_modeGate.takeJournal(); }

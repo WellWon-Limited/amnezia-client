@@ -1,7 +1,7 @@
 // client/core/serviceEngine/TransportModeGate.h
 // AVPN serviceEngine - when the user's stored transport-mode choice is IN FORCE. [header-only, QtCore values]
 //
-// 5.1.109 (plan step S4.1; defect of 12.11.2026 on 138; reviews of d5d739403 and 3dbe0361f+66dc21bb1).
+// 5.1.109 (plan step S4.1; defect of 12.11.2026 on 138; reviews of d5d739403, 3dbe0361f+66dc21bb1, df7f49db8).
 // On 138 the engine had one value, the mode in force: a stored "Xray" read while the cached config froze
 // Xray (every cold start) became Auto for the whole run and never came back. The fix keeps the CHOICE
 // apart from the mode IN FORCE; this class is the whole rule of how the mode in force follows the
@@ -28,13 +28,12 @@
 //  4. a session this process did not start turns out to run on a transport the mode in force
 //     excludes - it keeps Auto; the choice is admitted when the engine is idle again.
 //
-// The pin (a country the admitted mode cannot serve - ServiceEngine::pinLacksTransport):
-//  - an admission that follows a REAL GAIN (Xray became usable during this run) clears the pin and the
-//    facade stores it cleared - the rule of a mode change, CONNECT-INVARIANTS §22 п. 8а;
-//  - every other admission (the choice was usable since load and only waited for the startup
-//    observation or for a session to end) UN-APPLIES it: the engine drops it, the saved pin stays -
-//    exactly what the order "mode first, then restorePin" gave before 139 (a refused pin stays saved).
-//    A cold start must not erase a pin because of what the stored pool happens to hold.
+// The pin (a country the admitted mode cannot serve - ServiceEngine::pinLacksTransport): an admission
+// only UN-APPLIES it - the engine drops it, the SAVED pin stays, exactly what the order "mode first,
+// then restorePin" gave before 139 (a refused pin stays saved) - and it comes back when the pool or
+// the mode can serve it again. No admission ever erases the saved pin: only the user's tap on a mode
+// does (as on 138). Review of df7f49db8: an admission after a gain used to store the pin cleared, so
+// whether the pin survived depended on the age of the cached config, not on anything the user did.
 //
 // Upstream Amnezia has no counterpart (no server kill-switch, no transport mode).
 #pragma once
@@ -106,7 +105,6 @@ public:
     enum class Pin {
         Keep,    // nothing to do
         Unapply, // drop a pin the mode cannot serve from the engine, the saved pin stays
-        Clear,   // drop it and store it cleared (a real gain)
     };
     struct Outcome {
         bool modeChanged = false;
@@ -219,18 +217,19 @@ public:
         m_inForce = effective(mode, xrayUsable);
         m_loaded = true;
         m_loadAdmitted = true;
-        m_gain = false;
         m_pendingJournaled = false;
         m_xrayUsable = xrayUsable;
     }
 
     // macOS service: Xray needs tun2socks next to the installed service. LOSING it takes effect at
-    // once - a start must not pick a transport the service cannot raise. GAINING it takes effect only
-    // while nothing is running: a service updated inside Connect adds Xray for the NEXT start, the one
-    // in flight raises what the card showed.
+    // once - a start must not pick a transport the service cannot raise. GAINING it while the choice
+    // is "Xray" takes effect only while nothing is running: a service updated inside Connect must not
+    // bring "Xray" into force between the tap and connect(). With "Auto" or "Amnezia" chosen no mode
+    // is waiting for the gate, so it opens at once, as before 139 (review of df7f49db8: an Auto user
+    // whose service got tun2socks inside Connect had no Xray until the first disconnect).
     bool nextRuntimeGate(bool readyNow, bool present, const ModeActivity &a) const
     {
-        return present && (readyNow || idle(a));
+        return present && (readyNow || idle(a) || m_choice != TransportMode::Xray);
     }
 
     // --- events of the engine -------------------------------------------------------------------
@@ -242,7 +241,6 @@ public:
             return;
         m_inForce = TransportMode::Auto;
         m_xrayUsable = false;
-        m_gain = false;
         m_journal << effectiveLine(TransportMode::Xray, TransportMode::Auto, QStringLiteral("pick"));
     }
 
@@ -292,24 +290,21 @@ private:
         o.to = to;
         m_journal << effectiveLine(from, to, why);
     }
-    // Xray usable or not, as told with every event: a gain during the run is remembered until the
-    // admission (it decides what happens to the pin), a loss takes effect at once.
+    // Xray usable or not, as told with every event: a gain during the run is remembered (the choice
+    // was not usable since load - see m_gain), a loss takes effect at once.
     void noteAvailability(bool xrayUsable, Outcome &o, const QString &why)
     {
         if (xrayUsable && !m_xrayUsable && m_loaded)
             m_gain = true;
-        if (!xrayUsable)
-            m_gain = false;
         m_xrayUsable = xrayUsable;
         if (!xrayUsable && m_inForce == TransportMode::Xray)
             setInForce(TransportMode::Auto, o, why);
     }
-    void admit(TransportMode target, Pin pin, const QString &why, Outcome &o)
+    void admit(TransportMode target, const QString &why, Outcome &o)
     {
         setInForce(target, o, why);
-        o.pin = pin;
+        o.pin = Pin::Unapply; // never more: the saved pin is the user's (see the header)
         m_loadAdmitted = true;
-        m_gain = false;
         m_pendingJournaled = false;
     }
     void tryAdmit(bool idleNow, bool xrayUsable, const QString &why, Outcome &o)
@@ -330,7 +325,7 @@ private:
         // The first admission of a choice that was usable since load is the load admission ("start"):
         // it only waited for the startup observation.
         const bool loadAdmission = !m_loadAdmitted && !m_gain;
-        admit(target, m_gain ? Pin::Clear : Pin::Unapply, loadAdmission ? QStringLiteral("start") : why, o);
+        admit(target, loadAdmission ? QStringLiteral("start") : why, o);
     }
     Outcome judgeForeignSession(const QString &sessionProto, bool xrayUsable)
     {
@@ -348,7 +343,7 @@ private:
         const TransportMode target = effective(m_choice, xrayUsable);
         if (m_loaded && !m_loadAdmitted && !m_gain && !m_ownStartEver && target != m_inForce
             && sessionFitsMode(target, sessionProto))
-            admit(target, Pin::Unapply, why, o);
+            admit(target, why, o);
         return o;
     }
 
@@ -357,7 +352,9 @@ private:
     bool m_loaded = false;          // load() was called: before it nothing is admitted
     bool m_startupObserved = false; // the tunnel of an earlier process was looked for
     bool m_loadAdmitted = false;    // the choice has been in force at least once in this run
-    bool m_gain = false;            // Xray became usable during this run and is not admitted yet
+    bool m_gain = false;            // Xray became usable during this run: the choice was not usable since load.
+                                    // Read only before the first admission: the session found at startup does
+                                    // not take such a choice, and its admission is journalled by its own reason.
     bool m_xrayUsable = false;      // as told by the last event
     bool m_ownStartEver = false;    // this process has started a session
     bool m_sessionOwn = false;      // the current session was started by this process

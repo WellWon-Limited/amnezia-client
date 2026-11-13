@@ -207,7 +207,7 @@ static void admissionOnlyWhileNothingIsRunning()
         CHECK(!o.modeChanged && g.takeJournal().isEmpty());   // one line per wait
         o = g.observe(idleDown(), true, kIdleWhy);            // ... and it comes when everything stopped
         CHECK(changed(o, Auto, Xray));
-        CHECK(o.pin == Pin::Clear);                           // after a real gain the pin rule of a mode change
+        CHECK(o.pin == Pin::Unapply);                         // un-applied only: the saved pin is never erased
         CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
     }
     TransportModeGate g;
@@ -215,35 +215,40 @@ static void admissionOnlyWhileNothingIsRunning()
     CHECK(g.idle(idleDown()));
 }
 
-// A real gain (Xray became usable during the run) against a choice that was usable since load: only
-// the first clears the pin and has it stored cleared. Review of 3dbe0361f, finding A: every cold start
-// ran the pin rule against the stored pool and erased the pin on a transient pool state.
-static void pinIsClearedOnlyAfterARealGain()
+// No admission erases the saved pin: every one of them only un-applies a pin the mode cannot serve
+// (the engine drops it, the saved pin stays and comes back when the pool or the mode can serve it).
+// Review of 3dbe0361f, finding A: every cold start ran the pin rule against the stored pool and erased
+// the pin on a transient pool state. Review of df7f49db8: an admission after a gain still stored the
+// pin cleared - whether the pin survived depended on the age of the cached config (trusted cache ->
+// kept, untrusted cache -> erased), not on anything the user did. Only the user's tap may erase it.
+static void admissionNeverErasesThePin()
 {
-    {   // usable since load -> Unapply, whatever delayed the admission
+    {   // usable since load: journalled as the load admission
         TransportModeGate g;
         g.load(kXray, true, true);
         TransportModeGate::Outcome o = g.observe(idleDown(), true, kIdleWhy);
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
     }
-    {   // not usable at load, a fresh config allows it while idle -> Clear, why=config
+    {   // not usable at load (an untrusted cache), a fresh config allows it while idle: the same
+        // outcome for the pin, journalled by its own reason
         TransportModeGate g;
         g.load(kXray, true, false);
         g.observe(idleDown(), false, kIdleWhy);
         TransportModeGate::Outcome o = g.observe(idleDown(), true, kConfig);
-        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);
+        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
         CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=config"));
     }
-    {   // the gain arrives BEFORE the startup observation: it waits, and is still a gain afterwards
+    {   // the gain arrives BEFORE the startup observation: it waits for it
         TransportModeGate g;
         g.load(kXray, true, false);
         TransportModeGate::Outcome o = g.observe(notObserved(), true, kConfig);
         CHECK(!o.modeChanged && g.inForce() == Auto);
         o = g.startupObserved(notObserved(), true);
-        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);
+        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
         CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle")); // not "start": a gain
     }
-    {   // a gain that is lost again before the admission is no gain
+    {   // a gain that is lost again before the admission admits nothing; the next one does
         TransportModeGate g;
         g.load(kXray, true, false);
         g.observe(idleDown(), false, kIdleWhy);
@@ -252,17 +257,17 @@ static void pinIsClearedOnlyAfterARealGain()
         CHECK(!o.modeChanged && !g.choicePending(false));
         o = g.observe(idleDown(), false, kIdleWhy);
         CHECK(!o.modeChanged && g.inForce() == Auto);
-        o = g.observe(idleDown(), true, kConfig);             // a new gain, while idle
-        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);
+        o = g.observe(idleDown(), true, kConfig);             // usable again, while idle
+        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
     }
-    {   // Auto is admitted after a suspension: Auto never touches a pin beyond Unapply
+    {   // "Amnezia" is admitted back after a session that excluded it
         TransportModeGate g;
         g.load(kAwg, false, true);
         g.observe(idleDown(), true, kIdleWhy);
         g.sessionAdopted(kXray, true);                        // a live Xray session of the OS: Amnezia -> Auto
         CHECK(g.inForce() == Auto && g.choicePending(true));
         TransportModeGate::Outcome o = g.observe(idleDown(), true, kIdleWhy);
-        CHECK(changed(o, Auto, Awg) && o.pin == Pin::Unapply); // back, the saved pin is not erased
+        CHECK(changed(o, Auto, Awg) && o.pin == Pin::Unapply);
     }
 }
 
@@ -283,7 +288,8 @@ static void lossIsImmediateAndStaysForTheSession()
     CHECK(!o.modeChanged && g.inForce() == Auto);             // no return under it
     CHECK(has(g.takeJournal(), "transport_mode_pending choice=xray in_force=auto why=config"));
     o = g.observe(idleDown(), true, kIdleWhy);
-    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);     // a real gain
+    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+    CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
 
     TransportModeGate pick;                                   // the engine notices the loss at a pick
     pick.set(Xray, true);
@@ -297,7 +303,7 @@ static void lossIsImmediateAndStaysForTheSession()
     o = pick.observe(liveSession(), true, kConfig);           // usable again under the session
     CHECK(!o.modeChanged && pick.inForce() == Auto);
     o = pick.observe(idleDown(), true, kIdleWhy);
-    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);
+    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
     TransportModeGate awg;                                    // Amnezia does not depend on Xray
     awg.set(Awg, true);
     awg.writeDownLoss(false);
@@ -337,28 +343,51 @@ static void tap()
     CHECK(!o.modeChanged && dormant.inForce() == Auto);       // and Xray does not come back
 }
 
-// macOS service: tun2socks next to the service. Loss at once, gain only while nothing is running -
-// a service updated inside Connect must not add Xray between the tap and connect().
+// macOS service: tun2socks next to the service. Loss at once. A gain while "Xray" is the choice - only
+// while nothing is running: a service updated inside Connect must not bring "Xray" into force between
+// the tap and connect(). With "Auto" / "Amnezia" chosen no mode waits for the gate: it opens at once,
+// as before 139 (review of df7f49db8: an Auto user had no Xray until the first disconnect).
 static void runtimeGate()
 {
-    TransportModeGate g;
-    g.load(kAuto, false, false);
-    g.observe(idleDown(), false, kIdleWhy);
-    CHECK(g.nextRuntimeGate(/*readyNow=*/true, /*present=*/true, liveSession()));
-    CHECK(!g.nextRuntimeGate(true, false, liveSession()));    // lost under a session: off at once
-    CHECK(!g.nextRuntimeGate(true, false, startInFlight()));
-    CHECK(!g.nextRuntimeGate(true, false, idleDown()));
-    CHECK(!g.nextRuntimeGate(false, true, startInFlight()));  // the service got it inside Connect
-    CHECK(!g.nextRuntimeGate(false, true, liveSession()));
+    TransportModeGate xr;                                     // "Xray" is the choice and waits
+    xr.load(kXray, true, false);
+    xr.observe(idleDown(), false, kIdleWhy);
+    CHECK(xr.nextRuntimeGate(/*readyNow=*/true, /*present=*/true, liveSession()));
+    CHECK(!xr.nextRuntimeGate(true, false, liveSession()));   // lost under a session: off at once
+    CHECK(!xr.nextRuntimeGate(true, false, startInFlight()));
+    CHECK(!xr.nextRuntimeGate(true, false, idleDown()));
+    CHECK(!xr.nextRuntimeGate(false, true, startInFlight())); // the service got it inside Connect: closed
+    CHECK(!xr.nextRuntimeGate(false, true, liveSession()));   // ... and under the session it started
     ModeActivity install = idleDown();
     install.wantConnected = true;
     install.operationInFlight = true;                         // the service is being installed
-    CHECK(!g.nextRuntimeGate(false, true, install));
-    CHECK(g.nextRuntimeGate(false, true, idleDown()));        // ... Xray is back for the next start
-    CHECK(!g.nextRuntimeGate(false, false, idleDown()));
-    TransportModeGate cold;                                   // before the startup observation: no gain
+    CHECK(!xr.nextRuntimeGate(false, true, install));
+    CHECK(xr.nextRuntimeGate(false, true, idleDown()));       // ... until idle: Xray is back for the next start
+    CHECK(!xr.nextRuntimeGate(false, false, idleDown()));
+    TransportModeGate cold;                                   // before the startup observation: not idle yet
+    cold.load(kXray, true, false);
     CHECK(!cold.nextRuntimeGate(false, true, notObserved()));
     CHECK(cold.nextRuntimeGate(true, true, notObserved()));
+
+    TransportModeGate au;                                     // "Auto": nothing waits for the gate
+    au.load(kAuto, false, false);
+    au.observe(idleDown(), false, kIdleWhy);
+    CHECK(au.nextRuntimeGate(false, true, startInFlight()));  // the service got tun2socks inside Connect: open
+    CHECK(au.nextRuntimeGate(false, true, liveSession()));    // an always-on user does not wait for a disconnect
+    CHECK(au.nextRuntimeGate(false, true, install));
+    CHECK(au.nextRuntimeGate(false, true, idleDown()));
+    CHECK(!au.nextRuntimeGate(true, false, startInFlight())); // the loss is still at once
+    CHECK(!au.nextRuntimeGate(false, false, idleDown()));
+    TransportModeGate::Outcome o = au.observe(startInFlight(), /*xrayUsable=*/true, QStringLiteral("start"));
+    CHECK(!o.modeChanged && o.pin == Pin::Keep && au.inForce() == Auto); // opening it brings no mode into force
+    TransportModeGate aw;                                     // "Amnezia": the same
+    aw.load(kAwg, false, false);
+    CHECK(aw.nextRuntimeGate(false, true, startInFlight()));
+    o = aw.observe(startInFlight(), true, QStringLiteral("start"));
+    CHECK(!o.modeChanged && aw.inForce() == Awg);
+    TransportModeGate legacy;                                 // a dropped legacy "xray" is "Auto"
+    legacy.load(kXray, /*byChoiceBuild=*/false, false);
+    CHECK(legacy.nextRuntimeGate(false, true, startInFlight()));
 }
 
 // A live session this process did not start (the GUI restarted and the tunnel lived on; the OS started
@@ -421,7 +450,8 @@ static void sessionsThisProcessDidNotStart()
         TransportModeGate::Outcome o = g.sessionAdopted(QString(), true);
         CHECK(!o.modeChanged && g.inForce() == Auto);
         o = g.observe(idleDown(), true, kIdleWhy);
-        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Clear);
+        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
     }
     {   // a session this process started is never re-judged (a tap changed the mode, the restart is on its way)
         TransportModeGate g;
@@ -441,6 +471,46 @@ static void sessionsThisProcessDidNotStart()
         CHECK(!o.modeChanged && g.inForce() == Auto);
         o = g.observe(idleDown(), true, kIdleWhy);
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+    }
+    {   // an adoption makes the current session a foreign one again: this process started a session
+        // earlier, it ended, and the session adopted now (the OS started it) is judged by its transport
+        TransportModeGate g;
+        g.load(kXray, true, true);
+        g.observe(idleDown(), true, kIdleWhy);
+        CHECK(g.inForce() == Xray);
+        g.sessionStartedByUs();
+        g.observe(liveSession(), true, kIdleWhy);
+        g.observe(idleDown(), true, kIdleWhy);                // our session ended
+        TransportModeGate::Outcome o = g.sessionAdopted(QString(), true);
+        CHECK(!o.modeChanged && g.inForce() == Xray);         // unknown transport: not judged
+        o = g.sessionTransportKnown(kAwg, true);              // its hint arrives: AmneziaWG under "Xray"
+        CHECK(changed(o, Xray, Auto));
+    }
+    {   // the load admission happens once: after it no later session "takes the choice" as the one
+        // found at startup, and a later admission is journalled by its own reason
+        TransportModeGate g;
+        g.load(kXray, true, true);
+        TransportModeGate::Outcome o = g.observe(idleDown(), true, kIdleWhy);
+        CHECK(changed(o, Auto, Xray));
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
+        o = g.sessionAdopted(kAwg, true);                     // a foreign AmneziaWG session: Auto
+        CHECK(changed(o, Xray, Auto));
+        o = g.sessionAdopted(QString(), true);                // re-adopted with no hint (after an Error)
+        CHECK(!o.modeChanged && g.inForce() == Auto);         // not admitted under it
+        g.takeJournal();
+        o = g.observe(idleDown(), true, kIdleWhy);            // it ended
+        CHECK(changed(o, Auto, Xray));
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle")); // not "start"
+    }
+    {   // the same for a choice taken by the session found at startup
+        TransportModeGate g;
+        g.load(kXray, true, true);
+        TransportModeGate::Outcome o = g.sessionAdopted(QString(), true);
+        CHECK(changed(o, Auto, Xray));
+        o = g.sessionTransportKnown(kAwg, true);              // it is an AmneziaWG session: Auto
+        CHECK(changed(o, Xray, Auto));
+        o = g.sessionAdopted(QString(), true);
+        CHECK(!o.modeChanged && g.inForce() == Auto);
     }
     {   // an adoption is a startup observation: afterwards "no state" means down
         TransportModeGate g;
@@ -495,7 +565,7 @@ int main()
     autoAndAmneziaAreInForceFromLoad();
     xrayWaitsForTheStartupObservation();
     admissionOnlyWhileNothingIsRunning();
-    pinIsClearedOnlyAfterARealGain();
+    admissionNeverErasesThePin();
     lossIsImmediateAndStaysForTheSession();
     tap();
     runtimeGate();

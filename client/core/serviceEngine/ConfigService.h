@@ -70,7 +70,9 @@ private:
     void requestConfig(bool startedByApiSuccess);   // 5.1.109: + the refetch of reportNetworkSuccess
     void rejudgeCachedXray();                       // 5.1.109: judgeCachedXray + announce a change
     void fetchEdges();
-    void applyBody(const QByteArray &body, const QByteArray &sigB64); // verify → parse → cache → emit
+    // verify → parse → cache → emit. order - the start number of the request that carried the body:
+    // an answer is not applied once a request started LATER has been applied (see m_appliedOrder).
+    void applyBody(const QByteArray &body, const QByteArray &sigB64, quint64 order);
     int  failThreshold() const;
     bool switchToNextEdge(); // existing rotation (cached /v1/edges order, baked fallback); false = no other edge
     qint64 nowMs() const;
@@ -101,6 +103,11 @@ private:
     std::function<qint64()> m_nowMsFn;  // test clock (empty = the system clock)
     // 5.1.109 (reviews of d5d739403 and 3dbe0361f): the edge switch and the owed refetch.
     quint64        m_configSeq = 0;       // bumped by an edge switch: the request in flight went to the old edge
+    // 5.1.109 (review of df7f49db8): after an edge switch two requests are in flight and the body
+    // carries no version - only the order in which the requests were STARTED tells which answer is
+    // newer. An answer of an earlier request is still applied when it comes first.
+    quint64        m_requestOrder = 0;    // the start number of the last config request
+    quint64        m_appliedOrder = 0;    // the start number of the request whose answer is in force
     bool           m_refetchOwed = false; // a config request got no answer while on the cached copy
     qint64         m_lastRefetchMs = -1;  // when reportNetworkSuccess last asked (spacing)
 };

@@ -2520,8 +2520,9 @@ void AvpnEngineQml::syncTransportMode(const QString &why)
     applyModeChange(m_engine.noteModeActivity(modeActivity(), why));
 }
 
-// Applies what the gate decided: the journal, a stored value to rewrite, a pin to store cleared,
-// the macOS runtime gate when nothing is running any more.
+// Applies what the gate decided: the journal, a stored value to rewrite, the macOS runtime gate
+// when nothing is running any more. The saved pin is never written here: an admission only
+// un-applies a pin in the engine (review of df7f49db8).
 void AvpnEngineQml::applyModeChange(const avpn::ServiceEngine::ModeChange &c)
 {
     const QStringList journal = m_engine.takeModeJournal();
@@ -2532,8 +2533,6 @@ void AvpnEngineQml::applyModeChange(const avpn::ServiceEngine::ModeChange &c)
         s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(c.storedMode));
         s.setValue(QStringLiteral("avpn/transportModeByChoice"), true);
     }
-    if (!c.pinCleared.isEmpty())
-        persistPin(); // a real gain: the pin the admitted mode cannot serve is stored cleared
     bool gateChanged = false;
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     if (c.idleEntered)
@@ -5227,8 +5226,9 @@ void AvpnEngineQml::guardedStart()
 {
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // 5.1.109 (S4.1): the runtime gate is looked at BEFORE the start preparation, so the card and
-    // connect() read the same value. A start is in flight here (the intent is set): only the loss of
-    // tun2socks can take effect, a gain waits for the engine to be idle (refreshXrayRuntimeGate).
+    // connect() read the same value. A start is in flight here (the intent is set): with "Xray"
+    // chosen only the loss of tun2socks can take effect, a gain waits for the engine to be idle
+    // (TransportModeGate::nextRuntimeGate); with "Auto" / "Amnezia" the gate opens at once.
     if (!m_startPrepared)
         refreshXrayRuntimeGate(QStringLiteral("start"));
 #endif
@@ -5286,6 +5286,10 @@ void AvpnEngineQml::guardedStart()
                 } else {
                     // Службы нет — без установки подключиться невозможно; намерение снимаем честно.
                     m_wantConnected = false;
+                    // 5.1.109 (review of df7f49db8): this start is over - its preparation with it.
+                    // The flag used to stay set on this return: the next Connect skipped its own
+                    // preparation, and until then the facade never looked idle (no mode admission).
+                    m_startPrepared = false;
                     ++m_startAttempts;
                     reliabilityEvent(QStringLiteral("intent_off why=svc_install_declined"));
                     emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
@@ -5321,8 +5325,9 @@ void AvpnEngineQml::guardedStart()
     }
     // 5.1.108: the service is installed/updated by now - Auto must not spend attempts on an Xray path
     // the installed service cannot start (no tun2socks).
-    // 5.1.109 (S4.1): a new service WITH tun2socks no longer re-enables Xray here, between the tap and
-    // connect() - that waits for the engine to be idle (the card showed a choice made without Xray).
+    // 5.1.109 (S4.1): with "Xray" chosen a new service WITH tun2socks does not re-enable Xray here,
+    // between the tap and connect() - that waits for the engine to be idle (the card showed a choice
+    // made without Xray). With "Auto" / "Amnezia" it does, as before 139: no mode is waiting for it.
     refreshXrayRuntimeGate(QStringLiteral("start"));
 #endif
 
@@ -5435,10 +5440,11 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
     reconcile();
 }
 
-// 5.1.109 (S4.1, review of d5d739403): losing tun2socks takes effect at once (a start must not pick
-// a transport the service cannot raise); gaining it - only while nothing is running
-// (TransportModeGate::nextRuntimeGate). A service updated inside this Connect adds Xray for the
-// next start; the start in flight raises what the card showed.
+// 5.1.109 (S4.1, reviews of d5d739403 and df7f49db8): losing tun2socks takes effect at once (a start
+// must not pick a transport the service cannot raise); gaining it while "Xray" is the choice - only
+// while nothing is running: a service updated inside that Connect adds Xray for the next start, the
+// start in flight raises what the card showed. With "Auto" / "Amnezia" chosen the gain is taken at
+// once (TransportModeGate::nextRuntimeGate).
 bool AvpnEngineQml::refreshXrayRuntimeGate(const QString &why)
 {
     const bool readyNow = avpn::xrayPlatformRuntimeReady().load();
@@ -6266,6 +6272,11 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
         persistPin();
         reliabilityEvent(d.journal);
     }
+    // 5.1.109 (review of df7f49db8): "Auto" serves every country - a saved pin the previous mode
+    // could not serve (un-applied by an admission, never erased) comes back with this tap, not at
+    // the next pool refresh.
+    if (m == avpn::TransportMode::Auto)
+        restorePin();
     if (d.restartTunnel) {
         m_wantConnected = true;
         m_needsRestart = true;
