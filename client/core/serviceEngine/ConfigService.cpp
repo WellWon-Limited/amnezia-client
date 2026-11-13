@@ -89,8 +89,8 @@ qint64 ConfigService::cachedConfigAgeMin() const
 // 5.1.109: the S4.1 changes of this file act only where the client can raise Xray at all (iOS and
 // macOS - NodeRotation.h::xrayClientSupported). On Android, Windows and Linux the cached copy stays
 // frozen exactly as before 139, the config is asked for at the same moments, every transport failure
-// of a config request votes in the edge walk and an edge switch leaves the request in flight alone -
-// as before.
+// of a config request votes in the edge walk and an edge switch does not ask the new edge while a
+// request to the old one is in flight - as before.
 #if defined(Q_OS_IOS) || defined(Q_OS_MACOS)
 static constexpr bool kXrayPlatform = true;
 #else
@@ -100,7 +100,7 @@ static constexpr bool kXrayPlatform = false;
 bool ConfigService::judgeCachedXray()
 {
     const qint64 now = nowMs();
-    // One-way within a run (judgeCachedTrust): a trust that ended is not revived by a clock change.
+    // One-way within a run (judgeCachedTrust): an expired trust is not revived by a clock change.
     const XrayClientDecision d = judgeCachedTrust(m_cachedTrust, m_cachedXraySigned, m_cachedAtMs, now,
                                                   kXrayPlatform ? m_cachedMaxAgeMs : 0);
     m_xrayPolicy = d.why;
@@ -137,17 +137,23 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     const quint64 seq = m_configSeq;
     QNetworkRequest req{QUrl(m_activeBase + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
-    m_configReply = reply;
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, seq, startedByApiSuccess]() {
         reply->deleteLater();
-        if (m_configReply == reply)
-            m_configReply = nullptr;
-        // 5.1.109: the active edge was switched while this request was in flight. switchToNextEdge
-        // dropped it and asked the new edge at once; whatever the old edge did with it says nothing
-        // about the edge in use now (its failure used to be counted against the new edge).
-        if (seq != m_configSeq)
+        // 5.1.109: the active edge was switched while this request was in flight, and the new edge
+        // was asked at once (switchToNextEdge). The FAILURE of this request says nothing about the
+        // edge in use now and is ignored (it used to be counted against the new edge). Its ANSWER is
+        // as good as any: the body is signed and does not depend on the edge that carried it - it is
+        // verified and applied as 138 did (3dbe0361f dropped it: a good answer already on its way was
+        // lost and the device stayed on the cached copy until the new edge answered).
+        if (seq != m_configSeq) {
+            const int staleCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (staleCode != 0)
+                emit transportOk(); // an HTTP answer: the network is alive (the white-list detector)
+            if (staleCode >= 200 && staleCode < 300)
+                applyBody(reply->readAll(), reply->rawHeader(QByteArrayLiteral("X-Tribe-Sig")));
             return;
+        }
         m_configInFlight = false;
         // Волна-4 (P2-2, регресс 126): запрос оборвали мы сами (смена ноды/стоп гасит летящие
         // запросы), а не вход — ни отказ, ни успех; таймаут (avpn_timed_out) — честный отказ.
@@ -173,12 +179,15 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
         // любой дошедший HTTP-статус (вкл. 5xx: бэк упал, но сеть жива) = transportOk;
         // транспортный фейл только code==0. Иначе обычный 5xx-инцидент бэка кормил детектор.
         if (code == 0 || code >= 500) {
-            // 5.1.109 (review of d5d739403): who votes and who owes - classifyConfigFailure. A
-            // refetch started by an API success and an outcome the facade's classification ignores
-            // (the request outlived a freeze of the process, the window of our own tunnel
-            // transition) count neither against the edge nor for the white-list detector.
-            const bool ignored = kXrayPlatform && m_failureIgnoredFn && m_failureIgnoredFn(reply);
-            const ConfigFailure failure = classifyConfigFailure(m_fresh, startedByApiSuccess, ignored);
+            // 5.1.109 (reviews of d5d739403 and 3dbe0361f): who votes and who owes -
+            // classifyConfigFailure. A refetch started by an API success and a request that outlived
+            // a freeze of the process (its timer fired late - configRequestOutlivedFreeze; the stamp
+            // is armTimeout's, on the system clock) count neither against the edge nor for the
+            // white-list detector.
+            const bool frozen = kXrayPlatform
+                && configRequestOutlivedFreeze(reply->property("avpn_t0").toLongLong(),
+                                               QDateTime::currentMSecsSinceEpoch(), kNetTimeoutMs);
+            const ConfigFailure failure = classifyConfigFailure(m_fresh, startedByApiSuccess, frozen);
             if (code != 0)
                 emit transportOk();
             else if (failure.voteInEdgeWalk)
@@ -266,9 +275,9 @@ bool ConfigService::reportNetworkSuccess()
     // 5.1.109 (defect of 12.11.2026 on 138): an API path works again - if this process is still on the
     // cached config and the config is owed (its own request of the usual kind got no answer), ask now
     // instead of waiting for the next return to the screen (iOS has no periodic config refresh). Rides
-    // on requests the app makes anyway (bootstrap retry, subscription and account refresh). One
-    // refetch per owed episode, never closer than the refresh throttle to the previous one, and its
-    // failure neither votes in the edge walk nor arms the next refetch (ConfigCachePolicy.h).
+    // on requests the app makes anyway (bootstrap retry, subscription and account refresh). At once,
+    // then never closer than the refresh throttle to the previous such refetch; its failure does not
+    // vote in the edge walk and owes the next one after that spacing (ConfigCachePolicy.h).
     // iOS and macOS only (kXrayPlatform): the other platforms keep their refresh moments unchanged.
     const qint64 now = nowMs();
     if (kXrayPlatform && m_nam
@@ -324,18 +333,16 @@ bool ConfigService::switchToNextEdge()
     m_activeBase = next;
     ConfigStore::setActiveEdge(next);
     emit activeEdgeChanged(next);
-    // 5.1.109 (review of d5d739403): a config request still in flight went to the OLD edge. It is
-    // dropped: before, the in-flight guard swallowed the immediate request below, the new edge was not
-    // asked until the old request ended, and its failure was then counted against the new edge.
+    // 5.1.109 (reviews of d5d739403 and 3dbe0361f): a config request still in flight went to the OLD
+    // edge. Before, the in-flight guard swallowed the immediate request below, the new edge was not
+    // asked until the old request ended, and its failure was then counted against the new edge. Now
+    // the new edge is asked at once and the old request is left to finish: its answer is applied if
+    // it comes (signed, edge-independent), only its failure is ignored (the handler in requestConfig).
     // iOS and macOS (kXrayPlatform), where the refetch on an API success makes a request in flight at
     // this moment likely; the other platforms keep the behaviour they had.
     if (kXrayPlatform) {
         ++m_configSeq;
         m_configInFlight = false;
-        if (QNetworkReply *old = m_configReply) {
-            m_configReply = nullptr;
-            old->abort();
-        }
     }
     fetchConfig(); // немедленно пробуем новый вход
     return true;

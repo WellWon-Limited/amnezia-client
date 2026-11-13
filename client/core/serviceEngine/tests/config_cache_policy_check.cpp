@@ -125,49 +125,64 @@ static void journalNames()
     CHECK(std::strcmp(xrayPolicyName(XrayPolicy::CacheExpired), "cache_expired") == 0);
 }
 
-// Within a run the cached copy can lose the trust and never regain it (review of d5d739403: setting
-// the clock back revived an expired trust).
-static void trustIsOneWayWithinARun()
+// Within a run an EXPIRED trust is never regained (review of d5d739403: setting the clock back revived
+// it). Only the expiry is one-way (review of 3dbe0361f: a clock behind the receive time was sticky
+// too - after the time was corrected a one-hour-old cached "true" stayed off until a restart).
+static void expiredTrustIsOneWayWithinARun()
 {
     const qint64 at = kNow - 71 * kHour;
     CachedTrust trust;
     CHECK(is(judgeCachedTrust(trust, true, at, kNow, kBound), true, XrayPolicy::CacheTrusted));
-    CHECK(!trust.ended);
+    CHECK(!trust.expired);
     CHECK(is(judgeCachedTrust(trust, true, at, kNow + 30 * 60000, kBound), true, XrayPolicy::CacheTrusted));
     CHECK(is(judgeCachedTrust(trust, true, at, kNow + 2 * kHour, kBound), false, XrayPolicy::CacheExpired));
-    CHECK(trust.ended && trust.why == XrayPolicy::CacheExpired);
+    CHECK(trust.expired);
     // the clock is set back into the bound (not before the receive time): still expired
     CHECK(is(judgeCachedTrust(trust, true, at, kNow, kBound), false, XrayPolicy::CacheExpired));
     CHECK(is(decideXrayClient(false, true, at, kNow, kBound), true, XrayPolicy::CacheTrusted)); // the bare rule would revive it
     // ... and the server raising the bound does not revive it either: only a fresh signed answer does
     CHECK(is(judgeCachedTrust(trust, true, at, kNow, 168 * kHour), false, XrayPolicy::CacheExpired));
+    // ... nor does a detour through a clock behind the receive time
+    CHECK(is(judgeCachedTrust(trust, true, at, at - kHour, kBound), false, XrayPolicy::CacheClockBack));
+    CHECK(is(judgeCachedTrust(trust, true, at, kNow, kBound), false, XrayPolicy::CacheExpired));
 
-    CachedTrust clockBack;                                    // the clock was behind at start
-    CHECK(is(judgeCachedTrust(clockBack, true, kNow + kHour, kNow, kBound), false, XrayPolicy::CacheClockBack));
-    CHECK(is(judgeCachedTrust(clockBack, true, kNow + kHour, kNow + 2 * kHour, kBound), false, XrayPolicy::CacheClockBack));
+    // the clock was behind the receive time at start: a passing state, NOT sticky
+    CachedTrust clockBack;
+    const qint64 stamp = kNow + kHour;
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, kNow, kBound), false, XrayPolicy::CacheClockBack));
+    CHECK(!clockBack.expired);
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, stamp + kHour, kBound), true, XrayPolicy::CacheTrusted)); // the time was corrected
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, kNow, kBound), false, XrayPolicy::CacheClockBack));      // ... and went back again
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, stamp + 2 * kHour, kBound), true, XrayPolicy::CacheTrusted));
+    // corrected to a time past the bound: expired, and from then on one-way
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, stamp + 73 * kHour, kBound), false, XrayPolicy::CacheExpired));
+    CHECK(is(judgeCachedTrust(clockBack, true, stamp, stamp + kHour, kBound), false, XrayPolicy::CacheExpired));
 
-    CachedTrust off;                                          // signed "false" stays off
+    // the other reasons come from inputs that do not change within a run; they do not mark the trust
+    CachedTrust off;
     CHECK(is(judgeCachedTrust(off, false, kNow, kNow, kBound), false, XrayPolicy::CacheOff));
-    CHECK(off.ended);
+    CHECK(is(judgeCachedTrust(off, true, 0, kNow, kBound), false, XrayPolicy::CacheNoStamp));
+    CHECK(is(judgeCachedTrust(off, true, kNow, kNow, 0), false, XrayPolicy::CacheTrustOff));
+    CHECK(!off.expired);
 }
 
-// "An API path works again": ask for the config while it is owed - once per owed episode and not
-// closer than the refresh throttle to the previous refetch.
+// "An API path works again": ask for the config while it is owed - at once, then not closer than the
+// refresh throttle to the previous such refetch.
 static void refetchOnApiSuccess()
 {
     const qint64 spacing = kConfigRefreshThrottleMs;
     CHECK(spacing == 15 * 60 * 1000);                         // the foreground throttle, one constant
     // on the cached copy, owed, none in flight, no refetch yet
     CHECK(refetchConfigOnApiSuccess(/*fresh=*/false, /*inFlight=*/false, /*owed=*/true, /*lastRefetch=*/-1, kNow, spacing));
-    // nothing owed: no usual request has failed since the last refetch (d5d739403 asked on EVERY
-    // API success while /v1/config kept failing - about every 20 s under a live session)
+    // nothing owed: no config request has failed (the edge answered 4xx, or none was made yet)
     CHECK(!refetchConfigOnApiSuccess(false, false, false, -1, kNow, spacing));
     CHECK(!refetchConfigOnApiSuccess(false, false, false, kNow - 60 * 60000, kNow, spacing));
     // a request is already in flight: no second one
     CHECK(!refetchConfigOnApiSuccess(false, true, true, -1, kNow, spacing));
     // a fresh config is in force
     CHECK(!refetchConfigOnApiSuccess(true, false, true, -1, kNow, spacing));
-    // owed again (the next foreground request failed), but the previous refetch was 5 minutes ago
+    // owed again (the refetch itself failed, or the next foreground request did), but the previous
+    // refetch was 5 minutes ago (d5d739403 asked on EVERY API success - about every 20 s)
     CHECK(!refetchConfigOnApiSuccess(false, false, true, kNow - 5 * 60000, kNow, spacing));
     CHECK(!refetchConfigOnApiSuccess(false, false, true, kNow - spacing + 1, kNow, spacing));
     CHECK(refetchConfigOnApiSuccess(false, false, true, kNow - spacing, kNow, spacing));
@@ -176,27 +191,40 @@ static void refetchOnApiSuccess()
     CHECK(refetchConfigOnApiSuccess(false, false, true, kNow + kHour, kNow, spacing));
 }
 
-// A config request that got no answer: who votes in the edge walk and who arms the next refetch.
+// A config request that got no answer: who votes in the edge walk and who owes the next refetch.
 static void configFailureVotesAndOwes()
 {
     // a usual request (start, a return to the screen, an edge switch, the macOS timer) on the cache
-    ConfigFailure f = classifyConfigFailure(/*fresh=*/false, /*startedByApiSuccess=*/false, /*ignored=*/false);
+    ConfigFailure f = classifyConfigFailure(/*fresh=*/false, /*startedByApiSuccess=*/false, /*outlivedFreeze=*/false);
     CHECK(f.voteInEdgeWalk && f.refetchOwed);
     // ... with a fresh config already in force: votes as before, nothing is owed
     f = classifyConfigFailure(true, false, false);
     CHECK(f.voteInEdgeWalk && !f.refetchOwed);
     // the refetch of an API success: no vote ([success, fail, fail] switched the edge on d5d739403,
-    // not on the base) and it does not arm itself again (one refetch per owed episode)
+    // not on the base); the config is still owed - the next refetch comes after the spacing
+    // (3dbe0361f: it was not, and 180 API successes in an hour brought no config)
     f = classifyConfigFailure(false, true, false);
-    CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
-    // a request that outlived a freeze of the process / fell into our own tunnel transition: the
-    // same "Ignore" as every other API request - no vote; the config is still owed
+    CHECK(!f.voteInEdgeWalk && f.refetchOwed);
+    // a request that outlived a freeze of the process: no vote; the config is still owed
     f = classifyConfigFailure(false, false, true);
     CHECK(!f.voteInEdgeWalk && f.refetchOwed);
     f = classifyConfigFailure(true, false, true);
     CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
     f = classifyConfigFailure(false, true, true);
-    CHECK(!f.voteInEdgeWalk && !f.refetchOwed);
+    CHECK(!f.voteInEdgeWalk && f.refetchOwed);
+}
+
+// A config request that lived longer than its timeout allows was frozen with the process.
+static void requestThatOutlivedAFreeze()
+{
+    const qint64 timeout = 15000;
+    CHECK(!configRequestOutlivedFreeze(kNow - 200, kNow, timeout));       // failed at once
+    CHECK(!configRequestOutlivedFreeze(kNow - 15000, kNow, timeout));     // an honest timeout
+    CHECK(!configRequestOutlivedFreeze(kNow - 17000, kNow, timeout));     // ... with the timer's slack
+    CHECK(configRequestOutlivedFreeze(kNow - 17001, kNow, timeout));      // the timer fired late: frozen
+    CHECK(configRequestOutlivedFreeze(kNow - 8 * kHour, kNow, timeout));  // a night in the background
+    CHECK(!configRequestOutlivedFreeze(0, kNow, timeout));                // no start stamp: not judged frozen
+    CHECK(!configRequestOutlivedFreeze(kNow + kHour, kNow, timeout));     // the clock went back: not judged frozen
 }
 
 int main()
@@ -208,9 +236,10 @@ int main()
     clockMoved();
     boundFromTheServer();
     journalNames();
-    trustIsOneWayWithinARun();
+    expiredTrustIsOneWayWithinARun();
     refetchOnApiSuccess();
     configFailureVotesAndOwes();
+    requestThatOutlivedAFreeze();
     if (g_fail) {
         std::printf("config_cache_policy_check: %d FAILED of %d\n", g_fail, g_total);
         return 1;

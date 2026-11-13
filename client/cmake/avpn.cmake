@@ -63,6 +63,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/ServiceProbeTargets.h
     ${AVPN_SE}/NodeRanking.h
     ${AVPN_SE}/NodeRotation.h
+    ${AVPN_SE}/TransportModeGate.h
     ${AVPN_SE}/TransportPick.h
     ${AVPN_SE}/IRttProbe.h
     ${AVPN_SE}/RttProbeIcmp.h

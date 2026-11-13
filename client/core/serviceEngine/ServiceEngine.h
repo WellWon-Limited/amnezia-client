@@ -13,6 +13,7 @@
 #include "NodeRotation.h"
 #include "Selector.h"
 #include "Switcher.h"
+#include "TransportModeGate.h"
 #include "TransportPick.h"
 #include "dto/Subscription.h"
 
@@ -242,48 +243,47 @@ public:
     // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
     // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
     //
-    // 5.1.109 (S4.1; defect of 12.11.2026 on 138, review of d5d739403): two values.
-    //  m_chosenTransportMode - the user's CHOICE, as stored; availability never rewrites it. On 138
-    //    there was only the mode in force: a stored "Xray" read while Xray was frozen (every cold
-    //    start on the cached config) became Auto and nothing brought it back.
-    //  m_transportMode - the mode IN FORCE (what every pick reads). It changes in three ways only:
-    //    1. a tap (setTransportMode) - at once, whatever is running;
-    //    2. Xray stops being available - it reads as Auto at once and the next pick writes that down
-    //       (normalizeTransportMode, as before): the running session goes on with what is left;
-    //    3. the choice is ADMITTED (admitTransportModeChoice) - only at load and while nothing is
-    //       running; the facade decides that (DebugSnapshot.h::transportModeMayChangeNow).
-    // So a choice "Xray" that was not in force when a start began never comes into force between the
-    // tap and connect() or under the live session: re-up, failover, rotation and the engine's own
-    // switches keep the mode the session started with (or Auto after a loss).
-    void setTransportMode(TransportMode m)
-    {
-        m_chosenTransportMode = m;
-        m_transportMode = effectiveTransportMode(m);
-    }
-    // The stored choice at load: not in force until admitTransportModeChoice().
-    void setTransportModeChoice(TransportMode m) { m_chosenTransportMode = m; }
-    TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
-    TransportMode chosenTransportMode() const { return m_chosenTransportMode; }
-    void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
-    // The choice would be in force if admitted now, and is not (Xray came back under a session).
-    bool transportModeChoicePending() const
-    {
-        return effectiveTransportMode(m_chosenTransportMode) != transportMode();
-    }
-    // Brings the choice into force. A pin the admitted mode cannot serve (pinLacksTransport: a country
-    // pinned while the choice was not in force) is cleared here - the rule of a mode change,
-    // CONNECT-INVARIANTS §22 п. 8а; the facade persists and journals it. Auto never clears a pin.
-    struct ModeAdmission {
+    // 5.1.109 (S4.1; defect of 12.11.2026 on 138): the user's CHOICE is kept apart from the mode IN
+    // FORCE, and the whole rule of how the mode in force follows the choice is one plain class -
+    // TransportModeGate.h (read its header: a tap, a loss of Xray, admission at load / after the
+    // startup observation / while nothing is running, sessions this process did not start). The
+    // engine owns the gate, gives it what it cannot know (is Xray usable now, the engine phase, the
+    // pin) and feeds the session events itself; the facade forwards its own events through the
+    // calls below and applies the returned ModeChange (tests: transport_mode_gate_check for the
+    // rule, transport_pick_check §17 for this side of it).
+    void setTransportMode(TransportMode m) { m_modeGate.set(m, xrayClientSupported()); } // choice + in force
+    TransportMode transportMode() const { return effectiveTransportMode(m_modeGate.inForce()); }
+    TransportMode chosenTransportMode() const { return m_modeGate.choice(); }
+    void normalizeTransportMode() { m_modeGate.writeDownLoss(xrayClientSupported()); }
+    bool transportModeChoicePending() const { return m_modeGate.choicePending(xrayClientSupported()); }
+
+    // What an event did. pinCleared - a pin the admitted mode cannot serve was dropped after a real
+    // gain: the facade stores it cleared. pinUnapplied - dropped from the engine only, the saved pin
+    // stays (as "mode first, then restorePin" gave before 139). storeChoice - write avpn/transportMode
+    // (a legacy "xray" was dropped). idleEntered - nothing is running any more.
+    struct ModeChange {
         bool changed = false;
         TransportMode from = TransportMode::Auto;
         TransportMode to = TransportMode::Auto;
         QString pinCleared;
+        QString pinUnapplied;
+        bool storeChoice = false;
+        TransportMode storedMode = TransportMode::Auto;
+        bool idleEntered = false;
     };
-    ModeAdmission admitTransportModeChoice();
-    // A live session adopted from an earlier process runs on a transport the mode in force excludes
-    // (it was started while the choice was not in force): the session keeps Auto; the choice stays
-    // and is admitted when the engine is idle again.
-    void suspendTransportMode() { m_transportMode = TransportMode::Auto; }
+    // The stored choice at load. The facade restores the pin AFTER this call.
+    ModeChange loadTransportModeChoice(const QString &stored, bool byChoiceBuild);
+    // Every transition of the facade (it forwards changed()), a config applied, the runtime gate.
+    ModeChange noteModeActivity(const ModeActivity &a, const QString &why);
+    // The startup observation is done and the tunnel reports no state while down (macOS service:
+    // the end of the daemon probe). iOS / macOS NE need no call: their first status is it.
+    ModeChange noteStartupObserved(const ModeActivity &a);
+    // A tap on the selector: refused (Xray is not usable), a no-op, or the choice and the mode in force.
+    TransportModeGate::Tap tapTransportMode(TransportMode m) { return m_modeGate.tap(m, xrayClientSupported()); }
+    // macOS service: the next value of the tun2socks gate (loss at once, gain only while idle).
+    bool nextXrayRuntimeGate(bool readyNow, bool present, const ModeActivity &a) const;
+    // Journal lines of the gate (and of the pin rule) since the last call - the facade writes them.
+    QStringList takeModeJournal() { return m_modeGate.takeJournal(); }
 
     // AVPN awg31-xray-v1: локальная история транспортов (EWMA успеха/времени до трафика по паре
     // локация×proto, TransportPick.h). Персистит фасад (QSettings avpn/transportHistory):
@@ -509,6 +509,11 @@ private:
     // setPinnedNode and pinLacksTransport). anySupported - a connectable node of any proto.
     struct LocationTransports { bool anySupported = false; bool anyAllowed = false; };
     LocationTransports locationTransportsFor(const QString &loc, TransportMode mode) const;
+    // 5.1.109 (S4.1): the engine's side of the mode gate - the pin rule of an admission, the engine
+    // phase for "nothing is running", and sessions this process did not start.
+    ModeChange applyGateOutcome(const TransportModeGate::Outcome &o);
+    ModeActivity withEnginePhase(ModeActivity a) const;
+    void judgeAdoptedSession(const QString &sessionProto, bool adoptedNow);
     // Провал data-plane текущей ноды: история + сессионный список провалов.
     void noteDataPlaneFailure();
     // AVPN awg31-xray-v1 (reseed): применимо ли тело сейчас (терминал ИЛИ текущая/целевая нода без изменений).
@@ -588,8 +593,7 @@ private:
     qint64        m_healthySinceEpoch = 0;  // начало непрерывного здорового отрезка после шага
     qint64        m_tickPrevRx = -1;        // rx прошлого tick (рост rx = доказательство живого туннеля)
     // AVPN awg31-xray-v1:
-    TransportMode m_transportMode = TransportMode::Auto;        // the mode in force
-    TransportMode m_chosenTransportMode = TransportMode::Auto;  // 5.1.109: the user's stored choice
+    TransportModeGate m_modeGate; // 5.1.109: the stored choice and the mode in force (TransportModeGate.h)
     TransportHistory m_transportHistory;
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)

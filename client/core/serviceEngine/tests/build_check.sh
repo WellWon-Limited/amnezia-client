@@ -18,3 +18,7 @@ cd "$HERE"
 
 # AVPN H-4: сверка ручных копий never-bypass (клиент vs бэкенд)
 "$HERE/check_neverbypass_sync.sh"
+
+# 5.1.109 (S4.1): the facade forwards its events to the transport-mode gate at the expected places
+# (source level - AvpnEngineQml.cpp has no unit harness; the rule itself is tested by behaviour).
+"$HERE/check_transport_mode_wiring.sh"

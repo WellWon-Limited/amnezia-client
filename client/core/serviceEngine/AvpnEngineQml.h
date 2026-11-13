@@ -943,15 +943,19 @@ private:
     // (перенос явного pin на соседа сохраняется, неявный pin в памяти не персистится).
     void restorePin(const QString &pinBefore);
     void restorePin() { restorePin(m_engine.pinnedNodeId()); }
-    // 5.1.109 (S4.1): the stored transport-mode choice and the mode in force (ServiceEngine.h).
-    // The choice comes into force only at load and while nothing is running
-    // (DebugSnapshot.h::transportModeMayChangeNow); none of these touches the tunnel.
-    bool transportModeIdle() const;
-    void syncTransportModeChoice(const QString &why, bool atLoad = false);
-    void noteTransportAvailabilityChanged(avpn::TransportMode modeBefore, const QString &why);
-    void syncTransportAvailabilityWhileIdle(const QString &why);
-    void onChangedSyncTransportMode();
-    void keepModeOfAdoptedSession();
+    // 5.1.109 (S4.1): the stored transport-mode choice and the mode in force. The rule is
+    // TransportModeGate.h (owned by the engine, transport_mode_gate_check); the facade only tells it
+    // what it is doing (modeActivity - the ONE snapshot), forwards its events (syncTransportMode on
+    // every changed(), on a config, on a return to the screen) and applies what comes back
+    // (applyModeChange). None of these touches the tunnel.
+    avpn::ModeActivity modeActivity() const;
+    void syncTransportMode(const QString &why);
+    void syncTransportModeIdle() { syncTransportMode(QStringLiteral("idle")); }
+    void applyModeChange(const avpn::ServiceEngine::ModeChange &c);
+    // The tunnel of an earlier process was looked for and no state will be reported while it is
+    // down (the macOS service: the end of the daemon probe). iOS / macOS NE need no call: their
+    // first tunnel status is that observation.
+    void noteStartupTunnelObserved() { applyModeChange(m_engine.noteStartupObserved(modeActivity())); }
     // 5.1.109 (S4.1): journal line `xray_policy allowed= why= age_min=` at start and on a change.
     void journalXrayPolicy(bool atStart = false);
     void reliabilityEvent(const QString &event);
@@ -1051,9 +1055,9 @@ private:
     // (MacServiceInstaller::macXrayRuntimePresent -> NodeRotation.h::xrayPlatformRuntimeReady).
     // Called at construction and on every start after the service check/install.
     // 5.1.109 (S4.1): losing tun2socks takes effect at once, gaining it - only while nothing is
-    // running (DebugSnapshot.h::xrayRuntimeGateNext); never inside a start (startInFlight - the two
-    // calls of guardedStart). true = the gate changed.
-    bool refreshXrayRuntimeGate(const QString &why, bool startInFlight = false);
+    // running (TransportModeGate::nextRuntimeGate - the same "nothing is running" as the mode
+    // admission, so a call inside a start can only lose). true = the gate changed.
+    bool refreshXrayRuntimeGate(const QString &why);
 
 #endif
 #if defined(AMNEZIA_DESKTOP) && !defined(MACOS_NE)
@@ -1202,8 +1206,6 @@ private:
     quint64                     m_bootstrapSequence = 0;
     QString                     m_savedPin;
     QString                     m_xrayPolicyJournaled; // 5.1.109: the last journalled xray_policy reason
-    bool                        m_modePendingJournaled = false; // 5.1.109: transport_mode_pending written for this wait
-    bool                        m_modeIdleSeen = false;         // 5.1.109: transportModeIdle() at the last changed()
     QElapsedTimer               m_reliabilityClock;
     QTimer                      m_transitionTimer;
     // 5.1.109 (R7): wall time of the previous m_transitionTimer tick (-1 = none yet) - a late tick means

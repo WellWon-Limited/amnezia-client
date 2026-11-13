@@ -11,10 +11,11 @@
 // The rule now: the last SIGNED xray_client=true is honoured from the cache for a bounded time since
 // that signed config was received (numbers.xray_client_cache_max_age_h of the same signed copy,
 // default 72 h, 0 = never - the behaviour before 139). A fresh signed answer always wins at once, in
-// both directions. Within a run the trust is one-way: once ended it stays ended until a fresh answer
+// both directions. Within a run an EXPIRED trust stays expired until a fresh answer
 // (judgeCachedTrust). features.node_scan is NOT covered: it stays frozen from the cache (incident
 // 06.11.2026). Also here: when the config is asked for again on an API success, and what a failed
-// config request means for the edge walk (refetchConfigOnApiSuccess, classifyConfigFailure).
+// config request means for the edge walk (refetchConfigOnApiSuccess, classifyConfigFailure,
+// configRequestOutlivedFreeze).
 //
 // Accepted (review of d5d739403): the cached body is stored without its signature and the receive
 // time is a plain setting. A local user who edits them changes the behaviour of their own device
@@ -25,6 +26,8 @@
 // Tests: tests/config_cache_policy_check.cpp (the decisions), tests/config_refresh_check.cpp
 // (ConfigService with loopback servers). Canon: CONNECT-INVARIANTS §22 п. 7а, §30 п. 2а, REMOTE-TUNING §1.
 #pragma once
+
+#include "WhoamiVerdict.h" // timerFiredLate - the one rule "a deadline that fires late = the process was frozen"
 
 #include <QString>
 #include <QtGlobal>
@@ -105,26 +108,26 @@ inline XrayClientDecision decideXrayClient(bool fresh, bool signedValue, qint64 
     return {true, XrayPolicy::CacheTrusted};
 }
 
-// Within one run the cached copy can LOSE the trust and never regain it: once the cached signed
-// "true" was judged as not trusted (expired, the clock behind the receive time, no receive time, the
-// bound switched off), it stays so until a fresh signed answer - setting the clock back does not
-// revive an expired trust (review of d5d739403). ConfigService keeps one CachedTrust per run and
-// judges it again at start, before every config request, on the throttled foreground refresh and on
-// every API outcome it is told about - no timer of its own.
+// Within one run an EXPIRED trust is never regained: once the cached signed "true" was received the
+// bound ago or earlier, it stays off until a fresh signed answer - setting the clock back does not
+// revive it (review of d5d739403). Only the expiry is one-way (review of 3dbe0361f): a clock that is
+// BEHIND the receive time is a passing state (a device that has not synced its time yet) - when the
+// time is corrected a one-hour-old cached "true" is trusted again, without a restart. The other
+// reasons (no receive time, the bound switched off, a signed "false") come from inputs that do not
+// change within a run. ConfigService keeps one CachedTrust per run and judges it again at start,
+// before every config request, on the throttled foreground refresh and on every API outcome it is
+// told about - no timer of its own.
 struct CachedTrust {
-    bool ended = false;
-    XrayPolicy why = XrayPolicy::NoConfig;
+    bool expired = false;
 };
 inline XrayClientDecision judgeCachedTrust(CachedTrust &trust, bool signedValue, qint64 receivedAtMs, qint64 nowMs,
                                            qint64 maxAgeMs)
 {
-    if (trust.ended)
-        return {false, trust.why};
     const XrayClientDecision d = decideXrayClient(/*fresh=*/false, signedValue, receivedAtMs, nowMs, maxAgeMs);
-    if (!d.allowed) {
-        trust.ended = true;
-        trust.why = d.why;
-    }
+    if (d.why == XrayPolicy::CacheExpired)
+        trust.expired = true;
+    else if (trust.expired && d.allowed)
+        return {false, XrayPolicy::CacheExpired}; // expired earlier in this run: not revived
     return d;
 }
 
@@ -135,15 +138,16 @@ inline constexpr qint64 kConfigRefreshThrottleMs = 15 * 60 * 1000;
 
 // A request to the API has just succeeded on some path (AvpnEngineQml::noteApiOutcome ->
 // ConfigService::reportNetworkSuccess). Ask for /v1/config now if this process still runs on the
-// cached copy and the config is OWED: a config request of the usual kind (start, a return to the
-// screen, an edge switch, the macOS timer) got no answer. One refetch per owed episode - a failed
-// refetch does not arm the next one (classifyConfigFailure), only the next usual request that fails
-// does - and never closer than the refresh throttle to the previous refetch. No timer: the retry
+// cached copy and the config is OWED: a config request got no answer (classifyConfigFailure) - and
+// never closer than the refresh throttle to the previous such refetch. So while /v1/config keeps
+// failing and other API requests succeed, the config is asked for at once and then every 15 minutes -
+// when the path really returns, the fresh config is in force within that time. No timer: the retry
 // rides on requests the app already makes. An attempt the edge answered (4xx, a bad signature) owes
 // nothing here - the foreground throttle handles it as before.
 // Was (138): on iOS the config was asked for again only on a return to the screen or an edge switch.
 // Was (d5d739403): every API success asked again while /v1/config kept failing (about every 20 s
-// under a live session).
+// under a live session). Was (3dbe0361f): one refetch per episode - startup request fails, the one
+// refetch fails, then 180 API successes in an hour brought no config.
 inline bool refetchConfigOnApiSuccess(bool fresh, bool inFlight, bool owed, qint64 lastRefetchMs, qint64 nowMs,
                                       qint64 minSpacingMs)
 {
@@ -154,24 +158,34 @@ inline bool refetchConfigOnApiSuccess(bool fresh, bool inFlight, bool owed, qint
     return nowMs - lastRefetchMs >= minSpacingMs;
 }
 
+// A config request that lived longer than its own timeout allows was frozen with the process (iOS
+// suspended the app, a laptop slept; its timer fired on return): the time of the freeze is no
+// evidence about the edge (§29 п.5 - the same rule as for every late deadline, timerFiredLate).
+// startedMs - NetAwait.h::armTimeout's stamp on the reply (the system clock), timeoutMs - its timeout.
+// Was (138): such a request counted as a transport failure of the edge. Was (3dbe0361f): the facade
+// classified it through a callback that nothing tested; the rule now lives where the request does.
+inline bool configRequestOutlivedFreeze(qint64 startedMs, qint64 nowMs, qint64 timeoutMs)
+{
+    return startedMs > 0 && nowMs > startedMs && timerFiredLate(nowMs - startedMs, timeoutMs);
+}
+
 // A config request ended without an answer from the edge (no HTTP status, or 5xx).
 //  voteInEdgeWalk - the failure counts against the active edge (ConfigService::reportNetworkFailure)
 //                   and feeds the white-list detector. Not for a refetch started by an API success:
 //                   that request did not exist before 139 and must not add votes ([success, fail,
-//                   fail] switched the edge on d5d739403). Not for an outcome the facade's existing
-//                   classification ignores (the request outlived a freeze of the process or fell
-//                   into the window of our own tunnel transition - DebugSnapshot.h::classifyApiOutcome).
-//  refetchOwed    - the next API success may ask again: only while on the cached copy and only after
-//                   a request of the usual kind (one refetch per owed episode).
+//                   fail] switched the edge on d5d739403). Not for a request that outlived a freeze
+//                   of the process (configRequestOutlivedFreeze).
+//  refetchOwed    - the next API success may ask again (after the spacing): while on the cached
+//                   copy, whatever started the request that failed.
 struct ConfigFailure {
     bool voteInEdgeWalk = false;
     bool refetchOwed = false;
 };
-inline ConfigFailure classifyConfigFailure(bool fresh, bool startedByApiSuccess, bool outcomeIgnored)
+inline ConfigFailure classifyConfigFailure(bool fresh, bool startedByApiSuccess, bool outlivedFreeze)
 {
     ConfigFailure f;
-    f.voteInEdgeWalk = !startedByApiSuccess && !outcomeIgnored;
-    f.refetchOwed = !fresh && !startedByApiSuccess;
+    f.voteInEdgeWalk = !startedByApiSuccess && !outlivedFreeze;
+    f.refetchOwed = !fresh;
     return f;
 }
 
