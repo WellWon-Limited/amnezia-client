@@ -2,6 +2,8 @@
 #pragma once
 
 #include "dto/Subscription.h"
+#include "ConfigCachePolicy.h" // kConfigRefreshThrottleMs - the one throttle of the config refresh
+#include "TransportModeGate.h"  // ModeTunnel - what the transport-mode gate is told about the tunnel
 #include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
 #include <QHash>
 #include <QString>
@@ -313,6 +315,12 @@ inline PinRestoreAction decidePinRestore(const QString &saved, const QString &pi
     return pinBefore == saved ? PinRestoreAction::PersistMigrated : PinRestoreAction::Nothing;
 }
 
+// One format for a pin cleared because the mode cannot serve it (a tap or an admission).
+inline QString pinClearedByModeJournal(const QString &mode, const QString &nodeId)
+{
+    return QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, nodeId);
+}
+
 // 5.1.109 (review R3): the facade's decision on a transport mode change (AvpnEngineQml::setTransportMode,
 // after the new mode is applied). mode - the effective mode name ("auto" | "awg" | "xray");
 // pinnedNodeId - the engine's pin; pinLacksTransport - ServiceEngine::pinLacksTransport(effective mode);
@@ -335,13 +343,37 @@ inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QStri
     const bool autoMode = mode == QLatin1String("auto");
     if (!autoMode && !pinnedNodeId.isEmpty() && pinLacksTransport) {
         d.clearPin = true;
-        d.journal = QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, pinnedNodeId);
+        d.journal = pinClearedByModeJournal(mode, pinnedNodeId);
     }
     const bool curXray = currentProto == QLatin1String("xray");
     const bool mismatch = (mode == QLatin1String("awg") && curXray)
                           || (mode == QLatin1String("xray") && !currentProto.isEmpty() && !curXray);
     d.restartTunnel = tunnelUp && mismatch;
     return d;
+}
+
+// 5.1.109 (S4.1): how the tunnel looks to the transport-mode gate (TransportModeGate.h: when the
+// stored choice may come into force). The gate admits only when the tunnel is OBSERVED down:
+//  Unknown - no status seen in this run yet. Not "down": a session of an earlier process may be alive
+//            (review of 3dbe0361f: Unknown was treated as idle, so a config that arrived before the
+//            first status put the choice in force - and cleared the pin - under a live session);
+//  Disconnected - down, unless our own stop is still unconfirmed (then, whatever the state reads, moving);
+//  Error - down only when a start may act from it (reconcileActionable), otherwise still moving.
+inline ModeTunnel modeTunnelOf(ObservedTunnel tunnel, const TeardownLatch &latch)
+{
+    switch (tunnel) {
+    case ObservedTunnel::Connected:
+        return ModeTunnel::Up;
+    case ObservedTunnel::Unknown:
+        return latch.awaitingStopConfirm ? ModeTunnel::Moving : ModeTunnel::NotObserved;
+    case ObservedTunnel::Disconnected:
+    case ObservedTunnel::Error:
+        return (latch.awaitingStopConfirm || !reconcileActionable(tunnel, latch)) ? ModeTunnel::Moving
+                                                                                  : ModeTunnel::Down;
+    case ObservedTunnel::Transitional:
+        break;
+    }
+    return ModeTunnel::Moving;
 }
 
 // 5.1.109 (R7, device 35 build 138, 10-11.11.2026): a deadline timer that fires late means the process
@@ -694,7 +726,7 @@ inline bool networkChangeIsOwnTunnel(bool ownOpInFlight, qint64 lastOwnOpMs, qin
 // раз в 15 мин (ENG-03: iOS обновлял конфиг только перезапуском процесса).
 constexpr qint64 kFgMinInactiveMs = 10000;
 constexpr qint64 kFgSubscriptionThrottleMs = 30000;
-constexpr qint64 kFgConfigThrottleMs = 15 * 60 * 1000;
+constexpr qint64 kFgConfigThrottleMs = kConfigRefreshThrottleMs; // 15 min, ConfigCachePolicy.h (one constant)
 inline bool foregroundIsReturn(bool hiddenSeen, qint64 inactiveForMs)
 {
     return hiddenSeen || inactiveForMs >= kFgMinInactiveMs;

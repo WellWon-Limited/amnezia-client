@@ -276,6 +276,35 @@ static void pinOnTransportModeChange()
     CHECK(!d.restartTunnel);
 }
 
+// 5.1.109 (S4.1; reviews of d5d739403 and 3dbe0361f): how the tunnel looks to the transport-mode gate
+// (AvpnEngineQml::modeActivity -> TransportModeGate.h; the rule itself - transport_mode_gate_check,
+// on a real engine - transport_pick_check §17).
+static void tunnelAsTheTransportModeGateSeesIt()
+{
+    const TeardownLatch clean;
+    // no status seen in this run yet: NOT "down" - a session of an earlier process may be alive
+    CHECK(modeTunnelOf(ObservedTunnel::Unknown, clean) == ModeTunnel::NotObserved);
+    CHECK(modeTunnelOf(ObservedTunnel::Disconnected, clean) == ModeTunnel::Down);
+    CHECK(modeTunnelOf(ObservedTunnel::Connected, clean) == ModeTunnel::Up);
+    CHECK(modeTunnelOf(ObservedTunnel::Transitional, clean) == ModeTunnel::Moving);
+    // our own stop is not confirmed yet: moving, whatever the state reads
+    TeardownLatch stopping; stopping.awaitingStopConfirm = true;
+    CHECK(modeTunnelOf(ObservedTunnel::Disconnected, stopping) == ModeTunnel::Moving);
+    CHECK(modeTunnelOf(ObservedTunnel::Unknown, stopping) == ModeTunnel::Moving);
+    CHECK(modeTunnelOf(ObservedTunnel::Error, stopping) == ModeTunnel::Moving);
+    CHECK(modeTunnelOf(ObservedTunnel::Connected, stopping) == ModeTunnel::Up);
+    // an error a start may act from is down; one that needs a status first (iOS) is still moving
+    CHECK(modeTunnelOf(ObservedTunnel::Error, clean) == ModeTunnel::Down);
+    TeardownLatch afterError; afterError.needStatusBeforeStart = true;
+    CHECK(modeTunnelOf(ObservedTunnel::Error, afterError) == ModeTunnel::Moving);
+    CHECK(modeTunnelOf(ObservedTunnel::Disconnected, afterError) == ModeTunnel::Down);
+    // the journal line of a pin dropped by a tap on a mode (decidePinOnTransportMode)
+    CHECK(pinClearedByModeJournal(QStringLiteral("xray"), QStringLiteral("16:awg"))
+          == QLatin1String("pin_cleared why=transport_mode mode=xray node=16:awg"));
+    CHECK(decidePinOnTransportMode(QStringLiteral("xray"), QStringLiteral("16:awg"), true, false, QString()).journal
+          == pinClearedByModeJournal(QStringLiteral("xray"), QStringLiteral("16:awg")));
+}
+
 // 5.1.109 (R7): a deadline timer that fires late = the process was frozen (iOS suspended the app, a
 // laptop slept) - that tick must not judge the deadline; the start watchdog re-arms once and asks status.
 static void lateDeadlineTick()
@@ -704,6 +733,7 @@ int main()
     a2EmptyIssuanceKeepsPoolAndLkg();
     a6a7PinPersistence();
     pinOnTransportModeChange();
+    tunnelAsTheTransportModeGateSeesIt();
     lateDeadlineTick();
     a8a9a15InternalSwitch();
     a10a11Selection();

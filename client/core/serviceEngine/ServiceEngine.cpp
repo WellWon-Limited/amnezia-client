@@ -670,6 +670,10 @@ bool ServiceEngine::tryIdentifyCurrentNode()
     m_sessionHintNodeId.clear();
     m_sessionHintProto.clear();
     m_sessionHintEndpoint.clear();
+    // 5.1.109 (S4.1): nothing for the mode gate here. The transport of an adopted session is judged
+    // from its HINT the moment the hint exists (adoptTunnelConnected) - before its node is found in
+    // the pool; resolving the identity later (also inside a pool refresh) matches on that same
+    // hinted proto and tells the gate nothing new.
     return true;
 }
 
@@ -692,6 +696,7 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
+    m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session
     // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном
     // features.xray_client отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
     normalizeTransportMode();
@@ -719,7 +724,7 @@ bool ServiceEngine::connect(QString &error)
     // failover pin не учитывает — spec §24-26). Одноразово: запись снимается при любом исходе.
     if (interrupted.active && !interrupted.target.isEmpty()) {
         const SubscriptionNode *t = findNode(interrupted.target);
-        if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_transportMode)
+        if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_modeGate.inForce())
             && healthAggregate(*t) > 0.0 && !m_failedThisSession.contains(t->nodeId))
             candidate = *t;
     }
@@ -729,7 +734,7 @@ bool ServiceEngine::connect(QString &error)
     // Plan v3 step 5: network memory - the node that last carried data on this network goes first
     // after the manual choice (same eligibility as the automatic paths; no I/O).
     m_networkMemoryStartNodeId.clear();
-    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
+    if (!candidate && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate()) {
             candidate = *remembered;
             m_networkMemoryStartNodeId = remembered->nodeId; // owner test 06.11: forgotten if this start fails
@@ -739,7 +744,7 @@ bool ServiceEngine::connect(QString &error)
                                 .arg(m_networkMemoryNodeId, networkMemorySkipReason()));
         }
     }
-    if (!candidate && (autoPick || m_transportMode != TransportMode::Auto)) {
+    if (!candidate && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
         // AVPN awg31-xray-v1: локация — по измеренному off-tunnel RTT (кэш AvpnEngineQml::probeNodeRtt),
         // без замеров — weight-ярус (случайно среди равных); транспорт внутри — ранг + история. Без I/O.
         // Ревью CL-B (REV-2): повтор прерванного свитча идёт без нового раунда замеров (в connected
@@ -752,7 +757,7 @@ bool ServiceEngine::connect(QString &error)
         if (c)
             candidate = *c;
     }
-    if (!candidate && !autoPick && m_transportMode == TransportMode::Auto) {
+    if (!candidate && !autoPick && m_modeGate.inForce() == TransportMode::Auto) {
         // Легаси-цепочка (как до волны awg31-xray-v1; авто = только awg):
         // AVPN (выбор по скорости): «Авто (быстрейший)» — приоритет ноде с МИНИМАЛЬНЫМ ИЗМЕРЕННЫМ RTT
         // (off-tunnel ICMP, кэш из AvpnEngineQml::probeNodeRtt). Это и есть настоящий «быстрейший». Пусто
@@ -771,9 +776,9 @@ bool ServiceEngine::connect(QString &error)
     if (!candidate) {
         // AVPN awg31-xray-v1: ручной режим отфильтровал всё → честная техническая ошибка
         // (человеческий текст — AvpnEngineQml::humanEngineError); иначе штатное «нет нод».
-        if (m_transportMode != TransportMode::Auto && anySupportedNode())
+        if (m_modeGate.inForce() != TransportMode::Auto && anySupportedNode())
             error = QStringLiteral("no_transport: no '%1' candidates in pool")
-                        .arg(transportModeToString(m_transportMode));
+                        .arg(transportModeToString(m_modeGate.inForce()));
         else
             error = QStringLiteral("no nodes available");
         m_state = EngineState::Error;
@@ -1118,6 +1123,12 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     // работает и без identity (tick), подсказку запоминаем для опознания после reseed.
     bool identified = false;
     const bool hintGiven = !nodeId.isEmpty() || !endpoint.isEmpty();
+    // 5.1.109 (S4.1, review of 3dbe0361f): the transport of the session as its HINT tells it - known
+    // even while the node itself is not in the pool (empty proto in a hint = awg, as below); no hint =
+    // unknown. Before, the facade asked currentNodeProto(), which is empty until the identity is
+    // resolved - and the resolution inside a pool refresh was not looked at: a live AmneziaWG session
+    // stayed under "Xray" and its first DEAD moved it to another country with no re-up of its node.
+    const QString sessionProto = hintGiven ? (proto.isEmpty() ? QStringLiteral("awg") : proto) : QString();
     if (hintGiven) {
         const auto *node = findNode(nodeId);
         if (node && protoOf(*node) == (proto.isEmpty() ? QStringLiteral("awg") : proto)
@@ -1141,6 +1152,8 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     if (m_state == EngineState::Connected || m_state == EngineState::Verifying) {
         if (!identified)
             tryIdentifyCurrentNode();
+        if (hintGiven)
+            judgeAdoptedSession(sessionProto, /*adoptedNow=*/false); // the hint arrived after the adoption
         return false;
     }
     if (hintGiven && !identified) {
@@ -1159,6 +1172,10 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     m_switchUpPhase = false;
     m_pendingSwitchIsReup = false;
     m_interrupted = InterruptedSwitch{}; // туннель жив — повтор прерванного свитча не нужен
+    // 5.1.109 (S4.1): a live session this process did not start. The mode in force for it is decided
+    // by the gate: a known transport the mode excludes -> Auto; the session found at startup takes
+    // the stored choice unless its known transport contradicts it (TransportModeGate.h).
+    judgeAdoptedSession(sessionProto, /*adoptedNow=*/true);
     return true;
 }
 
@@ -1298,7 +1315,7 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
         normalizeTransportMode();
         const SubscriptionNode *cur = findNode(m_currentNodeId);
         if (cur && isSupportedProtoNode(*cur) && healthAggregate(*cur) > 0.0
-            && transportAllowed(*cur, m_transportMode)) {
+            && transportAllowed(*cur, m_modeGate.inForce())) {
             ++m_sameNodeReupTries;
             noteHealStep();
             appendSwitchLog(QStringLiteral("re-up same node %1 (dead data-plane, try %2)")
@@ -1341,7 +1358,7 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
     // B3: identity неизвестна → локации нет, exclA пуст — авто-выбор из всего пула.
     std::optional<SubscriptionNode> candidate;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    if (autoPick || m_transportMode != TransportMode::Auto) {
+    if (autoPick || m_modeGate.inForce() != TransportMode::Auto) {
         const QString loc = deadLocation.isEmpty() ? currentLocation() : deadLocation;
         const SubscriptionNode *c = nullptr;
         if (!loc.isEmpty())
@@ -1429,7 +1446,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
         if (applyPendingReseedBetweenRuntimes()) {
             const SubscriptionNode *t = findNode(m_pendingSwitchNodeId);
             if (!t || !isSupportedProtoNode(*t) || healthAggregate(*t) <= 0.0
-                || !transportAllowed(*t, m_transportMode)) {
+                || !transportAllowed(*t, m_modeGate.inForce())) {
                 // Цель исчезла/выведена новым пулом → шаг 3 с предпочтением её локации.
                 const QString gone = m_pendingSwitchNodeId;
                 const SubscriptionNode *c = nullptr;
@@ -1637,7 +1654,7 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     // узел, разрешённый ручным режимом. Строки ТЕХНИЧЕСКИЕ (лог/тесты); человеческий текст для
     // тоста — на границе фасада (AvpnEngineQml::humanPinError), маппится по стабильному префиксу.
     const QString loc = locationKeyOf(*found);
-    const LocationTransports lt = locationTransportsFor(loc, m_transportMode);
+    const LocationTransports lt = locationTransportsFor(loc, m_modeGate.inForce());
     const bool anySupported = lt.anySupported, anyAllowed = lt.anyAllowed;
     if (!anySupported) {
         // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
@@ -1647,7 +1664,7 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     }
     if (!anyAllowed) {
         error = QStringLiteral("no_transport: location %1 has no '%2' transport")
-                    .arg(loc, transportModeToString(m_transportMode));
+                    .arg(loc, transportModeToString(m_modeGate.inForce()));
         return false;
     }
     m_pinnedNodeId = nodeId;
@@ -1677,6 +1694,67 @@ bool ServiceEngine::pinLacksTransport(TransportMode mode) const
         return false;
     const LocationTransports lt = locationTransportsFor(locationKeyOf(*pinned), effectiveTransportMode(mode));
     return lt.anySupported && !lt.anyAllowed;
+}
+
+// ---- 5.1.109 (S4.1): the transport mode in force follows the stored choice by the rule of
+// TransportModeGate.h. Here - what that rule cannot know: whether Xray is usable right now, the
+// engine phase, and the pin. ----
+
+ServiceEngine::ModeChange ServiceEngine::applyGateOutcome(const TransportModeGate::Outcome &o)
+{
+    ModeChange c;
+    c.changed = o.modeChanged;
+    c.from = o.from;
+    c.to = o.to;
+    c.storeChoice = o.storeChoice;
+    c.storedMode = o.storedMode;
+    c.idleEntered = o.idleEntered;
+    // A pin the admitted mode cannot serve is un-applied: the engine drops it and the SAVED one stays
+    // (the facade does not store anything), as the order "mode first, then restorePin" gave before
+    // 139 - it comes back when the pool or the mode can serve it again. An admission never erases
+    // the saved pin: that is the user's tap only (review of df7f49db8).
+    if (o.pin == TransportModeGate::Pin::Unapply && pinLacksTransport(transportMode())) {
+        c.pinUnapplied = m_pinnedNodeId;
+        m_modeGate.note(QStringLiteral("pin_not_applied why=transport_mode mode=%1 node=%2")
+                            .arg(transportModeToString(transportMode()), m_pinnedNodeId));
+        m_pinnedNodeId.clear();
+    }
+    return c;
+}
+
+ModeActivity ServiceEngine::withEnginePhase(ModeActivity a) const
+{
+    a.engineBusy = m_state != EngineState::Disconnected && m_state != EngineState::Error;
+    return a;
+}
+
+ServiceEngine::ModeChange ServiceEngine::loadTransportModeChoice(const QString &stored, bool byChoiceBuild)
+{
+    return applyGateOutcome(m_modeGate.load(stored, byChoiceBuild, xrayClientSupported()));
+}
+
+ServiceEngine::ModeChange ServiceEngine::noteModeActivity(const ModeActivity &a, const QString &why)
+{
+    return applyGateOutcome(m_modeGate.observe(withEnginePhase(a), xrayClientSupported(), why));
+}
+
+ServiceEngine::ModeChange ServiceEngine::noteStartupObserved(const ModeActivity &a)
+{
+    return applyGateOutcome(m_modeGate.startupObserved(withEnginePhase(a), xrayClientSupported()));
+}
+
+bool ServiceEngine::nextXrayRuntimeGate(bool readyNow, bool present, const ModeActivity &a) const
+{
+    return m_modeGate.nextRuntimeGate(readyNow, present, withEnginePhase(a));
+}
+
+// The transport of a session this process did not start, as its hint tells it: "awg" | "xray"; empty =
+// no hint, unknown. The gate decides (a known transport the mode excludes -> Auto for the session;
+// the session found at startup takes the stored choice unless its known transport contradicts it).
+void ServiceEngine::judgeAdoptedSession(const QString &sessionProto, bool adoptedNow)
+{
+    applyGateOutcome(adoptedNow ? m_modeGate.sessionAdopted(sessionProto, xrayClientSupported())
+                                : m_modeGate.sessionTransportKnown(sessionProto, xrayClientSupported()));
 }
 
 // AVPN (live-node picker): round-robin «Обновить подключение» — по ЛОКАЦИЯМ (NodeRotation.h::

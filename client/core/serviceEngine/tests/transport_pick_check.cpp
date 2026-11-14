@@ -1312,6 +1312,356 @@ int main(int argc, char **argv)
         }
     }
 
+    // §17. 5.1.109 (S4.1; defect of 12.11.2026 on 138; reviews of d5d739403 and 3dbe0361f): the user's
+    // CHOICE of the transport mode is kept apart from the mode IN FORCE. The rule itself is
+    // TransportModeGate.h (transport_mode_gate_check); here - the engine's side of it on a real engine:
+    // the pin, the pick paths, and the sessions the engine adopts.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0, 10, "203.0.113.9:585"),
+                                          xrayNodeJson("9:xray", 9, "DE", 1.0, 20, "203.0.113.9:443"),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0, 10, "203.0.113.16:585") });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        const QString kStoredXray = QStringLiteral("xray"), kStoredAwg = QStringLiteral("awg");
+        // The facade's snapshots (AvpnEngineQml::modeActivity); the engine adds its own phase.
+        ModeActivity idleDown;                       // nothing runs, the tunnel is observed down
+        idleDown.tunnel = ModeTunnel::Down;
+        ModeActivity live;                           // the intent is set, the tunnel is up
+        live.wantConnected = true;
+        live.tunnel = ModeTunnel::Up;
+        const ModeActivity notObserved;              // a cold start before the first tunnel status
+        QString err;
+        auto has = [](const QStringList &journal, const char *prefix) {
+            for (const QString &l : journal)
+                if (l.startsWith(QLatin1String(prefix)))
+                    return true;
+            return false;
+        };
+
+        {   // A fresh config allows Xray UNDER a live session (review of d5d739403, finding 2): the
+            // session keeps Auto, the pin is not touched, its failover has the AmneziaWG fallback; the
+            // choice comes into force when everything stopped, and the pin the mode cannot serve is
+            // only un-applied - no admission erases a saved pin (review of df7f49db8).
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            ServiceEngine::ModeChange c = eng.loadTransportModeChoice(kStoredXray, /*byChoiceBuild=*/true);
+            CHECK(!c.changed && !c.storeChoice);
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray);  // the choice is kept (138: lost)
+            CHECK(eng.transportMode() == TransportMode::Auto);        // Xray is frozen: Auto in force
+            CHECK(eng.debugSnapshot().transportMode == QLatin1String("auto"));
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));  // restorePin: Serbia, AmneziaWG only
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(!c.changed && !eng.transportModeChoicePending());
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("16:awg"));       // what the card showed
+            CHECK(eng.onTunnelConnected());
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);         // the fresh signed config allows Xray
+            c = eng.noteModeActivity(live, QStringLiteral("config"));
+            CHECK(!c.changed && c.pinUnapplied.isEmpty());
+            CHECK(eng.transportMode() == TransportMode::Auto);        // NOT in force under the session
+            CHECK(eng.transportModeChoicePending());
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));
+            CHECK(has(eng.takeModeJournal(), "transport_mode_pending choice=xray in_force=auto why=config"));
+            // The engine's own phase counts too: the facade's snapshot may look idle for a moment.
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(!c.changed && eng.transportMode() == TransportMode::Auto);
+            CHECK(eng.notifyConnectionLost());                        // the first DEAD of that session
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));        // the AmneziaWG fallback, not Xray only
+            CHECK(eng.onTunnelConnected());
+            CHECK(eng.transportMode() == TransportMode::Auto);
+            eng.requestStop();                                        // the user disconnects
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(c.changed && c.from == TransportMode::Auto && c.to == TransportMode::Xray);
+            CHECK(c.pinUnapplied == QLatin1String("16:awg"));         // dropped from the engine, not erased
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.transportMode() == TransportMode::Xray && !eng.transportModeChoicePending());
+            CHECK(has(eng.takeModeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
+            const SubscriptionNode *next = eng.nextCandidate();
+            CHECK(next && next->nodeId == QLatin1String("9:xray"));   // the card before the tap ...
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));       // ... and what Connect raises
+        }
+        {   // Review of df7f49db8, item 2. The same gain while nothing runs (a cold start on an
+            // untrusted cache, then the fresh config): the pin is un-applied exactly as with a trusted
+            // cache - what happens to it does not depend on the age of the cache. The saved pin (the
+            // facade's) is not touched and applies again after a tap on "Auto".
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            const ServiceEngine::ModeChange c = eng.noteModeActivity(idleDown, QStringLiteral("config"));
+            CHECK(c.changed && c.to == TransportMode::Xray);
+            CHECK(c.pinUnapplied == QLatin1String("16:awg"));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            const QStringList journal = eng.takeModeJournal();
+            CHECK(has(journal, "transport_mode_effective from=auto to=xray why=config"));
+            CHECK(has(journal, "pin_not_applied why=transport_mode mode=xray node=16:awg"));
+            CHECK(!has(journal, "pin_cleared"));
+            CHECK(!eng.setPinnedNode(QStringLiteral("16:awg"), err));        // restorePin under "Xray": refused, stays saved
+            CHECK(!eng.tapTransportMode(TransportMode::Auto).noop);          // the user taps "Auto" ...
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));         // ... and restorePin applies the saved pin
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));
+        }
+        {   // Review of 3dbe0361f, finding A. A cold start: Xray chosen and usable, Germany pinned as
+            // 9:awg, Germany's Xray listener temporarily NOT in the stored pool. The pin must not be
+            // erased by the launch: it is un-applied (the engine drops it) and stays saved, as the
+            // order "mode first, then restorePin" gave before 139; when the listener is back the
+            // saved pin applies again.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            const QByteArray storedPool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                                    awgNodeJson("9:awg", 9, "DE", 1.0, 10, "203.0.113.9:585"),
+                                                    xrayNodeJson("7:xray", 7, "NL", 1.0, 20, "203.0.113.7:443") });
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(storedPool, err));
+            ServiceEngine::ModeChange c = eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(!c.changed && eng.transportMode() == TransportMode::Auto); // waits for the startup observation
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));          // restorePin at load
+            c = eng.noteModeActivity(notObserved, QStringLiteral("config")); // a config before the first status
+            CHECK(!c.changed && eng.pinnedNodeId() == QLatin1String("9:awg"));
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));      // the first status: no session
+            CHECK(c.changed && c.to == TransportMode::Xray);
+            CHECK(c.pinUnapplied == QLatin1String("9:awg"));                 // NOT erased (3dbe0361f: erased)
+            CHECK(eng.pinnedNodeId().isEmpty());
+            const QStringList journal = eng.takeModeJournal();
+            CHECK(has(journal, "transport_mode_effective from=auto to=xray why=start"));
+            CHECK(has(journal, "pin_not_applied why=transport_mode mode=xray node=9:awg"));
+            CHECK(!has(journal, "pin_cleared"));
+            CHECK(eng.loadSubscription(pool, err));                          // the listener is back in the pool
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));          // restorePin applies the saved pin
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        {   // The mirror case in Amnezia mode: in force from load, BEFORE the pin is restored - the
+            // engine refuses a pin the mode cannot serve and nothing is asked of the saved one.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                                 xrayNodeJson("9:xray", 9, "DE", 1.0, 20, "203.0.113.9:443") }), err));
+            ServiceEngine::ModeChange c = eng.loadTransportModeChoice(kStoredAwg, /*byChoiceBuild=*/false);
+            CHECK(c.changed && c.to == TransportMode::Awg);
+            CHECK(eng.transportMode() == TransportMode::Awg);                // no startup observation is waited for
+            CHECK(c.pinUnapplied.isEmpty());
+            CHECK(!eng.setPinnedNode(QStringLiteral("9:xray"), err));        // restorePin: refused, stays saved
+            CHECK(err.startsWith(QLatin1String("no_transport")));
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(!c.changed && c.pinUnapplied.isEmpty());
+            CHECK(eng.takeModeJournal().isEmpty());
+        }
+        {   // Review of 3dbe0361f, finding C. The app is relaunched with the VPN on: an AmneziaWG session
+            // on Serbia (pinned), Xray chosen and usable. Nothing is admitted before the session is
+            // seen, the session keeps Auto, the pin survives; after the disconnect the choice comes
+            // into force and the pin is un-applied, not erased.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            ServiceEngine::ModeChange c = eng.noteModeActivity(notObserved, QStringLiteral("config"));
+            CHECK(!c.changed && eng.transportMode() == TransportMode::Auto);
+            CHECK(eng.adoptTunnelConnected(QStringLiteral("16:awg"), QStringLiteral("awg"), QStringLiteral("203.0.113.16:585")));
+            CHECK(eng.currentNodeId() == QLatin1String("16:awg"));
+            CHECK(eng.transportMode() == TransportMode::Auto);               // its transport is known: Auto
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));            // 3dbe0361f: cleared and stored
+            c = eng.noteModeActivity(live, QStringLiteral("idle"));
+            CHECK(!c.changed && eng.pinnedNodeId() == QLatin1String("16:awg"));
+            CHECK(eng.notifyConnectionLost());                               // DEAD: not confined to Xray
+            CHECK(!isXrayProto(eng.currentNodeProto()));
+            CHECK(eng.onTunnelConnected());
+            eng.requestStop();
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(c.changed && c.to == TransportMode::Xray);
+            CHECK(c.pinUnapplied == QLatin1String("16:awg"));
+        }
+        {   // Review of 3dbe0361f, finding B. The adopted AmneziaWG session's node is NOT in the stored
+            // pool: its transport is known from the session hint at once - no wait for a pool refresh
+            // to resolve the identity. (Before: currentNodeProto() was empty until then, the session
+            // stayed under "Xray" and its first DEAD moved it to another country's Xray.)
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            const QByteArray storedPool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                                    awgNodeJson("9:awg", 9, "DE", 1.0, 10, "203.0.113.9:585"),
+                                                    xrayNodeJson("9:xray", 9, "DE", 1.0, 20, "203.0.113.9:443") });
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(storedPool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.adoptTunnelConnected(QStringLiteral("16:awg"), QStringLiteral("awg"), QStringLiteral("203.0.113.16:585")));
+            CHECK(!eng.currentIdentityKnown());                              // not in the stored pool
+            CHECK(eng.transportMode() == TransportMode::Auto);               // 3dbe0361f: Xray
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                                 awgNodeJson("9:awg", 9, "DE", 1.0, 10, "203.0.113.9:585"),
+                                                 xrayNodeJson("9:xray", 9, "DE", 1.0, 20, "203.0.113.9:443"),
+                                                 awgNodeJson("16:awg", 16, "RS", 1.0, 10, "203.0.113.16:585") }, 2), err));
+            CHECK(eng.currentNodeId() == QLatin1String("16:awg"));           // resolved inside the refresh
+            CHECK(eng.transportMode() == TransportMode::Auto);
+            const int ups = tun.upCalls;
+            tun.st = mkStats(1000, 100, 100);
+            CHECK(eng.notifyConnectionLost());                               // the first DEAD after the refresh
+            CHECK(tun.upCalls == ups + 1 && !isXrayProto(eng.currentNodeProto())); // an AmneziaWG node
+        }
+        {   // A hint with an empty proto is an AmneziaWG session (the hint of sessions started before
+            // the proto was written) - a KNOWN transport, not "unknown": under a chosen "Xray" it keeps
+            // Auto, at the adoption and when the hint arrives later.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            CHECK(eng.adoptTunnelConnected(QStringLiteral("16:awg"), QString(), QStringLiteral("203.0.113.16:585")));
+            CHECK(eng.currentNodeId() == QLatin1String("16:awg"));
+            CHECK(eng.transportMode() == TransportMode::Auto);               // "unknown" would take the choice
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));
+            ServiceEngine late; FakeTunnel tun2; late.setTunnel(&tun2);
+            CHECK(late.loadSubscription(pool, err));
+            late.loadTransportModeChoice(kStoredXray, true);
+            CHECK(late.adoptTunnelConnected());                              // no hint yet: takes the choice
+            CHECK(late.transportMode() == TransportMode::Xray);
+            CHECK(!late.adoptTunnelConnected(QStringLiteral("16:awg"), QString(), QStringLiteral("203.0.113.16:585")));
+            CHECK(late.transportMode() == TransportMode::Auto);
+        }
+        {   // The hint arrives after the adoption (iOS: the session metadata is read later): a session
+            // adopted with no hint takes the choice; when the hint says AmneziaWG it goes back to Auto.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            CHECK(eng.adoptTunnelConnected());                               // no hint: transport unknown
+            CHECK(eng.transportMode() == TransportMode::Xray);               // the session takes the choice
+            CHECK(eng.pinnedNodeId().isEmpty());                             // un-applied (the saved pin stays)
+            QStringList journal = eng.takeModeJournal();
+            CHECK(has(journal, "transport_mode_effective from=auto to=xray why=adopted_session"));
+            CHECK(has(journal, "pin_not_applied why=transport_mode mode=xray node=16:awg"));
+            CHECK(!eng.adoptTunnelConnected(QStringLiteral("16:awg"), QStringLiteral("awg"), QStringLiteral("203.0.113.16:585")));
+            CHECK(eng.transportMode() == TransportMode::Auto);               // known now: AmneziaWG
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray);
+            CHECK(has(eng.takeModeJournal(), "transport_mode_effective from=xray to=auto why=adopted_session"));
+            // an Xray session found at startup with its hint keeps the choice
+            ServiceEngine xr; FakeTunnel tun2; xr.setTunnel(&tun2);
+            CHECK(xr.loadSubscription(pool, err));
+            xr.loadTransportModeChoice(kStoredXray, true);
+            CHECK(xr.adoptTunnelConnected(QStringLiteral("9:xray"), QStringLiteral("xray"), QStringLiteral("203.0.113.9:443")));
+            CHECK(xr.transportMode() == TransportMode::Xray);
+        }
+        {   // A session this process started is not re-judged when its identity is refined; a session
+            // adopted later in the run does not admit a waiting choice.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.connect(err));                                         // Connect before the first status
+            CHECK(tun.lastUpNodeId == QLatin1String("2:awg"));               // under Auto
+            CHECK(eng.onTunnelConnected());
+            CHECK(!eng.adoptTunnelConnected());                              // a repeated Connected, no hint
+            CHECK(eng.transportMode() == TransportMode::Auto);               // the waiting choice is not admitted
+            eng.requestStop();
+            const ServiceEngine::ModeChange c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(c.changed && c.to == TransportMode::Xray);
+            // ... also when its transport happens to be the chosen one: started under Auto on a pinned
+            // Xray node, its identity confirmed by a hint - still the session of this process, the
+            // choice waits for it to end (connect() tells the gate whose session it is)
+            ServiceEngine own; FakeTunnel tun2; own.setTunnel(&tun2);
+            CHECK(own.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0, 10, "203.0.113.2:585"),
+                                                 xrayNodeJson("7:xray", 7, "NL", 1.0, 20, "203.0.113.7:443") }), err));
+            own.loadTransportModeChoice(kStoredXray, true);
+            CHECK(own.setPinnedNode(QStringLiteral("7:xray"), err));
+            CHECK(own.connect(err));
+            CHECK(tun2.lastUpNodeId == QLatin1String("7:xray"));
+            own.onTunnelConnected();
+            own.verifySucceeded();
+            CHECK(own.state() == EngineState::Connected);
+            CHECK(!own.adoptTunnelConnected(QStringLiteral("7:xray"), QStringLiteral("xray"), QStringLiteral("203.0.113.7:443")));
+            CHECK(own.transportMode() == TransportMode::Auto && own.transportModeChoicePending());
+            CHECK(own.pinnedNodeId() == QLatin1String("7:xray"));
+        }
+        {   // Xray goes away under a live Xray session (the server switch): it reads as Auto at once,
+            // the failover has AmneziaWG, and Xray does not come back under that session.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.loadTransportModeChoice(kStoredXray, true);
+            ServiceEngine::ModeChange c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(c.changed && eng.transportMode() == TransportMode::Xray);  // the load admission
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("9:xray"));
+            CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto);               // the switch acts on the next pick
+            CHECK(eng.notifyConnectionLost());
+            CHECK(!isXrayProto(eng.currentNodeProto()));                     // an AmneziaWG node, not no_transport
+            CHECK(eng.onTunnelConnected());
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            c = eng.noteModeActivity(live, QStringLiteral("config"));
+            CHECK(!c.changed && eng.transportMode() == TransportMode::Auto); // no return under the session
+            CHECK(eng.chosenTransportMode() == TransportMode::Xray && eng.transportModeChoicePending());
+            eng.requestStop();
+            c = eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(c.changed && eng.transportMode() == TransportMode::Xray);
+        }
+        {   // The macOS service reports no tunnel state while down: the end of its startup probe is the
+            // observation (the facade calls noteStartupObserved at every way the probe ends). Before
+            // it "no state" is not "down": a config that arrives in that window (it always does -
+            // the probe runs 1.5 s after launch) admits nothing and opens no runtime gate.
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.loadTransportModeChoice(kStoredXray, true);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            ServiceEngine::ModeChange c = eng.noteModeActivity(notObserved, QStringLiteral("config"));
+            CHECK(!c.changed && !c.idleEntered && eng.transportMode() == TransportMode::Auto);
+            CHECK(!eng.nextXrayRuntimeGate(/*readyNow=*/false, /*present=*/true, notObserved));
+            c = eng.noteStartupObserved(notObserved);                        // the daemon holds no tunnel
+            CHECK(c.changed && c.to == TransportMode::Xray && c.idleEntered);
+            CHECK(c.pinUnapplied == QLatin1String("16:awg"));
+            CHECK(has(eng.takeModeJournal(), "transport_mode_effective from=auto to=xray why=start"));
+            CHECK(eng.nextXrayRuntimeGate(false, true, notObserved));        // "no state" now means down
+            // ... and when the daemon does hold a tunnel, the adoption is that observation
+            ServiceEngine held; FakeTunnel tun2; held.setTunnel(&tun2);
+            CHECK(held.loadSubscription(pool, err));
+            held.loadTransportModeChoice(kStoredAwg, false);
+            CHECK(held.adoptTunnelConnected());                              // the macOS service passes no hint
+            CHECK(held.transportMode() == TransportMode::Awg);               // unknown transport: not judged
+            c = held.noteStartupObserved(live);
+            CHECK(!c.changed && !c.idleEntered);
+        }
+        {   // The tap, the legacy value, the macOS runtime gate - through the engine's wrappers.
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            const ServiceEngine::ModeChange c = eng.loadTransportModeChoice(kStoredXray, /*byChoiceBuild=*/false);
+            CHECK(c.storeChoice && c.storedMode == TransportMode::Auto);     // a "xray" of 138: dropped once
+            CHECK(eng.chosenTransportMode() == TransportMode::Auto);
+            CHECK(has(eng.takeModeJournal(), "transport_mode_legacy_reset stored=xray"));
+            eng.noteModeActivity(idleDown, QStringLiteral("idle"));
+            CHECK(eng.tapTransportMode(TransportMode::Xray).refused);        // Xray is not usable
+            CHECK(eng.chosenTransportMode() == TransportMode::Auto);
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto);               // and it does not come back by itself
+            TransportModeGate::Tap t = eng.tapTransportMode(TransportMode::Xray);
+            CHECK(!t.refused && !t.noop && eng.transportMode() == TransportMode::Xray);
+            CHECK(eng.tapTransportMode(TransportMode::Xray).noop);
+            // the gate: gained only while nothing runs - the ENGINE's phase counts, whatever the facade says
+            CHECK(eng.nextXrayRuntimeGate(/*readyNow=*/false, /*present=*/true, idleDown));
+            CHECK(eng.connect(err));
+            CHECK(!eng.nextXrayRuntimeGate(false, true, idleDown));          // a start in flight
+            CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+            CHECK(!eng.nextXrayRuntimeGate(false, true, idleDown));          // a live session
+            CHECK(!eng.nextXrayRuntimeGate(true, false, idleDown));          // lost: off at once
+            eng.requestStop();
+            CHECK(eng.nextXrayRuntimeGate(false, true, idleDown));
+            CHECK(!eng.nextXrayRuntimeGate(false, true, live));
+        }
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

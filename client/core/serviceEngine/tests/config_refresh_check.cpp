@@ -5,6 +5,7 @@
 #include <QStringList>
 namespace avpn {
 static QByteArray cachedConfig;
+static qint64 cachedConfigAtMs = 0; // 5.1.109: when the cached signed body was received (0 = unknown)
 static int savedConfigs = 0;
 static QString storedActiveEdge;   // 5.1.108: the persisted active edge of an earlier run
 static int savedEdges = 0;
@@ -12,7 +13,13 @@ static int activeEdgeWrites = 0;
 class ConfigStore {
 public:
     static QByteArray loadConfig() { return cachedConfig; }
-    static void saveConfig(const QByteArray &body) { cachedConfig = body; ++savedConfigs; }
+    static void saveConfig(const QByteArray &body, qint64 receivedAtMs)
+    {
+        cachedConfig = body;
+        cachedConfigAtMs = receivedAtMs;
+        ++savedConfigs;
+    }
+    static qint64 configReceivedAtMs() { return cachedConfigAtMs; }
     static QStringList loadEdges() { return {}; }
     static void saveEdges(const QStringList &) { ++savedEdges; }
     static QString activeEdge(const QString &value) { return storedActiveEdge.isEmpty() ? value : storedActiveEdge; }
@@ -24,10 +31,79 @@ bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 }
 }
 #include "../ConfigService.cpp"
+#include <QList>
+#include <QPointer>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSignalSpy>
 #include <QTest>
+#include <functional>
+#include <utility>
+
+// No test in this file may reach a real host: every request goes to a loopback fixture. A request
+// to anything else (a regression of the pinned edge, a walk to a compiled-in prod edge) aborts the
+// run instead of touching a server.
+class LoopbackOnlyNam : public QNetworkAccessManager {
+protected:
+    QNetworkReply *createRequest(Operation op, const QNetworkRequest &request, QIODevice *outgoingData = nullptr) override
+    {
+        const QString host = request.url().host();
+        if (host != QLatin1String("127.0.0.1"))
+            qFatal("config_refresh_check: a test tried to reach %s", qPrintable(host));
+        return QNetworkAccessManager::createRequest(op, request, outgoingData);
+    }
+};
+
+// 5.1.109 tests: a loopback server (127.0.0.1 only - no test here reaches a real host) that answers
+// the n-th GET /v1/config by a script; an empty answer = the request stays in flight until
+// answerHeld(). Everything else (/v1/edges) gets an unsigned "{}".
+static QByteArray httpAnswer(const char *status, const QByteArray &body, const char *sig = "fixture-signature")
+{
+    return QByteArray("HTTP/1.1 ") + status + "\r\nConnection: close\r\nX-Tribe-Sig: " + sig
+           + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+}
+class ConfigServer : public QObject {
+public:
+    explicit ConfigServer(std::function<QByteArray(int)> script) : m_script(std::move(script))
+    {
+        m_server.listen(QHostAddress::LocalHost);
+        connect(&m_server, &QTcpServer::newConnection, this, [this]() {
+            while (auto *socket = m_server.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [this, socket]() {
+                    const bool config = socket->readAll().startsWith("GET /v1/config ");
+                    const QByteArray answer = config ? m_script(++configRequests) : httpAnswer("200 OK", "{}", "none");
+                    if (answer.isEmpty()) {
+                        m_held << socket; // in flight
+                        return;
+                    }
+                    socket->write(answer);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+    }
+    // The requests left in flight get their answer now (a late answer of this edge).
+    void answerHeld(const QByteArray &answer)
+    {
+        for (const QPointer<QTcpSocket> &socket : std::exchange(m_held, {}))
+            if (socket) {
+                socket->write(answer);
+                socket->disconnectFromHost();
+            }
+    }
+    bool listening() const { return m_server.isListening(); }
+    QString base() const { return QString("http://127.0.0.1:%1").arg(m_server.serverPort()); }
+    int configRequests = 0;
+
+private:
+    QTcpServer m_server;
+    std::function<QByteArray(int)> m_script;
+    QList<QPointer<QTcpSocket>> m_held;
+};
+
+static const qint64 kTestNowMs = 1794500000000LL; // a fixed "now" for the injected clock
+static const qint64 kHourMs = 3600LL * 1000;
 
 class ConfigRefreshTest : public QObject {
     Q_OBJECT
@@ -35,6 +111,7 @@ private slots:
     void init()
     {
         avpn::cachedConfig.clear();
+        avpn::cachedConfigAtMs = 0;
         avpn::savedConfigs = 0;
         avpn::storedActiveEdge.clear();
         avpn::savedEdges = 0;
@@ -66,7 +143,7 @@ private slots:
                 });
             }
         });
-        QNetworkAccessManager network;
+        LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         {
             // Unpinned (prod): the stored edge of the earlier run is taken - unchanged behaviour.
@@ -92,6 +169,8 @@ private slots:
         QCOMPARE(avpn::activeEdgeWrites, 0);
         QCOMPARE(configs, 1);                                        // no re-fetch on a "new" edge
     }
+    // 5.1.109: this is the cache of a build before 139 (no receive time stored) - frozen as on 138.
+    // A copy with a receive time inside the bound is trusted: the S4.1 tests below.
     void cachedXrayDoesNotThawUntilFreshSignedResponse()
     {
         const QByteArray cached = R"({"features":{"xray_client":true,"node_scan":true}})";
@@ -110,7 +189,7 @@ private slots:
                 });
             }
         });
-        QNetworkAccessManager network;
+        LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         avpn::ConfigService service(&network, base, "fixture-key", {base});
         service.start();
@@ -150,7 +229,7 @@ private slots:
                 });
             }
         });
-        QNetworkAccessManager network;
+        LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         avpn::ConfigService service(&network, base, "fixture-key", {base});
         service.start();
@@ -170,23 +249,42 @@ private slots:
     // subscription in between resets that streak.
     void subscriptionStreakSwitchesEdgeDespiteSmallSuccesses()
     {
-        QNetworkAccessManager network; // no server: the switch re-fetches /v1/config, which just fails
-        const QString a = "http://127.0.0.1:9", b = "http://127.0.0.1:10";
+        // Both edges are loopback fixtures that answer /v1/config with 503, and every step waits for
+        // the outcome of what it started. Review of d5d739403: this test used unreachable ports and
+        // asserted before the failure of a config refetch could land - it passed whatever the
+        // refetch did to the edge walk.
+        ConfigServer edgeA([](int) { return httpAnswer("503 Service Unavailable", "{}"); });
+        ConfigServer edgeB([](int) { return httpAnswer("503 Service Unavailable", "{}"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
         avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });          // the streak does not decay while we wait
         QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
-        service.reportNetworkSuccess();                              // /v1/account OK
+        // Not started: no config request of the usual kind has failed, nothing is owed.
+        QVERIFY(!service.reportNetworkSuccess());                    // /v1/account OK - no config refetch
+        QTest::qWait(150);
+        QCOMPARE(edgeA.configRequests, 0);                           // d5d739403: 1, and its failure voted
+        service.reportNetworkFailure();                              // two unrelated API failures:
+        service.reportNetworkFailure();                              // below the threshold of 3
+        QCOMPARE(switched.count(), 0);                               // d5d739403: [success, fail, fail] switched
+        service.reportNetworkSuccess();
         QVERIFY(!service.reportSubscriptionOutcome(a, true));        // subscription timeout #1
         service.reportNetworkSuccess();                              // /v1/support/unread OK
         QVERIFY(!service.reportSubscriptionOutcome(a, false));       // delivered -> streak reset
         QVERIFY(!service.reportSubscriptionOutcome(a, true));        // #1 again
         QCOMPARE(switched.count(), 0);
         service.reportNetworkSuccess();
+        QTest::qWait(150);
+        QCOMPARE(edgeA.configRequests, 0);
         QVERIFY(service.reportSubscriptionOutcome(a, true));         // #2 in a row -> next edge
         QCOMPARE(switched.count(), 1);
         QCOMPARE(switched.at(0).at(0).toString(), b);
         QCOMPARE(service.activeBaseUrl(), b);
+        QTRY_COMPARE(edgeB.configRequests, 1);                       // the new edge is asked at once
+        QTest::qWait(100);
         QVERIFY(!service.reportSubscriptionOutcome(a, true));        // late failure from the old edge
         QCOMPARE(service.activeBaseUrl(), b);
+        QCOMPARE(switched.count(), 1);
     }
     // Owner test 06.11: a failed /v1/config while the process is still on the cached copy (Xray
     // frozen) must not throttle the next foreground refresh - it retries and thaws.
@@ -210,7 +308,7 @@ private slots:
                 });
             }
         });
-        QNetworkAccessManager network;
+        LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         avpn::ConfigService service(&network, base, "fixture-key", {base});
         service.start();
@@ -220,6 +318,670 @@ private slots:
         service.refreshIfStale(15 * 60 * 1000);                          // foreground return
         QTRY_VERIFY(service.config().features.value("xray_client", false));
         QCOMPARE(requests, 2);
+    }
+    // ---- 5.1.109 (plan step S4.1). Defect of 12.11.2026 on 138: after every cold start Xray was gone
+    // until the API answered - the cached config forced xray_client=false. Now the last SIGNED "true"
+    // is honoured for a bounded time since it was received (ConfigCachePolicy.h). ----
+
+    // Cold start, the API does not answer: Xray is there at once from the copy received an hour ago.
+    void cachedXrayTrustedInsideBoundBeforeAnyAnswer()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true,"node_scan":true}})";
+        const QByteArray cached = avpn::cachedConfig;
+        avpn::cachedConfigAtMs = kTestNowMs - kHourMs;
+        ConfigServer srv([](int) { return QByteArray(); }); // every /v1/config stays in flight
+        QVERIFY(srv.listening());
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QCOMPARE(applied, 1);
+        QVERIFY(service.config().features.value("xray_client", false));  // 138: false until the API answers
+        QVERIFY(!service.config().features.value("node_scan", true));    // node_scan is NOT covered
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheTrusted);
+        QCOMPARE(service.cachedConfigAgeMin(), qint64(60));
+        QVERIFY(!service.isFresh());                                     // fresh-only gates stay shut
+        QCOMPARE(avpn::cachedConfig, cached);                            // the signed copy is not rewritten
+        QCOMPARE(avpn::savedConfigs, 0);
+        QTRY_COMPARE(srv.configRequests, 1);                             // the fresh one is asked for as before
+        QTest::qWait(50);
+        QCOMPARE(applied, 1);
+    }
+    // The copy is older than the bound: frozen exactly as on 138, until a fresh signed answer.
+    void cachedXrayPastBoundIsFrozenUntilFreshAnswer()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs - 73 * kHourMs;
+        ConfigServer srv([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":true}})"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.start();
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheExpired);
+        QTRY_VERIFY(service.isFresh());
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOn);
+        QCOMPARE(service.cachedConfigAgeMin(), qint64(-1));
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs); // the receive time is stored with the fresh body
+    }
+    // The server switched Xray off: the fresh answer wins over a trusted cache at once, and the next
+    // cold start on that (now "off") copy is off however fresh the copy is.
+    void freshOffWinsOverTrustedCacheAtOnce()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs - kHourMs;
+        ConfigServer srv([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":false}})"); });
+        LoopbackOnlyNam network;
+        {
+            avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+            service.setNowMsForTest([] { return kTestNowMs; });
+            service.start();
+            QVERIFY(service.config().features.value("xray_client", false)); // trusted until the answer
+            QTRY_VERIFY(service.isFresh());
+            QVERIFY(!service.config().features.value("xray_client", true));
+            QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        }
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs);
+        avpn::ConfigService next(nullptr, srv.base(), "fixture-key", {srv.base()}); // no network at all
+        next.setNowMsForTest([] { return kTestNowMs + 60000; });
+        next.start();
+        QVERIFY(!next.config().features.value("xray_client", true));
+        QCOMPARE(next.xrayPolicy(), avpn::XrayPolicy::CacheOff);
+    }
+    // The bound travels with the signed copy (numbers.xray_client_cache_max_age_h): default 72 h,
+    // 0 = the trust is off (the behaviour of 138), ceiling 7 days. Also: no receive time (a cache
+    // written by 138) and a clock behind the receive time read as frozen.
+    void boundComesWithTheSignedCopy()
+    {
+        struct Case { const char *numbers; qint64 ageMin; bool allowed; avpn::XrayPolicy why; };
+        const Case cases[] = {
+            {"", 71 * 60, true, avpn::XrayPolicy::CacheTrusted},
+            {"", 72 * 60, false, avpn::XrayPolicy::CacheExpired},
+            {R"("xray_client_cache_max_age_h":1)", 30, true, avpn::XrayPolicy::CacheTrusted},
+            {R"("xray_client_cache_max_age_h":1)", 61, false, avpn::XrayPolicy::CacheExpired},
+            {R"("xray_client_cache_max_age_h":0)", 1, false, avpn::XrayPolicy::CacheTrustOff},
+            {R"("xray_client_cache_max_age_h":-3)", 1, false, avpn::XrayPolicy::CacheTrustOff},
+            {R"("xray_client_cache_max_age_h":1000)", 167 * 60, true, avpn::XrayPolicy::CacheTrusted},
+            {R"("xray_client_cache_max_age_h":1000)", 169 * 60, false, avpn::XrayPolicy::CacheExpired},
+            {"", -60, false, avpn::XrayPolicy::CacheClockBack}, // received "in an hour": the clock went back
+        };
+        for (const Case &c : cases) {
+            avpn::cachedConfig = QByteArray(R"({"features":{"xray_client":true},"numbers":{)") + c.numbers + "}}";
+            avpn::cachedConfigAtMs = kTestNowMs - c.ageMin * 60000;
+            avpn::ConfigService service(nullptr, "http://127.0.0.1:9", "fixture-key", {}); // no network
+            service.setNowMsForTest([] { return kTestNowMs; });
+            service.start();
+            QCOMPARE(service.config().features.value("xray_client", !c.allowed), c.allowed);
+            QCOMPARE(service.xrayPolicy(), c.why);
+        }
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfigAtMs = 0;                                      // written by a build before 139
+        avpn::ConfigService old(nullptr, "http://127.0.0.1:9", "fixture-key", {});
+        old.setNowMsForTest([] { return kTestNowMs; });
+        QCOMPARE(old.xrayPolicy(), avpn::XrayPolicy::NoConfig);
+        old.start();
+        QVERIFY(!old.config().features.value("xray_client", true));
+        QCOMPARE(old.xrayPolicy(), avpn::XrayPolicy::CacheNoStamp);
+        QCOMPARE(old.cachedConfigAgeMin(), qint64(-1));
+    }
+    // A process that stays on the cached copy (the API answers 503 for days): the trust is judged
+    // again before every config request and runs out at the bound - announced like any config.
+    void trustRunsOutWhileTheProcessStaysOnTheCache()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true,"node_scan":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs - 71 * kHourMs;
+        bool up = false;
+        ConfigServer srv([&up](int) {
+            return up ? httpAnswer("200 OK", R"({"features":{"xray_client":true}})")
+                      : httpAnswer("503 Service Unavailable", "{}");
+        });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QVERIFY(service.config().features.value("xray_client", false));
+        QTRY_COMPARE(srv.configRequests, 1);
+        QTest::qWait(100);
+        QVERIFY(service.config().features.value("xray_client", false)); // a failed request freezes nothing
+        now += kHourMs / 2;                                              // 71.5 h: still inside the bound
+        service.refreshIfStale(15 * 60 * 1000);                          // a return to the screen
+        QTRY_COMPARE(srv.configRequests, 2);
+        QTest::qWait(100);
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(applied, 1);
+        now += kHourMs / 2 + 60000;                                      // 72 h 01 min: past the bound
+        service.refreshIfStale(15 * 60 * 1000);
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheExpired);
+        QTRY_COMPARE(applied, 2);                                        // announced from the event loop
+        QVERIFY(!service.config().features.value("node_scan", true));
+        QTRY_COMPARE(srv.configRequests, 3);
+        QTest::qWait(100);
+        QCOMPARE(applied, 2);                                            // and only once
+        up = true;                                                       // the API is back
+        service.refreshIfStale(15 * 60 * 1000);
+        QTRY_VERIFY(service.isFresh());
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOn);
+    }
+    // 138 on iOS: after a failed startup /v1/config the config was asked for again only on a return
+    // to the screen or an edge switch. Now the first API request that succeeds (bootstrap retry,
+    // subscription, account) asks for it - while it is owed, one request at a time. iOS and macOS.
+    void apiSuccessAsksForTheConfigOwedAfterTransportFailure()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})"; // no receive time: frozen
+        ConfigServer srv([](int n) {
+            return n == 1 ? httpAnswer("503 Service Unavailable", "{}")
+                          : httpAnswer("200 OK", R"({"features":{"xray_client":true}})");
+        });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        service.start();
+        QTRY_COMPARE(srv.configRequests, 1);
+        QTest::qWait(100);
+        QVERIFY(!service.isFresh());
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QVERIFY(service.reportNetworkSuccess());   // /v1/subscription answered: the config is asked for now
+        QVERIFY(!service.reportNetworkSuccess());  // already in flight: not twice
+        QTRY_VERIFY(service.isFresh());
+        QCOMPARE(srv.configRequests, 2);
+        QVERIFY(service.config().features.value("xray_client", false));
+        QVERIFY(!service.reportNetworkSuccess());  // a fresh config is in force: API successes do not ask
+        QTest::qWait(50);
+        QCOMPARE(srv.configRequests, 2);
+    }
+    // An attempt the edge ANSWERED (404, a body with a bad signature) is not repeated on every API
+    // success, and the config's own answer never re-triggers itself: one request, no loop.
+    void answeredConfigIsNotAskedAgainOnApiSuccess()
+    {
+        const QByteArray answers[] = {
+            httpAnswer("404 Not Found", "{}"),
+            httpAnswer("200 OK", R"({"features":{"xray_client":true}})", "forged-signature"),
+        };
+        for (const QByteArray &answer : answers) {
+            avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+            ConfigServer srv([answer](int) { return answer; });
+            LoopbackOnlyNam network;
+            avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+            service.start();
+            QTRY_COMPARE(srv.configRequests, 1);
+            QTest::qWait(100);
+            QVERIFY(!service.isFresh());
+            QVERIFY(!service.reportNetworkSuccess());
+            QTest::qWait(50);
+            QCOMPARE(srv.configRequests, 1);
+            QVERIFY(!service.config().features.value("xray_client", true)); // a forged "true" changes nothing
+        }
+    }
+    // ---- 5.1.109, reviews of d5d739403 (finding 3) and 3dbe0361f (G): the refetch on an API success. ----
+
+    // /v1/config keeps failing while other API requests succeed (about every 20 s under a live
+    // session). d5d739403 asked for the config on EVERY success. 3dbe0361f asked once per episode: the
+    // startup request fails, the one refetch fails, then 180 successes in an hour brought no config.
+    // Now: at once, then every 15 minutes (the refresh throttle) while it is still owed - and the
+    // first refetch after the path really returns delivers the config.
+    void failedRefetchIsRepeatedAfterTheSpacing()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        bool up = false;
+        ConfigServer srv([&up](int) {
+            return up ? httpAnswer("200 OK", R"({"features":{"xray_client":true}})")
+                      : httpAnswer("503 Service Unavailable", "{}");
+        });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE(srv.configRequests, 1);
+        QTest::qWait(100);                                           // the start request failed: owed
+        QVERIFY(service.reportNetworkSuccess());                     // the first API success asks at once
+        QTRY_COMPARE(srv.configRequests, 2);
+        QTest::qWait(100);                                           // ... and that refetch failed too
+        QList<qint64> askedAtMin;                                    // minutes after the first refetch
+        for (int i = 1; i <= 180; ++i) {                             // an hour of API successes, every 20 s
+            now += 20 * 1000;
+            if (!service.reportNetworkSuccess())
+                continue;
+            askedAtMin << (now - kTestNowMs) / 60000;
+            QTRY_COMPARE(srv.configRequests, 2 + int(askedAtMin.size()));
+            QTest::qWait(100);                                       // it failed again
+        }
+        QCOMPARE(askedAtMin, (QList<qint64>{15, 30, 45, 60}));       // 3dbe0361f: none; d5d739403: 180
+        QCOMPARE(srv.configRequests, 6);
+        QCOMPARE(switched.count(), 0);                               // and none of those failures voted
+        // A usual request that fails in between does not shorten the spacing.
+        now += 60 * 1000;
+        service.refreshIfStale(15 * 60 * 1000);                      // a return to the screen
+        QTRY_COMPARE(srv.configRequests, 7);
+        QTest::qWait(100);
+        QVERIFY(!service.reportNetworkSuccess());                    // 1 minute after the last refetch
+        now += 13 * 60 * 1000;
+        QVERIFY(!service.reportNetworkSuccess());                    // 14 minutes
+        up = true;                                                   // the path to /v1/config is back
+        now += 60 * 1000;
+        QVERIFY(service.reportNetworkSuccess());                     // 15 minutes: asked, and answered
+        QTRY_VERIFY(service.isFresh());
+        QCOMPARE(srv.configRequests, 8);
+        QVERIFY(service.config().features.value("xray_client", false));
+        now += 60 * 60 * 1000;
+        QVERIFY(!service.reportNetworkSuccess());                    // fresh: API successes do not ask
+        QTest::qWait(50);
+        QCOMPARE(srv.configRequests, 8);
+    }
+    // The failure of a refetch does not vote in the edge walk: [success, fail, fail] must not switch
+    // the API edge (it did on d5d739403: the refetch's own failure was the third vote). A config
+    // request of the usual kind still votes.
+    void refetchFailureDoesNotVoteInTheEdgeWalk()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        ConfigServer edgeA([](int) { return httpAnswer("503 Service Unavailable", "{}"); });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":true}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });          // the streak does not decay
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        int failedSignals = 0;
+        connect(&service, &avpn::ConfigService::transportFailed, this, [&failedSignals]() { ++failedSignals; });
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QTest::qWait(100);                                           // the usual request failed: vote 1
+        QVERIFY(service.reportNetworkSuccess());                     // success: streak 0, the refetch goes out
+        QTRY_COMPARE(edgeA.configRequests, 2);
+        QTest::qWait(100);                                           // the refetch failed: NOT a vote
+        service.reportNetworkFailure();                              // fail
+        service.reportNetworkFailure();                              // fail - two votes, the threshold is 3
+        QTest::qWait(50);
+        QCOMPARE(switched.count(), 0);                               // d5d739403: switched to b here
+        QCOMPARE(service.activeBaseUrl(), a);
+        QCOMPARE(edgeB.configRequests, 0);
+        QCOMPARE(failedSignals, 0);                                  // 503 is an answer: nothing for the detector
+        service.reportNetworkFailure();                              // the third vote: the walk itself works
+        QCOMPARE(switched.count(), 1);
+        QCOMPARE(service.activeBaseUrl(), b);
+        QTRY_VERIFY(service.isFresh());                              // and the new edge delivers the config
+        QCOMPARE(edgeB.configRequests, 1);
+    }
+    // A refetch that WE aborted (a tunnel transition aborts the requests in flight) is re-issued at
+    // once, as every config request on the cached copy - and keeps its origin: the re-issued request
+    // must not come back as one whose failure votes.
+    void abortedRefetchIsReissuedAndStillDoesNotVote()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        bool hold = false;
+        ConfigServer edgeA([&hold](int) {
+            return hold ? QByteArray() : httpAnswer("503 Service Unavailable", "{}");
+        });
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":true}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QTest::qWait(100);                                           // the usual request failed: vote 1, owed
+        hold = true;
+        QVERIFY(service.reportNetworkSuccess());                     // streak 0; the refetch is in flight
+        QTRY_COMPARE(edgeA.configRequests, 2);
+        hold = false;
+        // AvpnEngineQml::onConnectionStateChanged: our own abort of the requests in flight
+        for (QNetworkReply *r : network.findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly))
+            if (r->isRunning() && r->url().path() == QLatin1String("/v1/config"))
+                r->abort();
+        QTRY_COMPARE(edgeA.configRequests, 3);                       // re-issued at once
+        QTest::qWait(100);                                           // ... and it failed: still not a vote
+        service.reportNetworkFailure();
+        service.reportNetworkFailure();
+        QCOMPARE(switched.count(), 0);                               // two votes only
+        QVERIFY(!service.reportNetworkSuccess());                    // owed, but inside the spacing: not asked again
+        QTest::qWait(50);
+        QCOMPARE(edgeA.configRequests, 3);
+        QCOMPARE(edgeB.configRequests, 0);
+    }
+    // The active edge is switched while a config request is in flight to the old one. Before 139: the
+    // in-flight guard swallowed the immediate request to the new edge (nothing was asked until the old
+    // request ended, up to its 15 s timeout) and the old edge's failure was then counted against the
+    // new one. Now the new edge is asked at once and the old request is left to finish: its FAILURE
+    // is ignored ...
+    void edgeSwitchAsksTheNewEdgeAtOnceAndIgnoresTheOldEdgesFailure()
+    {
+        for (const bool timesOut : {false, true}) {
+            avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+            avpn::storedActiveEdge.clear();                          // the previous pass stored its edge b
+            ConfigServer edgeA([](int) { return QByteArray(); });    // /v1/config stays in flight
+            bool bUp = false;
+            ConfigServer edgeB([&bUp](int) {
+                return bUp ? httpAnswer("200 OK", R"({"features":{"xray_client":true}})")
+                           : httpAnswer("503 Service Unavailable", "{}");
+            });
+            LoopbackOnlyNam network;
+            const QString a = edgeA.base(), b = edgeB.base();
+            avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+            service.setNowMsForTest([] { return kTestNowMs; });
+            QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+            int failedSignals = 0;
+            connect(&service, &avpn::ConfigService::transportFailed, this, [&failedSignals]() { ++failedSignals; });
+            service.start();
+            QTRY_COMPARE(edgeA.configRequests, 1);                   // in flight on a
+            QVERIFY(!service.reportSubscriptionOutcome(a, true));
+            QVERIFY(service.reportSubscriptionOutcome(a, true));     // the subscription streak switches to b
+            QCOMPARE(service.activeBaseUrl(), b);
+            QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000); // asked at once (before: after a's 15 s)
+            QTest::qWait(150);                                       // b answered 503: ONE vote, b's own
+            if (timesOut) {                                          // the old request ends by its timeout
+                for (QNetworkReply *r : network.findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly))
+                    if (r->isRunning() && r->url().port() == QUrl(a).port() && r->url().path() == QLatin1String("/v1/config")) {
+                        r->setProperty("avpn_timed_out", true);
+                        r->abort();
+                    }
+            } else {
+                edgeA.answerHeld(httpAnswer("503 Service Unavailable", "{}")); // ... or by a late 503 of a
+            }
+            QTest::qWait(150);
+            QCOMPARE(failedSignals, 0);                              // the old edge's failure is nobody's vote
+            service.reportNetworkFailure();                          // vote 2 against b
+            QCOMPARE(switched.count(), 1);                           // before: this was the third - a switch
+            QCOMPARE(service.activeBaseUrl(), b);
+            QVERIFY(!service.isFresh());
+            bUp = true;
+            service.refreshIfStale(15 * 60 * 1000);
+            QTRY_VERIFY(service.isFresh());
+            QCOMPARE(edgeA.configRequests, 1);
+        }
+    }
+    // ... a forged answer of the old edge changes nothing (the signature is checked as always) ...
+    void edgeSwitchDoesNotApplyAForgedAnswerOfTheOldEdge()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})"; // no receive time: frozen
+        ConfigServer edgeA([](int) { return QByteArray(); });        // /v1/config stays in flight
+        ConfigServer edgeB([](int) { return httpAnswer("503 Service Unavailable", "{}"); }); // the new edge is down
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QCOMPARE(applied, 1);                                        // the cached copy
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QTRY_COMPARE(edgeA.configRequests, 1);                       // in flight on a
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));         // switched to b
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000);
+        QTest::qWait(150);                                           // b answered 503
+        QVERIFY(!service.isFresh());
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true}})", "forged-signature"));
+        QTest::qWait(150);
+        QVERIFY(!service.isFresh());
+        QCOMPARE(applied, 1);
+        QCOMPARE(switched.count(), 1);
+    }
+    // ... and its signed ANSWER is applied: the body does not depend on the edge that carried it.
+    // 138 applied it; 3dbe0361f dropped the request on the switch - a good answer already on its way
+    // was lost and the device stayed on the cached copy (Xray frozen) until the new edge answered.
+    void edgeSwitchAppliesTheSignedAnswerOfTheOldEdge()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return httpAnswer("503 Service Unavailable", "{}"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000);
+        QTest::qWait(150);
+        QVERIFY(!service.isFresh());
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"late"}})"));
+        QTRY_VERIFY(service.isFresh());                              // 3dbe0361f: never (the request was dropped)
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOn);
+        QCOMPARE(service.config().recommendedVersion.value("macos"), QString("late"));
+        QCOMPARE(avpn::savedConfigs, 1);                             // and stored for the next cold start
+        QCOMPARE(service.activeBaseUrl(), b);                        // the edge in use is not touched by it
+        QCOMPARE(switched.count(), 1);
+        QVERIFY(!service.reportNetworkSuccess());                    // fresh: nothing is owed any more
+    }
+
+    // Review of df7f49db8: after an edge switch two requests are in flight, and the body carries no
+    // version - the answers are ordered by when their requests were STARTED. The new edge answers
+    // first with the newer config (the operator switched Xray off); the old edge's answer, produced
+    // before that, lands later: it must not overwrite the newer one (it did: applied as fresh, stored
+    // and re-stamped - the next cold start offline trusted "true").
+    void lateAnswerOfTheOldEdgeDoesNotOverwriteANewerConfig()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        const QByteArray off = R"({"features":{"xray_client":false},"recommended_version":{"macos":"new"}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });        // /v1/config stays in flight
+        ConfigServer edgeB([off](int) { return httpAnswer("200 OK", off); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QCOMPARE(applied, 1);                                        // the cached copy
+        QTRY_COMPARE(edgeA.configRequests, 1);                       // request 1, in flight on a
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));         // switched to b: request 2
+        QTRY_VERIFY(service.isFresh());                              // b answered: Xray is off
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(avpn::savedConfigs, 1);
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs);
+        now += 5000;
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"old"}})"));
+        QTest::qWait(200);                                           // the older answer lands, signed and valid
+        QVERIFY(!service.config().features.value("xray_client", true)); // df7f49db8: true again
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(service.config().recommendedVersion.value("macos"), QString("new"));
+        QCOMPARE(applied, 2);
+        QCOMPARE(avpn::savedConfigs, 1);                             // not stored ...
+        QCOMPARE(avpn::cachedConfig, off);
+        QCOMPARE(avpn::cachedConfigAtMs, kTestNowMs);                // ... and not re-stamped
+    }
+    // The other order: the old edge's answer comes first and is applied (finding D of the review of
+    // 3dbe0361f stays closed); the answer of the request started later then replaces it.
+    void answersAfterAnEdgeSwitchAreAppliedInTheOrderTheRequestsWereStarted()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });
+        ConfigServer edgeB([](int) { return QByteArray(); });        // both stay in flight
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.start();
+        QTRY_COMPARE(edgeA.configRequests, 1);
+        QVERIFY(!service.reportSubscriptionOutcome(a, true));
+        QVERIFY(service.reportSubscriptionOutcome(a, true));
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 1, 2000);
+        edgeA.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"old"}})"));
+        QTRY_VERIFY(service.isFresh());                              // the earlier request, first to answer: applied
+        QVERIFY(service.config().features.value("xray_client", false));
+        QCOMPARE(service.config().recommendedVersion.value("macos"), QString("old"));
+        edgeB.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":false},"recommended_version":{"macos":"new"}})"));
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("new")); // the later request wins
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::FreshOff);
+        QCOMPARE(avpn::savedConfigs, 2);
+        service.refreshIfStale(0);                                   // and an ordinary later request applies as always
+        QTRY_COMPARE_WITH_TIMEOUT(edgeB.configRequests, 2, 2000);
+        edgeB.answerHeld(httpAnswer("200 OK", R"({"features":{"xray_client":true},"recommended_version":{"macos":"newest"}})"));
+        QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("newest"));
+        QCOMPARE(avpn::savedConfigs, 3);
+    }
+
+    // ---- review of d5d739403 (finding 5): the cached trust is judged on more paths and is one-way. ----
+
+    // The trust runs out while the foreground refresh is throttled (the edge ANSWERED the last
+    // request, so the next one is 15 minutes away) and while no config request is made at all.
+    void trustIsJudgedOnTheThrottledForegroundPathAndOnApiOutcomes()
+    {
+        const QByteArray cached = R"({"features":{"xray_client":true}})";
+        for (const int path : {0, 1, 2}) {
+            avpn::cachedConfig = cached;
+            avpn::cachedConfigAtMs = kTestNowMs - 72 * kHourMs + 5 * 60 * 1000; // 5 minutes of trust left
+            ConfigServer srv([](int) { return httpAnswer("404 Not Found", "{}"); });
+            LoopbackOnlyNam network;
+            avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+            qint64 now = kTestNowMs;
+            service.setNowMsForTest([&now] { return now; });
+            int applied = 0;
+            connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+            service.start();
+            QVERIFY(service.config().features.value("xray_client", false));
+            QTRY_COMPARE(srv.configRequests, 1);
+            QTest::qWait(100);                                       // answered: the refresh is throttled
+            now += 6 * 60 * 1000;                                    // the bound has passed
+            if (path == 0)
+                service.refreshIfStale(15 * 60 * 1000);              // a return to the screen, throttled
+            else if (path == 1)
+                service.reportNetworkSuccess();                      // any API outcome
+            else
+                service.reportNetworkFailure();
+            QVERIFY(!service.config().features.value("xray_client", true)); // d5d739403: still true
+            QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheExpired);
+            QTRY_COMPARE(applied, 2);                                // announced like any config
+            QTest::qWait(50);
+            QCOMPARE(srv.configRequests, 1);                         // no config request was needed for it
+        }
+    }
+    // Review of 3dbe0361f (F): a clock behind the receive time is a passing state, not the end of the
+    // trust - when the time is corrected a one-hour-old cached "true" is trusted again without a
+    // restart and without a config request (3dbe0361f: off until the app restarted).
+    void clockBehindTheStampIsNotStickyForTheRun()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs;                         // received "now" by the right clock
+        ConfigServer srv([](int) { return httpAnswer("404 Not Found", "{}"); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        qint64 now = kTestNowMs - 5 * kHourMs;                       // the device clock is 5 hours behind
+        service.setNowMsForTest([&now] { return now; });
+        int applied = 0;
+        connect(&service, &avpn::ConfigService::configApplied, this, [&applied]() { ++applied; });
+        service.start();
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheClockBack);
+        QTRY_COMPARE(srv.configRequests, 1);
+        QTest::qWait(100);                                           // answered 404: still on the cached copy
+        now = kTestNowMs + kHourMs;                                  // the time is corrected: received an hour ago
+        service.refreshIfStale(15 * 60 * 1000);                      // a return to the screen (throttled)
+        QVERIFY(service.config().features.value("xray_client", false)); // 3dbe0361f: still false
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheTrusted);
+        QCOMPARE(service.cachedConfigAgeMin(), qint64(60));
+        QTRY_COMPARE(applied, 2);                                    // announced like any config
+        QVERIFY(!service.config().features.value("node_scan", true)); // node_scan stays frozen on the cache
+        now += 72 * kHourMs;                                         // ... and the bound still applies
+        service.reportNetworkFailure();
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheExpired);
+    }
+    // Once the cached trust has EXPIRED in a run it stays expired: setting the clock back inside the
+    // bound (not before the receive time) does not revive it. Only a fresh signed answer does.
+    void endedTrustIsNotRevivedByAClockChange()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs - 71 * kHourMs;
+        bool up = false;
+        ConfigServer srv([&up](int) {
+            return up ? httpAnswer("200 OK", R"({"features":{"xray_client":true}})")
+                      : httpAnswer("503 Service Unavailable", "{}");
+        });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        service.start();
+        QVERIFY(service.config().features.value("xray_client", false));
+        QTRY_COMPARE(srv.configRequests, 1);
+        QTest::qWait(100);
+        now += 2 * kHourMs;                                          // 73 h: expired
+        service.refreshIfStale(15 * 60 * 1000);
+        QVERIFY(!service.config().features.value("xray_client", true));
+        QTRY_COMPARE(srv.configRequests, 2);
+        QTest::qWait(100);
+        now -= 3 * kHourMs;                                          // the clock is set back: "70 h"
+        service.refreshIfStale(15 * 60 * 1000);
+        QVERIFY(!service.config().features.value("xray_client", true)); // d5d739403: true again
+        QCOMPARE(service.xrayPolicy(), avpn::XrayPolicy::CacheExpired);
+        QTRY_COMPARE(srv.configRequests, 3);
+        QTest::qWait(100);
+        up = true;                                                   // only a fresh signed answer revives it
+        service.refreshIfStale(15 * 60 * 1000);
+        QTRY_VERIFY(service.isFresh());
+        QVERIFY(service.config().features.value("xray_client", false));
+    }
+
+    // ---- reviews of d5d739403 (finding 6) and 3dbe0361f (E): a config request that outlived a freeze
+    // of the process (its timer fired late) is no evidence about the edge. The rule lives in
+    // ConfigService itself (ConfigCachePolicy.h::configRequestOutlivedFreeze) - nothing has to be
+    // wired by the facade for it. ----
+    void configRequestThatOutlivedAFreezeDoesNotVote()
+    {
+        avpn::cachedConfig = R"({"features":{"xray_client":true}})";
+        ConfigServer edgeA([](int) { return QByteArray(); });        // no answer: the test ends each request itself
+        ConfigServer edgeB([](int) { return httpAnswer("200 OK", R"({"features":{"xray_client":true}})"); });
+        LoopbackOnlyNam network;
+        const QString a = edgeA.base(), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        int failedSignals = 0;
+        connect(&service, &avpn::ConfigService::transportFailed, this, [&failedSignals]() { ++failedSignals; });
+        // armTimeout's own expiry: a transport failure with no HTTP status. frozen - the request was
+        // started (armTimeout's stamp) long before its 15 s timer could fire: the process was
+        // suspended in between and the timer ran on return.
+        const auto timeOutRequestInFlight = [&network](bool frozen) {
+            for (QNetworkReply *r : network.findChildren<QNetworkReply *>(QString(), Qt::FindDirectChildrenOnly))
+                if (r->isRunning() && r->url().path() == QLatin1String("/v1/config")) {
+                    QVERIFY(r->property("avpn_t0").toLongLong() > 0);
+                    if (frozen)
+                        r->setProperty("avpn_t0", QDateTime::currentMSecsSinceEpoch() - 10 * 60 * 1000);
+                    r->setProperty("avpn_timed_out", true);
+                    r->abort();
+                }
+        };
+        service.start();
+        for (int n = 1; n <= 4; ++n) {                               // four requests die in a freeze
+            QTRY_COMPARE(edgeA.configRequests, n);
+            timeOutRequestInFlight(/*frozen=*/true);
+            QTest::qWait(30);
+            if (n < 4)
+                service.refreshIfStale(15 * 60 * 1000);              // the return to the screen asks again
+        }
+        QCOMPARE(switched.count(), 0);                               // 138: three such failures switched the edge
+        QCOMPARE(failedSignals, 0);                                  // and fed the white-list detector
+        QVERIFY(service.reportNetworkSuccess());                     // the config is still owed
+        QTRY_COMPARE(edgeA.configRequests, 5);
+        timeOutRequestInFlight(/*frozen=*/false);                    // an honest timeout of a refetch: no vote either
+        QTest::qWait(30);
+        QCOMPARE(failedSignals, 0);
+        for (int n = 6; n <= 8; ++n) {                               // three usual requests time out honestly
+            service.refreshIfStale(15 * 60 * 1000);
+            QTRY_COMPARE(edgeA.configRequests, n);
+            timeOutRequestInFlight(/*frozen=*/false);
+            QTest::qWait(30);
+        }
+        QCOMPARE(failedSignals, 3);
+        QCOMPARE(switched.count(), 1);                               // the third vote switched the edge
+        QTRY_VERIFY(service.isFresh());
     }
     void refreshesWithoutApplicationRestart()
     {
@@ -256,7 +1018,7 @@ private:
                 });
             }
         });
-        QNetworkAccessManager network;
+        LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         avpn::ConfigService service(&network, base, "fixture-key", {base});
         service.start();

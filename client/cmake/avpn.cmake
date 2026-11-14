@@ -63,6 +63,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/ServiceProbeTargets.h
     ${AVPN_SE}/NodeRanking.h
     ${AVPN_SE}/NodeRotation.h
+    ${AVPN_SE}/TransportModeGate.h
     ${AVPN_SE}/TransportPick.h
     ${AVPN_SE}/IRttProbe.h
     ${AVPN_SE}/RttProbeIcmp.h
@@ -82,6 +83,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/Ed25519Verify.h
     ${AVPN_SE}/ConfigStore.h
     ${AVPN_SE}/EdgeWalk.h
+    ${AVPN_SE}/ConfigCachePolicy.h
     ${AVPN_SE}/ConfigService.h
     ${AVPN_SE}/BypassListTypes.h
     ${AVPN_SE}/BypassListLkg.h
