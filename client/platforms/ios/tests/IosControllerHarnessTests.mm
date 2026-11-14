@@ -19,6 +19,8 @@
 #include <QDateTime>
 #include <QEventLoop>
 #include <QJsonObject>
+#include <QLoggingCategory>
+#include <QStringList>
 #include <QTimer>
 #include <atomic>
 #include <cstdio>
@@ -1312,6 +1314,46 @@ static HarnessSession *adoptStalledSession(NSDictionary *reply, bool uplinkUp)
     c->requestReconcileStatus();
     return s;
 }
+// 5.1.109 (IOS-UP35): the journal line with the decision inputs. main() mutes warnings through
+// QT_LOGGING_RULES, which outranks setFilterRules - a category filter re-enables the default warnings.
+// Scoped (review R6): starts with an empty capture, restores the previous handler and filter on exit -
+// no state leaks into another test even if several run in one process.
+static QStringList g_warnings;
+struct WarningCapture {
+    QtMessageHandler previousHandler = nullptr;
+    QLoggingCategory::CategoryFilter previousFilter = nullptr;
+    WarningCapture()
+    {
+        g_warnings.clear();
+        previousFilter = QLoggingCategory::installFilter([](QLoggingCategory *category) {
+            if (qstrcmp(category->categoryName(), "default") == 0) category->setEnabled(QtWarningMsg, true);
+        });
+        previousHandler = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &, const QString &msg) {
+            if (type == QtWarningMsg) g_warnings << msg;
+        });
+    }
+    ~WarningCapture()
+    {
+        qInstallMessageHandler(previousHandler);
+        QLoggingCategory::installFilter(previousFilter);
+        g_warnings.clear();
+    }
+    WarningCapture(const WarningCapture &) = delete;
+    WarningCapture &operator=(const WarningCapture &) = delete;
+};
+static bool warned(const char *needle)
+{
+    for (const QString &w : g_warnings)
+        if (w.contains(QLatin1String(needle))) return true;
+    return false;
+}
+static int warnedCount(const char *needle)
+{
+    int n = 0;
+    for (const QString &w : g_warnings)
+        if (w.contains(QLatin1String(needle))) ++n;
+    return n;
+}
 static void runStatusPolls(int ms)
 {
     QTimer poll;
@@ -1321,8 +1363,11 @@ static void runStatusPolls(int ms)
 }
 static void test_adopted_dead_session_stopped()
 {
+    WarningCapture capture;
     HarnessSession *s = adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/true);
     runStatusPolls(1500);
+    CHECK(warned("adopted_dead_check stop=1 why=- shown=1 pending=0 answered=1 hs=0 rx=0 rx_threshold=4096 "
+                 "soft_restarts=0 resumes=0 physical_up=1"), "decision inputs of the stop are not journaled");
     CHECK(obs.has(Vpn::ConnectionState::Connected), "cold-start rule did not show the adopted session");
     CHECK(s.stopCalls == 1, "dead adopted session not stopped");
     CHECK(g_deadSignals == 1, "adoptedDeadSessionStopped not emitted");
@@ -1341,8 +1386,29 @@ static void expectAdoptedKept(HarnessSession *s, const char *what)
 }
 static void test_adopted_soft_restarted_session_kept()
 {
+    WarningCapture capture;
     expectAdoptedKept(adoptStalledSession(stalledReply(@1, @0), true), "soft-restarted session stopped");
     CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "soft-restarted session is not Reconnecting");
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 1,
+          "kept decision not journaled exactly once (re-checked every timeout, logged on change)");
+}
+// Review R4: the "log on change" memory ends with the session - the next session of the same process
+// with the same inputs is journaled again.
+static void test_adopted_check_logged_per_session()
+{
+    WarningCapture capture;
+    HarnessSession *s = adoptStalledSession(stalledReply(@1, @0), true);
+    runStatusPolls(1500);
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 1, "first session not journaled once");
+    s.hStatus = NEVPNStatusDisconnected;
+    notifyStatus(s);
+    spin(50);
+    s.hStatus = NEVPNStatusConnected; // the next session (On-Demand / Settings), same NE answers
+    s.hConnectedDate = [NSDate dateWithTimeIntervalSinceNow:-600];
+    notifyStatus(s);
+    runStatusPolls(1500);
+    CHECK(warnedCount("adopted_dead_check stop=0 why=soft_restarted ") == 2,
+          "second session with the same inputs not journaled");
 }
 static void test_adopted_resumed_session_kept()
 {
@@ -1350,7 +1416,9 @@ static void test_adopted_resumed_session_kept()
 }
 static void test_adopted_session_uplink_down_kept()
 {
+    WarningCapture capture;
     expectAdoptedKept(adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/false), "session stopped while offline");
+    CHECK(warned("adopted_dead_check stop=0 why=no_physical_uplink "), "offline decision not journaled");
 }
 static void test_adopted_session_empty_reply_kept()
 {
@@ -1431,6 +1499,7 @@ static const Test kTests[] = {
     {"adopted_dead_session_stopped", test_adopted_dead_session_stopped},
     {"adopted_soft_restarted_session_kept", test_adopted_soft_restarted_session_kept},
     {"adopted_resumed_session_kept", test_adopted_resumed_session_kept},
+    {"adopted_check_logged_per_session", test_adopted_check_logged_per_session},
     {"adopted_session_uplink_down_kept", test_adopted_session_uplink_down_kept},
     {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},

@@ -2,6 +2,7 @@
 // Overlay: НЕ часть апстрима. Интеграция в UI/туннель — через тонкие адаптеры, см. README.md.
 // TODO: сделать QObject в фоновом QThread (как VpnConnection), когда подключим к приложению.
 #pragma once
+#include <utility> // std::exchange
 
 #include "DebugSnapshot.h"
 #include "Enrollment.h"
@@ -36,6 +37,9 @@ enum class EngineState { Disconnected, Selecting, Connecting, Verifying, Connect
 // (состав, identity и метаданные нод, адрес): обновлены только traffic/expiry/status, switchLog не
 // трогаем (равная ревизия каждые ~20 с вымывала его), фасаду — ни changed(), ни persistPin, ни проб.
 enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
+
+// 5.1.109 (R7): result of ServiceEngine::shiftSwitchClock.
+enum class SwitchClockResync { NoPhase, Shifted, AlreadyShifted };
 
 class ServiceEngine {
 public:
@@ -234,6 +238,9 @@ public:
     // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
     // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
     // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
+    // 5.1.109 (review R2): also at the start of setPinnedNode, rotateNext, continuePendingSwitch and
+    // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
+    // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
     void setTransportMode(TransportMode m) { m_transportMode = effectiveTransportMode(m); }
     TransportMode transportMode() const { return effectiveTransportMode(m_transportMode); }
     void normalizeTransportMode() { m_transportMode = effectiveTransportMode(m_transportMode); }
@@ -278,12 +285,24 @@ public:
     QString nextLiveNodeId() const;
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     bool hasConnectablePin() const { return pinnedCandidate() != nullptr; }
+    // 5.1.109: the pinned location has connectable nodes but none of them serves transport mode
+    // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode (which
+    // normalizes the stored mode first), without its side effects (setPinnedNode also drops the
+    // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
+    // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
+    bool pinLacksTransport(TransportMode mode) const;
+    // 5.1.109 (review R1): the pin the last pool refresh dropped because its location no longer has a
+    // node the effective transport mode allows (the pinned listener was removed). One-shot: the facade
+    // persists the cleared pin and journals pin_cleared why=reseed. Empty = nothing dropped that way.
+    QString takePinDroppedForTransport() { return std::exchange(m_pinDroppedForTransport, QString()); }
     // 5.1.108: the node the next connect() would raise - the same order (pin -> network memory ->
     // pickTransport; the legacy measured-RTT/weight chain when transport_auto_pick is off) without
     // any side effect (no switch log, no state change, no I/O). For the Connect card's protocol badge
     // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
     // Inside an equal-weight tier without measurements the pick is random - callers that must not
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
+    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
+    // normalizeTransportMode() - test transport_pick_check §15.
     const SubscriptionNode *nextCandidate() const;
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
@@ -332,6 +351,16 @@ public:
     // бюджет max(timeoutMs, reconcileWatchdogMsTuned()) — не меньше сторожа коннекта. Истечение →
     // Error + interruptedSwitch (фасад повторяет старт с анти-зацикливанием, намерение НЕ снимает).
     bool expireSwitch(int timeoutMs = 30000);
+    // 5.1.109 (R7): the app process was frozen (iOS suspension, laptop sleep) for frozenMs - the time of
+    // the running switch phase did not pass for us: its clock moves forward by the freeze (never past
+    // now) so the deadline is judged on time we could observe. The facade calls it from a late tick
+    // (DebugSnapshot.h::decideDeadlineTick) and asks for a fresh status. false = no phase clock runs.
+    // At most once per phase (R7a): later late ticks of the same phase return AlreadyShifted and the
+    // deadline is judged normally - worst case one extra interval. A shift in the up phase also marks
+    // the up() as frozen (R7d: no time-to-traffic sample). expireSwitch clamps a future start (R7c).
+    SwitchClockResync shiftSwitchClock(qint64 frozenMs);
+    // R7d: the start watchdog re-armed after a freeze - the current up() has no honest time to traffic.
+    void noteAppFrozenDuringUp() { m_upFrozen = true; }
     bool switchInUpPhase() const { return m_state == EngineState::Switching && m_switchUpPhase; }
 
     // AVPN (фикс-волна 2026-09-22, K5/B4/B5): внутренний свитч/failover движка прерван (Error или
@@ -436,6 +465,10 @@ private:
     const SubscriptionNode *pinnedCandidate() const;
     const SubscriptionNode *networkMemoryCandidate() const; // plan v3 step 5
     bool anySupportedNode() const;
+    // 5.1.109: can location `loc` be raised at all / under transport mode `mode` (the rule of
+    // setPinnedNode and pinLacksTransport). anySupported - a connectable node of any proto.
+    struct LocationTransports { bool anySupported = false; bool anyAllowed = false; };
+    LocationTransports locationTransportsFor(const QString &loc, TransportMode mode) const;
     // Провал data-plane текущей ноды: история + сессионный список провалов.
     void noteDataPlaneFailure();
     // AVPN awg31-xray-v1 (reseed): применимо ли тело сейчас (терминал ИЛИ текущая/целевая нода без изменений).
@@ -497,6 +530,7 @@ private:
     InterruptedSwitch m_interrupted;     // B4/B5: прерванный внутренний свитч (решает фасад)
     // A5/B3: подсказка identity адоптированной сессии (sessionMetadata), когда нода не опознана.
     QString       m_sessionHintNodeId, m_sessionHintProto, m_sessionHintEndpoint;
+    QString       m_pinDroppedForTransport; // 5.1.109 (review R1), takePinDroppedForTransport
     QString       m_token;
     QString       m_accountId;
     QStringList   m_switchLog;
@@ -524,6 +558,8 @@ private:
     int           m_probeFailStreak = 0; // xray: провалы живой пробы подряд (feedProbeResult)
     int           m_dataPlaneFailStreak = 0; // провалы data-plane подряд за сессию (кап — ConnectTunables.h)
     bool          m_dataPlaneExhausted = false; // кап исчерпан: Error вместо очередного failover
+    bool          m_upFrozen = false;          // R7d: the app froze during this up() (no time to traffic)
+    bool          m_switchClockShifted = false; // R7a: the phase clock was shifted for a freeze once
     qint64        m_upStartedMs = 0;     // момент последнего up() — время до «реального трафика» для истории
     bool          m_okRecorded = false;  // один успех / один провал на сессию подъёма
     bool          m_failRecorded = false;

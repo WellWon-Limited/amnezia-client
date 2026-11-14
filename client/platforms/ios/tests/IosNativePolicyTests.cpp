@@ -311,6 +311,52 @@ static void testNeverConnectedAdoptedSession()
     assert(!with([](DeadAdoptedSession &d) { d.uplinkUp = false; }));              // no network (On-Demand offline)
 }
 
+// 5.1.109 (device check IOS-UP35): the journal line at the §25 decision names every input and the
+// first unmet condition; the rule itself is unchanged (blocker empty <=> stop).
+static void testDeadAdoptedSessionJournal()
+{
+    using namespace avpn_ios;
+    DeadAdoptedSession dead;
+    dead.shownConnectedBeforeHandshake = true;
+    dead.statsAnswered = true;
+    dead.lastHandshakeSec = 0;
+    dead.rxBytes = 12;
+    dead.rxThreshold = 4096;
+    dead.softRestarts = 0;
+    dead.resumes = 0;
+    dead.uplinkUp = true;
+    assert(std::string(deadAdoptedSessionBlocker(dead)).empty());
+    assert(describeDeadAdoptedSession(dead)
+           == "adopted_dead_check stop=1 why=- shown=1 pending=0 answered=1 hs=0 rx=12 rx_threshold=4096 "
+              "soft_restarts=0 resumes=0 physical_up=1");
+    struct Case { void (*edit)(DeadAdoptedSession &); const char *why; };
+    const Case cases[] = {
+        {[](DeadAdoptedSession &d) { d.shownConnectedBeforeHandshake = false; }, "not_adopted"},
+        {[](DeadAdoptedSession &d) { d.connectPending = true; }, "connect_pending"},
+        {[](DeadAdoptedSession &d) { d.statsAnswered = false; d.lastHandshakeSec = -1; }, "no_answer"},
+        {[](DeadAdoptedSession &d) { d.lastHandshakeSec = 1762400000; }, "had_handshake"},
+        {[](DeadAdoptedSession &d) { d.rxBytes = 4096; }, "rx_above_threshold"},
+        {[](DeadAdoptedSession &d) { d.softRestarts = -1; }, "no_roam_counters"},
+        {[](DeadAdoptedSession &d) { d.resumes = -1; }, "no_roam_counters"},
+        {[](DeadAdoptedSession &d) { d.softRestarts = 2; }, "soft_restarted"},
+        {[](DeadAdoptedSession &d) { d.resumes = 1; }, "resumed"},
+        {[](DeadAdoptedSession &d) { d.uplinkUp = false; }, "no_physical_uplink"},
+    };
+    for (const Case &c : cases) {
+        DeadAdoptedSession d = dead;
+        c.edit(d);
+        assert(!stopNeverConnectedAdoptedSession(d));
+        assert(std::string(deadAdoptedSessionBlocker(d)) == c.why);
+        assert(describeDeadAdoptedSession(d).find(std::string("stop=0 why=") + c.why + " ") != std::string::npos);
+    }
+    DeadAdoptedSession offline = dead; // inputs as the line shows them for the "kept, no network" case
+    offline.uplinkUp = false;
+    offline.softRestarts = 3;
+    assert(describeDeadAdoptedSession(offline)
+           == "adopted_dead_check stop=0 why=soft_restarted shown=1 pending=0 answered=1 hs=0 rx=12 "
+              "rx_threshold=4096 soft_restarts=3 resumes=0 physical_up=0");
+}
+
 // On-Demand (2026-09-30): правило — только для доказанно рабочей сессии; любой стоп его снимает.
 static void testOnDemandPolicy()
 {
@@ -386,6 +432,7 @@ int main()
     testTryLock();
     testEstablishedSession();
     testNeverConnectedAdoptedSession();
+    testDeadAdoptedSessionJournal();
     std::cout << "IosNativePolicyTests: all checks passed\n";
     return 0;
 }

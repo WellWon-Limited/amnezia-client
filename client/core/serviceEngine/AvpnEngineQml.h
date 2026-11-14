@@ -915,6 +915,12 @@ private slots:
     void onPauseTimeout();
     // AVPN (reconcile-машина): терминальный колбэк туннеля не пришёл за таймаут → разблокировать.
     void onWatchdog();
+    // 5.1.109 (R7): (re)arm m_watchdog for interval ms and remember when; freezeRearm=false starts a new
+    // operation's budget (the one-time re-arm after a freeze is available again).
+    void armWatchdog(int intervalMs, bool freezeRearm = false);
+    // 5.1.109 (R7): ask the native layer for a fresh tunnel status (iOS / macOS NE); elsewhere the
+    // daemon/service reports state changes itself - no-op.
+    void requestFreshTunnelStatus();
 
 private:
     // AVPN (reconcile-машина смены ноды): единый контур «намерение vs факт». ВСЕ подъёмы/опускания
@@ -1183,6 +1189,9 @@ private:
     QString                     m_savedPin;
     QElapsedTimer               m_reliabilityClock;
     QTimer                      m_transitionTimer;
+    // 5.1.109 (R7): wall time of the previous m_transitionTimer tick (-1 = none yet) - a late tick means
+    // the process was frozen (DebugSnapshot.h::decideDeadlineTick).
+    qint64                      m_lastTransitionTickMs = -1;
     // AVPN (фикс-волна 2026-09-22, A1): бывший m_requireConfirmedDown разделён на два смысла —
     // m_latch.awaitingStopConfirm (МЫ просили стоп) и m_latch.needStatusBeforeStart (после Error на
     // iOS/MACOS_NE; адопт и health не блокирует). См. DebugSnapshot.h::TeardownLatch.
@@ -1534,6 +1543,10 @@ private:
     enum class Op { None, Starting, Stopping };
     Op                           m_op = Op::None;                  // что сейчас в полёте (для обработки терминала)
     QTimer                       m_watchdog;                       // единый сторож (НЕ накапливаем singleShot)
+    // 5.1.109 (R7): when m_watchdog was armed (wall ms) and whether this operation was already re-armed
+    // once after a late (frozen-process) firing - armWatchdog / onWatchdog.
+    qint64                       m_watchdogArmedMs = -1;
+    bool                         m_watchdogFreezeRearmed = false;
     bool                         m_bootstrapped = false; // AVPN: bootstrap() УСПЕШНО выполнен (Task 11)
     qint64                       m_lastFgRefreshMs = 0;  // AVPN (store-flow E): троттл engine-level foreground-рефреша подписки (30с)
     bool                         m_bootstrapInFlight = false; // AVPN: цепочка ретраев идёт (дедуп QML-вызовов)

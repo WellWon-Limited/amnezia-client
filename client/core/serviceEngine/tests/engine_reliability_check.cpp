@@ -21,6 +21,7 @@
 // возвращаются вместе с бюджетом лечения после здорового отрезка (GAPFIX-2).
 // Секции, помеченные OLD-API, собираются и против базы (без новых методов) — на базе они ПАДАЮТ
 // (доказательство регрессии): tests/build_engine_reliability.sh --base. Флот как в проде: EE + US.
+#include "../DebugSnapshot.h"
 #include "../HealthLoop.h"
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
@@ -150,6 +151,19 @@ static bool feedDead(ServiceEngine &eng, FakeTunnel &tun, qint64 now, qint64 txB
 
 static const QByteArray EE = awgNodeJson("9", 9, "EE", "38.180.164.134:585");
 static const QByteArray US = awgNodeJson("10", 10, "US", "149.33.7.203:585");
+// 5.1.109 (R7e): an Xray listener on the US host (location h:10).
+static const QByteArray XRAY_US = QByteArray(R"({ "node_id": "10x", "region": "eu", "host_id": 10,
+    "endpoint": "149.33.7.203:443", "proto": "xray", "weight": 1.0, "country_code": "US",
+    "xray_params": { "uuid": "8f14e45f-ceea-4a7c-9d6b-2a1b3c4d5e6f",
+                     "public_key": "SbVjZ9Yl3dR3QpG1v8k2Wx0aU7Hq4Nn6Tt5Bc8Jd1mE",
+                     "short_id": "a1b2c3d4", "server_name": "vision.example.com",
+                     "fingerprint": "chrome", "flow": "xtls-rprx-vision",
+                     "network": "tcp", "security": "reality" } })");
+static void setXray(bool on)
+{
+    TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("dead_reup_same_node"), false},
+                          {QStringLiteral("xray_client"), on}}, {}, {});
+}
 
 int main(int argc, char **argv)
 {
@@ -370,6 +384,133 @@ int main(int argc, char **argv)
             QString err;
             CHECK(eng.connect(err));
             CHECK(tun.lastUpNodeId == QLatin1String("9"));         // повтор мимо провалившейся цели
+        }
+        {   // 5.1.109 (R7, device 35 build 138, 10-11.11): the re-up of the same node is in the up phase,
+            // the app is frozen for 11 h, the extension heals the session meanwhile. The facade's first
+            // tick after thaw is late (decideDeadlineTick) - it shifts the phase clock by the freeze and
+            // asks for status instead of evaluating the deadline; the status confirms Connected.
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.switchInUpPhase());
+            now += 4'000;                                          // frozen ~4 s into the up phase
+            const qint64 frozen = 11LL * 3600 * 1000;
+            now += frozen;
+            CHECK(eng.shiftSwitchClock(frozen) == SwitchClockResync::Shifted);
+            CHECK(!eng.expireSwitch(15000));                       // the deadline is not spent by the freeze
+            CHECK(eng.state() == EngineState::Switching);
+            CHECK(eng.onTunnelConnected());                        // fresh status: the session works
+            CHECK(eng.state() == EngineState::Connected || eng.state() == EngineState::Verifying);
+            CHECK(!eng.hasInterruptedSwitch());
+            CHECK(eng.shiftSwitchClock(1000) == SwitchClockResync::NoPhase); // no switch phase
+            // R7d: the pair healed during the freeze - success is recorded, time-to-traffic is unknown
+            // (traffic started somewhere inside the freeze), never the 120 s ceiling of the night.
+            CHECK(eng.recordTransportOutcome(true));               // the facade on Vpn::Connected (AWG)
+            const TransportHistoryEntry h = eng.transportHistory().entry(QStringLiteral("h:10"), QStringLiteral("awg"));
+            CHECK(h.successEwma > 0.99);
+            CHECK(h.ttfMsEwma < 0.0);
+            // R7b: one switchLog line for the one shift
+            int shiftedLines = 0;
+            for (const QString &l : eng.debugSnapshot().switchLog)
+                if (l.contains(QLatin1String("switch clock shifted"))) ++shiftedLines;
+            CHECK(shiftedLines == 1);
+        }
+        {   // R7a: App Nap / EcoQoS - the timers are only slowed (a tick every 10 s), no real freeze. At
+            // most ONE shift per phase: the dead switch still expires within deadline + one interval
+            // (was: each late tick credited ~1 s, the 15 s deadline became ~150 s).
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            const qint64 phaseStart = now;
+            int shifts = 0;
+            bool expired = false;
+            for (int i = 0; i < 40 && !expired; ++i) {
+                now += 10'000;                                     // a slowed 1 s timer
+                const DeadlineTick t = decideDeadlineTick(10'000, 1'000);
+                if (!t.evaluate && eng.shiftSwitchClock(t.frozenMs) == SwitchClockResync::Shifted) {
+                    ++shifts;                                      // the facade journals only this one
+                    continue;
+                }
+                expired = eng.expireSwitch(15000);
+            }
+            CHECK(expired);
+            CHECK(shifts == 1);                                    // R7b: one resync (one journal line)
+            CHECK(now - phaseStart <= 15'000 + 9'000 + 10'000);    // deadline + one shift + one tick
+        }
+        {   // R7a: the latch is per phase - a new phase (re-up after the down phase) may shift once again
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));                    // down phase
+            CHECK(eng.shiftSwitchClock(5'000) == SwitchClockResync::Shifted);
+            CHECK(eng.shiftSwitchClock(5'000) == SwitchClockResync::AlreadyShifted);
+            CHECK(eng.onTunnelDisconnected());                     // up phase starts: latch reset
+            CHECK(eng.shiftSwitchClock(5'000) == SwitchClockResync::Shifted);
+        }
+        {   // R7c: the wall clock jumps back 1 h during a switch - the phase start is clamped to now, the
+            // dead switch expires on the normal budget (was: it hung for the size of the jump)
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            now -= 3'600'000;
+            CHECK(!eng.expireSwitch(15000));
+            now += 16'000;
+            CHECK(eng.expireSwitch(15000));
+        }
+        {   // R7e: a pool refresh applied BETWEEN the runtimes of an engine switch drops a pin its mode
+            // cannot serve (US AWG removed, US keeps only Xray, mode "Amnezia") - the facade takes both
+            // flags right after onTunnelDisconnected (AvpnEngineQml: takeReseedAppliedInSwitch).
+            setXray(true);
+            ServiceEngine eng;
+            FakeTunnel tun;
+            eng.setNowMsForTest([&now]() { return now; });
+            eng.setTunnel(&tun);
+            QString err;
+            CHECK(eng.loadSubscription(subJson({ EE, US, XRAY_US }, 7), err));
+            eng.setTransportMode(TransportMode::Awg);
+            CHECK(eng.setPinnedNode(QStringLiteral("10"), err));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("10"));
+            CHECK(eng.onTunnelConnected());
+            CHECK(feedDead(eng, tun, 1000, 0));                    // DEAD -> failover to EE, down phase
+            CHECK(eng.state() == EngineState::Switching);
+            CHECK(eng.loadSubscription(subJson({ EE, XRAY_US }, 8), err)); // US AWG removed: deferred
+            CHECK(eng.hasPendingReseed());
+            eng.onTunnelDisconnected();                            // applied between the runtimes
+            CHECK(eng.takeReseedAppliedInSwitch());
+            CHECK(eng.takePinDroppedForTransport() == QLatin1String("10"));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            setXray(false);
+        }
+        {   // the same jump WITHOUT the freeze mark: the 15 s deadline fires exactly as before
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            now += 4'000 + 11LL * 3600 * 1000;
+            CHECK(eng.expireSwitch(15000));
+            CHECK(eng.interruptedSwitchCause() == QLatin1String("deadline_up"));
+        }
+        {   // a truly dead session after thaw: the unchanged deadline ~15 s later
+            ServiceEngine eng;
+            FakeTunnel tun;
+            bringUp(eng, tun);
+            CHECK(feedDead(eng, tun, 1000, 0));
+            CHECK(eng.onTunnelDisconnected());
+            now += 4'000;
+            now += 3'600'000;
+            CHECK(eng.shiftSwitchClock(3'600'000) == SwitchClockResync::Shifted);
+            now += 10'000;
+            CHECK(!eng.expireSwitch(15000));                       // 14 s of phase time
+            now += 2'000;
+            CHECK(eng.expireSwitch(15000));                        // 16 s: the deadline as before
         }
         {   // Error в фазе down внутреннего failover: цель не потеряна (B5)
             ServiceEngine eng;

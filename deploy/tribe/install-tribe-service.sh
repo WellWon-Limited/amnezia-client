@@ -24,6 +24,25 @@ die() { echo "ОШИБКА: $*" >&2; exit 1; }
 
 cmd="${1:-}"
 
+# Служба в state = running у launchd с тем же pid секундой позже; pid — от launchd, не pgrep.
+daemon_pid() {
+    launchctl print "system/${LABEL}" 2>/dev/null \
+        | awk '$1=="state" && s=="" {s=$3} $1=="pid" && p=="" {p=$3} END {if (s=="running" && p!="") print p}' || true
+}
+wait_daemon() {
+    local deadline=$((SECONDS + 15)) pid
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        pid="$(daemon_pid)"
+        if [ -n "$pid" ]; then
+            sleep 1
+            [ "$(daemon_pid)" = "$pid" ] && { echo "${LABEL} запущен (pid ${pid})"; return 0; }
+        else
+            sleep 0.5
+        fi
+    done
+    return 1
+}
+
 uninstall() {
     # Снимаем ТОЛЬКО наш демон и наш pf-анкор.
     launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
@@ -125,8 +144,11 @@ EOF
 
     launchctl bootstrap system "$PLIST" || die "bootstrap не прошёл — смотри: launchctl print system/${LABEL}"
     launchctl enable "system/${LABEL}" || true
-    launchctl kickstart -k "system/${LABEL}" || true
-    sleep 1
+    # AVPN 5.1.109: bootstrap уже запустил демон (RunAtLoad); `kickstart -k` убивал этот свежий экземпляр,
+    # и launchd откладывал повторный запуск на 10 с (см. tribe-svc-install.sh). Без -k — только если не
+    # запущен; затем ждём state = running с тем же pid секундой позже (потолок 15 с).
+    launchctl kickstart "system/${LABEL}" || true
+    wait_daemon || die "${LABEL} не запустился за 15 с после bootstrap — смотри: launchctl print system/${LABEL}"
     launchctl print "system/${LABEL}" | head -5 || true
     echo "OK: ${LABEL} установлен (${bin})."
 }

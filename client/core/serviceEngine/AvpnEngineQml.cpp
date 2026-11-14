@@ -727,6 +727,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_watchdog, &QTimer::timeout, this, &AvpnEngineQml::onWatchdog);
     m_transitionTimer.setInterval(1000);
     connect(&m_transitionTimer, &QTimer::timeout, this, [this]() {
+        // 5.1.109 (R7): a tick far later than its 1 s period = the process was frozen; the freeze is not
+        // spent switch time and no evidence about the tunnel (device 35, 138: an 11.6 h overdue tick
+        // stopped a session the extension had healed). Shift the phase clock, ask for status; the
+        // next ticks judge the deadline as before.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 since = m_lastTransitionTickMs < 0 ? m_transitionTimer.interval() : now - m_lastTransitionTickMs;
+        m_lastTransitionTickMs = now;
+        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(since, m_transitionTimer.interval());
+        if (!tick.evaluate) {
+            switch (m_engine.shiftSwitchClock(tick.frozenMs)) {
+            case avpn::SwitchClockResync::Shifted: // once per phase (R7a) - one journal line (R7b)
+                reliabilityEvent(QStringLiteral("switch_deadline_frozen_shift frozen_ms=%1").arg(tick.frozenMs));
+                requestFreshTunnelStatus();
+                return;
+            case avpn::SwitchClockResync::NoPhase:
+                return;
+            case avpn::SwitchClockResync::AlreadyShifted:
+                break; // slowed timers, not a new freeze: judge the deadline as before
+            }
+        }
         if (!m_engine.expireSwitch(avpn::reconcileWatchdogMsTuned())) return;
         onSwitchDeadline();
     });
@@ -810,8 +830,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         reliabilityEvent(QStringLiteral("permission_prompt pending=%1 op=%2").arg(pending).arg(int(m_op)));
         if (m_op != Op::Starting)
             return;
-        m_watchdog.setInterval(startWatchdogMs()); // true — потолок диалога; false — обычный бюджет
-        m_watchdog.start();
+        armWatchdog(startWatchdogMs(), /*freezeRearm=*/true); // same start; true — потолок диалога, false — обычный бюджет
     });
     // Review of 136: the native stops an adopted session that never completed a handshake only while
     // the device has a physical network path (an On-Demand session raised offline is not dead) - and
@@ -1769,8 +1788,8 @@ void AvpnEngineQml::refreshQualityEndpoints()
                                      QStringLiteral("https://connectivitycheck.gstatic.com/generate_204"))});
 }
 
-// The ping follows the transport like whoami does: on Xray api.tribevpn.com is the entry host, routed
-// outside the tunnel, so a ping there answers even when the Xray exit is dead (review of 138).
+// The ping follows the transport like whoami does: on Xray api.tribevpn.com is the entry host of the
+// same path (review of 138; routing per platform - WhoamiVerdict.h whoamiBaseUrl).
 QString AvpnEngineQml::livePingUrl() const
 {
     return avpn::liveProbePingUrl(m_baseUrl, avpn::isXrayProto(m_engine.currentNodeProto()),
@@ -2420,6 +2439,16 @@ void AvpnEngineQml::persistPin()
 void AvpnEngineQml::restorePin(const QString &pinBefore)
 {
     if (!m_engine.hasSubscription()) return;
+    // 5.1.109 (review R1): the refresh dropped the pin - its listener is gone and the location has no
+    // other node the transport mode allows. Persist the empty pin: re-applying the saved one would be
+    // refused (no_transport) and leave it saved.
+    const QString droppedForTransport = m_engine.takePinDroppedForTransport();
+    if (!droppedForTransport.isEmpty() && m_engine.pinnedNodeId().isEmpty()) {
+        persistPin();
+        reliabilityEvent(QStringLiteral("pin_cleared why=reseed mode=%1 node=%2")
+                             .arg(avpn::transportModeToString(m_engine.transportMode()), droppedForTransport));
+        return;
+    }
     switch (decidePinRestore(m_savedPin, pinBefore, m_engine.pinnedNodeId())) {
     case PinRestoreAction::Nothing:
         return;
@@ -4336,7 +4365,18 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // onTunnelDisconnected САМ продолжит НАМЕРЕННЫЙ свитч ноды (Switching+pendingSwitch → up());
         // если это не свитч — просто «отключено». БЕЗ реактивного failover на внешний обрыв (см. Error).
         ++m_verifyEpoch; // AVPN awg31-xray-v1: верификация xray старой сессии отменена
+    {
+        const QString pinBefore = m_engine.pinnedNodeId();
         m_engine.onTunnelDisconnected();
+        // 5.1.109 (R7e): the engine applied a deferred pool body between the runtimes of its own switch
+        // (GAP-1) - the same post-processing as applyPendingReseed: RTT view and the pin (a pin the mode
+        // cannot serve is persisted as cleared, pin_cleared why=reseed; a migrated one - its new id).
+        if (m_engine.takeReseedAppliedInSwitch()) {
+            m_nodeRtt = m_engine.measuredRtt();
+            restorePin(pinBefore);
+            qInfo() << "[avpn reseed] pool revision" << m_engine.poolRevision() << "applied inside a switch";
+        }
+    }
         break;
     case Vpn::Reconnecting:
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
@@ -5189,8 +5229,7 @@ void AvpnEngineQml::guardedStart()
     // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
     m_startWatchdogDeferrals = 0;              // волна-4 (P1-5): новый старт — новый бюджет перевзводов
     m_lastOwnOpMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P2-6): окно «своего» события сети
-    m_watchdog.setInterval(startWatchdogMs()); // ревью CL-A r2: диалог «Разрешить VPN» продлевает
-    m_watchdog.start();
+    armWatchdog(startWatchdogMs()); // ревью CL-A r2: диалог «Разрешить VPN» продлевает
     emit changed();
 
     QString err;
@@ -5549,8 +5588,7 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
     // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (см. guardedStart).
     // Пол связан с handshake-бюджетом (ConnectTunables.h): watchdog ВСЕГДА > handshake_timeout,
     // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
-    m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
-    m_watchdog.start();
+    armWatchdog(avpn::reconcileWatchdogMsTuned());
     m_healthTimer.stop();
     // Критик полноты (жалобы 1/2): повтор после дедлайна свитча — без requestStop(), иначе он
     // стирал цель повтора (в том числе переподъём EE), бюджет лечения и стрик data-plane движка.
@@ -5574,10 +5612,44 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
 
 // AVPN: сторож reconcile — терминальный колбэк не пришёл за таймаут (iOS NE иногда «молчит» при
 // teardown или connect завис). Разблокируем машину, чтобы не залипнуть навсегда.
+void AvpnEngineQml::armWatchdog(int intervalMs, bool freezeRearm)
+{
+    if (!freezeRearm)
+        m_watchdogFreezeRearmed = false;
+    m_watchdogArmedMs = QDateTime::currentMSecsSinceEpoch();
+    m_watchdog.setInterval(intervalMs);
+    m_watchdog.start();
+}
+
+void AvpnEngineQml::requestFreshTunnelStatus()
+{
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    IosController::Instance()->requestReconcileStatus();
+#endif
+}
+
 void AvpnEngineQml::onWatchdog()
 {
     if (!m_opInFlight)
         return;
+    // 5.1.109 (R7): the start watchdog fired late - the app was frozen past its deadline (device 269,
+    // builds 128/138: a working session stopped by an overdue start watchdog). Re-arm once for the same
+    // operation without spending a deferral or an attempt and ask for status; a Connected in between
+    // completes the start, a second late firing is judged as before.
+    if (m_op == Op::Starting && m_lastTunnelState != Vpn::Connected && m_watchdogArmedMs >= 0) {
+        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(
+            QDateTime::currentMSecsSinceEpoch() - m_watchdogArmedMs, m_watchdog.interval());
+        if (avpn::rearmStartWatchdogAfterFreeze(tick, m_watchdogFreezeRearmed)) {
+            reliabilityEvent(QStringLiteral("watchdog_start_frozen_rearm frozen_ms=%1 native=%2")
+                                 .arg(tick.frozenMs).arg(int(m_lastTunnelState)));
+            m_engine.noteAppFrozenDuringUp(); // R7d: no time-to-traffic sample for this start
+            const int interval = m_watchdog.interval();
+            armWatchdog(interval, /*freezeRearm=*/true);
+            m_watchdogFreezeRearmed = true;
+            requestFreshTunnelStatus();
+            return;
+        }
+    }
     const Op finished = m_op;
     m_op = Op::None;
     m_opInFlight = false;
@@ -5619,8 +5691,7 @@ void AvpnEngineQml::onWatchdog()
             m_busy = true;
             reliabilityEvent(QStringLiteral("watchdog_start_deferred native=%1 n=%2")
                                  .arg(int(m_lastTunnelState)).arg(m_startWatchdogDeferrals));
-            m_watchdog.setInterval(avpn::reconcileWatchdogMsTuned());
-            m_watchdog.start();
+            armWatchdog(avpn::reconcileWatchdogMsTuned(), /*freezeRearm=*/true); // same operation
             return;
         }
 #endif
@@ -6043,15 +6114,24 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
     QSettings s;
     s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(m));
     s.sync();
-    // Поднятый/поднимающийся туннель на транспорте, который новому режиму не соответствует, —
-    // переподнять ЧЕРЕЗ reconcile+m_needsRestart (stop→Disconnected→start), никогда прямой up()
-    // поверх teardown (CONNECT-INVARIANTS §2/§4). Авто: текущий транспорт всегда допустим — не трогаем.
+    // 5.1.109: a pinned country the new mode cannot serve (Serbia has AmneziaWG only, mode -> Xray)
+    // stayed pinned: the card showed it with the new transport's badge and Connect silently raised
+    // another country. Such a pin is dropped and persisted (setPinnedNode would refuse it now with
+    // no_transport); Auto never drops a pin. A tunnel up/coming up on a transport the new mode
+    // excludes is restarted THROUGH reconcile + m_needsRestart (stop -> Disconnected -> start), never a
+    // direct up() over a teardown (CONNECT-INVARIANTS §2/§4); the start then picks without that pin.
+    // The rule - DebugSnapshot.h::decidePinOnTransportMode (facade_policy_check).
+    const avpn::TransportMode effective = m_engine.transportMode();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    const bool up = avpn::isTunnelUpStateName(st);
-    const QString cur = m_engine.currentNodeProto();
-    const bool mismatch = (m == avpn::TransportMode::Awg && avpn::isXrayProto(cur))
-                          || (m == avpn::TransportMode::Xray && !cur.isEmpty() && !avpn::isXrayProto(cur));
-    if (up && mismatch) {
+    const avpn::PinModeDecision d = avpn::decidePinOnTransportMode(
+        avpn::transportModeToString(effective), m_engine.pinnedNodeId(), m_engine.pinLacksTransport(effective),
+        avpn::isTunnelUpStateName(st), m_engine.currentNodeProto());
+    if (d.clearPin) {
+        m_engine.clearPin();
+        persistPin();
+        reliabilityEvent(d.journal);
+    }
+    if (d.restartTunnel) {
         m_wantConnected = true;
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)

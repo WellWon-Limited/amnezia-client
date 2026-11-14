@@ -2,6 +2,7 @@
 #pragma once
 
 #include "dto/Subscription.h"
+#include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
 #include <QHash>
 #include <QString>
 #include <QStringList>
@@ -310,6 +311,67 @@ inline PinRestoreAction decidePinRestore(const QString &saved, const QString &pi
     if (pinAfter == saved)
         return PinRestoreAction::Nothing;
     return pinBefore == saved ? PinRestoreAction::PersistMigrated : PinRestoreAction::Nothing;
+}
+
+// 5.1.109 (review R3): the facade's decision on a transport mode change (AvpnEngineQml::setTransportMode,
+// after the new mode is applied). mode - the effective mode name ("auto" | "awg" | "xray");
+// pinnedNodeId - the engine's pin; pinLacksTransport - ServiceEngine::pinLacksTransport(effective mode);
+// tunnelUp / currentProto - the tunnel now (proto of the identified node, empty = unknown).
+//  clearPin      - a pin the mode cannot serve: clearPin() + persistPin(), journal line below. Auto never
+//                  clears (every connectable location serves Auto).
+//  restartTunnel - a tunnel up on a transport the mode excludes is restarted through reconcile +
+//                  m_needsRestart (stop -> Disconnected -> start, §2/§4), never a direct up(); the start
+//                  then picks without the cleared pin. Unknown proto (adopted, not identified) - no restart.
+struct PinModeDecision {
+    bool clearPin = false;
+    bool restartTunnel = false;
+    QString journal; // empty = nothing to journal
+};
+inline PinModeDecision decidePinOnTransportMode(const QString &mode, const QString &pinnedNodeId,
+                                                bool pinLacksTransport, bool tunnelUp,
+                                                const QString &currentProto)
+{
+    PinModeDecision d;
+    const bool autoMode = mode == QLatin1String("auto");
+    if (!autoMode && !pinnedNodeId.isEmpty() && pinLacksTransport) {
+        d.clearPin = true;
+        d.journal = QStringLiteral("pin_cleared why=transport_mode mode=%1 node=%2").arg(mode, pinnedNodeId);
+    }
+    const bool curXray = currentProto == QLatin1String("xray");
+    const bool mismatch = (mode == QLatin1String("awg") && curXray)
+                          || (mode == QLatin1String("xray") && !currentProto.isEmpty() && !curXray);
+    d.restartTunnel = tunnelUp && mismatch;
+    return d;
+}
+
+// 5.1.109 (R7, device 35 build 138, 10-11.11.2026): a deadline timer that fires late means the process
+// was frozen (iOS suspended the app in the background, a laptop slept): the time of the freeze is no
+// evidence about the tunnel (§29 п.5 "заморозка — не довод"; same rule as timerFiredLate). Such a tick
+// does not judge the deadline: the facade shifts the running switch-phase clock by frozenMs
+// (ServiceEngine::shiftSwitchClock) and asks for a fresh status; the normal path then decides (a
+// confirmed Connected ends the switch, a dead session meets the unchanged deadline after thaw).
+// sinceLastTickMs < 0 (wall clock went backwards) - judge normally: ServiceEngine::expireSwitch clamps a
+// phase start that is now in the future (R7c). The engine shifts at most once per phase (R7a): with
+// timers the OS only slows (App Nap, EcoQoS) every tick is late, later ones are judged normally.
+// Was: 11.6 h overdue 1 s tick -> expireSwitch -> guardedStop of a session the extension had healed.
+struct DeadlineTick {
+    bool evaluate = true;
+    qint64 frozenMs = 0;
+};
+inline DeadlineTick decideDeadlineTick(qint64 sinceLastTickMs, qint64 periodMs)
+{
+    if (sinceLastTickMs < 0)
+        return {true, 0};
+    if (!timerFiredLate(sinceLastTickMs, periodMs))
+        return {true, 0};
+    return {false, sinceLastTickMs - periodMs};
+}
+// The start watchdog (one-shot) fired late: re-arm it once for the same operation without spending a
+// deferral or an attempt, and ask for status (device 269, builds 128/138: a working session was
+// stopped by an overdue start watchdog). A second late firing of the same operation is judged.
+inline bool rearmStartWatchdogAfterFreeze(const DeadlineTick &tick, bool rearmedThisOperation)
+{
+    return !tick.evaluate && !rearmedThisOperation;
 }
 
 // A10: бюджет подготовки старта. С пулом — мягкий бюджет завершает подготовку; без пула

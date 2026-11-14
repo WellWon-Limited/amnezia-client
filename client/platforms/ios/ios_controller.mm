@@ -458,6 +458,7 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
     m_serverAddress = [configuration.value(configKey::hostName).toString().toNSString() copy];
     m_handshakeConfirmed = false;
     m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): our own start from here on
+    m_lastAdoptedDeadCheck.clear(); // AVPN 5.1.109 (review R4): a new session journals its §25 inputs again
     m_handshakeAwaiting = false;
     m_handshakeTimer.invalidate();
     m_handshakeTimeouts = 0;
@@ -1156,7 +1157,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState,
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1240,6 +1241,13 @@ void IosController::checkStatus()
                         dead.softRestarts = roamSoftRestarts;
                         dead.resumes = roamResumes;
                         dead.uplinkUp = m_uplinkProbe ? m_uplinkProbe() : false;
+                        // AVPN 5.1.109 (device check IOS-UP35): every input of the decision and the first
+                        // unmet condition, logged when it changes (the budget is re-checked each timeout).
+                        const QString deadCheck = QString::fromStdString(avpn_ios::describeDeadAdoptedSession(dead));
+                        if (deadCheck != m_lastAdoptedDeadCheck) {
+                            m_lastAdoptedDeadCheck = deadCheck;
+                            qWarning().noquote() << "IosController::checkStatus :" << deadCheck;
+                        }
                         if (avpn_ios::stopNeverConnectedAdoptedSession(dead)
                             && m_currentTunnel
                             && [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
@@ -1551,16 +1559,17 @@ void IosController::vpnStatusDidChange(void *pNotification)
                 if (!m_handshakeAwaiting) {
                     m_handshakeAwaiting = true;
                     m_handshakeTimer.restart();
-                    m_handshakeTimeouts = 0;
+                    m_handshakeTimeouts = 0; // AVPN: handshake budget starts per awaited session
                 }
             }
         } else if (session.status != NEVPNStatusConnected) {
             m_handshakeAwaiting = false;
             m_handshakeConfirmed = false;
-            m_shownConnectedBeforeHandshake = false;
+            m_shownConnectedBeforeHandshake = false; // AVPN (owner test 06.11): the adopted-session flag ends with the session
+            m_lastAdoptedDeadCheck.clear(); // AVPN 5.1.109 (review R4): the next session journals its §25 inputs again
             m_handshakeTimer.invalidate();
-            m_handshakeTimeouts = 0;
-            m_statusRequests.invalidate();
+            m_handshakeTimeouts = 0; // AVPN: handshake budget resets with the session
+            m_statusRequests.invalidate(); // AVPN (C5/H7): replaces upstream m_statusRequestInFlight = false
         }
         emitConnectionStateIfChanged(nextState);
 }

@@ -82,6 +82,38 @@ chown root:wheel "$PLIST"; chmod 644 "$PLIST"
 launchctl bootout system "$PLIST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST" || { echo "bootstrap failed"; exit 1; }
 launchctl enable "system/${LABEL}" 2>/dev/null || true
-launchctl kickstart -k "system/${LABEL}" 2>/dev/null || true
+# AVPN 5.1.109: bootstrap уже запускает демон (RunAtLoad). Прежний `kickstart -k` УБИВАЛ этот свежий
+# экземпляр (SIGTERM через ~16 мс), launchd откладывал повторный запуск на 10 с (throttle), а
+# приложение после установщика ждёт демона ~5 с → «Служба VPN установлена, но не запустилась» на
+# обновлении службы (системный журнал 2026-11-10 17:21:52 UTC). kickstart без -k запускает службу,
+# только если она не запущена. Затем ждём (с потолком 15 с), пока launchd держит службу в state =
+# running с тем же pid секундой позже; приложение следом проверяет процесс (macServiceRunning).
+launchctl kickstart "system/${LABEL}" 2>/dev/null || true
+# pid и state берём у launchd (а не pgrep -x): если bootout вернулся раньше, чем старый процесс
+# вышел, pgrep посчитал бы старый экземпляр новым. Секундой позже pid обязан быть тем же.
+daemon_pid() {
+  launchctl print "system/${LABEL}" 2>/dev/null \
+    | awk '$1=="state" && s=="" {s=$3} $1=="pid" && p=="" {p=$3} END {if (s=="running" && p!="") print p}' || true
+}
+wait_daemon() {
+  local deadline=$((SECONDS + 15)) pid
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    pid="$(daemon_pid)"
+    if [ -n "$pid" ]; then
+      sleep 1
+      [ "$(daemon_pid)" = "$pid" ] && { echo "Tribe-service запущен (pid $pid)."; return 0; }
+    else
+      sleep 0.5
+    fi
+  done
+  return 1
+}
+if ! wait_daemon; then
+  # Код выхода 0 намеренно: ненулевой `do shell script` приложение показывает как «нет прав
+  # администратора»; честную ошибку «установлена, но не запустилась» оно выдаст само по pgrep.
+  echo "ОШИБКА: Tribe-service не запустился за 15 с после bootstrap — состояние launchd ниже"
+  launchctl print "system/${LABEL}" 2>&1 | head -25
+  exit 0
+fi
 echo "Tribe-service установлен."
 exit 0

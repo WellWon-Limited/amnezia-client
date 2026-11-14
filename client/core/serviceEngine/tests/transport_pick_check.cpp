@@ -1124,6 +1124,194 @@ int main(int argc, char **argv)
         CHECK(orderByRankingRtt(ids, rank).constLast() == QLatin1String("12")); // unmeasured last
     }
 
+    // §14. 5.1.109: a pin the new transport mode cannot serve. Serbia has AmneziaWG only; the user pins
+    // it in "Auto" and switches the mode to Xray - the pin used to stay (card "Serbia 1" with an Xray
+    // badge, Connect silently on another country's Xray). The facade clears the pin when
+    // pinLacksTransport(effective mode) - the no_transport rule of setPinnedNode, without its effects.
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("16:awg", 16, "RS", 1.0),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          xrayNodeJson("7:xray", 7, "NL", 1.0) });
+        QString err;
+        ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+        CHECK(eng.loadSubscription(pool, err));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));             // no pin - nothing to clear
+        CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+        CHECK(eng.pinLacksTransport(TransportMode::Xray));              // AWG-only location, Xray -> clear
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));              // it has AWG -> stays
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));             // Auto never clears
+        eng.setTransportMode(TransportMode::Xray);                       // the facade: mode applied first
+        CHECK(eng.pinLacksTransport(eng.transportMode()));
+        CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));           // the check itself changes nothing
+        setFlags(/*xrayClient=*/false, /*autoPick=*/true);              // Xray off on the device: reads as Auto
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        eng.setTransportMode(TransportMode::Auto);
+        CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));        // DE has both transports
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));
+        CHECK(eng.setPinnedNode(QStringLiteral("7:xray"), err));        // Xray-only location
+        CHECK(eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+        CHECK(!eng.pinLacksTransport(TransportMode::Auto));
+        // Review R3: the pinned location (NL, Xray only) leaves the pool - the refresh drops the pin
+        // itself (no node of that location remains), so nothing is left for the mode check to clear.
+        CHECK(eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0) }), err));
+        CHECK(eng.pinnedNodeId().isEmpty());
+        CHECK(eng.takePinDroppedForTransport().isEmpty()); // the location is gone, not its transport
+        CHECK(!eng.pinLacksTransport(TransportMode::Awg));
+        CHECK(!eng.pinLacksTransport(TransportMode::Xray));
+    }
+
+    // §15. 5.1.109: the "protocol before connect" badge (nextCandidate) and connect() pick the same node.
+    // A stored "Xray" mode that is no longer available (xray_client off, a Mac with an old service)
+    // reads as Auto in connect() (effectiveTransportMode); nextCandidate read the raw mode and showed
+    // nothing or another node. Table: mode x pin x xray supported x network memory x auto pick.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          xrayNodeJson("9:xray", 9, "EE", 1.0),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        const TransportMode modes[] = {TransportMode::Auto, TransportMode::Awg, TransportMode::Xray};
+        const char *pins[] = {"", "16:awg", "9:xray"};
+        const char *memories[] = {"", "9:xray", "16:awg"};
+        int cases = 0, mismatches = 0;
+        for (const TransportMode mode : modes)
+            for (const char *pin : pins)
+                for (const bool xrayOn : {true, false})
+                    for (const char *memory : memories)
+                        for (const bool autoPick : {true, false}) {
+                            setFlags(/*xrayClient=*/true, autoPick);
+                            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+                            QString err;
+                            CHECK(eng.loadSubscription(pool, err));
+                            eng.setMeasuredRtt(rtt);
+                            eng.setTransportMode(mode); // stored while Xray was available
+                            if (*pin)
+                                eng.setPinnedNode(QString::fromLatin1(pin), err); // may refuse: still a case
+                            eng.setNetworkMemoryNode(QString::fromLatin1(memory));
+                            setFlags(xrayOn, autoPick);
+                            const SubscriptionNode *next = eng.nextCandidate();
+                            const QString nextId = next ? next->nodeId : QString();
+                            const bool ok = eng.connect(err);
+                            const QString upId = ok ? tun.lastUpNodeId : QString();
+                            ++cases;
+                            if (nextId != upId) {
+                                ++mismatches;
+                                fprintf(stderr, "  §15 mode=%s pin=%s xray=%d memory=%s autoPick=%d: next=%s connect=%s\n",
+                                        qPrintable(transportModeToString(mode)), pin, int(xrayOn), memory,
+                                        int(autoPick), qPrintable(nextId), qPrintable(upId));
+                            }
+                        }
+        CHECK(cases == 108);
+        CHECK(mismatches == 0);
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+
+    // §15b. 5.1.109 (review R2): the other entry points read the effective mode too - a stored "Xray"
+    // that is no longer available (xray_client off mid-session, tun2socks gone) is Auto for the pin,
+    // the rotation and the pool refresh, as the UI already shows.
+    {
+        const QByteArray pool = subJson({ awgNodeJson("2:awg", 2, "PL", 1.0),
+                                          awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          awgNodeJson("16:awg", 16, "RS", 1.0) });
+        const QHash<QString, int> rtt{{QStringLiteral("2:awg"), 10}, {QStringLiteral("9:awg"), 40},
+                                      {QStringLiteral("9:xray"), 40}, {QStringLiteral("16:awg"), 60}};
+        QString err;
+        auto staleXray = [&](ServiceEngine &eng) {   // "Xray" stored while available, then switched off
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setTransportMode(TransportMode::Xray);
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.transportMode() == TransportMode::Auto); // what the UI shows
+        };
+        {   // a tap on an AWG-only country is accepted (was no_transport)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            staleXray(eng);
+            CHECK(eng.setPinnedNode(QStringLiteral("16:awg"), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("16:awg"));
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        {   // "Обновить подключение": the next live location exists (was empty - Xray filter, Xray off)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            staleXray(eng);
+            CHECK(!eng.nextLiveNodeId().isEmpty());
+            CHECK(eng.rotateNext(err));
+            CHECK(tun.upCalls == 1);
+        }
+        {   // pool refresh while Xray is off, then Xray returns: no pin the mode cannot serve remains
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0), awgNodeJson("9:awg", 9, "DE", 1.0),
+                                                 awgNodeJson("16:awg", 16, "RS", 1.0) }, 2), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));     // Auto while Xray is off
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+
+    // §16. 5.1.109 (review R1): the pool refresh re-targets a pin whose node disappeared to a node of the
+    // same location ALLOWED by the effective transport mode; none allowed -> the pin is dropped (the
+    // facade persists that, journal pin_cleared why=reseed), never migrated to another transport.
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray full = subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0) });
+        const QByteArray noListener = subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), awgNodeJson("2:awg", 2, "PL", 1.0) }, 2);
+        QString err;
+        {   // mode Xray, the pinned DE listener removed -> pin dropped (not 9:awg)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+            CHECK(eng.loadSubscription(noListener, err));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.takePinDroppedForTransport() == QLatin1String("9:xray"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());          // one-shot
+            CHECK(!eng.pinLacksTransport(eng.transportMode()));
+        }
+        {   // mode Xray, another listener of the same location remains -> the pin moves to it
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0), xrayNodeJson("9:xray", 9, "DE", 1.0),
+                                                 xrayNodeJson("9:xray2", 9, "DE", 1.0, 20, "203.0.113.11:443") }), err));
+            eng.setTransportMode(TransportMode::Xray);
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("9:awg", 9, "DE", 1.0),
+                                                 xrayNodeJson("9:xray2", 9, "DE", 1.0, 20, "203.0.113.11:443") }, 2), err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:xray2"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+        {   // Auto: the location still serves -> the pin moves to 9:awg as before
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9:xray"), err));
+            CHECK(eng.loadSubscription(noListener, err));
+            CHECK(eng.pinnedNodeId() == QLatin1String("9:awg"));
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+        {   // the whole location gone -> pin dropped as before, but not "for transport"
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(full, err));
+            CHECK(eng.setPinnedNode(QStringLiteral("9:awg"), err));
+            CHECK(eng.loadSubscription(subJson({ awgNodeJson("2:awg", 2, "PL", 1.0) }, 2), err));
+            CHECK(eng.pinnedNodeId().isEmpty());
+            CHECK(eng.takePinDroppedForTransport().isEmpty());
+        }
+    }
+
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

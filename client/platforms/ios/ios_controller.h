@@ -277,6 +277,7 @@ private:
     uint64_t m_rebindSeq = 0; // AVPN (REV-5): итог только последнего rebindTunnel()
 
     QString m_lastRoamSummary; // AVPN seamless roaming: последняя строка счётчиков NE (лог при изменении)
+    QString m_lastAdoptedDeadCheck; // AVPN 5.1.109 (IOS-UP35): last journaled §25 decision inputs (log on change)
     // AVPN (девайс-разбор 2026-09-02): последняя доставленная причина отказа ядра Xray и хвост его
     // лога — чтобы одну и ту же строку не эмитить/не писать в лог на каждом опросе статуса.
     QString m_lastXrayStartFailure;

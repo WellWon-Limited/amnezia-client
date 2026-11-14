@@ -174,7 +174,8 @@ QHash<QString, int> ServiceEngine::failoverRtt() const
 
 void ServiceEngine::markUpStarted()
 {
-    m_upStartedMs = QDateTime::currentMSecsSinceEpoch();
+    m_upStartedMs = nowMs(); // 5.1.109: the engine clock (tests) - QDateTime in the app
+    m_upFrozen = false;
     m_okRecorded = false;
     m_failRecorded = false;
     m_probeFailStreak = 0;
@@ -190,9 +191,11 @@ bool ServiceEngine::recordTransportOutcome(bool ok)
         return false;
     if (!ok && m_failRecorded)
         return false;
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 now = nowMs();
     const qint64 elapsed = now - m_upStartedMs;
-    const int ttf = (ok && m_upStartedMs > 0)
+    // R7d: an up() that spanned a freeze of the app has no honest time to traffic (traffic started
+    // somewhere inside the freeze) - success is recorded, the time is not (no 120 s ceiling penalty).
+    const int ttf = (ok && m_upStartedMs > 0 && !m_upFrozen)
         ? int(elapsed < 0 ? 0 : (elapsed > qint64(TransportHistory::kMaxTtfMs) ? qint64(TransportHistory::kMaxTtfMs) : elapsed))
         : -1;
     m_transportHistory.record(locationKeyOf(*n), protoOf(*n), ok, ttf, now);
@@ -230,7 +233,7 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, m_transportMode)) // Task 10 + awg31: авто-пригодность
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -268,7 +271,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, m_transportMode)) // Task 10 + awg31: авто-пригодность
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -289,7 +292,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
                                                      bool useLastKnownRtt) const
 {
     TransportPickInput in;
-    in.mode = m_transportMode;
+    in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
     in.exclA = exclA;
     if (withExclusions)
         in.excluded = m_failedThisSession;
@@ -322,7 +325,7 @@ const SubscriptionNode *ServiceEngine::pinnedCandidate() const
 const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
 {
     const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
-    if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, m_transportMode))
+    if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, transportMode()))
         return nullptr;
     if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || m_failedThisSession.contains(n->nodeId))
         return nullptr;
@@ -340,7 +343,9 @@ const SubscriptionNode *ServiceEngine::nextCandidate() const
     if (const SubscriptionNode *pinned = pinnedCandidate())
         return pinned;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    if (autoPick || m_transportMode != TransportMode::Auto) {
+    // 5.1.109: the effective mode - connect() starts with normalizeTransportMode(), so a stored "Xray"
+    // that is no longer available reads as Auto here too (the badge and the start pick the same node).
+    if (autoPick || transportMode() != TransportMode::Auto) {
         if (const SubscriptionNode *remembered = networkMemoryCandidate())
             return remembered;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true);
@@ -554,12 +559,26 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
 
     // Ревалидация pin по ЛОКАЦИИ: узел исчез → сосед той же локации (представитель), иначе снять.
     // Актуальный pin фасад берёт из pinnedNodeId() (A7: персистит его, старый id не восстанавливает).
+    // 5.1.109 (review R1): the representative only among nodes the effective transport mode allows -
+    // a pinned Xray listener removed in mode "Xray" used to move the pin to the AWG node of the same
+    // location (the card showed it, Connect raised another country's Xray). None allowed while the
+    // location still has connectable nodes -> the pin is dropped, the facade persists and journals it.
+    m_pinDroppedForTransport.clear();
+    normalizeTransportMode(); // review R2: a pin re-targeted under Auto must not meet a revived "Xray"
     if (!m_pinnedNodeId.isEmpty() && !newIds.contains(m_pinnedNodeId)) {
+        const TransportMode mode = transportMode();
         QList<const SubscriptionNode *> loc;
-        for (const SubscriptionNode &n : m_pool.nodes())
-            if (!oldPinLoc.isEmpty() && locationKeyOf(n) == oldPinLoc && isSupportedProtoNode(n))
+        bool locationConnectable = false;
+        for (const SubscriptionNode &n : m_pool.nodes()) {
+            if (oldPinLoc.isEmpty() || locationKeyOf(n) != oldPinLoc || !isSupportedProtoNode(n))
+                continue;
+            locationConnectable = true;
+            if (transportAllowed(n, mode))
                 loc.append(&n);
+        }
         const SubscriptionNode *rep = locationRepresentative(loc);
+        if (!rep && locationConnectable)
+            m_pinDroppedForTransport = m_pinnedNodeId;
         m_pinnedNodeId = rep ? rep->nodeId : QString();
     }
 
@@ -1372,6 +1391,7 @@ bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, co
     m_state = EngineState::Switching;       // гард: transient Disconnected/Error от down() не триггерит failover
     // AVPN (фикс-волна 2026-09-22, B4): часы фазы down (до реального Disconnected старого рантайма).
     m_switchStartedMs = nowMs();
+    m_switchClockShifted = false; // R7a: one freeze shift per phase
     m_switchUpPhase = false;
     m_rebindAwaiting = false;
     m_interrupted = InterruptedSwitch{};
@@ -1400,6 +1420,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
 {
     if (m_pendingSwitchNodeId.isEmpty())
         return false;
+    normalizeTransportMode(); // 5.1.109 (review R2): the target check below and pickTransport agree
     // GAP-1 (U7): старый рантайм уже опущен — отложенный reseed (пришёл в фазе down или при Connected
     // с изменённой identity цели/текущей) применяем ДО up(): цель поднимается по актуальному конфигу.
     {
@@ -1449,6 +1470,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
     // AVPN (фикс-волна 2026-09-22, B4/H8): часы перезапускаются на фазу up — её бюджет не меньше
     // сторожа коннекта (раньше 15 с делили обе фазы, и легальный медленный failover на сотовой рвался).
     m_switchStartedMs = nowMs();
+    m_switchClockShifted = false; // R7a: one freeze shift per phase
     m_switchUpPhase = true;
     m_upPhaseReason = reason;
     markUpStarted();
@@ -1474,6 +1496,10 @@ bool ServiceEngine::expireSwitch(int timeoutMs)
     // AVPN (фикс-волна 2026-09-22, K5/B4): бюджет — на ТЕКУЩУЮ фазу; фаза up — не меньше сторожа коннекта.
     const qint64 budget = m_switchUpPhase ? qMax<qint64>(timeoutMs, reconcileWatchdogMsTuned())
                                           : qMax<qint64>(0, timeoutMs);
+    // R7c: the wall clock went backwards - a phase start in the future would hang the switch for the
+    // size of the jump; the phase is counted from now.
+    if (m_switchStartedMs > nowMs())
+        m_switchStartedMs = nowMs();
     if (nowMs() - m_switchStartedMs < budget)
         return false;
     const QString phase = m_switchUpPhase ? QStringLiteral("up") : QStringLiteral("down");
@@ -1486,6 +1512,25 @@ bool ServiceEngine::expireSwitch(int timeoutMs)
     m_pendingSwitchIsReup = false;
     m_state = EngineState::Error;
     return true;
+}
+
+SwitchClockResync ServiceEngine::shiftSwitchClock(qint64 frozenMs)
+{
+    if (m_state != EngineState::Switching || m_switchStartedMs < 0)
+        return SwitchClockResync::NoPhase;
+    // R7a: at most ONE shift per phase. Timers that the OS only slows (macOS App Nap, Windows EcoQoS)
+    // make every tick late; crediting each would stretch the 15 s deadline ~tenfold on a dead node.
+    if (m_switchClockShifted)
+        return SwitchClockResync::AlreadyShifted;
+    m_switchClockShifted = true;
+    if (m_switchUpPhase)
+        m_upFrozen = true; // R7d: the time to traffic of this up() is unknown
+    if (frozenMs > 0) {
+        m_switchStartedMs = qMin(m_switchStartedMs + frozenMs, nowMs());
+        appendSwitchLog(QStringLiteral("switch clock shifted by app freeze %1 s (%2 phase): awaiting native status")
+                            .arg(frozenMs / 1000).arg(m_switchUpPhase ? QStringLiteral("up") : QStringLiteral("down")));
+    }
+    return SwitchClockResync::Shifted;
 }
 
 DebugSnapshot ServiceEngine::debugSnapshot() const
@@ -1511,7 +1556,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
     s.lkgStale = m_lkgActive; // AVPN (LKG, C-7): пул из дискового кэша, свежий фетч ещё не доехал
     // AVPN awg31-xray-v1: транспорт/режим/фаза верификации/ревизия пула.
     s.activeProto = currentNodeProto();
-    s.transportMode = transportModeToString(m_transportMode);
+    s.transportMode = transportModeToString(transportMode()); // 5.1.109: effective, as the UI
     s.verifying = (m_state == EngineState::Verifying);
     s.poolRevision = sub.poolRevision;
     s.reseedPending = m_pendingReseed.has_value();
@@ -1577,6 +1622,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 // AVPN awg31-xray-v1: pin — ПО ЛОКАЦИИ (см. ServiceEngine.h).
 bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
+    normalizeTransportMode(); // 5.1.109 (review R2): the mode the UI shows, as connect()
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
@@ -1591,14 +1637,8 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     // узел, разрешённый ручным режимом. Строки ТЕХНИЧЕСКИЕ (лог/тесты); человеческий текст для
     // тоста — на границе фасада (AvpnEngineQml::humanPinError), маппится по стабильному префиксу.
     const QString loc = locationKeyOf(*found);
-    bool anySupported = false, anyAllowed = false;
-    for (const SubscriptionNode &n : m_pool.nodes()) {
-        if (locationKeyOf(n) != loc || !isSupportedProtoNode(n))
-            continue;
-        anySupported = true;
-        if (transportAllowed(n, m_transportMode))
-            anyAllowed = true;
-    }
+    const LocationTransports lt = locationTransportsFor(loc, m_transportMode);
+    const bool anySupported = lt.anySupported, anyAllowed = lt.anyAllowed;
     if (!anySupported) {
         // Task 10: нода с неподдерживаемым протоколом непригодна и для РУЧНОГО pin (в отличие от
         // manual_only) — коннект к ней невозможен, честная ошибка вместо вечного Connecting.
@@ -1615,10 +1655,35 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
     return true;
 }
 
+ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QString &loc,
+                                                                      TransportMode mode) const
+{
+    LocationTransports lt;
+    for (const SubscriptionNode &n : m_pool.nodes()) {
+        if (locationKeyOf(n) != loc || !isSupportedProtoNode(n))
+            continue;
+        lt.anySupported = true;
+        if (transportAllowed(n, mode))
+            lt.anyAllowed = true;
+    }
+    return lt;
+}
+
+// 5.1.109: the rule of setPinnedNode's no_transport refusal for an existing pin (see ServiceEngine.h).
+bool ServiceEngine::pinLacksTransport(TransportMode mode) const
+{
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    if (!pinned)
+        return false;
+    const LocationTransports lt = locationTransportsFor(locationKeyOf(*pinned), effectiveTransportMode(mode));
+    return lt.anySupported && !lt.anyAllowed;
+}
+
 // AVPN (live-node picker): round-robin «Обновить подключение» — по ЛОКАЦИЯМ (NodeRotation.h::
 // nextLiveNodeId: представитель следующей живой локации; транспорт внутри выбирает connect()).
 bool ServiceEngine::rotateNext(QString &error) // AVPN
 {
+    normalizeTransportMode(); // 5.1.109 (review R2)
     // Ручная ротация ≠ «закрепить»: снимаем закрепление, иначе offline-ветка ниже (m_currentNodeId=target
     // → connect()) перебивается приоритетом m_pinnedNodeId в connect() и ротация молча no-op'ит на pin.
     m_pinnedNodeId.clear(); // AVPN
@@ -1652,7 +1717,7 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
 // RU-нод из кольца — §14.3, ручной режим транспорта) — в NodeRotation.h, тест tests/node_rotation_check.cpp.
 QString ServiceEngine::nextLiveNodeId() const
 {
-    return avpn::nextLiveNodeId(m_pool.nodes(), m_currentNodeId, m_transportMode);
+    return avpn::nextLiveNodeId(m_pool.nodes(), m_currentNodeId, transportMode()); // 5.1.109: effective
 }
 
 } // namespace avpn

@@ -92,6 +92,26 @@ purge(){
   for d in "${LEGACY_DIRS[@]}"; do rm -rf "${d:?}"; done
 }
 
+# Служба в state = running у launchd с тем же pid секундой позже; потолок 15 с. pid — от launchd, а не
+# pgrep: старый экземпляр, ещё не вышедший после bootout, не должен сойти за новый.
+daemon_pid(){
+  launchctl print "system/${LABEL}" 2>/dev/null \
+    | awk '$1=="state" && s=="" {s=$3} $1=="pid" && p=="" {p=$3} END {if (s=="running" && p!="") print p}' || true
+}
+wait_daemon(){
+  local deadline=$((SECONDS + 15)) pid
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    pid="$(daemon_pid)"
+    if [ -n "$pid" ]; then
+      sleep 1
+      [ "$(daemon_pid)" = "$pid" ] && { echo "${LABEL} запущен (pid ${pid})"; return 0; }
+    else
+      sleep 0.5
+    fi
+  done
+  return 1
+}
+
 count_our_plists(){
   local p n=0
   for p in "${LEGACY_PLISTS[@]}"; do [ -f "$p" ] && n=$((n+1)); done
@@ -197,8 +217,11 @@ EOF
   # ── запуск (bootout уже сделан в purge → чистая загрузка) ──
   launchctl bootstrap system "$PLIST" || die "bootstrap не прошёл — смотри: launchctl print system/${LABEL}"
   launchctl enable "system/${LABEL}" 2>/dev/null || true
-  launchctl kickstart -k "system/${LABEL}" 2>/dev/null || true
-  sleep 1
+  # AVPN 5.1.109: bootstrap уже запустил демон (RunAtLoad); `kickstart -k` убивал этот свежий экземпляр,
+  # и launchd откладывал повторный запуск на 10 с (throttle) — см. tribe-svc-install.sh. Без -k
+  # kickstart запускает службу, только если она не запущена; затем ждём живой процесс (потолок 15 с).
+  launchctl kickstart "system/${LABEL}" 2>/dev/null || true
+  wait_daemon || die "${LABEL} не запустился за 15 с после bootstrap — смотри: launchctl print system/${LABEL}"
   echo "OK: ${LABEL} установлен → ${BIN} (версия ${ver:-unknown})"
   echo
   status

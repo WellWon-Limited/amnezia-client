@@ -1200,7 +1200,7 @@
     <message>
         <location line="-128"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+244"/>
@@ -1289,7 +1289,7 @@
     <message>
         <location line="+0"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1332,7 +1332,7 @@
     <message>
         <location line="+1"/>
         <source>Поддержка</source>
-        <translation type="unfinished">Support</translation>
+        <translation>Support</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -1362,17 +1362,17 @@
     <message>
         <location line="+90"/>
         <source>Уведомления</source>
-        <translation type="unfinished">Notifications</translation>
+        <translation>Notifications</translation>
     </message>
     <message>
         <location line="+119"/>
         <source>+%1 дней</source>
-        <translation type="unfinished">+%1 days</translation>
+        <translation>+%1 days</translation>
     </message>
     <message>
         <location line="+70"/>
         <source>Прочитал</source>
-        <translation type="unfinished">Got it</translation>
+        <translation>Got it</translation>
     </message>
 </context>
 <context>
@@ -1709,7 +1709,7 @@ A gift for every friend!</translation>
     <message>
         <location line="+0"/>
         <source>Авто</source>
-        <translation type="unfinished">Auto</translation>
+        <translation>Auto</translation>
     </message>
     <message>
         <location line="+11"/>
@@ -1779,7 +1779,7 @@ A gift for every friend!</translation>
     <message>
         <location line="+11"/>
         <source>Повторить</source>
-        <translation type="unfinished">Retry</translation>
+        <translation>Retry</translation>
     </message>
     <message>
         <location line="-10"/>
@@ -1808,7 +1808,7 @@ A gift for every friend!</translation>
     <message>
         <location line="+51"/>
         <source>Поддержка</source>
-        <translation type="unfinished">Support</translation>
+        <translation>Support</translation>
     </message>
     <message>
         <location line="+7"/>
@@ -1823,7 +1823,7 @@ A gift for every friend!</translation>
     <message>
         <location line="+17"/>
         <source>ID аккаунта скопирован</source>
-        <translation type="unfinished">Account ID copied</translation>
+        <translation>Account ID copied</translation>
     </message>
     <message>
         <location line="+79"/>
@@ -1875,7 +1875,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+9"/>
         <source>Отмена</source>
-        <translation type="unfinished">Cancel</translation>
+        <translation>Cancel</translation>
     </message>
 </context>
 <context>
@@ -2022,7 +2022,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+134"/>
         <source>Запустить диагностику?</source>
-        <translation type="unfinished">Run diagnostics?</translation>
+        <translation>Run diagnostics?</translation>
     </message>
     <message>
         <location line="+13"/>
@@ -2077,7 +2077,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+16"/>
         <source> мс</source>
-        <translation type="unfinished"> ms</translation>
+        <translation> ms</translation>
     </message>
     <message>
         <location line="+56"/>
@@ -2117,7 +2117,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+35"/>
         <source>Запустить диагностику</source>
-        <translation type="unfinished">Run diagnostics</translation>
+        <translation>Run diagnostics</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2250,7 +2250,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+2"/>
         <source>Доступна версия %1</source>
-        <translation type="unfinished">Version %1 is available</translation>
+        <translation>Version %1 is available</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2260,12 +2260,12 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+37"/>
         <source>Скрыть</source>
-        <translation type="unfinished">Hide</translation>
+        <translation>Hide</translation>
     </message>
     <message>
         <location line="+1"/>
         <source>Вернуть %1</source>
-        <translation type="unfinished">Restore %1</translation>
+        <translation>Restore %1</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2350,7 +2350,7 @@ You can attach a photo or video.</translation>
     <message>
         <location filename="../../ui/qml/Tribe/components/TribeUpdateSheet.qml" line="+31"/>
         <source>Доступна новая версия</source>
-        <translation type="unfinished">A new version is available</translation>
+        <translation>A new version is available</translation>
     </message>
     <message>
         <location line="+15"/>
@@ -2390,7 +2390,7 @@ You can attach a photo or video.</translation>
     <message>
         <location line="+0"/>
         <source>Обновить</source>
-        <translation type="unfinished">Update</translation>
+        <translation>Update</translation>
     </message>
     <message>
         <location line="+38"/>
@@ -2439,7 +2439,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2908"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+2928"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -2539,7 +2539,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2299"/>
+        <location line="-2319"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -2569,7 +2569,7 @@ You can attach a photo or video.</translation>
         <translation>Downloading and checking the signature…</translation>
     </message>
     <message>
-        <location line="+380"/>
+        <location line="+400"/>
         <source>Текущий сервер</source>
         <translation>Current server</translation>
     </message>
@@ -2732,7 +2732,7 @@ You can attach a photo or video.</translation>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+233"/>
+        <location line="+244"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>The server is not passing traffic — try another server</translation>
     </message>
