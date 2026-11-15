@@ -13,6 +13,9 @@
 
 #include <QtGlobal>
 
+#include <cmath>   // AVPN (iOS data watch, 140): std::isfinite / std::llround of the table below
+#include <cstring> // AVPN (iOS data watch, 140): std::strcmp
+
 namespace avpn {
 
 // iOS NE: бюджет ожидания одного AWG-handshake (checkStatus). Пол 2с (ниже — ложные таймауты
@@ -105,6 +108,80 @@ inline int roamStallRebindSTuned()
 {
     return qBound(0, int(TuningStore::numberOr(QStringLiteral("ios_roam_stall_rebind_s"), 10)), 120);
 }
+
+// iOS tunnel-side data watch (design docs/specs/2026-11-14-ios-tunnel-side-data-watch-design.md §5.6 and
+// §0a, build 140, iOS only). ONE table of every number of the mechanism: a default or a bound moves by
+// editing one row. toPlan: the number goes into TribeWatchPlan.json for the extension (it clamps again);
+// false = read by the app only. Every value is an integer: clamp, then round to the nearest integer.
+// Absent, non-finite or garbage from the server -> the default; out of range -> the nearest bound.
+struct TunnelWatchNumberSpec {
+    const char *key;
+    double def;
+    double lo;
+    double hi;
+    bool toPlan;
+};
+inline constexpr TunnelWatchNumberSpec kIosTunnelWatchNumbers[] = {
+    // key                              default     floor      ceiling   plan
+    {"ios_tw_cycle_s",                       25,       10,         120, true},  // dead cycle; > fleet keepalive 5-15 s
+    {"ios_tw_cycle_min_tx_bytes",          1024,     1024,     1048576, true},  // demand per cycle
+    {"ios_tw_dead_cycles",                    3,        2,          20, true},  // cycles in a row before no_data
+    {"ios_tw_cycle_chain_gap_s",             30,        0,         300, true},  // gap between "neighbour" cycles
+    {"ios_tw_recover_rx_bytes",           16384,     1024,     1048576, true},  // data that closes an episode
+    {"ios_tw_min_episode_tx_bytes",        3072,     2048,     1048576, true},  // sent in the episode before a verdict
+    {"ios_tw_hs_rx_allowance_bytes",        148,       92,        4096, true},  // handshake reply is not data
+    {"ios_tw_hs_tx_allowance_bytes",       1024,      148,        8192, true},  // handshake initiation is not demand
+    {"ios_tw_min_heal_steps",                 2,        0,           6, true},  // same-node heal steps before leaving
+    {"ios_tw_path_stable_s",                 20,        0,         120, true},  // quiet after a path change
+    {"ios_tw_start_grace_s",                 20,        5,         120, true},  // grace after start / peer change
+    {"ios_tw_wake_grace_s",                  10,        0,          60, true},  // grace after device sleep
+    {"ios_tw_app_alive_s",                   10,        3,          60, true},  // no status request this long = app asleep
+    {"ios_tw_max_switches",                   5,        0,           5, true},  // stage 2 only; 0 = never switch
+    {"ios_tw_suspect_window_s",              60,       30,         600, true},  // window of the low-rx probe reason
+    {"ios_tw_suspect_min_tx_bytes",       65536,     4096,    16777216, true},
+    {"ios_tw_suspect_max_rx_bytes",        4096,        0,     1048576, true},
+    {"ios_tw_probe_timeout_ms",            4000,     1000,       15000, true},  // probe through the tunnel
+    {"ios_tw_probe_max_per_episode",          3,        1,          10, true},
+    {"ios_tw_probe_max_per_hour",            12,        1,          60, true},
+    {"ios_tw_sanity_required",                1,        0,           1, true},  // physical-network check required
+    {"ios_tw_probe",                          1,        0,           1, true},  // 0 = no probe through the tunnel
+    {"ios_tw_plan_ttl_h",                    24,        1,         168, true},  // plan expires_ms = written + this
+    {"ios_tw_policy_max_age_h",              24,        0,         168, true},  // trust in the policy after the config
+    // App only. How long the app holds its own decisions on return to the foreground waiting for the
+    // extension's snapshot (TunnelWatchStatus.h::decideResumeFreeze): floor 0.5 s (one status round
+    // trip), ceiling 10 s (longer and the user waits for nothing).
+    {"ios_tw_resume_wait_ms",              3000,      500,       10000, false},
+    // App only. How long the On-Demand arming may hold background time after the app leaves the
+    // screen: ceiling 28 s - iOS grants about 30 s and kills an app that overstays its task.
+    {"ios_on_demand_bg_arm_max_s",           25,        5,          28, false},
+};
+
+inline long long clampTunnelWatchNumber(const TunnelWatchNumberSpec &spec, double raw)
+{
+    const double v = std::isfinite(raw) ? qBound(spec.lo, raw, spec.hi) : spec.def;
+    return std::llround(v);
+}
+
+inline const TunnelWatchNumberSpec *tunnelWatchNumberSpec(const char *key)
+{
+    for (const TunnelWatchNumberSpec &s : kIosTunnelWatchNumbers)
+        if (std::strcmp(s.key, key) == 0)
+            return &s;
+    return nullptr;
+}
+
+// The clamped value of a table key from the current TuningStore snapshot; an unknown key is 0 (the
+// table test proves every key the code reads is in the table).
+inline long long iosTunnelWatchNumberTuned(const char *key)
+{
+    const TunnelWatchNumberSpec *s = tunnelWatchNumberSpec(key);
+    if (!s)
+        return 0;
+    return clampTunnelWatchNumber(*s, TuningStore::numberOr(QLatin1String(key), s->def));
+}
+
+inline int iosTwResumeWaitMsTuned() { return int(iosTunnelWatchNumberTuned("ios_tw_resume_wait_ms")); }
+inline int iosOnDemandBgArmMaxSTuned() { return int(iosTunnelWatchNumberTuned("ios_on_demand_bg_arm_max_s")); }
 
 // AVPN seamless roaming (§23.9, macOS демон): сколько раз ПОВТОРИТЬ пробу живости после смены
 // BSSID/пробуждения, прежде чем считать туннель мёртвым и рестартовать (numbers.wake_probe_retries).

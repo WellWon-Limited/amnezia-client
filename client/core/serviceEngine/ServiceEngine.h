@@ -209,6 +209,13 @@ public:
     // give-up streak (data_plane_fail_max_tries) and the dead flag stay as they are - a reset here
     // made the failover carousel endless on a dead network.
     bool verifyInconclusive();
+    // AVPN (iOS data watch, build 140): the extension reported no_data / unconfirmed for this session -
+    // back from Connected to Verifying, so the facade re-checks the path with the existing data check
+    // (verifySucceeded / verifyFailed / verifyInconclusive as after a start). Only from Connected with a
+    // known node; heal budget, streak and failed list are untouched; a success of the re-check is recorded
+    // in the transport history at most once per rise and without a time to traffic. Compiled for every
+    // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
+    bool reenterVerifying();
     bool feedProbeResult(bool ok);
 
     // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every

@@ -10,6 +10,9 @@
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
+#include "TunnelWatchStatus.h" // AVPN (iOS data watch, 140): extension verdict + resume freeze (pure)
+#include <functional>
+#include <vector>
 #include "RestartGuard.h"    // AVPN (разбор 2026-09-23): фоновое время iOS на перезапуск туннеля
 #include "TribeJournal.h"    // AVPN (журнал тестирования, 2026-09-23): запись + досылка на /v1/diag/journal
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
@@ -962,6 +965,16 @@ private:
     // AVPN (разбор 2026-09-23): держать фоновое время iOS, пока намерение ON, а туннель не устоялся
     // (перезапуск «стоп → старт», начатый приложением, иначе замерзал между стопом и стартом).
     void syncRestartGuard();
+    // AVPN (iOS data watch, build 140; TunnelWatchPlan.h, TunnelWatchStatus.h). Called only under Q_OS_IOS;
+    // with features.ios_tunnel_watch / ios_on_demand_bg_arm false (default) each is a no-op for decisions.
+    void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
+    void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
+    bool tunnelWatchFrozen(const char *site);          // resume freeze: hold this decision?
+    bool deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume);
+    void beginTunnelWatchFreeze(const char *why);
+    void tickTunnelWatchFreeze(qint64 sinceLastTickMs); // on the existing 1 s transition tick
+    void releaseTunnelWatchFreeze(int step, const avpn::TunnelWatchSnapshot *snapshot);
+    void reverifyAfterExtensionVerdict(const avpn::TunnelWatchSnapshot &snapshot, const QString &nodeId);
     // AVPN (журнал тестирования): включить/выключить по видимости/выбору/флагу сервера.
     void syncJournal();
     void adoptNativeIdentity();
@@ -1219,6 +1232,12 @@ private:
     QTimer                      m_journalTimer;          // журнал тестирования: 15 мин, пока на экране
     QString                     m_journalLastState;      // журнал тестирования: прошлое состояние для перехода
     avpn::RestartGuardLatch     m_restartGuard;          // разбор 2026-09-23: удержание фонового времени iOS
+    // AVPN (iOS data watch, build 140): the resume freeze (TunnelWatchStatus.h::decideResumeFreeze), the
+    // generation the app believed before it, decisions waiting for its end, the last applied snapshot.
+    avpn::ResumeFreezeState     m_watchFreeze;
+    QString                     m_watchFreezeGeneration;
+    QString                     m_watchFreezeWhy;
+    std::vector<std::function<void()>> m_watchDeferred;
     SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)
     int                         m_statusRequestAttempts = 0; // запросы статуса в текущем ожидании
     QTimer                      m_statusRetryTimer;      // backoff запросов статуса (1/2/4 с)

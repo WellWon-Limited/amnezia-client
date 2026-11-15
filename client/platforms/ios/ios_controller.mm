@@ -12,6 +12,10 @@
 #include <QUuid>
 #include <memory>
 #include "AvpnIntentController.h"
+#include "IosBackgroundArm.h" // AVPN (iOS data watch, 140): On-Demand arming in the background (pure)
+#if defined(Q_OS_IOS)
+#include "AvpnBackgroundGuard.h" // AVPN (iOS data watch, 140): background time by reason
+#endif
 
 #import "ios_controller_wrapper.h"
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
@@ -807,6 +811,8 @@ void IosController::armOnDemandForConfirmedSession()
                     Avpn_recordLifecycle(saveFailed ? QStringLiteral("on_demand_arm_failed") : QStringLiteral("on_demand_armed"),
                         {{QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
                     [tunnel release];
+                    // AVPN (iOS data watch, 140): the arming the background hold waited for has its result.
+                    endBackgroundArmHold(saveFailed ? "not_needed" : "armed", saveFailed ? "save_failed" : "");
                     if (avpn_ios::armNeedsCleanup(saveFailed, onDemandIntentOff()))
                         stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::IntentCleanup);
                 }, Qt::QueuedConnection);
@@ -1064,6 +1070,7 @@ void IosController::checkStatus()
         QMetaObject::invokeMethod(this, [this] { checkStatus(); }, Qt::QueuedConnection);
         return;
     }
+    tickBackgroundArmHold(); // AVPN (iOS data watch, 140): the hold's bound is judged on this poll's tick
 
     // AVPN (ревью 2026-07-11): менеджер — только retained-копией (гонка с release на реконнекте),
     // ответ — только для СВОЕЙ сессии (gen): стейл-ответ старой сессии, долетевший после
@@ -1333,6 +1340,27 @@ void IosController::checkStatus()
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;
         }, Qt::QueuedConnection);
+        // AVPN (iOS data watch, build 140, contract C2): only when the facade asked for a snapshot
+        // (requestStatusSnapshot; never with the flag off) the extension's `watch` object (absent in a 139
+        // extension) goes to the facade with the session metadata of THIS reply. Queued after the lambda
+        // above, so it runs only for the reply that lambda applied (lastAppliedIs) - never for a stale one.
+        if (m_watchSnapshotWanted.load()) {
+            QVariantMap watchSnapshot{{QStringLiteral("session"), metadata}};
+            if ([response[@"watch"] isKindOfClass:[NSDictionary class]]
+                && [NSJSONSerialization isValidJSONObject:response[@"watch"]]) {
+                NSData *watchData = [NSJSONSerialization dataWithJSONObject:response[@"watch"] options:0 error:nil];
+                if (watchData)
+                    watchSnapshot.insert(QStringLiteral("watch"),
+                                         QJsonDocument::fromJson(QByteArray((const char *)watchData.bytes, watchData.length))
+                                             .object().toVariantMap());
+            }
+            QMetaObject::invokeMethod(this, [this, gen, request, watchSnapshot]() {
+                if (m_statusGeneration.load() != gen || !m_statusRequests.lastAppliedIs(gen, request))
+                    return;
+                if (m_watchSnapshotWanted.exchange(false))
+                    emit tunnelWatchSnapshot(watchSnapshot);
+            }, Qt::QueuedConnection);
+        }
     });
     [tunnel release]; // парный к retainedCurrentTunnel() в checkStatus
     });
@@ -1638,6 +1666,150 @@ static bool writeDirectSplitList(const QJsonArray &sites)
         return false;
     }
     return true;
+}
+
+// AVPN (iOS data watch, build 140, contract C1): the policy plan for the extension - same container and
+// mechanism as the direct split list above, but protected until the first unlock (the stage 2 plan carries
+// node keys, the same secrets the VPN profile already holds). Body built by
+// serviceEngine/TunnelWatchPlan.h; only the app writes the file.
+static bool writeTunnelWatchPlan(const QByteArray &json)
+{
+    NSURL *dir = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:@"group.hk.wellwon.tribe"];
+    if (!dir) {
+        qWarning() << "avpn: watch plan not written — no app group container";
+        return false;
+    }
+    NSData *data = [NSData dataWithBytes:json.constData() length:json.size()];
+    NSURL *url = [dir URLByAppendingPathComponent:@"TribeWatchPlan.json"];
+    NSDataWritingOptions options = NSDataWritingAtomic;
+#if defined(Q_OS_IOS)
+    options |= NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication;
+#endif
+    NSError *error = nil;
+    if (![data writeToURL:url options:options error:&error]) {
+        qWarning() << "avpn: watch plan not written:" << QString::fromNSString(error.localizedDescription);
+        return false;
+    }
+    return true;
+}
+
+bool IosController::writeTunnelWatchPlanFile(const QByteArray &json)
+{
+#if defined(Q_OS_IOS)
+    return !json.isEmpty() && writeTunnelWatchPlan(json);
+#else
+    Q_UNUSED(json);
+    return false;
+#endif
+}
+
+// AVPN (iOS data watch, build 140): one consistent snapshot after a return to the foreground - a reply to a
+// request sent before the freeze is not applied any more; the fresh request goes the usual status path.
+void IosController::requestStatusSnapshot()
+{
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this] { requestStatusSnapshot(); }, Qt::QueuedConnection);
+        return;
+    }
+    m_watchSnapshotWanted.store(true);
+    m_statusRequests.invalidate();
+    checkStatus();
+}
+
+// AVPN (iOS data watch, build 140; design §5.5 step 1): see IosBackgroundArm.h.
+void IosController::noteAppBackground(bool bgArmFlag, int maxHoldMs)
+{
+#if defined(Q_OS_IOS)
+    if (!bgArmFlag)
+        return; // build 139 behaviour: nothing held, nothing journaled
+    NETunnelProviderManager *tunnel = m_currentTunnel;
+    const NEVPNStatus st = tunnel ? tunnel.connection.status : NEVPNStatusInvalid;
+    const bool sessionUp = st == NEVPNStatusConnecting || st == NEVPNStatusConnected || st == NEVPNStatusReasserting;
+    const bool wireGuard = isWireGuardBasedProto(m_proto);
+    emit onDemandBackgroundEvent(QString::fromStdString(avpn_ios::describeOnDemandState(
+        m_onDemandArmed, sessionUp, wireGuard, m_onDemandChangePending, m_handshakeAwaiting)));
+    if (m_bgArmHeld)
+        return; // still holding from the previous transition
+    avpn_ios::BgArmInputs in;
+    in.flagOn = bgArmFlag;
+    in.haveTunnel = tunnel != nil;
+    in.sessionUp = sessionUp;
+    in.wireGuardBased = wireGuard;
+    in.armed = m_onDemandArmed;
+    in.changePending = m_onDemandChangePending;
+    in.handshakeAwaiting = m_handshakeAwaiting;
+    in.localStopRequested = m_localStopRequested;
+    const avpn_ios::BgArmDecision d = avpn_ios::decideBackgroundArm(in);
+    if (d.start != avpn_ios::BgArmStart::Hold) {
+        emit onDemandBackgroundEvent(QStringLiteral("on_demand_bg_arm result=not_needed why=%1").arg(QLatin1String(d.why)));
+        return;
+    }
+    const uint64_t token = ++m_bgArmToken;
+    const bool held = AvpnBackgroundGuard_acquire(avpn_ios::BgReason::OnDemandArm, [this, token] {
+        // iOS ended the background time (the task is already ended): the hold is over for this reason.
+        if (token != m_bgArmToken || !m_bgArmHeld)
+            return;
+        m_bgArmHeld = false;
+        ++m_bgArmToken;
+        emit onDemandBackgroundEvent(QStringLiteral("on_demand_bg_arm result=timeout why=expired held_ms=%1")
+                                         .arg(QDateTime::currentMSecsSinceEpoch() - m_bgArmSinceMs));
+    });
+    if (!held) {
+        emit onDemandBackgroundEvent(QStringLiteral("on_demand_bg_arm result=timeout why=denied"));
+        return;
+    }
+    m_bgArmHeld = true;
+    m_bgArmSinceMs = QDateTime::currentMSecsSinceEpoch();
+    m_bgArmMaxMs = maxHoldMs;
+    emit onDemandBackgroundEvent(QStringLiteral("on_demand_bg_arm hold max_ms=%1").arg(maxHoldMs));
+#else
+    Q_UNUSED(bgArmFlag);
+    Q_UNUSED(maxHoldMs);
+#endif
+}
+
+void IosController::noteAppForeground()
+{
+    endBackgroundArmHold("not_needed", "foreground");
+}
+
+void IosController::tickBackgroundArmHold()
+{
+    if (!m_bgArmHeld)
+        return;
+    NETunnelProviderManager *tunnel = m_currentTunnel;
+    const NEVPNStatus st = tunnel ? tunnel.connection.status : NEVPNStatusInvalid;
+    avpn_ios::BgArmTickInputs in;
+    in.nowMs = QDateTime::currentMSecsSinceEpoch();
+    in.heldSinceMs = m_bgArmSinceMs;
+    in.maxHoldMs = m_bgArmMaxMs;
+    in.armed = m_onDemandArmed && !m_onDemandChangePending; // saved, not only asked for
+    in.sessionUp = st == NEVPNStatusConnecting || st == NEVPNStatusConnected || st == NEVPNStatusReasserting;
+    in.localStopRequested = m_localStopRequested;
+    in.handshakeAwaiting = m_handshakeAwaiting;
+    in.changePending = m_onDemandChangePending;
+    const avpn_ios::BgArmTick t = avpn_ios::decideBackgroundArmTick(in);
+    if (t == avpn_ios::BgArmTick::Keep)
+        return;
+    const char *why = "";
+    if (t == avpn_ios::BgArmTick::ReleaseNotNeeded)
+        why = !in.sessionUp ? "session_down" : in.localStopRequested ? "stopping" : "arm_decided";
+    endBackgroundArmHold(avpn_ios::bgArmTickResult(t), why);
+}
+
+void IosController::endBackgroundArmHold(const char *result, const char *why)
+{
+    if (!m_bgArmHeld)
+        return;
+    m_bgArmHeld = false;
+    ++m_bgArmToken;
+#if defined(Q_OS_IOS)
+    AvpnBackgroundGuard_release(avpn_ios::BgReason::OnDemandArm);
+#endif
+    const QString whyPart = (why && *why) ? QStringLiteral(" why=%1").arg(QLatin1String(why)) : QString();
+    emit onDemandBackgroundEvent(QStringLiteral("on_demand_bg_arm result=%1%2 held_ms=%3")
+                                     .arg(QLatin1String(result), whyPart)
+                                     .arg(QDateTime::currentMSecsSinceEpoch() - m_bgArmSinceMs));
 }
 
 static void insertNonEmptyAwgParams(QJsonObject &wgConfig, const QJsonObject &config)

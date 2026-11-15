@@ -1103,6 +1103,17 @@ bool ServiceEngine::verifyInconclusive() // plan v3 step 5 (review)
     return true;
 }
 
+bool ServiceEngine::reenterVerifying() // AVPN (iOS data watch, build 140)
+{
+    if (m_state != EngineState::Connected || m_currentNodeId.isEmpty())
+        return false;
+    m_state = EngineState::Verifying;
+    // A success of this re-check is still at most one per rise (recordTransportOutcome), and it is
+    // not a time to traffic: the rise was long ago (the same rule as an up() that spanned a freeze).
+    m_upFrozen = true;
+    return true;
+}
+
 bool ServiceEngine::verifyFailed(const QString &reason) // AVPN awg31-xray-v1
 {
     if (m_state != EngineState::Verifying)

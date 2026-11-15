@@ -30,6 +30,10 @@
 #include <vector>
 #ifndef HARNESS_OLD
 #include "IosNativePolicy.h"
+#ifndef HARNESS_OLD
+#include "BackgroundHoldBook.h" // AVPN (iOS data watch, 140): the real bookkeeping behind the fake guard
+#include <cstring>
+#endif
 #endif
 
 // ------------------------------------------------------------------------------------------------
@@ -66,6 +70,43 @@ QVariantMap Avpn_currentIntent() { return g_intent; }
 QString Avpn_currentIntentGeneration() { return g_intent.value(QStringLiteral("generation")).toString(); }
 QVariantMap Avpn_lastStop() { return g_lastStop; }
 void Avpn_recordLifecycle(const QString &, const QVariantMap &) {}
+#ifndef HARNESS_OLD
+// AVPN (iOS data watch, 140): the one iOS background task behind AvpnBackgroundGuard, in memory. The
+// REAL bookkeeping by reason (BackgroundHoldBook.h) runs over this fake system, as in the app.
+static int g_bgBegins = 0;
+static int g_bgEnds = 0;
+static bool g_bgRefuse = false;
+static std::function<void()> g_bgExpire; // what iOS would call when the background time runs out
+struct HarnessBgSystem {
+    bool begin(std::function<void()> onSystemExpired)
+    {
+        if (g_bgRefuse) return false;
+        ++g_bgBegins;
+        g_bgExpire = std::move(onSystemExpired);
+        return true;
+    }
+    void end()
+    {
+        ++g_bgEnds;
+        g_bgExpire = nullptr;
+    }
+};
+static avpn_ios::BackgroundHold<HarnessBgSystem> &harnessBgHold()
+{
+    static avpn_ios::BackgroundHold<HarnessBgSystem> hold;
+    return hold;
+}
+bool AvpnBackgroundGuard_acquire(avpn_ios::BgReason reason, std::function<void()> onExpired)
+{
+    return harnessBgHold().acquire(reason, std::move(onExpired));
+}
+void AvpnBackgroundGuard_release(avpn_ios::BgReason reason) { harnessBgHold().release(reason); }
+bool AvpnBackgroundGuard_begin(std::function<void()> onExpired)
+{
+    return AvpnBackgroundGuard_acquire(avpn_ios::BgReason::TunnelRestart, std::move(onExpired));
+}
+void AvpnBackgroundGuard_end() { AvpnBackgroundGuard_release(avpn_ios::BgReason::TunnelRestart); }
+#endif
 #ifdef HARNESS_OLD
 bool Avpn_performIfCurrent(const QString &generation, const std::function<void()> &action)
 {

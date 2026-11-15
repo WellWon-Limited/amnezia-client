@@ -41,6 +41,13 @@ public:
         lastApplied = request;
         return true;
     }
+    // AVPN (iOS data watch, 140): the payload of `request` is the last one applied in `session` and was not
+    // invalidated since - a second consumer of the same reply (the `watch` snapshot) runs after accept()
+    // and must see exactly the reply accept() let through, never an older or a cancelled one.
+    bool lastAppliedIs(std::uint64_t session, std::uint64_t request) const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return epoch == session && request != 0 && lastApplied == request && request > invalidatedThrough;
+    }
     void invalidate() {
         std::lock_guard<std::mutex> lock(mutex);
         ++id;
