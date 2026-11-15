@@ -339,10 +339,16 @@ static void backgroundArmDecisions()
     CHECK(decideBackgroundArmTick(late) == BgArmTick::ReleaseTimeout, "25 s: the bound");
     BgArmTickInputs clockBack = t;
     clockBack.nowMs = 100;
-    CHECK(decideBackgroundArmTick(clockBack) == BgArmTick::Keep, "the clock went back: the hold is not stretched into the past");
+    CHECK(decideBackgroundArmTick(clockBack) == BgArmTick::ReleaseTimeout, "the clock went back: the hold is given back, not stretched");
     BgArmTickInputs armedLate = late;
     armedLate.armed = true;
     CHECK(decideBackgroundArmTick(armedLate) == BgArmTick::ReleaseArmed, "armed wins over the bound");
+    // Back on the screen: background time is not needed (the controller asks the system on its poll).
+    BgArmTickInputs active = t;
+    active.appActive = true;
+    CHECK(decideBackgroundArmTick(active) == BgArmTick::ReleaseNotNeeded, "on the screen again: let go");
+    active.armed = true;
+    CHECK(decideBackgroundArmTick(active) == BgArmTick::ReleaseArmed, "armed is still told as armed");
     CHECK(!std::strcmp(bgArmTickResult(BgArmTick::ReleaseArmed), "armed") && !std::strcmp(bgArmTickResult(BgArmTick::ReleaseTimeout), "timeout")
               && !std::strcmp(bgArmTickResult(BgArmTick::ReleaseNotNeeded), "not_needed") && !std::strcmp(bgArmTickResult(BgArmTick::Keep), ""),
           "journal words");

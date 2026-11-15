@@ -930,6 +930,15 @@ static void test_arm_cleanup_when_pause_lands_during_save()
 // ---- AVPN (iOS data watch, build 140): On-Demand arming after leaving the screen, the `watch` block of
 // the status reply, the plan file. Decisions: IosBackgroundArm.h, BackgroundHoldBook.h (pure tests in
 // IosDataWatchTests.cpp); here the real controller over the model of the system's rule store.
+// The app is on the screen again: the controller learns it from the system on its own status poll.
+static void harnessReturnToScreen()
+{
+    IosController::Instance()->setAppActiveProbe([] { return true; });
+    IosController::Instance()->checkStatus();
+    spin(30);
+    IosController::Instance()->setAppActiveProbe([] { return false; });
+}
+
 struct BgArmEvents {
     std::vector<std::string> lines;
     QMetaObject::Connection connection;
@@ -1005,8 +1014,8 @@ static void test_bg_arm_flag_off_is_silent()
     s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
     spin(250);
     CHECK(m.isOnDemandEnabled && g_bgBegins == 0 && g_bgEnds == 0 && events.lines.empty(), "the existing arming changed or touched the guard");
-    IosController::Instance()->noteAppForeground();
-    CHECK(events.lines.empty() && g_bgEnds == 0, "the foreground transition did something without a hold");
+    harnessReturnToScreen();
+    CHECK(events.lines.empty() && g_bgEnds == 0, "the return to the screen did something without a hold");
 }
 
 static void test_bg_arm_not_needed_without_session()
@@ -1027,11 +1036,16 @@ static void test_bg_arm_foreground_releases()
     startedSessionAwaitingHandshake(&m, &poll);
     BgArmEvents events;
     IosController::Instance()->noteAppBackground(true, 5000);
-    IosController::Instance()->noteAppForeground();
+    // Review mutant W16: nobody tells the controller about the return - it asks the system itself
+    // on its own status poll, so the hold cannot outlive the return because a caller forgot.
+    IosController::Instance()->checkStatus();
+    spin(30);
+    CHECK(g_bgBegins == 1 && g_bgEnds == 0, "the hold was given back while the app is still in the background");
+    harnessReturnToScreen();
     CHECK(g_bgBegins == 1 && g_bgEnds == 1, "the hold is not given back on the screen");
     CHECK(events.lastStartsWith("on_demand_bg_arm result=not_needed why=foreground"), "foreground release not journaled");
-    IosController::Instance()->noteAppForeground();
-    CHECK(g_bgEnds == 1 && events.lines.size() == 3, "a second foreground transition released again");
+    harnessReturnToScreen();
+    CHECK(g_bgEnds == 1 && events.lines.size() == 3, "a second poll on the screen released again");
 }
 
 // iOS ends the background time itself: the owner is told, nothing is released twice.
@@ -1048,7 +1062,7 @@ static void test_bg_arm_system_expiry()
     CHECK(g_bgEnds == 1 && events.lastStartsWith("on_demand_bg_arm result=timeout why=expired"), "expiry by the system not handled");
     const size_t lines = events.lines.size();
     spin(120);
-    IosController::Instance()->noteAppForeground();
+    harnessReturnToScreen();
     CHECK(g_bgEnds == 1 && events.lines.size() == lines, "after the expiry the hold was released or journaled again");
     CHECK(!m.isOnDemandEnabled, "the rule was armed without a handshake");
 }
@@ -1064,7 +1078,7 @@ static void test_bg_arm_refused_by_system()
     IosController::Instance()->noteAppBackground(true, 5000);
     CHECK(g_bgBegins == 0 && g_bgEnds == 0 && events.lastStartsWith("on_demand_bg_arm result=timeout why=denied"), "a refusal is not journaled");
     spin(120);
-    IosController::Instance()->noteAppForeground();
+    harnessReturnToScreen();
     CHECK(g_bgEnds == 0 && events.lines.size() == 2, "a refused hold was released");
 }
 

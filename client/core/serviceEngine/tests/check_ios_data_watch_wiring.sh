@@ -3,35 +3,40 @@
 # design.md in the backend repository, sections 0 and 0a): the wiring that unit tests cannot reach.
 #
 # The RULES are pure and tested by behaviour: the verdict (recipes/awg-apple/tribe/TribeDataWatch.swift,
-# tests/TribeDataWatchTests.swift + the mutation run in recipes/awg-apple/replay), the probe
-# (tribeprobe_test.go in patch 0012), the plan and the bypass reply (platforms/ios/tests/
-# TribeWatchPlanTests.swift), the app's half (tests/tunnel_watch_check.cpp, platforms/ios/tests/
-# IosDataWatchTests.cpp, the controller harness). What is left is where they are CALLED FROM: the
-# adapter patch, the provider, the facade and the controller have no unit harness of their own at these
-# places, so the forwarding is checked here at source level, and only that:
+# tests/TribeDataWatchTests.swift, tests/TribeDataWatchLadderTests.swift + the mutation run in
+# recipes/awg-apple/replay), the probe (tribeprobe_test.go in patch 0012), the plan and the bypass reply
+# (platforms/ios/tests/TribeWatchPlanTests.swift), the provider's runtime with fakes (platforms/ios/tests/
+# TribeDataWatchRuntimeTests.swift: the kill switch, the status reply, the probe's outcomes, the state
+# file), the app's half (tests/tunnel_watch_check.cpp: the plan write, the hand-over object with the
+# freeze, the background hold, the deferred decisions and the re-check; platforms/ios/tests/
+# IosDataWatchTests.cpp; the controller harness). What is left is where they are CALLED FROM, and only
+# what no test of those reaches: the adapter patch, the provider's call sites, the facade's call sites.
 #   extension
 #    E1. the adapter feeds the watch from the EXISTING stall tick, before the ladder acts, and the patch
 #        adds no timer;
 #    E2. with the policy off every hook in the adapter is a no-op;
 #    E3. the probe wrapper is the outermost one and is not created unless configured;
-#    E4. the provider configures the probe before the adapter starts, attaches and detaches the runtime,
-#        marks the app alive on a status request and adds the `watch` key only when there is a block;
-#    E5. the runtime has no timer of its own (the plan is re-read on the 10 s statistics tick), the
-#        bypass request is bound to the physical interface, nothing notifies the user;
+#    E4. the provider prepares the runtime before the adapter starts, attaches and detaches it, marks the
+#        app alive on a status request and adds the `watch` key only when there is a block;
+#    E5. the statistics tick is the runtime's (plan first, with the log on or off); neither the runtime
+#        nor the rule has a timer; the bypass request is bound to the physical interface; nothing
+#        notifies the user;
 #    E6. stage 1 moves nobody: no switching action is produced, no network settings are re-applied;
 #    E7. the package: tribe.13 = tribe.11 + 0012, both extension targets compile the new sources;
-#    E8. the Xray statistics line is diagnostics only;
+#    E8. the Xray statistics line is written only through the statistics tick;
 #   app
 #    A1. every new call in the facade is inside a Q_OS_IOS block;
 #    A2. the flags are read with the default false;
-#    A3. the plan is rewritten at the listed moments;
+#    A3. the plan is rewritten at the listed moments, through the one tested write;
 #    A4. the `watch` block reaches the facade only for the reply that was applied;
-#    A5. the freeze is consulted before the health verdict and before a data check completes;
+#    A5. the hand-over is consulted before the health verdict and before a data check completes;
 #    A6. the new code has no timer, watchdog or user notification;
-#    A7. the tunnel-restart guard keeps its own two calls; the arming holds under its own reason;
-#    A8. a verdict of the extension never touches the pin, the intent or the "data proven" marks;
+#    A7. the tunnel-restart guard keeps its own two calls; the arming holds under its own reason and
+#        asks the system itself whether the app is on the screen;
+#    A8. the effects handed to the hand-over never touch the pin, the intent or the "data proven" marks;
 #    A9. the engine's way back to Verifying is called from one place;
-#    X1. the numbers the extension reads and their bounds are those of the app's table.
+#    X1. the numbers the extension reads and their bounds are those of the app's table;
+#    X2. the extension's built-in bypass targets are the white-list detector's own defaults.
 # Run by build_check.sh.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -73,9 +78,9 @@ added_swift() { # the added lines of the adapter only
 
 # ---- E1: one owner, the existing tick -------------------------------------------------------------
 swift_added="$(added_swift)"
-[ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatchTick(sample)')" = "1" ] \
+[ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatchTick(sample, handle: handle)')" = "1" ] \
     || bad "E1: the adapter must feed the data watch from exactly one place"
-tick_ctx="$(grep -n -A2 'self.dataWatchTick(sample)' "$PATCH" | head -3)"
+tick_ctx="$(grep -n -A2 'self.dataWatchTick(sample, handle: handle)' "$PATCH" | head -3)"
 has "$tick_ctx" 'self.recovery.tick(sample, pathSatisfied' \
     || bad "E1: the data watch must be fed on the stall tick, right before the recovery ladder judges the same sample"
 for token in 'makeTimerSource' 'asyncAfter' 'Timer(' 'scheduledTimer' 'DispatchWorkItem'; do
@@ -86,7 +91,7 @@ done
 tick_body="$(printf '%s\n' "$swift_added" | awk '/private func dataWatchTick/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 order "$tick_body" 'guard self.dataWatchPolicy.enabled else' 'self.dataWatch.step(' \
     || bad "E2: dataWatchTick must leave before the step when the policy is off"
-has "$tick_body" 'self.dataWatchInputs?()' && order "$tick_body" 'guard self.dataWatchPolicy.enabled else' 'self.dataWatchInputs?()' \
+has "$tick_body" 'self.dataWatchInputs?(handle)' && order "$tick_body" 'guard self.dataWatchPolicy.enabled else' 'self.dataWatchInputs?(handle)' \
     || bad "E2: the provider's inputs must not be asked for while the policy is off"
 path_body="$(printf '%s\n' "$swift_added" | awk '/private func dataWatchPathEvent/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 order "$path_body" 'guard self.dataWatchPolicy.enabled else { return }' 'self.dataWatch.notePathEvent(' \
@@ -94,11 +99,12 @@ order "$path_body" 'guard self.dataWatchPolicy.enabled else { return }' 'self.da
 start_note="$(printf '%s\n' "$swift_added" | grep -B1 'self.dataWatch.noteDeviceStarted(' | head -1)"
 has "$start_note" 'if self.dataWatchPolicy.enabled {$' \
     && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteDeviceStarted(')" = "1" ] \
-    && [ "$(printf '%s\n' "$swift_added" | grep -c 'if self.dataWatchPolicy.enabled { self.dataWatch.noteBackendRestarted() }')" = "1" ] \
-    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteBackendRestarted()')" = "1" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteBackendRestarted(')" = "1" ] \
+    && has "$(printf '%s\n' "$swift_added" | grep -B1 'self.dataWatch.noteBackendRestarted(' | head -1)" 'if self.dataWatchPolicy.enabled {$' \
     || bad "E2: the device-start and backend-restart notes must be under the policy flag"
 has "$swift_added" 'private var dataWatchPolicy = TribeDataWatchPolicy.disabled' \
     || bad "E2: the adapter's policy must start disabled"
+has "$swift_added" 'dataWatchHealSteps\|healSteps' && bad "E2: the adapter must not count the ladder's steps for the watch (the verdict does not depend on them)"
 
 # ---- E3: the probe wrapper ---------------------------------------------------------------------------
 go_added="$(awk '/^diff --git/ { on = ($0 ~ /api-apple\.go/) } on && /^[+ ]/ { print substr($0, 2) }' "$PATCH")"
@@ -116,12 +122,17 @@ WG="$IOS/PacketTunnelProvider+WireGuard.swift"
 start_body="$(swift_func "$WG" 'func startWireguard(')"
 order "$start_body" 'prepareTribeDataWatch(wgConfig)' 'adapter.start(tunnelConfiguration' \
     || bad "E4: the probe must be configured before the adapter starts (the device wraps the tunnel at wgTurnOn)"
-order "$start_body" 'tribeDataWatch.attach(adapter: adapter, probeConfigured: tribeProbeReady)' 'adapter.start(tunnelConfiguration' \
+order "$start_body" 'tribeDataWatch.attach(adapter: adapter)' 'adapter.start(tunnelConfiguration' \
     || bad "E4: the runtime must be attached before the adapter starts"
 [ "$(cat "$IOS"/*.swift | grep -v '^[[:space:]]*//' | grep -c 'wgSetTribeProbe(')" = "1" ] \
     || bad "E4: the probe must be configured from one place"
-has "$(code "$IOS/PacketTunnelProvider+DataWatch.swift")" 'wgSetTribeProbe(wgConfig.clientIP, wgConfig.dns1, wanted ? 1 : 0)' \
-    || bad "E4: the probe goes from the client's tunnel address to the session's resolver, and is reset when not wanted"
+glue="$(code "$IOS/PacketTunnelProvider+DataWatch.swift")"
+has "$glue" 'setProbe: { clientIP, resolver, enabled in wgSetTribeProbe(clientIP, resolver, enabled ? 1 : 0) }' \
+    || bad "E4: the runtime's setProbe must be the Go call, with the runtime's own on/off"
+has "$glue" 'clientIP: wgConfig.clientIP, resolver: wgConfig.dns1)' \
+    || bad "E4: the probe goes from the client's tunnel address to the session's resolver"
+order "$(swift_func "$IOS/PacketTunnelProvider+DataWatch.swift" 'func prepareTribeDataWatch(')" 'tribeDataWatch.configure(tribeDataWatchDeps())' 'tribeDataWatch.prepare(' \
+    || bad "E4: the runtime must get its dependencies before it prepares a session"
 status_body="$(swift_func "$WG" 'func handleWireguardStatusMessage(')"
 has "$status_body" 'tribeDataWatch.noteAppStatusRequest()' || bad "E4: a status request must mark the app alive"
 has "$status_body" 'if let watch { response\["watch"\] = watch }' \
@@ -136,9 +147,11 @@ order "$block_body" 'guard enabled, let live else { completion(nil); return }' '
 
 # ---- E5: no timer, the bypass, no notifications --------------------------------------------------------
 stats_body="$(swift_func "$WG" 'private func logTribeStats(')"
-has "$stats_body" 'tribeDataWatch.refreshPlan()' || bad "E5: the plan must be re-read on the statistics tick"
-[ "$(cat "$IOS"/*.swift | grep -v '^[[:space:]]*//' | grep -c 'refreshPlan()')" = "2" ] \
-    || bad "E5: refreshPlan has exactly one caller (the statistics tick) besides its definition"
+has "$stats_body" 'tribeDataWatch.statsTick(isXray: protoType == .xray, loggingEnabled: Log.isLoggingEnabled,' \
+    || bad "E5: the statistics tick must be the runtime's sequence (plan first, with the log on or off - tested there)"
+has "$stats_body" 'guard Log.isLoggingEnabled' && bad "E5: the provider must not gate the statistics tick on the file log itself"
+[ "$(cat "$IOS"/*.swift | grep -v '^[[:space:]]*//' | grep -c 'statsTick(')" = "2" ] \
+    || bad "E5: the statistics tick has exactly one caller besides its definition"
 for token in 'makeTimerSource' 'scheduledTimer' 'Timer(' 'DispatchSourceTimer' 'CADisplayLink'; do
     for f in TribeDataWatchRuntime.swift TribeWatchPlan.swift PacketTunnelProvider+DataWatch.swift; do
         has "$(code "$IOS/$f")" "$token" && bad "E5: $f has a timer of its own ($token)"
@@ -183,14 +196,17 @@ for cm in "$ROOT/client/ios/networkextension/CMakeLists.txt" "$ROOT/client/macos
     done
 done
 grep -q 'run_tribe_data_watch_tests.sh' "$RECIPE/conanfile.py" || bad "E7: the package must be gated on the data-watch unit test"
+grep -q 'TribeDataWatchLadderTests.swift' "$RECIPE/conanfile.py" && grep -q 'TribeDataWatchLadderTests' "$RECIPE/tests/run_tribe_data_watch_tests.sh" \
+    || bad "E7: the package must be gated on the vectors that couple the rule with the stall ladder"
 grep -q "TestTribeProbe" "$RECIPE/conanfile.py" || bad "E7: the package must be gated on the probe's Go test"
 
 # ---- E8: Xray statistics --------------------------------------------------------------------------------
 XR="$IOS/PacketTunnelProvider+Xray.swift"
 [ "$(count "$XR" 'startTribeStatsTimer()')" = "1" ] && [ "$(count "$XR" 'stopTribeStatsTimer()')" = "1" ] \
     || bad "E8: the Xray path starts and stops the statistics tick once each"
-xstats="$(swift_func "$IOS/PacketTunnelProvider+DataWatch.swift" 'func logTribeXrayStats(')"
-order "$xstats" 'guard Log.isLoggingEnabled else { return }' 'xrayLog(' || bad "E8: the Xray statistics line is written only while the file log is on"
+[ "$(cat "$IOS"/*.swift | grep -v '^[[:space:]]*//' | grep -c 'logTribeXrayStats()')" = "2" ] \
+    && has "$stats_body" 'logXray: { \[weak self\] in self?.logTribeXrayStats() }' \
+    || bad "E8: the Xray statistics line is written only by the statistics tick (which writes it only with the file log on)"
 
 # ---- A1: Q_OS_IOS around every new call in the facade ----------------------------------------------------
 outside="$(awk '
@@ -200,7 +216,7 @@ outside="$(awk '
     /^[[:space:]]*#endif/ { if (depth > 0) depth--; next }
     /^[[:space:]]*\/\// { next }
     /^(void|bool) AvpnEngineQml::/ { next }
-    /writeTunnelWatchPlan\(|beginTunnelWatchFreeze\(|tickTunnelWatchFreeze\(|tunnelWatchFrozen\(|deferWhileTunnelWatchFrozen\(|releaseTunnelWatchFreeze\(|reverifyAfterExtensionVerdict\(|noteAppBackground\(|noteAppForeground\(|reenterVerifying\(|requestStatusSnapshot\(|writeTunnelWatchPlanFile\(|&IosController::tunnelWatchSnapshot|&IosController::onDemandBackgroundEvent/ {
+    /writeTunnelWatchPlan\(|setupTunnelWatchResume\(|tickTunnelWatchFreeze\(|tunnelWatchFrozen\(|deferWhileTunnelWatchFrozen\(|m_watchResume|noteAppBackground\(|reenterVerifying\(|requestStatusSnapshot\(|writeTunnelWatchPlanFile\(|&IosController::tunnelWatchSnapshot|&IosController::onDemandBackgroundEvent/ {
         ios = 0
         for (i = 1; i <= depth; i++) if (stack[i]) ios = 1
         if (!ios) print NR ": " $0
@@ -228,8 +244,12 @@ has "$(body_of "$FACADE" 'void AvpnEngineQml::guardedStart()')" 'writeTunnelWatc
 has "$(body_of "$FACADE" 'void AvpnEngineQml::persistPin()')" 'writeTunnelWatchPlan("pin")' || bad "A3: a pin change must rewrite the plan"
 has "$(body_of "$FACADE" 'void AvpnEngineQml::setTransportMode(')" 'writeTunnelWatchPlan("mode")' || bad "A3: a mode change must rewrite the plan"
 plan_body="$(body_of "$FACADE" 'void AvpnEngineQml::writeTunnelWatchPlan(')"
-order "$plan_body" 'avpn::decideWatchPlanWrite(' 'if (!w.write)' && order "$plan_body" 'if (!w.write)' 'writeTunnelWatchPlanFile(' \
-    || bad "A3: the file must not be written until the flag has been on once (decideWatchPlanWrite first)"
+has "$plan_body" 'avpn::writeWatchPlan(' && [ "$(count "$FACADE" 'writeTunnelWatchPlanFile(')" = "1" ] \
+    && order "$plan_body" 'avpn::writeWatchPlan(' 'writeTunnelWatchPlanFile(' \
+    || bad "A3: the file is written only through the tested write (writeWatchPlan decides whether, numbers it and journals it)"
+order "$plan_body" 'if (!out.attempted)' 's.setValue(QLatin1String(avpn::kWatchPlanSeqSettingsKey), out.seqAfter);' \
+    || bad "A3: the sequence number and the ever-on mark must be persisted after a write"
+has "$plan_body" 'avpn::watchPlanSanityTargets(' || bad "A3: the bypass targets must come through watchPlanSanityTargets"
 has "$plan_body" 'avpn::ConfigStore::configReceivedAtMs()' || bad "A3: the plan must carry when the config in force was received"
 has "$plan_body" 'avpn::watchPlanNumbers(' || bad "A3: the plan's numbers must come through the clamp table"
 
@@ -238,10 +258,10 @@ has "$plan_body" 'avpn::watchPlanNumbers(' || bad "A3: the plan's numbers must c
 emit_ctx="$(code "$CONTROLLER" | grep -B4 'emit tunnelWatchSnapshot(')"
 has "$emit_ctx" 'm_statusRequests.lastAppliedIs(gen, request)' \
     || bad "A4: the snapshot must be emitted only for the reply that was applied"
-has "$emit_ctx" 'if (m_watchSnapshotWanted.exchange(false))' \
-    || bad "A4: the snapshot must be emitted once per request and never without one"
+has "$emit_ctx" 'm_watchSnapshotWanted.store(false);' \
+    || bad "A4: the emitted snapshot must consume the request (one request - one snapshot)"
 [ "$(count "$CONTROLLER" 'm_watchSnapshotWanted.store(true)')" = "1" ] || bad "A4: only requestStatusSnapshot asks for a snapshot"
-[ "$(grep -c 'requestStatusSnapshot()' "$FACADE")" = "2" ] || bad "A4: the facade asks for a snapshot from the freeze only (begin, re-ask)"
+[ "$(grep -c 'requestStatusSnapshot()' "$FACADE")" = "1" ] || bad "A4: the facade asks for a snapshot only as the hand-over's effect"
 has "$ctor" '&IosController::tunnelWatchSnapshot' && has "$ctor" '&AvpnEngineQml::onTunnelWatchSnapshot' \
     || bad "A4: the facade must receive the snapshot"
 snap_body="$(body_of "$CONTROLLER" 'void IosController::requestStatusSnapshot()')"
@@ -249,10 +269,10 @@ order "$snap_body" 'm_statusRequests.invalidate();' 'checkStatus();' \
     || bad "A4: a snapshot request must cancel older replies before it asks"
 has "$snap_body" 'm_watchSnapshotWanted.store(true);' || bad "A4: a snapshot request must mark the snapshot as wanted"
 watch_body="$(body_of "$FACADE" 'void AvpnEngineQml::onTunnelWatchSnapshot(')"
-order "$watch_body" 'if (!m_watchFreeze.active)' 'avpn::parseTunnelWatch(' \
-    || bad "A4: outside a freeze a snapshot changes nothing"
-order "$watch_body" 'avpn::decideWatchConsume(' 'reverifyAfterExtensionVerdict(' \
-    || bad "A4: the re-check must go through decideWatchConsume"
+has "$watch_body" 'm_watchResume->onSnapshot(snapshot);' || bad "A4: the snapshot goes to the hand-over object and nowhere else"
+for token in 'parseTunnelWatch' 'decideWatchConsume' 'startDataPathVerification' 'reenterVerifying'; do
+    has "$watch_body" "$token" && bad "A4: the facade must not judge a snapshot itself ($token)"
+done
 
 # ---- A5: the freeze comes first ---------------------------------------------------------------------------
 tick="$(body_of "$FACADE" 'void AvpnEngineQml::onTick()')"
@@ -267,19 +287,29 @@ order "$verify" 'deferWhileTunnelWatchFrozen("verify"' 'avpn::xrayVerifyTimeoutM
     || bad "A5: a late verify attempt must wait for the snapshot before its budget is judged"
 has "$verify" 'deferWhileTunnelWatchFrozen("tiebreak_reply"' || bad "A5: a tiebreak reply cut by a freeze must wait for the snapshot"
 frozen="$(body_of "$FACADE" 'bool AvpnEngineQml::tunnelWatchFrozen(')"
-order "$frozen" 'if (!featureEnabled(QStringLiteral("ios_tunnel_watch"), false))' 'avpn::thawDetected(' \
-    || bad "A5: with the flag off nothing is ever frozen (the flag is checked first)"
-begin="$(body_of "$FACADE" 'void AvpnEngineQml::beginTunnelWatchFreeze(')"
-order "$begin" 'avpn::resumeFreezeBegins(' 'requestStatusSnapshot()' || bad "A5: the freeze must begin by its rule and then ask the extension"
-has "$ctor" 'tickTunnelWatchFreeze(since)' || bad "A5: the freeze must be judged on the existing transition tick"
+has "$frozen" 'm_watchResume->held(site, m_lastTransitionTickMs, m_transitionTimer.interval())' \
+    || bad "A5: a decision must ask the hand-over object, with the tick it measures a thaw by"
+has "$(body_of "$FACADE" 'bool AvpnEngineQml::deferWhileTunnelWatchFrozen(')" 'm_watchResume->defer(site, m_lastTransitionTickMs, m_transitionTimer.interval(), std::move(resume))' \
+    || bad "A5: a decision that must wait is kept by the hand-over object"
+has "$(body_of "$FACADE" 'void AvpnEngineQml::tickTunnelWatchFreeze(')" 'm_watchResume->onTick(sinceMs, m_transitionTimer.interval());' \
+    || bad "A5: the hand-over is driven by the existing transition tick"
+has "$ctor" 'tickTunnelWatchFreeze(since)' || bad "A5: the hand-over must be driven by the existing transition tick"
+has "$ctor" 'setupTunnelWatchResume();' || bad "A5: the hand-over object must be built"
+setup="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
+has "$setup" 'ops.watchFlag = \[this\] { return featureEnabled(QStringLiteral("ios_tunnel_watch"), false); };' \
+    || bad "A5: the hand-over reads features.ios_tunnel_watch, default false"
+has "$setup" 'ops.nodeScanFlag = \[this\] { return featureEnabled(QStringLiteral("node_scan"), false); };' \
+    || bad "A5: the hand-over reads features.node_scan, default false"
+has "$setup" 'return m_hiddenSeen && featureEnabled(QStringLiteral("ios_on_demand_bg_arm"), false) && !m_restartGuard.held();' \
+    || bad "A5: the background hold is: in the background, the arming flag on, nothing of ours in flight"
+has "$ctor" 'beginTunnelWatchFreeze\|noteAppForeground' && bad "A5: a return to the screen needs no call of its own (a thaw is recognised by the overdue tick)"
 
 # ---- A6: no timers in the new code ---------------------------------------------------------------------------
-for f in "$ENGINE/TunnelWatchPlan.h" "$ENGINE/TunnelWatchStatus.h" "$IOS/BackgroundHoldBook.h" "$IOS/IosBackgroundArm.h"; do
+for f in "$ENGINE/TunnelWatchPlan.h" "$ENGINE/TunnelWatchStatus.h" "$ENGINE/TunnelWatchResume.h" "$IOS/BackgroundHoldBook.h" "$IOS/IosBackgroundArm.h"; do
     grep -q 'QTimer\|startTimer\|dispatch_after\|NSTimer\|std::thread\|sleep(' "$f" && bad "A6: $(basename "$f") must stay pure (no timer, no thread)"
 done
-for fn in 'void AvpnEngineQml::writeTunnelWatchPlan(' 'void AvpnEngineQml::beginTunnelWatchFreeze(' 'bool AvpnEngineQml::tunnelWatchFrozen(' \
-          'void AvpnEngineQml::tickTunnelWatchFreeze(' 'void AvpnEngineQml::onTunnelWatchSnapshot(' 'void AvpnEngineQml::releaseTunnelWatchFreeze(' \
-          'void AvpnEngineQml::reverifyAfterExtensionVerdict('; do
+for fn in 'void AvpnEngineQml::writeTunnelWatchPlan(' 'void AvpnEngineQml::setupTunnelWatchResume()' 'bool AvpnEngineQml::tunnelWatchFrozen(' \
+          'void AvpnEngineQml::tickTunnelWatchFreeze(' 'void AvpnEngineQml::onTunnelWatchSnapshot(' 'bool AvpnEngineQml::deferWhileTunnelWatchFrozen('; do
     b="$(body_of "$FACADE" "$fn")"
     [ -n "$b" ] || bad "A6: $fn not found"
     has "$b" 'QTimer\|startTimer\|new QObject' && bad "A6: $fn must not start a timer"
@@ -307,21 +337,29 @@ order "$bg" 'avpn_ios::decideBackgroundArm(' 'AvpnBackgroundGuard_acquire(' || b
 arm="$(body_of "$CONTROLLER" 'void IosController::armOnDemandForConfirmedSession()')"
 has "$arm" 'avpn_ios::decideOnDemandArm(' || bad "A7: the arming must keep its own decision (only a proven session)"
 has "$arm" 'endBackgroundArmHold(' || bad "A7: the arming's result must end the hold"
+has "$(body_of "$CONTROLLER" 'void IosController::tickBackgroundArmHold()')" 'in.appActive = appIsActive();' \
+    || bad "A7: the hold's tick must ask the system itself whether the app is on the screen"
+has "$(body_of "$CONTROLLER" 'bool IosController::appIsActive() const')" 'applicationState == UIApplicationStateActive' \
+    || bad "A7: on the phone the answer comes from UIKit"
 
 # ---- A8: a reason to re-check, never a sentence ----------------------------------------------------------------
-rev="$(body_of "$FACADE" 'void AvpnEngineQml::reverifyAfterExtensionVerdict(')"
+# What the hand-over does with a verdict is tested (tunnel_watch_check: handOver). Here: the effects the
+# facade hands to it are what they claim to be and touch nothing else.
 for token in 'm_savedPin' 'clearPin' 'setPinned' 'm_wantConnected' 'verifySucceeded' 'verifyFailed' 'noteDataPlaneFailure' 'rememberNetworkPath' \
-             'guardedStop' 'm_needsRestart' 'onDead'; do
-    has "$rev" "$token" && bad "A8: the re-check must not touch $token (the extension's verdict is a reason to check, not a result)"
+             'guardedStop' 'guardedStart' 'm_needsRestart' 'onDead' 'reconcile('; do
+    has "$setup" "$token" && bad "A8: the hand-over's effects must not touch $token (the extension's verdict is a reason to check, not a result)"
 done
-has "$rev" 'startDataPathVerification()' || bad "A8: the re-check must be the app's own data check"
-has "$rev" 'avpn::networkMemoryForgetStored(' || bad "A8: the node must be forgotten in the per-network memory"
-has "$rev" 'if (avpn::watchVerdictForgetsNode(snapshot.verdict) && ' || bad "A8: the per-network memory forgets the node only on a verdict the probe confirmed"
-has "$rev" 'avpn::watchConsumedJournalLine(' || bad "A8: the consumed verdict must be journaled"
+has "$setup" 'ops.reenterVerifying = \[this\] { return m_engine.reenterVerifying(); };' || bad "A8: the engine's consent is the engine's own answer"
+order "$setup" 'ops.startVerification = \[this\] {' 'startDataPathVerification();' || bad "A8: the re-check must be the app's own data check"
+order "$setup" 'ops.forgetNode = ' 'avpn::networkMemoryForgetStored(' || bad "A8: forgetting the node is the per-network memory's own function"
+resume_h="$(code "$ENGINE/TunnelWatchResume.h")"
+order "$resume_h" 'if (watchVerdictForgetsNode(w.verdict))' 'm_ops.forgetNode(nodeId);' \
+    || bad "A8: the per-network memory forgets the node only on a verdict the judge confirmed"
 
 # ---- A9: one caller of the way back to Verifying -------------------------------------------------------------------
 callers="$(grep -ln 'reenterVerifying()' "$ENGINE"/*.cpp "$ENGINE"/*.h "$IOS"/*.mm 2>/dev/null | xargs -n1 basename | sort | tr '\n' ' ')"
-[ "$callers" = "AvpnEngineQml.cpp ServiceEngine.cpp ServiceEngine.h " ] || bad "A9: reenterVerifying is referenced from: $callers"
+[ "$callers" = "AvpnEngineQml.cpp ServiceEngine.cpp ServiceEngine.h TunnelWatchResume.h " ] || bad "A9: reenterVerifying is referenced from: $callers"
+[ "$(count "$ENGINE/TunnelWatchResume.h" 'm_ops.reenterVerifying()')" = "1" ] || bad "A9: the hand-over asks for the engine's consent at one place"
 [ "$(count "$FACADE" 'm_engine.reenterVerifying()')" = "1" ] || bad "A9: the facade must call reenterVerifying from one place"
 
 # ---- X1: one registry of numbers, the same bounds on both sides ----------------------------------------------------
@@ -336,6 +374,16 @@ ext_rows="$(sed -n 's/.*numbers\["\(ios_[a-z0-9_]*\)"\].*min: *\([0-9_]*\), *max
 # The two terms the app turns into moments of time are carried as such, not as numbers.
 plan_h="$(code "$ENGINE/TunnelWatchPlan.h")"
 has "$plan_h" '"expires_ms"' && has "$plan_h" '"policy_max_age_ms"' || bad "X1: the plan must carry expires_ms and policy_max_age_ms"
+
+# ---- X2: the same hosts as the white-list detector -----------------------------------------------------------------
+# The extension's built-in bypass targets must be the detector's compiled defaults (the marketplace tier
+# and its first anchor): they are what the plan carries when the server sets its own lists.
+detector="$(code "$ENGINE/WhitelistDetector.cpp")"
+wl="$(printf '%s\n' "$detector" | awk '/^const QStringList kDefaultWhitelistDomains = \{/ { on = 1; next } on && /^};/ { exit } on { print }' | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')"
+anchor="$(printf '%s\n' "$detector" | awk '/^const QStringList kDefaultAnchorDomains = \{/ { on = 1; next } on && /^};/ { exit } on { print }' | grep -o '"[^"]*"' | head -1 | tr -d '"')"
+builtin="$(code "$IOS/TribeWatchPlan.swift" | grep 'static let builtIn = ' | grep -o '"https://[^"]*"' | tr -d '"' | sed 's#https://##' | tr '\n' ' ')"
+[ -n "$wl" ] && [ -n "$anchor" ] && [ "$builtin" = "${wl}${anchor} " ] \
+    || bad "X2: the extension's built-in bypass targets ($builtin) are not the white-list detector's defaults (${wl}${anchor})"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_ios_data_watch_wiring: FAILED"

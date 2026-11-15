@@ -899,6 +899,22 @@ int main(int argc, char **argv)
             CHECK(eng.onTunnelDisconnected());
             CHECK(eng.currentNodeId() != first);                  // left the node the check failed on
         }
+        {   // review mutant E3: a re-check is not a fresh start for the give-up streak. One node failed
+            // its check, the next one is "limited"; the extension's verdict sends it back to Verifying -
+            // the streak of failures in a row is the same as before, so the cap still ends the carousel.
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("9:awg"), 40}, {QStringLiteral("2:awg"), 50}});
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.onTunnelConnected() && eng.verifyInconclusive() && eng.state() == EngineState::Connected);
+            CHECK(eng.dataPlaneFailStreak() == 1);                // "limited" did not clear it
+            CHECK(eng.reenterVerifying());
+            CHECK(eng.dataPlaneFailStreak() == 1 && !eng.dataPlaneExhausted()); // neither does the re-check
+        }
         {   // the re-check passes -> Connected; the success of this rise is not recorded twice and a
             // first success recorded by a re-check carries no time to traffic
             ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
