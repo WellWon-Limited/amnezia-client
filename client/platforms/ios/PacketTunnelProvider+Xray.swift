@@ -343,6 +343,7 @@ extension PacketTunnelProvider {
     }
 
     func stopXray(completionHandler: () -> Void) {
+        stopTribeStatsTimer() // AVPN (build 140): the statistics line of the Xray path
         // AVPN (этап D3): снапшот/инвалидация поколения и нативное закрытие — под тем же gate'ом,
         // что оба плеча старта: поздний старт либо целиком успевает раньше и гасится здесь, либо
         // видит новое поколение до того, как тронуть process-global движки.
@@ -686,6 +687,7 @@ extension PacketTunnelProvider {
             }
             DispatchQueue.global().async { [weak self] in
                 xrayLog(.info, message: "Hev socks started")
+                self?.startTribeStatsTimer() // AVPN (build 140): `Tribe stats (xray)` line with mem=, diagnostics only
                 completionHandler(nil)
                 let exitCode = Socks5Tunnel.run(withConfig: configurationFilePath)
                 self?.handleTun2socksExit(exitCode, generation: sessionGeneration)

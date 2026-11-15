@@ -46,6 +46,11 @@ extension PacketTunnelProvider {
                 _ = wgSetDirectSplit("", 0)
             }
 
+            // AVPN (build 140, data watch): the plan file decides whether the watch and its probe
+            // through the tunnel run in this session. Configured BEFORE the adapter starts; off =
+            // explicit reset, like the two blocks above (PacketTunnelProvider+DataWatch.swift).
+            let tribeProbeReady = prepareTribeDataWatch(wgConfig)
+
             let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgConfigStr)
 
             if tunnelConfiguration.peers.first!.allowedIPs
@@ -116,6 +121,7 @@ extension PacketTunnelProvider {
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
             let roaming = wgConfig.roamingPolicy
             adapter.roamingPolicy = roaming
+            tribeDataWatch.attach(adapter: adapter, probeConfigured: tribeProbeReady) // AVPN (build 140, data watch)
             wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
 
             adapter.start(tunnelConfiguration: tunnelConfiguration) { adapterError in
@@ -166,6 +172,7 @@ extension PacketTunnelProvider {
             completionHandler(nil)
             return
         }
+        tribeDataWatch.noteAppStatusRequest() // AVPN (build 140, data watch): the app is alive
         wgAdapter.getRuntimeConfiguration { settings in
             guard let settings = settings else {
                 completionHandler(nil)
@@ -201,7 +208,7 @@ extension PacketTunnelProvider {
                     self.tribeLastRecoverySummary = summary
                     TribeSharedState.appGroup?.recordAsync(source: "ne", event: "recovery_status", fields: ["generation": metadata["generation"] ?? "legacy", "counters": counters.asDictionary])
                 }
-                let response: [String: Any] = [
+                var response: [String: Any] = [
                     "session_metadata": metadata,
                     "rx_bytes": settingsDictionary["rx_bytes"] ?? "0",
                     "tx_bytes": settingsDictionary["tx_bytes"] ?? "0",
@@ -209,7 +216,12 @@ extension PacketTunnelProvider {
                     "roam": counters.asDictionary.mapValues { Int(clamping: $0) }
                 ]
 
-                completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
+                // AVPN (build 140, data watch): the `watch` block. With the watch off there is no
+                // block and the reply is the one of build 139.
+                self.tribeDataWatch.statusBlock { watch in
+                    if let watch { response["watch"] = watch }
+                    completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
+                }
             }
         }
     }
@@ -300,6 +312,7 @@ extension PacketTunnelProvider {
     func stopWireguard(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         wg_log(.info, message: "Stopping tunnel: reason: \(reason.amneziaDescription)")
         stopTribeStatsTimer()
+        tribeDataWatch.detach() // AVPN (build 140, data watch)
 
         guard let adapter = wgAdapter else {
             ErrorNotifier.removeLastErrorFile()
@@ -355,6 +368,10 @@ extension PacketTunnelProvider {
     }
 
     private func logTribeStats() {
+        // AVPN (build 140, data watch): the plan file is re-read on this existing tick (the kill
+        // switch reaches the extension here); the Xray path gets its own statistics line.
+        tribeDataWatch.refreshPlan()
+        if protoType == .xray { logTribeXrayStats(); return }
         guard Log.isLoggingEnabled, let adapter = wgAdapter else { return }
         adapter.getRuntimeConfiguration { [weak self] settings in
             guard let settings else { return }
@@ -373,7 +390,7 @@ extension PacketTunnelProvider {
             let now = UInt64(Date().timeIntervalSince1970)
             let age = handshake > 0 && now >= handshake ? "\(now - handshake)s" : "never"
             let uplink = self?.tribeUplinkDescription() ?? "?"
-            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink) mem=\(PacketTunnelProvider.tribeFootprintMB()) direct=[\(PacketTunnelProvider.tribeDirectSplitStats())]")
+            wg_log(.info, message: "Tribe stats: rx=\(rx) tx=\(tx) hs_age=\(age) uplink=\(uplink) mem=\(PacketTunnelProvider.tribeFootprintMB()) direct=[\(PacketTunnelProvider.tribeDirectSplitStats())]\(self?.tribeDataWatch.statsSuffix ?? "")")
         }
     }
 
@@ -385,7 +402,7 @@ extension PacketTunnelProvider {
     }
 
     /// Память расширения в МБ (phys_footprint — та же величина, по которой iOS держит лимит 50 МБ).
-    private static func tribeFootprintMB() -> UInt64 {
+    static func tribeFootprintMB() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {

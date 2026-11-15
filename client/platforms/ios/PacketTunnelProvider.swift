@@ -43,6 +43,9 @@ struct Constants {
 class PacketTunnelProvider: NEPacketTunnelProvider {
     var tribeLastRecoverySummary = ""
     var tribeRuntimeGeneration = UUID().uuidString
+    // AVPN (build 140, data watch): the provider's half of the tunnel-side data watch
+    // (TribeDataWatchRuntime.swift). Idle unless the app's plan file switches the watch on.
+    let tribeDataWatch = TribeDataWatchRuntime()
 
     // AVPN (D5): the adapter reference is cleared from the adapter's own workQueue (stop
     // completion) and read from the provider's message queue; guard every access with a lock.
@@ -579,6 +582,12 @@ extension PacketTunnelProvider {
         default: kind = "other"
         }
         return "\(path.status)/\(kind)\(path.isExpensive ? "/exp" : "")"
+    }
+
+    /// AVPN (build 140, data watch): the physical interface of the current path, for the request
+    /// that must bypass the tunnel (private fields of the monitor are reachable only from this file).
+    func tribeCurrentPhysicalInterface() -> NWInterface? {
+        primaryPhysicalInterface(for: pathMonitor.currentPath)
     }
 
     /// Предпочтительный ФИЗИЧЕСКИЙ интерфейс пути (без loopback и виртуальных utun/ipsec/…):

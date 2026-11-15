@@ -99,6 +99,10 @@ target_sources(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/LogRecord.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+WireGuard.swift
+    # AVPN (build 140, data watch): plan file reader, provider runtime, provider glue
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeWatchPlan.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeDataWatchRuntime.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+DataWatch.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+OpenVPN.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+Xray.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/IPv4RouteSpec.swift
