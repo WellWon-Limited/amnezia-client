@@ -122,9 +122,13 @@ extension PacketTunnelProvider {
             let roaming = wgConfig.roamingPolicy
             adapter.roamingPolicy = roaming
             tribeDataWatch.attach(adapter: adapter) // AVPN (build 140, data watch)
+            // AVPN (build 140, data watch stage 2): the adapter asks for a candidate's configuration
+            // only on an order of the watch's arbiter (never with the switch key off).
+            adapter.dataWatchCandidate = { [weak self] nodeId in self?.tribeSwitchConfiguration(nodeId) }
+            let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startedByApp: activationAttemptId != nil)
             wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
 
-            adapter.start(tunnelConfiguration: tunnelConfiguration) { adapterError in
+            adapter.start(tunnelConfiguration: startConfiguration) { adapterError in
                 guard let adapterError else {
                     let interfaceName = adapter.interfaceName ?? "unknown"
                     wg_log(.info, message: "Tunnel interface is \(interfaceName)")
@@ -203,6 +207,7 @@ extension PacketTunnelProvider {
                 var metadata = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
                 metadata["configuration_generation"] = metadata["generation"]
                 metadata["generation"] = self.tribeRuntimeGeneration
+                self.tribeApplySessionOverride(&metadata) // AVPN (build 140, data watch stage 2)
                 let summary = counters.asDictionary.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
                 if summary != self.tribeLastRecoverySummary {
                     self.tribeLastRecoverySummary = summary

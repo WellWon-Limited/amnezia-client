@@ -27,6 +27,17 @@ enum TribeWatchPlanTests {
         return try! JSONSerialization.data(withJSONObject: object)
     }
 
+    /// A candidate entry as the app writes it (TunnelWatchPlan.h): the node's part of the tunnel
+    /// configuration, strings by the provider configuration's keys.
+    static let key32 = Data(repeating: 7, count: 32).base64EncodedString()
+    static func candidate(_ node: Int, host: String = "198.51.100.7", _ change: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
+        var peer: [String: Any] = ["hostName": host, "port": "585", "server_pub_key": key32, "psk_key": key32,
+                                   "persistent_keep_alive": "25", "Jc": "4", "Jmin": "10", "Jmax": "50", "S1": "55", "S2": "66",
+                                   "S3": "12", "S4": "8", "H1": "101", "H2": "102", "H3": "103", "H4": "104", "I1": "<b 0xc0ffee>"]
+        change(&peer)
+        return ["node_id": node, "country": "FI", "peer": peer]
+    }
+
     typealias Order = TribeWatchPlan.Order
     static func parse(_ data: Data?, alive: Bool = false, last: Order = Order()) -> Result<TribeWatchPlan, TribeWatchPlan.Rejection> {
         TribeWatchPlan.parse(data, nowMs: now, appAlive: alive, last: last)
@@ -38,6 +49,108 @@ enum TribeWatchPlanTests {
     static func accepted(_ data: Data?, alive: Bool = false, last: Order = Order()) -> TribeWatchPlan? {
         if case .success(let p) = parse(data, alive: alive, last: last) { return p }
         return nil
+    }
+
+    /// Stage 2: the candidates of the plan, the text of a switch, the node of a start by the system.
+    static func stageTwo() {
+        let switchOn: (inout [String: Any]) -> Void = { $0["features"] = ["ios_tunnel_watch": true, "ios_tunnel_watch_switch": true] }
+        func parsed(_ entries: [Any], _ more: (inout [String: Any]) -> Void = { _ in }) -> TribeWatchPlan? {
+            accepted(plan { switchOn(&$0); $0["candidates"] = entries; more(&$0) })
+        }
+        // --- the list ---
+        let three = parsed([candidate(12), candidate(9, host: "node9.example.org"), candidate(3)])
+        check(three?.candidates.map { $0.nodeId } == ["12", "9", "3"] && three?.policy.switchEnabled == true, "the plan's order is kept: \(String(describing: three?.candidates.map { $0.nodeId }))")
+        check(three?.candidates.first?.country == "FI" && three?.candidates.first?.endpoint == "198.51.100.7:585", "labels and the endpoint as the app knows it")
+        check(parsed([candidate(12), candidate(12), candidate(9)])?.candidates.map { $0.nodeId } == ["12", "9"], "a node is offered once")
+        check(parsed((1...9).map { candidate($0) })?.candidates.count == TribeWatchPlan.maxCandidates, "at most six entries are read")
+        check(parsed([candidate(12)]) { $0["expires_ms"] = now }?.candidates.isEmpty == true, "an expired list is empty, not stale")
+        check(parsed(["junk", 7, ["node_id": 5]])?.candidates.isEmpty == true && parsed(["junk"])?.policy.switchEnabled == false, "junk entries are dropped and switch nothing on")
+        // --- the strict check of one entry ---
+        func ok(_ change: @escaping (inout [String: Any]) -> Void) -> Bool { TribeWatchCandidate(candidate(12, change)) != nil }
+        check(ok { _ in }, "a full entry passes")
+        check(TribeWatchCandidate(["node_id": 0, "peer": candidate(1)["peer"]!]) == nil && TribeWatchCandidate(["node_id": "x", "peer": candidate(1)["peer"]!]) == nil, "a node id is a positive number")
+        for missing in ["hostName", "port", "server_pub_key", "Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"] {
+            check(!ok { $0[missing] = nil }, "without \(missing) the entry is rejected")
+            check(!ok { $0[missing] = "  " }, "an empty \(missing) is a missing one")
+        }
+        check(ok { $0["psk_key"] = nil; $0["S3"] = nil; $0["I1"] = nil; $0["persistent_keep_alive"] = nil }, "the optional keys are optional")
+        check(!ok { $0["port"] = "0" } && !ok { $0["port"] = "65536" } && !ok { $0["port"] = "5a" } && ok { $0["port"] = 585 }, "the port is a port (a number is accepted)")
+        check(!ok { $0["hostName"] = "198.51.100.7\nEndpoint = evil:1" } && !ok { $0["H1"] = "1\n[Peer]" } && !ok { $0["I1"] = "a\rb" }, "a line break in any value rejects the entry")
+        check(!ok { $0["hostName"] = "host name" } && !ok { $0["hostName"] = "h/../x" } && !ok { $0["hostName"] = String(repeating: "a", count: 254) }, "a host is a host name or an address")
+        check(!ok { $0["server_pub_key"] = "c2hvcnQ=" } && !ok { $0["server_pub_key"] = "not base64 at all" } && !ok { $0["psk_key"] = "c2hvcnQ=" }, "keys are 32 bytes of base64")
+        check(!ok { $0["Jc"] = true } && !ok { $0["H1"] = ["1"] }, "a value is a string or a number")
+        check(!ok { $0["I1"] = String(repeating: "f", count: 4097) } && ok { $0["I1"] = String(repeating: "f", count: 4096) }, "a value is bounded")
+        let extra = TribeWatchCandidate(candidate(12) { $0["client_priv_key"] = "secret"; $0["dns1"] = "9.9.9.9"; $0["Table"] = "off" })
+        check(extra != nil && extra?.peer["client_priv_key"] == nil && extra?.peer["dns1"] == nil && extra?.peer["Table"] == nil, "keys outside the node's own are not taken")
+        // --- the text of the session on that node ---
+        let base = TribeSwitchBase(address: "10.8.1.7/32", dns: "100.100.100.53", mtu: "1280", privateKey: "PRIVATE", allowedIPs: "0.0.0.0/0, ::/0")
+        let text = TribeWatchCandidate(candidate(12))!.wgQuick(base: base)
+        let expected = ["[Interface]", "Address = 10.8.1.7/32", "DNS = 100.100.100.53", "MTU = 1280", "PrivateKey = PRIVATE",
+                        "Jc = 4", "Jmin = 10", "Jmax = 50", "S1 = 55", "S2 = 66", "H1 = 101", "H2 = 102", "H3 = 103", "H4 = 104",
+                        "S3 = 12", "S4 = 8", "I1 = <b 0xc0ffee>", "[Peer]", "PublicKey = \(key32)", "PresharedKey = \(key32)",
+                        "AllowedIPs = 0.0.0.0/0, ::/0", "Endpoint = 198.51.100.7:585", "PersistentKeepalive = 25", ""]
+        check(text.components(separatedBy: "\n") == expected, "the wg-quick text, line by line: \(text)")
+        let bare = TribeWatchCandidate(candidate(12) { $0["psk_key"] = nil; $0["persistent_keep_alive"] = nil; $0["S3"] = nil; $0["S4"] = nil; $0["I1"] = nil })!.wgQuick(base: base)
+        check(!bare.contains("PresharedKey") && !bare.contains("PersistentKeepalive") && !bare.contains("S3") && !bare.contains("I1"), "absent keys leave no line")
+        let v3 = TribeWatchCandidate(candidate(12) { $0["HeaderProtectionKey"] = key32; $0["RandomTrailers"] = "1"; $0["DisableCookies"] = "0"; $0["RekeyAfterTime"] = "100-120" })!.wgQuick(base: base)
+        check(v3.contains("HeaderProtectionKey = \(key32)\n") && v3.contains("RandomTrailers = 1\n") && v3.contains("DisableCookies = 0\n") && v3.contains("RekeyAfterTime = 100-120\n"), "the AmneziaWG 3.x keys of the node are carried")
+        // --- pin, mode and the network memory of the plan ---
+        let pinned = parsed([candidate(12)]) {
+            $0["pin"] = ["country": "FI", "node_id": 12]
+            $0["transport_mode"] = "amnezia"
+            $0["net_memory"] = ["wifi": ["node_id": 9, "saved_ms": 1], "cellular:250-02": ["node_id": 3, "saved_ms": 1], "cellular:250-99": ["node_id": 4, "saved_ms": 1]]
+        }
+        check(pinned?.pinNodeId == "12" && pinned?.pinCountry == "FI" && pinned?.transportMode == "amnezia", "pin and mode of the plan")
+        check(pinned?.memory == ["wifi": "9", "cellular": "3"], "the memory of the two networks the plan names: \(String(describing: pinned?.memory))")
+        check(parsed([candidate(12)])?.pinNodeId == "" && parsed([candidate(12)])?.memory.isEmpty == true, "no pin, no memory")
+        // --- a start by the system ---
+        typealias Choice = TribeStartChoice
+        func choose(_ plan: TribeWatchPlan?, net: String = "cellular", failed: Choice.LastFailure? = nil) -> String {
+            let c = Choice.choose(profileNodeId: "16", plan: plan, net: net, lastFailure: failed, nowMs: now)
+            return "\(c.nodeId)/\(c.why)"
+        }
+        let twoSpare = parsed([candidate(12), candidate(9)])
+        check(choose(nil) == "16/profile", "no plan: the profile's node, as build 139")
+        check(choose(accepted(plan { $0["candidates"] = [candidate(12)] })) == "16/profile", "the switch key off: the profile's node")
+        check(choose(parsed([])) == "16/profile", "nothing to choose from: the profile's node")
+        check(choose(twoSpare) == "16/profile", "a healthy profile node is kept")
+        let recently = Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 10 * 60 * 1000)
+        check(choose(twoSpare, failed: recently) == "12/plan_order", "the profile's node failed here ten minutes ago: the plan's first")
+        check(choose(twoSpare, net: "wifi", failed: recently) == "16/profile", "it failed on ANOTHER network: that proves nothing here")
+        check(choose(twoSpare, failed: Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 31 * 60 * 1000)) == "16/profile", "older than half an hour: forgotten")
+        check(choose(twoSpare, failed: Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now + 60_000)) == "16/profile", "a failure from the future is not believed")
+        check(choose(twoSpare, failed: Choice.LastFailure(nodeId: "12", net: "cellular", wallMs: now - 1000)) == "16/profile", "another node's failure does not move the start")
+        // the pin comes first; it is left only for a failure proven on this network
+        let pinOn9 = parsed([candidate(12), candidate(9)]) { $0["pin"] = ["country": "FI", "node_id": 9] }
+        check(choose(pinOn9) == "9/pin", "the pinned node first, even when the profile holds another")
+        check(choose(pinOn9, failed: Choice.LastFailure(nodeId: "9", net: "cellular", wallMs: now - 1000)) == "16/profile", "the pinned node is proven dead here: the next source")
+        check(choose(parsed([candidate(12)]) { $0["pin"] = ["country": "US", "node_id": 77] }) == "16/profile", "a pin the extension cannot raise is not invented")
+        // the app's memory of this network
+        let remembered = parsed([candidate(12), candidate(9)]) { $0["net_memory"] = ["cellular:250-02": ["node_id": 9, "saved_ms": 1], "wifi": ["node_id": 12, "saved_ms": 1]] }
+        check(choose(remembered) == "9/memory" && choose(remembered, net: "wifi") == "12/memory", "the node the app remembers for this kind of network")
+        check(choose(remembered, net: "unknown") == "16/profile", "an unknown network has no memory")
+        check(choose(remembered, failed: Choice.LastFailure(nodeId: "9", net: "cellular", wallMs: now - 1000)) == "16/profile", "a remembered node that failed here is skipped")
+        // everything failed that could be told: the profile's node
+        check(choose(parsed([candidate(16)]), failed: recently) == "16/profile", "nothing else to raise: the profile's node")
+        // --- its own last verdict, read back from the shared file ---
+        let state: [String: Any] = ["verdict": "no_data", "node_id": "16", "net": "cellular", "last_no_data_ms": now - 5000]
+        check(Choice.lastFailure(state: state) == Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 5000), "the last verdict of the previous run")
+        var other = state
+        other["verdict"] = "none"
+        check(Choice.lastFailure(state: other) == nil && Choice.lastFailure(state: nil) == nil && Choice.lastFailure(state: ["verdict": "no_data"]) == nil, "no verdict, no file, half a record: nothing")
+        check(Choice.failureMemoryMs == 30 * 60 * 1000, "half an hour")
+        // --- the journal lines of a command ---
+        check(TribeDataWatchJournal.commandLine(.switchPeer(to: "12", why: .noData), result: .performed, from: "16", seq: 3, net: "cellular")
+              == "Tribe watch: peer_switch from=16 to=12 why=no_data seq=3 net=cellular result=performed", "the switch line")
+        check(TribeDataWatchJournal.commandLine(.switchPeer(to: "16", why: .best), result: .failed, from: "9", seq: 3, net: "wifi")
+              == "Tribe watch: peer_switch from=9 to=16 why=exhausted_best seq=3 net=wifi result=failed", "the return line")
+        check(TribeDataWatchJournal.commandLine(.heal(.softRestart), result: .denied, from: "16", seq: 0, net: "cellular")
+              == "Tribe watch: heal step=soft_restart result=denied node=16 net=cellular", "the heal line")
+        var snapshot = TribeDataWatchSnapshot()
+        snapshot.arbiterTried = 3
+        snapshot.arbiterRound = 2
+        check(TribeDataWatchJournal.exhaustedLine(snapshot: snapshot, nodeId: "16", net: "cellular")
+              == "Tribe watch: exhausted tried=3 round=2 stay=16 net=cellular", "the exhausted line")
     }
 
     static func main() {
@@ -94,7 +207,7 @@ enum TribeWatchPlanTests {
         // --- the switch flag needs a live candidate list (stage 2) ---
         let withCandidates: (inout [String: Any]) -> Void = {
             $0["features"] = ["ios_tunnel_watch": true, "ios_tunnel_watch_switch": true]
-            $0["candidates"] = [["node_id": 16, "proto": "awg", "inplace": true]]
+            $0["candidates"] = [candidate(16)]
         }
         check(accepted(plan(withCandidates))?.policy.switchEnabled == true, "switch flag with candidates is carried")
         check(accepted(plan { withCandidates(&$0); $0["expires_ms"] = now })?.policy.switchEnabled == false, "an expired list switches it off")
@@ -175,6 +288,7 @@ enum TribeWatchPlanTests {
               && TribeDataWatchJournal.startOutcome(-1) == .unavailable && TribeDataWatchJournal.startOutcome(-2) == .noSession
               && TribeDataWatchJournal.startOutcome(-9) == .unavailable, "id / no probe / no route / no session")
 
+        stageTwo()
         if failures == 0 { print("TribeWatchPlan: all tests passed") } else { print("TribeWatchPlan: \(failures) check(s) FAILED"); exit(1) }
     }
 }

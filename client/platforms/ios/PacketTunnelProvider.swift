@@ -46,6 +46,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // AVPN (build 140, data watch): the provider's half of the tunnel-side data watch
     // (TribeDataWatchRuntime.swift). Idle unless the app's plan file switches the watch on.
     let tribeDataWatch = TribeDataWatchRuntime()
+    /// AVPN (build 140, data watch stage 2): the configuration the session was started with (the
+    /// profile's node); an in-place switch goes back to it when the candidates are exhausted.
+    var tribeHomeConfiguration: TunnelConfiguration?
 
     // AVPN (D5): the adapter reference is cleared from the adapter's own workQueue (stop
     // completion) and read from the provider's message queue; guard every access with a lock.

@@ -78,11 +78,11 @@ added_swift() { # the added lines of the adapter only
 
 # ---- E1: one owner, the existing tick -------------------------------------------------------------
 swift_added="$(added_swift)"
-[ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatchTick(sample, handle: handle)')" = "1" ] \
+[ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatchTick(sample, handle: handle')" = "1" ] \
     || bad "E1: the adapter must feed the data watch from exactly one place"
-tick_ctx="$(grep -n -A2 'self.dataWatchTick(sample, handle: handle)' "$PATCH" | head -3)"
+tick_ctx="$(grep -n -A2 'if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }' "$PATCH" | head -3)"
 has "$tick_ctx" 'self.recovery.tick(sample, pathSatisfied' \
-    || bad "E1: the data watch must be fed on the stall tick, right before the recovery ladder judges the same sample"
+    || bad "E1: the data watch must be fed on the stall tick, right before the recovery ladder judges the same sample; a tick on which the watch acted is not judged by the ladder as well"
 for token in 'makeTimerSource' 'asyncAfter' 'Timer(' 'scheduledTimer' 'DispatchWorkItem'; do
     has "$swift_added" "$token" && bad "E1: patch 0012 adds a timer or a delayed block to the adapter ($token)"
 done
@@ -129,7 +129,7 @@ order "$start_body" 'tribeDataWatch.attach(adapter: adapter)' 'adapter.start(tun
 glue="$(code "$IOS/PacketTunnelProvider+DataWatch.swift")"
 has "$glue" 'setProbe: { clientIP, resolver, enabled in wgSetTribeProbe(clientIP, resolver, enabled ? 1 : 0) }' \
     || bad "E4: the runtime's setProbe must be the Go call, with the runtime's own on/off"
-has "$glue" 'clientIP: wgConfig.clientIP, resolver: wgConfig.dns1)' \
+has "$glue" 'clientIP: wgConfig.clientIP, resolver: wgConfig.dns1,' \
     || bad "E4: the probe goes from the client's tunnel address to the session's resolver"
 order "$(swift_func "$IOS/PacketTunnelProvider+DataWatch.swift" 'func prepareTribeDataWatch(')" 'tribeDataWatch.configure(tribeDataWatchDeps())' 'tribeDataWatch.prepare(' \
     || bad "E4: the runtime must get its dependencies before it prepares a session"
@@ -171,16 +171,57 @@ for f in "$IOS"/TribeDataWatchRuntime.swift "$IOS"/TribeWatchPlan.swift "$IOS/Pa
 done
 has "$(added)" 'UNUserNotificationCenter' && bad "E5: patch 0012 notifies the user"
 
-# ---- E6: nobody is moved in stage 1 ---------------------------------------------------------------------
+# ---- E6: who may move the tunnel (stage 2) ---------------------------------------------------------------
+# Only the rule's arbiter orders, only behind its own key; only the adapter executes, in one place, in
+# the tested order; the runtime and the provider glue never touch the tunnel themselves.
 rule="$(code "$RECIPE/tribe/TribeDataWatch.swift")"
-[ "$(printf '%s\n' "$rule" | grep -c 'switchPeer')" = "1" ] && [ "$(printf '%s\n' "$rule" | grep -c '\.exhausted\|case exhausted')" = "1" ] \
-    || bad "E6: the switching actions may only be declared in this version, never produced"
-has "$swift_added" 'update(tunnelConfiguration' && bad "E6: patch 0012 must not switch the configuration"
-has "$swift_added" 'setTunnelNetworkSettings' && bad "E6: patch 0012 must not re-apply network settings"
-for token in 'setTunnelNetworkSettings' 'update(tunnelConfiguration' 'cancelTunnelWithError' 'stopTunnel' 'reasserting'; do
-    has "$runtime" "$token" && bad "E6: the runtime must only report ($token)"
-    has "$(code "$IOS/PacketTunnelProvider+DataWatch.swift")" "$token" && bad "E6: the provider glue must only report ($token)"
+[ "$(printf '%s\n' "$rule" | grep -c 'if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive {')" = "1" ] \
+    || bad "E6: the arbiter must be gated by the switch key, the switch budget and the living app, in one place"
+[ "$(printf '%s\n' "$rule" | grep -c 'arbiterCommand(now: now, env: env, policy: policy)')" = "1" ] \
+    || bad "E6: the arbiter must be asked from one place"
+arb="$(swift_func "$RECIPE/tribe/TribeDataWatch.swift" 'private mutating func arbiterCommand(')"
+[ "$(printf '%s\n' "$rule" | grep -c 'return (\.switchPeer(\|return (\.heal(')" = "$(printf '%s\n' "$arb" | grep -c 'return (\.switchPeer(\|return (\.heal(')" ] \
+    || bad "E6: a command may be produced only by arbiterCommand"
+[ "$(printf '%s\n' "$swift_added" | grep -c 'self.performDataWatchCommand(')" = "1" ] \
+    || bad "E6: the adapter must execute a command of the watch from exactly one place"
+order "$swift_added" 'if let command = output.command {' 'self.performDataWatchCommand(' \
+    || bad "E6: the adapter may act only on a command the rule returned"
+[ "$(printf '%s\n' "$swift_added" | grep -c 'self.switchBackend(handle: handle, from: settingsGenerator, to: configuration)')" = "1" ] \
+    || bad "E6: the peer may be replaced from exactly one place"
+has "$swift_added" 'guard let configuration = self.dataWatchCandidate?(nodeId) else { return .denied }' \
+    || bad "E6: without a configuration from the provider the switch must be refused"
+sw="$(awk '/^diff --git/ { on = ($0 ~ /WireGuardAdapter\.swift/) } on && /^\+/ && !/^\+\+\+/ { print substr($0, 2) }' "$PATCH" \
+        | awk '/private func switchBackend\(/ { on = 1 } on { print } on && /^    }$/ { exit }' | grep -v '^[[:space:]]*//' || true)"
+order "$sw" 'newGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)' 'wgTurnOff(handle)' \
+    || bad "E6: the new endpoint must be resolved before the old backend is stopped"
+order "$sw" 'wgTurnOff(handle)' 'try self.setNetworkSettings(newGenerator.generateNetworkSettings())' \
+    || bad "E6: the old backend must be stopped before the network settings change"
+order "$sw" 'try self.setNetworkSettings(newGenerator.generateNetworkSettings())' 'self.restartBackendInPlace(handle: handle, settingsGenerator: newGenerator)' \
+    || bad "E6: the new backend must start only after the new network settings are applied"
+has "$sw" 'self.packetTunnelProvider?.reasserting = true' && has "$sw" 'defer { self.packetTunnelProvider?.reasserting = false }' \
+    || bad "E6: the switch must be announced to the system as a reconnect and the mark taken back"
+order "$sw" 'try? self.setNetworkSettings(oldGenerator.generateNetworkSettings())' 'self.restartBackendInPlace(handle: handle, settingsGenerator: oldGenerator)' \
+    || bad "E6: a switch that fails at the network settings must put the old settings and the old backend back"
+[ "$(printf '%s\n' "$swift_added" | grep -c 'wgTurnOff(')" = "1" ] && [ "$(printf '%s\n' "$swift_added" | grep -c 'setNetworkSettings(')" = "2" ] \
+    || bad "E6: patch 0012 stops a backend and applies network settings only inside the switch"
+has "$swift_added" 'update(tunnelConfiguration' && bad "E6: patch 0012 must not call the public update path (its backend keeps running across the settings change)"
+for token in 'setTunnelNetworkSettings' 'update(tunnelConfiguration' 'cancelTunnelWithError' 'stopTunnel' 'reasserting' 'wgTurnOff' 'wgTurnOn' 'wgSetConfig'; do
+    has "$runtime" "$token" && bad "E6: the runtime must only report and answer ($token)"
+    has "$(code "$IOS/PacketTunnelProvider+DataWatch.swift")" "$token" && bad "E6: the provider glue must only report and answer ($token)"
 done
+wgfile="$(code "$IOS/PacketTunnelProvider+WireGuard.swift")"
+[ "$(printf '%s\n' "$wgfile" | grep -c 'adapter.dataWatchCandidate = ')" = "1" ] \
+    && has "$wgfile" 'adapter.dataWatchCandidate = { \[weak self\] nodeId in self?.tribeSwitchConfiguration(nodeId) }' \
+    || bad "E6: the adapter must get candidate configurations from the provider's one function"
+has "$wgfile" 'let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startedByApp: activationAttemptId != nil)' \
+    && has "$wgfile" 'adapter.start(tunnelConfiguration: startConfiguration)' \
+    || bad "E6: the start must go through tribeStartConfiguration with the true origin of the start"
+has "$glue" 'guard !startedByApp, let choice = tribeDataWatch.chooseStartBySystem() else { return profile }' \
+    || bad "E6: a start by the app must always raise the profile's node"
+[ "$(printf '%s\n' "$wgfile" | grep -c 'self.tribeApplySessionOverride(&metadata)')" = "1" ] \
+    || bad "E6: the status reply must carry the node the tunnel stands on"
+has "$glue" 'guard let actual = tribeDataWatch.sessionOverride() else { return }' \
+    || bad "E6: without a switch the status reply's session must stay untouched"
 
 # ---- E7: the package and the targets ----------------------------------------------------------------------
 grep -q 'self.requires("awg-apple/3.1.4-tribe.13")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.13"

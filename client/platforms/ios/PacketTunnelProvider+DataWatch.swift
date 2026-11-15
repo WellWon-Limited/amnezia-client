@@ -34,6 +34,10 @@ extension PacketTunnelProvider {
             },
             sanityCheck: { [weak self] targets, completion in
                 TribeSanityRunner.run(targets, interface: { self?.tribeCurrentPhysicalInterface() }, completion: completion)
+            },
+            readState: {
+                let state = TribeSharedState.appGroup?.read(TribeWatchPlan.stateFileName) ?? [:]
+                return state.isEmpty ? nil : state
             })
     }
 
@@ -44,8 +48,61 @@ extension PacketTunnelProvider {
     func prepareTribeDataWatch(_ wgConfig: WGConfig) {
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
         tribeDataWatch.configure(tribeDataWatchDeps())
+        // Stage 2: what an in-place switch keeps of this session (the interface half of the
+        // configuration); the peer half comes from the plan's candidate.
+        let base = TribeSwitchBase(address: wgConfig.clientIP, dns: wgConfig.effectiveDns, mtu: wgConfig.mtu,
+                                   privateKey: wgConfig.clientPrivateKey,
+                                   allowedIPs: wgConfig.allowedIPs.joined(separator: ", "))
         tribeDataWatch.prepare(nodeId: Self.tribeLabel(metadata["node_id"]), proto: Self.tribeLabel(metadata["proto"]),
-                               generation: tribeRuntimeGeneration, clientIP: wgConfig.clientIP, resolver: wgConfig.dns1)
+                               generation: tribeRuntimeGeneration, clientIP: wgConfig.clientIP, resolver: wgConfig.dns1,
+                               base: base)
+    }
+
+    // MARK: - Stage 2 (features.ios_tunnel_watch_switch): the configuration of another node
+
+    /// Called from startWireguard with the session's final configuration (the split-tunnel ranges
+    /// already applied). Remembers it as the profile's configuration and answers what the adapter
+    /// starts with: for a start by the app always the profile's node; for a start by the system
+    /// the node TribeStartChoice picks from the plan (the pin first), only with the switch key on.
+    func tribeStartConfiguration(profile: TunnelConfiguration, startedByApp: Bool) -> TunnelConfiguration {
+        tribeHomeConfiguration = profile
+        guard !startedByApp, let choice = tribeDataWatch.chooseStartBySystem() else { return profile }
+        guard let chosen = tribeCandidateConfiguration(wgQuick: choice.wgQuick) else {
+            tribeDataWatch.cancelStartChoice()
+            return profile
+        }
+        return chosen
+    }
+
+    /// The package's own strict parse of the candidate's text; the routed ranges (split tunnel)
+    /// are taken over from the profile's configuration, exactly as startWireguard applied them.
+    func tribeCandidateConfiguration(wgQuick text: String) -> TunnelConfiguration? {
+        guard let home = tribeHomeConfiguration,
+              let next = try? TunnelConfiguration(fromWgQuickConfig: text),
+              next.peers.count == home.peers.count else { return nil }
+        for index in next.peers.indices {
+            next.peers[index].allowedIPs = home.peers[index].allowedIPs
+            next.peers[index].excludeIPs = home.peers[index].excludeIPs
+        }
+        return next
+    }
+
+    /// The adapter's question during an in-place switch (asked on its work queue).
+    func tribeSwitchConfiguration(_ nodeId: String) -> TunnelConfiguration? {
+        switch tribeDataWatch.switchTarget(nodeId) {
+        case .home?: return tribeHomeConfiguration
+        case .candidate(let text)?: return tribeCandidateConfiguration(wgQuick: text)
+        case nil: return nil
+        }
+    }
+
+    /// The status reply tells the app where the tunnel actually stands: after an in-place switch
+    /// (or a start by the system on another node) the node id and the endpoint are the node's, not
+    /// the profile's. Without a switch nothing is touched.
+    func tribeApplySessionOverride(_ metadata: inout [String: Any]) {
+        guard let actual = tribeDataWatch.sessionOverride() else { return }
+        if metadata["node_id"] is String { metadata["node_id"] = actual.nodeId } else { metadata["node_id"] = Int(actual.nodeId) ?? 0 }
+        metadata["endpoint"] = actual.endpoint
     }
 
     /// A number or a short label from the session metadata; never a config value.

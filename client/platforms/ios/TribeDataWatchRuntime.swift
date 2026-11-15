@@ -47,6 +47,9 @@ struct TribeDataWatchDeps {
     var sanityCheck: (_ targets: [TribeSanityTarget], _ completion: @escaping (TribeSanityResult) -> Void) -> Void
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var nowMs: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    /// Stage 2: TribeWatchState.json as the previous run of the extension left it (a start by the
+    /// system reads its own last verdict from it); nil = no file.
+    var readState: () -> [String: Any]? = { nil }
 }
 
 final class TribeDataWatchRuntime {
@@ -73,11 +76,29 @@ final class TribeDataWatchRuntime {
     /// The last probe told as silent and until when (uptime) its late answer is looked for.
     private var lateWatch: (id: Int32, until: TimeInterval)?
 
-    // Session labels for the journal (never endpoints).
+    // Session labels for the journal (never endpoints). `nodeId` is the node the tunnel stands on
+    // NOW: after an in-place switch (stage 2) it is not the profile's node any more.
     private var nodeId = "unknown"
     private var proto = "unknown"
     private var generation = ""
     private var lastVerdict = TribeDataVerdict.none
+
+    // Stage 2 (features.ios_tunnel_watch_switch): the node of the profile, what a switch keeps of the
+    // session, the plan's candidates, and the switches made in this run of the extension.
+    private var homeNodeId = "unknown"
+    private var switchBase: TribeSwitchBase?
+    private var plan: TribeWatchPlan?
+    private var switchSeq = 0
+    private var switches: [[String: Any]] = []
+    static let maxSwitchesKept = 8
+
+    /// What the adapter needs to move the tunnel to `nodeId`.
+    enum SwitchTarget: Equatable {
+        /// The node of the profile: the configuration the session started with.
+        case home
+        /// A candidate of the plan: its wg-quick text.
+        case candidate(String)
+    }
 
     /// The provider gives its side once, before the first session.
     func configure(_ deps: TribeDataWatchDeps) {
@@ -98,9 +119,15 @@ final class TribeDataWatchRuntime {
     /// this is an explicit reset: the device then reads the tunnel exactly as in build 139.
     /// Returns true when the probe is available for this device.
     @discardableResult
-    func prepare(nodeId: String, proto: String, generation: String, clientIP: String, resolver: String) -> Bool {
+    func prepare(nodeId: String, proto: String, generation: String, clientIP: String, resolver: String,
+                 base: TribeSwitchBase? = nil) -> Bool {
         lock.lock()
         self.nodeId = nodeId
+        self.homeNodeId = nodeId
+        self.switchBase = base
+        self.plan = nil
+        self.switchSeq = 0
+        self.switches = []
         self.proto = proto
         self.generation = generation
         inputs = TribeDataWatchInputs()
@@ -139,6 +166,63 @@ final class TribeDataWatchRuntime {
         probeInFlight = 0
         lateWatch = nil
         lock.unlock()
+    }
+
+    // MARK: - Stage 2: where the tunnel stands and where it may go
+
+    /// The nodes offered to the arbiter: the plan's candidates except the node the tunnel is on,
+    /// and the profile's node whenever the tunnel has left it. Empty unless the switch key is on, the
+    /// list has not expired and the provider told what a switch keeps.
+    private func offeredLocked() -> [String] {
+        guard policy.enabled, policy.switchEnabled, switchBase != nil, let plan else { return [] }
+        var ids = plan.candidates.map { $0.nodeId }.filter { $0 != nodeId }
+        if nodeId != homeNodeId && !ids.contains(homeNodeId) { ids.append(homeNodeId) }
+        return ids
+    }
+
+    /// For the adapter's question "what is the configuration of this node"; nil = not a node the
+    /// arbiter was offered.
+    func switchTarget(_ node: String) -> SwitchTarget? {
+        lock.lock(); defer { lock.unlock() }
+        guard offeredLocked().contains(node), let base = switchBase else { return nil }
+        if node == homeNodeId { return .home }
+        guard let candidate = plan?.candidates.first(where: { $0.nodeId == node }) else { return nil }
+        return .candidate(candidate.wgQuick(base: base))
+    }
+
+    /// The identity of the session for the status reply when the tunnel is NOT on the profile's
+    /// node: the app recognises a node by its id and its "host:port". nil = the profile's own.
+    func sessionOverride() -> (nodeId: String, endpoint: String)? {
+        lock.lock(); defer { lock.unlock() }
+        guard nodeId != homeNodeId, let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }
+        return (nodeId, candidate.endpoint)
+    }
+
+    /// A start by the system (not by the app): the node to come up on, when it is not the
+    /// profile's (TribeStartChoice). Call after `prepare`. The choice is recorded as the first
+    /// switch of this run, so the app adopts it like any other. nil = the profile's node.
+    func chooseStartBySystem() -> (nodeId: String, why: String, wgQuick: String)? {
+        guard let deps = currentDeps else { return nil }
+        let net = deps.uplinkKind()
+        let last = TribeStartChoice.lastFailure(state: deps.readState())
+        lock.lock()
+        let home = homeNodeId
+        let choice = TribeStartChoice.choose(profileNodeId: home, plan: switchBase == nil ? nil : plan, net: net,
+                                             lastFailure: last, nowMs: deps.nowMs())
+        guard choice.nodeId != home, let base = switchBase,
+              let candidate = plan?.candidates.first(where: { $0.nodeId == choice.nodeId }) else {
+            lock.unlock()
+            return nil
+        }
+        nodeId = choice.nodeId
+        switchSeq = 1
+        switches = [["from": home, "to": choice.nodeId, "why": "os_start_\(choice.why)", "utc_ms": deps.nowMs(), "net": net]]
+        let labels = (generation, proto)
+        lock.unlock()
+        deps.log("Tribe watch: start candidate=\(choice.nodeId) why=\(choice.why) profile=\(home) net=\(net)")
+        deps.record("peer_switch", ["from": home, "to": choice.nodeId, "why": "os_start_\(choice.why)", "seq": 1, "net": net,
+                                    "result": TribeCommandResult.performed.rawValue, "generation": labels.0])
+        return (choice.nodeId, choice.why, candidate.wgQuick(base: base))
     }
 
     // MARK: - The provider's 10 s statistics tick
@@ -206,9 +290,13 @@ final class TribeDataWatchRuntime {
             state = next.enabled ? "on" : "off"
             lock.lock()
             lastOrder = plan.order
+            self.plan = plan
             lock.unlock()
         case .failure(let rejection):
             state = unreadable ? "unreadable" : rejection.rawValue
+            lock.lock()
+            self.plan = nil // no usable plan: nothing is offered to the arbiter
+            lock.unlock()
         }
         lock.lock()
         planStamp = stamp
@@ -230,8 +318,12 @@ final class TribeDataWatchRuntime {
         }
         // The watch went off: the shared file must not keep the verdict of a watch that is gone.
         if wasEnabled && !next.enabled {
+            lock.lock()
+            let made = (switchSeq, switches)
+            lock.unlock()
             deps.writeState(["schema": 1, "enabled": false, "verdict": TribeDataVerdict.none.rawValue, "generation": labels.0,
-                             "node_id": labels.1, "proto": labels.2, "updated_ms": deps.nowMs(), "switch_seq": 0, "switches": [Any]()])
+                             "node_id": labels.1, "proto": labels.2, "updated_ms": deps.nowMs(),
+                             "switch_seq": made.0, "switches": made.1])
         }
         return next
     }
@@ -254,11 +346,13 @@ final class TribeDataWatchRuntime {
         let live = adapter
         lock.unlock()
         guard enabled, let live else { completion(nil); return }
-        live.dataWatchSnapshot { snapshot in
+        live.dataWatchSnapshot { [weak self] snapshot in
             var block = snapshot.asDictionary
-            // Stage 2 (in-place switch) fills these; the protocol already carries them.
-            block["switch_seq"] = 0
-            block["switches"] = [Any]()
+            // The switches of this run (stage 2); read here, on the adapter's queue, AFTER the
+            // snapshot: a switch executed on that queue just before is already counted.
+            let made = self?.switchesMade() ?? (0, [])
+            block["switch_seq"] = made.0
+            block["switches"] = made.1
             completion(snapshot.enabled ? block : nil)
         }
     }
@@ -267,6 +361,22 @@ final class TribeDataWatchRuntime {
     var statsSuffix: String {
         lock.lock(); defer { lock.unlock() }
         return policy.enabled ? " node=\(nodeId) watch=\(lastVerdict.rawValue)" : ""
+    }
+
+    private func switchesMade() -> (Int, [[String: Any]]) {
+        lock.lock(); defer { lock.unlock() }
+        return (switchSeq, switches)
+    }
+
+    /// The configuration of the node chosen at a start by the system could not be built: the
+    /// tunnel comes up on the profile's node after all.
+    func cancelStartChoice() {
+        lock.lock()
+        nodeId = homeNodeId
+        switchSeq = 0
+        switches = []
+        lock.unlock()
+        currentDeps?.log("Tribe watch: start candidate dropped (configuration rejected), the profile's node is used")
     }
 
     // MARK: - The rule's side (adapter workQueue: field reads and cheap C calls)
@@ -315,19 +425,35 @@ final class TribeDataWatchRuntime {
             }
         }
         lock.lock(); defer { lock.unlock() }
-        return inputs
+        var current = inputs
+        current.nodeId = nodeId
+        current.candidates = offeredLocked()
+        return current
     }
 
     private func handle(handle: Int32, _ output: TribeDataWatchOutput, _ snapshot: TribeDataWatchSnapshot) {
         guard let deps = currentDeps else { return }
         if output.needsSanityCheck { startSanityCheck(deps) }
         if output.startProbe != nil { startProbe(deps, handle: handle) }
+        let net = deps.uplinkKind()
+        // Stage 2: what the arbiter ordered and the adapter has already executed on this tick.
+        if let command = output.command, let result = output.commandResult {
+            noteCommand(command, result: result, snapshot: snapshot, net: net, deps: deps)
+        }
+        if output.exhausted {
+            lock.lock()
+            let labels = (nodeId, generation)
+            lock.unlock()
+            deps.log(TribeDataWatchJournal.exhaustedLine(snapshot: snapshot, nodeId: labels.0, net: net))
+            deps.record("watch_exhausted", ["tried": snapshot.arbiterTried, "round": snapshot.arbiterRound, "node_id": labels.0,
+                                            "net": net, "generation": labels.1])
+        }
         guard output.action == .report, let report = output.report else { return }
         lock.lock()
         lastVerdict = snapshot.verdict
         let labels = (nodeId, proto, generation)
+        let made = (switchSeq, switches)
         lock.unlock()
-        let net = deps.uplinkKind()
         deps.log(TribeDataWatchJournal.line(report: report, verdict: output.verdict, snapshot: snapshot,
                                             nodeId: labels.0, proto: labels.1, net: net))
         deps.record("data_watch", TribeDataWatchJournal.fields(report: report, verdict: output.verdict, snapshot: snapshot,
@@ -341,8 +467,57 @@ final class TribeDataWatchRuntime {
         state["proto"] = labels.1
         state["net"] = net
         state["updated_ms"] = deps.nowMs()
-        state["switch_seq"] = 0
-        state["switches"] = [Any]()
+        state["switch_seq"] = made.0
+        state["switches"] = made.1
+        deps.writeState(state)
+    }
+
+    /// The journal of a command, and after a performed switch the new identity of the session: the
+    /// node the tunnel stands on, the number of the switch (`switch_seq` - the app adopts a switch
+    /// by it), the last eight switches. The shared file is rewritten at once: the verdict it held
+    /// was about the node the tunnel has left.
+    private func noteCommand(_ command: TribeWatchCommand, result: TribeCommandResult, snapshot: TribeDataWatchSnapshot,
+                             net: String, deps: TribeDataWatchDeps) {
+        lock.lock()
+        let from = nodeId
+        var switched = false
+        if case .switchPeer(let to, let why) = command, result == .performed {
+            switched = true
+            nodeId = to
+            switchSeq += 1
+            switches.append(["from": from, "to": to, "why": why.rawValue, "utc_ms": deps.nowMs(), "net": net])
+            if switches.count > Self.maxSwitchesKept { switches.removeFirst(switches.count - Self.maxSwitchesKept) }
+            // A new device on another node: what was learned through the old one is void.
+            lastVerdict = .none
+            probeInFlight = 0
+            lateWatch = nil
+            if inputs.probe != .unavailable { inputs.probe = .none }
+            inputs.probeAt = nil
+            inputs.lateAnswerAt = nil
+        }
+        let seq = switchSeq
+        let labels = (nodeId, proto, generation)
+        let made = (switchSeq, switches)
+        lock.unlock()
+        deps.log(TribeDataWatchJournal.commandLine(command, result: result, from: from, seq: seq, net: net))
+        switch command {
+        case .heal(let kind):
+            deps.record("watch_heal", ["step": kind.rawValue, "result": result.rawValue, "node_id": from, "net": net,
+                                       "generation": labels.2])
+        case .switchPeer(let to, let why):
+            deps.record("peer_switch", ["from": from, "to": to, "why": why.rawValue, "seq": seq, "net": net,
+                                        "result": result.rawValue, "generation": labels.2])
+        }
+        guard switched else { return }
+        var state = snapshot.asDictionary
+        state["schema"] = 1
+        state["generation"] = labels.2
+        state["node_id"] = labels.0
+        state["proto"] = labels.1
+        state["net"] = net
+        state["updated_ms"] = deps.nowMs()
+        state["switch_seq"] = made.0
+        state["switches"] = made.1
         deps.writeState(state)
     }
 

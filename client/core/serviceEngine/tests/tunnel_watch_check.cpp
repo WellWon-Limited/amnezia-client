@@ -73,6 +73,8 @@ static void tableAndClamps()
         {"ios_tw_probe_max_per_hour", 12, 1, 60, true},
         {"ios_tw_probe_low_rx_max_per_hour", 2, 0, 12, true},
         {"ios_tw_sanity_max_per_hour", 12, 1, 60, true},
+        {"ios_tw_switch_heal_steps", 2, 0, 2, true},
+        {"ios_tw_trial_probe_max_per_hour", 30, 1, 60, true},
         {"ios_tw_sanity_required", 1, 0, 1, true},
         {"ios_tw_probe", 1, 0, 1, true},
         {"ios_tw_plan_ttl_h", 24, 1, 168, true},

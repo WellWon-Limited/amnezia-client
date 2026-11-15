@@ -22,6 +22,8 @@ struct TribeWatchPlan {
     /// A plan written "in the future" by more than this is rejected (clock trouble).
     static let futureSlackMs: Int64 = 5 * 60 * 1000
     static let maxSanityTargets = 4
+    /// Stage 2: the app writes up to five spare nodes; one more is tolerated, the rest is cut.
+    static let maxCandidates = 6
 
     enum Rejection: String, Error, Equatable {
         case missing
@@ -57,8 +59,17 @@ struct TribeWatchPlan {
     var configFetchedMs: Int64
     /// The candidate list is usable until this moment (stage 2). The policy has its own age rule.
     var expiresMs: Int64
-    /// Stage 2: opaque here. Stage 1 never reads the entries.
-    var candidates: [[String: Any]]
+    /// Stage 2: the nodes the extension may switch to in place, in the order the app's own
+    /// ladder would try them (the pinned country first). Entries that do not pass the strict check
+    /// are dropped here; an expired list is empty.
+    var candidates: [TribeWatchCandidate]
+    /// Stage 2, for a start by the system: the pin in force when the plan was written (labels;
+    /// empty = no pin), the transport mode, and the node the app's network memory holds for
+    /// "wifi" and for "cellular".
+    var pinNodeId: String
+    var pinCountry: String
+    var transportMode: String
+    var memory: [String: String]
 
     /// `appAlive`: the app asked for the status recently. A policy older than its allowed age is
     /// still trusted while the app is alive: a living app rewrites the plan as soon as it gets a
@@ -80,20 +91,174 @@ struct TribeWatchPlan {
         let numbers = object["numbers"] as? [String: Any] ?? [:]
         var policy = TribeDataWatchPolicy.fromPlan(features: features, numbers: numbers)
         let expires = int(object["expires_ms"]) ?? 0
-        let candidates = object["candidates"] as? [[String: Any]] ?? []
+        var candidates: [TribeWatchCandidate] = []
+        if expires > nowMs {
+            for raw in (object["candidates"] as? [Any] ?? []).prefix(maxCandidates) {
+                guard let entry = raw as? [String: Any], let candidate = TribeWatchCandidate(entry),
+                      !candidates.contains(where: { $0.nodeId == candidate.nodeId }) else { continue }
+                candidates.append(candidate)
+            }
+        }
         // The candidate list has its own term; without a usable list there is nothing to switch to.
-        if expires <= nowMs || candidates.isEmpty { policy.switchEnabled = false }
+        if candidates.isEmpty { policy.switchEnabled = false }
+        let pin = object["pin"] as? [String: Any] ?? [:]
+        var memory: [String: String] = [:]
+        let keys = object["net_keys"] as? [String: Any] ?? [:]
+        let saved = object["net_memory"] as? [String: Any] ?? [:]
+        for kind in ["wifi", "cellular"] {
+            guard let key = keys[kind] as? String, let entry = saved[key] as? [String: Any],
+                  let node = int(entry["node_id"]), node > 0 else { continue }
+            memory[kind] = String(node)
+        }
         let targets = (object["sanity_targets"] as? [Any] ?? []).compactMap { $0 as? String }
             .filter { TribeSanityTarget(url: $0) != nil }
         return .success(TribeWatchPlan(policy: policy, sanityTargets: Array(targets.prefix(maxSanityTargets)), order: order,
                                        poolRevision: int(object["pool_revision"]) ?? 0, configFetchedMs: fetched,
-                                       expiresMs: expires, candidates: candidates))
+                                       expiresMs: expires, candidates: candidates,
+                                       pinNodeId: (int(pin["node_id"]) ?? 0) > 0 ? String(int(pin["node_id"]) ?? 0) : "",
+                                       pinCountry: TribeWatchCandidate.label(pin["country"]) ?? "",
+                                       transportMode: TribeWatchCandidate.label(object["transport_mode"]) ?? "",
+                                       memory: memory))
     }
 
-    private static func int(_ raw: Any?) -> Int64? {
+    fileprivate static func int(_ raw: Any?) -> Int64? {
         if let n = raw as? NSNumber { return TribeDataWatchPolicy.isBoolean(n) ? nil : n.int64Value }
         if let s = raw as? String { return Int64(s) }
         return nil
+    }
+}
+
+/// What a switch keeps from the running session: the interface half of its configuration. The app
+/// offers only candidates whose DNS, MTU and routed ranges are the same, and the tunnel address and
+/// the private key are one per device - so nothing of this changes when the peer does.
+struct TribeSwitchBase: Equatable {
+    var address: String
+    var dns: String
+    var mtu: String
+    var privateKey: String
+    var allowedIPs: String
+}
+
+/// One node the extension may switch to in place (stage 2): the node's half of the tunnel
+/// configuration, by the keys of the provider configuration (WGConfig.swift). Strictly checked:
+/// only the known keys, string values without a line break (the values go into a wg-quick text),
+/// the whole AmneziaWG bundle present. A candidate that fails is not offered at all.
+struct TribeWatchCandidate: Equatable {
+    let nodeId: String
+    let country: String
+    let peer: [String: String]
+
+    /// [Interface] keys of the node (AmneziaWG), in the order WGConfig.swift writes them.
+    static let interfaceKeys = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4", "S3", "S4",
+                                "I1", "I2", "I3", "I4", "I5", "HeaderProtectionKey", "ContentPaddingAddition",
+                                "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout",
+                                "MaxHandshakeAttempts", "RandomTrailers", "DisableCookies"]
+    static let requiredInterfaceKeys = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
+    static let peerKeys = ["hostName", "port", "server_pub_key", "psk_key", "persistent_keep_alive"]
+    static let maxValueLength = 4096
+
+    init?(_ raw: [String: Any]) {
+        guard let node = TribeWatchPlan.int(raw["node_id"]), node > 0,
+              let fields = raw["peer"] as? [String: Any] else { return nil }
+        var peer: [String: String] = [:]
+        for key in Self.interfaceKeys + Self.peerKeys {
+            guard let value = fields[key] else { continue }
+            let text: String
+            if let string = value as? String {
+                text = string.trimmingCharacters(in: .whitespaces)
+            } else if let number = value as? NSNumber, !TribeDataWatchPolicy.isBoolean(number) {
+                text = number.stringValue
+            } else {
+                return nil
+            }
+            guard !text.isEmpty else { continue }
+            guard text.count <= Self.maxValueLength,
+                  !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) })
+            else { return nil }
+            peer[key] = text
+        }
+        for key in Self.requiredInterfaceKeys + ["hostName", "port", "server_pub_key"] where peer[key] == nil { return nil }
+        guard let port = Int(peer["port"] ?? ""), (1...65535).contains(port),
+              let host = peer["hostName"], host.count <= 253,
+              host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == ":") }),
+              let key = peer["server_pub_key"], Data(base64Encoded: key)?.count == 32 else { return nil }
+        if let psk = peer["psk_key"], Data(base64Encoded: psk)?.count != 32 { return nil }
+        self.nodeId = String(node)
+        self.country = Self.label(raw["country"]) ?? ""
+        self.peer = peer
+    }
+
+    /// "host:port" as the app knows the node (the app recognises the session by it).
+    var endpoint: String { "\(peer["hostName"] ?? ""):\(peer["port"] ?? "")" }
+
+    /// The wg-quick text of the session on this node: the base's interface, the node's own
+    /// AmneziaWG parameters and peer. The same shape WGConfig.swift produces at a start.
+    func wgQuick(base: TribeSwitchBase) -> String {
+        var lines = ["[Interface]", "Address = \(base.address)", "DNS = \(base.dns)", "MTU = \(base.mtu)",
+                     "PrivateKey = \(base.privateKey)"]
+        for key in Self.interfaceKeys {
+            if let value = peer[key] { lines.append("\(key) = \(value)") }
+        }
+        lines.append("[Peer]")
+        lines.append("PublicKey = \(peer["server_pub_key"] ?? "")")
+        if let psk = peer["psk_key"] { lines.append("PresharedKey = \(psk)") }
+        lines.append("AllowedIPs = \(base.allowedIPs)")
+        lines.append("Endpoint = \(endpoint)")
+        if let keepalive = peer["persistent_keep_alive"] { lines.append("PersistentKeepalive = \(keepalive)") }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// A short label (country code, mode): letters, digits, "-" and "_", at most 16.
+    static func label(_ raw: Any?) -> String? {
+        guard let text = raw as? String, !text.isEmpty, text.count <= 16,
+              text.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) else { return nil }
+        return text
+    }
+}
+
+/// Stage 2: which node a tunnel started by the SYSTEM (not by the app) comes up on. The profile
+/// holds the node of the last start by the app; the plan holds what the app knew last. Order
+/// (design 0a item 8): the pinned node first -> the node the app's network memory holds for this
+/// kind of network -> the profile's node -> the plan's order. A node this extension itself judged
+/// dead on this kind of network within the last half hour is skipped - that is the "proven failure
+/// in this network" which alone lets a start leave the pin. Only nodes the extension can raise:
+/// the profile's node and the plan's candidates (AmneziaWG, the mode in force, never manual-only -
+/// the app wrote no others). Without a usable plan or with the switch key off: the profile's node,
+/// as build 139.
+enum TribeStartChoice {
+    struct LastFailure: Equatable {
+        var nodeId: String
+        var net: String
+        var wallMs: Int64
+    }
+    static let failureMemoryMs: Int64 = 30 * 60 * 1000
+
+    static func choose(profileNodeId: String, plan: TribeWatchPlan?, net: String,
+                       lastFailure: LastFailure?, nowMs: Int64) -> (nodeId: String, why: String) {
+        guard let plan, plan.policy.enabled, plan.policy.switchEnabled, !plan.candidates.isEmpty else {
+            return (profileNodeId, "profile")
+        }
+        let known = [profileNodeId] + plan.candidates.map { $0.nodeId }
+        func failed(_ node: String) -> Bool {
+            guard let last = lastFailure, last.nodeId == node, last.net == net else { return false }
+            return nowMs >= last.wallMs && nowMs - last.wallMs <= failureMemoryMs
+        }
+        var order: [(String, String)] = []
+        if !plan.pinNodeId.isEmpty, known.contains(plan.pinNodeId) { order.append((plan.pinNodeId, "pin")) }
+        if let remembered = plan.memory[net], known.contains(remembered) { order.append((remembered, "memory")) }
+        order.append((profileNodeId, "profile"))
+        order += plan.candidates.map { ($0.nodeId, "plan_order") }
+        for (node, why) in order where !failed(node) { return (node, why) }
+        return (profileNodeId, "profile")
+    }
+
+    /// The last verdict this extension wrote (TribeWatchState.json), read back at a start.
+    static func lastFailure(state: [String: Any]?) -> LastFailure? {
+        guard let state, state["verdict"] as? String == TribeDataVerdict.noData.rawValue,
+              let node = state["node_id"] as? String, !node.isEmpty,
+              let net = state["net"] as? String,
+              let at = TribeWatchPlan.int(state["last_no_data_ms"]), at > 0 else { return nil }
+        return LastFailure(nodeId: node, net: net, wallMs: at)
     }
 }
 
@@ -213,6 +378,21 @@ enum TribeDataWatchJournal {
             + " tx=\(snapshot.episodeTx) rx_data=\(snapshot.episodeRxData) sanity=\(snapshot.sanity.rawValue)"
             + " evidence=\(snapshot.evidence.rawValue) would_switch=\(snapshot.wouldSwitch ? 1 : 0) app_alive=\(snapshot.appAlive ? 1 : 0)"
             + " refuted=\(snapshot.refuted) disturbed=\(snapshot.disturbed)"
+    }
+
+    /// Stage 2: the journal line of a command the arbiter ordered and the adapter executed.
+    static func commandLine(_ command: TribeWatchCommand, result: TribeCommandResult, from: String, seq: Int, net: String) -> String {
+        switch command {
+        case .heal(let kind):
+            return "Tribe watch: heal step=\(kind.rawValue) result=\(result.rawValue) node=\(from) net=\(net)"
+        case .switchPeer(let node, let why):
+            return "Tribe watch: peer_switch from=\(from) to=\(node) why=\(why.rawValue) seq=\(seq) net=\(net) result=\(result.rawValue)"
+        }
+    }
+
+    /// `stay` = the node the tunnel stands on until the next round (after the way back, if one was made).
+    static func exhaustedLine(snapshot: TribeDataWatchSnapshot, nodeId: String, net: String) -> String {
+        "Tribe watch: exhausted tried=\(snapshot.arbiterTried) round=\(snapshot.arbiterRound) stay=\(nodeId) net=\(net)"
     }
 
     /// "state=<s> id=<n> ms=<n> late=<0|1>" from wgTribeProbeResult. The Go layer's "no_session"

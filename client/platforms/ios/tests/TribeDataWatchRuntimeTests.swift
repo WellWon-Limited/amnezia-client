@@ -32,6 +32,13 @@ enum TribeDataWatchRuntimeTests {
         var rx: UInt64 = 0
         var handshake: Int64 = 0
         var snapshotCalls = 0
+        /// Stage 2: the adapter executes the arbiter's commands on the tick, as the real one does
+        /// (WireGuardAdapter.dataWatchTick): it asks the provider for the node's configuration.
+        var switchTarget: ((String) -> TribeDataWatchRuntime.SwitchTarget?)?
+        var healResult = TribeCommandResult.denied
+        var commands: [(command: TribeWatchCommand, result: TribeCommandResult)] = []
+        var switched: [(node: String, target: TribeDataWatchRuntime.SwitchTarget)] = []
+        var lastInputs = TribeDataWatchInputs()
 
         func setDataWatchPolicy(_ policy: TribeDataWatchPolicy) {
             self.policy = policy
@@ -50,9 +57,31 @@ enum TribeDataWatchRuntimeTests {
                 return
             }
             let inputs = dataWatchInputs?(handle) ?? TribeDataWatchInputs()
-            let output = watch.step(TribeDataWatchSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, uptime: uptime, wall: wall),
+            lastInputs = inputs
+            var output = watch.step(TribeDataWatchSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, uptime: uptime, wall: wall),
                                     env: inputs.env(pathSatisfied: true), policy: policy)
-            guard output.action != .keep || output.needsSanityCheck || output.startProbe != nil else { return }
+            guard !output.isQuiet else { return }
+            if let command = output.command {
+                var result = TribeCommandResult.performed
+                switch command {
+                case .heal(let kind):
+                    result = healResult
+                    if result == .performed && kind == .softRestart {
+                        watch.noteBackendRestarted(at: uptime, policy: policy)
+                        tx = 0; rx = 0; handshake = 0
+                    }
+                case .switchPeer(let node, _):
+                    if let target = switchTarget?(node) {
+                        switched.append((node, target))
+                        tx = 0; rx = 0; handshake = 0
+                    } else {
+                        result = .denied
+                    }
+                }
+                watch.noteCommandResult(command, result: result, at: uptime, policy: policy)
+                output.commandResult = result
+                commands.append((command, result))
+            }
             dataWatchHandler?(handle, output, watch.snapshot(policy: policy))
         }
     }
@@ -74,6 +103,9 @@ enum TribeDataWatchRuntimeTests {
         var sanityAsked: [[TribeSanityTarget]] = []
         var sanityAnswer: TribeSanityResult? = .ok
         var planSeq: Int64 = 0
+        /// Stage 2: what the previous run of the extension left in TribeWatchState.json.
+        var previousState: [String: Any]?
+        var uplink = "cellular"
         let runtime = TribeDataWatchRuntime()
         let adapter = FakeAdapter()
 
@@ -97,27 +129,43 @@ enum TribeDataWatchRuntimeTests {
                     self.probeResultPolls += 1
                     return self.probeResult
                 },
-                uplinkKind: { "cellular" },
+                uplinkKind: { [unowned self] in self.uplink },
                 sanityCheck: { [unowned self] targets, completion in
                     self.sanityAsked.append(targets)
                     if let answer = self.sanityAnswer { completion(answer) }
                 },
                 uptime: { [unowned self] in self.uptime },
-                nowMs: { [unowned self] in self.wallMs }))
+                nowMs: { [unowned self] in self.wallMs },
+                readState: { [unowned self] in self.previousState }))
+            adapter.switchTarget = { [unowned self] node in self.runtime.switchTarget(node) }
         }
+
+        static let key32 = Data(repeating: 9, count: 32).base64EncodedString()
+        /// A candidate entry as the app writes it.
+        static func candidate(_ node: Int) -> [String: Any] {
+            ["node_id": node, "country": "FI",
+             "peer": ["hostName": "198.51.100.\(node)", "port": "585", "server_pub_key": key32, "persistent_keep_alive": "25",
+                      "Jc": "4", "Jmin": "10", "Jmax": "50", "S1": "55", "S2": "66", "H1": "1", "H2": "2", "H3": "3", "H4": "4"]]
+        }
+        static let base = TribeSwitchBase(address: "10.8.1.7/32", dns: "1.1.1.1, 1.0.0.1", mtu: "1280", privateKey: "PRIVATE", allowedIPs: "0.0.0.0/0, ::/0")
         deinit { try? FileManager.default.removeItem(at: directory) }
 
         var planURL: URL { directory.appendingPathComponent(TribeWatchPlan.fileName) }
 
         /// The app writes a plan (atomically, a new sequence number every time).
         func writePlan(watch: Bool = true, numbers: [String: Any] = [:], poolRevision: Int64 = 1_763_190_000_000,
-                       fetchedAgoMs: Int64 = 60_000, targets: [String]? = nil) {
+                       fetchedAgoMs: Int64 = 60_000, targets: [String]? = nil,
+                       switchOn: Bool = false, candidates: [Int] = [], expiresInMs: Int64 = 86_400_000,
+                       pin: Int = 0, memory: [String: Int] = [:]) {
             planSeq += 1
             var object: [String: Any] = [
                 "schema": 2, "seq": planSeq, "written_ms": wallMs, "config_fetched_ms": wallMs - fetchedAgoMs,
-                "policy_max_age_ms": 86_400_000, "expires_ms": wallMs + 86_400_000, "pool_revision": poolRevision,
-                "features": ["ios_tunnel_watch": watch, "ios_tunnel_watch_switch": false, "ios_on_demand_bg_arm": false],
-                "numbers": numbers, "candidates": [Any](),
+                "policy_max_age_ms": 86_400_000, "expires_ms": wallMs + expiresInMs, "pool_revision": poolRevision,
+                "features": ["ios_tunnel_watch": watch, "ios_tunnel_watch_switch": switchOn, "ios_on_demand_bg_arm": false],
+                "numbers": numbers, "candidates": candidates.map { Bench.candidate($0) },
+                "pin": ["country": pin > 0 ? "FI" : "", "node_id": pin],
+                "net_keys": ["wifi": "wifi", "cellular": "cellular:250-02"],
+                "net_memory": Dictionary(uniqueKeysWithValues: memory.map { (($0.key == "cellular" ? "cellular:250-02" : $0.key), ["node_id": $0.value, "saved_ms": 1] as [String: Any]) }),
             ]
             if let targets { object["sanity_targets"] = targets }
             try! JSONSerialization.data(withJSONObject: object).write(to: planURL, options: .atomic)
@@ -125,8 +173,9 @@ enum TribeDataWatchRuntimeTests {
 
         /// A session comes up the way startWireguard does it.
         @discardableResult
-        func startSession(nodeId: String = "16") -> Bool {
-            let available = runtime.prepare(nodeId: nodeId, proto: "awg", generation: "gen-1", clientIP: "10.8.1.7/32", resolver: "1.1.1.1")
+        func startSession(nodeId: String = "16", base: TribeSwitchBase? = Bench.base) -> Bool {
+            let available = runtime.prepare(nodeId: nodeId, proto: "awg", generation: "gen-1", clientIP: "10.8.1.7/32", resolver: "1.1.1.1",
+                                            base: base)
             runtime.attach(adapter: adapter)
             adapter.start(at: uptime)
             return available
@@ -156,6 +205,179 @@ enum TribeDataWatchRuntimeTests {
             var block: [String: Any]?
             runtime.statusBlock { called += 1; block = $0 }
             return (called, block)
+        }
+    }
+
+    /// Stage 2: the arbiter's commands through the whole extension - the plan's candidates, the
+    /// adapter executing on the tick, the identity of the session and the journal.
+    static func stageTwo() {
+        /// The world of these scenarios: every probe is silent until told otherwise, the heals are
+        /// refused by the shared budget (so a round goes straight to the switches).
+        func dead(_ b: Bench, seconds: Int) {
+            for second in 1...seconds { b.second(tx: 400, handshake: b.adapter.handshake == 0 ? second % 3 == 0 : false) }
+        }
+        run("switch_goes_through_the_whole_extension") {
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [12, 9])
+            b.startSession()
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(b, seconds: 110)
+            check(b.adapter.lastInputs.nodeId == "12" || b.adapter.switched.count == 1, "the first switch happened: \(b.adapter.commands)")
+            check(b.adapter.commands.map { "\($0.command)" }.prefix(2).allSatisfy { $0.contains("heal") } && b.adapter.switched.first?.node == "12",
+                  "two heals (refused by the shared budget), then the plan's first candidate: \(b.adapter.commands)")
+            if case .candidate(let text)? = b.adapter.switched.first?.target {
+                check(text.contains("Endpoint = 198.51.100.12:585\n") && text.contains("PrivateKey = PRIVATE\n") && text.contains("Address = 10.8.1.7/32\n")
+                      && text.contains("AllowedIPs = 0.0.0.0/0, ::/0\n") && text.contains("H4 = 4\n"),
+                      "the adapter got the candidate's peer on the session's own interface: \(text)")
+            } else {
+                check(false, "the adapter must get the candidate's configuration text")
+            }
+            check(b.logs.contains("Tribe watch: heal step=fresh_port result=denied node=16 net=cellular")
+                  && b.logs.contains("Tribe watch: heal step=soft_restart result=denied node=16 net=cellular"), "the heals are journaled with their result: \(b.logs.suffix(6))")
+            check(b.logs.contains("Tribe watch: peer_switch from=16 to=12 why=no_data seq=1 net=cellular result=performed"), "the switch is journaled with both nodes and the reason: \(b.logs.suffix(4))")
+            let event = b.records.last { $0.event == "peer_switch" }?.fields
+            check(event?["from"] as? String == "16" && event?["to"] as? String == "12" && event?["why"] as? String == "no_data"
+                  && event?["seq"] as? Int == 1 && event?["result"] as? String == "performed" && event?["generation"] as? String == "gen-1",
+                  "and in the journal ring: \(String(describing: event))")
+            // Where the tunnel stands now, for everybody who asks.
+            check(b.runtime.sessionOverride()?.nodeId == "12" && b.runtime.sessionOverride()?.endpoint == "198.51.100.12:585", "the status reply's session is the new node")
+            check(b.runtime.statsSuffix.hasPrefix(" node=12 "), "the statistics line names the new node: \(b.runtime.statsSuffix)")
+            check(b.lastState["node_id"] as? String == "12" && b.lastState["switch_seq"] as? Int == 1 && b.lastState["verdict"] as? String == "none",
+                  "the shared file: the new node, the switch number, and no verdict of the node it left: \(b.lastState)")
+            let made = b.lastState["switches"] as? [[String: Any]]
+            check(made?.count == 1 && made?.first?["from"] as? String == "16" && made?.first?["to"] as? String == "12"
+                  && made?.first?["why"] as? String == "no_data" && made?.first?["net"] as? String == "cellular" && (made?.first?["utc_ms"] as? Int64 ?? 0) > 0,
+                  "the list of switches: \(String(describing: made))")
+            let block = b.statusBlock().block
+            check(block?["switch_seq"] as? Int == 1 && (block?["switches"] as? [[String: Any]])?.count == 1, "the status block carries the switch number: \(String(describing: block?["switch_seq"]))")
+            check(b.adapter.lastInputs.nodeId == "12" || b.adapter.lastInputs.nodeId == "16", "inputs follow")
+            // The new node answers its trial probe: it is trusted and nobody is moved again.
+            b.probeResult = "state=answered id=5 ms=40 late=0"
+            dead(b, seconds: 60)
+            check(b.adapter.switched.count == 1 && b.adapter.lastInputs.nodeId == "12", "trusted: no second switch")
+            check(b.adapter.lastInputs.candidates == ["9", "16"], "what is offered from the new node: the rest of the plan and the profile's node: \(b.adapter.lastInputs.candidates)")
+        }
+        run("nothing_is_offered_without_the_key_a_live_list_and_the_base") {
+            // The switch key off: the plan may hold candidates, the arbiter is offered nothing.
+            let off = Bench()
+            off.writePlan(switchOn: false, candidates: [12, 9])
+            off.startSession()
+            off.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(off, seconds: 200)
+            check(off.adapter.watch.verdict == .noData && off.adapter.commands.isEmpty && off.adapter.lastInputs.candidates.isEmpty, "key off: verdict only")
+            check(off.runtime.switchTarget("12") == nil && off.runtime.sessionOverride() == nil, "and no configuration is handed out")
+            check(off.statusBlock().block?["switch_seq"] as? Int == 0, "switch_seq stays 0")
+            // An expired list.
+            let expired = Bench()
+            expired.writePlan(switchOn: true, candidates: [12], expiresInMs: 30_000)
+            expired.startSession()
+            expired.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(expired, seconds: 20)
+            check(expired.adapter.lastInputs.candidates == ["12"], "offered while the list is alive")
+            dead(expired, seconds: 20)
+            expired.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            dead(expired, seconds: 160)
+            check(expired.adapter.lastInputs.candidates.isEmpty && expired.adapter.switched.isEmpty && expired.runtime.switchTarget("12") == nil,
+                  "the list expired: nothing is offered, nobody is moved: \(expired.adapter.commands)")
+            // The provider did not say what a switch keeps (a session this code cannot rebuild).
+            let bare = Bench()
+            bare.writePlan(switchOn: true, candidates: [12])
+            bare.startSession(base: nil)
+            bare.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(bare, seconds: 200)
+            check(bare.adapter.lastInputs.candidates.isEmpty && bare.adapter.commands.isEmpty, "no base: no switch")
+            // A node that was not offered gets no configuration, whatever asks for it.
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [12])
+            b.startSession()
+            check(b.runtime.switchTarget("99") == nil && b.runtime.switchTarget("16") == nil && b.runtime.switchTarget("12") != nil,
+                  "only an offered node has a configuration (the current one is never offered)")
+        }
+        run("exhausted_goes_back_to_the_profile_node_and_says_so") {
+            let b = Bench()
+            b.writePlan(numbers: ["ios_tw_trial_probe_max_per_hour": 60], switchOn: true, candidates: [12, 9])
+            b.startSession()
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(b, seconds: 260)
+            check(b.adapter.switched.map { $0.node } == ["12", "9", "16"], "both candidates, then back: \(b.adapter.switched.map { $0.node })")
+            check(b.adapter.switched.last?.target == .home, "the way back is the configuration the session started with")
+            check(b.logs.contains("Tribe watch: exhausted tried=3 round=1 stay=16 net=cellular"), "exhausted is journaled with the node the tunnel stays on: \(b.logs.filter { $0.contains("exhausted") })")
+            check(b.logs.contains("Tribe watch: peer_switch from=9 to=16 why=exhausted_best seq=3 net=cellular result=performed"), "the return is journaled as such")
+            check(b.records.contains { $0.event == "watch_exhausted" && $0.fields["tried"] as? Int == 3 }, "and in the ring")
+            check(b.runtime.sessionOverride() == nil && b.runtime.statsSuffix.hasPrefix(" node=16 "), "back on the profile's node: its own identity again")
+            check(b.statusBlock().block?["switch_seq"] as? Int == 3, "three switches were made")
+            let before = b.adapter.commands.count
+            dead(b, seconds: 150)
+            check(b.adapter.commands.count == before, "silent until the next round")
+        }
+        run("switch_list_keeps_the_last_eight") {
+            let b = Bench()
+            b.writePlan(numbers: ["ios_tw_trial_probe_max_per_hour": 60], switchOn: true, candidates: [12, 9])
+            b.startSession()
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(b, seconds: 2700) // rounds at 5, 10, 20 minutes: 4 rounds x 3 switches
+            let block = b.statusBlock().block
+            let seq = block?["switch_seq"] as? Int ?? 0
+            let list = block?["switches"] as? [[String: Any]] ?? []
+            check(seq >= 9 && list.count == TribeDataWatchRuntime.maxSwitchesKept, "the number goes on, the list is bounded: \(seq) \(list.count)")
+            check(list.last?["to"] as? String == b.adapter.switched.last?.node, "the newest is the last")
+        }
+        run("plan_without_the_key_stops_a_round") {
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [12, 9, 3])
+            b.startSession()
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(b, seconds: 110)
+            check(b.adapter.switched.count == 1, "a round is in progress")
+            b.writePlan(switchOn: false, candidates: [12, 9, 3]) // the server switched the key off; the app rewrote the plan
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            dead(b, seconds: 300)
+            check(b.adapter.switched.count == 1 && !b.adapter.watch.snapshot(policy: b.adapter.policy).arbiterActive, "not one more switch after the key went off")
+            check(b.runtime.sessionOverride()?.nodeId == "12" || b.runtime.sessionOverride() == nil, "the tunnel stays where it is")
+        }
+        run("start_by_the_system_chooses_from_the_plan") {
+            // The previous run judged the profile's node dead on this network 5 minutes ago.
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [12, 9])
+            b.previousState = ["verdict": "no_data", "node_id": "16", "net": "cellular", "last_no_data_ms": b.wallMs - 300_000]
+            _ = b.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            let choice = b.runtime.chooseStartBySystem()
+            check(choice?.nodeId == "12" && choice?.why == "plan_order" && (choice?.wgQuick.contains("Endpoint = 198.51.100.12:585\n") ?? false),
+                  "the plan's first candidate instead of the node that failed here: \(String(describing: choice?.nodeId))")
+            check(b.logs.contains("Tribe watch: start candidate=12 why=plan_order profile=16 net=cellular"), "journaled: \(b.logs)")
+            check(b.records.contains { $0.event == "peer_switch" && $0.fields["why"] as? String == "os_start_plan_order" && $0.fields["seq"] as? Int == 1 }, "and in the ring")
+            b.runtime.attach(adapter: b.adapter)
+            check(b.runtime.sessionOverride()?.nodeId == "12", "the session's identity is the chosen node")
+            b.writePlan(switchOn: true, candidates: [12, 9])
+            b.adapter.start(at: b.uptime)
+            let block = b.statusBlock().block
+            let list = block?["switches"] as? [[String: Any]]
+            check(block?["switch_seq"] as? Int == 1 && list?.first?["why"] as? String == "os_start_plan_order" && list?.first?["from"] as? String == "16",
+                  "the app is told as about any switch: \(String(describing: list))")
+            // The configuration could not be built: the profile's node after all.
+            b.runtime.cancelStartChoice()
+            check(b.runtime.sessionOverride() == nil && b.statusBlock().block?["switch_seq"] as? Int == 0, "a dropped choice leaves no trace of a switch")
+            // A healthy profile node, another network, no key: nothing is chosen.
+            let healthy = Bench()
+            healthy.writePlan(switchOn: true, candidates: [12])
+            _ = healthy.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            check(healthy.runtime.chooseStartBySystem() == nil && healthy.logs.allSatisfy { !$0.contains("start candidate") }, "no failure known: the profile's node, silently")
+            let wifi = Bench()
+            wifi.writePlan(switchOn: true, candidates: [12])
+            wifi.uplink = "wifi"
+            wifi.previousState = ["verdict": "no_data", "node_id": "16", "net": "cellular", "last_no_data_ms": wifi.wallMs - 300_000]
+            _ = wifi.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            check(wifi.runtime.chooseStartBySystem() == nil, "the failure was on another network")
+            let off = Bench()
+            off.writePlan(switchOn: false, candidates: [12])
+            off.previousState = ["verdict": "no_data", "node_id": "16", "net": "cellular", "last_no_data_ms": off.wallMs - 300_000]
+            _ = off.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            check(off.runtime.chooseStartBySystem() == nil, "the switch key off: the profile's node, as build 139")
+            // The pin of the plan comes first.
+            let pinned = Bench()
+            pinned.writePlan(switchOn: true, candidates: [12, 9], pin: 9)
+            _ = pinned.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            check(pinned.runtime.chooseStartBySystem()?.nodeId == "9" && pinned.logs.contains("Tribe watch: start candidate=9 why=pin profile=16 net=cellular"), "the pinned node first")
         }
     }
 
@@ -451,6 +673,7 @@ enum TribeDataWatchRuntimeTests {
             check(b.logs.count == before, "and the plan is not read for a stopped session")
         }
 
+        stageTwo()
         if failures == 0 { print("TribeDataWatchRuntime: all tests passed") } else { print("TribeDataWatchRuntime: \(failures) check(s) FAILED"); exit(1) }
     }
 }
