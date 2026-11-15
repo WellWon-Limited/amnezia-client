@@ -926,6 +926,285 @@ static void test_arm_cleanup_when_pause_lands_during_save()
 }
 
 // Connect пришёл, пока снималось правило для стопа: стоп отменён, живая сессия адоптируется.
+#ifndef HARNESS_OLD
+// ---- AVPN (iOS data watch, build 140): On-Demand arming after leaving the screen, the `watch` block of
+// the status reply, the plan file. Decisions: IosBackgroundArm.h, BackgroundHoldBook.h (pure tests in
+// IosDataWatchTests.cpp); here the real controller over the model of the system's rule store.
+struct BgArmEvents {
+    std::vector<std::string> lines;
+    QMetaObject::Connection connection;
+    BgArmEvents()
+    {
+        connection = QObject::connect(IosController::Instance(), &IosController::onDemandBackgroundEvent,
+                                      [this](const QString &line) { lines.push_back(line.toStdString()); });
+    }
+    ~BgArmEvents() { QObject::disconnect(connection); }
+    bool lastStartsWith(const char *prefix) const
+    {
+        return !lines.empty() && lines.back().compare(0, std::strlen(prefix), prefix) == 0;
+    }
+};
+
+// The user leaves the app right after Connect: the handshake is not confirmed yet. The app holds
+// background time, the existing status poll confirms the handshake, the existing arming arms the rule.
+static void test_bg_arm_holds_until_handshake()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    HarnessSession *s = startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 1 && g_bgEnds == 0, "background time not taken for the arming");
+    CHECK(events.lines.size() == 2
+              && events.lines[0] == "on_demand_state armed=0 session=up proto=awg pending=0 handshake=awaiting"
+              && events.lines[1] == "on_demand_bg_arm hold max_ms=5000",
+          "the state of the rule and the hold are not journaled at the transition to background");
+    spin(150);
+    CHECK(g_bgEnds == 0 && !m.isOnDemandEnabled, "the hold ended or the rule was armed before the handshake");
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(250);
+    CHECK(m.isOnDemandEnabled, "the rule is not armed after the handshake came in the background");
+    CHECK(g_bgBegins == 1 && g_bgEnds == 1, "background time not given back after the arming");
+    CHECK(events.lastStartsWith("on_demand_bg_arm result=armed"), "result=armed not journaled");
+    CHECK(s.stopCalls == 0, "the arming stopped the tunnel");
+    // The next transition to background finds the rule armed: nothing to hold.
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 1 && events.lastStartsWith("on_demand_bg_arm result=not_needed why=armed"), "an armed session held background time again");
+}
+
+// No handshake within the bound: the hold is given back, the rule is NOT armed (only a proven session).
+static void test_bg_arm_times_out()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 150);
+    CHECK(g_bgBegins == 1, "no hold");
+    spin(100);
+    CHECK(g_bgEnds == 0, "released before its bound");
+    spin(300);
+    CHECK(g_bgEnds == 1 && events.lastStartsWith("on_demand_bg_arm result=timeout"), "the hold outlived its bound");
+    CHECK(!m.isOnDemandEnabled, "a session without a confirmed handshake was armed");
+    const size_t lines = events.lines.size();
+    spin(150);
+    CHECK(g_bgEnds == 1 && events.lines.size() == lines, "released or journaled twice");
+}
+
+// Flag off (the default): exactly build 139 - nothing held, nothing journaled.
+static void test_bg_arm_flag_off_is_silent()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    HarnessSession *s = startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(false, 5000);
+    spin(100);
+    CHECK(g_bgBegins == 0 && g_bgEnds == 0 && events.lines.empty(), "with the flag off the background transition did something");
+    // The arming itself is untouched by the flag: a handshake seen by the running app still arms.
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(250);
+    CHECK(m.isOnDemandEnabled && g_bgBegins == 0 && g_bgEnds == 0 && events.lines.empty(), "the existing arming changed or touched the guard");
+    IosController::Instance()->noteAppForeground();
+    CHECK(events.lines.empty() && g_bgEnds == 0, "the foreground transition did something without a hold");
+}
+
+static void test_bg_arm_not_needed_without_session()
+{
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 0, "background time taken with no tunnel");
+    CHECK(events.lines.size() == 2 && events.lines[0] == "on_demand_state armed=0 session=down proto=- pending=0 handshake=done"
+              && events.lines[1] == "on_demand_bg_arm result=not_needed why=no_session",
+          "no session: state and not_needed are not journaled");
+}
+
+// Back on the screen before the handshake: the hold is given back, the running app arms as before.
+static void test_bg_arm_foreground_releases()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    IosController::Instance()->noteAppForeground();
+    CHECK(g_bgBegins == 1 && g_bgEnds == 1, "the hold is not given back on the screen");
+    CHECK(events.lastStartsWith("on_demand_bg_arm result=not_needed why=foreground"), "foreground release not journaled");
+    IosController::Instance()->noteAppForeground();
+    CHECK(g_bgEnds == 1 && events.lines.size() == 3, "a second foreground transition released again");
+}
+
+// iOS ends the background time itself: the owner is told, nothing is released twice.
+static void test_bg_arm_system_expiry()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 1 && bool(g_bgExpire), "no hold");
+    std::function<void()> expire = g_bgExpire;
+    expire();
+    CHECK(g_bgEnds == 1 && events.lastStartsWith("on_demand_bg_arm result=timeout why=expired"), "expiry by the system not handled");
+    const size_t lines = events.lines.size();
+    spin(120);
+    IosController::Instance()->noteAppForeground();
+    CHECK(g_bgEnds == 1 && events.lines.size() == lines, "after the expiry the hold was released or journaled again");
+    CHECK(!m.isOnDemandEnabled, "the rule was armed without a handshake");
+}
+
+// iOS refuses background time: no hold, journaled, the app goes on as build 139.
+static void test_bg_arm_refused_by_system()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    startedSessionAwaitingHandshake(&m, &poll);
+    BgArmEvents events;
+    g_bgRefuse = true;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 0 && g_bgEnds == 0 && events.lastStartsWith("on_demand_bg_arm result=timeout why=denied"), "a refusal is not journaled");
+    spin(120);
+    IosController::Instance()->noteAppForeground();
+    CHECK(g_bgEnds == 0 && events.lines.size() == 2, "a refused hold was released");
+}
+
+// The tunnel-restart guard holds the same task: the arming finishing must not take its background time.
+static void test_bg_arm_keeps_restart_guard_time()
+{
+    NETunnelProviderManager *m = nil;
+    QTimer poll;
+    HarnessSession *s = startedSessionAwaitingHandshake(&m, &poll);
+    int restartExpired = 0;
+    CHECK(AvpnBackgroundGuard_begin([&restartExpired] { ++restartExpired; }) && g_bgBegins == 1, "the restart guard got no background time");
+    BgArmEvents events;
+    IosController::Instance()->noteAppBackground(true, 5000);
+    CHECK(g_bgBegins == 1, "a second system task was started for the arming");
+    s.statusReply = statusReply(@"run-1", @"cfg-1", (long long)[[NSDate date] timeIntervalSince1970], 5000);
+    spin(250);
+    CHECK(m.isOnDemandEnabled && events.lastStartsWith("on_demand_bg_arm result=armed"), "not armed");
+    CHECK(g_bgEnds == 0, "the arming finished and ended the task the restart guard still holds");
+    AvpnBackgroundGuard_end();
+    CHECK(g_bgEnds == 1 && restartExpired == 0, "the restart guard could not end its own hold");
+}
+
+// The `watch` block of the status reply reaches the facade with the session of the SAME reply; a build
+// 139 extension (no block) gives a snapshot without it.
+static void test_watch_block_forwarded()
+{
+    HarnessSession *s = adoptLiveSession();
+    std::vector<QVariantMap> snapshots;
+    QObject::connect(IosController::Instance(), &IosController::tunnelWatchSnapshot,
+                     [&snapshots](const QVariantMap &snapshot) { snapshots.push_back(snapshot); });
+    const long long now = (long long)[[NSDate date] timeIntervalSince1970];
+    NSMutableDictionary *reply = [[statusReply(@"run-1", @"cfg-1", now, 5000) mutableCopy] autorelease];
+    reply[@"watch"] = @{@"enabled": @YES, @"verdict": @"no_data", @"since_ms": @(1800000000000LL), @"cycles": @3,
+                        @"probe": @"silent", @"would_switch": @YES, @"switch_seq": @0, @"switches": @[]};
+    s.statusReply = reply;
+    // An ordinary status poll (all there is with the flag off) never gives a snapshot.
+    IosController::Instance()->checkStatus();
+    spin(120);
+    CHECK(snapshots.empty(), "a status poll nobody asked a snapshot from gave one");
+    IosController::Instance()->requestStatusSnapshot();
+    spin(120);
+    CHECK(snapshots.size() == 1, "one request - one snapshot");
+    IosController::Instance()->checkStatus();
+    spin(120);
+    CHECK(snapshots.size() == 1, "the poll after the answered request gave a second snapshot");
+    if (!snapshots.empty()) {
+        const QVariantMap watch = snapshots.back().value(QStringLiteral("watch")).toMap();
+        const QVariantMap session = snapshots.back().value(QStringLiteral("session")).toMap();
+        CHECK(watch.value(QStringLiteral("verdict")).toString() == QLatin1String("no_data")
+                  && watch.value(QStringLiteral("enabled")).typeId() == QMetaType::Bool && watch.value(QStringLiteral("enabled")).toBool()
+                  && watch.value(QStringLiteral("cycles")).toInt() == 3 && watch.value(QStringLiteral("since_ms")).toLongLong() == 1800000000000LL
+                  && watch.value(QStringLiteral("would_switch")).toBool(),
+              "the watch block did not arrive as sent");
+        CHECK(session.value(QStringLiteral("node_id")).toString() == QLatin1String("9")
+                  && session.value(QStringLiteral("generation")).toString() == QLatin1String("run-1"),
+              "the snapshot does not carry the session of its own reply");
+    }
+    // A build 139 extension: no `watch` key at all.
+    s.statusReply = statusReply(@"run-1", @"cfg-1", now, 6000);
+    IosController::Instance()->requestStatusSnapshot();
+    spin(120);
+    CHECK(snapshots.size() == 2 && !snapshots.back().contains(QStringLiteral("watch"))
+              && snapshots.back().value(QStringLiteral("session")).toMap().value(QStringLiteral("node_id")).toString() == QLatin1String("9"),
+          "a reply without the block must give a snapshot without it");
+    // A block that is not an object is dropped, the reply itself still applies.
+    NSMutableDictionary *junk = [[statusReply(@"run-1", @"cfg-1", now, 7000) mutableCopy] autorelease];
+    junk[@"watch"] = @"no_data";
+    s.statusReply = junk;
+    IosController::Instance()->requestStatusSnapshot();
+    spin(120);
+    CHECK(snapshots.size() == 3 && !snapshots.back().contains(QStringLiteral("watch")), "a garbled block was passed on");
+}
+
+// A snapshot request cancels the replies of requests sent before it: what the facade adopts was asked
+// AFTER the return to the foreground.
+static void test_status_snapshot_drops_older_reply()
+{
+    HarnessSession *s = adoptLiveSession();
+    std::vector<QVariantMap> snapshots;
+    QObject::connect(IosController::Instance(), &IosController::tunnelWatchSnapshot,
+                     [&snapshots](const QVariantMap &snapshot) { snapshots.push_back(snapshot); });
+    const long long now = (long long)[[NSDate date] timeIntervalSince1970];
+    NSMutableDictionary *old = [[statusReply(@"run-1", @"cfg-1", now, 5000) mutableCopy] autorelease];
+    old[@"watch"] = @{@"enabled": @YES, @"verdict": @"none"};
+    s.statusReply = old;
+    s.statusReplyDelayMs = 80; // the reply to the request below is still in flight when the snapshot is asked for
+    IosController::Instance()->checkStatus();
+    spin(20);
+    NSMutableDictionary *fresh = [[statusReply(@"run-1", @"cfg-1", now, 9000) mutableCopy] autorelease];
+    fresh[@"watch"] = @{@"enabled": @YES, @"verdict": @"no_data"};
+    s.statusReply = fresh;
+    IosController::Instance()->requestStatusSnapshot();
+    spin(260);
+    CHECK(snapshots.size() == 1, "the reply asked for before the snapshot request was adopted too");
+    CHECK(!snapshots.empty() && snapshots.back().value(QStringLiteral("watch")).toMap().value(QStringLiteral("verdict")).toString()
+                                     == QLatin1String("no_data"),
+          "the snapshot is not the one asked for after the request");
+}
+
+static NSURL *g_planContainer = nil;
+@interface NSFileManager (HarnessWatchPlan)
+- (NSURL *)harness_containerURLForSecurityApplicationGroupIdentifier:(NSString *)identifier;
+@end
+@implementation NSFileManager (HarnessWatchPlan)
+- (NSURL *)harness_containerURLForSecurityApplicationGroupIdentifier:(NSString *)identifier
+{
+    return [identifier isEqualToString:@"group.hk.wellwon.tribe"] ? g_planContainer : nil;
+}
+@end
+
+// The plan file: the exact bytes, in the App Group container, replaced atomically; no container or an
+// empty body - nothing is written.
+static void test_watch_plan_file_written()
+{
+    method_exchangeImplementations(
+        class_getInstanceMethod([NSFileManager class], @selector(containerURLForSecurityApplicationGroupIdentifier:)),
+        class_getInstanceMethod([NSFileManager class], @selector(harness_containerURLForSecurityApplicationGroupIdentifier:)));
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *file = [dir stringByAppendingPathComponent:@"TribeWatchPlan.json"];
+    g_planContainer = nil;
+    CHECK(!IosController::Instance()->writeTunnelWatchPlanFile(QByteArrayLiteral("{\"schema\":1}")), "written without a container");
+    g_planContainer = [NSURL fileURLWithPath:dir];
+    CHECK(!IosController::Instance()->writeTunnelWatchPlanFile(QByteArray()), "an empty plan was written");
+    CHECK(![[NSFileManager defaultManager] fileExistsAtPath:file], "a file appeared for an empty plan");
+    const QByteArray first = QByteArrayLiteral("{\"schema\":1,\"features\":{\"ios_tunnel_watch\":true}}");
+    CHECK(IosController::Instance()->writeTunnelWatchPlanFile(first), "the plan is not written");
+    NSData *onDisk = [NSData dataWithContentsOfFile:file];
+    CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == first, "the bytes on disk are not the plan");
+    const QByteArray second = QByteArrayLiteral("{\"schema\":1,\"features\":{\"ios_tunnel_watch\":false}}");
+    CHECK(IosController::Instance()->writeTunnelWatchPlanFile(second), "the plan is not rewritten");
+    onDisk = [NSData dataWithContentsOfFile:file];
+    CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == second, "the kill switch did not reach the file");
+    NSArray *left = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
+    CHECK(left.count == 1, "the atomic write left a temporary file behind");
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+    g_planContainer = nil;
+}
+#endif // HARNESS_OLD
+
 static void test_connect_during_disarm_cancels_stop()
 {
     NETunnelProviderManager *m = nil;
@@ -1546,6 +1825,20 @@ static const Test kTests[] = {
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
 #endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
+#ifndef HARNESS_OLD
+    // AVPN (iOS data watch, build 140)
+    {"bg_arm_holds_until_handshake", test_bg_arm_holds_until_handshake},
+    {"bg_arm_times_out", test_bg_arm_times_out},
+    {"bg_arm_flag_off_is_silent", test_bg_arm_flag_off_is_silent},
+    {"bg_arm_not_needed_without_session", test_bg_arm_not_needed_without_session},
+    {"bg_arm_foreground_releases", test_bg_arm_foreground_releases},
+    {"bg_arm_system_expiry", test_bg_arm_system_expiry},
+    {"bg_arm_refused_by_system", test_bg_arm_refused_by_system},
+    {"bg_arm_keeps_restart_guard_time", test_bg_arm_keeps_restart_guard_time},
+    {"watch_block_forwarded", test_watch_block_forwarded},
+    {"status_snapshot_drops_older_reply", test_status_snapshot_drops_older_reply},
+    {"watch_plan_file_written", test_watch_plan_file_written},
+#endif
     {"stop_disarms_on_demand_before_stop", test_stop_disarms_on_demand_before_stop},
     {"stop_without_on_demand_is_immediate", test_stop_without_on_demand_is_immediate},
     {"stop_when_down_disarms_on_demand", test_stop_when_down_disarms_on_demand},

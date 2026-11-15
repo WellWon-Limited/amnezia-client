@@ -22,3 +22,7 @@ cd "$HERE"
 # 5.1.109 (S4.1): the facade forwards its events to the transport-mode gate at the expected places
 # (source level - AvpnEngineQml.cpp has no unit harness; the rule itself is tested by behaviour).
 "$HERE/check_transport_mode_wiring.sh"
+
+# 5.1.110 (140, iOS data watch): the adapter, the provider, the facade and the controller call the
+# watch at the expected places and only there (source level; the rules are tested by behaviour).
+"$HERE/check_ios_data_watch_wiring.sh"

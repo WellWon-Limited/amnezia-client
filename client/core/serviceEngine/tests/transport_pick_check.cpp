@@ -857,6 +857,71 @@ int main(int argc, char **argv)
         }
     }
 
+    // --- 9c) iOS data watch (build 140): the extension reported no_data for a session the app
+    // holds as Connected - the engine goes back to Verifying and the EXISTING check decides
+    // (reenterVerifying is called only from the facade's Q_OS_IOS block). It is not a verdict by
+    // itself: the streak, the failed list and the heal budget move only by what the check says. ---
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const QByteArray pool = subJson({ awgNodeJson("9:awg", 9, "EE", 1.0),
+                                          awgNodeJson("2:awg", 2, "PL", 1.0) });
+        QString err;
+        {   // only from Connected with a known node
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            CHECK(!eng.reenterVerifying());                       // Disconnected
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(!eng.reenterVerifying());                       // Connecting
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(!eng.reenterVerifying());                       // already Verifying
+            CHECK(eng.verifyInconclusive() && eng.state() == EngineState::Connected);
+            const QString node = eng.currentNodeId();
+            const int streak = eng.dataPlaneFailStreak();
+            CHECK(eng.reenterVerifying() && eng.isVerifying());   // Connected -> Verifying
+            CHECK(eng.currentNodeId() == node && eng.dataPlaneFailStreak() == streak); // nothing else moved
+            CHECK(tun.downCalls == 0);                            // the tunnel is not touched
+            // "limited" again: Connected, still no proof and no failure
+            CHECK(eng.verifyInconclusive() && eng.state() == EngineState::Connected);
+            CHECK(eng.dataPlaneFailStreak() == streak && !eng.dataPlaneExhausted());
+        }
+        {   // the re-check fails -> the usual ladder: another node, the failure counted once
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("9:awg"), 40}, {QStringLiteral("2:awg"), 50}});
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+            const QString first = eng.currentNodeId();
+            CHECK(eng.reenterVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            CHECK(eng.state() == EngineState::Switching && eng.dataPlaneFailStreak() == 1);
+            CHECK(eng.onTunnelDisconnected());
+            CHECK(eng.currentNodeId() != first);                  // left the node the check failed on
+        }
+        {   // the re-check passes -> Connected; the success of this rise is not recorded twice and a
+            // first success recorded by a re-check carries no time to traffic
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(eng.onTunnelConnected() && eng.verifySucceeded());
+            const QByteArray once = eng.transportHistoryJson();
+            CHECK(eng.reenterVerifying() && eng.verifySucceeded() && eng.state() == EngineState::Connected);
+            CHECK(eng.transportHistoryJson() == once);
+            ServiceEngine late; FakeTunnel tun2; late.setTunnel(&tun2);
+            CHECK(late.loadSubscription(pool, err));
+            late.setVerifyEveryTransport(true);
+            CHECK(late.connect(err));
+            CHECK(late.onTunnelConnected() && late.verifyInconclusive());
+            const QByteArray none = late.transportHistoryJson();
+            CHECK(late.reenterVerifying() && late.verifySucceeded());
+            const QByteArray withSuccess = late.transportHistoryJson();
+            CHECK(withSuccess != none);                           // the success is recorded...
+            CHECK(withSuccess.contains("\"t\":-1"));              // ...without a time to traffic (the rise was long ago)
+        }
+    }
+
     // --- 10) plan v3 step 5: network memory is the first candidate after the manual choice ---
     {
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);

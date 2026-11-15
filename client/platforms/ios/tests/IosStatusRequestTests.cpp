@@ -30,5 +30,23 @@ int main() {
         for (auto &thread : racers) thread.join();
         assert(completed == 1); // response/sendError/deadline/double callback: exactly once
     }
+    // AVPN (iOS data watch, 140): lastAppliedIs - the second consumer of a reply sees only the reply accept()
+    // let through; a newer accepted reply, an invalidation or another session hide it.
+    {
+        IosStatusRequest g;
+        auto a = g.begin(7);
+        assert(a && !g.lastAppliedIs(7, *a)); // not applied yet
+        assert(g.complete(7, *a) && g.accept(7, *a));
+        assert(g.lastAppliedIs(7, *a));
+        assert(!g.lastAppliedIs(8, *a)); // other session
+        auto b = g.begin(7);
+        assert(b && g.complete(7, *b) && g.accept(7, *b));
+        assert(!g.lastAppliedIs(7, *a) && g.lastAppliedIs(7, *b)); // superseded by a newer reply
+        g.invalidate();
+        assert(!g.lastAppliedIs(7, *b)); // a snapshot request cancels what was applied before it
+        auto c = g.begin(7);
+        assert(c && !g.accept(7, *b) && g.accept(7, *c) && g.lastAppliedIs(7, *c));
+        assert(!g.lastAppliedIs(7, 0));
+    }
     std::cout << "IosStatusRequestTests: 500 competing completion races passed\n";
 }
