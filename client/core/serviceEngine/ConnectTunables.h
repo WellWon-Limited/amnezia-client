@@ -131,7 +131,6 @@ inline constexpr TunnelWatchNumberSpec kIosTunnelWatchNumbers[] = {
     {"ios_tw_min_episode_tx_bytes",        3072,     2048,     1048576, true},  // sent in the episode before a verdict
     {"ios_tw_hs_rx_allowance_bytes",        148,       92,        4096, true},  // handshake reply is not data
     {"ios_tw_hs_tx_allowance_bytes",       1024,      148,        8192, true},  // handshake initiation is not demand
-    {"ios_tw_min_heal_steps",                 2,        0,           6, true},  // same-node heal steps before leaving
     {"ios_tw_path_stable_s",                 20,        0,         120, true},  // quiet after a path change
     {"ios_tw_start_grace_s",                 20,        5,         120, true},  // grace after start / peer change
     {"ios_tw_wake_grace_s",                  10,        0,          60, true},  // grace after device sleep
@@ -143,6 +142,8 @@ inline constexpr TunnelWatchNumberSpec kIosTunnelWatchNumbers[] = {
     {"ios_tw_probe_timeout_ms",            4000,     1000,       15000, true},  // probe through the tunnel
     {"ios_tw_probe_max_per_episode",          3,        1,          10, true},
     {"ios_tw_probe_max_per_hour",            12,        1,          60, true},
+    {"ios_tw_probe_low_rx_max_per_hour",      2,        0,          12, true},  // the low-inbound trigger's own budget; 0 = off
+    {"ios_tw_sanity_max_per_hour",           12,        1,          60, true},  // requests outside the tunnel
     {"ios_tw_sanity_required",                1,        0,           1, true},  // physical-network check required
     {"ios_tw_probe",                          1,        0,           1, true},  // 0 = no probe through the tunnel
     {"ios_tw_plan_ttl_h",                    24,        1,         168, true},  // plan expires_ms = written + this

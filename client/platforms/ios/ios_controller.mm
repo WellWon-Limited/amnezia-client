@@ -1357,8 +1357,8 @@ void IosController::checkStatus()
             QMetaObject::invokeMethod(this, [this, gen, request, watchSnapshot]() {
                 if (m_statusGeneration.load() != gen || !m_statusRequests.lastAppliedIs(gen, request))
                     return;
-                if (m_watchSnapshotWanted.exchange(false))
-                    emit tunnelWatchSnapshot(watchSnapshot);
+                m_watchSnapshotWanted.store(false); // one request - one snapshot
+                emit tunnelWatchSnapshot(watchSnapshot);
             }, Qt::QueuedConnection);
         }
     });
@@ -1768,9 +1768,14 @@ void IosController::noteAppBackground(bool bgArmFlag, int maxHoldMs)
 #endif
 }
 
-void IosController::noteAppForeground()
+// Whether the app is on the screen, asked from the system itself (main thread: the status poll runs there).
+bool IosController::appIsActive() const
 {
-    endBackgroundArmHold("not_needed", "foreground");
+#if defined(Q_OS_IOS) && !MACOS_NE // UIKit comes with ios_controller_wrapper.h; the harness and the macOS extension have none
+    return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+#else
+    return m_appActiveProbe ? m_appActiveProbe() : false;
+#endif
 }
 
 void IosController::tickBackgroundArmHold()
@@ -1788,12 +1793,13 @@ void IosController::tickBackgroundArmHold()
     in.localStopRequested = m_localStopRequested;
     in.handshakeAwaiting = m_handshakeAwaiting;
     in.changePending = m_onDemandChangePending;
+    in.appActive = appIsActive();
     const avpn_ios::BgArmTick t = avpn_ios::decideBackgroundArmTick(in);
     if (t == avpn_ios::BgArmTick::Keep)
         return;
     const char *why = "";
     if (t == avpn_ios::BgArmTick::ReleaseNotNeeded)
-        why = !in.sessionUp ? "session_down" : in.localStopRequested ? "stopping" : "arm_decided";
+        why = in.appActive ? "foreground" : !in.sessionUp ? "session_down" : in.localStopRequested ? "stopping" : "arm_decided";
     endBackgroundArmHold(avpn_ios::bgArmTickResult(t), why);
 }
 

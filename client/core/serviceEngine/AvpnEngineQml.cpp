@@ -784,6 +784,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 140): the extension's `watch` snapshot (resume freeze) and the journal lines
     // of the On-Demand arming in the background. Both are inert while their flags are off.
+    setupTunnelWatchResume();
     connect(IosController::Instance(), &IosController::tunnelWatchSnapshot, this,
             &AvpnEngineQml::onTunnelWatchSnapshot, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::onDemandBackgroundEvent, this,
@@ -1118,9 +1119,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     // снимаем, чтобы следующий уход в фон посреди перезапуска снова был защищён.
                     m_restartGuard.onForeground();
                     syncRestartGuard();
-#ifdef Q_OS_IOS
-                    IosController::Instance()->noteAppForeground(); // AVPN (iOS data watch, 140): end the arming hold
-#endif
                     // AVPN (белые списки): foreground-триггер детектора (детектор дебаунсит сам).
                     if (m_whitelistDetector)
                         m_whitelistDetector->noteForeground();
@@ -1131,9 +1129,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                     if (!foregroundIsReturn(hidden, inactiveFor))
                         return;
 #ifdef Q_OS_IOS
-                    // AVPN (iOS data watch, 140): hold own decisions until the extension's snapshot
-                    // (features.ios_tunnel_watch), and refresh the extension's plan (kill switch too).
-                    beginTunnelWatchFreeze("foreground");
+                    // AVPN (iOS data watch, 140): refresh the extension's plan (the kill switch too). The
+                    // hand-over itself needs no call here: a process that was suspended is recognised by
+                    // its overdue tick (TunnelWatchResume.h).
                     writeTunnelWatchPlan("foreground");
 #endif
                     m_fgTimer.start();
@@ -2670,17 +2668,16 @@ void AvpnEngineQml::syncRestartGuard()
 // created until features.ios_tunnel_watch has been true once on this install). No timer of its own: the
 // freeze is judged on the existing 1 s transition tick and on the extension's status replies.
 
-// Plan file for the extension (contract C1). why: start / config / foreground / pin / mode.
+// Plan file for the extension (contract C1). why: start / config / foreground / pin / mode. The write
+// itself - whether, with which sequence number, the journal line - is TunnelWatchPlan.h::writeWatchPlan.
 void AvpnEngineQml::writeTunnelWatchPlan(const char *why)
 {
 #ifdef Q_OS_IOS
     const bool watch = featureEnabled(QStringLiteral("ios_tunnel_watch"), false);
     QSettings s;
-    const avpn::WatchPlanWrite w =
-        avpn::decideWatchPlanWrite(watch, s.value(QLatin1String(avpn::kWatchPlanEverOnSettingsKey), false).toBool());
-    if (!w.write)
-        return; // the flag has never been on here: no file, as build 139
-    s.setValue(QLatin1String(avpn::kWatchPlanEverOnSettingsKey), w.everOnAfter);
+    const bool everOn = s.value(QLatin1String(avpn::kWatchPlanEverOnSettingsKey), false).toBool();
+    if (!watch && !everOn)
+        return; // the flag has never been on here: nothing to collect (writeWatchPlan would write nothing)
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const avpn::DebugSnapshot snap = m_engine.debugSnapshot();
     auto countryOf = [&snap](const QString &nodeId) {
@@ -2709,52 +2706,75 @@ void AvpnEngineQml::writeTunnelWatchPlan(const char *why)
     in.numbers = avpn::watchPlanNumbers([](const avpn::TunnelWatchNumberSpec &spec) {
         return avpn::TuningStore::numberOr(QLatin1String(spec.key), spec.def);
     });
-    in.sanityUrls = avpn::TuningStore::listOr(QStringLiteral("ios_tw_sanity_urls"), {});
-    in.sanityUrlsKnown = !in.sanityUrls.isEmpty();
-    const QJsonObject plan = avpn::buildWatchPlan(in);
-    const QByteArray body = avpn::serializeWatchPlan(plan);
-    if (body.isEmpty()) {
-        reliabilityEvent(QStringLiteral("watch_plan_not_written why=too_big at=%1").arg(QLatin1String(why)));
+    // The white-list detector's own lists (WhitelistDetector.cpp); not set on the server - empty here,
+    // and the extension uses its built-in targets, which are the same compiled defaults.
+    in.sanityTargets = avpn::watchPlanSanityTargets(
+        avpn::TuningStore::listOr(QStringLiteral("ios_tw_sanity_urls"), {}),
+        avpn::TuningStore::listOr(QStringLiteral("whitelist_probe_domains"), {}),
+        avpn::TuningStore::listOr(QStringLiteral("whitelist_anchor_domains"), {}));
+    const avpn::WatchPlanWriteOutcome out = avpn::writeWatchPlan(
+        in, everOn, s.value(QLatin1String(avpn::kWatchPlanSeqSettingsKey), 0).toLongLong(), QLatin1String(why),
+        [](const QByteArray &body) { return IosController::Instance()->writeTunnelWatchPlanFile(body); });
+    if (!out.attempted)
         return;
-    }
-    if (IosController::Instance()->writeTunnelWatchPlanFile(body))
-        reliabilityEvent(avpn::watchPlanJournalLine(plan, QLatin1String(why)));
-    else
-        reliabilityEvent(QStringLiteral("watch_plan_not_written why=io at=%1").arg(QLatin1String(why)));
+    s.setValue(QLatin1String(avpn::kWatchPlanEverOnSettingsKey), out.everOnAfter);
+    s.setValue(QLatin1String(avpn::kWatchPlanSeqSettingsKey), out.seqAfter);
+    reliabilityEvent(out.journal);
 #else
     Q_UNUSED(why);
 #endif
 }
 
-// Resume freeze (TunnelWatchStatus.h::decideResumeFreeze): begin on a return to the foreground or a thaw.
-void AvpnEngineQml::beginTunnelWatchFreeze(const char *why)
+// The hand-over at a return of the app (TunnelWatchResume.h: resume freeze, background hold, deferred
+// decisions, the re-check). Here only its effects; built once in the constructor, iOS only.
+void AvpnEngineQml::setupTunnelWatchResume()
 {
 #ifdef Q_OS_IOS
-    if (!avpn::resumeFreezeBegins(m_watchFreeze, featureEnabled(QStringLiteral("ios_tunnel_watch"), false),
-                                  m_lastTunnelState == Vpn::Connected))
-        return;
-    avpn::beginResumeFreeze(m_watchFreeze, QDateTime::currentMSecsSinceEpoch());
-    m_watchFreezeGeneration = IosController::Instance()->sessionMetadata().value(QStringLiteral("generation")).toString();
-    m_watchFreezeWhy = QLatin1String(why);
-    reliabilityEvent(QStringLiteral("watch_resume_freeze begin why=%1 node=%2 state=%3")
-                         .arg(m_watchFreezeWhy, m_engine.currentNodeId(), state()));
-    IosController::Instance()->requestStatusSnapshot();
-#else
-    Q_UNUSED(why);
+    avpn::TunnelWatchResumeOps ops;
+    ops.watchFlag = [this] { return featureEnabled(QStringLiteral("ios_tunnel_watch"), false); };
+    ops.nodeScanFlag = [this] { return featureEnabled(QStringLiteral("node_scan"), false); };
+    ops.tunnelConnected = [this] { return m_lastTunnelState == Vpn::Connected; };
+    // In the background, with the arming flag on and nothing of ours in flight (the restart guard does not
+    // hold), the app is awake only for the On-Demand arming.
+    ops.backgroundArmOnly = [this] {
+        return m_hiddenSeen && featureEnabled(QStringLiteral("ios_on_demand_bg_arm"), false) && !m_restartGuard.held();
+    };
+    ops.nowMs = [] { return QDateTime::currentMSecsSinceEpoch(); };
+    ops.timeoutMs = [] { return qint64(avpn::iosTwResumeWaitMsTuned()); };
+    ops.requestSnapshot = [] { IosController::Instance()->requestStatusSnapshot(); };
+    ops.appNodeId = [this] { return m_engine.currentNodeId(); };
+    ops.sessionGeneration = [] {
+        return IosController::Instance()->sessionMetadata().value(QStringLiteral("generation")).toString();
+    };
+    ops.journal = [this](const QString &line) { reliabilityEvent(line); };
+    ops.engineVerifying = [this] { return m_engine.isVerifying(); };
+    ops.engineConnected = [this] { return m_engine.state() == avpn::EngineState::Connected; };
+    ops.reenterVerifying = [this] { return m_engine.reenterVerifying(); };
+    ops.startVerification = [this] {
+        refreshDataFlowing();
+        startDataPathVerification();
+        emit changed();
+    };
+    // The app's own per-network memory forgets the node (§29 item 7, the same stored-copy function a
+    // failed start uses); the key is the attempt's (computed with the tunnel down).
+    ops.forgetNode = [this](const QString &nodeId) {
+        if (m_attemptNetKey.isEmpty())
+            return;
+        QSettings s;
+        const bool removed = avpn::networkMemoryForgetStored(s, m_attemptNetKey, nodeId);
+        reliabilityEvent(QStringLiteral("network_memory_forget why=extension_no_data key=%1 node=%2 removed=%3")
+                             .arg(m_attemptNetKey, nodeId)
+                             .arg(int(removed)));
+    };
+    m_watchResume = std::make_unique<avpn::TunnelWatchResume>(std::move(ops));
 #endif
 }
 
-// A decision consults the freeze first; a thaw seen by the decision itself (the 1 s tick is overdue - the
-// process has just thawed and the tick has not run yet) begins it.
+// A decision consults the hand-over first (it also notices a thaw by itself).
 bool AvpnEngineQml::tunnelWatchFrozen(const char *site)
 {
 #ifdef Q_OS_IOS
-    if (!featureEnabled(QStringLiteral("ios_tunnel_watch"), false))
-        return false;
-    if (!m_watchFreeze.active
-        && avpn::thawDetected(QDateTime::currentMSecsSinceEpoch(), m_lastTransitionTickMs, m_transitionTimer.interval()))
-        beginTunnelWatchFreeze(site);
-    return m_watchFreeze.active;
+    return m_watchResume && m_watchResume->held(site, m_lastTransitionTickMs, m_transitionTimer.interval());
 #else
     Q_UNUSED(site);
     return false;
@@ -2764,10 +2784,8 @@ bool AvpnEngineQml::tunnelWatchFrozen(const char *site)
 bool AvpnEngineQml::deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume)
 {
 #ifdef Q_OS_IOS
-    if (!tunnelWatchFrozen(site))
-        return false;
-    m_watchDeferred.push_back(std::move(resume));
-    return true;
+    return m_watchResume
+        && m_watchResume->defer(site, m_lastTransitionTickMs, m_transitionTimer.interval(), std::move(resume));
 #else
     Q_UNUSED(site);
     Q_UNUSED(resume);
@@ -2779,138 +2797,21 @@ bool AvpnEngineQml::deferWhileTunnelWatchFrozen(const char *site, std::function<
 void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
 {
 #ifdef Q_OS_IOS
-    const bool on = featureEnabled(QStringLiteral("ios_tunnel_watch"), false);
-    const qint64 period = m_transitionTimer.interval();
-    if (!m_watchFreeze.active) {
-        if (on && sinceMs >= 0 && avpn::timerFiredLate(sinceMs, period))
-            beginTunnelWatchFreeze("thaw");
-        return;
-    }
-    avpn::ResumeFreezeInputs in;
-    in.flagOn = on;
-    in.tunnelConnected = m_lastTunnelState == Vpn::Connected;
-    in.nowMs = QDateTime::currentMSecsSinceEpoch();
-    in.timeoutMs = avpn::iosTwResumeWaitMsTuned();
-    in.sinceLastTickMs = sinceMs;
-    in.tickPeriodMs = period;
-    const avpn::FreezeStep step = avpn::decideResumeFreeze(m_watchFreeze, in);
-    if (step == avpn::FreezeStep::HoldReask) {
-        reliabilityEvent(QStringLiteral("watch_resume_freeze reask why=frozen_while_waiting"));
-        IosController::Instance()->requestStatusSnapshot();
-        return;
-    }
-    if (avpn::freezeReleases(step))
-        releaseTunnelWatchFreeze(int(step), nullptr);
+    if (m_watchResume)
+        m_watchResume->onTick(sinceMs, m_transitionTimer.interval());
 #else
     Q_UNUSED(sinceMs);
 #endif
 }
 
 // The reply to a snapshot request (IosController::tunnelWatchSnapshot; older requests were invalidated).
-// Stage 1 acts on it only while frozen: it is the one consistent snapshot the freeze waits for.
 void AvpnEngineQml::onTunnelWatchSnapshot(const QVariantMap &snapshot)
 {
 #ifdef Q_OS_IOS
-    if (!m_watchFreeze.active)
-        return;
-    avpn::ResumeFreezeInputs in;
-    in.flagOn = featureEnabled(QStringLiteral("ios_tunnel_watch"), false);
-    in.tunnelConnected = m_lastTunnelState == Vpn::Connected;
-    in.nowMs = QDateTime::currentMSecsSinceEpoch();
-    in.snapshotArrived = true;
-    in.timeoutMs = avpn::iosTwResumeWaitMsTuned();
-    in.sinceLastTickMs = 0; // not a tick
-    const avpn::FreezeStep step = avpn::decideResumeFreeze(m_watchFreeze, in);
-    if (!avpn::freezeReleases(step))
-        return;
-    if (step != avpn::FreezeStep::ReleaseSnapshot) {
-        releaseTunnelWatchFreeze(int(step), nullptr);
-        return;
-    }
-    const avpn::TunnelWatchSnapshot w = avpn::parseTunnelWatch(snapshot.value(QStringLiteral("watch")));
-    const QVariantMap session = snapshot.value(QStringLiteral("session")).toMap();
-    avpn::WatchConsumeInputs ci;
-    ci.snapshot = w;
-    ci.snapshotNodeId = session.value(QStringLiteral("node_id")).toString();
-    ci.snapshotGeneration = session.value(QStringLiteral("generation")).toString();
-    ci.appNodeId = m_engine.currentNodeId();
-    ci.appGeneration = m_watchFreezeGeneration;
-    const avpn::WatchConsume c = avpn::decideWatchConsume(ci);
-    releaseTunnelWatchFreeze(int(step), &w);
-    if (c == avpn::WatchConsume::Reverify)
-        reverifyAfterExtensionVerdict(w, ci.appNodeId);
-    // The decisions that waited run after the snapshot was adopted; a re-check started above has a new
-    // epoch, so a waiting completion of the old check returns without a verdict.
-    std::vector<std::function<void()>> deferred;
-    deferred.swap(m_watchDeferred);
-    for (auto &fn : deferred)
-        fn();
+    if (m_watchResume)
+        m_watchResume->onSnapshot(snapshot);
 #else
     Q_UNUSED(snapshot);
-#endif
-}
-
-void AvpnEngineQml::releaseTunnelWatchFreeze(int step, const avpn::TunnelWatchSnapshot *snapshot)
-{
-#ifdef Q_OS_IOS
-    m_watchFreeze = avpn::ResumeFreezeState{};
-    const auto s = avpn::FreezeStep(step);
-    const QString released = s == avpn::FreezeStep::ReleaseSnapshot ? QStringLiteral("snapshot")
-                           : s == avpn::FreezeStep::ReleaseTimeout  ? QStringLiteral("timeout")
-                                                                    : QStringLiteral("off");
-    const QString verdict = !snapshot ? QStringLiteral("-")
-                          : !snapshot->present ? QStringLiteral("absent")
-                          : !snapshot->valid   ? QStringLiteral("garbled")
-                                               : avpn::watchVerdictName(snapshot->verdict);
-    reliabilityEvent(QStringLiteral("watch_resume_freeze released=%1 verdict=%2 why=%3 deferred=%4")
-                         .arg(released, verdict, m_watchFreezeWhy)
-                         .arg(m_watchDeferred.size()));
-    if (s == avpn::FreezeStep::ReleaseSnapshot)
-        return; // the snapshot handler runs the deferred decisions after adopting it
-    std::vector<std::function<void()>> deferred;
-    deferred.swap(m_watchDeferred);
-    for (auto &fn : deferred)
-        fn();
-#else
-    Q_UNUSED(step);
-    Q_UNUSED(snapshot);
-#endif
-}
-
-// no_data / unconfirmed for the session the app has: a reason to re-check, never a verdict (§29 item 9
-// stays: nothing here counts as a failure, proves data or returns heal budget). The pin is not touched.
-void AvpnEngineQml::reverifyAfterExtensionVerdict(const avpn::TunnelWatchSnapshot &snapshot, const QString &nodeId)
-{
-#ifdef Q_OS_IOS
-    reliabilityEvent(avpn::watchConsumedJournalLine(snapshot, nodeId, QDateTime::currentMSecsSinceEpoch()));
-    // The app's own per-network memory forgets this node (§29 item 7, the same stored-copy function a
-    // failed start uses) when the probe confirmed the verdict; the key is the attempt's (computed
-    // with the tunnel down).
-    if (avpn::watchVerdictForgetsNode(snapshot.verdict) && !m_attemptNetKey.isEmpty()) {
-        QSettings s;
-        const bool removed = avpn::networkMemoryForgetStored(s, m_attemptNetKey, nodeId);
-        reliabilityEvent(QStringLiteral("network_memory_forget why=extension_no_data key=%1 node=%2 removed=%3")
-                             .arg(m_attemptNetKey, nodeId)
-                             .arg(int(removed)));
-    }
-    switch (avpn::reverifyActionFor(m_engine.isVerifying(), m_engine.state() == avpn::EngineState::Connected)) {
-    case avpn::ReverifyAction::RestartPending:
-        startDataPathVerification(); // full budget, new epoch: the frozen check never completes as "limited"
-        emit changed();
-        return;
-    case avpn::ReverifyAction::ReenterFromConnected:
-        if (m_engine.reenterVerifying()) {
-            refreshDataFlowing();
-            startDataPathVerification();
-            emit changed();
-        }
-        return;
-    case avpn::ReverifyAction::None:
-        return; // the engine is already moving (switch / start / stop)
-    }
-#else
-    Q_UNUSED(snapshot);
-    Q_UNUSED(nodeId);
 #endif
 }
 

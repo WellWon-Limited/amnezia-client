@@ -11,6 +11,10 @@
 // features.ios_tunnel_watch has been true at least once (decideWatchPlanWrite): before that - the
 // behaviour of build 139, no file at all; after it - the file is kept and carries the flag, so turning the
 // flag off reaches the extension (kill switch).
+//
+// Plans are ordered by `seq` - the app's own counter, one step per written plan - and `written_ms`. The
+// pool revision is carried for the journal only: the server's revision is not monotonic (deleting a node
+// lowers it), so it cannot order anything.
 #pragma once
 
 #include "ConnectTunables.h"
@@ -26,10 +30,12 @@
 
 namespace avpn {
 
-constexpr int kWatchPlanSchema = 1;
+constexpr int kWatchPlanSchema = 2; // 2: `seq`, `sanity_targets`
 constexpr qsizetype kWatchPlanMaxBytes = 64 * 1024; // the extension refuses a bigger plan
 constexpr char kWatchPlanFileName[] = "TribeWatchPlan.json";
 constexpr char kWatchPlanEverOnSettingsKey[] = "avpn/tunnelWatchPlanEverOn";
+constexpr char kWatchPlanSeqSettingsKey[] = "avpn/tunnelWatchPlanSeq";
+constexpr int kWatchPlanMaxSanityTargets = 4; // the extension takes no more
 
 // Node ids of the pool are strings ("16", Xray listeners "16:xray", "16:xray:2"); the plan carries the
 // integer node id (the leading digits). Anything else - 0 (unknown).
@@ -95,6 +101,7 @@ inline WatchPlanMemoryEntry watchPlanMemoryEntry(const QByteArray &json, const Q
 
 struct WatchPlanInputs {
     qint64 nowMs = 0;              // wall clock of the write
+    qint64 seq = 0;                // the app's own counter of written plans (set by writeWatchPlan)
     qint64 configFetchedMs = 0;    // when the signed /v1/config in effect was received; 0 = unknown
     bool watch = false;            // features.ios_tunnel_watch
     bool watchSwitch = false;      // features.ios_tunnel_watch_switch (carried only in stage 1)
@@ -109,9 +116,39 @@ struct WatchPlanInputs {
     QString cellularKey;           // networkMemoryKey("cellular", carrier): "cellular:<MCC-MNC>" or "cellular"
     QList<WatchPlanMemoryEntry> memory; // entries for "wifi" and cellularKey (dead ones are dropped here)
     QList<QPair<QString, long long>> numbers; // clamped plan numbers (key, value) in table order
-    bool sanityUrlsKnown = false;  // lists.ios_tw_sanity_urls present in the config
-    QStringList sanityUrls;
+    QStringList sanityTargets;     // watchPlanSanityTargets(); empty = the extension's built-in ones
 };
+
+// Targets of the extension's request that bypasses the tunnel ("is the physical network a real path to
+// the Internet?"). The operator's own list (lists.ios_tw_sanity_urls) wins. Without it the targets are the
+// hosts the white-list detector already probes for the same purpose: the marketplace tier
+// (lists.whitelist_probe_domains - they answer inside Russia also on a mobile network in white-list mode,
+// and do not answer on a zero balance, which is what "no usable network" means) and then one independent
+// anchor (lists.whitelist_anchor_domains) for a phone that is abroad. A bare host name is a TLS handshake
+// (no HTTP request is sent). Nothing to offer - empty: the extension uses its built-in three.
+inline QStringList watchPlanSanityTargets(const QStringList &own, const QStringList &whitelistProbe,
+                                          const QStringList &whitelistAnchors)
+{
+    QStringList out;
+    auto add = [&out](const QString &raw) {
+        const QString t = raw.trimmed();
+        if (!t.isEmpty() && !out.contains(t) && out.size() < kWatchPlanMaxSanityTargets)
+            out.append(t);
+    };
+    if (!own.isEmpty()) {
+        for (const QString &u : own)
+            add(u);
+        return out;
+    }
+    for (const QString &d : whitelistProbe) {
+        if (out.size() >= kWatchPlanMaxSanityTargets - 1)
+            break; // one slot is kept for the anchor
+        add(d);
+    }
+    if (!whitelistAnchors.isEmpty())
+        add(whitelistAnchors.first());
+    return out;
+}
 
 // The clamped plan numbers from a raw lookup (TuningStore in the app, a map in tests): every toPlan row
 // of kIosTunnelWatchNumbers, in table order.
@@ -156,6 +193,7 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
 
     QJsonObject plan{
         {QStringLiteral("schema"), kWatchPlanSchema},
+        {QStringLiteral("seq"), double(in.seq)},
         {QStringLiteral("written_ms"), double(in.nowMs)},
         {QStringLiteral("config_fetched_ms"), double(in.configFetchedMs > 0 ? in.configFetchedMs : 0)},
         {QStringLiteral("expires_ms"), double(in.nowMs + ttlH * 3600LL * 1000LL)},
@@ -177,8 +215,8 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
         {QStringLiteral("numbers"), numbers},
         {QStringLiteral("candidates"), QJsonArray{}}, // stage 1: always empty
     };
-    if (in.sanityUrlsKnown && !in.sanityUrls.isEmpty())
-        plan.insert(QStringLiteral("sanity_urls"), QJsonArray::fromStringList(in.sanityUrls));
+    if (!in.sanityTargets.isEmpty())
+        plan.insert(QStringLiteral("sanity_targets"), QJsonArray::fromStringList(in.sanityTargets));
     return plan;
 }
 
@@ -202,6 +240,43 @@ inline WatchPlanWrite decideWatchPlanWrite(bool flagNow, bool everOnBefore)
     return {everOn, everOn};
 }
 
+// One write of the plan, start to end, with its effects handed in: the facade cannot write a plan on an
+// install whose flag was never on, cannot skip the sequence step and cannot forget the journal line -
+// all of it is here and tested. `writeFile(bytes) -> bool` puts the bytes into the App Group container.
+struct WatchPlanWriteOutcome {
+    bool attempted = false; // false: the flag has never been on here - no file, as build 139
+    bool written = false;
+    bool everOnAfter = false; // to persist (kWatchPlanEverOnSettingsKey)
+    qint64 seqAfter = 0;      // to persist (kWatchPlanSeqSettingsKey)
+    QString journal;          // empty when nothing was attempted
+};
+inline QString watchPlanJournalLine(const QJsonObject &plan, const QString &why);
+template <class WriteFile>
+inline WatchPlanWriteOutcome writeWatchPlan(WatchPlanInputs in, bool everOnBefore, qint64 seqBefore, const QString &why,
+                                            WriteFile writeFile)
+{
+    WatchPlanWriteOutcome out;
+    const WatchPlanWrite w = decideWatchPlanWrite(in.watch, everOnBefore);
+    out.everOnAfter = w.everOnAfter;
+    out.seqAfter = seqBefore;
+    if (!w.write)
+        return out;
+    out.attempted = true;
+    // A number is spent whether or not the write succeeds: two plans never share one.
+    out.seqAfter = seqBefore < 0 ? 1 : seqBefore + 1;
+    in.seq = out.seqAfter;
+    const QJsonObject plan = buildWatchPlan(in);
+    const QByteArray body = serializeWatchPlan(plan);
+    if (body.isEmpty()) {
+        out.journal = QStringLiteral("watch_plan_not_written why=too_big at=%1").arg(why);
+        return out;
+    }
+    out.written = writeFile(body);
+    out.journal = out.written ? watchPlanJournalLine(plan, why)
+                              : QStringLiteral("watch_plan_not_written why=io at=%1").arg(why);
+    return out;
+}
+
 // The journal line of a written plan (design appendix, the app journal formats).
 inline QString watchPlanJournalLine(const QJsonObject &plan, const QString &why)
 {
@@ -211,13 +286,14 @@ inline QString watchPlanJournalLine(const QJsonObject &plan, const QString &why)
                                         : (pin.value(QStringLiteral("country")).toString().isEmpty()
                                                ? QStringLiteral("-") : pin.value(QStringLiteral("country")).toString());
     const QJsonObject f = plan.value(QStringLiteral("features")).toObject();
-    return QStringLiteral("watch_plan_written candidates=%1 switch=%2 pool_rev=%3 mode=%4 pin=%5 watch=%6 why=%7")
+    return QStringLiteral("watch_plan_written seq=%8 candidates=%1 switch=%2 pool_rev=%3 mode=%4 pin=%5 watch=%6 why=%7")
         .arg(plan.value(QStringLiteral("candidates")).toArray().size())
         .arg(int(f.value(QStringLiteral("ios_tunnel_watch_switch")).toBool()))
         .arg(qint64(plan.value(QStringLiteral("pool_revision")).toDouble()))
         .arg(plan.value(QStringLiteral("transport_mode")).toString(), pinText)
         .arg(int(f.value(QStringLiteral("ios_tunnel_watch")).toBool()))
-        .arg(why);
+        .arg(why)
+        .arg(qint64(plan.value(QStringLiteral("seq")).toDouble()));
 }
 
 } // namespace avpn

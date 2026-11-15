@@ -60,17 +60,22 @@ struct BgArmTickInputs {
     bool localStopRequested = false;
     bool handshakeAwaiting = false;
     bool changePending = false;
+    // The app is on the screen again: background time is not needed. Read by the controller itself on its
+    // status poll, so the hold ends on return whether or not anybody tells the controller.
+    bool appActive = false;
 };
 
 inline BgArmTick decideBackgroundArmTick(const BgArmTickInputs &in)
 {
     if (in.armed) return BgArmTick::ReleaseArmed;
+    if (in.appActive) return BgArmTick::ReleaseNotNeeded;
     if (!in.sessionUp || in.localStopRequested) return BgArmTick::ReleaseNotNeeded;
     // Confirmed and the arming already decided without arming (skip: intent off, disarm in flight...).
     if (!in.handshakeAwaiting && !in.changePending) return BgArmTick::ReleaseNotNeeded;
-    // Wall clock back: never stretch the hold beyond the bound counted from now.
-    const long long held = in.nowMs >= in.heldSinceMs ? in.nowMs - in.heldSinceMs : 0;
-    if (held >= in.maxHoldMs) return BgArmTick::ReleaseTimeout;
+    // The clock went back: how long the hold has lasted cannot be told any more. It is given back rather
+    // than stretched (iOS kills an app that overstays its background time).
+    if (in.nowMs < in.heldSinceMs) return BgArmTick::ReleaseTimeout;
+    if (in.nowMs - in.heldSinceMs >= in.maxHoldMs) return BgArmTick::ReleaseTimeout;
     return BgArmTick::Keep;
 }
 

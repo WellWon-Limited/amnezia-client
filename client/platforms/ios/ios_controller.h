@@ -67,12 +67,13 @@ public:
     // first reply applied after it arrives as tunnelWatchSnapshot, once; without a request the signal
     // is never emitted. writeTunnelWatchPlanFile: TribeWatchPlan.json in the App
     // Group, atomic, protected until the first unlock (contract C1); false = not written.
-    // noteAppBackground / noteAppForeground: the On-Demand arming after leaving the screen (§5.5 step 1,
+    // noteAppBackground: the On-Demand arming after leaving the screen (§5.5 step 1,
     // features.ios_on_demand_bg_arm; decision IosBackgroundArm.h) - events arrive as onDemandBackgroundEvent.
     void requestStatusSnapshot();
     bool writeTunnelWatchPlanFile(const QByteArray &json);
     void noteAppBackground(bool bgArmFlag, int maxHoldMs);
-    void noteAppForeground();
+    // The macOS harness has no UIKit: it says here whether the app is on the screen.
+    void setAppActiveProbe(std::function<bool()> probe) { m_appActiveProbe = std::move(probe); }
     // AVPN (review of 136): the facade provides the physical uplink state (UplinkMonitor).
     void setUplinkProbe(std::function<bool()> probe) { m_uplinkProbe = std::move(probe); }
 #ifdef AVPN_IOS_HARNESS
@@ -303,6 +304,8 @@ private:
     uint64_t m_bgArmToken = 0;
     void tickBackgroundArmHold();
     void endBackgroundArmHold(const char *result, const char *why);
+    bool appIsActive() const;
+    std::function<bool()> m_appActiveProbe;
 
     QString m_lastRoamSummary; // AVPN seamless roaming: последняя строка счётчиков NE (лог при изменении)
     QString m_lastAdoptedDeadCheck; // AVPN 5.1.109 (IOS-UP35): last journaled §25 decision inputs (log on change)

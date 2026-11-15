@@ -63,7 +63,6 @@ struct TunnelWatchSnapshot {
     int epS = 0;
     qint64 tx = 0;
     qint64 rxData = 0;
-    int healSteps = 0;
     QString sanity;
     QString probe;
     QString probeReason;
@@ -72,6 +71,8 @@ struct TunnelWatchSnapshot {
     int probesEpisode = 0;
     int probesHour = 0;
     int refuted = 0;
+    int disturbed = 0;     // probes of the passive rule that could not be judged
+    QString evidence;      // what confirmed no_data: "probe" / "handshake" / "none"
     bool wouldSwitch = false;
     bool appAlive = false;
     qint64 lastNoDataMs = 0;
@@ -125,7 +126,6 @@ inline TunnelWatchSnapshot parseTunnelWatch(const QVariant &watch)
     s.epS = int(i64(m, "ep_s"));
     s.tx = i64(m, "tx");
     s.rxData = i64(m, "rx_data");
-    s.healSteps = int(i64(m, "heal_steps"));
     s.sanity = str(m, "sanity");
     s.probe = str(m, "probe");
     s.probeReason = str(m, "probe_reason");
@@ -134,6 +134,8 @@ inline TunnelWatchSnapshot parseTunnelWatch(const QVariant &watch)
     s.probesEpisode = int(i64(m, "probes_episode"));
     s.probesHour = int(i64(m, "probes_hour"));
     s.refuted = int(i64(m, "refuted"));
+    s.disturbed = int(i64(m, "disturbed"));
+    s.evidence = str(m, "evidence");
     s.wouldSwitch = m.value(QStringLiteral("would_switch")).toBool();
     s.appAlive = m.value(QStringLiteral("app_alive")).toBool();
     s.lastNoDataMs = i64(m, "last_no_data_ms");
@@ -229,9 +231,11 @@ inline FreezeStep decideResumeFreeze(ResumeFreezeState &st, const ResumeFreezeIn
 
 // ---- what an adopted snapshot means ---------------------------------------------------------------
 enum class WatchConsume {
-    Nothing,        // no verdict to act on (absent, garbled, watch off, none/suspect/network/captive)
-    OtherSession,   // a verdict about another session (node or generation differs): identity only, as today
-    Reverify,       // no_data / unconfirmed for the session the app has: re-check the path now
+    Nothing,         // no verdict to act on (absent, garbled, watch off, none/suspect/network/captive)
+    OtherSession,    // a verdict about another session (node or generation differs): identity only, as today
+    AlreadyConsumed, // this very verdict (same session, same since_ms) was acted on at an earlier return
+    JournalOnly,     // features.node_scan is off: the app has no data check of its own for AmneziaWG
+    Reverify,        // no_data / unconfirmed for the session the app has: re-check the path now
 };
 
 struct WatchConsumeInputs {
@@ -240,6 +244,13 @@ struct WatchConsumeInputs {
     QString snapshotGeneration;  // session_metadata.generation of the same reply
     QString appNodeId;           // the node the engine believes is up (empty = identity unknown)
     QString appGeneration;       // the generation the app saw before the freeze
+    // features.node_scan (the honest "Connected" check). Off: the only check the app could start is the
+    // Xray-style one, whose failure fails over at once - so the verdict is journaled and nothing else.
+    bool nodeScanOn = false;
+    // The verdict the app already acted on (0 / empty = none): a verdict stays in the extension until
+    // 16 KiB arrive, and must not send the app into a re-check at every return to the screen.
+    qint64 consumedSinceMs = 0;
+    QString consumedGeneration;
 };
 
 inline WatchConsume decideWatchConsume(const WatchConsumeInputs &in)
@@ -252,6 +263,10 @@ inline WatchConsume decideWatchConsume(const WatchConsumeInputs &in)
     if (in.appNodeId.isEmpty() || in.snapshotNodeId != in.appNodeId || in.snapshotGeneration.isEmpty()
         || in.snapshotGeneration != in.appGeneration)
         return WatchConsume::OtherSession;
+    if (s.sinceMs > 0 && s.sinceMs == in.consumedSinceMs && in.snapshotGeneration == in.consumedGeneration)
+        return WatchConsume::AlreadyConsumed;
+    if (!in.nodeScanOn)
+        return WatchConsume::JournalOnly;
     return WatchConsume::Reverify;
 }
 
@@ -275,13 +290,15 @@ inline bool watchVerdictForgetsNode(WatchVerdict v)
     return v == WatchVerdict::NoData;
 }
 
-inline QString watchConsumedJournalLine(const TunnelWatchSnapshot &s, const QString &nodeId, qint64 nowMs)
+// `what`: "reverify" or "ignored why=node_scan_off".
+inline QString watchConsumedJournalLine(const TunnelWatchSnapshot &s, const QString &nodeId, qint64 nowMs,
+                                        const QString &what = QStringLiteral("reverify"))
 {
     const qint64 age = s.sinceMs > 0 && nowMs >= s.sinceMs ? nowMs - s.sinceMs : -1;
-    return QStringLiteral("data_watch_consumed verdict=%1 node=%2 age_ms=%3 probe=%4 -> reverify")
+    return QStringLiteral("data_watch_consumed verdict=%1 node=%2 age_ms=%3 probe=%4 evidence=%5 -> %6")
         .arg(watchVerdictName(s.verdict), nodeId)
         .arg(age)
-        .arg(s.probe.isEmpty() ? QStringLiteral("-") : s.probe);
+        .arg(s.probe.isEmpty() ? QStringLiteral("-") : s.probe, s.evidence.isEmpty() ? QStringLiteral("-") : s.evidence, what);
 }
 
 } // namespace avpn
