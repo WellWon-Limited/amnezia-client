@@ -112,6 +112,8 @@ enum TribeWatchPlanTests {
         let twoSpare = parsed([candidate(12), candidate(9)])
         check(choose(nil) == "16/profile", "no plan: the profile's node, as build 139")
         check(choose(accepted(plan { $0["candidates"] = [candidate(12)] })) == "16/profile", "the switch key off: the profile's node")
+        check(choose(accepted(plan { $0["candidates"] = [candidate(12)] }), failed: Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 60_000)) == "16/profile",
+              "the switch key off: the profile's node even when it failed here a minute ago (build 139)")
         check(choose(parsed([])) == "16/profile", "nothing to choose from: the profile's node")
         check(choose(twoSpare) == "16/profile", "a healthy profile node is kept")
         let recently = Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 10 * 60 * 1000)

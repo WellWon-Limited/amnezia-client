@@ -279,17 +279,19 @@ PURE = [
     ("rs-04", IOS + "TribeDataWatchRuntime.swift", "var ids = plan.candidates.map { $0.nodeId }.filter { $0 != nodeId }", "var ids = plan.candidates.map { $0.nodeId }", "rt", "the node the tunnel is on is offered"),
     ("rs-05", IOS + "TribeDataWatchRuntime.swift", "        guard offeredLocked().contains(node), let base = switchBase else { return nil }", "        guard let base = switchBase else { return nil }", "rt", "a node that was not offered gets a configuration"),
     ("rs-06", IOS + "TribeDataWatchRuntime.swift", "if case .switchPeer(let to, let why) = command, result == .performed {", "if case .switchPeer(let to, let why) = command {", "rt", "a switch that failed changes the session's identity"),
-    ("rs-07", IOS + "TribeDataWatchRuntime.swift", "            nodeId = to\n            switchSeq += 1\n", "            nodeId = to\n", "rt", "the switch number does not grow"),
+    ("rs-07", IOS + "TribeDataWatchRuntime.swift", "ndpoint : nil\n            switchSeq += 1\n", "ndpoint : nil\n", "rt", "the switch number does not grow"),
     ("rs-08", IOS + "TribeDataWatchRuntime.swift", "            if switches.count > Self.maxSwitchesKept { switches.removeFirst(switches.count - Self.maxSwitchesKept) }\n", "", "rt", "the list of switches grows without a bound"),
     ("rs-09", IOS + "TribeDataWatchRuntime.swift", "        if let command = output.command, let result = output.commandResult {\n", "        if false, let command = output.command, let result = output.commandResult {\n", "rt", "executed commands are neither journaled nor reflected in the identity"),
     ("rs-10", IOS + "TribeDataWatchRuntime.swift", "        if output.exhausted {\n", "        if false {\n", "rt", "exhausted is not journaled"),
     ("rs-11", IOS + "TribeDataWatchRuntime.swift", "            block[\"switch_seq\"] = made.0\n", "            block[\"switch_seq\"] = 0\n", "rt", "the status reply does not carry the switch number"),
-    ("rs-12", IOS + "TribeDataWatchRuntime.swift", "        guard nodeId != homeNodeId, let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }", "        guard let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }", "rt", "(a candidate is never the profile's node in these plans) the override is given on the profile's node"),
-    ("rs-13", IOS + "TribeDataWatchRuntime.swift", "        nodeId = choice.nodeId\n        switchSeq = 1\n", "        nodeId = choice.nodeId\n", "rt", "a start by the system on another node is not told as a switch"),
+    ("rs-17", IOS + "TribeDataWatchRuntime.swift", "            actualEndpoint = handedOut?.node == to ? handedOut?.endpoint : nil\n", "", "rt", "the status reply names the profile's endpoint after a switch"),
+    ("rs-19", IOS + "TribeDataWatchRuntime.swift", "actualEndpoint = handedOut?.node == to ? handedOut?.endpoint : nil", "actualEndpoint = handedOut?.endpoint", "rt", "back on the profile's node the reply still names another node's endpoint"),
+    ("rs-18", IOS + "TribeDataWatchRuntime.swift", "        handedOut = (node, candidate.endpoint)\n", "", "rt", "the endpoint of the node switched to is not remembered"),
+    ("rs-20", IOS + "TribeDataWatchRuntime.swift", "        nodeId = choice.nodeId\n        actualEndpoint = candidate.endpoint\n", "        nodeId = choice.nodeId\n", "rt", "a start by the system on another node keeps the profile's identity"),
+    ("rs-13", IOS + "TribeDataWatchRuntime.swift", "        actualEndpoint = candidate.endpoint\n        switchSeq = 1\n", "        actualEndpoint = candidate.endpoint\n", "rt", "a start by the system on another node is not told as a switch"),
     ("rs-14", IOS + "TribeDataWatchRuntime.swift", "        guard switched else { return }\n", "        guard switched, false else { return }\n", "rt", "the shared file keeps the node the tunnel has left"),
-    ("rs-15", IOS + "TribeDataWatchRuntime.swift", "        nodeId = homeNodeId\n        switchSeq = 0\n        switches = []\n        lock.unlock()\n        currentDeps?.log(", "        lock.unlock()\n        currentDeps?.log(", "rt", "a dropped start choice still names the other node"),
+    ("rs-15", IOS + "TribeDataWatchRuntime.swift", "        nodeId = homeNodeId\n        actualEndpoint = nil\n        switchSeq = 0\n        switches = []\n        lock.unlock()\n        currentDeps?.log(", "        lock.unlock()\n        currentDeps?.log(", "rt", "a dropped start choice still names the other node"),
     ("rs-16", IOS + "TribeDataWatchRuntime.swift", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n        self.switchSeq = 0\n        self.switches = []\n", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n", "rt", "(a new process starts from zero anyway) the switches of the previous session are kept"),
-    ("rs-17", IOS + "TribeDataWatchRuntime.swift", "            self.plan = nil // no usable plan: nothing is offered to the arbiter\n", "", "rt", "a rejected plan's candidates stay on offer"),
     # ---- the controller (the real ios_controller.mm in its harness) ----
     ("ctl-01", IOS + "ios_controller.mm", "    if (!bgArmFlag)\n        return; // build 139 behaviour: nothing held, nothing journaled\n", "", "harness", "rev-W3: the background transition acts with the flag off"),
     ("ctl-02", IOS + "ios_controller.mm", "        if (m_watchSnapshotWanted.load()) {", "        if (true) {", "harness", "rev-W4: the snapshot signal fires on every status reply"),
@@ -360,7 +362,6 @@ WIRING = [
 ACCEPTED = {
     "cand-07": "equivalent: with Xray listeners in the pool the Awg mode of the pick still refuses them (transportAllowed)",
     "eng-11": "equivalent: buildWatchPlan cuts the list to five as well (plan-28); the engine's cut only saves work",
-    "rs-12": "equivalent: the app never lists the session's own node as a candidate, so on the profile's node no candidate matches",
     "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
 }
 

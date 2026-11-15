@@ -226,7 +226,12 @@ enum TribeDataWatchRuntimeTests {
             b.writePlan(switchOn: true, candidates: [12, 9])
             b.startSession()
             b.probeResult = "state=silent id=5 ms=0 late=0"
-            dead(b, seconds: 110)
+            for _ in 1...200 where b.adapter.switched.isEmpty { dead(b, seconds: 1) }
+            // On the very tick of the switch: the shared file already names the new node and holds
+            // no verdict of the node the tunnel has left (nothing waits for the next report).
+            check(b.adapter.switched.count == 1 && b.lastState["node_id"] as? String == "12" && b.lastState["switch_seq"] as? Int == 1
+                  && b.lastState["verdict"] as? String == "none", "the shared file follows the switch at once: \(b.lastState["node_id"] ?? "-") \(b.lastState["verdict"] ?? "-")")
+            dead(b, seconds: 8)
             check(b.adapter.lastInputs.nodeId == "12" || b.adapter.switched.count == 1, "the first switch happened: \(b.adapter.commands)")
             check(b.adapter.commands.map { "\($0.command)" }.prefix(2).allSatisfy { $0.contains("heal") } && b.adapter.switched.first?.node == "12",
                   "two heals (refused by the shared budget), then the plan's first candidate: \(b.adapter.commands)")
@@ -261,6 +266,18 @@ enum TribeDataWatchRuntimeTests {
             dead(b, seconds: 60)
             check(b.adapter.switched.count == 1 && b.adapter.lastInputs.nodeId == "12", "trusted: no second switch")
             check(b.adapter.lastInputs.candidates == ["9", "16"], "what is offered from the new node: the rest of the plan and the profile's node: \(b.adapter.lastInputs.candidates)")
+            // The plan is rewritten without that node, then without the key, then it is rejected:
+            // what the status reply says about the switch already made does not change.
+            b.writePlan(switchOn: true, candidates: [9])
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            check(b.runtime.sessionOverride()?.nodeId == "12" && b.runtime.sessionOverride()?.endpoint == "198.51.100.12:585", "a plan without the node: the identity stands")
+            b.writePlan(switchOn: false)
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            check(b.runtime.sessionOverride()?.endpoint == "198.51.100.12:585", "the key off: the identity stands")
+            try! Data("not a plan".utf8).write(to: b.planURL, options: .atomic)
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            check(b.runtime.sessionOverride()?.nodeId == "12" && b.runtime.sessionOverride()?.endpoint == "198.51.100.12:585", "a rejected plan: the identity stands")
+            check(b.runtime.switchTarget("9") == nil && b.runtime.switchTarget("16") == nil, "and with no usable plan no configuration is handed out")
         }
         run("nothing_is_offered_without_the_key_a_live_list_and_the_base") {
             // The switch key off: the plan may hold candidates, the arbiter is offered nothing.

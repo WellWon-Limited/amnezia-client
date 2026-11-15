@@ -861,16 +861,16 @@ static void stageTwo()
     CHECK(!watchPlanInPlace(noText, noText), "nothing to compare: not offered");
     // --- candidates in the plan: only with both flags ---
     WatchPlanInputs in = planInputs();
+    in.candidates.append({QStringLiteral("11"), QStringLiteral("FI"), QJsonObject()}); // no configuration: never written
     for (const char *id : {"3", "12", "9:xray", "x7", "9", "5", "8", "4"})
         in.candidates.append({QLatin1String(id), QStringLiteral("FI"), peer});
-    in.candidates.append({QStringLiteral("11"), QStringLiteral("FI"), QJsonObject()});
     CHECK(buildWatchPlan(in).value("candidates").toArray().isEmpty(), "the switch key off: nothing of a node is written");
     in.watchSwitch = true;
     QJsonArray written = buildWatchPlan(in).value("candidates").toArray();
     QStringList ids;
     for (const QJsonValue &v : written)
         ids.append(QString::number(v.toObject().value("node_id").toInt()));
-    CHECK(ids == QStringList({"3", "12", "9", "5", "8"}), "five at most, in the given order; an Xray listener and a junk id are skipped");
+    CHECK(ids == QStringList({"3", "12", "9", "5", "8"}), "five at most, in the given order; an Xray listener, a junk id and an entry without a configuration are skipped");
     CHECK(written.first().toObject().value("country").toString() == "FI" && written.first().toObject().value("peer").toObject() == peer, "an entry: node, country, peer");
     in.watch = false;
     CHECK(buildWatchPlan(in).value("candidates").toArray().isEmpty(), "the watch off: no candidates either");

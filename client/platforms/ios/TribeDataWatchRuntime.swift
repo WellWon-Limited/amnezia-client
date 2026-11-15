@@ -91,6 +91,12 @@ final class TribeDataWatchRuntime {
     private var switchSeq = 0
     private var switches: [[String: Any]] = []
     static let maxSwitchesKept = 8
+    /// "host:port" of the node the tunnel stands on when that is not the profile's node. Kept apart
+    /// from the plan: a plan that is rewritten, rejected or expires later must not change what the
+    /// status reply says about a switch already made.
+    private var actualEndpoint: String?
+    /// The candidate last handed to the adapter (it becomes `actualEndpoint` if the switch is performed).
+    private var handedOut: (node: String, endpoint: String)?
 
     /// What the adapter needs to move the tunnel to `nodeId`.
     enum SwitchTarget: Equatable {
@@ -128,6 +134,8 @@ final class TribeDataWatchRuntime {
         self.plan = nil
         self.switchSeq = 0
         self.switches = []
+        self.actualEndpoint = nil
+        self.handedOut = nil
         self.proto = proto
         self.generation = generation
         inputs = TribeDataWatchInputs()
@@ -187,6 +195,7 @@ final class TribeDataWatchRuntime {
         guard offeredLocked().contains(node), let base = switchBase else { return nil }
         if node == homeNodeId { return .home }
         guard let candidate = plan?.candidates.first(where: { $0.nodeId == node }) else { return nil }
+        handedOut = (node, candidate.endpoint)
         return .candidate(candidate.wgQuick(base: base))
     }
 
@@ -194,8 +203,8 @@ final class TribeDataWatchRuntime {
     /// node: the app recognises a node by its id and its "host:port". nil = the profile's own.
     func sessionOverride() -> (nodeId: String, endpoint: String)? {
         lock.lock(); defer { lock.unlock() }
-        guard nodeId != homeNodeId, let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }
-        return (nodeId, candidate.endpoint)
+        guard let endpoint = actualEndpoint else { return nil } // nil on the profile's node
+        return (nodeId, endpoint)
     }
 
     /// A start by the system (not by the app): the node to come up on, when it is not the
@@ -215,6 +224,7 @@ final class TribeDataWatchRuntime {
             return nil
         }
         nodeId = choice.nodeId
+        actualEndpoint = candidate.endpoint
         switchSeq = 1
         switches = [["from": home, "to": choice.nodeId, "why": "os_start_\(choice.why)", "utc_ms": deps.nowMs(), "net": net]]
         let labels = (generation, proto)
@@ -294,9 +304,6 @@ final class TribeDataWatchRuntime {
             lock.unlock()
         case .failure(let rejection):
             state = unreadable ? "unreadable" : rejection.rawValue
-            lock.lock()
-            self.plan = nil // no usable plan: nothing is offered to the arbiter
-            lock.unlock()
         }
         lock.lock()
         planStamp = stamp
@@ -373,6 +380,7 @@ final class TribeDataWatchRuntime {
     func cancelStartChoice() {
         lock.lock()
         nodeId = homeNodeId
+        actualEndpoint = nil
         switchSeq = 0
         switches = []
         lock.unlock()
@@ -484,6 +492,8 @@ final class TribeDataWatchRuntime {
         if case .switchPeer(let to, let why) = command, result == .performed {
             switched = true
             nodeId = to
+            // The way back to the profile's node hands out no candidate: its endpoint is the profile's.
+            actualEndpoint = handedOut?.node == to ? handedOut?.endpoint : nil
             switchSeq += 1
             switches.append(["from": from, "to": to, "why": why.rawValue, "utc_ms": deps.nowMs(), "net": net])
             if switches.count > Self.maxSwitchesKept { switches.removeFirst(switches.count - Self.maxSwitchesKept) }
