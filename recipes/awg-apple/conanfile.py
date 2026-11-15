@@ -158,8 +158,10 @@ class AwgApple(ConanFile):
         # snapshot the way _roaming_snapshots does.
         if self._has_data_watch:
             watch_swift = os.path.join(self.source_folder, "tribe", "TribeDataWatch.swift")
+            # Two binaries: the rule alone, and the rule wired to this version's own stall ladder.
             self.run(f'sh "{os.path.join(self.source_folder, "tests", "run_tribe_data_watch_tests.sh")}" '
-                     f'"{watch_swift}" "{os.path.join(self.source_folder, "tests", "TribeDataWatchTests.swift")}"')
+                     f'"{watch_swift}" "{os.path.join(self.source_folder, "tests", "TribeDataWatchTests.swift")}" '
+                     f'"{roaming_swift}" "{os.path.join(self.source_folder, "tests", "TribeDataWatchLadderTests.swift")}"')
             copy(self, "TribeDataWatch.swift", src=os.path.dirname(watch_swift),
                  dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"), keep_path=False)
         go_path = os.path.join(self.build_folder, ".tribe-go-path")
@@ -200,7 +202,8 @@ class AwgApple(ConanFile):
             # tribe.11: the userspace direct split is a build gate too (absent before 0009).
             # tribe.13: api-apple.go calls into tribeprobe.go (patch 0012), so the file list of
             # this gate carries it when it exists.
-            probe_go = " tribeprobe.go" if os.path.exists(os.path.join(self.build_folder, "tribeprobe.go")) else ""
+            probe_go = (" tribeprobe.go tribeprobe_engine.go"
+                        if os.path.exists(os.path.join(self.build_folder, "tribeprobe.go")) else "")
             if os.path.exists(os.path.join(self.build_folder, "directsplit.go")):
                 self.run(
                     "go test -count=1 -run '^(TestDirect|TestForeign)' "

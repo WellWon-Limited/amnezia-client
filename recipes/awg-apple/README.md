@@ -206,7 +206,7 @@ The stall watchdog answers "is the session alive" and counts a new handshake as 
 13.11.2026 a node completed handshakes for 6 min 50 s and returned no data, and nothing in the
 extension said so. tribe.13 adds a second question to the SAME one-second tick, "does data come
 back", and an active probe that judges the answer. Stage 1 only reports; nothing in the package
-switches a peer.
+switches a peer. The text below is the state after the independent review of stage 1.
 
 - `TribeDataWatch` (pure, `tribe/TribeDataWatch.swift`): the statistics sample is cut into cycles of
   `cycleSeconds` (25). A cycle is dead when at least `cycleMinTxBytes` (1024) went out and NO
@@ -214,44 +214,85 @@ switches a peer.
   directions first
   (`handshakeRxAllowanceBytes` 148, `handshakeTxAllowanceBytes` 1024 per change of the handshake
   time). `deadCycles` (3) dead cycles in a chain (gap at most `cycleChainGapSeconds`) with
-  `minEpisodeTxBytes` (3072) sent in the episode and `minHealSteps` (2) same-node heal steps seen in
-  the last 300 s make the passive rule. Start, wake-up and path changes open quiet periods; a
-  change of the physical interface voids the verdict.
+  `minEpisodeTxBytes` (3072) sent in the episode make the passive rule. Start, wake-up and path
+  changes open quiet periods; a change of the physical interface voids the verdict.
+- The rule does NOT look at what the stall ladder did (review of stage 1: the ladder acts only after
+  4096 bytes of demand since the last progress, so below about 270 B/s it never steps and a rule
+  that waited for its steps never judged the 13.11 path). The judge is the probe.
 - The passive rule alone is never the final word. It first asks for a request that bypasses the
   tunnel (the provider sends it; no reply = `network`, a foreign reply = `captive`), then for the
-  probe. `no_data` requires a SILENT probe; an answered probe refutes the rule (`refuted` counter);
-  a probe that could not be judged leaves `unconfirmed`. A second trigger asks for the probe only:
-  at least `suspectMinTxBytes` (64 KiB) sent and less than `suspectMaxRxBytes` (4 KiB) of data
-  received over `suspectWindowSeconds` (60) while no episode is open.
-- Probes are bounded: `probeMaxPerEpisode` (3), `probeMaxPerHour` (12).
-- `tribeprobe.go`: `wgSetTribeProbe(clientIp, target, enabled)` before `wgTurnOn`,
-  `wgTribeProbeStart(timeoutMs)`, `wgTribeProbeResult()` -> `state=<pending|answered|silent|not_sent|
-  unavailable|none> id=<n> ms=<n>`. `wrapTribeProbeIfEnabled` is the outermost pass-through wrapper
-  of the TUN device. The probe is one DNS query for the root name (type A, 17 bytes of payload: the
-  query the split-DNS forwarder warms up with) from the tunnel address to the session's first DNS server, source port 50100-50199, repeated once after
-  1.5 s, injected as an inner IPv4/UDP packet; the reply is taken out of the device's output and
-  never reaches the OS. Without a configuration the wrapper is not created and `wgTurnOn` behaves
-  as tribe.11.
+  probe:
+  - `answered` refutes the rule (`refuted` counter), also when the answer comes after the poll
+    (`lateAnswerAt`: a `no_data` confirmed by the probe is taken back);
+  - `silent` confirms `no_data` (`evidence=probe`) only when the wait was UNDISTURBED: no inbound
+    data, no quiet period, no device restart, no new handshake, no path event. A disturbed wait is
+    void: report `disturbed`, counted separately, asked again after `probeRetryGapSeconds` (10)
+    within the limits;
+  - `noSession` - the engine has no keypair that can send, nothing was injected and no budget is
+    spent. The node is then judged by the handshake itself: no handshake for `cycleSeconds x
+    deadCycles` (75 s) since the device start / the last handshake while dead cycles go on
+    confirms `no_data` (`evidence=handshake`); a transmit counter that grows without a keypair can
+    only be handshake initiations. Before that the rule waits;
+  - `staged`, `notSent`, `unavailable` judge nothing.
+  `unconfirmed` (nothing can judge the rule) asks nobody again: neither the probe nor the bypass
+  request.
+- An in-place restart of the backend (`noteBackendRestarted`) voids a probe in flight and holds the
+  next one for one start grace; the chain of dead cycles goes on (the path did not change).
+- A second trigger asks for the probe only: at least `suspectMinTxBytes` (64 KiB) sent and less than
+  `suspectMaxRxBytes` (4 KiB) of data received over `suspectWindowSeconds` (60) while no episode is
+  open. It has its own budget (`probeLowRxMaxPerHour`, 2) and a back-off after an answered probe
+  (10 min, doubled up to an hour); it never spends the passive rule's budget.
+- Bounds: `probeMaxPerEpisode` (3), `probeMaxPerHour` (12), `sanityMaxPerHour` (12 requests outside
+  the tunnel per hour). They survive a device start.
+- Every change of the verdict is reported, the end of one too: the outputs (journal, status reply,
+  shared file) never keep a verdict the rule no longer holds.
+- `tribeprobe.go` + `tribeprobe_engine.go`: `wgSetTribeProbe(clientIp, target, enabled)` before
+  `wgTurnOn`, `wgTribeProbeStart(handle, timeoutMs)`, `wgTribeProbeResult(handle)` ->
+  `state=<pending|answered|silent|no_session|not_sent|unavailable|none> id=<n> ms=<n> late=<0|1>`.
+  `wrapTribeProbeIfEnabled` is the outermost pass-through wrapper of the TUN device. The probe is one
+  DNS query for the root name (type A, 17 bytes of payload: the query the split-DNS forwarder warms
+  up with) from the tunnel address to the session's first DNS server, source port 50100-50199,
+  repeated once after 1.5 s, injected as an inner IPv4/UDP packet; the reply is taken out of the
+  device's output and never reaches the OS. Without a configuration the wrapper is not created and
+  `wgTurnOn` behaves as tribe.11.
+- What "sent" means (the truthful signal, not a guess from timing). amneziawg-go encrypts a packet
+  read from the TUN only when the peer has a current keypair younger than `RejectAfterTime`
+  (180 s); otherwise the packet is STAGED and a handshake is started. The wrapper therefore reads
+  the engine's own `last_handshake_time` through the UAPI dump (`IpcGet`, from the adapter's work
+  queue only - never from a device goroutine) at the start and at the result, and its own time of
+  the device consuming the packet (`Read`):
+  - start is refused with -2 (`no_session`, nothing injected) when there is no handshake or the
+    keypair is within 5 s of its expiry; -1 when the resolver is not routed through the tunnel
+    (allowed IPs / the direct-split list) or the engine cannot be read;
+  - `silent` is reported only if the packet was consumed while the keypair of the SAME handshake
+    could still send and the handshake time has not changed by the end of the wait; otherwise
+    `no_session`. The timeout counts from the consumption, not from the request.
+  A late answer is accepted for 30 s after the timeout (`late=1`); the look-out on the write path
+  ends by a deadline of its own, without polling.
 - Limits of the probe, to be read literally: it is a DNS root query to the session's `dns1`; an
   answer proves the path phone -> node -> forwarding -> that resolver and back for a SMALL packet.
-  `not_sent` (no way to inject: the DNS forwarder is off and no outbound packet came by, or the
-  device was restarted during the wait) is distinct from `silent` and never confirms `no_data`.
-  Inner IPv4 only. It says nothing about bulk transfer: a freeze that depends on size (about 16 KB
-  and more) is invisible to it.
+  `silent` proves that the engine had a sending keypair and took the packet; it does not prove the
+  datagram left the radio. Inner IPv4 only. It says nothing about bulk transfer: a freeze that
+  depends on size (about 16 KB and more) is invisible to it.
 - `WireGuardAdapter`: `setDataWatchPolicy(_:)`, `dataWatchSnapshot(completionHandler:)`,
-  `dataWatchInputs`, `dataWatchHandler`. The watch is fed by `dataWatchTick` right before
-  `recovery.tick` in `stallTick` and told about real path events, device starts and in-place
-  restarts. With the policy off (the default) every hook is one comparison and the adapter behaves
-  as tribe.11; the only unconditional statement is a counter of heal steps.
+  `dataWatchInputs`, `dataWatchHandler` (both get the engine handle). The watch is fed by
+  `dataWatchTick` right before `recovery.tick` in `stallTick` and told about real path events,
+  device starts and in-place restarts. With the policy off (the default) every hook is one
+  comparison and the adapter behaves as tribe.11; nothing is counted unconditionally any more.
 - `TribeDataWatchAction.switchPeer` / `.exhausted` and `TribeDataWatchPolicy.switchEnabled` are
   reserved for stage 2 (in-place switch); `step` never returns them.
 
-Build gates: `tests/run_tribe_data_watch_tests.sh` (named scenarios: the 13.11 replay, every
-false-positive case of the design's table, the probe outcomes, limits, clamps) and
-`go test -run '^TestTribeProbe'` (a fake TUN and a fake forwarder: packet layout and checksums,
-answer, silence, repeat, one probe at a time, a foreign packet passed through untouched, restart
-during the wait, no configuration, departure through the forwarder). `replay/` holds the offline tooling (not exported): the replay of a tester journal
-through the real function (aggregates only) and the mutation run of the rule
+Build gates: `tests/run_tribe_data_watch_tests.sh` builds two binaries - the named scenarios of the
+rule (the 13.11 replay, the 60 / 120 / 200 / 260 B/s vectors of the review, every false-positive case
+of the design's table, the probe outcomes, disturbance, the handshake judge, late answers, limits,
+clamps) and `TribeDataWatchLadderTests.swift`, the rule next to the REAL stall ladder
+(`TribeRecoveryArbiter`) - and `go test -run '^TestTribeProbe'` (a fake TUN, a fake forwarder and a
+fake engine dump: packet layout and checksums, answer, silence, repeat, one probe at a time, a
+foreign packet passed through untouched, restart during the wait, no configuration, departure
+through the forwarder, a refused start without a keypair, a staged packet, an expired keypair, a
+handshake during the wait, a late answer, a resolver in the direct list). `replay/` holds the
+offline tooling (not exported): the replay of a tester journal through the real function
+(aggregates only) and the mutation run of the rule
 (`python3 recipes/awg-apple/replay/tribe_data_watch_mutants.py`).
 
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)

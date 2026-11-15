@@ -21,6 +21,15 @@
 //    against the client's 15 s new-handshake timer). So the provider sends a small packet THROUGH
 //    the tunnel (tribeprobe.go) and `no_data` needs a silent probe. An answered probe refutes the
 //    passive rule and is journaled as such: that count is the gate for layer 2.
+//    "Silent" is told by the Go layer only for a packet the device took while a keypair could
+//    send. When the engine holds no such keypair (no handshake completed, or the last one is
+//    older than a keypair lives) a probe cannot leave the phone at all; the judge is then the
+//    engine's own handshake: initiations going out for a whole chain of dead cycles with not one
+//    response (`evidence=handshake`). A probe whose wait was disturbed (device restart, new
+//    handshake, path event, inbound data) judges nothing and is counted as `disturbed`.
+//
+// The verdict does NOT depend on what the stall ladder did: below ~270 B/s of demand the ladder
+// never steps (a completed handshake is progress for it), and the 13.11 path stayed unjudged.
 //
 // There is no timer here and nothing is executed here: stage 1 (layer 1) only reports.
 // `TribeDataWatchAction.switchPeer` / `.exhausted` are reserved for stage 2 and are never
@@ -36,7 +45,9 @@ public enum TribeDataVerdict: String, Equatable {
     /// An episode is open (dead cycles seen); the passive rule is not met, or it was refuted by an
     /// answered probe, or its checks are still running.
     case suspect
-    /// The passive rule is met, the physical network answers, the probe through the tunnel is silent.
+    /// The passive rule is met, the physical network answers, and the judge confirmed it: the
+    /// probe through the tunnel is silent, or the engine has no session and its handshakes have
+    /// gone unanswered for a whole chain of dead cycles.
     case noData = "no_data"
     /// The passive rule is met but nothing could judge it (probe off, unavailable, not sent or
     /// rate-limited). A shadow verdict only: layer 2 never acts on it.
@@ -68,6 +79,10 @@ public enum TribeDataWatchReport: String, Equatable {
     /// Result of a probe that changes no verdict: the low-inbound trigger, or a passive rule that
     /// was no longer met when the result arrived.
     case probe
+    /// A probe asked by the passive rule could not be judged: its wait was disturbed (device
+    /// restart, new handshake, path event, inbound data) or the packet was only staged. Counted
+    /// apart from `refuted` so that the shadow period can see how often the judge is void.
+    case disturbed
     /// The app fell silent while the verdict was no_data: the shadow mark turned on.
     case wouldSwitch = "would_switch"
 }
@@ -86,8 +101,14 @@ public enum TribeProbeResult: String, Equatable {
     case pending
     /// A reply came back through the tunnel.
     case answered
-    /// The packet was handed to the device and nothing came back within the timeout.
+    /// The device took the packet while a keypair could send, and nothing came back in time.
     case silent
+    /// The probe was not started: the engine holds no keypair that may send now (no handshake
+    /// completed, or the last one is too old). Nothing was injected.
+    case noSession = "no_session"
+    /// The packet was injected but cannot be judged: the device took it without a usable keypair
+    /// (it was only staged) or a new session began during the wait.
+    case staged
     /// The packet never reached the device (nothing read the tunnel within the timeout).
     case notSent = "not_sent"
     /// There is no probe in this session (no wrapper, no IPv4 client address, no resolver).
@@ -99,6 +120,15 @@ public enum TribeProbeReason: String, Equatable {
     case passive
     /// A lot was sent and very little data came back within the suspect window.
     case lowRx = "low_rx"
+}
+
+/// What confirmed a `no_data` verdict.
+public enum TribeVerdictEvidence: String, Equatable {
+    case none
+    /// A probe through the tunnel left under a keypair and stayed unanswered.
+    case probe
+    /// The engine has no session: its handshake initiations went unanswered for a whole chain.
+    case handshake
 }
 
 /// Server-driven policy (REMOTE-TUNING: `features.ios_tunnel_watch*`, `numbers.ios_tw_*`). The app
@@ -137,9 +167,6 @@ public struct TribeDataWatchPolicy: Equatable {
     public var handshakeRxAllowanceBytes: UInt64 = 148
     /// Subtracted from the tx growth of a sample in which the handshake time changed.
     public var handshakeTxAllowanceBytes: UInt64 = 1024
-    /// Same-node heal steps (fresh port, soft restart) required within the last
-    /// `healWindowSeconds` before the passive rule is met.
-    public var minHealSteps = 2
     /// Quiet time after a path change.
     public var pathStableSeconds: TimeInterval = 20
     /// Quiet time after a device start or a peer switch.
@@ -158,9 +185,13 @@ public struct TribeDataWatchPolicy: Equatable {
     public var suspectMaxRxBytes: UInt64 = 4096
     /// How long the provider waits for the probe's answer.
     public var probeTimeoutSeconds: TimeInterval = 4
-    /// Hard limits on probes: battery and data.
+    /// Hard limits on the probes the passive rule asks for: battery and data.
     public var probeMaxPerEpisode = 3
     public var probeMaxPerHour = 12
+    /// The low-inbound trigger has a small budget of its own: it never spends the one above.
+    public var probeLowRxMaxPerHour = 2
+    /// Hard limit on the requests that bypass the tunnel (they are visible to the local network).
+    public var sanityMaxPerHour = 12
 
     /// An episode with no new dead cycle for this long is closed (demand ended).
     public static let episodeIdleSeconds: TimeInterval = 120
@@ -170,10 +201,13 @@ public struct TribeDataWatchPolicy: Equatable {
     public static let sanityRecheckSeconds: TimeInterval = 120
     /// Wall clock running ahead of uptime by more than this within one sample = the device slept.
     public static let sleepJumpSeconds: TimeInterval = 2
-    /// Heal steps older than this do not count as "the same node was treated". The stall ladder's
-    /// steady state is one step every 120 s (TribeStallTracker.persistentBackoff), so the window
-    /// holds at least two of them for as long as the ladder keeps treating the node.
-    public static let healWindowSeconds: TimeInterval = 300
+    /// A bypass check that did not report back this long after it was asked is asked again.
+    public static let sanityAskTimeoutSeconds: TimeInterval = 15
+    /// After a probe that judged nothing the next one is not asked sooner than this.
+    public static let probeRetryGapSeconds: TimeInterval = 10
+    /// The low-inbound trigger backs off after an answered probe: 10 min, doubling up to an hour.
+    public static let lowRxBackoffBaseSeconds: TimeInterval = 600
+    public static let lowRxBackoffMaxSeconds: TimeInterval = 3600
     /// A probe whose result did not arrive this long after its timeout is written off.
     public static let probeLostSlackSeconds: TimeInterval = 6
     public static let probeHourSeconds: TimeInterval = 3600
@@ -199,7 +233,6 @@ public struct TribeDataWatchPolicy: Equatable {
         policy.minEpisodeTxBytes = UInt64(number(numbers["ios_tw_min_episode_tx_bytes"], fallback: Double(policy.minEpisodeTxBytes), min: 2048, max: 1_048_576))
         policy.handshakeRxAllowanceBytes = UInt64(number(numbers["ios_tw_hs_rx_allowance_bytes"], fallback: Double(policy.handshakeRxAllowanceBytes), min: 92, max: 4096))
         policy.handshakeTxAllowanceBytes = UInt64(number(numbers["ios_tw_hs_tx_allowance_bytes"], fallback: Double(policy.handshakeTxAllowanceBytes), min: 148, max: 8192))
-        policy.minHealSteps = Int(number(numbers["ios_tw_min_heal_steps"], fallback: Double(policy.minHealSteps), min: 0, max: 6))
         policy.pathStableSeconds = number(numbers["ios_tw_path_stable_s"], fallback: policy.pathStableSeconds, min: 0, max: 120)
         policy.startGraceSeconds = number(numbers["ios_tw_start_grace_s"], fallback: policy.startGraceSeconds, min: 5, max: 120)
         policy.wakeGraceSeconds = number(numbers["ios_tw_wake_grace_s"], fallback: policy.wakeGraceSeconds, min: 0, max: 60)
@@ -211,6 +244,8 @@ public struct TribeDataWatchPolicy: Equatable {
         policy.probeTimeoutSeconds = number(numbers["ios_tw_probe_timeout_ms"], fallback: policy.probeTimeoutSeconds * 1000, min: 1000, max: 15000) / 1000
         policy.probeMaxPerEpisode = Int(number(numbers["ios_tw_probe_max_per_episode"], fallback: Double(policy.probeMaxPerEpisode), min: 1, max: 10))
         policy.probeMaxPerHour = Int(number(numbers["ios_tw_probe_max_per_hour"], fallback: Double(policy.probeMaxPerHour), min: 1, max: 60))
+        policy.probeLowRxMaxPerHour = Int(number(numbers["ios_tw_probe_low_rx_max_per_hour"], fallback: Double(policy.probeLowRxMaxPerHour), min: 0, max: 12))
+        policy.sanityMaxPerHour = Int(number(numbers["ios_tw_sanity_max_per_hour"], fallback: Double(policy.sanityMaxPerHour), min: 1, max: 60))
         return policy
     }
 
@@ -264,9 +299,6 @@ public struct TribeDataWatchSample: Equatable {
 /// What the adapter and the provider know at the moment of a sample.
 public struct TribeDataWatchEnv: Equatable {
     public var pathSatisfied: Bool
-    /// Monotonic count of same-node heal steps the adapter has performed (fresh port, soft
-    /// restart: watchdog, app request or a returning path).
-    public var healSteps: UInt64
     public var sanity: TribeSanityResult
     /// Uptime of the bypass result; nil = never checked.
     public var sanityAt: TimeInterval?
@@ -276,46 +308,52 @@ public struct TribeDataWatchEnv: Equatable {
     public var probeAt: TimeInterval?
     /// Round trip of an answered probe, milliseconds.
     public var probeLatencyMs: Int
+    /// Uptime at which the answer to an already judged (silent) probe arrived after all; nil = none.
+    public var lateAnswerAt: TimeInterval?
     /// Uptime of the last status request from the app; nil = none in this session.
     public var appSeenAt: TimeInterval?
 
-    public init(pathSatisfied: Bool, healSteps: UInt64 = 0, sanity: TribeSanityResult = .unknown,
+    public init(pathSatisfied: Bool, sanity: TribeSanityResult = .unknown,
                 sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none, probeAt: TimeInterval? = nil,
-                probeLatencyMs: Int = 0, appSeenAt: TimeInterval? = nil) {
+                probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil, appSeenAt: TimeInterval? = nil) {
         self.pathSatisfied = pathSatisfied
-        self.healSteps = healSteps
         self.sanity = sanity
         self.sanityAt = sanityAt
         self.probe = probe
         self.probeAt = probeAt
         self.probeLatencyMs = probeLatencyMs
+        self.lateAnswerAt = lateAnswerAt
         self.appSeenAt = appSeenAt
     }
 }
 
 /// The provider's half of the environment: what it learned from the bypass check, from the probe
-/// and from the app's status requests. The adapter adds its own half (path, heal steps).
+/// and from the app's status requests. The adapter adds its own half (the path).
 public struct TribeDataWatchInputs: Equatable {
     public var sanity: TribeSanityResult
     public var sanityAt: TimeInterval?
     public var probe: TribeProbeResult
     public var probeAt: TimeInterval?
     public var probeLatencyMs: Int
+    public var lateAnswerAt: TimeInterval?
     public var appSeenAt: TimeInterval?
 
     public init(sanity: TribeSanityResult = .unknown, sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none,
-                probeAt: TimeInterval? = nil, probeLatencyMs: Int = 0, appSeenAt: TimeInterval? = nil) {
+                probeAt: TimeInterval? = nil, probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil,
+                appSeenAt: TimeInterval? = nil) {
         self.sanity = sanity
         self.sanityAt = sanityAt
         self.probe = probe
         self.probeAt = probeAt
         self.probeLatencyMs = probeLatencyMs
+        self.lateAnswerAt = lateAnswerAt
         self.appSeenAt = appSeenAt
     }
 
-    public func env(pathSatisfied: Bool, healSteps: UInt64) -> TribeDataWatchEnv {
-        TribeDataWatchEnv(pathSatisfied: pathSatisfied, healSteps: healSteps, sanity: sanity, sanityAt: sanityAt,
-                          probe: probe, probeAt: probeAt, probeLatencyMs: probeLatencyMs, appSeenAt: appSeenAt)
+    public func env(pathSatisfied: Bool) -> TribeDataWatchEnv {
+        TribeDataWatchEnv(pathSatisfied: pathSatisfied, sanity: sanity, sanityAt: sanityAt,
+                          probe: probe, probeAt: probeAt, probeLatencyMs: probeLatencyMs,
+                          lateAnswerAt: lateAnswerAt, appSeenAt: appSeenAt)
     }
 }
 
@@ -324,12 +362,13 @@ public struct TribeDataWatchOutput: Equatable {
     public var action: TribeDataWatchAction
     /// What the report is about; nil when `action` is `.keep`.
     public var report: TribeDataWatchReport?
-    /// The passive rule is met and there is no fresh bypass result: run one check now.
+    /// Run ONE request that bypasses the tunnel now. Set on exactly one step per check: the
+    /// hourly limit is already charged.
     public var needsSanityCheck: Bool
     /// Start ONE probe through the tunnel now. Set on exactly one step per probe: the limits
-    /// (per episode, per hour) are already charged.
+    /// are already charged.
     public var startProbe: TribeProbeReason?
-    /// Shadow mark for layer 2: no_data (silent probe) and the app shows no sign of life.
+    /// Shadow mark for layer 2: no_data (confirmed) and the app shows no sign of life.
     public var wouldSwitch: Bool
 
     public init(verdict: TribeDataVerdict, action: TribeDataWatchAction, report: TribeDataWatchReport? = nil,
@@ -358,7 +397,6 @@ public struct TribeDataWatchSnapshot: Equatable {
     public var episodeSeconds = 0
     public var episodeTx: UInt64 = 0
     public var episodeRxData: UInt64 = 0
-    public var healSteps = 0
     public var sanity = TribeSanityResult.unknown
     /// Result of the last probe this watch asked for (none = never asked).
     public var probe = TribeProbeResult.none
@@ -366,11 +404,18 @@ public struct TribeDataWatchSnapshot: Equatable {
     public var probeLatencyMs = 0
     /// Wall time of that result; 0 = none.
     public var probeWallMs: Int64 = 0
-    /// Probes charged to the current episode / to the last hour.
+    /// Probes charged to the current episode / to the last hour (the passive rule's budget).
     public var probesInEpisode = 0
     public var probesLastHour = 0
+    /// The low-inbound trigger's own probes and the bypass requests of the last hour.
+    public var lowRxProbesLastHour = 0
+    public var sanityLastHour = 0
     /// Passive rule met and probe answered, counted over the session (the layer 2 gate).
     public var refuted = 0
+    /// Probes of the passive rule that could not be judged, counted over the session.
+    public var disturbed = 0
+    /// What confirmed the current no_data.
+    public var evidence = TribeVerdictEvidence.none
     public var wouldSwitch = false
     public var appAlive = false
     /// Wall time of the last sample at which the verdict was no_data; 0 = never in this session.
@@ -385,10 +430,12 @@ public struct TribeDataWatchSnapshot: Equatable {
         ["enabled": enabled, "verdict": verdict.rawValue, "since_ms": sinceWallMs,
          "passive": passive ? "no_data" : "none", "cycles": cycles,
          "ep_s": episodeSeconds, "tx": Int64(clamping: episodeTx), "rx_data": Int64(clamping: episodeRxData),
-         "heal_steps": healSteps, "sanity": sanity.rawValue,
+         "sanity": sanity.rawValue,
          "probe": probe.rawValue, "probe_reason": probeReason?.rawValue ?? "none",
          "probe_ms": probeLatencyMs, "probe_at_ms": probeWallMs,
-         "probes_episode": probesInEpisode, "probes_hour": probesLastHour, "refuted": refuted,
+         "probes_episode": probesInEpisode, "probes_hour": probesLastHour,
+         "probes_low_rx_hour": lowRxProbesLastHour, "sanity_hour": sanityLastHour,
+         "refuted": refuted, "disturbed": disturbed, "evidence": evidence.rawValue,
          "would_switch": wouldSwitch, "app_alive": appAlive,
          "last_no_data_ms": lastNoDataWallMs, "recovered_ms": recoveredWallMs]
     }
@@ -406,9 +453,9 @@ public struct TribeDataWatch: Equatable {
     private var windowStart: TimeInterval?
     private var windowTx: UInt64 = 0
 
-    // Same-node heal steps seen recently (uptime of the sample that showed each one).
-    private var healSeen: UInt64?
-    private var healTimes: [TimeInterval] = []
+    /// Uptime of the last completed handshake this watch saw, or of the device's (re)start: since
+    /// then the engine has had at most this one session. nil = not known yet.
+    private var sessionEpoch: TimeInterval?
 
     // The chain of dead cycles.
     private var chain = 0
@@ -440,20 +487,36 @@ public struct TribeDataWatch: Equatable {
     // The probe this watch asked for and is waiting on.
     private var probeRequestedAt: TimeInterval?
     private var probeRequestReason = TribeProbeReason.passive
-    /// Inbound data seen since the probe was asked for, and whether the watch had to look away
-    /// (quiet period): a silent result judges only an undisturbed wait.
+    /// Inbound data seen since the probe was asked for, and whether the wait was disturbed (quiet
+    /// period, device restart, new handshake, path event): a result other than "answered" judges
+    /// only an undisturbed wait.
     private var rxDataSinceProbe: UInt64 = 0
     private var disturbedSinceProbe = false
-    /// Uptimes of the probes of the last hour (the hourly limit).
+    /// After a probe that judged nothing: no new one before this uptime.
+    private var nextProbeNotBefore: TimeInterval = 0
+    /// Uptimes of the passive rule's probes of the last hour (the hourly limit).
     private var probeTimes: [TimeInterval] = []
+    /// The low-inbound trigger's own budget and back-off.
+    private var lowRxProbeTimes: [TimeInterval] = []
+    private var lowRxNotBefore: TimeInterval = 0
+    private var lowRxBackoff = TribeDataWatchPolicy.lowRxBackoffBaseSeconds
+    /// The bypass checks of the last hour, and the one that has not reported back yet.
+    private var sanityTimes: [TimeInterval] = []
+    private var sanityAskedAt: TimeInterval?
+    private var lateAnswerSeenAt: TimeInterval = 0
     private var lastProbe = TribeProbeResult.none
     private var lastProbeReason: TribeProbeReason?
     private var lastProbeLatencyMs = 0
     private var lastProbeWall: TimeInterval = 0
     private var refutedCount = 0
+    private var disturbedCount = 0
 
     // The verdict.
     public private(set) var verdict = TribeDataVerdict.none
+    private var evidence = TribeVerdictEvidence.none
+    /// What the outputs (journal, status reply, shared file) were last told: every change of the
+    /// verdict is reported, also one that happens between two samples (another network, a new device).
+    private var lastReported = TribeDataVerdict.none
     private var verdictSinceWall: TimeInterval = 0
     private var rxDataSinceVerdict: UInt64 = 0
     private var lastWouldSwitch = false
@@ -461,37 +524,48 @@ public struct TribeDataWatch: Equatable {
     private var recoveredWall: TimeInterval = 0
     private var lastEnv = TribeDataWatchEnv(pathSatisfied: true)
     private var lastAppAlive = false
-    private var lastHealStepsInEpisode = 0
     private var lastPassive = false
 
     public init() {}
 
     /// The device was started, resumed after a long-offline pause, or (stage 2) moved to another
     /// peer: everything known about the previous device is void and a start grace begins.
-    /// The hourly probe limit survives: it protects the battery, not a device.
+    /// What survives: the hourly limits (they protect the battery and the network, not a device),
+    /// the session's gate counters, and what the outputs were last told.
     public mutating func noteDeviceStarted(at uptime: TimeInterval, policy: TribeDataWatchPolicy) {
-        let keptProbeTimes = probeTimes
+        let kept = (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported)
         self = TribeDataWatch()
-        probeTimes = keptProbeTimes
+        (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported) = kept
         startGraceUntil = uptime + policy.startGraceSeconds
+        sessionEpoch = uptime
     }
 
     /// The backend was restarted in place on the same node (a heal step): its counters start from
-    /// zero. That drop is neither inbound progress nor a cycle; the episode and the verdict stay.
-    public mutating func noteBackendRestarted() {
+    /// zero and it has no session yet. That drop is neither inbound progress nor a cycle; the
+    /// episode, the chain of dead cycles and the verdict stay (the cycles go on being counted: the
+    /// path did not change). A probe in flight is void (the next sample sees the reset through
+    /// `restartPending`), and no probe is asked for one start grace: the new device has to shake
+    /// hands first.
+    public mutating func noteBackendRestarted(at uptime: TimeInterval, policy: TribeDataWatchPolicy) {
         restartPending = true
+        nextProbeNotBefore = Swift.max(nextProbeNotBefore, uptime + policy.startGraceSeconds)
+        sessionEpoch = uptime
     }
 
     /// A real path change: the path was lost, came back after a loss, or moved to another physical
     /// interface. Path updates that change neither (interface order, DNS, cost) are not passed in:
     /// on cellular there are hundreds per hour.
     public mutating func notePathEvent(at uptime: TimeInterval, interfaceChanged: Bool, policy: TribeDataWatchPolicy) {
+        // A probe in flight crossed a path change: whatever it says is about no one path.
+        if probeRequestedAt != nil { disturbedSinceProbe = true }
         if interfaceChanged {
-            // Another network: what was judged belongs to the previous one.
+            // Another network: what was judged belongs to the previous one. The outputs are told
+            // at the next sample (`lastReported` still holds the old verdict).
             closeEpisode()
             probeRequestedAt = nil
             if verdict != .none {
                 verdict = .none
+                evidence = .none
                 verdictSinceWall = 0
                 rxDataSinceVerdict = 0
                 lastWouldSwitch = false
@@ -525,13 +599,18 @@ public struct TribeDataWatch: Equatable {
         guard let previous = last else {
             last = sample
             lastHandshake = sample.lastHandshakeSec
-            healSeen = env.healSteps
+            if sessionEpoch == nil {
+                // Switched on in the middle of a session: the session is as old as its handshake.
+                let age = sample.lastHandshakeSec > 0 ? Swift.max(0, sample.wall - TimeInterval(sample.lastHandshakeSec)) : 0
+                sessionEpoch = sample.uptime - age
+            }
             return .idle
         }
 
         // 1. Deltas. Counters that go down (or an announced in-place restart) belong to a new
         // device: its counters are the deltas, its handshake is new.
         let countersReset = restartPending || sample.txBytes < previous.txBytes || sample.rxBytes < previous.rxBytes
+        let announcedRestart = restartPending
         restartPending = false
         let deltaTx = countersReset ? sample.txBytes : sample.txBytes - previous.txBytes
         let deltaRx = countersReset ? sample.rxBytes : sample.rxBytes - previous.rxBytes
@@ -544,6 +623,9 @@ public struct TribeDataWatch: Equatable {
         last = sample
         lastHandshake = sample.lastHandshakeSec
         let now = sample.uptime
+        // The engine's session: a new handshake begins one; a device that came up unannounced
+        // (counters fell) has none yet.
+        if handshakeChanged || (countersReset && !announcedRestart) { sessionEpoch = now }
 
         // 2. Sleep: the cycle starts over and a wake grace begins.
         if slept {
@@ -554,15 +636,11 @@ public struct TribeDataWatch: Equatable {
         }
         let quiet = !env.pathSatisfied || now < startGraceUntil || now < wakeGraceUntil || now < pathGraceUntil
 
-        // Heal steps the adapter performed since the previous sample, stamped with this sample.
-        if let seen = healSeen, env.healSteps > seen {
-            for _ in 0..<Swift.min(env.healSteps - seen, 16) { healTimes.append(now) }
-        }
-        healSeen = env.healSteps
-        healTimes.removeAll { now - $0 > TribeDataWatchPolicy.healWindowSeconds }
         if probeRequestedAt != nil {
             rxDataSinceProbe &+= rxData
-            if quiet { disturbedSinceProbe = true }
+            // What makes the wait worthless: the watch looked away, the device is another one, or
+            // the engine began a new session (the packet may have been only staged).
+            if quiet || countersReset || handshakeChanged { disturbedSinceProbe = true }
         }
 
         var justRecovered = false
@@ -621,21 +699,39 @@ public struct TribeDataWatch: Equatable {
             suspectRxData = 0
         }
 
-        // 6. The passive rule.
-        let healRecent = healTimes.count
-        lastHealStepsInEpisode = healRecent
+        // 6. The passive rule. It does not look at what the stall ladder did: the judge is the probe.
         let chainLive = lastDeadCycleEnd.map { now - $0 <= policy.cycleChainGapSeconds + policy.cycleSeconds } ?? false
         var passive = episodeStart != nil
             && chain >= policy.deadCycles && chainLive
             && episodeTx >= policy.minEpisodeTxBytes
-            && healRecent >= policy.minHealSteps
             && !quiet
 
-        // 7. The probe this watch is waiting for.
-        probeTimes.removeAll { now - $0 >= TribeDataWatchPolicy.probeHourSeconds }
+        let hour = TribeDataWatchPolicy.probeHourSeconds
+        probeTimes.removeAll { now - $0 >= hour }
+        lowRxProbeTimes.removeAll { now - $0 >= hour }
+        sanityTimes.removeAll { now - $0 >= hour }
         var report: TribeDataWatchReport?
-        /// A probe result that judges the passive rule on this step.
-        var judged: TribeProbeResult?
+
+        // 7. An answer that came after its probe had been judged silent: the verdict was wrong.
+        if let late = env.lateAnswerAt, late > lateAnswerSeenAt {
+            lateAnswerSeenAt = late
+            if verdict == .noData && evidence == .probe {
+                refutedCount += 1
+                report = .refuted
+                lastProbe = .answered
+                chain = 0
+                passive = false
+                if episodeStart != nil { answeredInEpisode = true }
+                verdict = episodeStart != nil ? .suspect : .none
+                evidence = .none
+                verdictSinceWall = verdict == .none ? 0 : sample.wall
+                rxDataSinceVerdict = 0
+            }
+        }
+
+        // 8. The probe this watch is waiting for.
+        /// What confirmed the passive rule on this step.
+        var judged = TribeVerdictEvidence.none
         if let requested = probeRequestedAt {
             var outcome: TribeProbeResult?
             if let at = env.probeAt, at >= requested, TribeDataWatch.isOutcome(env.probe) {
@@ -644,29 +740,54 @@ public struct TribeDataWatch: Equatable {
                 outcome = .notSent // the provider never reported back
             }
             if let outcome {
+                let reason = probeRequestReason
                 probeRequestedAt = nil
                 lastProbe = outcome
-                lastProbeReason = probeRequestReason
+                lastProbeReason = reason
                 lastProbeLatencyMs = outcome == .answered ? env.probeLatencyMs : 0
                 lastProbeWall = sample.wall
-                // A result judges the passive rule if the rule asked for it or is met right now.
-                let concerned = probeRequestReason == .passive || passive
-                // A result other than "answered" judges only an undisturbed wait: no inbound data
-                // and no quiet period since the probe was asked for. The chain itself may have
-                // aged during the wait, so the rule is held as met for this one step.
+                if outcome == .noSession { refundProbe(reason) } // nothing was injected
+                if reason == .lowRx {
+                    // Answered: the path is fine, come back later and later (10 min, 20, 40, an hour).
+                    if outcome != .answered { lowRxBackoff = TribeDataWatchPolicy.lowRxBackoffBaseSeconds }
+                    lowRxNotBefore = now + lowRxBackoff
+                    if outcome == .answered {
+                        lowRxBackoff = Swift.min(lowRxBackoff * 2, TribeDataWatchPolicy.lowRxBackoffMaxSeconds)
+                    }
+                }
+                // A result judges the passive rule only if the rule asked for it; the low-inbound
+                // trigger's own result is reported and the rule, if met, asks for its own probe.
+                let concerned = reason == .passive
+                // A result other than "answered" judges only an undisturbed wait. The chain itself
+                // may have aged during the wait, so the rule is held as met for this one step.
                 let undisturbed = rxDataSinceProbe == 0 && !disturbedSinceProbe && !quiet && episodeStart != nil
-                if concerned && outcome == .answered {
+                // No session and no response to the handshakes for a whole chain of dead cycles.
+                let handshakeSilent = sessionEpoch.map { now - $0 >= policy.cycleSeconds * Double(policy.deadCycles) } ?? false
+                if !concerned {
+                    report = .probe // the low-inbound trigger's own result
+                } else if outcome == .answered {
                     // The path passes data: the passive rule was wrong. Count it and start over.
                     refutedCount += 1
                     report = .refuted
                     chain = 0
                     passive = false
                     if episodeStart != nil { answeredInEpisode = true }
-                } else if concerned && undisturbed {
+                } else if outcome == .silent && undisturbed {
                     passive = true
-                    judged = outcome
+                    judged = .probe
+                } else if outcome == .noSession && undisturbed && handshakeSilent {
+                    passive = true
+                    judged = .handshake
+                } else if outcome == .noSession && undisturbed {
+                    // The engine is still trying its first handshakes: wait for a whole chain.
+                    nextProbeNotBefore = now + TribeDataWatchPolicy.probeRetryGapSeconds
+                } else if outcome == .silent || outcome == .staged || outcome == .noSession {
+                    disturbedCount += 1
+                    report = .disturbed
+                    nextProbeNotBefore = now + TribeDataWatchPolicy.probeRetryGapSeconds
                 } else {
-                    report = .probe // low-inbound trigger, a disturbed wait, or a rule no longer met
+                    report = .probe // not sent / unavailable: nothing to judge with
+                    nextProbeNotBefore = now + TribeDataWatchPolicy.probeRetryGapSeconds
                 }
             }
         }
@@ -674,17 +795,35 @@ public struct TribeDataWatch: Equatable {
         var needsSanity = false
         var startProbe: TribeProbeReason?
         var next = verdict
+        /// There is a probe at all (the policy allows it and the provider has one configured).
+        let probeUsable = policy.probeEnabled && env.probe != .unavailable
+        let canProbe = probeUsable
+            && probesInEpisode < policy.probeMaxPerEpisode && probeTimes.count < policy.probeMaxPerHour
 
         if justRecovered {
             next = .recovered
+        } else if passive && judged != .none {
+            next = .noData
+            evidence = judged
+        } else if passive && verdict == .noData {
+            // Already judged; stays until inbound data, a device start or another network.
+        } else if passive && verdict == .unconfirmed && !canProbe {
+            // Nothing can judge it: nobody is asked again (no bypass request either).
+        } else if passive && !canProbe && answeredInEpisode && probeRequestedAt == nil {
+            // Out of probes, and the last word of this episode was "it answers": start the chain
+            // over and ask nobody (no bypass request either: nothing could follow it).
+            chain = 0
+            passive = false
+            if !TribeDataWatch.isFinal(verdict) { next = .suspect }
         } else if passive {
-            // 7a. Is the physical network there at all? A no_data verdict was judged with a fresh
-            // result and is not re-asked; network / captive are re-asked at a slower pace.
-            var sanityOk = !policy.sanityRequired || verdict == .noData
+            // 9a. Is the physical network there at all? network / captive are re-asked at a
+            // slower pace; every request is charged to the hourly limit.
+            var sanityOk = !policy.sanityRequired
             if !sanityOk {
                 let maxAge = (verdict == .network || verdict == .captive)
                     ? TribeDataWatchPolicy.sanityRecheckSeconds : TribeDataWatchPolicy.sanityMaxAgeSeconds
                 let usable = env.sanityAt.map { now >= $0 && now - $0 <= maxAge } ?? false
+                let waiting = sanityAskedAt.map { now - $0 < TribeDataWatchPolicy.sanityAskTimeoutSeconds } ?? false
                 if usable && env.sanity != .unknown {
                     switch env.sanity {
                     case .ok: sanityOk = true
@@ -692,36 +831,31 @@ public struct TribeDataWatch: Equatable {
                     case .captive: next = .captive
                     case .unknown: break
                     }
-                } else {
-                    needsSanity = true
+                } else if waiting {
                     if verdict == .none { next = .suspect }
+                } else if sanityTimes.count < policy.sanityMaxPerHour {
+                    needsSanity = true
+                    sanityAskedAt = now
+                    sanityTimes.append(now)
+                    if verdict == .none { next = .suspect }
+                } else if !TribeDataWatch.isFinal(verdict) {
+                    next = .unconfirmed // the network cannot be checked any more this hour
                 }
             }
-            // 7b. The judge.
+            // 9b. The judge.
             if sanityOk {
-                if let outcome = judged {
-                    if outcome == .silent {
-                        next = .noData
-                    } else if verdict != .noData {
-                        next = .unconfirmed
-                    }
-                } else if verdict == .noData {
-                    // Already judged; stays until inbound data, a device start or another network.
-                } else if probeRequestedAt != nil {
+                if probeRequestedAt != nil {
                     if verdict == .none { next = .suspect } // waiting for the probe
-                } else if !policy.probeEnabled || env.probe == .unavailable {
+                } else if !probeUsable {
                     next = .unconfirmed
-                } else if probesInEpisode < policy.probeMaxPerEpisode && probeTimes.count < policy.probeMaxPerHour {
+                } else if now < nextProbeNotBefore {
+                    if verdict == .none { next = .suspect } // the last probe judged nothing: a short pause
+                } else if canProbe {
                     startProbe = .passive
                     chargeProbe(at: now, reason: .passive)
                     if verdict == .none { next = .suspect }
-                } else if answeredInEpisode {
-                    // Out of probes, and the last word of this episode was "it answers".
-                    chain = 0
-                    passive = false
-                    if !TribeDataWatch.isFinal(verdict) { next = .suspect }
                 } else {
-                    next = .unconfirmed
+                    next = .unconfirmed // out of probes and nothing ever answered
                 }
             }
         } else {
@@ -737,22 +871,22 @@ public struct TribeDataWatch: Equatable {
             }
         }
 
-        // 7c. The low-inbound trigger may start a probe of its own: its result is only reported.
+        // 9c. The low-inbound trigger may start a probe of its own: its result is only reported.
         // Not while an episode is open: no inbound data at all is the passive rule's business,
-        // and it will ask for the probe itself.
+        // and it will ask for the probe itself. Its budget and back-off are its own.
         if lowRxDue && episodeStart == nil && startProbe == nil && probeRequestedAt == nil && !TribeDataWatch.isFinal(next)
-            && policy.probeEnabled && env.probe != .unavailable && probeTimes.count < policy.probeMaxPerHour {
+            && probeUsable
+            && lowRxProbeTimes.count < policy.probeLowRxMaxPerHour && now >= lowRxNotBefore {
             startProbe = .lowRx
             chargeProbe(at: now, reason: .lowRx)
         }
         lastPassive = passive
 
-        // 8. What to tell.
+        // 10. What to tell.
         let appAlive = env.appSeenAt.map { now >= $0 && now - $0 <= policy.appAliveSeconds } ?? false
         lastAppAlive = appAlive
         let wouldSwitch = next == .noData && !appAlive
         if next != verdict {
-            if next != .none { report = report == .refuted ? .refuted : .verdict }
             if next == .recovered {
                 recoveredWall = sample.wall
             } else if next == .none {
@@ -761,6 +895,11 @@ public struct TribeDataWatch: Equatable {
                 verdictSinceWall = sample.wall
             }
             if !(TribeDataWatch.isFinal(verdict) && TribeDataWatch.isFinal(next)) { rxDataSinceVerdict = 0 }
+        }
+        if next != lastReported {
+            // Every change is told, also the end of a verdict (the outputs must never keep a
+            // verdict that is no longer held) and a change made between two samples.
+            report = report == .refuted ? .refuted : .verdict
         } else if wouldSwitch && !lastWouldSwitch && report == nil {
             report = .wouldSwitch // the app fell asleep after the verdict: the shadow mark turns on
         }
@@ -769,6 +908,7 @@ public struct TribeDataWatch: Equatable {
         let reported = next
         // `recovered` is an event, not a state: the next sample starts from `none`.
         verdict = next == .recovered ? .none : next
+        lastReported = verdict
         if next == .recovered { verdictSinceWall = 0 }
         return TribeDataWatchOutput(verdict: reported, action: report == nil ? .keep : .report, report: report,
                                     needsSanityCheck: needsSanity, startProbe: startProbe, wouldSwitch: wouldSwitch)
@@ -788,7 +928,6 @@ public struct TribeDataWatch: Equatable {
         }
         snapshot.episodeTx = episodeTx
         snapshot.episodeRxData = episodeRxData
-        snapshot.healSteps = lastHealStepsInEpisode
         let sanityFresh = lastEnv.sanityAt.flatMap { at in last.map { $0.uptime - at <= TribeDataWatchPolicy.sanityMaxAgeSeconds } } ?? false
         snapshot.sanity = sanityFresh ? lastEnv.sanity : .unknown
         snapshot.probe = probeRequestedAt != nil ? .pending : lastProbe
@@ -797,7 +936,11 @@ public struct TribeDataWatch: Equatable {
         snapshot.probeWallMs = Int64(lastProbeWall * 1000)
         snapshot.probesInEpisode = probesInEpisode
         snapshot.probesLastHour = probeTimes.count
+        snapshot.lowRxProbesLastHour = lowRxProbeTimes.count
+        snapshot.sanityLastHour = sanityTimes.count
         snapshot.refuted = refutedCount
+        snapshot.disturbed = disturbedCount
+        snapshot.evidence = verdict == .noData ? evidence : .none
         snapshot.wouldSwitch = lastWouldSwitch
         snapshot.appAlive = lastAppAlive
         snapshot.lastNoDataWallMs = Int64(lastNoDataWall * 1000)
@@ -815,7 +958,8 @@ public struct TribeDataWatch: Equatable {
     }
 
     private static func isOutcome(_ probe: TribeProbeResult) -> Bool {
-        probe == .answered || probe == .silent || probe == .notSent || probe == .unavailable
+        probe == .answered || probe == .silent || probe == .noSession || probe == .staged
+            || probe == .notSent || probe == .unavailable
     }
 
     private mutating func chargeProbe(at now: TimeInterval, reason: TribeProbeReason) {
@@ -823,8 +967,24 @@ public struct TribeDataWatch: Equatable {
         probeRequestReason = reason
         rxDataSinceProbe = 0
         disturbedSinceProbe = false
-        probeTimes.append(now)
-        if episodeStart != nil { probesInEpisode += 1 }
+        switch reason {
+        case .passive:
+            probeTimes.append(now)
+            if episodeStart != nil { probesInEpisode += 1 }
+        case .lowRx:
+            lowRxProbeTimes.append(now)
+        }
+    }
+
+    /// The start was refused (no session): no packet was injected, so no budget is spent.
+    private mutating func refundProbe(_ reason: TribeProbeReason) {
+        switch reason {
+        case .passive:
+            if !probeTimes.isEmpty { probeTimes.removeLast() }
+            if probesInEpisode > 0 { probesInEpisode -= 1 }
+        case .lowRx:
+            if !lowRxProbeTimes.isEmpty { lowRxProbeTimes.removeLast() }
+        }
     }
 
     private mutating func noteDeadCycle(start: TimeInterval, end: TimeInterval, policy: TribeDataWatchPolicy) {

@@ -1,29 +1,28 @@
 diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
-index 6ce7d65..331dc74 100644
+index 6ce7d65..35b44fe 100644
 --- a/Sources/WireGuardKit/WireGuardAdapter.swift
 +++ b/Sources/WireGuardKit/WireGuardAdapter.swift
-@@ -72,6 +72,20 @@ public class WireGuardAdapter {
+@@ -72,6 +72,19 @@ public class WireGuardAdapter {
      // whether the pending coalesced roam step is a fresh port (path returned after a real loss).
      private var lastPathInterface: String?
      private var roamWantsFreshPort = false
 +    // tribe.13 data watch (TribeDataWatch.swift): a verdict about DATA, fed on the stall watchdog's
 +    // own tick (no timer of its own; no stall watchdog = no data watch). It reports and asks, it
-+    // never acts. Off until the provider sets an enabled policy: the three hooks below are then
++    // never acts. Off until the provider sets an enabled policy: the hooks below are then
 +    // no-ops and the adapter behaves as tribe.11. workQueue only.
 +    private var dataWatch = TribeDataWatch()
 +    private var dataWatchPolicy = TribeDataWatchPolicy.disabled
 +    private var dataWatchActive = false
-+    /// Same-node heal steps performed so far (fresh ports and in-place restarts, whoever asked).
-+    private var dataWatchHealSteps: UInt64 = 0
 +    /// The provider's side of the watch (bypass check, probe, last status request of the app).
-+    /// Called on workQueue at every tick while the watch is on: it must only read fields.
-+    public var dataWatchInputs: (() -> TribeDataWatchInputs)?
++    /// Called on workQueue at every tick while the watch is on, with the handle of the device
++    /// that is up (the probe's result is asked from that device).
++    public var dataWatchInputs: ((_ handle: Int32) -> TribeDataWatchInputs)?
 +    /// Called on workQueue when the watch has something to report or asks for a check or a probe.
-+    public var dataWatchHandler: ((TribeDataWatchOutput, TribeDataWatchSnapshot) -> Void)?
++    public var dataWatchHandler: ((_ handle: Int32, TribeDataWatchOutput, TribeDataWatchSnapshot) -> Void)?
  
      /// Packet tunnel provider.
      private weak var packetTunnelProvider: NEPacketTunnelProvider?
-@@ -401,6 +415,17 @@ public class WireGuardAdapter {
+@@ -401,6 +414,17 @@ public class WireGuardAdapter {
          }
      }
  
@@ -41,7 +40,7 @@ index 6ce7d65..331dc74 100644
      // MARK: - Private methods
  
      /// Setup WireGuard log handler.
-@@ -587,6 +612,7 @@ public class WireGuardAdapter {
+@@ -587,6 +611,7 @@ public class WireGuardAdapter {
                  let realLoss = self.pathLostAt != nil && self.everHadHandshake
                      && self.remainingUnsatisfiedGraceSeconds() == 0
                  let interfaceChanged = self.notePathInterface(path) && self.everHadHandshake
@@ -49,7 +48,7 @@ index 6ce7d65..331dc74 100644
                  if let lostAt = self.pathLostAt {
                      self.pathLostAt = nil
                      self.roamCounters.pathRestored += 1
-@@ -673,6 +699,7 @@ public class WireGuardAdapter {
+@@ -673,6 +698,7 @@ public class WireGuardAdapter {
          guard self.pathLostAt == nil else { return }
          self.pathLostAt = Date()
          self.roamCounters.pathLost += 1
@@ -57,7 +56,7 @@ index 6ce7d65..331dc74 100644
      }
  
      /// tribe.9: remembers the physical interface of the satisfied path (utun/ipsec are `.other`
-@@ -760,6 +787,10 @@ public class WireGuardAdapter {
+@@ -760,6 +786,10 @@ public class WireGuardAdapter {
          self.stallTimer = timer
          self.recovery.resetTracker()
          self.previousWatchdogSample = nil
@@ -68,33 +67,26 @@ index 6ce7d65..331dc74 100644
          timer.resume()
      }
  
-@@ -793,6 +824,7 @@ public class WireGuardAdapter {
-         for op in ops {
-             switch op {
-             case .freshListenPort:
-+                self.dataWatchHealSteps &+= 1 // tribe.13: a same-node heal step
-                 wgSetConfig(handle, "listen_port=0\n")
-                 #if os(iOS)
-                 wgDisableSomeRoamingForBrokenMobileSemantics(handle)
-@@ -823,6 +855,9 @@ public class WireGuardAdapter {
+@@ -823,6 +853,10 @@ public class WireGuardAdapter {
              self.state = .started(newHandle, settingsGenerator)
              self.roamCounters.softRestarts += 1
              self.previousWatchdogSample = nil
-+            // tribe.13: a same-node heal step; the new device's counters start from zero.
-+            self.dataWatchHealSteps &+= 1
-+            if self.dataWatchPolicy.enabled { self.dataWatch.noteBackendRestarted() }
++            // tribe.13: the new device's counters start from zero and it has no session yet.
++            if self.dataWatchPolicy.enabled {
++                self.dataWatch.noteBackendRestarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++            }
              if let sample = self.currentStallSample(handle: newHandle) {
                  self.recovery.rebaseAfterBackendRestart(sample)
              }
-@@ -871,6 +906,7 @@ public class WireGuardAdapter {
+@@ -871,6 +905,7 @@ public class WireGuardAdapter {
          self.previousWatchdogSample = sample
          let interval: Double = (!self.lastPathSatisfiable || idle) ? 5 : 1
          self.stallTimer?.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(300))
-+        self.dataWatchTick(sample) // tribe.13: the same sample, before the ladder acts on it
++        self.dataWatchTick(sample, handle: handle) // tribe.13: the same sample, before the ladder acts on it
          let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
          switch outcome {
          case .none:
-@@ -902,6 +938,36 @@ public class WireGuardAdapter {
+@@ -902,6 +937,36 @@ public class WireGuardAdapter {
          }
      }
  
@@ -102,7 +94,7 @@ index 6ce7d65..331dc74 100644
 +
 +    /// One step of the data watch on the stall watchdog's sample. With the policy off this is one
 +    /// comparison; the watch is cleared once when the policy goes off.
-+    private func dataWatchTick(_ sample: TribeStallSample) {
++    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32) {
 +        guard self.dataWatchPolicy.enabled else {
 +            if self.dataWatchActive {
 +                self.dataWatchActive = false
@@ -111,14 +103,14 @@ index 6ce7d65..331dc74 100644
 +            return
 +        }
 +        self.dataWatchActive = true
-+        let inputs = self.dataWatchInputs?() ?? TribeDataWatchInputs()
++        let inputs = self.dataWatchInputs?(handle) ?? TribeDataWatchInputs()
 +        let output = self.dataWatch.step(
 +            TribeDataWatchSample(txBytes: sample.txBytes, rxBytes: sample.rxBytes, lastHandshakeSec: sample.lastHandshakeSec,
 +                                 uptime: sample.at, wall: Date().timeIntervalSince1970),
-+            env: inputs.env(pathSatisfied: self.lastPathSatisfiable, healSteps: self.dataWatchHealSteps),
++            env: inputs.env(pathSatisfied: self.lastPathSatisfiable),
 +            policy: self.dataWatchPolicy)
 +        guard output.action != .keep || output.needsSanityCheck || output.startProbe != nil else { return }
-+        self.dataWatchHandler?(output, self.dataWatch.snapshot(policy: self.dataWatchPolicy))
++        self.dataWatchHandler?(handle, output, self.dataWatch.snapshot(policy: self.dataWatchPolicy))
 +    }
 +
 +    /// A real path change (lost, back after a loss, another physical interface). Path updates that
@@ -147,10 +139,10 @@ index e104403..1b034c0 100644
  	err = dev.IpcSet(C.GoString(settings))
 diff --git a/Sources/WireGuardKitGo/tribeprobe.go b/Sources/WireGuardKitGo/tribeprobe.go
 new file mode 100644
-index 0000000..ec71a46
+index 0000000..7811611
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/tribeprobe.go
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,634 @@
 +/* SPDX-License-Identifier: MIT
 + *
 + * Tribe data watch probe (awg-apple tribe.13).
@@ -168,15 +160,35 @@ index 0000000..ec71a46
 + * phone <-> node. It says nothing about bulk transfer: a freeze that depends on the size of the
 + * answer is invisible to a 100-byte reply. The resolver answers the root query itself.
 + *
++ * What "silent" means, exactly. The device encrypts and sends a packet only while it holds a
++ * keypair that may still send (device/send.go SendStagedPackets: keypair != nil and its age below
++ * keychainExpireTime); otherwise the packet is only STAGED and a handshake is started. A staged
++ * packet never left the phone, so its silence proves nothing. The engine does not expose its
++ * keypair, but it exposes the moment the keypair was created: last_handshake_time (uapi.go,
++ * peer.lastHandshakeNano, written when the handshake completes) and the expiry it applies
++ * (reject_after_time, 180 s when not configured). So:
++ *   - a probe is started only when that timestamp says a keypair may send now; otherwise the
++ *     start itself answers "no session" and nothing is injected;
++ *   - "silent" is reported only when the device took the packet off the tunnel (this wrapper's
++ *     own Read handed it over) at a moment the keypair of that same handshake could still send,
++ *     and the timestamp is the same at the end of the wait (no new session in between);
++ *   - anything else is "no_session" (staged, cannot be judged) or "not_sent" (the device never
++ *     took the packet).
++ * The timestamp is read through the engine's own UAPI dump from the caller's queue (the same
++ * call the adapter makes every second), never from the device's goroutines.
++ *
++ * A reply that comes after the verdict is still credited: for a while the write path keeps
++ * looking for it and the result turns into "answered late=1". The look-out ends by itself (a
++ * deadline checked on the write path), whether or not anybody asks for the result again.
++ *
 + * The wrapper is its own outermost tun.Device and is a pass-through: no pump goroutine, no copy
-+ * per packet; Write looks at packets only while a probe is in flight. How the packet gets in:
++ * per packet; Read and Write look at packets only while a probe needs it. How the packet gets in:
 + *  - the split-DNS forwarder is on (the default): the forwarder already feeds the device from a
-+ *    channel, the probe packet is put into that channel and leaves at once;
++ *    channel, the probe packet is put into that channel; it counts as taken only when it comes
++ *    back through this wrapper's Read (the device is reading, the direct split let it through);
 + *  - the forwarder is off (RU node, user setting): Read hands out a waiting probe packet first
 + *    and otherwise calls the inner Read, so the packet leaves with the next outbound packet of
-+ *    the OS. The probe is asked for only when there is outbound demand, but on a dead path that
-+ *    demand can pause for seconds: if nothing reads the tunnel before the timeout the result is
-+ *    "not_sent", which is different from "silent".
++ *    the OS. If nothing reads the tunnel before the timeout the result is "not_sent".
 + *
 + * Inner IPv4 only: the client address of our configs is IPv4.
 + * amneziawg-go is not patched.
@@ -189,6 +201,7 @@ index 0000000..ec71a46
 +	"encoding/binary"
 +	"fmt"
 +	"net/netip"
++	"strconv"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -202,13 +215,34 @@ index 0000000..ec71a46
 +	// from its warm-up port (50000), so the two wrappers never claim each other's replies.
 +	tribeProbePortBase = 50100
 +	tribeProbePortSpan = 100
++
++	// Results of a start that injected nothing.
++	tribeProbeStartNone      = 0  // no probe in this session
++	tribeProbeStartNoTarget  = -1 // the resolver cannot be reached through the tunnel in this session
++	tribeProbeStartNoSession = -2 // the engine holds no keypair that may send now
++
++	// The engine's own default (device/constants.go RejectAfterTime) when reject_after_time is
++	// not configured.
++	tribeProbeDefaultExpire = 180 * time.Second
++	// A keypair this close to its expiry is treated as gone: the read of the timestamp and the
++	// device's own check are not the same instant.
++	tribeProbeExpireMargin = 5 * time.Second
 +)
 +
 +// Tunable in tests only.
 +var (
 +	tribeProbeResendAfter    = 1500 * time.Millisecond
 +	tribeProbeDefaultTimeout = 4 * time.Second
-+	tribeProbeNow            = time.Now
++	// How long after its verdict a probe's reply is still looked for.
++	tribeProbeLateWindow = 30 * time.Second
++	tribeProbeNow        = time.Now
++)
++
++// Set by api-apple.go: the engine's UAPI dump of a tunnel handle, and whether an address is in
++// the direct-split list (such a packet is taken out of the tunnel below this wrapper).
++var (
++	tribeProbeEngineDump = func(handle int32) (string, bool) { return "", false }
++	tribeProbeIsDirect   = func(addr netip.Addr) bool { return false }
 +)
 +
 +type tribeProbeConfig struct {
@@ -216,16 +250,106 @@ index 0000000..ec71a46
 +	target netip.Addr // the resolver the session uses (dns1)
 +}
 +
++// What the engine says about the peer that routes the probe's target.
++type tribeEngineFacts struct {
++	ok        bool          // the dump was read
++	routed    bool          // the target is inside a peer's allowed IPs
++	handshake time.Time     // that peer's last completed handshake; zero = none yet
++	expire    time.Duration // how long a keypair may send
++}
++
++// usable: a keypair created at the handshake may still send at `at`.
++func (f tribeEngineFacts) usable(at time.Time) bool {
++	if !f.ok || !f.routed || f.handshake.IsZero() {
++		return false
++	}
++	age := at.Sub(f.handshake)
++	return age >= 0 && age < f.expire-tribeProbeExpireMargin
++}
++
++// tribeParseEngineFacts reads the UAPI dump (device/uapi.go IpcGetOperation).
++func tribeParseEngineFacts(dump string, target netip.Addr) tribeEngineFacts {
++	facts := tribeEngineFacts{ok: true, expire: tribeProbeDefaultExpire}
++	type peerFacts struct {
++		routed bool
++		bits   int
++		sec    int64
++		nsec   int64
++	}
++	var peers []peerFacts
++	for _, line := range strings.Split(dump, "\n") {
++		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
++		if !found {
++			continue
++		}
++		switch key {
++		case "reject_after_time":
++			// A range "lo-hi" or one number; the engine applies the upper bound (keychainExpireTime).
++			hi := value
++			if i := strings.LastIndex(value, "-"); i >= 0 {
++				hi = value[i+1:]
++			}
++			if n, err := strconv.ParseInt(strings.TrimSpace(hi), 10, 64); err == nil && n > 0 {
++				facts.expire = time.Duration(n) * time.Second
++			}
++		case "public_key":
++			peers = append(peers, peerFacts{bits: -1})
++		case "last_handshake_time_sec":
++			if len(peers) > 0 {
++				peers[len(peers)-1].sec, _ = strconv.ParseInt(value, 10, 64)
++			}
++		case "last_handshake_time_nsec":
++			if len(peers) > 0 {
++				peers[len(peers)-1].nsec, _ = strconv.ParseInt(value, 10, 64)
++			}
++		case "allowed_ip":
++			if len(peers) == 0 {
++				continue
++			}
++			if prefix, err := netip.ParsePrefix(value); err == nil && prefix.Contains(target) && prefix.Bits() > peers[len(peers)-1].bits {
++				peers[len(peers)-1].routed = true
++				peers[len(peers)-1].bits = prefix.Bits()
++			}
++		}
++	}
++	best := -1
++	for i, p := range peers { // the engine routes by the longest prefix
++		if p.routed && (best < 0 || p.bits > peers[best].bits) {
++			best = i
++		}
++	}
++	if best < 0 {
++		return facts
++	}
++	facts.routed = true
++	if peers[best].sec > 0 || peers[best].nsec > 0 {
++		facts.handshake = time.Unix(peers[best].sec, peers[best].nsec)
++	}
++	return facts
++}
++
++func tribeProbeFacts(handle int32, target netip.Addr) tribeEngineFacts {
++	dump, ok := tribeProbeEngineDump(handle)
++	if !ok {
++		return tribeEngineFacts{}
++	}
++	return tribeParseEngineFacts(dump, target)
++}
++
 +// One probe. Times are zero until the event happens.
 +type tribeProbeState struct {
-+	id        uint32
-+	port      uint16
-+	dnsID     uint16
-+	timeout   time.Duration
-+	startedAt time.Time
-+	handedAt  time.Time // the first packet was taken by the device
-+	answered  time.Time
-+	sent      int // packets handed to the device (1 or 2)
++	id         uint32
++	port       uint16
++	dnsID      uint16
++	timeout    time.Duration
++	startedAt  time.Time
++	hsAtStart  time.Time // the engine's last handshake when the probe was started
++	expire     time.Duration
++	consumedAt time.Time // the device took the first packet off the tunnel
++	answered   time.Time
++	// The verdict once the wait is over ("silent", "no_session", "not_sent"); it is told once and
++	// stays. An answer that comes later is told as answered with late=1.
++	final string
 +	// The device went away (stop or in-place restart) before an answer: the probe cannot be
 +	// judged any more. Reported as not_sent, never as silent.
 +	aborted bool
@@ -233,12 +357,16 @@ index 0000000..ec71a46
 +}
 +
 +var (
-+	tribeProbeMu     sync.Mutex
-+	tribeProbeCfg    *tribeProbeConfig // nil = no probe in this session
-+	tribeProbeTun    *tribeProbeTunDev // the wrapper of the device that is up now
-+	tribeProbeCur    *tribeProbeState
-+	tribeProbeSeq    uint32
-+	tribeProbeFlying atomic.Bool // a probe is in flight: Write has to look at packets
++	tribeProbeMu  sync.Mutex
++	tribeProbeCfg *tribeProbeConfig // nil = no probe in this session
++	tribeProbeTun *tribeProbeTunDev // the wrapper of the device that is up now
++	tribeProbeCur *tribeProbeState
++	tribeProbeSeq uint32
++	// Unix nanoseconds until which the write path looks for the probe's reply; 0 = it does not.
++	// A deadline, not a flag: the look-out ends by itself even when nobody polls the result.
++	tribeProbeUntil atomic.Int64
++	// The probe's packet has not been seen coming out of the forwarder yet: Read looks for it.
++	tribeProbeAwaitTake atomic.Bool
 +)
 +
 +// wgSetTribeProbe configures the probe before wgTurnOn (like wgSetSplitDns). enabled == 0
@@ -268,30 +396,55 @@ index 0000000..ec71a46
 +	return 0
 +}
 +
-+// wgTribeProbeStart starts one probe. Returns its id (> 0), the id of the probe already in
-+// flight, or 0 when there is no probe in this session. timeoutMs <= 0 = the default.
++// wgTribeProbeStart starts one probe on the device of `handle`. Returns its id (> 0), the id of
++// the probe already in flight, 0 when there is no probe in this session, -1 when the resolver
++// cannot be reached through the tunnel in this session (not routed into it, or taken out of it
++// by the direct split), -2 when the engine holds no keypair that may send now (nothing is
++// injected: the packet would only be staged). timeoutMs <= 0 = the default.
 +//
 +//export wgTribeProbeStart
-+func wgTribeProbeStart(timeoutMs int32) int32 {
-+	return int32(tribeProbeStart(time.Duration(timeoutMs) * time.Millisecond))
++func wgTribeProbeStart(handle int32, timeoutMs int32) int32 {
++	return tribeProbeStart(handle, time.Duration(timeoutMs)*time.Millisecond)
 +}
 +
-+func tribeProbeStart(timeout time.Duration) uint32 {
++func tribeProbeStart(handle int32, timeout time.Duration) int32 {
++	tribeProbeMu.Lock()
++	cfg := tribeProbeCfg
++	dev := tribeProbeTun
++	now := tribeProbeNow()
++	if cfg == nil || dev == nil {
++		tribeProbeMu.Unlock()
++		return tribeProbeStartNone
++	}
++	if cur := tribeProbeCur; cur != nil && tribeProbePendingLocked(cur, now) {
++		tribeProbeMu.Unlock()
++		return int32(cur.id)
++	}
++	tribeProbeMu.Unlock()
++
++	// The engine is asked outside our lock: its dump takes the device's own locks.
++	if tribeProbeIsDirect(cfg.target) {
++		return tribeProbeStartNoTarget
++	}
++	facts := tribeProbeFacts(handle, cfg.target)
++	if !facts.ok || !facts.routed {
++		return tribeProbeStartNoTarget
++	}
++	if !facts.usable(now) {
++		return tribeProbeStartNoSession
++	}
++
 +	tribeProbeMu.Lock()
 +	defer tribeProbeMu.Unlock()
-+	if tribeProbeCfg == nil || tribeProbeTun == nil {
-+		return 0
-+	}
-+	now := tribeProbeNow()
-+	if cur := tribeProbeCur; cur != nil && tribeProbeStateLocked(cur, now) == "pending" {
-+		return cur.id
++	if tribeProbeCfg != cfg || tribeProbeTun != dev {
++		return tribeProbeStartNone // the session changed while the engine was asked
 +	}
 +	tribeProbeAbortLocked()
 +	if timeout <= 0 {
 +		timeout = tribeProbeDefaultTimeout
 +	}
 +	tribeProbeSeq++
-+	if tribeProbeSeq == 0 {
++	if tribeProbeSeq == 0 || tribeProbeSeq > 1<<30 {
 +		tribeProbeSeq = 1
 +	}
 +	st := &tribeProbeState{
@@ -300,77 +453,128 @@ index 0000000..ec71a46
 +		dnsID:     uint16(now.UnixNano()>>8) | 1,
 +		timeout:   timeout,
 +		startedAt: now,
++		hsAtStart: facts.handshake,
++		expire:    facts.expire,
 +	}
 +	tribeProbeCur = st
-+	tribeProbeFlying.Store(true)
-+	if tribeProbeTun.send(tribeProbePacket(tribeProbeCfg, st)) {
-+		st.handedAt = now
-+		st.sent++
-+	}
++	// Until the wait can be over at the latest (taken at the very end of the first timeout, then
++	// a full timeout of silence) plus the late window.
++	tribeProbeUntil.Store(now.Add(2*timeout + tribeProbeLateWindow).UnixNano())
++	tribeProbeAwaitTake.Store(dev.fwd != nil)
++	dev.send(tribeProbePacket(cfg, st))
 +	// One repeat: a single lost datagram must not read as a dead tunnel.
 +	st.resend = time.AfterFunc(tribeProbeResendAfter, func() { tribeProbeResend(st) })
-+	return st.id
++	return int32(st.id)
 +}
 +
 +func tribeProbeResend(st *tribeProbeState) {
 +	tribeProbeMu.Lock()
 +	defer tribeProbeMu.Unlock()
-+	if tribeProbeCur != st || tribeProbeCfg == nil || tribeProbeTun == nil || !st.answered.IsZero() || st.aborted {
++	if tribeProbeCur != st || tribeProbeCfg == nil || tribeProbeTun == nil || !st.answered.IsZero() || st.aborted || st.final != "" {
 +		return
 +	}
-+	if tribeProbeTun.send(tribeProbePacket(tribeProbeCfg, st)) {
-+		if st.handedAt.IsZero() {
-+			st.handedAt = tribeProbeNow()
-+		}
-+		st.sent++
-+	}
++	tribeProbeTun.send(tribeProbePacket(tribeProbeCfg, st))
 +}
 +
-+// wgTribeProbeResult returns "state=<s> id=<n> ms=<n>": s is none | pending | answered | silent |
-+// not_sent | unavailable; ms is the round trip of an answered probe. The caller frees the string.
++// wgTribeProbeResult returns "state=<s> id=<n> ms=<n> late=<0|1>": s is none | pending |
++// answered | silent | no_session | not_sent | unavailable; ms is the round trip of an answered
++// probe; late=1 marks an answer that came after the probe had already been told as silent or
++// no_session. The caller frees the string.
 +//
 +//export wgTribeProbeResult
-+func wgTribeProbeResult() *C.char {
-+	return C.CString(tribeProbeResult())
++func wgTribeProbeResult(handle int32) *C.char {
++	return C.CString(tribeProbeResult(handle))
 +}
 +
-+func tribeProbeResult() string {
++func tribeProbeFormat(state string, st *tribeProbeState, late bool) string {
++	id, ms, lateFlag := uint32(0), int64(0), 0
++	if st != nil {
++		id = st.id
++		if state == "answered" {
++			ms = st.answered.Sub(st.consumedAt).Milliseconds()
++		}
++	}
++	if late {
++		lateFlag = 1
++	}
++	return fmt.Sprintf("state=%s id=%d ms=%d late=%d", state, id, ms, lateFlag)
++}
++
++func tribeProbeResult(handle int32) string {
++	tribeProbeMu.Lock()
++	cfg := tribeProbeCfg
++	st := tribeProbeCur
++	if cfg == nil {
++		tribeProbeMu.Unlock()
++		return tribeProbeFormat("unavailable", nil, false)
++	}
++	if st == nil {
++		tribeProbeMu.Unlock()
++		return tribeProbeFormat("none", nil, false)
++	}
++	now := tribeProbeNow()
++	if state, done := tribeProbeSettledLocked(st, now); done {
++		tribeProbeMu.Unlock()
++		return state
++	}
++	if st.consumedAt.IsZero() || now.Sub(st.consumedAt) < st.timeout {
++		tribeProbeMu.Unlock()
++		return tribeProbeFormat("pending", st, false)
++	}
++	tribeProbeMu.Unlock()
++
++	// The wait is over without an answer. Did the packet really leave under a keypair? The engine
++	// is asked outside our lock.
++	facts := tribeProbeFacts(handle, cfg.target)
++
 +	tribeProbeMu.Lock()
 +	defer tribeProbeMu.Unlock()
-+	if tribeProbeCfg == nil {
-+		return "state=unavailable id=0 ms=0"
++	if tribeProbeCur != st {
++		return tribeProbeFormat("not_sent", st, false) // replaced meanwhile: this one is never judged
 +	}
-+	st := tribeProbeCur
-+	if st == nil {
-+		return "state=none id=0 ms=0"
++	if state, done := tribeProbeSettledLocked(st, now); done {
++		return state
 +	}
-+	state := tribeProbeStateLocked(st, tribeProbeNow())
-+	ms := int64(0)
-+	if state == "answered" {
-+		ms = st.answered.Sub(st.handedAt).Milliseconds()
++	started := tribeEngineFacts{ok: true, routed: true, handshake: st.hsAtStart, expire: st.expire}
++	if facts.ok && facts.routed && facts.handshake.Equal(st.hsAtStart) && started.usable(st.consumedAt) {
++		st.final = "silent"
++	} else {
++		st.final = "no_session"
 +	}
-+	if state != "pending" {
-+		tribeProbeFlying.Store(false)
-+	}
-+	return fmt.Sprintf("state=%s id=%d ms=%d", state, st.id, ms)
++	tribeProbeUntil.Store(now.Add(tribeProbeLateWindow).UnixNano())
++	return tribeProbeFormat(st.final, st, false)
 +}
 +
-+func tribeProbeStateLocked(st *tribeProbeState, now time.Time) string {
++// tribeProbeSettledLocked: the result when no question to the engine is needed.
++func tribeProbeSettledLocked(st *tribeProbeState, now time.Time) (string, bool) {
 +	switch {
 +	case !st.answered.IsZero():
-+		return "answered"
++		return tribeProbeFormat("answered", st, st.final != ""), true
++	case st.final != "":
++		return tribeProbeFormat(st.final, st, false), true
 +	case st.aborted:
-+		return "not_sent"
-+	case st.handedAt.IsZero():
-+		if now.Sub(st.startedAt) >= st.timeout {
-+			return "not_sent"
++		st.final = "not_sent"
++		return tribeProbeFormat(st.final, st, false), true
++	case st.consumedAt.IsZero() && now.Sub(st.startedAt) >= st.timeout:
++		st.final = "not_sent"
++		if st.resend != nil {
++			st.resend.Stop()
 +		}
-+		return "pending"
-+	case now.Sub(st.handedAt) >= st.timeout:
-+		return "silent"
-+	default:
-+		return "pending"
++		tribeProbeUntil.Store(0) // nothing left the phone: no reply can come
++		tribeProbeAwaitTake.Store(false)
++		return tribeProbeFormat(st.final, st, false), true
 +	}
++	return "", false
++}
++
++func tribeProbePendingLocked(st *tribeProbeState, now time.Time) bool {
++	if !st.answered.IsZero() || st.final != "" || st.aborted {
++		return false
++	}
++	if st.consumedAt.IsZero() {
++		return now.Sub(st.startedAt) < st.timeout
++	}
++	return now.Sub(st.consumedAt) < st.timeout
 +}
 +
 +// tribeProbeAbortLocked ends the probe in flight without a verdict (its state stays readable).
@@ -379,11 +583,12 @@ index 0000000..ec71a46
 +		if st.resend != nil {
 +			st.resend.Stop()
 +		}
-+		if st.answered.IsZero() {
++		if st.answered.IsZero() && st.final == "" {
 +			st.aborted = true
 +		}
 +	}
-+	tribeProbeFlying.Store(false)
++	tribeProbeUntil.Store(0)
++	tribeProbeAwaitTake.Store(false)
 +	if tribeProbeTun != nil {
 +		tribeProbeTun.drain()
 +	}
@@ -424,22 +629,20 @@ index 0000000..ec71a46
 +	return dev
 +}
 +
-+// send hands the packet to the device. true = it is on its way now (the forwarder's channel);
-+// false = it waits for the device's next Read, or could not be queued at all.
-+func (d *tribeProbeTunDev) send(pkt []byte) bool {
++// send queues the packet for the device: into the forwarder's channel, or for this wrapper's
++// next Read. Queued is not taken: the probe counts as taken only in Read.
++func (d *tribeProbeTunDev) send(pkt []byte) {
 +	if d.fwd != nil {
 +		select {
 +		case d.fwd.out <- pkt:
-+			return true
 +		default: // the forwarder's queue is full or closed: the device is not reading
-+			return false
 +		}
++		return
 +	}
 +	select {
 +	case d.pending <- pkt:
 +	default: // both slots taken: the device is not reading; the result will be not_sent
 +	}
-+	return false
 +}
 +
 +func (d *tribeProbeTunDev) drain() {
@@ -457,28 +660,57 @@ index 0000000..ec71a46
 +	case pkt := <-d.pending:
 +		if len(bufs) > 0 && len(bufs[0]) >= offset+len(pkt) {
 +			sizes[0] = copy(bufs[0][offset:], pkt)
-+			tribeProbeHanded(d)
++			tribeProbeConsumed(d)
 +			return 1, nil
 +		}
 +	default:
 +	}
-+	return d.Device.Read(bufs, sizes, offset)
++	n, err := d.Device.Read(bufs, sizes, offset)
++	if n > 0 && tribeProbeAwaitTake.Load() {
++		for i := 0; i < n; i++ {
++			if len(bufs[i]) >= offset+sizes[i] && tribeProbeIsOurs(d, bufs[i][offset:offset+sizes[i]]) {
++				tribeProbeConsumed(d)
++				break
++			}
++		}
++	}
++	return n, err
 +}
 +
-+func tribeProbeHanded(d *tribeProbeTunDev) {
++// tribeProbeIsOurs: the packet coming out of the forwarder is the probe's query.
++func tribeProbeIsOurs(d *tribeProbeTunDev, pkt []byte) bool {
++	m, ok := parseUDP4(pkt)
++	if !ok || m.dpt != 53 || m.sport < tribeProbePortBase || m.sport >= tribeProbePortBase+tribeProbePortSpan {
++		return false
++	}
 +	tribeProbeMu.Lock()
 +	defer tribeProbeMu.Unlock()
-+	if tribeProbeTun != d || tribeProbeCur == nil || tribeProbeCur.aborted {
++	st := tribeProbeCur
++	return st != nil && tribeProbeCfg != nil && tribeProbeTun == d && m.sport == st.port &&
++		m.dst == tribeProbeCfg.target && len(m.payload) >= 2 && binary.BigEndian.Uint16(m.payload[0:2]) == st.dnsID
++}
++
++// tribeProbeConsumed: the device has just taken the probe's packet off the tunnel.
++func tribeProbeConsumed(d *tribeProbeTunDev) {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	st := tribeProbeCur
++	if tribeProbeTun != d || st == nil || st.aborted || st.final != "" {
 +		return
 +	}
-+	if tribeProbeCur.handedAt.IsZero() {
-+		tribeProbeCur.handedAt = tribeProbeNow()
++	if st.consumedAt.IsZero() {
++		st.consumedAt = tribeProbeNow()
 +	}
-+	tribeProbeCur.sent++
++	tribeProbeAwaitTake.Store(false)
 +}
 +
 +func (d *tribeProbeTunDev) Write(bufs [][]byte, offset int) (int, error) {
-+	if !tribeProbeFlying.Load() {
++	until := tribeProbeUntil.Load()
++	if until == 0 {
++		return d.Device.Write(bufs, offset)
++	}
++	if tribeProbeNow().UnixNano() > until {
++		tribeProbeUntil.CompareAndSwap(until, 0) // the look-out is over, asked for or not
 +		return d.Device.Write(bufs, offset)
 +	}
 +	hit := -1
@@ -510,7 +742,8 @@ index 0000000..ec71a46
 +	return n, err
 +}
 +
-+// tribeProbeTakeReply: true = this packet is the answer to the probe in flight (or its repeat).
++// tribeProbeTakeReply: true = this packet is the answer to the last probe (or to its repeat),
++// in time or late.
 +func tribeProbeTakeReply(d *tribeProbeTunDev, pkt []byte) bool {
 +	m, ok := parseUDP4(pkt)
 +	if !ok || m.sport != 53 || m.dpt < tribeProbePortBase || m.dpt >= tribeProbePortBase+tribeProbePortSpan {
@@ -526,7 +759,7 @@ index 0000000..ec71a46
 +	if len(m.payload) < 2 || binary.BigEndian.Uint16(m.payload[0:2]) != st.dnsID {
 +		return false
 +	}
-+	if st.answered.IsZero() && !st.handedAt.IsZero() {
++	if st.answered.IsZero() && !st.consumedAt.IsZero() {
 +		st.answered = tribeProbeNow()
 +		if st.resend != nil {
 +			st.resend.Stop()
@@ -544,12 +777,51 @@ index 0000000..ec71a46
 +	tribeProbeMu.Unlock()
 +	return d.Device.Close()
 +}
+diff --git a/Sources/WireGuardKitGo/tribeprobe_engine.go b/Sources/WireGuardKitGo/tribeprobe_engine.go
+new file mode 100644
+index 0000000..f06cfaf
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeprobe_engine.go
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Tribe data watch probe: what it asks the engine and the direct split (awg-apple tribe.13).
++ * Kept apart from tribeprobe.go so that the probe's own tests need neither the device nor cgo.
++ */
++package main
++
++import "net/netip"
++
++func init() {
++	// The engine's UAPI dump of a tunnel handle (the call wgGetConfig makes). Called from the
++	// adapter's queue only, like every other use of the handle table.
++	tribeProbeEngineDump = func(handle int32) (string, bool) {
++		dev, ok := tunnelHandles[handle]
++		if !ok {
++			return "", false
++		}
++		dump, err := dev.IpcGet()
++		return dump, err == nil
++	}
++	// A destination inside the direct-split list never enters the tunnel (directsplit.go takes
++	// the packet out below the probe's wrapper): such a resolver cannot be probed.
++	tribeProbeIsDirect = func(addr netip.Addr) bool {
++		directMu.Lock()
++		set := directSet
++		directMu.Unlock()
++		if set == nil || !addr.Is4() {
++			return false
++		}
++		a := addr.As4()
++		return set.contains4(be32(a[:]))
++	}
++}
 diff --git a/Sources/WireGuardKitGo/tribeprobe_test.go b/Sources/WireGuardKitGo/tribeprobe_test.go
 new file mode 100644
-index 0000000..5d58d9b
+index 0000000..7d4bfa0
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/tribeprobe_test.go
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,957 @@
 +/* SPDX-License-Identifier: MIT
 + *
 + * Tribe data watch probe - tests with a fake tun (no device, no network): what the wrapper hands
@@ -562,6 +834,7 @@ index 0000000..5d58d9b
 +	"errors"
 +	"net/netip"
 +	"os"
++	"strconv"
 +	"strings"
 +	"sync"
 +	"testing"
@@ -653,7 +926,69 @@ index 0000000..5d58d9b
 +	c.mu.Unlock()
 +}
 +
++// probeEngine is what the engine would say in its UAPI dump (the hook tribeProbeEngineDump).
++type probeEngine struct {
++	mu        sync.Mutex
++	ok        bool
++	handshake time.Time // zero = no handshake yet
++	reject    string    // reject_after_time as the engine prints it; "" = not configured
++	allowed   []string
++	asked     int
++}
++
++func (e *probeEngine) dump(int32) (string, bool) {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	e.asked++
++	if !e.ok {
++		return "", false
++	}
++	var b strings.Builder
++	b.WriteString("private_key=00\nlisten_port=1\n")
++	if e.reject != "" {
++		b.WriteString("reject_after_time=" + e.reject + "\n")
++	}
++	b.WriteString("public_key=aa\nprotocol_version=1\nendpoint=203.0.113.9:585\n")
++	sec, nsec := int64(0), int64(0)
++	if !e.handshake.IsZero() {
++		sec, nsec = e.handshake.Unix(), int64(e.handshake.Nanosecond())
++	}
++	b.WriteString("last_handshake_time_sec=" + strconv.FormatInt(sec, 10) + "\n")
++	b.WriteString("last_handshake_time_nsec=" + strconv.FormatInt(nsec, 10) + "\n")
++	b.WriteString("tx_bytes=1\nrx_bytes=1\npersistent_keepalive_interval=25\n")
++	for _, a := range e.allowed {
++		b.WriteString("allowed_ip=" + a + "\n")
++	}
++	return b.String(), true
++}
++
++func (e *probeEngine) setHandshake(at time.Time) {
++	e.mu.Lock()
++	e.handshake = at
++	e.mu.Unlock()
++}
++
++const probeHandle = 7
++
++// setupProbe: a configured probe over a fake tun, a test clock, and an engine whose last handshake
++// completed 10 s ago (a keypair that may send).
 +func setupProbe(t *testing.T) (*fakeProbeTun, tun.Device, *probeClock) {
++	inner, dev, clock, _ := setupProbeEngine(t)
++	return inner, dev, clock
++}
++
++func setupProbeEngine(t *testing.T) (*fakeProbeTun, tun.Device, *probeClock, *probeEngine) {
++	t.Helper()
++	clock := installProbeClock(t)
++	engine := installProbeEngine(t, clock)
++	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
++		t.Fatalf("configure rc=%d", rc)
++	}
++	inner := newFakeProbeTun()
++	return inner, wrapTribeProbeIfEnabled(inner, nil, nil), clock, engine
++}
++
++func installProbeClock(t *testing.T) *probeClock {
 +	t.Helper()
 +	clock := &probeClock{now: time.Unix(1_800_000_000, 0)}
 +	oldNow, oldResend := tribeProbeNow, tribeProbeResendAfter
@@ -666,11 +1001,25 @@ index 0000000..5d58d9b
 +		tribeProbeMu.Unlock()
 +		tribeProbeNow, tribeProbeResendAfter = oldNow, oldResend
 +	})
-+	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
-+		t.Fatalf("configure rc=%d", rc)
++	return clock
++}
++
++func installProbeEngine(t *testing.T, clock *probeClock) *probeEngine {
++	t.Helper()
++	engine := &probeEngine{ok: true, handshake: clock.Now().Add(-10 * time.Second), allowed: []string{"0.0.0.0/0", "::/0"}}
++	oldDump, oldDirect := tribeProbeEngineDump, tribeProbeIsDirect
++	tribeProbeEngineDump = engine.dump
++	t.Cleanup(func() { tribeProbeEngineDump, tribeProbeIsDirect = oldDump, oldDirect })
++	return engine
++}
++
++func startProbe(t *testing.T, timeout time.Duration) int32 {
++	t.Helper()
++	id := tribeProbeStart(probeHandle, timeout)
++	if id <= 0 {
++		t.Fatalf("probe not started: %d", id)
 +	}
-+	inner := newFakeProbeTun()
-+	return inner, wrapTribeProbeIfEnabled(inner, nil, nil), clock
++	return id
 +}
 +
 +// readOne is the device reading one batch from the tunnel.
@@ -706,7 +1055,7 @@ index 0000000..5d58d9b
 +
 +func wantState(t *testing.T, want string) string {
 +	t.Helper()
-+	got := tribeProbeResult()
++	got := tribeProbeResult(probeHandle)
 +	if !strings.HasPrefix(got, "state="+want+" ") {
 +		t.Fatalf("result %q, want state=%s", got, want)
 +	}
@@ -716,7 +1065,7 @@ index 0000000..5d58d9b
 +func TestTribeProbeUnavailable(t *testing.T) {
 +	tribeProbeConfigure("", "", false)
 +	wantState(t, "unavailable")
-+	if id := tribeProbeStart(0); id != 0 {
++	if id := tribeProbeStart(probeHandle, 0); id != 0 {
 +		t.Fatalf("a probe started without a configuration: id=%d", id)
 +	}
 +	inner := newFakeProbeTun()
@@ -739,7 +1088,7 @@ index 0000000..5d58d9b
 +	tribeProbeMu.Lock()
 +	tribeProbeTun = nil
 +	tribeProbeMu.Unlock()
-+	if id := tribeProbeStart(0); id != 0 {
++	if id := tribeProbeStart(probeHandle, 0); id != 0 {
 +		t.Fatalf("a probe started without a device: id=%d", id)
 +	}
 +	wantState(t, "none")
@@ -751,10 +1100,7 @@ index 0000000..5d58d9b
 +	wantState(t, "none")
 +	osPacket := buildUDP4(probeClient, netip.MustParseAddr("8.8.8.8"), 40000, 443, []byte("user data"))
 +	inner.fromOS <- osPacket
-+	id := tribeProbeStart(0)
-+	if id == 0 {
-+		t.Fatal("probe not started")
-+	}
++	startProbe(t, 0)
 +	wantState(t, "pending")
 +	first := readOne(t, dev)
 +	m, ok := parseUDP4(first)
@@ -782,7 +1128,7 @@ index 0000000..5d58d9b
 +
 +func TestTribeProbeAnswered(t *testing.T) {
 +	inner, dev, clock := setupProbe(t)
-+	id := tribeProbeStart(0)
++	id := startProbe(t, 0)
 +	query := readOne(t, dev)
 +	clock.Advance(180 * time.Millisecond)
 +	other := buildUDP4(netip.MustParseAddr("8.8.8.8"), probeClient, 443, 40000, []byte("download"))
@@ -791,18 +1137,17 @@ index 0000000..5d58d9b
 +		t.Fatalf("Write n=%d err=%v", n, err)
 +	}
 +	got := wantState(t, "answered")
-+	if !strings.Contains(got, " ms=180") || !strings.Contains(got, "id="+itoa(id)+" ") {
++	if !strings.Contains(got, " ms=180") || !strings.Contains(got, "id="+itoa(uint32(id))+" ") {
 +		t.Fatalf("result %q", got)
 +	}
 +	out := inner.delivered()
 +	if len(out) != 2 || !bytes.Equal(out[0], other) || !bytes.Equal(out[1], other) {
 +		t.Fatalf("the reply must not reach the OS and the rest must pass in order: %d packets", len(out))
 +	}
-+	if tribeProbeFlying.Load() {
-+		t.Fatal("after the result the write path must be a plain pass-through again")
++	// A late copy of the reply (the repeat was answered too) is taken off as well.
++	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 || len(inner.delivered()) != 2 {
++		t.Fatalf("the copy of the reply reached the OS: n=%d err=%v", n, err)
 +	}
-+	// A late copy of the reply (the repeat was answered too) is not handed to the OS as garbage
-+	// either way, but with no probe in flight the wrapper does not even look.
 +	clock.Advance(10 * time.Second)
 +	wantState(t, "answered")
 +}
@@ -810,7 +1155,7 @@ index 0000000..5d58d9b
 +func TestTribeProbeSilentAndNotSent(t *testing.T) {
 +	_, dev, clock := setupProbe(t)
 +	// Handed to the device, no reply: silent after the timeout, pending before it.
-+	tribeProbeStart(3 * time.Second)
++	startProbe(t, 3 * time.Second)
 +	readOne(t, dev)
 +	clock.Advance(2999 * time.Millisecond)
 +	wantState(t, "pending")
@@ -818,16 +1163,16 @@ index 0000000..5d58d9b
 +	wantState(t, "silent")
 +
 +	// Nothing reads the tunnel: the packet never leaves. That is NOT silence.
-+	id := tribeProbeStart(3 * time.Second)
++	id := startProbe(t, 3 * time.Second)
 +	clock.Advance(2999 * time.Millisecond)
 +	wantState(t, "pending")
 +	clock.Advance(time.Millisecond)
 +	got := wantState(t, "not_sent")
-+	if !strings.Contains(got, "id="+itoa(id)+" ") {
++	if !strings.Contains(got, "id="+itoa(uint32(id))+" ") {
 +		t.Fatalf("result %q", got)
 +	}
 +	// The default timeout applies to a non-positive value.
-+	tribeProbeStart(0)
++	startProbe(t, 0)
 +	readOne(t, dev)
 +	clock.Advance(tribeProbeDefaultTimeout - time.Millisecond)
 +	wantState(t, "pending")
@@ -837,14 +1182,14 @@ index 0000000..5d58d9b
 +
 +func TestTribeProbeOneAtATime(t *testing.T) {
 +	_, dev, clock := setupProbe(t)
-+	first := tribeProbeStart(0)
-+	if again := tribeProbeStart(0); again != first {
++	first := startProbe(t, 0)
++	if again := tribeProbeStart(probeHandle, 0); again != first {
 +		t.Fatalf("a second probe started while one is in flight: %d vs %d", again, first)
 +	}
 +	q1 := readOne(t, dev)
 +	clock.Advance(5 * time.Second)
 +	wantState(t, "silent")
-+	second := tribeProbeStart(0)
++	second := startProbe(t, 0)
 +	if second == first || second == 0 {
 +		t.Fatalf("a finished probe must be replaced: %d", second)
 +	}
@@ -854,16 +1199,19 @@ index 0000000..5d58d9b
 +	if m1.sport == m2.sport {
 +		t.Fatal("two probes share a source port")
 +	}
-+	// The answer to the FIRST probe arrives late: it is not the answer to the second.
++	// The answer to the FIRST probe arrives now: it is not the answer to the second.
 +	if n, err := writeBatch(t, dev, probeReply(q1)); err != nil || n != 1 {
 +		t.Fatalf("Write n=%d err=%v", n, err)
 +	}
 +	wantState(t, "pending")
++	if tribeProbeStart(probeHandle, 0) != second {
++		t.Fatal("the probe in flight was replaced")
++	}
 +}
 +
 +func TestTribeProbeForeignPacketsPass(t *testing.T) {
 +	inner, dev, _ := setupProbe(t)
-+	tribeProbeStart(0)
++	startProbe(t, 0)
 +	query := readOne(t, dev)
 +	m, _ := parseUDP4(query)
 +	reply := probeReply(query)
@@ -889,7 +1237,7 @@ index 0000000..5d58d9b
 +func TestTribeProbeRepeat(t *testing.T) {
 +	_, dev, clock := setupProbe(t)
 +	tribeProbeResendAfter = 30 * time.Millisecond
-+	tribeProbeStart(0)
++	startProbe(t, 0)
 +	first := readOne(t, dev)
 +	deadline := time.Now().Add(2 * time.Second)
 +	var second []byte
@@ -918,14 +1266,14 @@ index 0000000..5d58d9b
 +
 +func TestTribeProbeDeviceRestart(t *testing.T) {
 +	inner, dev, clock := setupProbe(t)
-+	id := tribeProbeStart(0)
++	id := startProbe(t, 0)
 +	query := readOne(t, dev)
 +	// In-place restart of the backend: the old device closes, a new one wraps the tun again.
 +	if err := dev.Close(); err != nil {
 +		t.Fatal(err)
 +	}
 +	got := wantState(t, "not_sent")
-+	if !strings.Contains(got, "id="+itoa(id)+" ") {
++	if !strings.Contains(got, "id="+itoa(uint32(id))+" ") {
 +		t.Fatalf("a probe cut by a restart is unjudged, not silent: %q", got)
 +	}
 +	inner2 := newFakeProbeTun()
@@ -939,11 +1287,11 @@ index 0000000..5d58d9b
 +	}
 +	wantState(t, "not_sent")
 +	// A new probe works on the new device.
-+	second := tribeProbeStart(0)
++	second := startProbe(t, 0)
 +	q2 := readOne(t, dev2)
 +	clock.Advance(50 * time.Millisecond)
 +	writeBatch(t, dev2, probeReply(q2))
-+	if got := wantState(t, "answered"); !strings.Contains(got, "id="+itoa(second)+" ") {
++	if got := wantState(t, "answered"); !strings.Contains(got, "id="+itoa(uint32(second))+" ") {
 +		t.Fatalf("result %q", got)
 +	}
 +	_ = inner
@@ -956,7 +1304,7 @@ index 0000000..5d58d9b
 +	if n, err := writeBatch(t, dev, other, other); err != nil || n != 2 || inner.writeN != 1 {
 +		t.Fatalf("plain pass-through: n=%d err=%v writes=%d", n, err, inner.writeN)
 +	}
-+	tribeProbeStart(0)
++	startProbe(t, 0)
 +	query := readOne(t, dev)
 +	// A batch that is only the reply: nothing is written to the OS, the device sees success.
 +	before := inner.writeN
@@ -984,7 +1332,7 @@ index 0000000..5d58d9b
 +		}
 +	}()
 +	time.Sleep(20 * time.Millisecond) // the device is now blocked inside the inner Read
-+	tribeProbeStart(0)
++	startProbe(t, 0)
 +	select {
 +	case <-got:
 +		t.Fatal("the probe cannot leave while the device waits for the OS: there is no outbound demand")
@@ -1002,20 +1350,233 @@ index 0000000..5d58d9b
 +	}
 +}
 +
-+func TestTribeProbeLeavesAtOnceThroughTheForwarder(t *testing.T) {
-+	// With the split-DNS forwarder in the chain the probe does not wait for the OS: the
-+	// forwarder's channel feeds the device, and the device is blocked on exactly that channel.
-+	clock := &probeClock{now: time.Unix(1_800_000_000, 0)}
-+	oldNow, oldResend := tribeProbeNow, tribeProbeResendAfter
-+	tribeProbeNow = clock.Now
-+	tribeProbeResendAfter = time.Hour
-+	defer func() {
-+		tribeProbeConfigure("", "", false)
-+		tribeProbeMu.Lock()
-+		tribeProbeTun = nil
-+		tribeProbeMu.Unlock()
-+		tribeProbeNow, tribeProbeResendAfter = oldNow, oldResend
-+	}()
++
++// What "silent" needs: the device took the packet while a keypair could send, and the same
++// session is there at the end of the wait.
++func TestTribeProbeSilentNeedsAKeypair(t *testing.T) {
++	_, dev, clock, engine := setupProbeEngine(t)
++	// No completed handshake: nothing is injected, the start itself says "no session".
++	engine.setHandshake(time.Time{})
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoSession {
++		t.Fatalf("start without a handshake: %d", rc)
++	}
++	tribeProbeMu.Lock()
++	queued := len(tribeProbeTun.pending)
++	tribeProbeMu.Unlock()
++	if queued != 0 || tribeProbeUntil.Load() != 0 {
++		t.Fatal("a probe was queued although the device could only stage it")
++	}
++	wantState(t, "none")
++	// A keypair past its life (180 s by default, 5 s of margin) cannot send either.
++	engine.setHandshake(clock.Now().Add(-176 * time.Second))
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoSession {
++		t.Fatalf("start with an expired keypair: %d", rc)
++	}
++	engine.setHandshake(clock.Now().Add(-174 * time.Second))
++	startProbe(t, 3*time.Second)
++	// ... but the device takes the packet two seconds later: by then the keypair is gone and the
++	// packet was only staged. That is not silence.
++	clock.Advance(2 * time.Second)
++	readOne(t, dev)
++	clock.Advance(3 * time.Second)
++	wantState(t, "no_session")
++	// The engine's own expiry is honoured when the fleet configures it (upper bound of the range).
++	engine.mu.Lock()
++	engine.reject = "60-90"
++	engine.mu.Unlock()
++	engine.setHandshake(clock.Now().Add(-86 * time.Second))
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoSession {
++		t.Fatalf("start past the configured expiry: %d", rc)
++	}
++	engine.setHandshake(clock.Now().Add(-80 * time.Second))
++	startProbe(t, 3*time.Second)
++	readOne(t, dev)
++	clock.Advance(3 * time.Second)
++	wantState(t, "silent")
++	// A handshake clock that runs ahead of ours is not a keypair we can reason about.
++	engine.setHandshake(clock.Now().Add(30 * time.Second))
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoSession {
++		t.Fatalf("start with a handshake from the future: %d", rc)
++	}
++}
++
++// A new session during the wait (the device re-keyed, or was restarted in place and shook hands
++// again): the packet may have been staged, the silence is not judged.
++func TestTribeProbeHandshakeDuringTheWait(t *testing.T) {
++	_, dev, clock, engine := setupProbeEngine(t)
++	startProbe(t, 3*time.Second)
++	readOne(t, dev)
++	clock.Advance(time.Second)
++	engine.setHandshake(clock.Now())
++	clock.Advance(2 * time.Second)
++	got := wantState(t, "no_session")
++	// The verdict is told once and stays, whatever the engine says later.
++	engine.setHandshake(clock.Now().Add(-13 * time.Second))
++	if again := tribeProbeResult(probeHandle); again != got {
++		t.Fatalf("the verdict changed: %q then %q", got, again)
++	}
++	// The engine cannot be read at the end of the wait: not silence either.
++	engine.setHandshake(clock.Now().Add(-5 * time.Second))
++	startProbe(t, 3*time.Second)
++	readOne(t, dev)
++	clock.Advance(3 * time.Second)
++	engine.mu.Lock()
++	engine.ok = false
++	engine.mu.Unlock()
++	wantState(t, "no_session")
++}
++
++// The timeout runs from the moment the device took the packet, not from the start.
++func TestTribeProbeTimeoutCountsFromTheTake(t *testing.T) {
++	_, dev, clock := setupProbe(t)
++	startProbe(t, 4*time.Second)
++	clock.Advance(3 * time.Second) // nothing read the tunnel for three seconds
++	readOne(t, dev)
++	clock.Advance(3999 * time.Millisecond)
++	wantState(t, "pending")
++	clock.Advance(time.Millisecond)
++	wantState(t, "silent")
++}
++
++// A resolver the tunnel does not carry cannot be probed.
++func TestTribeProbeTargetOutsideTheTunnel(t *testing.T) {
++	_, _, _, engine := setupProbeEngine(t)
++	engine.mu.Lock()
++	engine.allowed = []string{"10.0.0.0/8", "fd00::/8"}
++	engine.mu.Unlock()
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoTarget {
++		t.Fatalf("the resolver is outside the allowed IPs: %d", rc)
++	}
++	engine.mu.Lock()
++	engine.allowed = []string{"0.0.0.0/0"}
++	engine.mu.Unlock()
++	tribeProbeIsDirect = func(a netip.Addr) bool { return a == probeTarget }
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoTarget {
++		t.Fatalf("the resolver is in the direct-split list: %d", rc)
++	}
++	tribeProbeIsDirect = func(netip.Addr) bool { return false }
++	engine.mu.Lock()
++	engine.ok = false
++	engine.mu.Unlock()
++	if rc := tribeProbeStart(probeHandle, 0); rc != tribeProbeStartNoTarget {
++		t.Fatalf("the engine cannot be read: %d", rc)
++	}
++	wantState(t, "none")
++}
++
++func TestTribeProbeEngineFacts(t *testing.T) {
++	dump := "private_key=00\nlisten_port=5\nreject_after_time=100-140\n" +
++		"public_key=aa\nlast_handshake_time_sec=1700000000\nlast_handshake_time_nsec=5\nallowed_ip=0.0.0.0/0\n" +
++		"public_key=bb\nlast_handshake_time_sec=1700000100\nlast_handshake_time_nsec=0\nallowed_ip=1.1.1.0/24\nallowed_ip=::/0\n"
++	f := tribeParseEngineFacts(dump, probeTarget)
++	if !f.ok || !f.routed || f.expire != 140*time.Second || !f.handshake.Equal(time.Unix(1700000100, 0)) {
++		t.Fatalf("the longest prefix decides the peer: %+v", f)
++	}
++	f = tribeParseEngineFacts(dump, netip.MustParseAddr("8.8.8.8"))
++	if !f.routed || !f.handshake.Equal(time.Unix(1700000000, 5)) {
++		t.Fatalf("the other peer: %+v", f)
++	}
++	f = tribeParseEngineFacts("public_key=aa\nlast_handshake_time_sec=0\nlast_handshake_time_nsec=0\nallowed_ip=0.0.0.0/0\n", probeTarget)
++	if !f.routed || !f.handshake.IsZero() || f.expire != tribeProbeDefaultExpire || f.usable(time.Unix(1700000000, 0)) {
++		t.Fatalf("no handshake yet: %+v", f)
++	}
++	f = tribeParseEngineFacts("public_key=aa\nallowed_ip=10.0.0.0/8\nreject_after_time=junk\ngarbage\n=\n", probeTarget)
++	if !f.ok || f.routed || f.expire != tribeProbeDefaultExpire {
++		t.Fatalf("not routed, junk ignored: %+v", f)
++	}
++	if got := tribeParseEngineFacts("", probeTarget); got.routed || got.usable(time.Now()) {
++		t.Fatalf("an empty dump: %+v", got)
++	}
++	usable := tribeEngineFacts{ok: true, routed: true, handshake: time.Unix(1000, 0), expire: 180 * time.Second}
++	if !usable.usable(time.Unix(1000, 0)) || !usable.usable(time.Unix(1174, 0)) || usable.usable(time.Unix(1175, 0)) || usable.usable(time.Unix(999, 0)) {
++		t.Fatal("the keypair may send from its handshake until 5 s before its expiry")
++	}
++}
++
++// A reply that comes after the verdict is credited: the result turns into answered, late.
++func TestTribeProbeLateAnswer(t *testing.T) {
++	inner, dev, clock := setupProbe(t)
++	id := startProbe(t, 4*time.Second)
++	query := readOne(t, dev)
++	clock.Advance(4 * time.Second)
++	wantState(t, "silent")
++	clock.Advance(2 * time.Second)
++	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if len(inner.delivered()) != 0 {
++		t.Fatal("the late reply reached the OS")
++	}
++	got := wantState(t, "answered")
++	if !strings.Contains(got, " late=1") || !strings.Contains(got, " ms=6000") || !strings.Contains(got, "id="+itoa(uint32(id))+" ") {
++		t.Fatalf("result %q", got)
++	}
++	// An answer in time is not late.
++	second := startProbe(t, 4*time.Second)
++	q2 := readOne(t, dev)
++	clock.Advance(100 * time.Millisecond)
++	writeBatch(t, dev, probeReply(q2))
++	if got := wantState(t, "answered"); !strings.Contains(got, " late=0") || !strings.Contains(got, "id="+itoa(uint32(second))+" ") {
++		t.Fatalf("result %q", got)
++	}
++}
++
++// The look-out for the reply ends by itself: nobody has to ask for the result (the watch may have
++// been switched off with a probe in flight).
++func TestTribeProbeLookoutEndsByItself(t *testing.T) {
++	inner, dev, clock, engine := setupProbeEngine(t)
++	startProbe(t, 2*time.Second)
++	query := readOne(t, dev)
++	if tribeProbeUntil.Load() == 0 {
++		t.Fatal("no look-out while the probe is in flight")
++	}
++	// Nobody polls. Ten minutes later the write path has to be a plain pass-through again, and
++	// what looks like the old reply is an ordinary packet for the OS.
++	clock.Advance(10 * time.Minute)
++	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if tribeProbeUntil.Load() != 0 {
++		t.Fatal("the look-out did not end")
++	}
++	if len(inner.delivered()) != 1 {
++		t.Fatal("after the look-out a packet was still taken off the write path")
++	}
++	// Told as silent, the look-out is 30 s from the verdict.
++	engine.setHandshake(clock.Now().Add(-10 * time.Second))
++	startProbe(t, 2*time.Second)
++	q2 := readOne(t, dev)
++	clock.Advance(2 * time.Second)
++	wantState(t, "silent")
++	clock.Advance(tribeProbeLateWindow + time.Second)
++	writeBatch(t, dev, probeReply(q2))
++	wantState(t, "silent")
++	if len(inner.delivered()) != 2 || tribeProbeUntil.Load() != 0 {
++		t.Fatal("a reply after the late window must pass to the OS and change nothing")
++	}
++}
++
++// User packets that only look like the probe: another port of the range, the probe's port with
++// another DNS id. They pass. (Same port and same id cannot be told from the answer.)
++func TestTribeProbeUserPacketsInItsPortRange(t *testing.T) {
++	inner, dev, _ := setupProbe(t)
++	startProbe(t, 0)
++	query := readOne(t, dev)
++	m, _ := parseUDP4(query)
++	other := uint16(tribeProbePortBase + (int(m.sport-tribeProbePortBase)+7)%tribeProbePortSpan)
++	answer := []byte{0xAA, 0xBB, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0}
++	otherPort := buildUDP4(probeTarget, probeClient, 53, other, answer)
++	otherID := buildUDP4(probeTarget, probeClient, 53, m.sport, []byte{m.payload[0] ^ 0x40, m.payload[1], 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0})
++	if n, err := writeBatch(t, dev, otherPort, otherID); err != nil || n != 2 || len(inner.delivered()) != 2 {
++		t.Fatalf("user packets were not passed: n=%d err=%v delivered=%d", n, err, len(inner.delivered()))
++	}
++	wantState(t, "pending")
++}
++
++func setupProbeForwarder(t *testing.T) (*fakeProbeTun, *fwdTun, tun.Device, *probeClock) {
++	t.Helper()
++	clock := installProbeClock(t)
++	installProbeEngine(t, clock)
 +	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
 +		t.Fatalf("rc=%d", rc)
 +	}
@@ -1028,7 +1589,29 @@ index 0000000..5d58d9b
 +		closed: make(chan struct{}),
 +		offset: -1,
 +	}
-+	dev := wrapTribeProbeIfEnabled(fwd, fwd, nil)
++	return inner, fwd, wrapTribeProbeIfEnabled(fwd, fwd, nil), clock
++}
++
++// With the forwarder "queued" is not "taken": nobody reads the device (from the wire's point of
++// view the same as no keypair: the packet never leaves the phone). That is not_sent, not silent.
++func TestTribeProbeForwarderQueuedButNeverRead(t *testing.T) {
++	_, fwd, dev, clock := setupProbeForwarder(t)
++	defer dev.Close()
++	startProbe(t, 3*time.Second)
++	if len(fwd.out) != 1 {
++		t.Fatalf("queue depth %d", len(fwd.out))
++	}
++	clock.Advance(3 * time.Second)
++	wantState(t, "not_sent")
++	if tribeProbeUntil.Load() != 0 {
++		t.Fatal("nothing left the phone: there is no reply to look for")
++	}
++}
++
++func TestTribeProbeLeavesAtOnceThroughTheForwarder(t *testing.T) {
++	// With the split-DNS forwarder in the chain the probe does not wait for the OS: the
++	// forwarder's channel feeds the device, and the device is blocked on exactly that channel.
++	inner, fwd, dev, clock := setupProbeForwarder(t)
 +	defer dev.Close()
 +	got := make(chan []byte, 1)
 +	go func() {
@@ -1039,7 +1622,7 @@ index 0000000..5d58d9b
 +		}
 +	}()
 +	time.Sleep(20 * time.Millisecond) // the device waits; the OS sends nothing
-+	id := tribeProbeStart(0)
++	id := startProbe(t, 0)
 +	var query []byte
 +	select {
 +	case query = <-got:
@@ -1055,7 +1638,7 @@ index 0000000..5d58d9b
 +	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 {
 +		t.Fatalf("Write n=%d err=%v", n, err)
 +	}
-+	if res := wantState(t, "answered"); !strings.Contains(res, " ms=90") || !strings.Contains(res, "id="+itoa(id)+" ") {
++	if res := wantState(t, "answered"); !strings.Contains(res, " ms=90") || !strings.Contains(res, "id="+itoa(uint32(id))+" ") {
 +		t.Fatalf("result %q", res)
 +	}
 +	if len(inner.delivered()) != 0 {
@@ -1066,9 +1649,123 @@ index 0000000..5d58d9b
 +		fwd.out <- []byte{0}
 +	}
 +	clock.Advance(10 * time.Second)
-+	tribeProbeStart(2 * time.Second)
++	startProbe(t, 2*time.Second)
 +	clock.Advance(2 * time.Second)
 +	wantState(t, "not_sent")
++}
++
++
++// Device goroutines read and write while the caller starts and polls probes and the device is
++// closed and wrapped again (in-place restart): no user packet is lost or duplicated on the write
++// path. Run with -race when changing the wrapper.
++func TestTribeProbeConcurrentUse(t *testing.T) {
++	oldResend, oldDump := tribeProbeResendAfter, tribeProbeEngineDump
++	tribeProbeResendAfter = 2 * time.Millisecond
++	engine := &probeEngine{ok: true, handshake: time.Now().Add(-10 * time.Second), allowed: []string{"0.0.0.0/0"}}
++	tribeProbeEngineDump = engine.dump
++	defer func() {
++		tribeProbeConfigure("", "", false)
++		tribeProbeMu.Lock()
++		tribeProbeTun = nil
++		tribeProbeMu.Unlock()
++		tribeProbeResendAfter, tribeProbeEngineDump = oldResend, oldDump
++	}()
++	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
++		t.Fatalf("rc=%d", rc)
++	}
++	user := buildUDP4(probeClient, netip.MustParseAddr("8.8.8.8"), 40000, 443, []byte("user data"))
++	down := buildUDP4(netip.MustParseAddr("8.8.8.8"), probeClient, 443, 40000, []byte("download"))
++	var mu sync.Mutex
++	var sentDown, passedDown, answers int64
++	for round := 0; round < 12; round++ {
++		inner := newFakeProbeTun()
++		dev := wrapTribeProbeIfEnabled(inner, nil, nil)
++		stop := make(chan struct{})
++		var wg sync.WaitGroup
++		wg.Add(4)
++		go func() { // the device's TUN reader: answers every probe query through Write
++			defer wg.Done()
++			bufs := [][]byte{make([]byte, 2048), make([]byte, 2048)}
++			sizes := make([]int, 2)
++			for {
++				n, err := dev.Read(bufs, sizes, probeTestOffset)
++				if err != nil {
++					return
++				}
++				for i := 0; i < n; i++ {
++					pkt := bufs[i][probeTestOffset : probeTestOffset+sizes[i]]
++					if m, ok := parseUDP4(pkt); ok && m.dpt == 53 && m.dst == probeTarget {
++						reply := probeReply(append([]byte(nil), pkt...))
++						b := make([]byte, probeTestOffset+len(reply))
++						copy(b[probeTestOffset:], reply)
++						d := make([]byte, probeTestOffset+len(down))
++						copy(d[probeTestOffset:], down)
++						mu.Lock()
++						sentDown++
++						mu.Unlock()
++						dev.Write([][]byte{d, b}, probeTestOffset)
++					}
++				}
++			}
++		}()
++		go func() { // the device's TUN writer: plain download traffic
++			defer wg.Done()
++			for {
++				select {
++				case <-stop:
++					return
++				default:
++				}
++				d := make([]byte, probeTestOffset+len(down))
++				copy(d[probeTestOffset:], down)
++				mu.Lock()
++				sentDown++
++				mu.Unlock()
++				dev.Write([][]byte{d}, probeTestOffset)
++			}
++		}()
++		go func() { // the OS
++			defer wg.Done()
++			for {
++				select {
++				case <-stop:
++					return
++				case inner.fromOS <- user:
++				default:
++					time.Sleep(50 * time.Microsecond)
++				}
++			}
++		}()
++		go func() { // the adapter's queue
++			defer wg.Done()
++			for i := 0; i < 150; i++ {
++				tribeProbeStart(probeHandle, 5*time.Millisecond)
++				if strings.HasPrefix(tribeProbeResult(probeHandle), "state=answered") {
++					mu.Lock()
++					answers++
++					mu.Unlock()
++				}
++				time.Sleep(100 * time.Microsecond)
++			}
++		}()
++		time.Sleep(15 * time.Millisecond)
++		dev.Close()
++		close(stop)
++		wg.Wait()
++		mu.Lock()
++		for _, p := range inner.delivered() {
++			if m, ok := parseUDP4(p); ok && m.sport == 443 {
++				passedDown++
++			}
++		}
++		mu.Unlock()
++	}
++	if passedDown != sentDown {
++		t.Fatalf("user traffic lost or duplicated on the write path: sent %d, delivered %d", sentDown, passedDown)
++	}
++	if answers == 0 {
++		t.Fatal("not one probe was answered: the test did not exercise the reply path")
++	}
 +}
 +
 +func itoa(v uint32) string {
@@ -1083,20 +1780,24 @@ index 0000000..5d58d9b
 +	return string(b)
 +}
 diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
-index 9f6a601..72afae8 100644
+index 9f6a601..51e65f7 100644
 --- a/Sources/WireGuardKitGo/wireguard.h
 +++ b/Sources/WireGuardKitGo/wireguard.h
-@@ -50,4 +50,13 @@ extern char *wgDirectSplitStats();
+@@ -50,4 +50,17 @@ extern char *wgDirectSplitStats();
   * пересоздали их сразу. Возвращает число сброшенных соединений; без движка — 0. */
  extern int32_t wgDirectSplitPathChanged();
  
 +/* Tribe data watch probe (tribeprobe.go, awg-apple tribe.13): configure BEFORE wgTurnOn; enabled=0 =
 + * off. 0 = available, -1 = not available (an address is not IPv4): the tunnel comes up either way. */
 +extern int32_t wgSetTribeProbe(const char *clientIp, const char *target, int32_t enabled);
-+/* Starts one probe through the tunnel; returns its id, the id of the probe in flight, or 0 when
-+ * the session has no probe. timeoutMs <= 0 = default. */
-+extern int32_t wgTribeProbeStart(int32_t timeoutMs);
-+/* "state=<none|pending|answered|silent|not_sent|unavailable> id=<n> ms=<n>"; the caller frees it. */
-+extern char *wgTribeProbeResult();
++/* Starts one probe through the tunnel of `handle`; returns its id (> 0) or the id of the probe in
++ * flight; 0 = the session has no probe; -1 = the resolver cannot be reached through the tunnel in
++ * this session; -2 = the engine holds no keypair that may send now (nothing is injected).
++ * timeoutMs <= 0 = default. */
++extern int32_t wgTribeProbeStart(int32_t handle, int32_t timeoutMs);
++/* "state=<none|pending|answered|silent|no_session|not_sent|unavailable> id=<n> ms=<n> late=<0|1>";
++ * silent = the device took the packet while a keypair could send and no answer came; the caller
++ * frees the string. */
++extern char *wgTribeProbeResult(int32_t handle);
 +
  #endif
