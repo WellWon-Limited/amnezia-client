@@ -49,7 +49,7 @@ extension PacketTunnelProvider {
             // AVPN (build 140, data watch): the plan file decides whether the watch and its probe
             // through the tunnel run in this session. Configured BEFORE the adapter starts; off =
             // explicit reset, like the two blocks above (PacketTunnelProvider+DataWatch.swift).
-            let tribeProbeReady = prepareTribeDataWatch(wgConfig)
+            prepareTribeDataWatch(wgConfig)
 
             let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgConfigStr)
 
@@ -121,7 +121,7 @@ extension PacketTunnelProvider {
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
             let roaming = wgConfig.roamingPolicy
             adapter.roamingPolicy = roaming
-            tribeDataWatch.attach(adapter: adapter, probeConfigured: tribeProbeReady) // AVPN (build 140, data watch)
+            tribeDataWatch.attach(adapter: adapter) // AVPN (build 140, data watch)
             wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
 
             adapter.start(tunnelConfiguration: tunnelConfiguration) { adapterError in
@@ -368,11 +368,16 @@ extension PacketTunnelProvider {
     }
 
     private func logTribeStats() {
-        // AVPN (build 140, data watch): the plan file is re-read on this existing tick (the kill
-        // switch reaches the extension here); the Xray path gets its own statistics line.
-        tribeDataWatch.refreshPlan()
-        if protoType == .xray { logTribeXrayStats(); return }
-        guard Log.isLoggingEnabled, let adapter = wgAdapter else { return }
+        // AVPN (build 140, data watch): the order of this tick is the runtime's (tested there): the
+        // plan file is re-read first and always - the kill switch reaches the extension here, with
+        // the file log on or off - then the statistics line of the transport.
+        tribeDataWatch.statsTick(isXray: protoType == .xray, loggingEnabled: Log.isLoggingEnabled,
+                                 logXray: { [weak self] in self?.logTribeXrayStats() },
+                                 logWireGuard: { [weak self] in self?.logTribeWireGuardStats() })
+    }
+
+    private func logTribeWireGuardStats() {
+        guard let adapter = wgAdapter else { return }
         adapter.getRuntimeConfiguration { [weak self] settings in
             guard let settings else { return }
             var rx: UInt64 = 0
