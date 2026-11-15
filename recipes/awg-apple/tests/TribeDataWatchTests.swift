@@ -49,6 +49,17 @@ struct Sim {
     var verdicts: [TribeDataVerdict] = []
     var actions: [TribeDataWatchAction] = []
     var startedAt: TimeInterval = 1000
+    /// Stage 2: the nodes of the world (id -> passes data), what the adapter answers to a command,
+    /// and what the arbiter ordered.
+    var nodes: [String: Bool] = [:]
+    /// The plan's candidates in order, and the node of the profile (the provider offers the plan's
+    /// nodes except the current one, and the profile's node whenever the tunnel is not on it).
+    var plan: [String] = []
+    var home = ""
+    var healResult = TribeCommandResult.performed
+    var switchResult = TribeCommandResult.performed
+    var commands: [(at: TimeInterval, command: TribeWatchCommand)] = []
+    var exhausted: [TimeInterval] = []
 
     init(_ policy: TribeDataWatchPolicy = basePolicy(), started: Bool = true) {
         self.policy = policy
@@ -104,8 +115,43 @@ struct Sim {
         if out.action != .keep && out.report == nil { failures += 1; print("FAIL \(currentTest): report without a kind") }
         verdicts.append(out.verdict)
         actions.append(out.action)
+        if out.exhausted { exhausted.append(uptime) }
+        if let command = out.command {
+            // The adapter executes a command on the same tick and tells the result back.
+            commands.append((uptime, command))
+            switch command {
+            case .heal(let kind):
+                if healResult == .performed && kind == .softRestart { heal(softRestart: true) }
+                watch.noteCommandResult(command, result: healResult, at: uptime, policy: policy)
+            case .switchPeer(let node, _):
+                if switchResult == .performed {
+                    env.nodeId = node
+                    env.candidates = plan.filter { $0 != node } + (node != home && !plan.contains(home) ? [home] : [])
+                    tx = 0
+                    rx = 0
+                    handshake = 0
+                }
+                watch.noteCommandResult(command, result: switchResult, at: uptime, policy: policy)
+            }
+        }
         return out
     }
+
+    /// Stage 2 world: steady outbound demand. A node that passes data answers the probe and sends
+    /// data back; a dead one completes handshakes (the 13.11 picture) and nothing else. A node
+    /// listed in `mute` does not even shake hands.
+    mutating func world(seconds: Int, txPerSecond: UInt64 = 400, mute: Set<String> = []) {
+        for _ in 1...seconds {
+            let alive = nodes[env.nodeId] ?? false
+            let muted = mute.contains(env.nodeId)
+            let second = Int(elapsed) + 1
+            probeAnswer = alive ? .answered : (muted && handshake == 0 ? .noSession : .silent)
+            tick(1, tx: txPerSecond, rx: alive ? 3000 : 0,
+                 handshake: !muted && (handshake == 0 ? second % 3 == 0 : second % 17 == 0))
+        }
+    }
+    var switches: [String] { commands.compactMap { if case .switchPeer(let node, _) = $0.command { return node } else { return nil } } }
+    var heals: [TribeWatchHeal] { commands.compactMap { if case .heal(let kind) = $0.command { return kind } else { return nil } } }
 
     /// The stall ladder performed a same-node heal step. A fresh port is invisible to the watch;
     /// a soft restart is a new device on the same node (counters and handshake start over).
@@ -157,7 +203,9 @@ run("policy_defaults_are_off") {
     check(p.probeTimeoutSeconds == 4 && p.probeMaxPerEpisode == 3 && p.probeMaxPerHour == 12, "probe timeout and limits")
     check(p.probeLowRxMaxPerHour == 2 && p.sanityMaxPerHour == 12, "the low-inbound trigger's own budget; bypass requests per hour")
     let labels = Mirror(reflecting: p).children.compactMap { $0.label }
-    check(!labels.contains { $0.lowercased().contains("heal") }, "the verdict has no heal-step condition: \(labels)")
+    check(!labels.contains("minHealSteps"), "the verdict has no heal-step condition: \(labels)")
+    check(p.switchHealSteps == 2 && p.trialProbeMaxPerHour == 30, "stage 2: two same-node heals before a switch, 30 trial probes an hour")
+    check(TribeDataWatchPolicy.healTrialSeconds == 10 && TribeDataWatchPolicy.roundPauseSeconds == [300, 600, 1200, 1800], "stage 2: trial wait and the pauses between rounds")
 }
 
 run("policy_flags") {
@@ -194,7 +242,8 @@ run("policy_clamps") {
                  "ios_tw_wake_grace_s", "ios_tw_app_alive_s", "ios_tw_max_switches", "ios_tw_suspect_window_s",
                  "ios_tw_suspect_min_tx_bytes", "ios_tw_suspect_max_rx_bytes", "ios_tw_probe_timeout_ms",
                  "ios_tw_probe_max_per_episode", "ios_tw_probe_max_per_hour", "ios_tw_probe_low_rx_max_per_hour",
-                 "ios_tw_sanity_max_per_hour", "ios_tw_sanity_required", "ios_tw_probe"]
+                 "ios_tw_sanity_max_per_hour", "ios_tw_sanity_required", "ios_tw_probe",
+                 "ios_tw_switch_heal_steps", "ios_tw_trial_probe_max_per_hour"]
     func all(_ value: Any) -> TribeDataWatchPolicy {
         TribeDataWatchPolicy.fromPlan(features: ["ios_tunnel_watch": true], numbers: Dictionary(uniqueKeysWithValues: names.map { ($0, value) }))
     }
@@ -205,6 +254,7 @@ run("policy_clamps") {
     check(low.appAliveSeconds == 3 && low.maxSwitches == 0 && low.suspectWindowSeconds == 30 && low.suspectMinTxBytes == 4096 && low.suspectMaxRxBytes == 0, "lower clamps 4")
     check(low.probeTimeoutSeconds == 1 && low.probeMaxPerEpisode == 1 && low.probeMaxPerHour == 1, "lower clamps 5")
     check(low.probeLowRxMaxPerHour == 0 && low.sanityMaxPerHour == 1, "lower clamps 6")
+    check(low.switchHealSteps == 0 && low.trialProbeMaxPerHour == 1, "lower clamps 7")
     check(!low.sanityRequired && !low.probeEnabled, "0-clamped bits are off")
     let high = all(1e12)
     check(high.cycleSeconds == 120 && high.cycleMinTxBytes == 1_048_576 && high.deadCycles == 20 && high.cycleChainGapSeconds == 300, "upper clamps 1")
@@ -213,6 +263,7 @@ run("policy_clamps") {
     check(high.appAliveSeconds == 60 && high.maxSwitches == 5 && high.suspectWindowSeconds == 600 && high.suspectMinTxBytes == 16_777_216 && high.suspectMaxRxBytes == 1_048_576, "upper clamps 4")
     check(high.probeTimeoutSeconds == 15 && high.probeMaxPerEpisode == 10 && high.probeMaxPerHour == 60, "upper clamps 5")
     check(high.probeLowRxMaxPerHour == 12 && high.sanityMaxPerHour == 60, "upper clamps 6")
+    check(high.switchHealSteps == 2 && high.trialProbeMaxPerHour == 60, "upper clamps 7")
     check(high.sanityRequired && high.probeEnabled, "1-clamped bits are on")
     var expected = basePolicy()
     for junk in ["abc", "", [1, 2], NSNull(), true, Double.nan, Double.infinity] as [Any] {
@@ -243,8 +294,8 @@ run("megafon_13_11_replay") {
     check(snap.enabled && snap.verdict == .noData && snap.sinceWallMs > 0 && snap.lastNoDataWallMs >= snap.sinceWallMs, "snapshot carries the verdict: \(snap)")
     check(snap.probe == .silent && snap.probeReason == .passive && snap.probesInEpisode == 1 && snap.probesLastHour == 1, "snapshot carries the judge: \(snap)")
     check(snap.episodeRxData == 0 && snap.episodeTx > 16000 && snap.wouldSwitch, "episode numbers and the shadow mark: \(snap)")
-    // Stage 1 never moves anybody.
-    check(!s.actions.contains(.switchPeer) && !s.actions.contains(.exhausted), "no switching action in this version")
+    // With the switch key off nobody is moved and nothing is treated.
+    check(s.commands.isEmpty && s.exhausted.isEmpty, "no command without the switch key")
 }
 
 run("megafon_13_11_replay_cycle_15") {
@@ -538,7 +589,7 @@ run("ipv6_only_cellular") {
     let fields = Mirror(reflecting: TribeDataWatchSample(txBytes: 0, rxBytes: 0, lastHandshakeSec: 0, uptime: 0, wall: 0)).children.compactMap { $0.label }
     check(fields == ["txBytes", "rxBytes", "lastHandshakeSec", "uptime", "wall"], "the sample has no address field: \(fields)")
     let envFields = Mirror(reflecting: TribeDataWatchEnv(pathSatisfied: true)).children.compactMap { $0.label }
-    check(envFields == ["pathSatisfied", "sanity", "sanityAt", "probe", "probeAt", "probeLatencyMs", "lateAnswerAt", "appSeenAt"], "nor has the environment: \(envFields)")
+    check(envFields == ["pathSatisfied", "sanity", "sanityAt", "probe", "probeAt", "probeLatencyMs", "lateAnswerAt", "appSeenAt", "nodeId", "candidates"], "nor has the environment (node ids are labels): \(envFields)")
 }
 
 run("start_grace") {
@@ -1096,14 +1147,19 @@ run("app_alive_defers_switch") {
 }
 
 run("shadow_mode") {
-    // Layer 2 on or off, this version only reports.
-    for switchOn in [false, true] {
+    // The switch key off: only reports, whatever the plan offers. The key on with nothing to
+    // switch to: the same.
+    for (switchOn, candidates) in [(false, ["12", "9"]), (true, [])] as [(Bool, [String])] {
         var p = basePolicy()
         p.switchEnabled = switchOn
         var s = Sim(p)
+        s.env.nodeId = "16"
+        s.env.candidates = candidates
         s.deadPath(seconds: 400)
         check(s.watch.verdict == .noData && s.watch.snapshot(policy: p).wouldSwitch, "verdict and shadow mark (switch flag \(switchOn))")
-        check(Set(s.actions.map { "\($0)" }) == ["keep", "report"], "only keep and report: \(Set(s.actions.map { "\($0)" }))")
+        check(s.commands.isEmpty && s.exhausted.isEmpty, "nothing is treated and nobody is moved (switch flag \(switchOn))")
+        let snap = s.watch.snapshot(policy: p)
+        check(!snap.arbiterActive && snap.arbiterHeals == 0 && snap.trialProbesLastHour == 0, "the arbiter never woke up")
     }
 }
 
@@ -1224,7 +1280,9 @@ run("snapshot_dictionary_contract") {
     let expected: Set<String> = ["enabled", "verdict", "since_ms", "passive", "cycles", "ep_s", "tx", "rx_data", "sanity",
                                  "probe", "probe_reason", "probe_ms", "probe_at_ms", "probes_episode", "probes_hour",
                                  "probes_low_rx_hour", "sanity_hour", "refuted", "disturbed", "evidence",
-                                 "would_switch", "app_alive", "last_no_data_ms", "recovered_ms"]
+                                 "would_switch", "app_alive", "last_no_data_ms", "recovered_ms",
+                                 "arb_active", "arb_round", "arb_heals", "arb_switches", "arb_tried", "arb_trial",
+                                 "arb_exhausted", "probes_trial_hour"]
     check(keys == expected, "keys of the status block: \(keys.symmetricDifference(expected))")
     check(d["verdict"] as? String == "no_data" && d["passive"] as? String == "no_data" && d["probe"] as? String == "silent", "labels: \(d)")
     check(d["probe_reason"] as? String == "passive" && d["sanity"] as? String == "ok" && d["enabled"] as? Bool == true, "labels 2")
@@ -1232,6 +1290,278 @@ run("snapshot_dictionary_contract") {
     check(TribeDataVerdict.noData.rawValue == "no_data" && TribeDataVerdict.unconfirmed.rawValue == "unconfirmed"
           && TribeProbeResult.notSent.rawValue == "not_sent" && TribeProbeReason.lowRx.rawValue == "low_rx"
           && TribeSanityResult.noReply.rawValue == "no_reply" && TribeDataWatchReport.wouldSwitch.rawValue == "would_switch", "wire labels are pinned")
+    check(TribeProbeReason.trial.rawValue == "trial" && TribeWatchHeal.freshPort.rawValue == "fresh_port" && TribeWatchHeal.softRestart.rawValue == "soft_restart"
+          && TribeSwitchReason.noData.rawValue == "no_data" && TribeSwitchReason.best.rawValue == "exhausted_best"
+          && TribeCommandResult.performed.rawValue == "performed" && TribeDataWatchReport.trial.rawValue == "trial", "stage 2 labels are pinned")
+}
+
+// MARK: - stage 2: the arbiter
+
+/// A phone in the pocket on node 16, the app asleep, the switch key on, the plan offers `candidates`.
+func switching(_ candidates: [String] = ["12", "9"], alive: Set<String> = [], _ tune: (inout TribeDataWatchPolicy) -> Void = { _ in }) -> Sim {
+    var p = basePolicy()
+    p.switchEnabled = true
+    tune(&p)
+    var s = Sim(p)
+    s.env.nodeId = "16"
+    s.home = "16"
+    s.plan = candidates
+    s.env.candidates = candidates.filter { $0 != "16" }
+    for node in ["16"] + candidates { s.nodes[node] = alive.contains(node) }
+    return s
+}
+
+run("arbiter_heals_the_node_then_leaves_it") {
+    // The 13.11 path with a working node in the plan: no_data by a silent probe, then the two
+    // same-node heals the arbiter runs ITSELF (each judged by its own probe), then the switch; the
+    // new node gets its own grace and its own probe before it is trusted.
+    var s = switching(["12", "9"], alive: ["12"])
+    s.world(seconds: 240)
+    check(s.heals == [.freshPort, .softRestart], "both heals, in the ladder's order: \(s.heals)")
+    check(s.switches == ["12"], "then the first candidate of the plan, once: \(s.switches)")
+    let noDataAt = s.reports.first { $0.verdict == .noData }?.at ?? 0
+    check(s.commands.count == 3 && s.commands[0].at == noDataAt, "the first heal on the tick of the verdict: \(s.commands.map { $0.at - s.startedAt })")
+    check(s.commands.count == 3 && s.commands[1].at - s.commands[0].at >= TribeDataWatchPolicy.healTrialSeconds + s.policy.probeTimeoutSeconds,
+          "the fresh port is given 10 s and a whole probe before the next step")
+    check(s.commands.count == 3 && s.commands[2].at - s.commands[1].at >= s.policy.startGraceSeconds + s.policy.probeTimeoutSeconds,
+          "the restarted device is given its start grace and a whole probe")
+    let trials = s.probesStarted.filter { $0.reason == .trial }
+    check(trials.count >= 3, "a trial probe after every action (a re-key during a wait voids one and it is asked again): \(trials.count)")
+    let onNew = trials.filter { s.commands.count == 3 && $0.at > s.commands[2].at }
+    check(onNew.count >= 1 && onNew[0].at - s.commands[2].at >= s.policy.startGraceSeconds, "the new node is not probed inside its start grace")
+    check(s.count(.trial) == 1 && s.reports.last { $0.report == .trial }?.verdict != .noData, "the new node answered: it is trusted")
+    let snap = s.watch.snapshot(policy: s.policy)
+    check(s.watch.verdict != .noData && !snap.arbiterActive && !snap.arbiterTrial && snap.refuted == 0, "the round is over and nothing counts as a false decision: \(snap.refuted)")
+    check(snap.probesLastHour == 1 && snap.trialProbesLastHour == trials.count, "trials have a budget of their own: \(snap.probesLastHour) \(snap.trialProbesLastHour)")
+    check(s.env.nodeId == "12" && s.exhausted.isEmpty, "the tunnel stays on the node that works")
+    let after = s.commands.count
+    s.world(seconds: 600)
+    check(s.commands.count == after, "and nothing more is done while it works")
+}
+
+run("heal_that_cures_keeps_the_node") {
+    // The soft restart helps: the node answers its trial probe. Nobody is moved, the verdict is
+    // taken back, and it is not a false decision of the passive rule.
+    var s = switching(["12"])
+    for _ in 1...400 where s.heals.count < 2 { s.world(seconds: 1) }
+    check(s.heals == [.freshPort, .softRestart] && s.switches.isEmpty, "treated twice, not moved yet")
+    // The node answers again, the user simply has nothing coming in right now.
+    for second in 1...60 {
+        s.probeAnswer = .answered
+        s.tick(1, tx: 400, handshake: second == 2)
+    }
+    check(s.switches.isEmpty && s.env.nodeId == "16", "the cured node is kept")
+    check(s.count(.trial) == 1 && s.watch.verdict != .noData, "the verdict is taken back by the trial probe")
+    let snap = s.watch.snapshot(policy: s.policy)
+    check(snap.refuted == 0 && !snap.arbiterActive, "a heal that worked is not a refuted verdict: \(snap.refuted)")
+}
+
+run("heals_the_shared_budget_refuses_are_not_waited_for") {
+    // The stall ladder has already spent the episode's fresh port and restart: the adapter's shared
+    // budget refuses, nothing changed, so there is nothing to wait for.
+    var s = switching(["12"], alive: ["12"])
+    s.healResult = .denied
+    s.world(seconds: 130)
+    check(s.heals == [.freshPort, .softRestart] && s.switches == ["12"], "both asked, both refused, then the switch: \(s.commands)")
+    check(s.commands.count == 3 && s.commands[2].at - s.commands[0].at <= 2, "on consecutive ticks: \(s.commands.map { $0.at - s.startedAt })")
+    var none = switching(["12"], alive: ["12"]) { $0.switchHealSteps = 0 }
+    none.world(seconds: 130)
+    check(none.heals.isEmpty && none.switches == ["12"], "ios_tw_switch_heal_steps = 0: the switch at once")
+    var one = switching(["12"], alive: ["12"]) { $0.switchHealSteps = 1 }
+    one.world(seconds: 160)
+    check(one.heals == [.freshPort] && one.switches == ["12"], "one step = the fresh port only: \(one.heals)")
+}
+
+run("living_app_decides_itself") {
+    // The app polls the status: the extension reports and does nothing.
+    var s = switching(["12"], alive: ["12"])
+    for second in 1...200 {
+        s.env.appSeenAt = s.uptime
+        s.probeAnswer = .silent
+        s.tick(1, tx: 400, handshake: second % 17 == 0)
+    }
+    check(s.watch.verdict == .noData && s.commands.isEmpty, "verdict yes, command no")
+    check(!s.watch.snapshot(policy: s.policy).arbiterActive, "the arbiter is not even started")
+    // The app wakes up in the middle of a round: the round is forgotten at once.
+    var w = switching(["12", "9", "3"])
+    for _ in 1...400 where w.switches.count < 1 { w.world(seconds: 1) }
+    check(w.switches == ["12"] && w.watch.snapshot(policy: w.policy).arbiterActive, "a round is in progress")
+    let before = w.commands.count
+    for _ in 1...200 {
+        w.env.appSeenAt = w.uptime
+        w.world(seconds: 1)
+    }
+    check(w.commands.count == before, "not one more command while the app is alive: \(w.commands.count - before)")
+    let snap = w.watch.snapshot(policy: w.policy)
+    check(!snap.arbiterActive && snap.arbiterTried == 0 && snap.arbiterHeals == 0 && !snap.arbiterTrial, "the round is forgotten: \(snap)")
+    // The app falls asleep again and the node is still dead: a new round from the start.
+    w.env.appSeenAt = w.uptime
+    w.world(seconds: 300)
+    check(w.commands.count > before, "asleep again: the arbiter starts over")
+}
+
+run("candidates_in_plan_order_each_with_its_own_trial") {
+    var s = switching(["12", "9", "3"], alive: ["3"]) { $0.switchHealSteps = 0 }
+    s.world(seconds: 400)
+    check(s.switches == ["12", "9", "3"], "the plan's order, none twice: \(s.switches)")
+    let at = s.commands.map { $0.at }
+    check(at.count == 3 && at[1] - at[0] >= s.policy.startGraceSeconds + s.policy.probeTimeoutSeconds
+          && at[2] - at[1] >= s.policy.startGraceSeconds + s.policy.probeTimeoutSeconds, "a node is left only after its grace and its own silent probe: \(at.map { $0 - s.startedAt })")
+    check(s.env.nodeId == "3" && s.watch.verdict != .noData && s.exhausted.isEmpty, "stops at the first node that works")
+    // The current node is never a candidate for itself, even if the plan lists it.
+    var own = switching(["16", "12"], alive: ["12"]) { $0.switchHealSteps = 0 }
+    own.world(seconds: 200)
+    check(own.switches == ["12"], "the node the tunnel is on is skipped: \(own.switches)")
+}
+
+run("max_switches_bounds_a_round") {
+    var s = switching(["12", "9", "3", "7", "5"]) { $0.switchHealSteps = 0; $0.maxSwitches = 2 }
+    s.world(seconds: 400)
+    check(s.switches.prefix(2) == ["12", "9"] && s.exhausted.count == 1, "two switches, then exhausted: \(s.switches) \(s.exhausted.count)")
+    var zero = switching(["12"], alive: ["12"]) { $0.maxSwitches = 0 }
+    zero.world(seconds: 400)
+    check(zero.commands.isEmpty && zero.watch.verdict == .noData, "ios_tw_max_switches = 0: the arbiter does nothing at all")
+}
+
+run("exhausted_stays_on_the_best_and_waits_for_the_next_round") {
+    // No node of the plan works (an operator that cuts all of AmneziaWG). The tunnel goes back to
+    // where the round began and tries again after 5, 10, 20, 30, 30 minutes - silently.
+    var s = switching(["12", "9"]) { $0.trialProbeMaxPerHour = 60 }
+    for _ in 1...600 where s.exhausted.isEmpty { s.world(seconds: 1) }
+    check(s.heals.count == 2 && s.switches == ["12", "9", "16"], "both candidates, then back to where it began: \(s.switches)")
+    check(s.exhausted.count == 1, "exhausted is told once: \(s.exhausted.count)")
+    if case .switchPeer(_, let why)? = s.commands.last?.command { check(why == .best, "the return is marked as such") } else { check(false, "the last command is the return") }
+    var snap = s.watch.snapshot(policy: s.policy)
+    check(snap.arbiterExhausted && snap.arbiterRound == 1, "waiting for the next round: \(snap)")
+    let first = s.exhausted[0]
+    let roundOne = s.commands.count
+    s.world(seconds: 295)
+    check(s.commands.count == roundOne && s.exhausted.count == 1, "nothing for five minutes: \(s.commands.count - roundOne)")
+    check(s.watch.verdict == .noData && s.env.nodeId == "16", "the tunnel stands on the node it went back to, the verdict stands")
+    for _ in 1...600 where s.exhausted.count < 2 { s.world(seconds: 1) }
+    let roundTwo = Array(s.commands.dropFirst(roundOne))
+    check(roundTwo.count == 3 && (roundTwo.first?.at ?? 0) - first >= 300 && (roundTwo.first?.at ?? 0) - first < 310, "the next round five minutes later: \(roundTwo.map { $0.at - first })")
+    check(s.heals.count == 2, "a later round does not treat the node again: \(s.heals.count)")
+    check(Array(s.switches.suffix(3)) == ["12", "9", "16"], "the same candidates again and back: \(s.switches)")
+    let second = s.exhausted[1]
+    let afterTwo = s.commands.count
+    s.world(seconds: 595)
+    check(s.commands.count == afterTwo, "then nothing for ten minutes")
+    for _ in 1...60 where s.commands.count == afterTwo { s.world(seconds: 1) }
+    check(s.commands.count > afterTwo && s.commands[afterTwo].at - second >= 600, "the third round ten minutes after the second: \(s.commands.last.map { $0.at - second } ?? -1)")
+    snap = s.watch.snapshot(policy: s.policy)
+    check(snap.arbiterRound == 2, "rounds are counted: \(snap.arbiterRound)")
+    // The node that received some data in the round is the best one.
+    var b = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...600 where b.exhausted.isEmpty {
+        b.probeAnswer = .silent
+        // node 12 lets a trickle through (not enough to recover), the others nothing
+        b.tick(1, tx: 400, rx: b.env.nodeId == "12" ? 20 : 0, handshake: b.handshake == 0 ? Int(b.uptime) % 3 == 0 : Int(b.uptime) % 17 == 0)
+    }
+    check(b.switches == ["12", "9", "12"] && b.env.nodeId == "12", "back to the node that received the most data: \(b.switches)")
+    // The best is the node the tunnel is already on: no extra switch.
+    var last = switching(["12"]) { $0.switchHealSteps = 0 }
+    for _ in 1...600 where last.exhausted.isEmpty {
+        last.probeAnswer = .silent
+        last.tick(1, tx: 400, rx: last.env.nodeId == "12" ? 20 : 0, handshake: last.handshake == 0 ? Int(last.uptime) % 3 == 0 : Int(last.uptime) % 17 == 0)
+    }
+    check(last.switches == ["12"] && last.exhausted.count == 1 && last.env.nodeId == "12", "already on the best: it stays: \(last.switches)")
+}
+
+run("switch_that_fails_leaves_the_tunnel_where_it_is") {
+    var s = switching(["12", "9"], alive: ["9"]) { $0.switchHealSteps = 0 }
+    s.switchResult = .failed
+    for _ in 1...200 where s.switches.isEmpty { s.world(seconds: 1) }
+    check(s.switches == ["12"] && s.env.nodeId == "16" && s.watch.verdict == .noData, "the tunnel is still on 16 with its verdict")
+    s.switchResult = .performed
+    s.world(seconds: 60)
+    check(s.switches == ["12", "9"] && s.env.nodeId == "9", "the next candidate, the failed one is not asked twice: \(s.switches)")
+    check(s.commands.count == 2 && s.commands[1].at - s.commands[0].at <= 1, "at the next sample: nothing changed, nothing to wait for")
+}
+
+run("candidate_that_never_shakes_hands_is_left_by_the_handshake") {
+    // Node 12 is blocked by address: the engine never gets a session, a probe cannot leave. It is
+    // judged by the handshake silence, 75 s, and left.
+    var s = switching(["12", "9"], alive: ["9"]) { $0.switchHealSteps = 0 }
+    s.world(seconds: 300, mute: ["12"])
+    check(s.switches == ["12", "9"], "left for the next one: \(s.switches)")
+    check(s.commands.count == 2 && s.commands[1].at - s.commands[0].at >= s.policy.cycleSeconds * Double(s.policy.deadCycles), "not before a whole chain of handshake silence: \(s.commands.map { $0.at - s.startedAt })")
+    check(s.watch.snapshot(policy: s.policy).trialProbesLastHour <= 2, "refused starts spend no trial budget: \(s.watch.snapshot(policy: s.policy).trialProbesLastHour)")
+}
+
+run("trial_probes_have_an_hourly_limit") {
+    var s = switching(["12", "9", "3"]) { $0.switchHealSteps = 0; $0.trialProbeMaxPerHour = 1 }
+    s.world(seconds: 115)
+    check(s.switches == ["12"], "the first switch: \(s.switches)")
+    s.world(seconds: 30)
+    check(s.probesStarted.filter { $0.reason == .trial }.count == 1 && s.switches == ["12", "9"], "its one trial probe judged node 12: \(s.switches)")
+    // The budget is spent: node 9 is not judged by a trial. The passive rule still can (75 s of
+    // dead cycles and its own probe), so the round goes on, slower.
+    s.world(seconds: 60)
+    check(s.probesStarted.filter { $0.reason == .trial }.count == 1 && s.switches.count == 2, "no second trial probe this hour, no blind switch")
+    s.world(seconds: 120)
+    check(s.switches == ["12", "9", "3"], "the passive rule judged node 9 instead: \(s.switches)")
+}
+
+run("disturbed_trial_is_asked_again") {
+    var s = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...300 where s.switches.isEmpty { s.world(seconds: 1) }
+    for _ in 1...60 where s.probesStarted.last?.reason != .trial { s.world(seconds: 1) }
+    check(s.probesStarted.last?.reason == .trial, "the trial probe of node 12 is in flight")
+    s.probeAnswer = .silent
+    s.tick(1, tx: 400, handshake: true)               // the engine re-keys during the wait: the probe is void
+    for _ in 1...5 { s.probeAnswer = .silent; s.tick(1, tx: 400) }
+    check(s.switches == ["12"] && s.count(.disturbed) == 1, "a void trial moves nobody: \(s.switches)")
+    s.world(seconds: 40)
+    check(s.switches == ["12", "9"] && s.probesStarted.filter { $0.reason == .trial }.count >= 2, "asked again, then judged: \(s.switches)")
+}
+
+run("round_ends_with_the_data_and_with_the_network") {
+    // Data comes back on the node under trial (16 KiB): the round is over.
+    var s = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...300 where s.switches.isEmpty { s.world(seconds: 1) }
+    s.nodes["12"] = true
+    s.world(seconds: 120)
+    check(s.switches == ["12"] && !s.watch.snapshot(policy: s.policy).arbiterActive, "node 12 works: the round is over")
+    // Another network in the middle of a round: the round belonged to the old one.
+    var n = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...300 where n.switches.isEmpty { n.world(seconds: 1) }
+    n.watch.notePathEvent(at: n.uptime, interfaceChanged: true, policy: n.policy)
+    let snap = n.watch.snapshot(policy: n.policy)
+    check(!snap.arbiterActive && !snap.arbiterTrial && snap.arbiterTried == 0, "the round is forgotten with the network: \(snap)")
+    let before = n.commands.count
+    n.world(seconds: 60)
+    check(n.commands.count == before, "nothing is done on the new network until it is judged itself")
+    // The switch key goes off in the middle of a round.
+    var k = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...300 where k.switches.isEmpty { k.world(seconds: 1) }
+    k.policy.switchEnabled = false
+    let kBefore = k.commands.count
+    k.world(seconds: 300)
+    check(k.commands.count == kBefore && !k.watch.snapshot(policy: k.policy).arbiterActive, "key off: not one more command")
+    // A device started by somebody else (the app, the system) ends the round too.
+    var d = switching(["12", "9"]) { $0.switchHealSteps = 0 }
+    for _ in 1...300 where d.switches.isEmpty { d.world(seconds: 1) }
+    d.watch.noteDeviceStarted(at: d.uptime, policy: d.policy)
+    check(!d.watch.snapshot(policy: d.policy).arbiterActive && !d.watch.snapshot(policy: d.policy).arbiterTrial, "somebody else's start: the arbiter forgets its round")
+}
+
+run("arbiter_snapshot") {
+    var s = switching(["12", "9"])
+    for _ in 1...300 where s.heals.count < 1 { s.world(seconds: 1) }
+    var snap = s.watch.snapshot(policy: s.policy)
+    check(snap.arbiterActive && snap.arbiterRound == 0 && snap.arbiterHeals == 1 && snap.arbiterSwitches == 0 && snap.arbiterTried == 1 && snap.arbiterTrial && !snap.arbiterExhausted, "after the first heal: \(snap)")
+    for _ in 1...300 where s.switches.count < 1 { s.world(seconds: 1) }
+    snap = s.watch.snapshot(policy: s.policy)
+    check(snap.arbiterHeals == 2 && snap.arbiterSwitches == 1 && snap.arbiterTried == 2 && snap.arbiterTrial, "after the first switch: \(snap)")
+    let reportsBefore = s.reports.count
+    s.world(seconds: 2) // the first sample of a new device only primes the counters
+    check(snap.verdict == .none && s.verdicts.last == TribeDataVerdict.none, "the verdict about the previous node does not follow the tunnel to the new one")
+    check(s.reports.count == reportsBefore + 1 && s.reports.last?.verdict == TribeDataVerdict.none, "and the outputs are told so")
+    let d = snap.asDictionary
+    check(d["arb_active"] as? Bool == true && d["arb_heals"] as? Int == 2 && d["arb_switches"] as? Int == 1 && d["arb_tried"] as? Int == 2
+          && d["arb_trial"] as? Bool == true && d["arb_exhausted"] as? Bool == false && d["arb_round"] as? Int == 0, "the status block carries the arbiter: \(d)")
+    check((d["probes_trial_hour"] as? Int ?? -1) == s.probesStarted.filter { $0.reason == .trial }.count && (d["probes_trial_hour"] as? Int ?? 0) >= 2, "and its probes: \(String(describing: d["probes_trial_hour"]))")
 }
 
 if failures == 0 {

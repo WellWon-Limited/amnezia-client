@@ -62,12 +62,37 @@ public enum TribeDataVerdict: String, Equatable {
 
 public enum TribeDataWatchAction: Equatable {
     case keep
-    /// Something worth a journal line happened (see `TribeDataWatchOutput.report`). Nobody is moved.
+    /// Something worth a journal line happened (see `TribeDataWatchOutput.report`).
     case report
-    /// Reserved for stage 2 (in-place peer switch). Never returned by this version.
-    case switchPeer
-    /// Reserved for stage 2 (candidates exhausted). Never returned by this version.
-    case exhausted
+}
+
+/// A same-node heal the arbiter runs before it leaves a node (stage 2). Both go through the
+/// adapter's shared recovery budget, the one the stall ladder and the app's requests use.
+public enum TribeWatchHeal: String, Equatable {
+    case freshPort = "fresh_port"
+    case softRestart = "soft_restart"
+}
+
+public enum TribeSwitchReason: String, Equatable {
+    /// The node is confirmed dead; the next candidate of the plan.
+    case noData = "no_data"
+    /// The candidates are exhausted: back to the node that received the most data in the round.
+    case best = "exhausted_best"
+}
+
+/// What the arbiter orders (stage 2: features.ios_tunnel_watch_switch). The adapter executes it at
+/// once, on the same tick, and tells the result back (`noteCommandResult`).
+public enum TribeWatchCommand: Equatable {
+    case heal(TribeWatchHeal)
+    case switchPeer(to: String, why: TribeSwitchReason)
+}
+
+public enum TribeCommandResult: String, Equatable {
+    case performed
+    /// Refused (the shared recovery budget, or no configuration for the candidate): nothing changed.
+    case denied
+    /// Tried and not done: the tunnel is still on the previous node.
+    case failed
 }
 
 /// What a `.report` is about (the journal line carries it as `event=`).
@@ -85,6 +110,8 @@ public enum TribeDataWatchReport: String, Equatable {
     case disturbed
     /// The app fell silent while the verdict was no_data: the shadow mark turned on.
     case wouldSwitch = "would_switch"
+    /// The probe the arbiter asked after a heal or a switch was answered: the node passes data.
+    case trial
 }
 
 /// Result of the request that bypasses the tunnel (bound to the physical interface).
@@ -120,6 +147,8 @@ public enum TribeProbeReason: String, Equatable {
     case passive
     /// A lot was sent and very little data came back within the suspect window.
     case lowRx = "low_rx"
+    /// The arbiter's own probe after a heal or a switch, once the grace is over (stage 2).
+    case trial
 }
 
 /// What confirmed a `no_data` verdict.
@@ -192,6 +221,11 @@ public struct TribeDataWatchPolicy: Equatable {
     public var probeLowRxMaxPerHour = 2
     /// Hard limit on the requests that bypass the tunnel (they are visible to the local network).
     public var sanityMaxPerHour = 12
+    /// Stage 2: same-node heals the arbiter runs itself before the first switch (a fresh port,
+    /// then an in-place restart); 0 = switch at once.
+    public var switchHealSteps = 2
+    /// Stage 2: probes per hour the arbiter may spend on trials (one per heal or switch).
+    public var trialProbeMaxPerHour = 30
 
     /// An episode with no new dead cycle for this long is closed (demand ended).
     public static let episodeIdleSeconds: TimeInterval = 120
@@ -210,6 +244,12 @@ public struct TribeDataWatchPolicy: Equatable {
     public static let lowRxBackoffMaxSeconds: TimeInterval = 3600
     /// A probe whose result did not arrive this long after its timeout is written off.
     public static let probeLostSlackSeconds: TimeInterval = 6
+    /// Stage 2: wait between a fresh port and its trial probe (a restart or a switch waits one
+    /// start grace: the new device has to shake hands).
+    public static let healTrialSeconds: TimeInterval = 10
+    /// Stage 2: with the candidates exhausted the next round starts after 5, 10, 20, then every
+    /// 30 minutes (or at once on another network: the round belongs to the network it began on).
+    public static let roundPauseSeconds: [TimeInterval] = [300, 600, 1200, 1800]
     public static let probeHourSeconds: TimeInterval = 3600
 
     public init() {}
@@ -246,6 +286,8 @@ public struct TribeDataWatchPolicy: Equatable {
         policy.probeMaxPerHour = Int(number(numbers["ios_tw_probe_max_per_hour"], fallback: Double(policy.probeMaxPerHour), min: 1, max: 60))
         policy.probeLowRxMaxPerHour = Int(number(numbers["ios_tw_probe_low_rx_max_per_hour"], fallback: Double(policy.probeLowRxMaxPerHour), min: 0, max: 12))
         policy.sanityMaxPerHour = Int(number(numbers["ios_tw_sanity_max_per_hour"], fallback: Double(policy.sanityMaxPerHour), min: 1, max: 60))
+        policy.switchHealSteps = Int(number(numbers["ios_tw_switch_heal_steps"], fallback: Double(policy.switchHealSteps), min: 0, max: 2))
+        policy.trialProbeMaxPerHour = Int(number(numbers["ios_tw_trial_probe_max_per_hour"], fallback: Double(policy.trialProbeMaxPerHour), min: 1, max: 60))
         return policy
     }
 
@@ -312,10 +354,15 @@ public struct TribeDataWatchEnv: Equatable {
     public var lateAnswerAt: TimeInterval?
     /// Uptime of the last status request from the app; nil = none in this session.
     public var appSeenAt: TimeInterval?
+    /// Stage 2: the node the tunnel is on right now (a label), and the nodes the provider can
+    /// switch to in place, in the plan's order (never the current one). Empty = nothing to switch to.
+    public var nodeId: String
+    public var candidates: [String]
 
     public init(pathSatisfied: Bool, sanity: TribeSanityResult = .unknown,
                 sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none, probeAt: TimeInterval? = nil,
-                probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil, appSeenAt: TimeInterval? = nil) {
+                probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil, appSeenAt: TimeInterval? = nil,
+                nodeId: String = "", candidates: [String] = []) {
         self.pathSatisfied = pathSatisfied
         self.sanity = sanity
         self.sanityAt = sanityAt
@@ -324,6 +371,8 @@ public struct TribeDataWatchEnv: Equatable {
         self.probeLatencyMs = probeLatencyMs
         self.lateAnswerAt = lateAnswerAt
         self.appSeenAt = appSeenAt
+        self.nodeId = nodeId
+        self.candidates = candidates
     }
 }
 
@@ -337,10 +386,12 @@ public struct TribeDataWatchInputs: Equatable {
     public var probeLatencyMs: Int
     public var lateAnswerAt: TimeInterval?
     public var appSeenAt: TimeInterval?
+    public var nodeId: String
+    public var candidates: [String]
 
     public init(sanity: TribeSanityResult = .unknown, sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none,
                 probeAt: TimeInterval? = nil, probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil,
-                appSeenAt: TimeInterval? = nil) {
+                appSeenAt: TimeInterval? = nil, nodeId: String = "", candidates: [String] = []) {
         self.sanity = sanity
         self.sanityAt = sanityAt
         self.probe = probe
@@ -348,12 +399,15 @@ public struct TribeDataWatchInputs: Equatable {
         self.probeLatencyMs = probeLatencyMs
         self.lateAnswerAt = lateAnswerAt
         self.appSeenAt = appSeenAt
+        self.nodeId = nodeId
+        self.candidates = candidates
     }
 
     public func env(pathSatisfied: Bool) -> TribeDataWatchEnv {
         TribeDataWatchEnv(pathSatisfied: pathSatisfied, sanity: sanity, sanityAt: sanityAt,
                           probe: probe, probeAt: probeAt, probeLatencyMs: probeLatencyMs,
-                          lateAnswerAt: lateAnswerAt, appSeenAt: appSeenAt)
+                          lateAnswerAt: lateAnswerAt, appSeenAt: appSeenAt,
+                          nodeId: nodeId, candidates: candidates)
     }
 }
 
@@ -370,15 +424,32 @@ public struct TribeDataWatchOutput: Equatable {
     public var startProbe: TribeProbeReason?
     /// Shadow mark for layer 2: no_data (confirmed) and the app shows no sign of life.
     public var wouldSwitch: Bool
+    /// Stage 2: what the adapter must do now, on this tick. nil = nothing (always nil with the
+    /// switch key off).
+    public var command: TribeWatchCommand?
+    /// Filled in by the adapter after it executed `command`, for the journal.
+    public var commandResult: TribeCommandResult?
+    /// Stage 2: every candidate was tried on this step; the tunnel stays on the best node until
+    /// the next round. Set on exactly one step per round.
+    public var exhausted: Bool
 
     public init(verdict: TribeDataVerdict, action: TribeDataWatchAction, report: TribeDataWatchReport? = nil,
-                needsSanityCheck: Bool = false, startProbe: TribeProbeReason? = nil, wouldSwitch: Bool = false) {
+                needsSanityCheck: Bool = false, startProbe: TribeProbeReason? = nil, wouldSwitch: Bool = false,
+                command: TribeWatchCommand? = nil, exhausted: Bool = false) {
         self.verdict = verdict
         self.action = action
         self.report = report
         self.needsSanityCheck = needsSanityCheck
         self.startProbe = startProbe
         self.wouldSwitch = wouldSwitch
+        self.command = command
+        self.commandResult = nil
+        self.exhausted = exhausted
+    }
+
+    /// Nothing for the provider to journal or do.
+    public var isQuiet: Bool {
+        action == .keep && !needsSanityCheck && startProbe == nil && command == nil && !exhausted
     }
 
     public static let idle = TribeDataWatchOutput(verdict: .none, action: .keep)
@@ -422,6 +493,16 @@ public struct TribeDataWatchSnapshot: Equatable {
     public var lastNoDataWallMs: Int64 = 0
     /// Wall time inbound data last ended a verdict as recovered; 0 = never in this session.
     public var recoveredWallMs: Int64 = 0
+    /// Stage 2, the arbiter: a round is in progress; rounds started; same-node heals done; switches
+    /// and nodes tried in the round; a trial probe is awaited; the candidates are exhausted.
+    public var arbiterActive = false
+    public var arbiterRound = 0
+    public var arbiterHeals = 0
+    public var arbiterSwitches = 0
+    public var arbiterTried = 0
+    public var arbiterTrial = false
+    public var arbiterExhausted = false
+    public var trialProbesLastHour = 0
 
     public init() {}
 
@@ -437,7 +518,10 @@ public struct TribeDataWatchSnapshot: Equatable {
          "probes_low_rx_hour": lowRxProbesLastHour, "sanity_hour": sanityLastHour,
          "refuted": refuted, "disturbed": disturbed, "evidence": evidence.rawValue,
          "would_switch": wouldSwitch, "app_alive": appAlive,
-         "last_no_data_ms": lastNoDataWallMs, "recovered_ms": recoveredWallMs]
+         "last_no_data_ms": lastNoDataWallMs, "recovered_ms": recoveredWallMs,
+         "arb_active": arbiterActive, "arb_round": arbiterRound, "arb_heals": arbiterHeals,
+         "arb_switches": arbiterSwitches, "arb_tried": arbiterTried, "arb_trial": arbiterTrial,
+         "arb_exhausted": arbiterExhausted, "probes_trial_hour": trialProbesLastHour]
     }
 }
 
@@ -526,6 +610,28 @@ public struct TribeDataWatch: Equatable {
     private var lastAppAlive = false
     private var lastPassive = false
 
+    /// The arbiter (stage 2): what is done about a confirmed no_data while the app sleeps. One
+    /// round = the same-node heals (first round only), then the plan's candidates one by one, each
+    /// judged by its own trial probe after its own grace; exhausted = back to the node that received
+    /// the most data and a pause before the next round.
+    private struct Arbiter: Equatable {
+        var active = false
+        var round = 0
+        var healsDone = 0
+        var switchesDone = 0
+        /// Nodes that were current in this round, in order (the first is where the round began),
+        /// and the inbound data each of them received while current.
+        var tried: [String] = []
+        var rx: [UInt64] = []
+        /// A heal or a switch was performed and its trial probe has not judged it yet.
+        var trialPending = false
+        var trialDueAt: TimeInterval = 0
+        var exhausted = false
+        var nextRoundAt: TimeInterval = 0
+    }
+    private var arb = Arbiter()
+    private var trialProbeTimes: [TimeInterval] = []
+
     public init() {}
 
     /// The device was started, resumed after a long-offline pause, or (stage 2) moved to another
@@ -534,10 +640,42 @@ public struct TribeDataWatch: Equatable {
     /// the session's gate counters, and what the outputs were last told.
     public mutating func noteDeviceStarted(at uptime: TimeInterval, policy: TribeDataWatchPolicy) {
         let kept = (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported)
+        let keptTrials = trialProbeTimes
         self = TribeDataWatch()
         (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported) = kept
+        trialProbeTimes = keptTrials
         startGraceUntil = uptime + policy.startGraceSeconds
         sessionEpoch = uptime
+    }
+
+    /// The adapter executed a command of the arbiter (stage 2).
+    /// A heal that was refused changes nothing and is not waited for; a performed one is judged by
+    /// a trial probe. A performed switch is a new device on ANOTHER node: everything known about the
+    /// previous node is dropped, the new one gets its own start grace and its own trial probe before
+    /// it is trusted; the round, the budgets and the counters stay.
+    public mutating func noteCommandResult(_ command: TribeWatchCommand, result: TribeCommandResult,
+                                           at uptime: TimeInterval, policy: TribeDataWatchPolicy) {
+        switch command {
+        case .heal(let kind):
+            arb.healsDone += 1
+            guard result == .performed else { return }
+            arb.trialPending = true
+            arb.trialDueAt = uptime + (kind == .freshPort ? TribeDataWatchPolicy.healTrialSeconds : policy.startGraceSeconds)
+        case .switchPeer(let node, let why):
+            if why == .noData {
+                arb.switchesDone += 1
+                if !arb.tried.contains(node) {
+                    arb.tried.append(node)
+                    arb.rx.append(0)
+                }
+            }
+            guard result == .performed else { return }
+            let keptArbiter = arb
+            noteDeviceStarted(at: uptime, policy: policy)
+            arb = keptArbiter
+            arb.trialPending = true
+            arb.trialDueAt = uptime + policy.startGraceSeconds
+        }
     }
 
     /// The backend was restarted in place on the same node (a heal step): its counters start from
@@ -563,6 +701,7 @@ public struct TribeDataWatch: Equatable {
             // at the next sample (`lastReported` still holds the old verdict).
             closeEpisode()
             probeRequestedAt = nil
+            arb = Arbiter() // stage 2: the round belongs to the network it began on
             if verdict != .none {
                 verdict = .none
                 evidence = .none
@@ -710,6 +849,7 @@ public struct TribeDataWatch: Equatable {
         probeTimes.removeAll { now - $0 >= hour }
         lowRxProbeTimes.removeAll { now - $0 >= hour }
         sanityTimes.removeAll { now - $0 >= hour }
+        trialProbeTimes.removeAll { now - $0 >= hour }
         var report: TribeDataWatchReport?
 
         // 7. An answer that came after its probe had been judged silent: the verdict was wrong.
@@ -755,16 +895,35 @@ public struct TribeDataWatch: Equatable {
                         lowRxBackoff = Swift.min(lowRxBackoff * 2, TribeDataWatchPolicy.lowRxBackoffMaxSeconds)
                     }
                 }
-                // A result judges the passive rule only if the rule asked for it; the low-inbound
-                // trigger's own result is reported and the rule, if met, asks for its own probe.
-                let concerned = reason == .passive
+                // A result judges the node only if the passive rule or the arbiter asked for it; the
+                // low-inbound trigger's own result is reported and the rule, if met, asks for its own.
+                let concerned = reason == .passive || reason == .trial
                 // A result other than "answered" judges only an undisturbed wait. The chain itself
                 // may have aged during the wait, so the rule is held as met for this one step.
-                let undisturbed = rxDataSinceProbe == 0 && !disturbedSinceProbe && !quiet && episodeStart != nil
+                // A trial is another question - "prove that you pass data before you are trusted",
+                // asked about a node the arbiter has just acted on: it needs no episode, and a
+                // trickle of inbound packets is no answer to it (16 KiB are: `recovered`).
+                let calm = !disturbedSinceProbe && !quiet
+                let undisturbed = calm && (reason == .trial || (rxDataSinceProbe == 0 && episodeStart != nil))
                 // No session and no response to the handshakes for a whole chain of dead cycles.
                 let handshakeSilent = sessionEpoch.map { now - $0 >= policy.cycleSeconds * Double(policy.deadCycles) } ?? false
                 if !concerned {
                     report = .probe // the low-inbound trigger's own result
+                } else if outcome == .answered && reason == .trial {
+                    // The node the arbiter treated or moved to passes data: the round is over and
+                    // a verdict about this node, if one stands, is taken back. Not a false decision
+                    // of the passive rule, so it is not counted as refuted.
+                    report = .trial
+                    arb.trialPending = false
+                    chain = 0
+                    passive = false
+                    if episodeStart != nil { answeredInEpisode = true }
+                    if verdict == .noData {
+                        verdict = episodeStart != nil ? .suspect : .none
+                        evidence = .none
+                        verdictSinceWall = verdict == .none ? 0 : sample.wall
+                        rxDataSinceVerdict = 0
+                    }
                 } else if outcome == .answered {
                     // The path passes data: the passive rule was wrong. Count it and start over.
                     refutedCount += 1
@@ -775,9 +934,11 @@ public struct TribeDataWatch: Equatable {
                 } else if outcome == .silent && undisturbed {
                     passive = true
                     judged = .probe
+                    arb.trialPending = false
                 } else if outcome == .noSession && undisturbed && handshakeSilent {
                     passive = true
                     judged = .handshake
+                    arb.trialPending = false
                 } else if outcome == .noSession && undisturbed {
                     // The engine is still trying its first handshakes: wait for a whole chain.
                     nextProbeNotBefore = now + TribeDataWatchPolicy.probeRetryGapSeconds
@@ -882,8 +1043,32 @@ public struct TribeDataWatch: Equatable {
         }
         lastPassive = passive
 
-        // 10. What to tell.
+        // 9d. The arbiter (stage 2): what to DO about a confirmed no_data. Only with its own key
+        // on and only while the app shows no sign of life: a living app decides itself, and the
+        // extension forgets its round the moment it sees one.
         let appAlive = env.appSeenAt.map { now >= $0 && now - $0 <= policy.appAliveSeconds } ?? false
+        var command: TribeWatchCommand?
+        var exhaustedNow = false
+        if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive {
+            if arb != Arbiter() { arb = Arbiter() }
+        } else {
+            if arb.active, let index = arb.tried.firstIndex(of: env.nodeId) { arb.rx[index] &+= rxData }
+            // The trial of what the arbiter did last: one probe once the grace is over.
+            if arb.trialPending && startProbe == nil && probeRequestedAt == nil && !quiet && probeUsable
+                && now >= arb.trialDueAt && now >= nextProbeNotBefore
+                && trialProbeTimes.count < policy.trialProbeMaxPerHour {
+                startProbe = .trial
+                chargeProbe(at: now, reason: .trial)
+            }
+            if next == .recovered || (arb.active && !arb.trialPending && next != .noData) {
+                arb = Arbiter() // data came back, or the verdict was taken back: the round is over
+            } else if next == .noData && !arb.trialPending && probeRequestedAt == nil && !quiet
+                        && (arb.active || !env.candidates.isEmpty) {
+                (command, exhaustedNow) = arbiterCommand(now: now, env: env, policy: policy)
+            }
+        }
+
+        // 10. What to tell.
         lastAppAlive = appAlive
         let wouldSwitch = next == .noData && !appAlive
         if next != verdict {
@@ -899,7 +1084,7 @@ public struct TribeDataWatch: Equatable {
         if next != lastReported {
             // Every change is told, also the end of a verdict (the outputs must never keep a
             // verdict that is no longer held) and a change made between two samples.
-            report = report == .refuted ? .refuted : .verdict
+            report = (report == .refuted || report == .trial) ? report : .verdict
         } else if wouldSwitch && !lastWouldSwitch && report == nil {
             report = .wouldSwitch // the app fell asleep after the verdict: the shadow mark turns on
         }
@@ -911,7 +1096,47 @@ public struct TribeDataWatch: Equatable {
         lastReported = verdict
         if next == .recovered { verdictSinceWall = 0 }
         return TribeDataWatchOutput(verdict: reported, action: report == nil ? .keep : .report, report: report,
-                                    needsSanityCheck: needsSanity, startProbe: startProbe, wouldSwitch: wouldSwitch)
+                                    needsSanityCheck: needsSanity, startProbe: startProbe, wouldSwitch: wouldSwitch,
+                                    command: command, exhausted: exhaustedNow)
+    }
+
+    /// The next thing to do about the node the tunnel stands on (it is confirmed dead and nothing
+    /// is being waited for). Order: the same-node heals (first round only) -> the plan's candidates
+    /// that were not tried in this round, at most `maxSwitches` of them -> exhausted: back to the
+    /// node that received the most data in the round (a tie goes to where the round began), then a
+    /// pause before the next round.
+    private mutating func arbiterCommand(now: TimeInterval, env: TribeDataWatchEnv,
+                                         policy: TribeDataWatchPolicy) -> (TribeWatchCommand?, Bool) {
+        if !arb.active {
+            arb.active = true
+            arb.tried = [env.nodeId]
+            arb.rx = [0]
+        }
+        if arb.exhausted {
+            guard now >= arb.nextRoundAt else { return (nil, false) }
+            arb.exhausted = false
+            arb.tried = [env.nodeId]
+            arb.rx = [0]
+            arb.switchesDone = 0
+        }
+        if arb.round == 0 && arb.healsDone < policy.switchHealSteps {
+            return (.heal(arb.healsDone == 0 ? .freshPort : .softRestart), false)
+        }
+        if arb.switchesDone < policy.maxSwitches,
+           let node = env.candidates.first(where: { $0 != env.nodeId && !arb.tried.contains($0) }) {
+            return (.switchPeer(to: node, why: .noData), false)
+        }
+        arb.exhausted = true
+        let pauses = TribeDataWatchPolicy.roundPauseSeconds
+        arb.nextRoundAt = now + pauses[Swift.min(arb.round, pauses.count - 1)]
+        arb.round += 1
+        var best = 0
+        for index in arb.rx.indices where arb.rx[index] > arb.rx[best] { best = index }
+        let bestNode = arb.tried[best]
+        if bestNode != env.nodeId && env.candidates.contains(bestNode) {
+            return (.switchPeer(to: bestNode, why: .best), true)
+        }
+        return (nil, true)
     }
 
     /// Counters for the journal line, the status reply and the shared file (state after the last step).
@@ -945,6 +1170,14 @@ public struct TribeDataWatch: Equatable {
         snapshot.appAlive = lastAppAlive
         snapshot.lastNoDataWallMs = Int64(lastNoDataWall * 1000)
         snapshot.recoveredWallMs = Int64(recoveredWall * 1000)
+        snapshot.arbiterActive = arb.active
+        snapshot.arbiterRound = arb.round
+        snapshot.arbiterHeals = arb.healsDone
+        snapshot.arbiterSwitches = arb.switchesDone
+        snapshot.arbiterTried = arb.tried.count
+        snapshot.arbiterTrial = arb.trialPending
+        snapshot.arbiterExhausted = arb.exhausted
+        snapshot.trialProbesLastHour = trialProbeTimes.count
         return snapshot
     }
 
@@ -973,6 +1206,8 @@ public struct TribeDataWatch: Equatable {
             if episodeStart != nil { probesInEpisode += 1 }
         case .lowRx:
             lowRxProbeTimes.append(now)
+        case .trial:
+            trialProbeTimes.append(now)
         }
     }
 
@@ -984,6 +1219,8 @@ public struct TribeDataWatch: Equatable {
             if probesInEpisode > 0 { probesInEpisode -= 1 }
         case .lowRx:
             if !lowRxProbeTimes.isEmpty { lowRxProbeTimes.removeLast() }
+        case .trial:
+            if !trialProbeTimes.isEmpty { trialProbeTimes.removeLast() }
         }
     }
 
