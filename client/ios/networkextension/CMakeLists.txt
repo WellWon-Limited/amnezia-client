@@ -71,6 +71,8 @@ set(WG_APPLE_SOURCE_DIR "${AWG_APPLE_SOURCE_DIR}")
 target_sources(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeRoaming.swift
+    # AVPN (build 140, awg-apple tribe.13): pure verdict rule of the tunnel-side data watch
+    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeDataWatch.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardNetworkExtension/ErrorNotifier.swift

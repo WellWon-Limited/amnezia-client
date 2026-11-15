@@ -1,0 +1,1102 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index 6ce7d65..331dc74 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -72,6 +72,20 @@ public class WireGuardAdapter {
+     // whether the pending coalesced roam step is a fresh port (path returned after a real loss).
+     private var lastPathInterface: String?
+     private var roamWantsFreshPort = false
++    // tribe.13 data watch (TribeDataWatch.swift): a verdict about DATA, fed on the stall watchdog's
++    // own tick (no timer of its own; no stall watchdog = no data watch). It reports and asks, it
++    // never acts. Off until the provider sets an enabled policy: the three hooks below are then
++    // no-ops and the adapter behaves as tribe.11. workQueue only.
++    private var dataWatch = TribeDataWatch()
++    private var dataWatchPolicy = TribeDataWatchPolicy.disabled
++    private var dataWatchActive = false
++    /// Same-node heal steps performed so far (fresh ports and in-place restarts, whoever asked).
++    private var dataWatchHealSteps: UInt64 = 0
++    /// The provider's side of the watch (bypass check, probe, last status request of the app).
++    /// Called on workQueue at every tick while the watch is on: it must only read fields.
++    public var dataWatchInputs: (() -> TribeDataWatchInputs)?
++    /// Called on workQueue when the watch has something to report or asks for a check or a probe.
++    public var dataWatchHandler: ((TribeDataWatchOutput, TribeDataWatchSnapshot) -> Void)?
+ 
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+@@ -401,6 +415,17 @@ public class WireGuardAdapter {
+         }
+     }
+ 
++    /// tribe.13: policy of the data watch (the provider re-reads it from the plan file). A
++    /// disabled policy makes the watch forget everything at the next tick.
++    public func setDataWatchPolicy(_ policy: TribeDataWatchPolicy) {
++        workQueue.async { self.dataWatchPolicy = policy }
++    }
++
++    /// tribe.13: the watch's counters for the status reply and the shared file.
++    public func dataWatchSnapshot(completionHandler: @escaping (TribeDataWatchSnapshot) -> Void) {
++        workQueue.async { completionHandler(self.dataWatch.snapshot(policy: self.dataWatchPolicy)) }
++    }
++
+     // MARK: - Private methods
+ 
+     /// Setup WireGuard log handler.
+@@ -587,6 +612,7 @@ public class WireGuardAdapter {
+                 let realLoss = self.pathLostAt != nil && self.everHadHandshake
+                     && self.remainingUnsatisfiedGraceSeconds() == 0
+                 let interfaceChanged = self.notePathInterface(path) && self.everHadHandshake
++                if realLoss || interfaceChanged { self.dataWatchPathEvent(interfaceChanged: interfaceChanged) } // tribe.13
+                 if let lostAt = self.pathLostAt {
+                     self.pathLostAt = nil
+                     self.roamCounters.pathRestored += 1
+@@ -673,6 +699,7 @@ public class WireGuardAdapter {
+         guard self.pathLostAt == nil else { return }
+         self.pathLostAt = Date()
+         self.roamCounters.pathLost += 1
++        self.dataWatchPathEvent(interfaceChanged: false) // tribe.13
+     }
+ 
+     /// tribe.9: remembers the physical interface of the satisfied path (utun/ipsec are `.other`
+@@ -760,6 +787,10 @@ public class WireGuardAdapter {
+         self.stallTimer = timer
+         self.recovery.resetTracker()
+         self.previousWatchdogSample = nil
++        // tribe.13: a (re)started device is a new subject for the data watch (start grace).
++        if self.dataWatchPolicy.enabled {
++            self.dataWatch.noteDeviceStarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++        }
+         timer.resume()
+     }
+ 
+@@ -793,6 +824,7 @@ public class WireGuardAdapter {
+         for op in ops {
+             switch op {
+             case .freshListenPort:
++                self.dataWatchHealSteps &+= 1 // tribe.13: a same-node heal step
+                 wgSetConfig(handle, "listen_port=0\n")
+                 #if os(iOS)
+                 wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+@@ -823,6 +855,9 @@ public class WireGuardAdapter {
+             self.state = .started(newHandle, settingsGenerator)
+             self.roamCounters.softRestarts += 1
+             self.previousWatchdogSample = nil
++            // tribe.13: a same-node heal step; the new device's counters start from zero.
++            self.dataWatchHealSteps &+= 1
++            if self.dataWatchPolicy.enabled { self.dataWatch.noteBackendRestarted() }
+             if let sample = self.currentStallSample(handle: newHandle) {
+                 self.recovery.rebaseAfterBackendRestart(sample)
+             }
+@@ -871,6 +906,7 @@ public class WireGuardAdapter {
+         self.previousWatchdogSample = sample
+         let interval: Double = (!self.lastPathSatisfiable || idle) ? 5 : 1
+         self.stallTimer?.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(300))
++        self.dataWatchTick(sample) // tribe.13: the same sample, before the ladder acts on it
+         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
+         switch outcome {
+         case .none:
+@@ -902,6 +938,36 @@ public class WireGuardAdapter {
+         }
+     }
+ 
++    // MARK: - Tribe data watch (tribe.13, workQueue only)
++
++    /// One step of the data watch on the stall watchdog's sample. With the policy off this is one
++    /// comparison; the watch is cleared once when the policy goes off.
++    private func dataWatchTick(_ sample: TribeStallSample) {
++        guard self.dataWatchPolicy.enabled else {
++            if self.dataWatchActive {
++                self.dataWatchActive = false
++                self.dataWatch = TribeDataWatch()
++            }
++            return
++        }
++        self.dataWatchActive = true
++        let inputs = self.dataWatchInputs?() ?? TribeDataWatchInputs()
++        let output = self.dataWatch.step(
++            TribeDataWatchSample(txBytes: sample.txBytes, rxBytes: sample.rxBytes, lastHandshakeSec: sample.lastHandshakeSec,
++                                 uptime: sample.at, wall: Date().timeIntervalSince1970),
++            env: inputs.env(pathSatisfied: self.lastPathSatisfiable, healSteps: self.dataWatchHealSteps),
++            policy: self.dataWatchPolicy)
++        guard output.action != .keep || output.needsSanityCheck || output.startProbe != nil else { return }
++        self.dataWatchHandler?(output, self.dataWatch.snapshot(policy: self.dataWatchPolicy))
++    }
++
++    /// A real path change (lost, back after a loss, another physical interface). Path updates that
++    /// change neither are not passed on: on cellular there are hundreds per hour.
++    private func dataWatchPathEvent(interfaceChanged: Bool) {
++        guard self.dataWatchPolicy.enabled else { return }
++        self.dataWatch.notePathEvent(at: ProcessInfo.processInfo.systemUptime, interfaceChanged: interfaceChanged, policy: self.dataWatchPolicy)
++    }
++
+     // MARK: - iOS offline detection helpers
+ 
+     private var unsatisfiedGracePeriodAfterNetworkSettings: TimeInterval {
+diff --git a/Sources/WireGuardKitGo/api-apple.go b/Sources/WireGuardKitGo/api-apple.go
+index e104403..1b034c0 100644
+--- a/Sources/WireGuardKitGo/api-apple.go
++++ b/Sources/WireGuardKitGo/api-apple.go
+@@ -108,7 +108,9 @@ func wgTurnOn(settings *C.char, tunFd int32) int32 {
+ 	}
+ 	logger.Verbosef("Attaching to interface")
+ 	tun = wrapTunIfEnabled(tun, logger.Verbosef) // AVPN split-DNS форвардер (dnsfwd.go); no-op если выключен
++	tribeFwd, _ := tun.(*fwdTun) // AVPN tribe.13: the forwarder's channel lets the data-watch probe leave at once
+ 	tun = wrapDirectSplitIfEnabled(tun, logger.Verbosef) // AVPN разделение РФ в расширении (directsplit.go); no-op если выключено
++	tun = wrapTribeProbeIfEnabled(tun, tribeFwd, logger.Verbosef) // AVPN tribe.13: data-watch probe (tribeprobe.go); no-op unless configured
+ 	dev := device.NewDevice(tun, conn.NewStdNetBind(), logger)
+ 
+ 	err = dev.IpcSet(C.GoString(settings))
+diff --git a/Sources/WireGuardKitGo/tribeprobe.go b/Sources/WireGuardKitGo/tribeprobe.go
+new file mode 100644
+index 0000000..ec71a46
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeprobe.go
+@@ -0,0 +1,393 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Tribe data watch probe (awg-apple tribe.13).
++ *
++ * The data watch (TribeDataWatch.swift) decides from the device counters WHEN the tunnel looks
++ * dead; this probe is its judge. It sends a small packet THROUGH the tunnel and waits for the
++ * answer: a DNS query (root name, A/IN) from the client's tunnel address to the resolver the
++ * session already uses. The packet is handed to the WireGuard device as if the OS had sent it
++ * (the same idea as the split-DNS forwarder's warm-up, dnsfwd.go), so it is encrypted, goes to
++ * the node, leaves the node through its NAT, and the reply comes back the same way. The reply is
++ * taken off the device's write path and never reaches the OS.
++ *
++ * What an answer proves: transport packets pass phone -> node, the node forwards to the Internet
++ * and back, and transport packets pass node -> phone. With a node-local resolver it proves only
++ * phone <-> node. It says nothing about bulk transfer: a freeze that depends on the size of the
++ * answer is invisible to a 100-byte reply. The resolver answers the root query itself.
++ *
++ * The wrapper is its own outermost tun.Device and is a pass-through: no pump goroutine, no copy
++ * per packet; Write looks at packets only while a probe is in flight. How the packet gets in:
++ *  - the split-DNS forwarder is on (the default): the forwarder already feeds the device from a
++ *    channel, the probe packet is put into that channel and leaves at once;
++ *  - the forwarder is off (RU node, user setting): Read hands out a waiting probe packet first
++ *    and otherwise calls the inner Read, so the packet leaves with the next outbound packet of
++ *    the OS. The probe is asked for only when there is outbound demand, but on a dead path that
++ *    demand can pause for seconds: if nothing reads the tunnel before the timeout the result is
++ *    "not_sent", which is different from "silent".
++ *
++ * Inner IPv4 only: the client address of our configs is IPv4.
++ * amneziawg-go is not patched.
++ */
++package main
++
++import "C"
++
++import (
++	"encoding/binary"
++	"fmt"
++	"net/netip"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++)
++
++const (
++	// Source ports of probe packets: outside the forwarder's mux range (61000-64999) and away
++	// from its warm-up port (50000), so the two wrappers never claim each other's replies.
++	tribeProbePortBase = 50100
++	tribeProbePortSpan = 100
++)
++
++// Tunable in tests only.
++var (
++	tribeProbeResendAfter    = 1500 * time.Millisecond
++	tribeProbeDefaultTimeout = 4 * time.Second
++	tribeProbeNow            = time.Now
++)
++
++type tribeProbeConfig struct {
++	client netip.Addr // source of the probe: the client's address inside the tunnel
++	target netip.Addr // the resolver the session uses (dns1)
++}
++
++// One probe. Times are zero until the event happens.
++type tribeProbeState struct {
++	id        uint32
++	port      uint16
++	dnsID     uint16
++	timeout   time.Duration
++	startedAt time.Time
++	handedAt  time.Time // the first packet was taken by the device
++	answered  time.Time
++	sent      int // packets handed to the device (1 or 2)
++	// The device went away (stop or in-place restart) before an answer: the probe cannot be
++	// judged any more. Reported as not_sent, never as silent.
++	aborted bool
++	resend  *time.Timer
++}
++
++var (
++	tribeProbeMu     sync.Mutex
++	tribeProbeCfg    *tribeProbeConfig // nil = no probe in this session
++	tribeProbeTun    *tribeProbeTunDev // the wrapper of the device that is up now
++	tribeProbeCur    *tribeProbeState
++	tribeProbeSeq    uint32
++	tribeProbeFlying atomic.Bool // a probe is in flight: Write has to look at packets
++)
++
++// wgSetTribeProbe configures the probe before wgTurnOn (like wgSetSplitDns). enabled == 0
++// switches it off. Returns 0 when the probe is available, -1 when it is not (an address is not
++// IPv4): the tunnel comes up either way and the watch reports its verdict as unconfirmed.
++//
++//export wgSetTribeProbe
++func wgSetTribeProbe(clientIp *C.char, target *C.char, enabled int32) int32 {
++	return tribeProbeConfigure(C.GoString(clientIp), C.GoString(target), enabled != 0)
++}
++
++func tribeProbeConfigure(clientIP, target string, enabled bool) int32 {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	tribeProbeAbortLocked()
++	tribeProbeCur = nil
++	tribeProbeCfg = nil
++	if !enabled {
++		return 0
++	}
++	client, err1 := netip.ParseAddr(strings.TrimSpace(strings.Split(clientIP, "/")[0]))
++	dst, err2 := netip.ParseAddr(strings.TrimSpace(target))
++	if err1 != nil || err2 != nil || !client.Is4() || !dst.Is4() || client.IsUnspecified() || dst.IsUnspecified() {
++		return -1
++	}
++	tribeProbeCfg = &tribeProbeConfig{client: client, target: dst}
++	return 0
++}
++
++// wgTribeProbeStart starts one probe. Returns its id (> 0), the id of the probe already in
++// flight, or 0 when there is no probe in this session. timeoutMs <= 0 = the default.
++//
++//export wgTribeProbeStart
++func wgTribeProbeStart(timeoutMs int32) int32 {
++	return int32(tribeProbeStart(time.Duration(timeoutMs) * time.Millisecond))
++}
++
++func tribeProbeStart(timeout time.Duration) uint32 {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	if tribeProbeCfg == nil || tribeProbeTun == nil {
++		return 0
++	}
++	now := tribeProbeNow()
++	if cur := tribeProbeCur; cur != nil && tribeProbeStateLocked(cur, now) == "pending" {
++		return cur.id
++	}
++	tribeProbeAbortLocked()
++	if timeout <= 0 {
++		timeout = tribeProbeDefaultTimeout
++	}
++	tribeProbeSeq++
++	if tribeProbeSeq == 0 {
++		tribeProbeSeq = 1
++	}
++	st := &tribeProbeState{
++		id:        tribeProbeSeq,
++		port:      tribeProbePortBase + uint16(tribeProbeSeq%tribeProbePortSpan),
++		dnsID:     uint16(now.UnixNano()>>8) | 1,
++		timeout:   timeout,
++		startedAt: now,
++	}
++	tribeProbeCur = st
++	tribeProbeFlying.Store(true)
++	if tribeProbeTun.send(tribeProbePacket(tribeProbeCfg, st)) {
++		st.handedAt = now
++		st.sent++
++	}
++	// One repeat: a single lost datagram must not read as a dead tunnel.
++	st.resend = time.AfterFunc(tribeProbeResendAfter, func() { tribeProbeResend(st) })
++	return st.id
++}
++
++func tribeProbeResend(st *tribeProbeState) {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	if tribeProbeCur != st || tribeProbeCfg == nil || tribeProbeTun == nil || !st.answered.IsZero() || st.aborted {
++		return
++	}
++	if tribeProbeTun.send(tribeProbePacket(tribeProbeCfg, st)) {
++		if st.handedAt.IsZero() {
++			st.handedAt = tribeProbeNow()
++		}
++		st.sent++
++	}
++}
++
++// wgTribeProbeResult returns "state=<s> id=<n> ms=<n>": s is none | pending | answered | silent |
++// not_sent | unavailable; ms is the round trip of an answered probe. The caller frees the string.
++//
++//export wgTribeProbeResult
++func wgTribeProbeResult() *C.char {
++	return C.CString(tribeProbeResult())
++}
++
++func tribeProbeResult() string {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	if tribeProbeCfg == nil {
++		return "state=unavailable id=0 ms=0"
++	}
++	st := tribeProbeCur
++	if st == nil {
++		return "state=none id=0 ms=0"
++	}
++	state := tribeProbeStateLocked(st, tribeProbeNow())
++	ms := int64(0)
++	if state == "answered" {
++		ms = st.answered.Sub(st.handedAt).Milliseconds()
++	}
++	if state != "pending" {
++		tribeProbeFlying.Store(false)
++	}
++	return fmt.Sprintf("state=%s id=%d ms=%d", state, st.id, ms)
++}
++
++func tribeProbeStateLocked(st *tribeProbeState, now time.Time) string {
++	switch {
++	case !st.answered.IsZero():
++		return "answered"
++	case st.aborted:
++		return "not_sent"
++	case st.handedAt.IsZero():
++		if now.Sub(st.startedAt) >= st.timeout {
++			return "not_sent"
++		}
++		return "pending"
++	case now.Sub(st.handedAt) >= st.timeout:
++		return "silent"
++	default:
++		return "pending"
++	}
++}
++
++// tribeProbeAbortLocked ends the probe in flight without a verdict (its state stays readable).
++func tribeProbeAbortLocked() {
++	if st := tribeProbeCur; st != nil {
++		if st.resend != nil {
++			st.resend.Stop()
++		}
++		if st.answered.IsZero() {
++			st.aborted = true
++		}
++	}
++	tribeProbeFlying.Store(false)
++	if tribeProbeTun != nil {
++		tribeProbeTun.drain()
++	}
++}
++
++func tribeProbePacket(cfg *tribeProbeConfig, st *tribeProbeState) []byte {
++	query := warmupDNSQuery()
++	binary.BigEndian.PutUint16(query[0:2], st.dnsID)
++	return buildUDP4(cfg.client, cfg.target, st.port, 53, query)
++}
++
++// tribeProbeTunDev is the pass-through wrapper.
++type tribeProbeTunDev struct {
++	tun.Device
++	// The split-DNS forwarder below, if this session has one: its channel feeds the device.
++	fwd *fwdTun
++	// Without a forwarder: probe packets waiting for the device's next Read (the packet and its repeat).
++	pending chan []byte
++}
++
++// wrapTribeProbeIfEnabled: called from wgTurnOn, outside every other wrapper. `fwd` is the
++// split-DNS forwarder of this device or nil. No-op when the probe is not configured: the device
++// then reads the inner tun exactly as before.
++func wrapTribeProbeIfEnabled(inner tun.Device, fwd *fwdTun, logf func(format string, args ...interface{})) tun.Device {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	if tribeProbeCfg == nil {
++		tribeProbeTun = nil
++		return inner
++	}
++	// A new device (start or in-place restart): a probe of the previous device cannot be answered.
++	tribeProbeAbortLocked()
++	dev := &tribeProbeTunDev{Device: inner, fwd: fwd, pending: make(chan []byte, 2)}
++	tribeProbeTun = dev
++	if logf != nil {
++		logf("Tribe probe: in-tunnel probe available (immediate=%v)", fwd != nil)
++	}
++	return dev
++}
++
++// send hands the packet to the device. true = it is on its way now (the forwarder's channel);
++// false = it waits for the device's next Read, or could not be queued at all.
++func (d *tribeProbeTunDev) send(pkt []byte) bool {
++	if d.fwd != nil {
++		select {
++		case d.fwd.out <- pkt:
++			return true
++		default: // the forwarder's queue is full or closed: the device is not reading
++			return false
++		}
++	}
++	select {
++	case d.pending <- pkt:
++	default: // both slots taken: the device is not reading; the result will be not_sent
++	}
++	return false
++}
++
++func (d *tribeProbeTunDev) drain() {
++	for {
++		select {
++		case <-d.pending:
++		default:
++			return
++		}
++	}
++}
++
++func (d *tribeProbeTunDev) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
++	select {
++	case pkt := <-d.pending:
++		if len(bufs) > 0 && len(bufs[0]) >= offset+len(pkt) {
++			sizes[0] = copy(bufs[0][offset:], pkt)
++			tribeProbeHanded(d)
++			return 1, nil
++		}
++	default:
++	}
++	return d.Device.Read(bufs, sizes, offset)
++}
++
++func tribeProbeHanded(d *tribeProbeTunDev) {
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	if tribeProbeTun != d || tribeProbeCur == nil || tribeProbeCur.aborted {
++		return
++	}
++	if tribeProbeCur.handedAt.IsZero() {
++		tribeProbeCur.handedAt = tribeProbeNow()
++	}
++	tribeProbeCur.sent++
++}
++
++func (d *tribeProbeTunDev) Write(bufs [][]byte, offset int) (int, error) {
++	if !tribeProbeFlying.Load() {
++		return d.Device.Write(bufs, offset)
++	}
++	hit := -1
++	for i, b := range bufs {
++		if len(b) > offset && tribeProbeTakeReply(d, b[offset:]) {
++			hit = i
++			break
++		}
++	}
++	if hit < 0 {
++		return d.Device.Write(bufs, offset)
++	}
++	// Rare path: the reply is dropped here, the rest goes on in order (a fresh slice: the
++	// caller's batch is left as it was).
++	kept := make([][]byte, 0, len(bufs)-1)
++	for i, b := range bufs {
++		if i == hit || (i > hit && len(b) > offset && tribeProbeTakeReply(d, b[offset:])) {
++			continue
++		}
++		kept = append(kept, b)
++	}
++	if len(kept) == 0 {
++		return len(bufs), nil
++	}
++	n, err := d.Device.Write(kept, offset)
++	if n == len(kept) {
++		n = len(bufs)
++	}
++	return n, err
++}
++
++// tribeProbeTakeReply: true = this packet is the answer to the probe in flight (or its repeat).
++func tribeProbeTakeReply(d *tribeProbeTunDev, pkt []byte) bool {
++	m, ok := parseUDP4(pkt)
++	if !ok || m.sport != 53 || m.dpt < tribeProbePortBase || m.dpt >= tribeProbePortBase+tribeProbePortSpan {
++		return false
++	}
++	tribeProbeMu.Lock()
++	defer tribeProbeMu.Unlock()
++	st := tribeProbeCur
++	if st == nil || st.aborted || tribeProbeCfg == nil || tribeProbeTun != d || m.dpt != st.port ||
++		m.src != tribeProbeCfg.target || m.dst != tribeProbeCfg.client {
++		return false
++	}
++	if len(m.payload) < 2 || binary.BigEndian.Uint16(m.payload[0:2]) != st.dnsID {
++		return false
++	}
++	if st.answered.IsZero() && !st.handedAt.IsZero() {
++		st.answered = tribeProbeNow()
++		if st.resend != nil {
++			st.resend.Stop()
++		}
++	}
++	return true
++}
++
++func (d *tribeProbeTunDev) Close() error {
++	tribeProbeMu.Lock()
++	if tribeProbeTun == d {
++		tribeProbeAbortLocked()
++		tribeProbeTun = nil
++	}
++	tribeProbeMu.Unlock()
++	return d.Device.Close()
++}
+diff --git a/Sources/WireGuardKitGo/tribeprobe_test.go b/Sources/WireGuardKitGo/tribeprobe_test.go
+new file mode 100644
+index 0000000..5d58d9b
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeprobe_test.go
+@@ -0,0 +1,532 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Tribe data watch probe - tests with a fake tun (no device, no network): what the wrapper hands
++ * to the device, what it takes off the write path, and how the result is told apart.
++ */
++package main
++
++import (
++	"bytes"
++	"errors"
++	"net/netip"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++)
++
++// fakeProbeTun is the inner device: Read blocks until the test feeds a packet "from the OS",
++// Write records what reached "the OS".
++type fakeProbeTun struct {
++	fromOS  chan []byte
++	mu      sync.Mutex
++	toOS    [][]byte
++	closed  chan struct{}
++	writeN  int
++	failing bool
++}
++
++func newFakeProbeTun() *fakeProbeTun {
++	return &fakeProbeTun{fromOS: make(chan []byte, 16), closed: make(chan struct{})}
++}
++
++func (f *fakeProbeTun) File() *os.File           { return nil }
++func (f *fakeProbeTun) MTU() (int, error)        { return 1280, nil }
++func (f *fakeProbeTun) Name() (string, error)    { return "utun-test", nil }
++func (f *fakeProbeTun) Events() <-chan tun.Event { return nil }
++func (f *fakeProbeTun) BatchSize() int           { return 4 }
++func (f *fakeProbeTun) Close() error {
++	select {
++	case <-f.closed:
++	default:
++		close(f.closed)
++	}
++	return nil
++}
++
++func (f *fakeProbeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
++	select {
++	case pkt := <-f.fromOS:
++		sizes[0] = copy(bufs[0][offset:], pkt)
++		return 1, nil
++	case <-f.closed:
++		return 0, os.ErrClosed
++	}
++}
++
++func (f *fakeProbeTun) Write(bufs [][]byte, offset int) (int, error) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.writeN++
++	if f.failing {
++		return 0, errors.New("write failed")
++	}
++	for _, b := range bufs {
++		f.toOS = append(f.toOS, append([]byte(nil), b[offset:]...))
++	}
++	return len(bufs), nil
++}
++
++func (f *fakeProbeTun) delivered() [][]byte {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([][]byte(nil), f.toOS...)
++}
++
++const probeTestOffset = 4
++
++var (
++	probeClient = netip.MustParseAddr("10.8.1.7")
++	probeTarget = netip.MustParseAddr("1.1.1.1")
++)
++
++// probeClock is the test's clock; the resend timer is real but set far away unless a test asks.
++type probeClock struct {
++	mu  sync.Mutex
++	now time.Time
++}
++
++func (c *probeClock) Now() time.Time {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.now
++}
++
++func (c *probeClock) Advance(d time.Duration) {
++	c.mu.Lock()
++	c.now = c.now.Add(d)
++	c.mu.Unlock()
++}
++
++func setupProbe(t *testing.T) (*fakeProbeTun, tun.Device, *probeClock) {
++	t.Helper()
++	clock := &probeClock{now: time.Unix(1_800_000_000, 0)}
++	oldNow, oldResend := tribeProbeNow, tribeProbeResendAfter
++	tribeProbeNow = clock.Now
++	tribeProbeResendAfter = time.Hour
++	t.Cleanup(func() {
++		tribeProbeConfigure("", "", false)
++		tribeProbeMu.Lock()
++		tribeProbeTun = nil
++		tribeProbeMu.Unlock()
++		tribeProbeNow, tribeProbeResendAfter = oldNow, oldResend
++	})
++	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
++		t.Fatalf("configure rc=%d", rc)
++	}
++	inner := newFakeProbeTun()
++	return inner, wrapTribeProbeIfEnabled(inner, nil, nil), clock
++}
++
++// readOne is the device reading one batch from the tunnel.
++func readOne(t *testing.T, dev tun.Device) []byte {
++	t.Helper()
++	bufs := [][]byte{make([]byte, 2048), make([]byte, 2048)}
++	sizes := make([]int, 2)
++	n, err := dev.Read(bufs, sizes, probeTestOffset)
++	if err != nil || n != 1 {
++		t.Fatalf("Read n=%d err=%v", n, err)
++	}
++	return append([]byte(nil), bufs[0][probeTestOffset:probeTestOffset+sizes[0]]...)
++}
++
++// writeBatch is the device writing decrypted packets towards the OS.
++func writeBatch(t *testing.T, dev tun.Device, pkts ...[]byte) (int, error) {
++	t.Helper()
++	bufs := make([][]byte, 0, len(pkts))
++	for _, p := range pkts {
++		b := make([]byte, probeTestOffset+len(p))
++		copy(b[probeTestOffset:], p)
++		bufs = append(bufs, b)
++	}
++	return dev.Write(bufs, probeTestOffset)
++}
++
++func probeReply(query []byte) []byte {
++	m, _ := parseUDP4(query)
++	resp := append([]byte(nil), m.payload...)
++	resp[2] |= 0x80 // QR
++	return buildUDP4(m.dst, m.src, 53, m.sport, resp)
++}
++
++func wantState(t *testing.T, want string) string {
++	t.Helper()
++	got := tribeProbeResult()
++	if !strings.HasPrefix(got, "state="+want+" ") {
++		t.Fatalf("result %q, want state=%s", got, want)
++	}
++	return got
++}
++
++func TestTribeProbeUnavailable(t *testing.T) {
++	tribeProbeConfigure("", "", false)
++	wantState(t, "unavailable")
++	if id := tribeProbeStart(0); id != 0 {
++		t.Fatalf("a probe started without a configuration: id=%d", id)
++	}
++	inner := newFakeProbeTun()
++	if got := wrapTribeProbeIfEnabled(inner, nil, nil); got != tun.Device(inner) {
++		t.Fatalf("not configured: the device must get the inner tun itself")
++	}
++	for _, bad := range [][2]string{
++		{"fd00::7/128", "1.1.1.1"}, {"10.8.1.7/32", "2606:4700:4700::1111"}, {"garbage", "1.1.1.1"},
++		{"10.8.1.7/32", ""}, {"0.0.0.0/0", "1.1.1.1"}, {"10.8.1.7", "0.0.0.0"},
++	} {
++		if rc := tribeProbeConfigure(bad[0], bad[1], true); rc != -1 {
++			t.Fatalf("configure(%q, %q) rc=%d, want -1", bad[0], bad[1], rc)
++		}
++		wantState(t, "unavailable")
++	}
++	// Configured but no device yet: still nothing to send into.
++	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
++		t.Fatalf("rc=%d", rc)
++	}
++	tribeProbeMu.Lock()
++	tribeProbeTun = nil
++	tribeProbeMu.Unlock()
++	if id := tribeProbeStart(0); id != 0 {
++		t.Fatalf("a probe started without a device: id=%d", id)
++	}
++	wantState(t, "none")
++	tribeProbeConfigure("", "", false)
++}
++
++func TestTribeProbePacketGoesFirstAndIsWellFormed(t *testing.T) {
++	inner, dev, _ := setupProbe(t)
++	wantState(t, "none")
++	osPacket := buildUDP4(probeClient, netip.MustParseAddr("8.8.8.8"), 40000, 443, []byte("user data"))
++	inner.fromOS <- osPacket
++	id := tribeProbeStart(0)
++	if id == 0 {
++		t.Fatal("probe not started")
++	}
++	wantState(t, "pending")
++	first := readOne(t, dev)
++	m, ok := parseUDP4(first)
++	if !ok || m.src != probeClient || m.dst != probeTarget || m.dpt != 53 {
++		t.Fatalf("probe packet %+v ok=%v", m, ok)
++	}
++	if m.sport < tribeProbePortBase || m.sport >= tribeProbePortBase+tribeProbePortSpan {
++		t.Fatalf("source port %d outside the probe range", m.sport)
++	}
++	if m.sport >= fwdEphBase && m.sport < fwdEphBase+fwdEphSpan || m.sport == warmupSport {
++		t.Fatalf("source port %d collides with the forwarder", m.sport)
++	}
++	if qname, ok := parseQName(m.payload); !ok || qname != "" {
++		t.Fatalf("payload is not a root query: %q ok=%v", qname, ok)
++	}
++	if ipChecksum(first[:20]) != uint16(first[10])<<8|uint16(first[11]) || udpChecksum(first) != uint16(first[26])<<8|uint16(first[27]) {
++		t.Fatal("checksums are wrong")
++	}
++	// The OS packet that was already waiting comes next, untouched.
++	if second := readOne(t, dev); !bytes.Equal(second, osPacket) {
++		t.Fatal("the OS packet did not pass through unchanged")
++	}
++	wantState(t, "pending")
++}
++
++func TestTribeProbeAnswered(t *testing.T) {
++	inner, dev, clock := setupProbe(t)
++	id := tribeProbeStart(0)
++	query := readOne(t, dev)
++	clock.Advance(180 * time.Millisecond)
++	other := buildUDP4(netip.MustParseAddr("8.8.8.8"), probeClient, 443, 40000, []byte("download"))
++	n, err := writeBatch(t, dev, other, probeReply(query), other)
++	if err != nil || n != 3 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	got := wantState(t, "answered")
++	if !strings.Contains(got, " ms=180") || !strings.Contains(got, "id="+itoa(id)+" ") {
++		t.Fatalf("result %q", got)
++	}
++	out := inner.delivered()
++	if len(out) != 2 || !bytes.Equal(out[0], other) || !bytes.Equal(out[1], other) {
++		t.Fatalf("the reply must not reach the OS and the rest must pass in order: %d packets", len(out))
++	}
++	if tribeProbeFlying.Load() {
++		t.Fatal("after the result the write path must be a plain pass-through again")
++	}
++	// A late copy of the reply (the repeat was answered too) is not handed to the OS as garbage
++	// either way, but with no probe in flight the wrapper does not even look.
++	clock.Advance(10 * time.Second)
++	wantState(t, "answered")
++}
++
++func TestTribeProbeSilentAndNotSent(t *testing.T) {
++	_, dev, clock := setupProbe(t)
++	// Handed to the device, no reply: silent after the timeout, pending before it.
++	tribeProbeStart(3 * time.Second)
++	readOne(t, dev)
++	clock.Advance(2999 * time.Millisecond)
++	wantState(t, "pending")
++	clock.Advance(time.Millisecond)
++	wantState(t, "silent")
++
++	// Nothing reads the tunnel: the packet never leaves. That is NOT silence.
++	id := tribeProbeStart(3 * time.Second)
++	clock.Advance(2999 * time.Millisecond)
++	wantState(t, "pending")
++	clock.Advance(time.Millisecond)
++	got := wantState(t, "not_sent")
++	if !strings.Contains(got, "id="+itoa(id)+" ") {
++		t.Fatalf("result %q", got)
++	}
++	// The default timeout applies to a non-positive value.
++	tribeProbeStart(0)
++	readOne(t, dev)
++	clock.Advance(tribeProbeDefaultTimeout - time.Millisecond)
++	wantState(t, "pending")
++	clock.Advance(time.Millisecond)
++	wantState(t, "silent")
++}
++
++func TestTribeProbeOneAtATime(t *testing.T) {
++	_, dev, clock := setupProbe(t)
++	first := tribeProbeStart(0)
++	if again := tribeProbeStart(0); again != first {
++		t.Fatalf("a second probe started while one is in flight: %d vs %d", again, first)
++	}
++	q1 := readOne(t, dev)
++	clock.Advance(5 * time.Second)
++	wantState(t, "silent")
++	second := tribeProbeStart(0)
++	if second == first || second == 0 {
++		t.Fatalf("a finished probe must be replaced: %d", second)
++	}
++	q2 := readOne(t, dev)
++	m1, _ := parseUDP4(q1)
++	m2, _ := parseUDP4(q2)
++	if m1.sport == m2.sport {
++		t.Fatal("two probes share a source port")
++	}
++	// The answer to the FIRST probe arrives late: it is not the answer to the second.
++	if n, err := writeBatch(t, dev, probeReply(q1)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	wantState(t, "pending")
++}
++
++func TestTribeProbeForeignPacketsPass(t *testing.T) {
++	inner, dev, _ := setupProbe(t)
++	tribeProbeStart(0)
++	query := readOne(t, dev)
++	m, _ := parseUDP4(query)
++	reply := probeReply(query)
++	wrongSource := buildUDP4(netip.MustParseAddr("9.9.9.9"), probeClient, 53, m.sport, m.payload)
++	wrongPort := buildUDP4(probeTarget, probeClient, 53, m.sport+1, m.payload)
++	wrongID := append([]byte(nil), reply...)
++	wrongID[28] ^= 0xFF
++	wrongID = buildUDP4(probeTarget, probeClient, 53, m.sport, wrongID[28:])
++	forwarderReply := buildUDP4(probeTarget, probeClient, 53, fwdEphBase+5, m.payload)
++	tcp := append([]byte(nil), reply...)
++	tcp[9] = 6
++	short := []byte{0x45, 0, 0}
++	n, err := writeBatch(t, dev, wrongSource, wrongPort, wrongID, forwarderReply, tcp, short)
++	if err != nil || n != 6 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if got := inner.delivered(); len(got) != 6 {
++		t.Fatalf("%d of 6 foreign packets reached the OS", len(got))
++	}
++	wantState(t, "pending")
++}
++
++func TestTribeProbeRepeat(t *testing.T) {
++	_, dev, clock := setupProbe(t)
++	tribeProbeResendAfter = 30 * time.Millisecond
++	tribeProbeStart(0)
++	first := readOne(t, dev)
++	deadline := time.Now().Add(2 * time.Second)
++	var second []byte
++	for second == nil && time.Now().Before(deadline) {
++		tribeProbeMu.Lock()
++		waiting := tribeProbeTun != nil && len(tribeProbeTun.pending) > 0
++		tribeProbeMu.Unlock()
++		if waiting {
++			second = readOne(t, dev)
++		} else {
++			time.Sleep(5 * time.Millisecond)
++		}
++	}
++	if second == nil || !bytes.Equal(first, second) {
++		t.Fatal("the repeat was not sent or differs from the first packet")
++	}
++	// The latency is counted from the FIRST packet.
++	clock.Advance(1700 * time.Millisecond)
++	if n, err := writeBatch(t, dev, probeReply(second)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if got := wantState(t, "answered"); !strings.Contains(got, " ms=1700") {
++		t.Fatalf("result %q", got)
++	}
++}
++
++func TestTribeProbeDeviceRestart(t *testing.T) {
++	inner, dev, clock := setupProbe(t)
++	id := tribeProbeStart(0)
++	query := readOne(t, dev)
++	// In-place restart of the backend: the old device closes, a new one wraps the tun again.
++	if err := dev.Close(); err != nil {
++		t.Fatal(err)
++	}
++	got := wantState(t, "not_sent")
++	if !strings.Contains(got, "id="+itoa(id)+" ") {
++		t.Fatalf("a probe cut by a restart is unjudged, not silent: %q", got)
++	}
++	inner2 := newFakeProbeTun()
++	dev2 := wrapTribeProbeIfEnabled(inner2, nil, nil)
++	if dev2 == tun.Device(inner2) {
++		t.Fatal("the new device has no probe wrapper")
++	}
++	// The old probe's answer on the new device is not an answer.
++	if n, err := writeBatch(t, dev2, probeReply(query)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	wantState(t, "not_sent")
++	// A new probe works on the new device.
++	second := tribeProbeStart(0)
++	q2 := readOne(t, dev2)
++	clock.Advance(50 * time.Millisecond)
++	writeBatch(t, dev2, probeReply(q2))
++	if got := wantState(t, "answered"); !strings.Contains(got, "id="+itoa(second)+" ") {
++		t.Fatalf("result %q", got)
++	}
++	_ = inner
++}
++
++func TestTribeProbeWriteErrorsAndCounts(t *testing.T) {
++	inner, dev, _ := setupProbe(t)
++	other := buildUDP4(netip.MustParseAddr("8.8.8.8"), probeClient, 443, 40000, []byte("x"))
++	// No probe in flight: one inner Write per batch, the batch itself.
++	if n, err := writeBatch(t, dev, other, other); err != nil || n != 2 || inner.writeN != 1 {
++		t.Fatalf("plain pass-through: n=%d err=%v writes=%d", n, err, inner.writeN)
++	}
++	tribeProbeStart(0)
++	query := readOne(t, dev)
++	// A batch that is only the reply: nothing is written to the OS, the device sees success.
++	before := inner.writeN
++	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 || inner.writeN != before {
++		t.Fatalf("reply-only batch: n=%d err=%v writes=%d", n, err, inner.writeN-before)
++	}
++	wantState(t, "answered")
++	// An inner error is passed on.
++	inner.failing = true
++	if _, err := writeBatch(t, dev, other); err == nil {
++		t.Fatal("the inner write error was swallowed")
++	}
++}
++
++func TestTribeProbeReadBlocksOnlyOnTheInnerTun(t *testing.T) {
++	inner, dev, _ := setupProbe(t)
++	got := make(chan []byte, 2)
++	go func() {
++		for i := 0; i < 2; i++ {
++			bufs := [][]byte{make([]byte, 2048)}
++			sizes := make([]int, 1)
++			if n, err := dev.Read(bufs, sizes, probeTestOffset); err == nil && n == 1 {
++				got <- append([]byte(nil), bufs[0][probeTestOffset:probeTestOffset+sizes[0]]...)
++			}
++		}
++	}()
++	time.Sleep(20 * time.Millisecond) // the device is now blocked inside the inner Read
++	tribeProbeStart(0)
++	select {
++	case <-got:
++		t.Fatal("the probe cannot leave while the device waits for the OS: there is no outbound demand")
++	case <-time.After(50 * time.Millisecond):
++	}
++	osPacket := buildUDP4(probeClient, netip.MustParseAddr("8.8.8.8"), 40000, 443, []byte("demand"))
++	inner.fromOS <- osPacket
++	first := <-got
++	second := <-got
++	if !bytes.Equal(first, osPacket) {
++		t.Fatal("the OS packet did not pass")
++	}
++	if m, ok := parseUDP4(second); !ok || m.dst != probeTarget {
++		t.Fatal("the probe did not leave with the next read")
++	}
++}
++
++func TestTribeProbeLeavesAtOnceThroughTheForwarder(t *testing.T) {
++	// With the split-DNS forwarder in the chain the probe does not wait for the OS: the
++	// forwarder's channel feeds the device, and the device is blocked on exactly that channel.
++	clock := &probeClock{now: time.Unix(1_800_000_000, 0)}
++	oldNow, oldResend := tribeProbeNow, tribeProbeResendAfter
++	tribeProbeNow = clock.Now
++	tribeProbeResendAfter = time.Hour
++	defer func() {
++		tribeProbeConfigure("", "", false)
++		tribeProbeMu.Lock()
++		tribeProbeTun = nil
++		tribeProbeMu.Unlock()
++		tribeProbeNow, tribeProbeResendAfter = oldNow, oldResend
++	}()
++	if rc := tribeProbeConfigure("10.8.1.7/32", "1.1.1.1", true); rc != 0 {
++		t.Fatalf("rc=%d", rc)
++	}
++	inner := newFakeProbeTun()
++	fwd := &fwdTun{
++		real: inner,
++		cfg: &splitDNSConfig{enabled: true, suffixes: []string{"ru"}, directSrv: netip.MustParseAddr("77.88.8.8"),
++			tunnelSrv: probeTarget, virtIP: netip.MustParseAddr("100.100.100.53"), clientIP: probeClient},
++		out:    make(chan []byte, fwdOutDepth),
++		closed: make(chan struct{}),
++		offset: -1,
++	}
++	dev := wrapTribeProbeIfEnabled(fwd, fwd, nil)
++	defer dev.Close()
++	got := make(chan []byte, 1)
++	go func() {
++		bufs := [][]byte{make([]byte, 2048)}
++		sizes := make([]int, 1)
++		if n, err := dev.Read(bufs, sizes, probeTestOffset); err == nil && n == 1 {
++			got <- append([]byte(nil), bufs[0][probeTestOffset:probeTestOffset+sizes[0]]...)
++		}
++	}()
++	time.Sleep(20 * time.Millisecond) // the device waits; the OS sends nothing
++	id := tribeProbeStart(0)
++	var query []byte
++	select {
++	case query = <-got:
++	case <-time.After(2 * time.Second):
++		t.Fatal("the probe did not leave without outbound demand")
++	}
++	if m, ok := parseUDP4(query); !ok || m.dst != probeTarget || m.src != probeClient {
++		t.Fatal("not the probe packet")
++	}
++	wantState(t, "pending")
++	// The reply is taken by the probe BEFORE the forwarder sees it (ports do not overlap anyway).
++	clock.Advance(90 * time.Millisecond)
++	if n, err := writeBatch(t, dev, probeReply(query)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if res := wantState(t, "answered"); !strings.Contains(res, " ms=90") || !strings.Contains(res, "id="+itoa(id)+" ") {
++		t.Fatalf("result %q", res)
++	}
++	if len(inner.delivered()) != 0 {
++		t.Fatal("the reply reached the OS")
++	}
++	// A full forwarder queue (the device is not reading) is not_sent, not silent.
++	for len(fwd.out) < cap(fwd.out) {
++		fwd.out <- []byte{0}
++	}
++	clock.Advance(10 * time.Second)
++	tribeProbeStart(2 * time.Second)
++	clock.Advance(2 * time.Second)
++	wantState(t, "not_sent")
++}
++
++func itoa(v uint32) string {
++	if v == 0 {
++		return "0"
++	}
++	var b []byte
++	for v > 0 {
++		b = append([]byte{byte('0' + v%10)}, b...)
++		v /= 10
++	}
++	return string(b)
++}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index 9f6a601..72afae8 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -50,4 +50,13 @@ extern char *wgDirectSplitStats();
+  * пересоздали их сразу. Возвращает число сброшенных соединений; без движка — 0. */
+ extern int32_t wgDirectSplitPathChanged();
+ 
++/* Tribe data watch probe (tribeprobe.go, awg-apple tribe.13): configure BEFORE wgTurnOn; enabled=0 =
++ * off. 0 = available, -1 = not available (an address is not IPv4): the tunnel comes up either way. */
++extern int32_t wgSetTribeProbe(const char *clientIp, const char *target, int32_t enabled);
++/* Starts one probe through the tunnel; returns its id, the id of the probe in flight, or 0 when
++ * the session has no probe. timeoutMs <= 0 = default. */
++extern int32_t wgTribeProbeStart(int32_t timeoutMs);
++/* "state=<none|pending|answered|silent|not_sent|unavailable> id=<n> ms=<n>"; the caller frees it. */
++extern char *wgTribeProbeResult();
++
+ #endif

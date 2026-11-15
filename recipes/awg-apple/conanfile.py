@@ -31,7 +31,10 @@ class AwgApple(ConanFile):
     # tribe.11: tribe.10 + 0009 userspace direct split (directsplit.go): destinations from a list
     # file leave through the extension's own sockets instead of 10.8k system excluded routes.
     # Swift sources and TribeRoaming.swift are those of tribe.10.
-    version = "3.1.4-tribe.11"
+    # tribe.13: tribe.11 + 0012 data watch: TribeDataWatch.swift (pure verdict rule, own gate) fed
+    # on the adapter's stall tick, tribeprobe.go (probe through the tunnel). tribe.12 is skipped:
+    # that number and patches 0010/0011 belong to an unmerged branch and are not in this version.
+    version = "3.1.4-tribe.13"
     settings = "os", "arch", "compiler"
 
     _upstream_version = "3.1.4"
@@ -54,6 +57,11 @@ class AwgApple(ConanFile):
                     os.path.join(self.source_folder, "tests", "TribeRoamingTests.swift"))
         return (os.path.join(self.source_folder, "tribe", "snapshots", snapshot, "TribeRoaming.swift"),
                 os.path.join(self.source_folder, "tests", "snapshots", snapshot, "TribeRoamingTests.swift"))
+
+    @property
+    def _has_data_watch(self):
+        # Present from patch 0012 on (tribeprobe.go is added by it).
+        return os.path.exists(os.path.join(self.source_folder, "Sources", "WireGuardKitGo", "tribeprobe.go"))
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -144,6 +152,16 @@ class AwgApple(ConanFile):
                  f'"{roaming_swift}" "{roaming_test}"')
         copy(self, "TribeRoaming.swift", src=os.path.dirname(roaming_swift),
              dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"), keep_path=False)
+        # tribe.13: patch 0012 makes the adapter reference TribeDataWatch.swift (absent before it).
+        # Same rule as the roaming logic: gate the package on its unit test, then ship the file
+        # next to the adapter. The first released version that changes it later must freeze a
+        # snapshot the way _roaming_snapshots does.
+        if self._has_data_watch:
+            watch_swift = os.path.join(self.source_folder, "tribe", "TribeDataWatch.swift")
+            self.run(f'sh "{os.path.join(self.source_folder, "tests", "run_tribe_data_watch_tests.sh")}" '
+                     f'"{watch_swift}" "{os.path.join(self.source_folder, "tests", "TribeDataWatchTests.swift")}"')
+            copy(self, "TribeDataWatch.swift", src=os.path.dirname(watch_swift),
+                 dst=os.path.join(self.source_folder, "Sources", "WireGuardKit"), keep_path=False)
         go_path = os.path.join(self.build_folder, ".tribe-go-path")
         go_cache = os.path.join(self.build_folder, ".tribe-go-cache")
         prep_env = Environment()
@@ -180,10 +198,19 @@ class AwgApple(ConanFile):
                 "api-xray.go api-xray_testhelper.go api-xray_callback_test.go"
             )
             # tribe.11: the userspace direct split is a build gate too (absent before 0009).
+            # tribe.13: api-apple.go calls into tribeprobe.go (patch 0012), so the file list of
+            # this gate carries it when it exists.
+            probe_go = " tribeprobe.go" if os.path.exists(os.path.join(self.build_folder, "tribeprobe.go")) else ""
             if os.path.exists(os.path.join(self.build_folder, "directsplit.go")):
                 self.run(
                     "go test -count=1 -run '^(TestDirect|TestForeign)' "
-                    "api-apple.go api-xray.go dnsfwd.go directsplit.go directsplit_test.go"
+                    f"api-apple.go api-xray.go dnsfwd.go directsplit.go{probe_go} directsplit_test.go"
+                )
+            # tribe.13: the probe through the tunnel is a build gate too (absent before 0012).
+            if os.path.exists(os.path.join(self.build_folder, "tribeprobe.go")):
+                self.run(
+                    "go test -count=1 -run '^TestTribeProbe' "
+                    "dnsfwd.go tribeprobe.go tribeprobe_test.go"
                 )
             autotools = Autotools(self)
             autotools.make()
@@ -228,4 +255,7 @@ class AwgApple(ConanFile):
             # Tribe seamless roaming (patch 0003 + TribeRoaming.swift): the NE CMake target
             # compiles TribeRoaming.swift only when the package declares it.
             "AWG_APPLE_TRIBE_ROAMING": "1",
+            # tribe.13: the adapter needs TribeDataWatch.swift next to it (patch 0012).
+            "AWG_APPLE_TRIBE_DATA_WATCH": "1" if os.path.exists(
+                os.path.join(self.package_folder, "src", "Sources", "WireGuardKit", "TribeDataWatch.swift")) else "0",
         })

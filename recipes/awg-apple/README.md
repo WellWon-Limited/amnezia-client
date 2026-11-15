@@ -8,7 +8,8 @@ and macOS Network Extension targets compile.
 
 | Version | Patches | Notes |
 |---|---|---|
-| `3.1.4-tribe.11` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 | current; 0009 = userspace direct split (`directsplit.go`), off unless the app configures it |
+| `3.1.4-tribe.13` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 + 0012 | current (iOS 5.1.110 / 140, not released); tribe.11 + 0012 = data watch (`TribeDataWatch.swift`) and in-tunnel probe (`tribeprobe.go`), off unless the app's plan file enables it. The number skips 12 and the patch slot skips 0010/0011: both are taken by the unmerged branch `feat/upstream-nodes` (Xray core bump), whose changes tribe.13 does NOT contain |
+| `3.1.4-tribe.11` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 + 0009 | shipped (iOS 5.1.109 / 139); 0009 = userspace direct split (`directsplit.go`), off unless the app configures it |
 | `3.1.4-tribe.10` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 + 0008 | shipped (iOS 5.1.98-5.1.99); 0008 = immortal logger context (NE crash), real-loss gate, no stale flag |
 | `3.1.4-tribe.9` | 0001 + 0002 + 0003 + 0005 + 0006 + 0007 | built for iOS 5.1.97 (127, not released to users); 0007 = fresh port on a returning path, ladder fresh port -> soft restart |
 | `3.1.4-tribe.8` | 0001 + 0002 + 0003 + 0005 + 0006 | shipped (iOS 5.1.90-5.1.96); 0006 = persistent heal (stage 3) + in-place soft restart |
@@ -194,7 +195,64 @@ sh recipes/awg-apple/tests/run_tribe_roaming_tests.sh   # current version; also 
 sh recipes/awg-apple/tests/run_tribe_roaming_tests.sh \
   recipes/awg-apple/tribe/snapshots/3.1.4-tribe.7/TribeRoaming.swift \
   recipes/awg-apple/tests/snapshots/3.1.4-tribe.7/TribeRoamingTests.swift
+sh recipes/awg-apple/tests/run_tribe_data_watch_tests.sh   # tribe.13 data watch; also a build() gate
 ```
+
+## tribe.13 behaviour (patch 0012 + TribeDataWatch.swift)
+
+Everything of tribe.11, plus a verdict about DATA (design:
+`docs/specs/2026-11-14-ios-tunnel-side-data-watch-design.md` in tribe-backend, sections 0 and 0a).
+The stall watchdog answers "is the session alive" and counts a new handshake as inbound progress; on
+13.11.2026 a node completed handshakes for 6 min 50 s and returned no data, and nothing in the
+extension said so. tribe.13 adds a second question to the SAME one-second tick, "does data come
+back", and an active probe that judges the answer. Stage 1 only reports; nothing in the package
+switches a peer.
+
+- `TribeDataWatch` (pure, `tribe/TribeDataWatch.swift`): the statistics sample is cut into cycles of
+  `cycleSeconds` (25). A cycle is dead when at least `cycleMinTxBytes` (1024) went out and NO
+  transport packet (data or keepalive) came back; the bytes of a handshake are deducted from both
+  directions first
+  (`handshakeRxAllowanceBytes` 148, `handshakeTxAllowanceBytes` 1024 per change of the handshake
+  time). `deadCycles` (3) dead cycles in a chain (gap at most `cycleChainGapSeconds`) with
+  `minEpisodeTxBytes` (3072) sent in the episode and `minHealSteps` (2) same-node heal steps seen in
+  the last 300 s make the passive rule. Start, wake-up and path changes open quiet periods; a
+  change of the physical interface voids the verdict.
+- The passive rule alone is never the final word. It first asks for a request that bypasses the
+  tunnel (the provider sends it; no reply = `network`, a foreign reply = `captive`), then for the
+  probe. `no_data` requires a SILENT probe; an answered probe refutes the rule (`refuted` counter);
+  a probe that could not be judged leaves `unconfirmed`. A second trigger asks for the probe only:
+  at least `suspectMinTxBytes` (64 KiB) sent and less than `suspectMaxRxBytes` (4 KiB) of data
+  received over `suspectWindowSeconds` (60) while no episode is open.
+- Probes are bounded: `probeMaxPerEpisode` (3), `probeMaxPerHour` (12).
+- `tribeprobe.go`: `wgSetTribeProbe(clientIp, target, enabled)` before `wgTurnOn`,
+  `wgTribeProbeStart(timeoutMs)`, `wgTribeProbeResult()` -> `state=<pending|answered|silent|not_sent|
+  unavailable|none> id=<n> ms=<n>`. `wrapTribeProbeIfEnabled` is the outermost pass-through wrapper
+  of the TUN device. The probe is one DNS query for the root name (type A, 17 bytes of payload: the
+  query the split-DNS forwarder warms up with) from the tunnel address to the session's first DNS server, source port 50100-50199, repeated once after
+  1.5 s, injected as an inner IPv4/UDP packet; the reply is taken out of the device's output and
+  never reaches the OS. Without a configuration the wrapper is not created and `wgTurnOn` behaves
+  as tribe.11.
+- Limits of the probe, to be read literally: it is a DNS root query to the session's `dns1`; an
+  answer proves the path phone -> node -> forwarding -> that resolver and back for a SMALL packet.
+  `not_sent` (no way to inject: the DNS forwarder is off and no outbound packet came by, or the
+  device was restarted during the wait) is distinct from `silent` and never confirms `no_data`.
+  Inner IPv4 only. It says nothing about bulk transfer: a freeze that depends on size (about 16 KB
+  and more) is invisible to it.
+- `WireGuardAdapter`: `setDataWatchPolicy(_:)`, `dataWatchSnapshot(completionHandler:)`,
+  `dataWatchInputs`, `dataWatchHandler`. The watch is fed by `dataWatchTick` right before
+  `recovery.tick` in `stallTick` and told about real path events, device starts and in-place
+  restarts. With the policy off (the default) every hook is one comparison and the adapter behaves
+  as tribe.11; the only unconditional statement is a counter of heal steps.
+- `TribeDataWatchAction.switchPeer` / `.exhausted` and `TribeDataWatchPolicy.switchEnabled` are
+  reserved for stage 2 (in-place switch); `step` never returns them.
+
+Build gates: `tests/run_tribe_data_watch_tests.sh` (named scenarios: the 13.11 replay, every
+false-positive case of the design's table, the probe outcomes, limits, clamps) and
+`go test -run '^TestTribeProbe'` (a fake TUN and a fake forwarder: packet layout and checksums,
+answer, silence, repeat, one probe at a time, a foreign packet passed through untouched, restart
+during the wait, no configuration, departure through the forwarder). `replay/` holds the offline tooling (not exported): the replay of a tester journal
+through the real function (aggregates only) and the mutation run of the rule
+(`python3 recipes/awg-apple/replay/tribe_data_watch_mutants.py`).
 
 ## Rebuilding the package (isolated Conan home, nothing in the global cache changes)
 
@@ -263,9 +321,11 @@ v4-only VPN (sum.golang.org writes fail), point Go at an already verified module
 `GOPROXY=file://<GOPATH>/pkg/mod/cache/download GOSUMDB=off GOTOOLCHAIN=local`.
 
 The app build picks the package up through the root `conanfile.py`
-(`self.requires("awg-apple/3.1.4-tribe.11")`); CMake configure exports all `recipes/` itself
+(`self.requires("awg-apple/3.1.4-tribe.13")`); CMake configure exports all `recipes/` itself
 (`client/cmake/recipes_bootstrap.cmake`), so use the same `CONAN_HOME` for configure. Rollback =
-pin the root requirement back to `awg-apple/3.1.4-tribe.10` (then drop the `wgSetDirectSplit` /
+pin the root requirement back to `awg-apple/3.1.4-tribe.11` (then drop `TribeDataWatch.swift` and the
+three data-watch provider files from the two `networkextension/CMakeLists.txt` and their calls from
+`PacketTunnelProvider*.swift`), `awg-apple/3.1.4-tribe.10` (then also drop the `wgSetDirectSplit` /
 `wgDirectSplitStats` calls from `PacketTunnelProvider+WireGuard.swift`), `3.1.4-tribe.9` or `3.1.4-tribe.8` (iOS; all binaries are
 in the release cache), `3.1.4-tribe.7` (the NE sources then lose the `soft_restart` provider message:
 revert `PacketTunnelProvider*.swift` to their tribe.7 state) or `3.1.4-tribe.5`. Both can be resolved from a cache that holds their binaries or rebuilt from this

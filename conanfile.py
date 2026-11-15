@@ -34,7 +34,9 @@ class AmneziaVPN(ConanFile):
         if has_ne:
             # Official parser-fixed 3.1.4 plus the existing Tribe
             # dnsfwd/warmup/rebind patch set.
-            self.requires("awg-apple/3.1.4-tribe.11")
+            # tribe.13: tribe.11 + the tunnel-side data watch (patch 0012). tribe.12 is the number of
+            # an unmerged branch and is skipped on purpose.
+            self.requires("awg-apple/3.1.4-tribe.13")
             self.requires("hev-socks5-tunnel/2.15.0", options={"as_framework": True})
             self.requires("openvpnadapter/1.0.0")
 
