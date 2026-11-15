@@ -79,6 +79,7 @@ struct TunnelWatchSnapshot {
     qint64 recoveredMs = 0;
     int switchSeq = 0;     // stage 1: always 0; carried so stage 2 does not change the protocol
     int switches = 0;      // number of entries of `switches` (stage 1: 0)
+    QString lastSwitchWhy; // stage 2: the reason of the newest entry of `switches` (a label)
 };
 
 namespace watch_detail {
@@ -141,7 +142,16 @@ inline TunnelWatchSnapshot parseTunnelWatch(const QVariant &watch)
     s.lastNoDataMs = i64(m, "last_no_data_ms");
     s.recoveredMs = i64(m, "recovered_ms");
     s.switchSeq = int(i64(m, "switch_seq"));
-    s.switches = int(m.value(QStringLiteral("switches")).toList().size());
+    const QVariantList switches = m.value(QStringLiteral("switches")).toList();
+    s.switches = int(switches.size());
+    if (!switches.isEmpty()) {
+        // The reason of the last switch, for the journal: a short label, never free text.
+        const QString why = switches.last().toMap().value(QStringLiteral("why")).toString();
+        bool label = !why.isEmpty() && why.size() <= 32;
+        for (const QChar c : why)
+            label = label && (c.isLetterOrNumber() || c == QLatin1Char('_'));
+        s.lastSwitchWhy = label ? why : QStringLiteral("unknown");
+    }
     return s;
 }
 
@@ -227,6 +237,42 @@ inline FreezeStep decideResumeFreeze(ResumeFreezeState &st, const ResumeFreezeIn
     st.active = false;
     st.startMs = -1;
     return step;
+}
+
+// ---- the extension moved the tunnel (stage 2) -----------------------------------------------------
+// The reply says on which node the tunnel stands. The app takes another node than its own only when
+// the extension says it made a switch (switch_seq > 0: an in-place switch, or a start by the system on
+// another node), names the node, and the app has not adopted this very switch already. A build 139
+// extension and one that never switched carry no switch number: nothing is adopted and the app's own
+// identity rules (CONNECT-INVARIANTS §19) apply as before.
+struct WatchAdoptInputs {
+    int switchSeq = 0;           // the larger of watch.switch_seq and session_metadata.switch_seq
+    QString snapshotNodeId;      // session_metadata.node_id of the reply: where the tunnel stands
+    QString snapshotGeneration;  // session_metadata.generation: this run of the extension
+    QString appNodeId;           // the node the engine believes is up
+    int adoptedSeq = 0;          // the switch the app adopted last...
+    QString adoptedGeneration;   // ...and in which run of the extension
+};
+
+inline bool decideWatchAdopt(const WatchAdoptInputs &in)
+{
+    if (in.switchSeq <= 0 || in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())
+        return false;
+    if (in.snapshotNodeId == in.appNodeId)
+        return false; // the app is already there
+    // Adopted before: since then the node differs only because the app moved by ITSELF (a tap, its own
+    // ladder) - the extension's old switch must not pull it back.
+    if (in.snapshotGeneration == in.adoptedGeneration && in.switchSeq <= in.adoptedSeq)
+        return false;
+    return true;
+}
+
+inline QString watchAdoptJournalLine(const QString &from, const QString &to, int seq, const QString &why, bool taken)
+{
+    return QStringLiteral("adopt_extension_switch from=%1 to=%2 seq=%3 why=%4 result=%5")
+        .arg(from.isEmpty() ? QStringLiteral("-") : from, to)
+        .arg(seq)
+        .arg(why.isEmpty() ? QStringLiteral("unknown") : why, taken ? QStringLiteral("adopted") : QStringLiteral("unknown_node"));
 }
 
 // ---- what an adopted snapshot means ---------------------------------------------------------------

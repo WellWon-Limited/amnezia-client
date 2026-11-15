@@ -99,6 +99,75 @@ inline WatchPlanMemoryEntry watchPlanMemoryEntry(const QByteArray &json, const Q
     return e;
 }
 
+// Stage 2: one node the extension may switch to in place. `peer` is the node's part of the tunnel
+// configuration by the keys of the provider configuration (AwgConfigBuilder::buildInner), strings only.
+struct WatchPlanCandidate {
+    QString nodeId;
+    QString country;
+    QJsonObject peer;
+};
+constexpr int kWatchPlanMaxCandidates = 5; // spare nodes; the current one is in the profile
+
+// The keys of a node's own half of the configuration: its endpoint, keys and AmneziaWG parameters.
+// Nothing of the device (private key, tunnel address) and nothing the session keeps (DNS, MTU, routes).
+inline const QStringList &watchPlanCandidateKeys()
+{
+    static const QStringList keys{
+        QStringLiteral("hostName"), QStringLiteral("port"), QStringLiteral("server_pub_key"), QStringLiteral("psk_key"),
+        QStringLiteral("persistent_keep_alive"),
+        QStringLiteral("Jc"), QStringLiteral("Jmin"), QStringLiteral("Jmax"), QStringLiteral("S1"), QStringLiteral("S2"),
+        QStringLiteral("S3"), QStringLiteral("S4"), QStringLiteral("H1"), QStringLiteral("H2"), QStringLiteral("H3"),
+        QStringLiteral("H4"), QStringLiteral("I1"), QStringLiteral("I2"), QStringLiteral("I3"), QStringLiteral("I4"),
+        QStringLiteral("I5"), QStringLiteral("HeaderProtectionKey"), QStringLiteral("ContentPaddingAddition"),
+        QStringLiteral("RekeyAfterTime"), QStringLiteral("RekeyTimeout"), QStringLiteral("RejectAfterTime"),
+        QStringLiteral("KeepaliveTimeout"), QStringLiteral("MaxHandshakeAttempts"), QStringLiteral("RandomTrailers"),
+        QStringLiteral("DisableCookies"),
+    };
+    return keys;
+}
+
+// `inner` - the node's full tunnel configuration (AwgConfigBuilder::buildInner). Numbers become strings
+// (the extension reads strings); empty values and every other key are left out.
+inline QJsonObject watchPlanCandidatePeer(const QJsonObject &inner)
+{
+    QJsonObject peer;
+    for (const QString &key : watchPlanCandidateKeys()) {
+        const QJsonValue v = inner.value(key);
+        const QString text = v.isString() ? v.toString() : v.isDouble() ? QString::number(qint64(v.toDouble())) : QString();
+        if (!text.isEmpty())
+            peer.insert(key, text);
+    }
+    return peer;
+}
+
+// A switch in place keeps the session's interface: only a node with the same DNS, MTU, tunnel address
+// and routed ranges qualifies; the others wait for the app. Compared on what the builder really emits
+// for the two nodes (its defaults included): the interface lines of the wg-quick text the extension
+// starts with, and the builder's own `mtu` and `allowed_ips`.
+inline QStringList watchPlanSessionLines(const QJsonObject &inner)
+{
+    QStringList out;
+    const QStringList lines = inner.value(QStringLiteral("config")).toString().split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const QString t = line.trimmed();
+        for (const char *key : {"DNS = ", "MTU = ", "Address = ", "AllowedIPs = "})
+            if (t.startsWith(QLatin1String(key)))
+                out.append(t);
+    }
+    return out;
+}
+
+inline bool watchPlanInPlace(const QJsonObject &currentInner, const QJsonObject &candidateInner)
+{
+    const QStringList current = watchPlanSessionLines(currentInner);
+    if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))
+        return false;
+    for (const char *key : {"mtu", "allowed_ips", "client_ip"})
+        if (currentInner.value(QLatin1String(key)) != candidateInner.value(QLatin1String(key)))
+            return false;
+    return true;
+}
+
 struct WatchPlanInputs {
     qint64 nowMs = 0;              // wall clock of the write
     qint64 seq = 0;                // the app's own counter of written plans (set by writeWatchPlan)
@@ -117,6 +186,9 @@ struct WatchPlanInputs {
     QList<WatchPlanMemoryEntry> memory; // entries for "wifi" and cellularKey (dead ones are dropped here)
     QList<QPair<QString, long long>> numbers; // clamped plan numbers (key, value) in table order
     QStringList sanityTargets;     // watchPlanSanityTargets(); empty = the extension's built-in ones
+    // Stage 2: where the extension may switch to, in the ladder's order. Written only with BOTH flags on
+    // (a node's preshared key lies in the file; with the switch off nothing of a node is written).
+    QList<WatchPlanCandidate> candidates;
 };
 
 // Targets of the extension's request that bypasses the tunnel ("is the physical network a real path to
@@ -191,6 +263,20 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
                                          {QStringLiteral("saved_ms"), double(e.savedMs)}});
     }
 
+    QJsonArray candidates;
+    if (in.watch && in.watchSwitch) {
+        for (const WatchPlanCandidate &c : in.candidates) {
+            if (candidates.size() >= kWatchPlanMaxCandidates)
+                break;
+            const int node = watchPlanNodeId(c.nodeId);
+            if (node <= 0 || c.nodeId.contains(QLatin1Char(':')) || c.peer.isEmpty())
+                continue; // AmneziaWG nodes only ("16:xray" is an Xray listener)
+            candidates.append(QJsonObject{{QStringLiteral("node_id"), node},
+                                          {QStringLiteral("country"), c.country},
+                                          {QStringLiteral("peer"), c.peer}});
+        }
+    }
+
     QJsonObject plan{
         {QStringLiteral("schema"), kWatchPlanSchema},
         {QStringLiteral("seq"), double(in.seq)},
@@ -213,7 +299,7 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
                                                  {QStringLiteral("ios_tunnel_watch_switch"), in.watchSwitch},
                                                  {QStringLiteral("ios_on_demand_bg_arm"), in.bgArm}}},
         {QStringLiteral("numbers"), numbers},
-        {QStringLiteral("candidates"), QJsonArray{}}, // stage 1: always empty
+        {QStringLiteral("candidates"), candidates}, // empty unless the switch key is on
     };
     if (!in.sanityTargets.isEmpty())
         plan.insert(QStringLiteral("sanity_targets"), QJsonArray::fromStringList(in.sanityTargets));

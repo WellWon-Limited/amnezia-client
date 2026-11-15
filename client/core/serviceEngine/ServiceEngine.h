@@ -15,6 +15,7 @@
 #include "Switcher.h"
 #include "TransportModeGate.h"
 #include "TransportPick.h"
+#include "TunnelWatchPlan.h"
 #include "dto/Subscription.h"
 
 #include <QByteArray>
@@ -216,6 +217,19 @@ public:
     // in the transport history at most once per rise and without a time to traffic. Compiled for every
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
+    // AVPN (iOS data watch, build 140, stage 2). The nodes the packet tunnel extension may switch to in
+    // place while the app sleeps - the engine's own failover order with what the extension cannot raise
+    // taken out (TunnelWatchCandidates.h), only nodes whose DNS, MTU and routed ranges equal the current
+    // node's, each with its own half of the tunnel configuration. Empty when the current node is unknown.
+    QList<WatchPlanCandidate> extensionSwitchCandidates() const;
+    // The extension moved the tunnel to `nodeId` while the app slept. Only in Connected / Verifying, only
+    // to another node of the pool: that node becomes the current one, the node it left is marked failed
+    // in this session (the app's own ladder does not go back to it by itself), the health sample and the
+    // heal budget start over. Not a step of the app's ladder: no DEAD, no failure streak, no transport
+    // history; the pin, the intent and the mode are not touched. `verify`: back to Verifying - the facade
+    // then runs its own data check before "Connected" is shown. Compiled for every platform, called only
+    // from the facade's Q_OS_IOS block.
+    bool adoptExtensionSwitch(const QString &nodeId, bool verify);
     bool feedProbeResult(bool ok);
 
     // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every

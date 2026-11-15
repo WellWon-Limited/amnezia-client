@@ -2708,6 +2708,9 @@ void AvpnEngineQml::writeTunnelWatchPlan(const char *why)
     });
     // The white-list detector's own lists (WhitelistDetector.cpp); not set on the server - empty here,
     // and the extension uses its built-in targets, which are the same compiled defaults.
+    // Stage 2: where the extension may switch to in place. Collected only with both flags on.
+    if (in.watch && in.watchSwitch)
+        in.candidates = m_engine.extensionSwitchCandidates();
     in.sanityTargets = avpn::watchPlanSanityTargets(
         avpn::TuningStore::listOr(QStringLiteral("ios_tw_sanity_urls"), {}),
         avpn::TuningStore::listOr(QStringLiteral("whitelist_probe_domains"), {}),
@@ -2757,6 +2760,15 @@ void AvpnEngineQml::setupTunnelWatchResume()
     };
     // The app's own per-network memory forgets the node (§29 item 7, the same stored-copy function a
     // failed start uses); the key is the attempt's (computed with the tunnel down).
+    ops.adoptSwitch = [this](const QString &nodeId) {
+        // Stage 2: the extension moved the tunnel while the app slept. The engine takes the node; the
+        // app's own check of it runs only where the app has one (features.node_scan).
+        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false)))
+            return false;
+        writeTunnelWatchPlan("adopt"); // the candidates are counted from the node the tunnel stands on
+        emit changed();
+        return true;
+    };
     ops.forgetNode = [this](const QString &nodeId) {
         if (m_attemptNetKey.isEmpty())
             return;

@@ -53,6 +53,10 @@ struct TunnelWatchResumeOps {
     std::function<bool()> reenterVerifying;   // ServiceEngine::reenterVerifying: Connected -> Verifying, or false
     std::function<void()> startVerification;  // the app's own data check, full budget
     std::function<void(const QString &nodeId)> forgetNode; // the per-network memory forgets the node
+    // Stage 2: the extension moved the tunnel to `nodeId` while the app slept. The engine takes it as its
+    // current node (ServiceEngine::adoptExtensionSwitch) and the screen shows it; false = not a node of
+    // the pool. Nothing of the app's own ladder runs, the pin is not touched.
+    std::function<bool(const QString &nodeId)> adoptSwitch;
 };
 
 class TunnelWatchResume {
@@ -141,8 +145,26 @@ public:
         ci.snapshot = w;
         ci.snapshotNodeId = session.value(QStringLiteral("node_id")).toString();
         ci.snapshotGeneration = session.value(QStringLiteral("generation")).toString();
+        // Stage 2: where the tunnel actually stands comes BEFORE any decision of the app's own. If
+        // the extension moved it, the engine takes that node first; everything below - the verdict,
+        // the decisions that waited - is then about the node the tunnel is on.
+        WatchAdoptInputs ai;
+        ai.switchSeq = qMax(w.switchSeq, session.value(QStringLiteral("switch_seq")).toInt());
+        ai.snapshotNodeId = ci.snapshotNodeId;
+        ai.snapshotGeneration = ci.snapshotGeneration;
+        ai.appNodeId = m_ops.appNodeId();
+        ai.adoptedSeq = m_adoptedSeq;
+        ai.adoptedGeneration = m_adoptedGeneration;
+        bool adopted = false;
+        if (decideWatchAdopt(ai)) {
+            adopted = m_ops.adoptSwitch(ai.snapshotNodeId);
+            m_ops.journal(watchAdoptJournalLine(ai.appNodeId, ai.snapshotNodeId, ai.switchSeq, w.lastSwitchWhy, adopted));
+            m_adoptedSeq = ai.switchSeq;
+            m_adoptedGeneration = ai.snapshotGeneration;
+        }
         ci.appNodeId = m_ops.appNodeId();
-        ci.appGeneration = m_generation;
+        // An adopted session is the app's session from now on (a start by the system is another run).
+        ci.appGeneration = adopted ? ci.snapshotGeneration : m_generation;
         ci.nodeScanOn = m_ops.nodeScanFlag();
         ci.consumedSinceMs = m_consumedSinceMs;
         ci.consumedGeneration = m_consumedGeneration;
@@ -156,6 +178,10 @@ public:
             m_ops.journal(watchConsumedJournalLine(w, ci.appNodeId, in.nowMs, QStringLiteral("ignored why=node_scan_off")));
         } else if (consume == WatchConsume::Reverify) {
             reverify(w, ci.appNodeId, in.nowMs);
+        } else if (adopted && m_ops.engineVerifying()) {
+            // The node the extension moved to is checked by the app itself before it is shown as
+            // connected (the engine went back to Verifying when it adopted the switch).
+            m_ops.startVerification();
         }
         // The decisions that waited run after the snapshot was adopted; a re-check started above has a
         // new epoch, so a waiting completion of the old check returns without a verdict.
@@ -231,6 +257,8 @@ private:
     std::vector<std::function<void()>> m_deferred;
     qint64 m_consumedSinceMs = 0;
     QString m_consumedGeneration;
+    int m_adoptedSeq = 0;
+    QString m_adoptedGeneration;
 };
 
 } // namespace avpn

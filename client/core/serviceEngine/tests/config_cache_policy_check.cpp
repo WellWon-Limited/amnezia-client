@@ -227,8 +227,32 @@ static void requestThatOutlivedAFreeze()
     CHECK(!configRequestOutlivedFreeze(kNow + kHour, kNow, timeout));     // the clock went back: not judged frozen
 }
 
+// AVPN (iOS data watch, build 140): what a cached config may not switch on at a cold start.
+static void cachedFeaturesThatMoveSessionsAreFrozen()
+{
+    QMap<QString, bool> ios{{QStringLiteral("node_scan"), true},
+                            {QStringLiteral("ios_tunnel_watch_switch"), true},
+                            {QStringLiteral("ios_tunnel_watch"), true},
+                            {QStringLiteral("ios_on_demand_bg_arm"), true},
+                            {QStringLiteral("rebind_heal"), true}};
+    QMap<QString, bool> other = ios;
+    freezeCachedFeatures(ios, /*ios=*/true);
+    CHECK(!ios.value(QStringLiteral("node_scan")));               // frozen as before
+    CHECK(!ios.value(QStringLiteral("ios_tunnel_watch_switch"))); // the tunnel-side switch waits for a fresh answer
+    CHECK(ios.value(QStringLiteral("ios_tunnel_watch")));         // the verdict only reports: trusted from the cache
+    CHECK(ios.value(QStringLiteral("ios_on_demand_bg_arm")));
+    CHECK(ios.value(QStringLiteral("rebind_heal")));              // nothing else is touched
+    freezeCachedFeatures(other, /*ios=*/false);
+    CHECK(!other.value(QStringLiteral("node_scan")));
+    CHECK(other.value(QStringLiteral("ios_tunnel_watch_switch"))); // not this platform's key: left as it came
+    QMap<QString, bool> absent;
+    freezeCachedFeatures(absent, /*ios=*/true);
+    CHECK(absent.contains(QStringLiteral("ios_tunnel_watch_switch")) && !absent.value(QStringLiteral("ios_tunnel_watch_switch")));
+}
+
 int main()
 {
+    cachedFeaturesThatMoveSessionsAreFrozen();
     freshAnswerWins();
     cachedTrueInsideAndPastTheBound();
     cachedFalseStaysOff();

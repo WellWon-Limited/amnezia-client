@@ -1,4 +1,5 @@
 #include "ServiceEngine.h"
+#include "TunnelWatchCandidates.h"
 #include "ConnectTunables.h" // AVPN (BUG-4 auto-heal): rebindHealMaxTriesTuned — кламп кап попыток; xray-пороги
 #include "NodeRanking.h"  // AVPN (выбор по скорости): fastestMeasuredNodeId
 #include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
@@ -1111,6 +1112,54 @@ bool ServiceEngine::reenterVerifying() // AVPN (iOS data watch, build 140)
     // A success of this re-check is still at most one per rise (recordTransportOutcome), and it is
     // not a time to traffic: the rise was long ago (the same rule as an up() that spanned a freeze).
     m_upFrozen = true;
+    return true;
+}
+
+QList<WatchPlanCandidate> ServiceEngine::extensionSwitchCandidates() const // AVPN (iOS data watch, stage 2)
+{
+    QList<WatchPlanCandidate> out;
+    const SubscriptionNode *current = findNode(m_currentNodeId);
+    if (!current)
+        return out;
+    const QJsonObject currentInner = AwgConfigBuilder::buildInner({}, *current, {});
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    const QStringList order = watchSwitchCandidateOrder(m_pool.nodes(), rankingRtt(failoverRtt()), m_transportHistory,
+                                                        transportMode(), m_currentNodeId,
+                                                        pinned ? pinned->countryCode : QString(), m_failedThisSession);
+    for (const QString &id : order) {
+        const SubscriptionNode *n = findNode(id);
+        if (!n)
+            continue;
+        const QJsonObject inner = AwgConfigBuilder::buildInner({}, *n, {});
+        if (!watchPlanInPlace(currentInner, inner))
+            continue; // another DNS, MTU or routed range: that switch is the app's own
+        out.append({id, n->countryCode, watchPlanCandidatePeer(inner)});
+        if (out.size() >= kWatchPlanMaxCandidates)
+            break;
+    }
+    return out;
+}
+
+bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify) // AVPN (iOS data watch, stage 2)
+{
+    if (m_state != EngineState::Connected && m_state != EngineState::Verifying)
+        return false;
+    if (nodeId == m_currentNodeId || !findNode(nodeId))
+        return false;
+    if (!m_currentNodeId.isEmpty())
+        m_failedThisSession.insert(m_currentNodeId);
+    appendSwitchLog(QStringLiteral("extension switch adopted: %1 -> %2")
+                        .arg(m_currentNodeId.isEmpty() ? QStringLiteral("?") : m_currentNodeId, nodeId));
+    m_currentNodeId = nodeId;
+    m_sessionHintNodeId.clear();
+    m_sessionHintProto.clear();
+    m_sessionHintEndpoint.clear();
+    resetHealSession(nodeId);
+    resetHealthSampling();
+    if (verify) {
+        m_state = EngineState::Verifying;
+        m_upFrozen = true; // not a time to traffic: the rise was the extension's
+    }
     return true;
 }
 

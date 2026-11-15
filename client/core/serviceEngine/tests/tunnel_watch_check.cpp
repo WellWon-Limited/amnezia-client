@@ -149,7 +149,7 @@ static void planBuilder()
     CHECK(qint64(plan.value("expires_ms").toDouble()) == 1800000000000LL + 24LL * 3600000, "expires = written + ttl");
     CHECK(qint64(plan.value("policy_max_age_ms").toDouble()) == 24LL * 3600000, "policy max age in ms");
     CHECK(qint64(plan.value("pool_revision").toDouble()) == 1794627422892LL, "a 13-digit pool revision survives the JSON number");
-    CHECK(plan.value("candidates").isArray() && plan.value("candidates").toArray().isEmpty(), "stage 1: candidates are always empty");
+    CHECK(plan.value("candidates").isArray() && plan.value("candidates").toArray().isEmpty(), "the switch key off: no candidates");
     const QJsonObject features = plan.value("features").toObject();
     CHECK(features.value("ios_tunnel_watch").isBool() && features.value("ios_tunnel_watch").toBool(), "the flag is a JSON boolean");
     CHECK(features.value("ios_tunnel_watch_switch").isBool() && !features.value("ios_tunnel_watch_switch").toBool()
@@ -567,6 +567,9 @@ struct ResumeBench {
     int snapshotRequests = 0;
     int reenterCalls = 0;
     int verifications = 0;
+    // Stage 2: the engine's side of an adopted switch (ServiceEngine::adoptExtensionSwitch).
+    QStringList pool{QStringLiteral("16"), QStringLiteral("12"), QStringLiteral("9")};
+    QStringList adoptions;
     QStringList forgotten;
     QStringList journal;
     TunnelWatchResume resume;
@@ -590,6 +593,15 @@ struct ResumeBench {
         o.reenterVerifying = [this] { ++reenterCalls; return engineAgrees; };
         o.startVerification = [this] { ++verifications; };
         o.forgetNode = [this](const QString &n) { forgotten.append(n); };
+        o.adoptSwitch = [this](const QString &n) {
+            if (!pool.contains(n))
+                return false;
+            adoptions.append(node + QStringLiteral("->") + n);
+            node = n;
+            verifying = nodeScan; // the engine goes back to Verifying only where the app has a check
+            engineConnected = !nodeScan;
+            return true;
+        };
         return o;
     }
     // The facade's 1 s tick ran `ms` after its previous run.
@@ -805,6 +817,209 @@ static void handOver()
     }
 }
 
+// ---- stage 2: candidates in the plan, the switch the app finds made -----------------------------------
+static QJsonObject innerConfig(const char *host, const char *dns = "1.1.1.1, 1.0.0.1", const char *mtu = "1280")
+{
+    // The shape AwgConfigBuilder::buildInner gives a node (what matters here).
+    return QJsonObject{
+        {"client_ip", "10.7.0.5/32"}, {"client_priv_key", "PRIVATE"}, {"client_pub_key", "PUB"}, {"client_id", "PUB"},
+        {"server_pub_key", "K1nDpUbLiCkEyExAmPlE0000000000000000000000="}, {"psk_key", "PSK"}, {"hostName", host}, {"port", 585},
+        {"allowed_ips", QJsonArray{"0.0.0.0/0", "::/0"}}, {"persistent_keep_alive", "25"}, {"mtu", mtu},
+        {"Jc", "4"}, {"Jmin", "50"}, {"Jmax", "1000"}, {"S1", "86"}, {"S2", "57"}, {"H1", "1"}, {"H2", "2"}, {"H3", "3"}, {"H4", "4"},
+        {"I1", ""}, {"RandomTrailers", "0"}, {"isObfuscationEnabled", true},
+        {"config", QStringLiteral("[Interface]\nPrivateKey = PRIVATE\nAddress = 10.7.0.5/32\nDNS = %1\nMTU = %2\nJc = 4\n"
+                                  "[Peer]\nPublicKey = K\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %3:585\n")
+                       .arg(QLatin1String(dns), QLatin1String(mtu), QLatin1String(host))},
+    };
+}
+
+static void stageTwo()
+{
+    // --- a node's own half of the configuration ---
+    const QJsonObject inner = innerConfig("203.0.113.12");
+    const QJsonObject peer = watchPlanCandidatePeer(inner);
+    CHECK(peer.value("hostName").toString() == "203.0.113.12" && peer.value("port").toString() == "585", "the endpoint; a number becomes a string");
+    CHECK(peer.value("server_pub_key") == inner.value("server_pub_key") && peer.value("psk_key").toString() == "PSK"
+              && peer.value("persistent_keep_alive").toString() == "25", "keys and keepalive");
+    CHECK(peer.value("Jc").toString() == "4" && peer.value("H4").toString() == "4" && peer.value("RandomTrailers").toString() == "0", "the AmneziaWG parameters");
+    for (const char *never : {"client_priv_key", "client_ip", "client_pub_key", "client_id", "config", "mtu", "allowed_ips", "isObfuscationEnabled", "I1"})
+        CHECK(!peer.contains(QLatin1String(never)), "nothing of the device, nothing the session keeps, no empty value");
+    for (auto it = peer.begin(); it != peer.end(); ++it)
+        CHECK(it.value().isString() && watchPlanCandidateKeys().contains(it.key()), "strings by the allow-listed keys only");
+    // --- a switch in place keeps the interface ---
+    CHECK(watchPlanInPlace(inner, innerConfig("203.0.113.9")), "another endpoint only: in place");
+    CHECK(!watchPlanInPlace(inner, innerConfig("203.0.113.9", "9.9.9.9, 1.0.0.1")), "another DNS: the app's own switch");
+    CHECK(!watchPlanInPlace(inner, innerConfig("203.0.113.9", "1.1.1.1, 1.0.0.1", "1376")), "another MTU: the app's own switch");
+    QJsonObject otherRoutes = innerConfig("203.0.113.9");
+    otherRoutes.insert("allowed_ips", QJsonArray{"10.0.0.0/8"});
+    CHECK(!watchPlanInPlace(inner, otherRoutes), "other routed ranges: the app's own switch");
+    QJsonObject otherAddress = innerConfig("203.0.113.9");
+    otherAddress.insert("client_ip", "10.7.0.6/32");
+    CHECK(!watchPlanInPlace(inner, otherAddress), "another tunnel address: not in place");
+    QJsonObject noText = inner;
+    noText.remove("config");
+    CHECK(!watchPlanInPlace(noText, noText), "nothing to compare: not offered");
+    // --- candidates in the plan: only with both flags ---
+    WatchPlanInputs in = planInputs();
+    for (const char *id : {"3", "12", "9:xray", "x7", "9", "5", "8", "4"})
+        in.candidates.append({QLatin1String(id), QStringLiteral("FI"), peer});
+    in.candidates.append({QStringLiteral("11"), QStringLiteral("FI"), QJsonObject()});
+    CHECK(buildWatchPlan(in).value("candidates").toArray().isEmpty(), "the switch key off: nothing of a node is written");
+    in.watchSwitch = true;
+    QJsonArray written = buildWatchPlan(in).value("candidates").toArray();
+    QStringList ids;
+    for (const QJsonValue &v : written)
+        ids.append(QString::number(v.toObject().value("node_id").toInt()));
+    CHECK(ids == QStringList({"3", "12", "9", "5", "8"}), "five at most, in the given order; an Xray listener and a junk id are skipped");
+    CHECK(written.first().toObject().value("country").toString() == "FI" && written.first().toObject().value("peer").toObject() == peer, "an entry: node, country, peer");
+    in.watch = false;
+    CHECK(buildWatchPlan(in).value("candidates").toArray().isEmpty(), "the watch off: no candidates either");
+    in.watch = true;
+    const WatchPlanWriteOutcome out = writeWatchPlan(in, true, 6, QStringLiteral("pin"), [](const QByteArray &) { return true; });
+    CHECK(out.journal == QStringLiteral("watch_plan_written seq=7 candidates=5 switch=1 pool_rev=1794627422892 mode=auto pin=- watch=1 why=pin"), "the journal line counts them");
+    CHECK(!out.journal.contains("PSK") && !out.journal.contains("203.0.113"), "and names nothing of a node");
+    CHECK(kWatchPlanMaxCandidates == 5, "five spare nodes");
+    // --- the switch the app finds made ---
+    WatchAdoptInputs a;
+    a.switchSeq = 1;
+    a.snapshotNodeId = QStringLiteral("12");
+    a.snapshotGeneration = QStringLiteral("gen-A");
+    a.appNodeId = QStringLiteral("16");
+    CHECK(decideWatchAdopt(a), "the extension switched and stands on another node: adopt");
+    WatchAdoptInputs b = a;
+    b.switchSeq = 0;
+    CHECK(!decideWatchAdopt(b), "no switch was made (a 139 extension, the key off): the app's own identity rules");
+    b = a;
+    b.snapshotNodeId = QStringLiteral("16");
+    CHECK(!decideWatchAdopt(b), "the app is already on that node");
+    b = a;
+    b.snapshotNodeId.clear();
+    CHECK(!decideWatchAdopt(b), "no node named");
+    b = a;
+    b.snapshotGeneration.clear();
+    CHECK(!decideWatchAdopt(b), "no run of the extension named");
+    b = a;
+    b.adoptedSeq = 1;
+    b.adoptedGeneration = QStringLiteral("gen-A");
+    CHECK(!decideWatchAdopt(b), "this switch was adopted; the app has moved on by itself since");
+    b.switchSeq = 2;
+    CHECK(decideWatchAdopt(b), "a later switch of the same run is a new one");
+    b.switchSeq = 1;
+    b.adoptedGeneration = QStringLiteral("gen-0");
+    CHECK(decideWatchAdopt(b), "the same number in another run of the extension is a new one");
+    CHECK(watchAdoptJournalLine(QStringLiteral("16"), QStringLiteral("12"), 3, QStringLiteral("no_data"), true)
+              == QStringLiteral("adopt_extension_switch from=16 to=12 seq=3 why=no_data result=adopted"), "the journal line");
+    CHECK(watchAdoptJournalLine(QString(), QStringLiteral("12"), 1, QString(), false)
+              == QStringLiteral("adopt_extension_switch from=- to=12 seq=1 why=unknown result=unknown_node"), "the journal line of a node the pool does not know");
+    // --- the reason of the last switch in the status block ---
+    QVariantMap block = watchBlock(QStringLiteral("none"));
+    block.insert("switch_seq", 2);
+    block.insert("switches", QVariantList{QVariantMap{{"from", "16"}, {"to", "12"}, {"why", "no_data"}},
+                                          QVariantMap{{"from", "12"}, {"to", "9"}, {"why", "exhausted_best"}}});
+    TunnelWatchSnapshot snap = parseTunnelWatch(block);
+    CHECK(snap.switchSeq == 2 && snap.switches == 2 && snap.lastSwitchWhy == QStringLiteral("exhausted_best"), "the newest switch's reason");
+    block.insert("switches", QVariantList{QVariantMap{{"why", "free text with spaces; and = signs"}}});
+    CHECK(parseTunnelWatch(block).lastSwitchWhy == QStringLiteral("unknown"), "only a label gets into the journal");
+    CHECK(parseTunnelWatch(watchBlock(QStringLiteral("none"))).lastSwitchWhy.isEmpty(), "no switch, no reason");
+
+    // --- the hand-over: where the tunnel stands comes before any decision of the app ---
+    const auto switched = [](ResumeBench &bench, const QString &verdict, const QString &to, int seq, const QString &gen = QStringLiteral("gen-A")) {
+        QVariantMap m = bench.snapshot(verdict, to, gen);
+        QVariantMap w = m.value("watch").toMap();
+        w.insert("switch_seq", seq);
+        w.insert("switches", QVariantList{QVariantMap{{"from", "16"}, {"to", to}, {"why", "no_data"}}});
+        m.insert("watch", w);
+        return m;
+    };
+    {   // the extension moved to node 12 while the app slept
+        ResumeBench bench;
+        int ran = 0;
+        bench.now += 60000;
+        CHECK(bench.defer(&ran, "verify"), "a decision about the old node waits");
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.node == "12", "the engine takes the node the tunnel stands on");
+        CHECK(bench.journaled("adopt_extension_switch from=16 to=12 seq=1 why=no_data result=adopted"), "journaled with both nodes, the number and the reason");
+        CHECK(bench.verifications == 1 && bench.reenterCalls == 0, "the new node is checked by the app itself, once");
+        CHECK(ran == 1, "what waited runs after the adoption (it finds a new epoch and returns)");
+        CHECK(bench.forgotten.isEmpty(), "nothing is forgotten on a healthy verdict");
+        // the same snapshot at the next return: nothing again
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.size() == 1 && bench.verifications == 1, "a switch is adopted once");
+        // the user picked node 9 by a tap (the app's own start would be a new run; here: same run, own move)
+        bench.node = QStringLiteral("9");
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.size() == 1 && bench.node == "9", "an adopted switch never pulls the app back: a tap wins");
+        // the extension switched again (seq 2)
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("16"), 2));
+        CHECK(bench.adoptions.size() == 2 && bench.node == "16", "a later switch is a new one");
+    }
+    {   // the node the extension moved to is itself judged dead: one check, of the new node
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("no_data"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.size() == 1 && bench.verifications == 1 && bench.reenterCalls == 0, "adopted, then one re-check (the engine is already in Verifying)");
+        CHECK(bench.journaled("data_watch_consumed verdict=no_data node=12"), "the verdict is consumed for the node the tunnel is on");
+        CHECK(bench.forgotten == QStringList({"12"}), "and the memory forgets that node, not the one the app held");
+    }
+    {   // a start by the system on another node: another run of the extension
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("no_data"), QStringLiteral("12"), 1, QStringLiteral("gen-B")));
+        CHECK(bench.adoptions == QStringList({"16->12"}), "adopted across the restart");
+        CHECK(bench.verifications == 1 && bench.journaled("data_watch_consumed verdict=no_data node=12"), "its verdict is about the session the app now holds");
+    }
+    {   // without a check of its own (node_scan off) the app only takes the node
+        ResumeBench bench;
+        bench.nodeScan = false;
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.size() == 1 && bench.verifications == 0 && bench.node == "12", "taken, not checked");
+    }
+    {   // a node the pool does not know
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("77"), 1));
+        CHECK(bench.adoptions.isEmpty() && bench.node == "16" && bench.journaled("result=unknown_node"), "not taken, journaled");
+        bench.tick(60000);
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("77"), 1));
+        int lines = 0;
+        for (const QString &l : bench.journal)
+            lines += l.contains("adopt_extension_switch");
+        CHECK(lines == 1, "and not asked again at every return");
+    }
+    {   // the switch number only in the session metadata (the watch block is gone: the watch was switched off after a switch)
+        ResumeBench bench;
+        bench.tick(60000);
+        QVariantMap m = bench.snapshot(QString(), QStringLiteral("12"));
+        QVariantMap session = m.value("session").toMap();
+        session.insert("switch_seq", 4);
+        m.insert("session", session);
+        bench.resume.onSnapshot(m);
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.journaled("seq=4 why=unknown"), "the session's own switch number is enough");
+    }
+    {   // in the background (awake only for the arming) nothing is adopted
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.backgroundArmOnly = true;
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.isEmpty() && bench.node == "16", "left for the return to the screen");
+    }
+    {   // not frozen: a snapshot nobody waits for adopts nothing
+        ResumeBench bench;
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.isEmpty(), "outside a hand-over nothing is adopted");
+    }
+    {   // no switch was made: the node of another session is not adopted (stage 1 behaviour)
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.resume.onSnapshot(bench.snapshot(QStringLiteral("no_data"), QStringLiteral("12")));
+        CHECK(bench.adoptions.isEmpty() && bench.verifications == 0 && bench.node == "16", "without a switch number another node is only another session");
+    }
+}
+
 int main()
 {
     tableAndClamps();
@@ -813,6 +1028,7 @@ int main()
     consume();
     resumeFreeze();
     handOver();
+    stageTwo();
     std::printf("\n%d/%d ok\n", total - failures, total);
     if (failures) {
         std::printf("tunnel_watch_check: %d FAILED\n", failures);

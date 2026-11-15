@@ -29,10 +29,25 @@
 
 #include "WhoamiVerdict.h" // timerFiredLate - the one rule "a deadline that fires late = the process was frozen"
 
+#include <QMap>
 #include <QString>
 #include <QtGlobal>
 
 namespace avpn {
+
+// Features a CACHED config may not switch on at a cold start. Each of them moves or re-judges live
+// sessions, and a stale "true" must not override a server-side "false" until a fresh verified response
+// authorizes it again:
+//  * node_scan - every platform (incident of 06.11.2026, 5.1.108);
+//  * ios_tunnel_watch_switch - iOS, build 140: the packet tunnel extension changes the server by itself.
+//    The extension learns the key only from the plan the app writes, so an app that starts on its
+//    cache writes the plan WITHOUT the key until the API answers.
+inline void freezeCachedFeatures(QMap<QString, bool> &features, bool ios)
+{
+    features.insert(QStringLiteral("node_scan"), false);
+    if (ios)
+        features.insert(QStringLiteral("ios_tunnel_watch_switch"), false);
+}
 
 // numbers.xray_client_cache_max_age_h - how long the cached signed xray_client=true is honoured.
 inline constexpr char kXrayCacheMaxAgeKey[] = "xray_client_cache_max_age_h";

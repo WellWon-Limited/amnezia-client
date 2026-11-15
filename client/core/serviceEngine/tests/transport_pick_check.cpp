@@ -9,6 +9,7 @@
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
 #include "../TransportPick.h"
+#include "../TunnelWatchCandidates.h"
 #include "../TuningStore.h"
 
 #include <QCoreApplication>
@@ -935,6 +936,121 @@ int main(int argc, char **argv)
             const QByteArray withSuccess = late.transportHistoryJson();
             CHECK(withSuccess != none);                           // the success is recorded...
             CHECK(withSuccess.contains("\"t\":-1"));              // ...without a time to traffic (the rise was long ago)
+        }
+    }
+
+    // --- 9d) iOS data watch, stage 2 (build 140): where the packet tunnel extension may switch to in
+    // place while the app sleeps, and how the app takes the node it finds the tunnel on. ---
+    {
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        const auto withField = [](QByteArray node, const char *field) {
+            node.chop(1); // the closing brace of the node object
+            return node + ", " + field + " }";
+        };
+        // 16 (RS) is the session. 12 and 9 are Finland, 3 is Estonia, 7 is the USA and manual-only,
+        // 5 is dead by the server's data, 8 has another DNS, "9:xray" is the Xray listener of host 9.
+        const QByteArray pool = subJson({
+            awgNodeJson("16", 16, "RS", 1.0, 10, "203.0.113.16:585"),
+            awgNodeJson("12", 12, "FI", 1.0, 10, "203.0.113.12:585"),
+            awgNodeJson("9", 9, "FI", 1.0, 10, "203.0.113.9:585"),
+            xrayNodeJson("9:xray", 9, "FI", 1.0),
+            awgNodeJson("3", 3, "EE", 1.0, 10, "203.0.113.3:585"),
+            withField(awgNodeJson("7", 7, "US", 1.0, 10, "203.0.113.7:585"), R"("manual_only": true)"),
+            withField(awgNodeJson("5", 5, "DE", 1.0, 10, "203.0.113.5:585"), R"("health": {"probe": 0})"),
+            awgNodeJson("8", 8, "LV", 1.0, 10, "203.0.113.8:585").replace(R"("dns": ["1.1.1.1", "1.0.0.1"])", R"("dns": ["9.9.9.9", "1.0.0.1"])"),
+        });
+        const QList<SubscriptionNode> nodes = parseNodes(pool);
+        CHECK(byId(nodes, "7") && isManualOnlyNode(*byId(nodes, "7")) && byId(nodes, "5") && healthAggregate(*byId(nodes, "5")) <= 0.0);
+        // The engine's own order by the measured off-tunnel RTT: EE (3), then FI 12, FI 9, LV 8.
+        const QHash<QString, int> rtt{{QStringLiteral("3"), 10}, {QStringLiteral("12"), 20}, {QStringLiteral("9"), 30},
+                                      {QStringLiteral("9:xray"), 30}, {QStringLiteral("8"), 40}, {QStringLiteral("7"), 1},
+                                      {QStringLiteral("5"), 1}, {QStringLiteral("16"), 50}};
+        const TransportHistory hist;
+        const auto order = [&](TransportMode mode, const char *current, const char *pinCountry, QSet<QString> failed = {}) {
+            return watchSwitchCandidateOrder(nodes, rtt, hist, mode, QLatin1String(current), QLatin1String(pinCountry), failed);
+        };
+        const QStringList plain = order(TransportMode::Auto, "16", "");
+        CHECK(plain == QStringList({QStringLiteral("3"), QStringLiteral("12"), QStringLiteral("9"), QStringLiteral("8")})); // the ladder's order; no Xray, no manual-only, no dead, no current
+        CHECK(!plain.contains(QStringLiteral("7")));       // manual-only: never, though it is the fastest
+        CHECK(!plain.contains(QStringLiteral("5")));       // dead by the server's data (a drained node leaves this way)
+        CHECK(!plain.contains(QStringLiteral("9:xray")));  // the extension cannot raise Xray in place
+        CHECK(!plain.contains(QStringLiteral("16")));      // the node the tunnel is on
+        CHECK(order(TransportMode::Awg, "16", "") == plain);                 // "Amnezia" mode: the same
+        CHECK(order(TransportMode::Xray, "16", "").isEmpty());               // Xray-only mode: nothing to offer
+        CHECK(order(TransportMode::Auto, "9:xray", "").isEmpty());           // an Xray session is not switched by the watch
+        CHECK(order(TransportMode::Auto, "404", "").isEmpty());              // an unknown current node: nothing
+        // The pin: the pinned country first, the rest only after it; the pinned node itself is not special here.
+        CHECK(order(TransportMode::Auto, "12", "FI") == QStringList({QStringLiteral("9"), QStringLiteral("3"), QStringLiteral("8"), QStringLiteral("16")}));
+        CHECK(order(TransportMode::Auto, "16", "FI") == QStringList({QStringLiteral("12"), QStringLiteral("9"), QStringLiteral("3"), QStringLiteral("8")}));
+        CHECK(order(TransportMode::Auto, "16", "US") == plain);              // a pinned country with nothing to raise: the plain order
+        // What failed in this app session is not offered again.
+        CHECK(order(TransportMode::Auto, "16", "", {QStringLiteral("3"), QStringLiteral("9")}) == QStringList({QStringLiteral("12"), QStringLiteral("8")}));
+
+        QString err;
+        {   // the engine's list: the same order, in-place nodes only, each with its own half of the configuration
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.extensionSwitchCandidates().isEmpty());                 // no current node yet
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            CHECK(eng.connect(err));
+            CHECK(tun.lastUpNodeId == QLatin1String("16"));
+            QList<WatchPlanCandidate> c = eng.extensionSwitchCandidates();
+            QStringList ids;
+            for (const WatchPlanCandidate &x : c)
+                ids.append(x.nodeId);
+            if (ids != QStringList({QStringLiteral("3"), QStringLiteral("12"), QStringLiteral("9")}))
+                fprintf(stderr, "candidates: %s\n", ids.join(QLatin1Char(',')).toUtf8().constData());
+            CHECK(ids == QStringList({QStringLiteral("3"), QStringLiteral("12"), QStringLiteral("9")})); // 8 has another DNS: the app's own switch
+            CHECK(c.size() == 3 && c[0].country == QLatin1String("EE") && c[1].country == QLatin1String("FI"));
+            const QJsonObject peer = c.isEmpty() ? QJsonObject() : c[0].peer;
+            CHECK(peer.value(QStringLiteral("hostName")).toString() == QLatin1String("203.0.113.3")
+                  && peer.value(QStringLiteral("port")).toString() == QLatin1String("585")
+                  && !peer.value(QStringLiteral("server_pub_key")).toString().isEmpty()
+                  && peer.value(QStringLiteral("Jc")).toString() == QLatin1String("4")
+                  && peer.value(QStringLiteral("H4")).toString() == QLatin1String("4"));
+            for (const char *never : {"client_priv_key", "client_ip", "config", "dns1", "mtu", "allowed_ips"})
+                CHECK(!peer.contains(QLatin1String(never)));                  // nothing of the device, nothing the session keeps
+            // pinned on a Finnish node: Finland first
+            CHECK(eng.setPinnedNode(QStringLiteral("12"), err));
+            ids.clear();
+            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                ids.append(x.nodeId);
+            CHECK(ids.value(0) == QLatin1String("12") && ids.value(1) == QLatin1String("9") && ids.value(2) == QLatin1String("3"));
+            CHECK(eng.pinnedNodeId() == QLatin1String("12"));                 // asking for the list changes nothing
+        }
+        {   // the app finds the tunnel on another node: the engine takes it, and only that
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true));     // Disconnected: nothing to adopt
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err));
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true));     // Connecting: the app's own start is in flight
+            CHECK(eng.onTunnelConnected() && eng.verifyInconclusive() && eng.state() == EngineState::Connected);
+            const int streak = eng.dataPlaneFailStreak();
+            const QByteArray history = eng.transportHistoryJson();
+            const int ups = tun.upCalls, downs = tun.downCalls;
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("16"), true));     // the same node: nothing
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("404"), true));    // not a node of the pool
+            CHECK(eng.currentNodeId() == QLatin1String("16") && eng.state() == EngineState::Connected);
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), true));
+            CHECK(eng.currentNodeId() == QLatin1String("12") && eng.isVerifying()); // the new node, to be checked by the app
+            CHECK(tun.upCalls == ups && tun.downCalls == downs);              // the tunnel is not touched
+            CHECK(eng.pinnedNodeId() == QLatin1String("16"));                 // the pin stays: only a tap changes it
+            CHECK(eng.dataPlaneFailStreak() == streak && eng.transportHistoryJson() == history); // not a step of the app's ladder
+            QStringList ids;
+            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                ids.append(x.nodeId);
+            CHECK(!ids.contains(QStringLiteral("16")) && !ids.contains(QStringLiteral("12"))); // the node it left failed in this session
+            CHECK(eng.verifySucceeded() && eng.state() == EngineState::Connected);
+            // without a check of its own (features.node_scan off) the app only takes the node
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("9"), false));
+            CHECK(eng.currentNodeId() == QLatin1String("9") && eng.state() == EngineState::Connected);
+            // from Verifying too (the app was checking the old node when it froze)
+            CHECK(eng.reenterVerifying() && eng.adoptExtensionSwitch(QStringLiteral("3"), true) && eng.isVerifying()
+                  && eng.currentNodeId() == QLatin1String("3"));
         }
     }
 

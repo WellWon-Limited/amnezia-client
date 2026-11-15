@@ -56,7 +56,13 @@ void ConfigService::start()
             // The honest-Connected / network-memory mechanism is NOT covered by that trust (5.1.108):
             // a server-side node_scan=false (06.11.2026 incident) must not be overridden by a stale
             // cache that still says true - until a fresh verified response authorizes it again.
-            c.features.insert(QStringLiteral("node_scan"), false);
+            // AVPN (iOS data watch, build 140): on iOS the tunnel-side switch of the server is frozen the
+            // same way (ConfigCachePolicy.h::freezeCachedFeatures).
+#ifdef Q_OS_IOS
+            freezeCachedFeatures(c.features, /*ios=*/true);
+#else
+            freezeCachedFeatures(c.features, /*ios=*/false);
+#endif
             m_config = c;
             judgeCachedXray();
             emit configApplied(m_config);
