@@ -288,7 +288,7 @@ func replay(device: String, rows: [Row], options: Options) -> DeviceResult {
                 if out.verdict == .noData && watch.snapshot(policy: policy).evidence == .handshake { result.byHandshake += 1 }
             case .refuted: result.refuted += 1
             case .disturbed: result.disturbed += 1
-            case .probe, .wouldSwitch: break
+            case .probe, .wouldSwitch, .trial: break // the replay runs with the switch key off: no trial
             }
         }
         if watch.verdict == .noData || watch.verdict == .unconfirmed {

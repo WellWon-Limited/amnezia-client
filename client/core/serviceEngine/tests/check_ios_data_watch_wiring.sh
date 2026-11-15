@@ -223,6 +223,26 @@ has "$glue" 'guard !startedByApp, let choice = tribeDataWatch.chooseStartBySyste
 has "$glue" 'guard let actual = tribeDataWatch.sessionOverride() else { return }' \
     || bad "E6: without a switch the status reply's session must stay untouched"
 
+# ---- A10: stage 2 in the app ------------------------------------------------------------------------------
+plan_fn="$(body_of "$FACADE" 'void AvpnEngineQml::writeTunnelWatchPlan(')"
+order "$plan_fn" 'if (in.watch && in.watchSwitch)' 'in.candidates = m_engine.extensionSwitchCandidates();' \
+    && [ "$(printf '%s\n' "$plan_fn" | grep -A1 'if (in.watch && in.watchSwitch)' | grep -c 'in.candidates = m_engine.extensionSwitchCandidates();')" = "1" ] \
+    || bad "A10: candidates may be collected only with both flags on"
+[ "$(grep -c 'extensionSwitchCandidates()' "$FACADE")" = "1" ] || bad "A10: the candidates are asked from one place"
+[ "$(grep -c 'adoptExtensionSwitch(' "$FACADE")" = "1" ] || bad "A10: a switch is adopted from one place"
+resume_fn="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
+has "$resume_fn" 'm_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false))' \
+    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan)"
+for token in 'clearPin' 'setPinnedNode' 'm_savedPin' 'onDead' 'verifyFailed'; do
+    has "$(printf '%s\n' "$resume_fn" | awk '/ops.adoptSwitch = /{on=1} on{print} on && /^    };/{exit}')" "$token" \
+        && bad "A10: adopting a switch must not touch the pin or run the app's ladder ($token)"
+done
+cfg_start="$(body_of "$ENGINE/ConfigService.cpp" 'void ConfigService::start()')"
+order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*/true);' \
+    && has "$cfg_start" 'freezeCachedFeatures(c.features, /\*ios=\*/false);' \
+    || bad "A10: a cached config must not switch the tunnel-side switch on at a cold start (iOS)"
+[ "$(grep -c 'freezeCachedFeatures(' "$ENGINE/ConfigService.cpp")" = "2" ] || bad "A10: the freeze is applied in one place"
+
 # ---- E7: the package and the targets ----------------------------------------------------------------------
 grep -q 'self.requires("awg-apple/3.1.4-tribe.13")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.13"
 grep -q '^    version = "3.1.4-tribe.13"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.13"

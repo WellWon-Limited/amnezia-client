@@ -1339,6 +1339,44 @@ run("arbiter_heals_the_node_then_leaves_it") {
     check(s.commands.count == after, "and nothing more is done while it works")
 }
 
+run("heal_is_given_its_wait_before_it_is_judged") {
+    // No re-key and no other disturbance around the heals, so the waits are the arbiter's own:
+    // 10 s after a fresh port, one start grace after a restart, and only then the trial probe.
+    var s = switching(["12"])
+    for second in 1...200 where s.heals.count < 2 {
+        s.probeAnswer = .silent
+        s.tick(1, tx: 400, handshake: second == 30 || (s.heals.count == 1 && s.handshake == 0))
+    }
+    let trials = s.probesStarted.filter { $0.reason == .trial }
+    check(s.heals == [.freshPort, .softRestart] && trials.count == 1, "one trial between the two heals: \(trials.count)")
+    check(trials.count == 1 && trials[0].at - s.commands[0].at >= TribeDataWatchPolicy.healTrialSeconds
+          && trials[0].at - s.commands[0].at < TribeDataWatchPolicy.healTrialSeconds + 3, "the fresh port is probed 10 s after it, not at once: \(trials.first.map { $0.at - s.commands[0].at } ?? -1)")
+    for second in 1...60 where s.probesStarted.filter({ $0.reason == .trial }).count < 2 {
+        s.probeAnswer = .silent
+        s.tick(1, tx: 400, handshake: second == 2)
+    }
+    let second = s.probesStarted.filter { $0.reason == .trial }
+    check(second.count == 2 && second[1].at - s.commands[1].at >= s.policy.startGraceSeconds, "the restarted device is probed after its start grace: \(second.last.map { $0.at - s.commands[1].at } ?? -1)")
+}
+
+run("arbiter_waits_out_a_quiet_period") {
+    // The verdict stands while the app is alive; the app falls asleep at a moment when the path is
+    // not satisfied: nothing is done until the path is back.
+    var s = switching(["12"], alive: ["12"])
+    for second in 1...150 {
+        s.env.appSeenAt = s.uptime
+        s.probeAnswer = .silent
+        s.tick(1, tx: 400, handshake: second % 17 == 0)
+    }
+    check(s.watch.verdict == .noData && s.commands.isEmpty, "a verdict, and a living app")
+    s.env.pathSatisfied = false
+    for _ in 1...30 { s.probeAnswer = .silent; s.tick(1, tx: 400) }
+    check(s.commands.isEmpty && s.watch.verdict == .noData, "the app sleeps, the path is gone: the arbiter waits")
+    s.env.pathSatisfied = true
+    for _ in 1...5 { s.probeAnswer = .silent; s.tick(1, tx: 400) }
+    check(!s.commands.isEmpty, "the path is back: now it acts")
+}
+
 run("heal_that_cures_keeps_the_node") {
     // The soft restart helps: the node answers its trial probe. Nobody is moved, the verdict is
     // taken back, and it is not a false decision of the passive rule.
@@ -1416,8 +1454,10 @@ run("candidates_in_plan_order_each_with_its_own_trial") {
 
 run("max_switches_bounds_a_round") {
     var s = switching(["12", "9", "3", "7", "5"]) { $0.switchHealSteps = 0; $0.maxSwitches = 2 }
-    s.world(seconds: 400)
-    check(s.switches.prefix(2) == ["12", "9"] && s.exhausted.count == 1, "two switches, then exhausted: \(s.switches) \(s.exhausted.count)")
+    for _ in 1...600 where s.exhausted.isEmpty { s.world(seconds: 1) }
+    let forward = s.commands.filter { if case .switchPeer(_, .noData) = $0.command { return true } else { return false } }.count
+    check(s.switches.prefix(2) == ["12", "9"] && forward == 2 && s.exhausted.count == 1, "two switches, then exhausted: \(s.switches) \(s.exhausted.count)")
+    check(s.switches == ["12", "9", "16"], "the third move is the way back, not a third candidate: \(s.switches)")
     var zero = switching(["12"], alive: ["12"]) { $0.maxSwitches = 0 }
     zero.world(seconds: 400)
     check(zero.commands.isEmpty && zero.watch.verdict == .noData, "ios_tw_max_switches = 0: the arbiter does nothing at all")
@@ -1501,6 +1541,10 @@ run("trial_probes_have_an_hourly_limit") {
     check(s.probesStarted.filter { $0.reason == .trial }.count == 1 && s.switches.count == 2, "no second trial probe this hour, no blind switch")
     s.world(seconds: 120)
     check(s.switches == ["12", "9", "3"], "the passive rule judged node 9 instead: \(s.switches)")
+    // The budget is per hour: an hour later a trial probe is possible again.
+    let spent = s.probesStarted.filter { $0.reason == .trial }.count
+    s.world(seconds: 3700)
+    check(s.probesStarted.filter { $0.reason == .trial }.count > spent, "the trial budget frees up after an hour: \(s.probesStarted.filter { $0.reason == .trial }.count)")
 }
 
 run("disturbed_trial_is_asked_again") {

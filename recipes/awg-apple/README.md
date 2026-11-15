@@ -205,8 +205,10 @@ Everything of tribe.11, plus a verdict about DATA (design:
 The stall watchdog answers "is the session alive" and counts a new handshake as inbound progress; on
 13.11.2026 a node completed handshakes for 6 min 50 s and returned no data, and nothing in the
 extension said so. tribe.13 adds a second question to the SAME one-second tick, "does data come
-back", and an active probe that judges the answer. Stage 1 only reports; nothing in the package
-switches a peer. The text below is the state after the independent review of stage 1.
+back", and an active probe that judges the answer. Stage 1 (features.ios_tunnel_watch) only
+reports. Stage 2 (features.ios_tunnel_watch_switch, off by default) adds an arbiter that, while the
+app sleeps, treats the node and then replaces the peer in place. The text below is the state after
+the independent review of stage 1 plus stage 2.
 
 - `TribeDataWatch` (pure, `tribe/TribeDataWatch.swift`): the statistics sample is cut into cycles of
   `cycleSeconds` (25). A cycle is dead when at least `cycleMinTxBytes` (1024) went out and NO
@@ -279,13 +281,49 @@ switches a peer. The text below is the state after the independent review of sta
   `dataWatchTick` right before `recovery.tick` in `stallTick` and told about real path events,
   device starts and in-place restarts. With the policy off (the default) every hook is one
   comparison and the adapter behaves as tribe.11; nothing is counted unconditionally any more.
-- `TribeDataWatchAction.switchPeer` / `.exhausted` and `TribeDataWatchPolicy.switchEnabled` are
-  reserved for stage 2 (in-place switch); `step` never returns them.
+- Stage 2, the arbiter (inside `TribeDataWatch`, pure). `step` returns `command`
+  (`TribeWatchCommand.heal(.freshPort | .softRestart)` or `.switchPeer(to:why:)`) and `exhausted`
+  only when ALL hold: `policy.switchEnabled`, `maxSwitches > 0`, the app shows no sign of life
+  (`appAliveSeconds`), the verdict is a confirmed `no_data`, the provider offers candidates
+  (`env.candidates`, never the current node), no quiet period, no probe in flight. One round:
+  the same-node heals (first round only, `switchHealSteps`, 2) -> the candidates in the given
+  order, each once, at most `maxSwitches` (5) -> exhausted: back to the node that received the most
+  inbound data in the round (a tie goes to where the round began), then a pause of 5, 10, 20, 30,
+  30... minutes (`roundPauseSeconds`). After every performed action the node is judged by a TRIAL
+  probe (`TribeProbeReason.trial`) once its wait is over (10 s after a fresh port, one start grace
+  after a restart or a switch): answered = trusted (report `trial`, a standing verdict is taken
+  back, not counted as refuted); silent and undisturbed = the next action (a trickle of inbound
+  packets is no answer; `recoverRxBytes` are); no session = the handshake judge. Trial probes
+  have their own hourly budget (`trialProbeMaxPerHour`, 30). The round is forgotten at once when
+  the app is seen alive, the key goes off, somebody else starts a device, the data comes back
+  or the physical interface changes.
+- Stage 2, the adapter (`WireGuardAdapter`, patch 0012). A command is executed inside
+  `dataWatchTick`, on the tick that produced it, and the stall ladder skips that sample (one
+  executor per tick); `noteCommandResult` tells the rule what happened. The heals are the ladder's
+  own steps and go through the same shared recovery budget (`recovery.requestFreshPort` /
+  `requestSoftRestart`): a refusal means the step is already spent and is not waited for.
+  `switchBackend` replaces the peer in place - the upstream `update(tunnelConfiguration:)` path
+  with the backend stopped across the settings change:
+  1. the new endpoint is resolved while the old backend still runs (a failure changes nothing);
+  2. `wgTurnOff` of the old backend: nothing reads the TUN any more;
+  3. `setTunnelNetworkSettings` of the new configuration (the excluded route of the NEW endpoint
+     exists before the first packet to it, the old one's is withdrawn);
+  4. a new backend on the same TUN (`restartBackendInPlace`: a new device with the new node's own
+     AmneziaWG parameters; `softRestarts` is counted).
+  No engine runs between 2 and 4, so at no moment does a running engine have a peer whose endpoint
+  is routed into its own tunnel. A failure at 3 puts the old settings and the old backend back.
+  The candidate's `TunnelConfiguration` comes from the provider (`dataWatchCandidate`); without one
+  the switch is refused (`denied`). The adapter cannot be built into a host test: the order above
+  is pinned by the wiring check of the client repo, the types by a host type-check of the patched
+  sources together with the rule.
 
 Build gates: `tests/run_tribe_data_watch_tests.sh` builds two binaries - the named scenarios of the
 rule (the 13.11 replay, the 60 / 120 / 200 / 260 B/s vectors of the review, every false-positive case
 of the design's table, the probe outcomes, disturbance, the handshake judge, late answers, limits,
-clamps) and `TribeDataWatchLadderTests.swift`, the rule next to the REAL stall ladder
+clamps, and the arbiter of stage 2: heals then switch, a heal that cures, refused heals, a living
+app, the order of candidates, the bound per round, exhausted and the rounds, a failed switch, a
+node without a handshake, the trial budget, a disturbed trial, the ends of a round) and
+`TribeDataWatchLadderTests.swift`, the rule next to the REAL stall ladder
 (`TribeRecoveryArbiter`) - and `go test -run '^TestTribeProbe'` (a fake TUN, a fake forwarder and a
 fake engine dump: packet layout and checksums, answer, silence, repeat, one probe at a time, a
 foreign packet passed through untouched, restart during the wait, no configuration, departure

@@ -36,6 +36,8 @@ enum TribeDataWatchRuntimeTests {
         /// (WireGuardAdapter.dataWatchTick): it asks the provider for the node's configuration.
         var switchTarget: ((String) -> TribeDataWatchRuntime.SwitchTarget?)?
         var healResult = TribeCommandResult.denied
+        /// The switch itself fails in the adapter (the endpoint does not resolve, the settings are refused).
+        var switchFails = false
         var commands: [(command: TribeWatchCommand, result: TribeCommandResult)] = []
         var switched: [(node: String, target: TribeDataWatchRuntime.SwitchTarget)] = []
         var lastInputs = TribeDataWatchInputs()
@@ -71,7 +73,10 @@ enum TribeDataWatchRuntimeTests {
                         tx = 0; rx = 0; handshake = 0
                     }
                 case .switchPeer(let node, _):
-                    if let target = switchTarget?(node) {
+                    if let target = switchTarget?(node), switchFails {
+                        _ = target
+                        result = .failed
+                    } else if let target = switchTarget?(node) {
                         switched.append((node, target))
                         tx = 0; rx = 0; handshake = 0
                     } else {
@@ -309,6 +314,19 @@ enum TribeDataWatchRuntimeTests {
             let before = b.adapter.commands.count
             dead(b, seconds: 150)
             check(b.adapter.commands.count == before, "silent until the next round")
+        }
+        run("switch_that_fails_changes_nothing_of_the_session") {
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [12, 9])
+            b.startSession()
+            b.adapter.switchFails = true
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(b, seconds: 110)
+            check(b.logs.contains("Tribe watch: peer_switch from=16 to=12 why=no_data seq=0 net=cellular result=failed"), "a failed switch is journaled as failed: \(b.logs.suffix(3))")
+            check(b.runtime.sessionOverride() == nil && b.runtime.statsSuffix.hasPrefix(" node=16 "), "the session is still the profile's node")
+            check(b.statusBlock().block?["switch_seq"] as? Int == 0 && (b.statusBlock().block?["switches"] as? [[String: Any]])?.isEmpty == true, "no switch is counted")
+            check(b.states.allSatisfy { $0["node_id"] as? String == "16" }, "the shared file never named another node")
+            check(b.records.contains { $0.event == "peer_switch" && $0.fields["result"] as? String == "failed" }, "and the ring has the attempt")
         }
         run("switch_list_keeps_the_last_eight") {
             let b = Bench()

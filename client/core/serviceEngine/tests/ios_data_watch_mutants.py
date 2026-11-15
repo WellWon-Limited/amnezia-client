@@ -11,6 +11,7 @@ Groups:
               pick    - transport_pick_check            rt   - TribeDataWatchRuntimeTests.swift
               ios     - IosDataWatchTests.cpp           harness - the controller harness (the real
                                                                   ios_controller.mm)
+              cfg     - config_cache_policy_check
   wiring  - one call site removed, moved or un-gated where no test reaches (the adapter patch, the
             provider's and the facade's call sites, the recipe, the CMake lists); killed when
             check_ios_data_watch_wiring.sh fails. These are the mutants ONLY the source-level check
@@ -57,7 +58,6 @@ PURE = [
     ("plan-02", ENG + "TunnelWatchPlan.h", "double(in.nowMs + ttlH * 3600LL * 1000LL)", "double(in.nowMs)", "watch", "the plan expires at once"),
     ("plan-03", ENG + "TunnelWatchPlan.h", "double(policyH * 3600LL * 1000LL)", "double(policyH)", "watch", "policy max age in the wrong unit"),
     ("plan-04", ENG + "TunnelWatchPlan.h", '{QStringLiteral("ios_tunnel_watch"), in.watch}', '{QStringLiteral("ios_tunnel_watch"), true}', "watch", "the plan switches the watch on by itself"),
-    ("plan-05", ENG + "TunnelWatchPlan.h", '{QStringLiteral("candidates"), QJsonArray{}}', '{QStringLiteral("candidates"), QJsonArray{1}}', "watch", "stage 1 hands candidates to the extension"),
     ("plan-06", ENG + "TunnelWatchPlan.h", '        if (e.key != QLatin1String("wifi") && e.key != in.cellularKey)\n            continue; // only the two keys of net_keys\n', "", "watch", "another network's memory entry is handed over"),
     ("plan-07", ENG + "TunnelWatchPlan.h", "if (!t.isDouble() || nowSec - qint64(t.toDouble()) > maxAgeSec)\n            return e;", "if (!t.isDouble())\n            return e;", "watch", "a memory entry older than 7 days is handed over"),
     ("plan-08", ENG + "TunnelWatchPlan.h", "return body.size() > kWatchPlanMaxBytes ? QByteArray() : body;", "return body.size() >= kWatchPlanMaxBytes ? QByteArray() : body;", "watch", "64 KB boundary"),
@@ -128,7 +128,6 @@ PURE = [
     ("res-08", ENG + "TunnelWatchResume.h", "        if (step == FreezeStep::HoldReask) {\n            m_ops.journal(QStringLiteral(\"watch_resume_freeze reask why=frozen_while_waiting\"));\n            m_ops.requestSnapshot();", "        if (step == FreezeStep::HoldReask) {\n            m_ops.journal(QStringLiteral(\"watch_resume_freeze reask why=frozen_while_waiting\"));", "watch", "after a second freeze the extension is not asked again"),
     ("res-10", ENG + "TunnelWatchResume.h", "        if (step != FreezeStep::ReleaseSnapshot) {\n            journalRelease(step, nullptr);\n            runDeferred();\n            return;\n        }", "        if (step != FreezeStep::ReleaseSnapshot) {\n            journalRelease(step, nullptr);\n            return;\n        }", "watch", "decisions dropped when the freeze ends because the tunnel went down"),
     ("res-11", ENG + "TunnelWatchResume.h", "        if (m_ops.backgroundArmOnly()) {\n            // The app went to the background before the answer came", "        if (false) {\n            // The app went to the background before the answer came", "watch", "a verdict is adopted and a re-check started in the background"),
-    ("res-12", ENG + "TunnelWatchResume.h", "        ci.appGeneration = m_generation;", "        ci.appGeneration = ci.snapshotGeneration;", "watch", "the generation the app saw before the freeze is not compared"),
     ("res-13", ENG + "TunnelWatchResume.h", "        ci.nodeScanOn = m_ops.nodeScanFlag();", "        ci.nodeScanOn = true;", "watch", "with node_scan off the verdict starts a check"),
     ("res-14", ENG + "TunnelWatchResume.h", "        if (consume == WatchConsume::Reverify || consume == WatchConsume::JournalOnly) {\n            m_consumedSinceMs = w.sinceMs;\n            m_consumedGeneration = ci.snapshotGeneration;\n        }\n", "", "watch", "the same verdict is consumed at every return"),
     ("res-15", ENG + "TunnelWatchResume.h", "        } else if (consume == WatchConsume::Reverify) {\n            reverify(w, ci.appNodeId, in.nowMs);\n        }", "        }", "watch", "a verdict of our session starts no re-check"),
@@ -178,7 +177,6 @@ PURE = [
     ("xp-03", IOS + "TribeWatchPlan.swift", "        guard last.accepts(order) else { return .failure(.stale) }\n", "", "plan", "the order of plans is not checked at all"),
     ("xp-04", IOS + "TribeWatchPlan.swift", "        guard policyFresh || appAlive else { return .failure(.policyStale) }\n", "", "plan", "a policy older than its age is trusted while the app sleeps"),
     ("xp-05", IOS + "TribeWatchPlan.swift", "nowMs - fetched <= maxAge && fetched - nowMs <= futureSlackMs", "nowMs - fetched <= maxAge", "plan", "a config time from the future is fresh"),
-    ("xp-06", IOS + "TribeWatchPlan.swift", "        if expires <= nowMs || candidates.isEmpty { policy.switchEnabled = false }\n", "", "plan", "the switch stays on with an expired or empty candidate list"),
     ("xp-07", IOS + "TribeWatchPlan.swift", "guard written > 0, written - nowMs <= futureSlackMs else { return .failure(.future) }", "guard written > 0 else { return .failure(.future) }", "plan", "a plan written in the future is accepted"),
     ("xp-08", IOS + "TribeWatchPlan.swift", "guard data.count <= maxBytes else { return .failure(.tooLarge) }", "guard data.count <= maxBytes * 4 else { return .failure(.tooLarge) }", "plan", "a plan over 64 KB is read"),
     ("xp-09", IOS + "TribeWatchPlan.swift", "        if status == 200 {\n            if text.contains(\"<TITLE>Success</TITLE>\") { return .ok }\n            return complete ? .captive : nil\n        }", "        if status == 200 {\n            if text.contains(\"<TITLE>Success</TITLE>\") { return .ok }\n            return .captive\n        }", "plan", "a 200 whose body has not arrived is called a login page"),
@@ -206,12 +204,92 @@ PURE = [
     ("rt-15", IOS + "TribeDataWatchRuntime.swift", "        case .noSession:\n            probeInFlight = 0\n            inputs.probe = .noSession", "        case .noSession:\n            probeInFlight = 0\n            inputs.probe = .silent", "rt", "a refused start is told as a silent probe"),
     ("rt-17", IOS + "TribeDataWatchRuntime.swift", "        if sanityRunning { lock.unlock(); return }\n", "", "rt", "a second bypass check is started while one runs"),
     ("rt-18", IOS + "TribeDataWatchRuntime.swift", "        lastVerdict = snapshot.verdict\n", "", "rt", "the statistics suffix never follows the verdict"),
-    ("rt-19", IOS + "TribeDataWatchRuntime.swift", "        deps.writeState(state)\n    }", "    }", "rt", "the shared file is never written"),
     ("rt-20", IOS + "TribeDataWatchRuntime.swift", "        guard output.action == .report, let report = output.report else { return }", "        guard output.action == .report, let report = output.report, output.verdict != .none else { return }", "rt", "the end of a verdict is not told to the outputs (stale no_data)"),
     ("rt-21", IOS + "TribeDataWatchRuntime.swift", "        adapter = nil\n        policy = .disabled\n        probeInFlight = 0", "        adapter = nil\n        probeInFlight = 0", "rt", "a stopped session still answers the status with a block"),
     ("rt-22", IOS + "TribeDataWatchRuntime.swift", "nextTargets = (plan.sanityTargets.isEmpty ? TribeSanityTarget.builtIn : plan.sanityTargets).compactMap { TribeSanityTarget(url: $0) }", "nextTargets = TribeSanityTarget.builtIn.compactMap { TribeSanityTarget(url: $0) }", "rt", "the plan's own bypass targets are ignored"),
     ("rt-23", IOS + "TribeDataWatchRuntime.swift", "let alive = inputs.appSeenAt.map { deps.uptime() - $0 <= policy.appAliveSeconds } ?? false", "let alive = false", "rt", "a living app does not vouch for an old policy"),
     ("rt-24", IOS + "TribeDataWatchRuntime.swift", "        if let deps { inputs.appSeenAt = deps.uptime() }\n", "", "rt", "a status request does not mark the app alive"),
+    # ---- stage 2: candidates, the plan, the switch the app finds made ----
+    ("plan-05", ENG + "TunnelWatchPlan.h", "    if (in.watch && in.watchSwitch) {\n        for (const WatchPlanCandidate &c : in.candidates) {", "    if (in.watch) {\n        for (const WatchPlanCandidate &c : in.candidates) {", "watch", "a node's keys are written with the switch key off"),
+    ("plan-28", ENG + "TunnelWatchPlan.h", "            if (candidates.size() >= kWatchPlanMaxCandidates)\n                break;\n", "", "watch", "more than five candidates are written"),
+    ("plan-29", ENG + "TunnelWatchPlan.h", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')) || c.peer.isEmpty())", "if (node <= 0 || c.peer.isEmpty())", "watch", "an Xray listener is written as a candidate"),
+    ("plan-30", ENG + "TunnelWatchPlan.h", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')) || c.peer.isEmpty())", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')))", "watch", "a candidate without a configuration is written"),
+    ("plan-31", ENG + "TunnelWatchPlan.h", "        if (!text.isEmpty())\n            peer.insert(key, text);", "        peer.insert(key, text);", "watch", "empty values and absent keys are written"),
+    ("plan-32", ENG + "TunnelWatchPlan.h", "if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))", "if (current.isEmpty())", "watch", "a node with another DNS or MTU is offered for a switch in place"),
+    ("plan-33", ENG + "TunnelWatchPlan.h", "for (const char *key : {\"mtu\", \"allowed_ips\", \"client_ip\"})", "for (const char *key : {\"mtu\"})", "watch", "other routed ranges or another tunnel address count as in place"),
+    ("plan-34", ENG + "TunnelWatchPlan.h", "if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))", "if (current != watchPlanSessionLines(candidateInner))", "watch", "two nodes with nothing to compare count as in place"),
+    ("adopt-01", ENG + "TunnelWatchStatus.h", "if (in.switchSeq <= 0 || in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())", "if (in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())", "watch", "a node is adopted although the extension made no switch"),
+    ("adopt-02", ENG + "TunnelWatchStatus.h", "    if (in.snapshotNodeId == in.appNodeId)\n        return false; // the app is already there\n", "", "watch", "the node the app is on is adopted again"),
+    ("adopt-03", ENG + "TunnelWatchStatus.h", "if (in.snapshotGeneration == in.adoptedGeneration && in.switchSeq <= in.adoptedSeq)", "if (in.switchSeq <= in.adoptedSeq)", "watch", "a switch of another run of the extension is taken for an adopted one"),
+    ("adopt-04", ENG + "TunnelWatchStatus.h", "if (in.snapshotGeneration == in.adoptedGeneration && in.switchSeq <= in.adoptedSeq)", "if (false)", "watch", "an adopted switch pulls the app back after a tap"),
+    ("adopt-05", ENG + "TunnelWatchStatus.h", "if (in.switchSeq <= 0 || in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())", "if (in.switchSeq <= 0 || in.snapshotNodeId.isEmpty())", "watch", "a switch without a run of the extension is adopted"),
+    ("adopt-06", ENG + "TunnelWatchStatus.h", "        s.lastSwitchWhy = label ? why : QStringLiteral(\"unknown\");", "        s.lastSwitchWhy = why;", "watch", "free text from the reply gets into the journal"),
+    ("res-12", ENG + "TunnelWatchResume.h", "        ci.appGeneration = adopted ? ci.snapshotGeneration : m_generation;", "        ci.appGeneration = ci.snapshotGeneration;", "watch", "the generation the app saw before the freeze is not compared"),
+    ("res-25", ENG + "TunnelWatchResume.h", "            m_adoptedSeq = ai.switchSeq;\n            m_adoptedGeneration = ai.snapshotGeneration;\n", "", "watch", "a switch is adopted at every return (a tap is undone)"),
+    ("res-26", ENG + "TunnelWatchResume.h", "ai.switchSeq = qMax(w.switchSeq, session.value(QStringLiteral(\"switch_seq\")).toInt());", "ai.switchSeq = w.switchSeq;", "watch", "the session's own switch number is not read"),
+    ("res-27", ENG + "TunnelWatchResume.h", "        } else if (adopted && m_ops.engineVerifying()) {", "        } else if (false) {", "watch", "the node the extension moved to is not checked by the app"),
+    ("res-28", ENG + "TunnelWatchResume.h", "        ci.appGeneration = adopted ? ci.snapshotGeneration : m_generation;", "        ci.appGeneration = m_generation;", "watch", "after a start by the system the verdict of the adopted session is another session's"),
+    ("res-29", ENG + "TunnelWatchResume.h", "        ci.appNodeId = m_ops.appNodeId();\n        // An adopted session", "        ci.appNodeId = ai.appNodeId;\n        // An adopted session", "watch", "the verdict is consumed for the node the app held, not the one the tunnel is on"),
+    ("cand-01", ENG + "TunnelWatchCandidates.h", "    if (mode == TransportMode::Xray)\n        return out;\n", "", "pick", "Xray-only mode offers AmneziaWG candidates"),
+    ("cand-02", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "if (isXrayProto(n.proto))", "pick", "a manual-only node is offered"),
+    ("cand-03", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto))", "if (!current)", "pick", "an Xray session gets candidates"),
+    ("cand-04", ENG + "TunnelWatchCandidates.h", "        in.excluded = failedThisSession;\n", "", "pick", "a node that failed in this session is offered again"),
+    ("cand-05", ENG + "TunnelWatchCandidates.h", "    take(pinned);\n", "", "pick", "the pinned country does not come first"),
+    ("cand-06", ENG + "TunnelWatchCandidates.h", "        in.exclA = currentNodeId;\n", "", "pick", "the current node is offered as a candidate"),
+    ("cand-07", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "if (isManualOnlyNode(n))", "pick", "(the Awg mode filters them too) Xray listeners enter the pool"),
+    ("eng-05", ENG + "ServiceEngine.cpp", "        if (!watchPlanInPlace(currentInner, inner))\n            continue; // another DNS, MTU or routed range: that switch is the app's own\n", "", "pick", "a node with another DNS is put into the plan"),
+    ("eng-06", ENG + "ServiceEngine.cpp", "    if (m_state != EngineState::Connected && m_state != EngineState::Verifying)\n        return false;\n    if (nodeId == m_currentNodeId || !findNode(nodeId))", "    if (nodeId == m_currentNodeId || !findNode(nodeId))", "pick", "a switch is adopted while the app's own start is in flight"),
+    ("eng-07", ENG + "ServiceEngine.cpp", "    if (nodeId == m_currentNodeId || !findNode(nodeId))\n        return false;", "    if (nodeId == m_currentNodeId)\n        return false;", "pick", "a node the pool does not know is adopted"),
+    ("eng-08", ENG + "ServiceEngine.cpp", "    if (!m_currentNodeId.isEmpty())\n        m_failedThisSession.insert(m_currentNodeId);\n    appendSwitchLog(QStringLiteral(\"extension switch adopted", "    appendSwitchLog(QStringLiteral(\"extension switch adopted", "pick", "the node the extension left is not marked failed (the app's ladder goes back to it)"),
+    ("eng-09", ENG + "ServiceEngine.cpp", "    if (verify) {\n        m_state = EngineState::Verifying;\n        m_upFrozen = true; // not a time to traffic: the rise was the extension's", "    if (true) {\n        m_state = EngineState::Verifying;\n        m_upFrozen = true; // not a time to traffic: the rise was the extension's", "pick", "without a check of its own the engine is left in Verifying"),
+    ("eng-10", ENG + "ServiceEngine.cpp", "    m_currentNodeId = nodeId;\n    m_sessionHintNodeId.clear();", "    m_sessionHintNodeId.clear();", "pick", "the adopted node does not become the current one"),
+    ("eng-11", ENG + "ServiceEngine.cpp", "        if (out.size() >= kWatchPlanMaxCandidates)\n            break;\n    }\n    return out;\n}\n\nbool ServiceEngine::adoptExtensionSwitch", "    }\n    return out;\n}\n\nbool ServiceEngine::adoptExtensionSwitch", "pick", "(the plan writer cuts to five as well) the engine's list is unbounded"),
+    ("cfg-01", ENG + "ConfigCachePolicy.h", "    if (ios)\n        features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "    Q_UNUSED(ios);", "cfg", "the switch key is trusted from a cached config"),
+    ("cfg-02", ENG + "ConfigCachePolicy.h", "    if (ios)\n        features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "    features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "cfg", "the freeze touches another platform's flag"),
+    ("cfg-03", ENG + "ConfigCachePolicy.h", "    features.insert(QStringLiteral(\"node_scan\"), false);\n    if (ios)", "    if (ios)", "cfg", "node_scan is trusted from a cached config"),
+    # ---- stage 2, the extension: the plan's candidates and the start by the system ----
+    ("xp-06", IOS + "TribeWatchPlan.swift", "        if candidates.isEmpty { policy.switchEnabled = false }\n", "", "plan", "the switch stays on without a usable candidate"),
+    ("xc-01", IOS + "TribeWatchPlan.swift", "        if expires > nowMs {\n            for raw in", "        if true {\n            for raw in", "plan", "an expired candidate list is used"),
+    ("xc-02", IOS + "TribeWatchPlan.swift", "                      !candidates.contains(where: { $0.nodeId == candidate.nodeId }) else { continue }", "                      true else { continue }", "plan", "a node is offered twice"),
+    ("xc-03", IOS + "TribeWatchPlan.swift", "(object[\"candidates\"] as? [Any] ?? []).prefix(maxCandidates)", "(object[\"candidates\"] as? [Any] ?? [])", "plan", "the list is not bounded"),
+    ("xc-04", IOS + "TribeWatchPlan.swift", "!text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) })", "true", "plan", "a line break in a value gets into the wg-quick text"),
+    ("xc-05", IOS + "TribeWatchPlan.swift", "        for key in Self.requiredInterfaceKeys + [\"hostName\", \"port\", \"server_pub_key\"] where peer[key] == nil { return nil }\n", "", "plan", "an entry without the whole AmneziaWG bundle is accepted"),
+    ("xc-06", IOS + "TribeWatchPlan.swift", "let key = peer[\"server_pub_key\"], Data(base64Encoded: key)?.count == 32 else { return nil }", "let key = peer[\"server_pub_key\"], !key.isEmpty else { return nil }", "plan", "a key that is not 32 bytes is accepted"),
+    ("xc-07", IOS + "TribeWatchPlan.swift", "(1...65535).contains(port),", "port >= 0,", "plan", "a port outside the range is accepted"),
+    ("xc-08", IOS + "TribeWatchPlan.swift", "        if let psk = peer[\"psk_key\"], Data(base64Encoded: psk)?.count != 32 { return nil }\n", "", "plan", "a malformed preshared key is accepted"),
+    ("xc-09", IOS + "TribeWatchPlan.swift", "            guard text.count <= Self.maxValueLength,", "            guard true,", "plan", "a value of any length is accepted"),
+    ("xc-10", IOS + "TribeWatchPlan.swift", "        for key in Self.interfaceKeys + Self.peerKeys {\n            guard let value = fields[key] else { continue }", "        for key in fields.keys.sorted() {\n            guard let value = fields[key] else { continue }", "plan", "keys outside the node's own are taken into the configuration"),
+    ("xc-11", IOS + "TribeWatchPlan.swift", "host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == \".\" || $0 == \"-\" || $0 == \":\") }),", "true,", "plan", "anything is accepted as a host"),
+    ("xc-12", IOS + "TribeWatchPlan.swift", "        guard let plan, plan.policy.enabled, plan.policy.switchEnabled, !plan.candidates.isEmpty else {", "        guard let plan, plan.policy.enabled, !plan.candidates.isEmpty else {", "plan", "a start by the system chooses a node with the switch key off"),
+    ("xc-13", IOS + "TribeWatchPlan.swift", "guard let last = lastFailure, last.nodeId == node, last.net == net else { return false }", "guard let last = lastFailure, last.nodeId == node else { return false }", "plan", "a failure on another network moves the start"),
+    ("xc-14", IOS + "TribeWatchPlan.swift", "return nowMs >= last.wallMs && nowMs - last.wallMs <= failureMemoryMs", "return nowMs >= last.wallMs", "plan", "an old failure is remembered for ever"),
+    ("xc-15", IOS + "TribeWatchPlan.swift", "return nowMs >= last.wallMs && nowMs - last.wallMs <= failureMemoryMs", "return nowMs - last.wallMs <= failureMemoryMs", "plan", "a failure from the future is believed"),
+    ("xc-16", IOS + "TribeWatchPlan.swift", "        if !plan.pinNodeId.isEmpty, known.contains(plan.pinNodeId) { order.append((plan.pinNodeId, \"pin\")) }\n", "", "plan", "the pin does not come first at a start by the system"),
+    ("xc-17", IOS + "TribeWatchPlan.swift", "        if let remembered = plan.memory[net], known.contains(remembered) { order.append((remembered, \"memory\")) }\n", "", "plan", "the app's memory of the network is not used"),
+    ("xc-18", IOS + "TribeWatchPlan.swift", "if !plan.pinNodeId.isEmpty, known.contains(plan.pinNodeId) {", "if !plan.pinNodeId.isEmpty {", "plan", "a pin the extension cannot raise is chosen"),
+    ("xc-19", IOS + "TribeWatchPlan.swift", "        for (node, why) in order where !failed(node) { return (node, why) }", "        for (node, why) in order { return (node, why) }", "plan", "a node proven dead on this network is started again"),
+    ("xc-20", IOS + "TribeWatchPlan.swift", "state[\"verdict\"] as? String == TribeDataVerdict.noData.rawValue,", "state[\"verdict\"] != nil,", "plan", "any last verdict counts as a failure"),
+    ("xc-21", IOS + "TribeWatchPlan.swift", "            if let value = peer[key] { lines.append(\"\\(key) = \\(value)\") }", "            lines.append(\"\\(key) = \\(peer[key] ?? \"\")\")", "plan", "absent keys leave empty lines in the configuration"),
+    ("xc-22", IOS + "TribeWatchPlan.swift", "        lines.append(\"AllowedIPs = \\(base.allowedIPs)\")\n", "", "plan", "the switch text has no routed ranges"),
+    # ---- stage 2, the extension runtime ----
+    ("rt-19", IOS + "TribeDataWatchRuntime.swift", "        deps.writeState(state)\n    }\n\n    /// The journal of a command", "    }\n\n    /// The journal of a command", "rt", "the shared file is never written on a report"),
+    ("rs-01", IOS + "TribeDataWatchRuntime.swift", "guard policy.enabled, policy.switchEnabled, switchBase != nil, let plan else { return [] }", "guard policy.enabled, switchBase != nil, let plan else { return [] }", "rt", "candidates are offered with the switch key off"),
+    ("rs-02", IOS + "TribeDataWatchRuntime.swift", "guard policy.enabled, policy.switchEnabled, switchBase != nil, let plan else { return [] }", "guard policy.enabled, policy.switchEnabled, let plan else { return [] }", "rt", "candidates are offered for a session that cannot be rebuilt"),
+    ("rs-03", IOS + "TribeDataWatchRuntime.swift", "        if nodeId != homeNodeId && !ids.contains(homeNodeId) { ids.append(homeNodeId) }\n", "", "rt", "there is no way back to the profile's node"),
+    ("rs-04", IOS + "TribeDataWatchRuntime.swift", "var ids = plan.candidates.map { $0.nodeId }.filter { $0 != nodeId }", "var ids = plan.candidates.map { $0.nodeId }", "rt", "the node the tunnel is on is offered"),
+    ("rs-05", IOS + "TribeDataWatchRuntime.swift", "        guard offeredLocked().contains(node), let base = switchBase else { return nil }", "        guard let base = switchBase else { return nil }", "rt", "a node that was not offered gets a configuration"),
+    ("rs-06", IOS + "TribeDataWatchRuntime.swift", "if case .switchPeer(let to, let why) = command, result == .performed {", "if case .switchPeer(let to, let why) = command {", "rt", "a switch that failed changes the session's identity"),
+    ("rs-07", IOS + "TribeDataWatchRuntime.swift", "            nodeId = to\n            switchSeq += 1\n", "            nodeId = to\n", "rt", "the switch number does not grow"),
+    ("rs-08", IOS + "TribeDataWatchRuntime.swift", "            if switches.count > Self.maxSwitchesKept { switches.removeFirst(switches.count - Self.maxSwitchesKept) }\n", "", "rt", "the list of switches grows without a bound"),
+    ("rs-09", IOS + "TribeDataWatchRuntime.swift", "        if let command = output.command, let result = output.commandResult {\n", "        if false, let command = output.command, let result = output.commandResult {\n", "rt", "executed commands are neither journaled nor reflected in the identity"),
+    ("rs-10", IOS + "TribeDataWatchRuntime.swift", "        if output.exhausted {\n", "        if false {\n", "rt", "exhausted is not journaled"),
+    ("rs-11", IOS + "TribeDataWatchRuntime.swift", "            block[\"switch_seq\"] = made.0\n", "            block[\"switch_seq\"] = 0\n", "rt", "the status reply does not carry the switch number"),
+    ("rs-12", IOS + "TribeDataWatchRuntime.swift", "        guard nodeId != homeNodeId, let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }", "        guard let candidate = plan?.candidates.first(where: { $0.nodeId == nodeId }) else { return nil }", "rt", "(a candidate is never the profile's node in these plans) the override is given on the profile's node"),
+    ("rs-13", IOS + "TribeDataWatchRuntime.swift", "        nodeId = choice.nodeId\n        switchSeq = 1\n", "        nodeId = choice.nodeId\n", "rt", "a start by the system on another node is not told as a switch"),
+    ("rs-14", IOS + "TribeDataWatchRuntime.swift", "        guard switched else { return }\n", "        guard switched, false else { return }\n", "rt", "the shared file keeps the node the tunnel has left"),
+    ("rs-15", IOS + "TribeDataWatchRuntime.swift", "        nodeId = homeNodeId\n        switchSeq = 0\n        switches = []\n        lock.unlock()\n        currentDeps?.log(", "        lock.unlock()\n        currentDeps?.log(", "rt", "a dropped start choice still names the other node"),
+    ("rs-16", IOS + "TribeDataWatchRuntime.swift", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n        self.switchSeq = 0\n        self.switches = []\n", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n", "rt", "(a new process starts from zero anyway) the switches of the previous session are kept"),
+    ("rs-17", IOS + "TribeDataWatchRuntime.swift", "            self.plan = nil // no usable plan: nothing is offered to the arbiter\n", "", "rt", "a rejected plan's candidates stay on offer"),
     # ---- the controller (the real ios_controller.mm in its harness) ----
     ("ctl-01", IOS + "ios_controller.mm", "    if (!bgArmFlag)\n        return; // build 139 behaviour: nothing held, nothing journaled\n", "", "harness", "rev-W3: the background transition acts with the flag off"),
     ("ctl-02", IOS + "ios_controller.mm", "        if (m_watchSnapshotWanted.load()) {", "        if (true) {", "harness", "rev-W4: the snapshot signal fires on every status reply"),
@@ -223,8 +301,22 @@ PURE = [
 ]
 
 WIRING = [
-    ("w-e1a", PATCH, "+        self.dataWatchTick(sample, handle: handle) // tribe.13: the same sample, before the ladder acts on it\n         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)\n", "         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)\n+        self.dataWatchTick(sample, handle: handle) // tribe.13: the same sample, before the ladder acts on it\n", "the watch is fed after the ladder acted"),
-    ("w-e1b", PATCH, "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32) {\n", "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32) {\n+        self.workQueue.asyncAfter(deadline: .now() + 1) { }\n", "the adapter patch grows a delayed block"),
+    ("w-e1a", PATCH, "+        if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }\n         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)\n", "         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)\n+        if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }\n", "the watch is fed after the ladder acted"),
+    ("w-e1b", PATCH, "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {\n", "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {\n+        self.workQueue.asyncAfter(deadline: .now() + 1) { }\n", "the adapter patch grows a delayed block"),
+    ("w-s1", PATCH, "+        if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }\n", "+        _ = self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator)\n", "the stall ladder acts on the tick the watch's arbiter acted on"),
+    ("w-s2", PATCH, "+        wgTurnOff(handle)\n+        do {\n+            try self.setNetworkSettings(newGenerator.generateNetworkSettings())\n", "+        do {\n+            try self.setNetworkSettings(newGenerator.generateNetworkSettings())\n+            wgTurnOff(handle)\n", "the old backend still runs while the network settings change (a peer routed into its own tunnel)"),
+    ("w-s3", PATCH, "+            newGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)\n", "+            wgTurnOff(handle)\n+            newGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)\n", "the backend is stopped before the new endpoint is known to resolve"),
+    ("w-s4", PATCH, "+            guard let configuration = self.dataWatchCandidate?(nodeId) else { return .denied }\n", "+            guard let configuration = self.dataWatchCandidate?(nodeId) else { return .performed }\n", "a switch without a configuration is told as performed"),
+    ("w-s5", PATCH, "+            try? self.setNetworkSettings(oldGenerator.generateNetworkSettings())\n", "", "a failed switch leaves the new node's routes with the old backend"),
+    ("w-s6", PATCH, "+        self.packetTunnelProvider?.reasserting = true\n+        defer { self.packetTunnelProvider?.reasserting = false }\n", "", "the switch is not announced to the system"),
+    ("w-s7", IOS + "PacketTunnelProvider+DataWatch.swift", "guard !startedByApp, let choice = tribeDataWatch.chooseStartBySystem() else { return profile }", "guard let choice = tribeDataWatch.chooseStartBySystem() else { return profile }", "a start by the app is moved to another node"),
+    ("w-s8", IOS + "PacketTunnelProvider+WireGuard.swift", "adapter.start(tunnelConfiguration: startConfiguration)", "adapter.start(tunnelConfiguration: tunnelConfiguration)", "the node chosen for a start by the system is not the one raised"),
+    ("w-s9", IOS + "PacketTunnelProvider+WireGuard.swift", "                self.tribeApplySessionOverride(&metadata) // AVPN (build 140, data watch stage 2)\n", "", "the status reply names the profile's node after a switch"),
+    ("w-s10", IOS + "PacketTunnelProvider+WireGuard.swift", "startedByApp: activationAttemptId != nil)", "startedByApp: false)", "every start is treated as a start by the system"),
+    ("w-s11", ENG + "AvpnEngineQml.cpp", "    if (in.watch && in.watchSwitch)\n        in.candidates = m_engine.extensionSwitchCandidates();", "    in.candidates = m_engine.extensionSwitchCandidates();", "candidates are collected with the switch key off"),
+    ("w-s12", ENG + "AvpnEngineQml.cpp", "if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral(\"node_scan\"), false)))", "if (!m_engine.adoptExtensionSwitch(nodeId, true))", "an adopted node is sent to a check the app does not have"),
+    ("w-s13", ENG + "ConfigService.cpp", "            freezeCachedFeatures(c.features, /*ios=*/true);", "            freezeCachedFeatures(c.features, /*ios=*/false);", "on iOS the switch key is trusted from the cache"),
+    ("w-s14", "recipes/awg-apple/tribe/TribeDataWatch.swift", "        if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive {", "        if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive || env.candidates.isEmpty {", "the arbiter's gate is rewritten (its conditions are pinned by the rule's own mutants)"),
     ("w-e2a", PATCH, "+        guard self.dataWatchPolicy.enabled else { return }\n+        self.dataWatch.notePathEvent(", "+        self.dataWatch.notePathEvent(", "a path event reaches a switched-off watch"),
     ("w-e2b", PATCH, "+            if self.dataWatchPolicy.enabled {\n+                self.dataWatch.noteBackendRestarted(", "+            do {\n+                self.dataWatch.noteBackendRestarted(", "a backend restart reaches a switched-off watch"),
     ("w-e2c", PATCH, "+        guard self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "+        guard !self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "rev-W6: the adapter's own guard is inverted (the rule itself still refuses a disabled policy - tested; this guard is the adapter's shortcut)"),
@@ -265,7 +357,12 @@ WIRING = [
 ]
 
 # Survivors that are accepted, with the reason no test of this group can or should kill them.
-ACCEPTED = {}
+ACCEPTED = {
+    "cand-07": "equivalent: with Xray listeners in the pool the Awg mode of the pick still refuses them (transportAllowed)",
+    "eng-11": "equivalent: buildWatchPlan cuts the list to five as well (plan-28); the engine's cut only saves work",
+    "rs-12": "equivalent: the app never lists the session's own node as a candidate, so on the profile's node no candidate matches",
+    "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
+}
 
 COPY = [
     "conanfile.py",
@@ -315,6 +412,8 @@ def test_command(kind, tree, work):
                 '"%s/TribeDataWatchRuntime.swift" "%s/TribeDataWatchRuntimeTests.swift" && "%s/rt"' % (work, rule, ios, ios, ios_tests, work)]
     if kind == "harness":
         return ["bash", "-c", 'OUT="%s/harness" QT_ROOT="%s" bash "%s/build_ios_controller_harness.sh"' % (work, QT, ios_tests)]
+    if kind == "cfg":
+        return ["bash", "-c", 'OUT="%s/ccp" QT_ROOT="%s" bash "%s/build_config_cache_policy.sh"' % (work, QT, eng_tests)]
     if kind == "wiring":
         return ["bash", os.path.join(eng_tests, "check_ios_data_watch_wiring.sh")]
     raise ValueError(kind)
