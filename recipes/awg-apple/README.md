@@ -208,7 +208,7 @@ extension said so. tribe.13 adds a second question to the SAME one-second tick, 
 back", and an active probe that judges the answer. Stage 1 (features.ios_tunnel_watch) only
 reports. Stage 2 (features.ios_tunnel_watch_switch, off by default) adds an arbiter that, while the
 app sleeps, treats the node and then replaces the peer in place. The text below is the state after
-the independent review of stage 1 plus stage 2.
+both independent reviews (stage 1; stage 2 with the server-change key).
 
 - `TribeDataWatch` (pure, `tribe/TribeDataWatch.swift`): the statistics sample is cut into cycles of
   `cycleSeconds` (25). A cycle is dead when at least `cycleMinTxBytes` (1024) went out and NO
@@ -284,47 +284,82 @@ the independent review of stage 1 plus stage 2.
 - Stage 2, the arbiter (inside `TribeDataWatch`, pure). `step` returns `command`
   (`TribeWatchCommand.heal(.freshPort | .softRestart)` or `.switchPeer(to:why:)`) and `exhausted`
   only when ALL hold: `policy.switchEnabled`, `maxSwitches > 0`, the app shows no sign of life
-  (`appAliveSeconds`), the verdict is a confirmed `no_data`, the provider offers candidates
-  (`env.candidates`, never the current node), no quiet period, no probe in flight. One round:
-  the same-node heals (first round only, `switchHealSteps`, 2) -> the candidates in the given
-  order, each once, at most `maxSwitches` (5) -> exhausted: back to the node that received the most
-  inbound data in the round (a tie goes to where the round began), then a pause of 5, 10, 20, 30,
-  30... minutes (`roundPauseSeconds`). After every performed action the node is judged by a TRIAL
-  probe (`TribeProbeReason.trial`) once its wait is over (10 s after a fresh port, one start grace
-  after a restart or a switch): answered = trusted (report `trial`, a standing verdict is taken
-  back, not counted as refuted); silent and undisturbed = the next action (a trickle of inbound
-  packets is no answer; `recoverRxBytes` are); no session = the handshake judge. Trial probes
-  have their own hourly budget (`trialProbeMaxPerHour`, 30). The round is forgotten at once when
-  the app is seen alive, the key goes off, somebody else starts a device, the data comes back
-  or the physical interface changes.
+  (`appAliveSeconds`), the verdict is a confirmed `no_data` (never `unconfirmed`), the provider
+  offers candidates (`env.candidates`, never the current node), no quiet period, no probe in flight.
+  One round: the same-node heals (`switchHealSteps`, 2; counted for the whole episode) -> the
+  candidates in the given order, each once, at most `maxSwitches` (5) -> exhausted: back to the
+  node that received the most inbound data in the round (a tie goes to where the round began; only
+  if that node is on offer), then a pause of 5 min after the first failed round and 30 min after
+  every later one (`roundPauseSeconds`) until the network changes or the app writes a new plan
+  (`env.planEpoch`). Rules of the second review:
+  - a node is LEFT only after two silent, undisturbed judgments at least `healTrialSeconds` (10 s)
+    apart with nothing inbound between them (`silences`): the confirming probe plus one more trial,
+    whatever happened to the heals. ANY inbound transport data, a late answer, a device start,
+    another network and the pause between rounds start the count over - this is also how a late
+    answer to either probe cancels the leave (the engine counts the reply as inbound data);
+  - every heal - performed, refused by the shared budget (`denied`) or failed - is followed by its
+    own trial probe; a refused heal is `healsAsked`, not `healsDone`;
+  - a switch is `performed | denied | failed | rejected`. `denied` (the shared budget) changed
+    nothing and is asked again 10 s later; `failed` / `rejected` count as tried and against the
+    hourly ceiling `switchMaxPerHour` (6, `ios_tw_switch_max_per_hour`, 1..30) - every switch counts
+    against it, also the way back and the move at a network change; at the ceiling the arbiter
+    waits and declares nothing;
+  - while a round is in progress (`arbiterOwnsRecovery`: active and not exhausted) the adapter
+    does not run the stall ladder: its steps would spend the shared budget the switch needs. Between
+    rounds and with the key off the ladder works as in tribe.11;
+  - a node reached by a switch is `untrusted` until it answers its trial or passes `recoverRxBytes`.
+    If the physical interface changes while it is untrusted, the next satisfied sample orders
+    `.switchPeer(to: env.networkChoice, why: .network)` - where a start on the new network would go
+    (the provider computes it with the start-choice function) - if that node differs and is on
+    offer; inbound data cancels it. A trusted node is never moved for the sake of a better choice.
+  After every action the node is judged by a TRIAL probe (`TribeProbeReason.trial`) once its wait is
+  over (10 s after a fresh port or a refused heal, one start grace after a restart or a switch):
+  answered = trusted (report `trial`, a standing verdict is taken back, not counted as refuted).
+  Trial probes have their own hourly budget (`trialProbeMaxPerHour`, 30). The round is forgotten at
+  once when the app is seen alive, the key goes off, somebody else starts a device, the data
+  comes back or the physical interface changes.
 - Stage 2, the adapter (`WireGuardAdapter`, patch 0012). A command is executed inside
   `dataWatchTick`, on the tick that produced it, and the stall ladder skips that sample (one
-  executor per tick); `noteCommandResult` tells the rule what happened. The heals are the ladder's
-  own steps and go through the same shared recovery budget (`recovery.requestFreshPort` /
-  `requestSoftRestart`): a refusal means the step is already spent and is not waited for.
+  executor per tick); `noteCommandResult` tells the rule what happened. Everything goes through the
+  shared recovery budget: the heals as the ladder's own steps (`recovery.requestFreshPort` /
+  `requestSoftRestart`), a switch through `recovery.requestPeerSwitch` (the rolling cap of
+  interventions and the cooldown between two new devices; not the episode of the node being left).
   `switchBackend` replaces the peer in place - the upstream `update(tunnelConfiguration:)` path
-  with the backend stopped across the settings change:
-  1. the new endpoint is resolved while the old backend still runs (a failure changes nothing);
-  2. `wgTurnOff` of the old backend: nothing reads the TUN any more;
-  3. `setTunnelNetworkSettings` of the new configuration (the excluded route of the NEW endpoint
-     exists before the first packet to it, the old one's is withdrawn);
-  4. a new backend on the same TUN (`restartBackendInPlace`: a new device with the new node's own
-     AmneziaWG parameters; `softRestarts` is counted).
-  No engine runs between 2 and 4, so at no moment does a running engine have a peer whose endpoint
-  is routed into its own tunnel. A failure at 3 puts the old settings and the old backend back.
+  with the backend stopped across the settings change. The order and every way it can fail are the
+  pure `TribeSwitchSequence.run(TribeSwitchSteps)` (host-tested with a fake engine that fails at
+  each step):
+  1. `prepare`: the new endpoint is resolved while the old backend still runs (a failure changes
+     nothing: `failed`, the engine is up);
+  2. `stopEngine`: `wgTurnOff` of the old backend - nothing reads the TUN any more;
+  3. `applySettings(new)`: `setTunnelNetworkSettings` of the new configuration, CONFIRMED by the
+     system within 5 s (`applySettingsConfirmed`; no answer = failure);
+  4. `startEngine(new)`: a new backend on the same TUN. `performed` is told only here.
+  If 3 fails (`failed`) or 4 fails (`rejected`: the candidate is never offered again while the plan
+  lives), the previous node is put back: its settings, then - only on confirmed settings - its
+  engine. If no engine can be started at all, the adapter is in `.temporaryShutdown`,
+  `dataWatchEngineHandler(true)` tells the provider, and the stall tick (which keeps running: the
+  retry is its first statement) retries the previous configuration 2, 4, 8 ... 60 s apart
+  (`TribeEngineRetry`), settings first when they are not in force; `dataWatchEngineHandler(false)`
+  when an engine runs again. An engine is started only right after its own settings were confirmed,
+  so at no moment does a running engine have a peer whose endpoint is routed into its own tunnel.
   The candidate's `TunnelConfiguration` comes from the provider (`dataWatchCandidate`); without one
-  the switch is refused (`denied`). The adapter cannot be built into a host test: the order above
-  is pinned by the wiring check of the client repo, the types by a host type-check of the patched
-  sources together with the rule.
+  the switch is `rejected`. The adapter cannot be built into a host test: its call sites are pinned
+  by the wiring check of the client repo, the types by a host type-check of the patched sources
+  together with the rule.
 
 Build gates: `tests/run_tribe_data_watch_tests.sh` builds two binaries - the named scenarios of the
 rule (the 13.11 replay, the 60 / 120 / 200 / 260 B/s vectors of the review, every false-positive case
 of the design's table, the probe outcomes, disturbance, the handshake judge, late answers, limits,
-clamps, and the arbiter of stage 2: heals then switch, a heal that cures, refused heals, a living
-app, the order of candidates, the bound per round, exhausted and the rounds, a failed switch, a
-node without a handshake, the trial budget, a disturbed trial, the ends of a round) and
-`TribeDataWatchLadderTests.swift`, the rule next to the REAL stall ladder
-(`TribeRecoveryArbiter`) - and `go test -run '^TestTribeProbe'` (a fake TUN, a fake forwarder and a
+clamps, and the arbiter of stage 2: heals then switch, two silent probes before a node is left,
+never on `unconfirmed`, the keys-off ownership of recovery, a heal that cures, refused heals, a
+living app, the order of candidates, the bound per round, the hourly ceiling, exhausted and the
+rounds, a new plan, a failed switch, a node without a handshake, the trial budget, a disturbed
+trial, the ends of a round, a change of network with an unproven node, the switch sequence with a
+failing engine) and `TribeDataWatchLadderTests.swift`, the rule next to the REAL stall ladder
+(`TribeRecoveryArbiter`): the vectors of the reviews with a fixed seed - the 13.11 path (verdict
+100 s, left 128..138 s), a blocked node, a late answer, a lossy one-way upload (300 runs at 10 / 20 /
+30 % loss: nobody is moved), six hours with every node dead (6 switches an hour), an outage that
+hits every node and a change of network - and `go test -run '^TestTribeProbe'` (a fake TUN, a fake forwarder and a
 fake engine dump: packet layout and checksums, answer, silence, repeat, one probe at a time, a
 foreign packet passed through untouched, restart during the wait, no configuration, departure
 through the forwarder, a refused start without a keypair, a staged packet, an expired keypair, a

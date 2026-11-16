@@ -648,6 +648,19 @@ public struct TribeRecoveryArbiter: Equatable {
         tracker?.noteExternalStep(.softRestart, at: sample.at, tx: sample.txBytes)
         return .performed
     }
+
+    /// tribe.13 (data watch, stage 2): an in-place switch of the peer. It is a new device like a
+    /// soft restart, but on ANOTHER node, so the episode of the node being left does not limit it;
+    /// the rolling cap of interventions and the cooldown between two new devices do. On
+    /// `.performed` the caller replaces the backend and then calls `rebaseAfterBackendRestart`
+    /// with the new device's first sample.
+    public mutating func requestPeerSwitch(_ sample: TribeStallSample?, pathSatisfied: Bool) -> TribeSoftRestartResult {
+        guard pathSatisfied else { return .offline }
+        guard let sample else { return .notStarted }
+        budget.observe(sample)
+        if let denial = budget.request(at: sample.at, kind: .softRestart, persistent: true) { return .budget(denial) }
+        return .performed
+    }
 }
 
 public struct TribeRoamingCounters: Equatable {
