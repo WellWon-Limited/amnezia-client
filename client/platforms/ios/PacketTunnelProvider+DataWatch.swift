@@ -39,20 +39,12 @@ extension PacketTunnelProvider {
                 let state = TribeSharedState.appGroup?.read(TribeWatchPlan.stateFileName) ?? [:]
                 return state.isEmpty ? nil : state
             },
-            writePlan: { plan in
-                // Only to take the candidates' keys out of the plan when the permission to switch
-                // is gone (TribeDataWatchRuntime.scrub). The same protection class the app writes
-                // the file with, and the file stays out of device backups.
-                guard var url = TribeSharedState.appGroup?.directory.appendingPathComponent(TribeWatchPlan.fileName) else { return false }
-                do {
-                    try plan.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-                    var values = URLResourceValues()
-                    values.isExcludedFromBackup = true
-                    try? url.setResourceValues(values)
-                    return true
-                } catch {
-                    return false
-                }
+            replacePlan: { expected, clean in
+                // Only to take the candidates' keys out of the plan when nothing may be done with
+                // them (TribeDataWatchRuntime.scrub): under the lock the app's writer takes too, and
+                // only if the file still holds the plan that was judged (TribeWatchPlanFile).
+                guard let directory = TribeSharedState.appGroup?.directory else { return .failed }
+                return TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: expected, with: clean)
             })
     }
 
@@ -128,6 +120,8 @@ extension PacketTunnelProvider {
         guard let made = tribeDataWatch.sessionSwitch() else { return }
         metadata["switch_seq"] = made.seq
         metadata["switch_why"] = made.why
+        metadata["switch_ms"] = made.atMs
+        metadata["switch_net"] = made.net
         guard let node = made.nodeId, let endpoint = made.endpoint else { return }
         if metadata["node_id"] is String { metadata["node_id"] = node } else { metadata["node_id"] = Int(node) ?? 0 }
         metadata["endpoint"] = endpoint

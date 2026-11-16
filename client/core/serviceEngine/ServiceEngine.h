@@ -231,7 +231,8 @@ public:
     // no failure streak, no transport history; the pin, the intent and the mode are not touched.
     // `verify`: back to Verifying - the facade then runs its own data check before "Connected" is shown.
     // Compiled for every platform, called only from the facade's Q_OS_IOS block.
-    bool adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey);
+    // `netKey`, `atMs`: the network and the moment the extension left the node (0 = now).
+    bool adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey, qint64 atMs = 0);
     // The network the phone is on now (the facade's network-memory key): evidence made on another
     // network excludes nothing here.
     void setExtensionEvidenceNetwork(const QString &netKey) { m_extEvidenceNet = netKey; }

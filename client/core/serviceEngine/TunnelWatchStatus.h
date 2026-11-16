@@ -308,7 +308,9 @@ constexpr int kWatchEvidenceMax = 16;
 
 class WatchEvidence {
 public:
-    void note(const QString &nodeId, const QString &netKey, qint64 nowMs)
+    // `atMs`: when the extension left the node (the time of the switch itself, not of its adoption by
+    // the app - that may be hours later).
+    void note(const QString &nodeId, const QString &netKey, qint64 atMs, qint64 nowMs)
     {
         if (nodeId.isEmpty())
             return;
@@ -316,7 +318,7 @@ public:
         for (int i = m_entries.size() - 1; i >= 0; --i)
             if (m_entries.at(i).nodeId == nodeId && m_entries.at(i).netKey == netKey)
                 m_entries.removeAt(i);
-        m_entries.append({nodeId, netKey, nowMs});
+        m_entries.append({nodeId, netKey, atMs});
         while (m_entries.size() > kWatchEvidenceMax)
             m_entries.removeFirst();
     }
@@ -354,6 +356,47 @@ private:
     QList<Entry> m_entries;
 };
 
+// ---- when and where the extension left a node (third review, T7) ----------------------------------
+// The evidence is about the moment and the network of the SWITCH. The extension tells both: in the
+// `switches` list of its watch block (every switch of the run: from, to, utc_ms, net) and, for the last
+// switch, in every status reply's session (switch_ms, switch_net). The entry that says when the node the
+// app holds was left is preferred; a time that is missing, not positive or from the future is "now" (the
+// evidence then lasts longer, never shorter); a network label that is not a label is "unknown".
+struct WatchSwitchStamp {
+    qint64 atMs = 0;
+    QString net; // the extension's label of the network kind: "wifi", "cellular", ...; empty = not told
+};
+inline WatchSwitchStamp watchSwitchStamp(const QVariantMap &session, const QVariantList &switches, const QString &appNodeId, qint64 nowMs)
+{
+    QVariant at = session.value(QStringLiteral("switch_ms"));
+    QString net = session.value(QStringLiteral("switch_net")).toString();
+    for (int i = switches.size() - 1; i >= 0; --i) {
+        const QVariantMap entry = switches.at(i).toMap();
+        if (!appNodeId.isEmpty() && entry.value(QStringLiteral("from")).toString() == appNodeId) {
+            at = entry.value(QStringLiteral("utc_ms"));
+            net = entry.value(QStringLiteral("net")).toString();
+            break;
+        }
+    }
+    WatchSwitchStamp stamp;
+    bool numeric = false;
+    const double ms = at.toDouble(&numeric);
+    stamp.atMs = numeric && ms > 0 && ms <= double(nowMs) ? qint64(ms) : nowMs;
+    const QString label = watchLabel(net);
+    stamp.net = label == QLatin1String("unknown") ? QString() : label;
+    return stamp;
+}
+// The app files evidence under its own network keys ("wifi", "cellular:<MCC-MNC>"); the extension knows
+// only the kind. A kind it does not name is filed under the network the phone is on now.
+inline QString watchEvidenceNetKey(const QString &extensionNet, const QString &cellularKey, const QString &currentKey)
+{
+    if (extensionNet == QLatin1String("wifi"))
+        return QStringLiteral("wifi");
+    if (extensionNet == QLatin1String("cellular"))
+        return cellularKey.isEmpty() ? QStringLiteral("cellular") : cellularKey;
+    return currentKey;
+}
+
 // When the extension has moved the session away from the user's pinned location and its evidence
 // against that location's node has expired (or was made on another network), the app's ORDINARY
 // restart through reconcile may bring the session back to the user's choice - with the app's own data
@@ -373,6 +416,14 @@ inline bool decideExtensionReturn(const WatchReturnInputs &in)
 {
     return in.movedByExtension && in.pinRaisable && !in.evidenceFresh && in.nodeScanOn
         && in.engineConnected && in.wantConnected && !in.busy;
+}
+// The question is asked on the facade's existing 1 s tick whenever nothing of the hand-over holds -
+// also while the app simply stays on the screen and after a reply that came later than the wait
+// (third review, T7) - but not more often than this: the facts cost a few lookups in the engine.
+constexpr qint64 kWatchReturnCheckPeriodMs = 30 * 1000;
+inline bool watchReturnCheckDue(qint64 lastAskedMs, qint64 nowMs)
+{
+    return lastAskedMs < 0 || nowMs < lastAskedMs || nowMs - lastAskedMs >= kWatchReturnCheckPeriodMs;
 }
 
 // ---- the tunnel has no engine (second review, R5) ---------------------------------------------------

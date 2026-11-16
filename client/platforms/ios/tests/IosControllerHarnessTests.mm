@@ -23,6 +23,9 @@
 #include <QStringList>
 #include <QTimer>
 #include <atomic>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -1287,7 +1290,43 @@ static void test_watch_plan_file_written()
     [[NSURL fileURLWithPath:file] getResourceValue:&excluded forKey:NSURLIsExcludedFromBackupKey error:nil];
     CHECK(excluded.boolValue, "the rewritten plan file is not excluded from backups");
     NSArray *left = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
-    CHECK(left.count == 1, "the atomic write left a temporary file behind");
+    CHECK(left.count == 2 && [left containsObject:@"TribeWatchPlan.lock"], "the directory holds the plan and its lock, and no temporary file");
+
+    // Third review, T4: the file has a second writer (the extension takes the spare nodes' keys out).
+    // Both hold TribeWatchPlan.lock for their write: while the other side holds it, our write waits.
+    NSString *lockPath = [dir stringByAppendingPathComponent:@"TribeWatchPlan.lock"];
+    const auto elapsedMsWhileLockedFor = [&](int holdMs, const QByteArray &body) {
+        const int fd = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+        CHECK(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0, "the test could not take the plan's lock");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)holdMs * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            flock(fd, LOCK_UN);
+            close(fd);
+        });
+        const NSTimeInterval before = [NSDate timeIntervalSinceReferenceDate];
+        CHECK(IosController::Instance()->writeTunnelWatchPlanFile(body), "the plan is not written");
+        return (int)(([NSDate timeIntervalSinceReferenceDate] - before) * 1000);
+    };
+    const QByteArray third = QByteArrayLiteral("{\"schema\":2,\"seq\":3}");
+    const int waited = elapsedMsWhileLockedFor(120, third);
+    CHECK(waited >= 100, "the write did not wait for the other writer to release the lock");
+    CHECK(waited < 240, "the write waited longer than the other writer held the lock");
+    onDisk = [NSData dataWithContentsOfFile:file];
+    CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == third, "the plan written after the wait is not on disk");
+    // A lock that is not released: the wait is bounded and the plan is written all the same - the kill
+    // switch must reach the file.
+    const QByteArray fourth = QByteArrayLiteral("{\"schema\":2,\"seq\":4,\"features\":{\"ios_tunnel_watch\":false}}");
+    const int bounded = elapsedMsWhileLockedFor(900, fourth);
+    CHECK(bounded >= 200 && bounded < 700, "the wait for the lock is not bounded at about a quarter of a second");
+    onDisk = [NSData dataWithContentsOfFile:file];
+    CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == fourth, "a held lock kept the kill switch out of the file");
+    spin(800); // the test's lock is released
+    // The lock is free again after our own write.
+    const int fd = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+    CHECK(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0, "our write left the lock taken");
+    if (fd >= 0) {
+        flock(fd, LOCK_UN);
+        close(fd);
+    }
     [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
     g_planContainer = nil;
 }

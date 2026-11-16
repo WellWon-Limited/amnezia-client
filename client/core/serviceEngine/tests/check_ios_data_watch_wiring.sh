@@ -290,19 +290,32 @@ has "$runtime" 'adapter.dataWatchEngineHandler = { \[weak self\] down in self?.n
     || bad "E6: the status reply must carry the node the tunnel stands on"
 has "$glue" 'guard let made = tribeDataWatch.sessionSwitch() else { return }' \
     || bad "E6: without a switch the status reply's session must stay untouched"
-# Second review, R7: the plan is the app's file; the extension rewrites it only to take the spare nodes'
-# keys out, protected as the app writes it and kept out of device backups.
-[ "$(printf '%s\n' "$glue" | grep -c 'completeFileProtectionUntilFirstUserAuthentication')" = "1" ] \
-    && has "$glue" 'isExcludedFromBackup = true' \
+# Second review R7, third review T4: the plan file has two writers - the app (the whole plan) and the
+# extension (only to take the spare nodes' keys out). Both hold ONE lock for their write, and the
+# extension's "is it still the plan I judged?" is decided under that lock, together with its write
+# (TribeWatchPlanFile.replaceIfUnchanged - tested with the reviewer's interleaving). Here: both sides
+# really go through it, with the same lock file.
+planfile="$(code "$IOS/TribeWatchPlan.swift")"
+has "$glue" 'return TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: expected, with: clean)' \
+    && [ "$(printf '%s\n' "$runtime" | grep -c 'deps.replacePlan(')" = "1" ] \
+    || bad "E6: the extension may write the plan only through the locked compare-and-replace, from one place"
+for f in TribeDataWatchRuntime.swift PacketTunnelProvider+DataWatch.swift PacketTunnelProvider+WireGuard.swift PacketTunnelProvider.swift; do
+    code "$IOS/$f" | grep -q 'TribeWatchPlan.fileName).*write\|\.write(to:' && bad "E6: $f writes a file itself (the plan has one extension-side writer: TribeWatchPlanFile)"
+done
+[ "$(printf '%s\n' "$planfile" | grep -c 'completeFileProtectionUntilFirstUserAuthentication')" = "1" ] \
+    && has "$planfile" 'values.isExcludedFromBackup = true' \
     || bad "E6: the extension's rewrite of the plan must keep the file's protection and stay out of backups"
 grep -q 'NSURLIsExcludedFromBackupKey' "$CONTROLLER" && grep -q 'NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication' "$CONTROLLER" \
     || bad "E6: the app must write the plan protected and excluded from backups"
-# ... and only a file that is still the one it read (the app may have written a newer plan meanwhile),
-# never while the app is alive, once per file (the conditions themselves are tested in the runtime tests).
-scrub_fn="$(swift_func "$IOS/TribeDataWatchRuntime.swift" 'private func scrub(')"
-order "$scrub_fn" 'guard now == stamp else { return }' 'let done = deps.writePlan(clean)' \
-    && [ "$(printf '%s\n' "$runtime" | grep -c 'deps.writePlan(')" = "1" ] \
-    || bad "E6: the extension may rewrite the plan only if the file is still the one it read, from one place"
+has "$planfile" 'static let lockName = "TribeWatchPlan.lock"' && grep -q 'URLByAppendingPathComponent:@"TribeWatchPlan.lock"\]' "$CONTROLLER" \
+    || bad "E6: the two writers of the plan must lock the same file"
+app_write="$(body_of "$CONTROLLER" 'static bool writeTunnelWatchPlan(')"
+order "$app_write" 'locked = flock(lockFd, LOCK_EX | LOCK_NB) == 0;' 'const BOOL written = \[data writeToURL:url options:options error:&error\];' \
+    && order "$app_write" 'const BOOL written = \[data writeToURL:url options:options error:&error\];' 'flock(lockFd, LOCK_UN);' \
+    || bad "E6: the app must hold the plan's lock across its write"
+# A stop by the user: the spare nodes' keys leave the file (before the runtime lets go of its adapter).
+order "$stop_body" 'tribeDataWatch.noteStop(userInitiated: reason == .userInitiated)' 'tribeDataWatch.detach()' \
+    || bad "E6: a stop must tell the runtime whether the user stopped the tunnel"
 
 # ---- A10: stage 2 in the app ------------------------------------------------------------------------------
 ctor="$(body_of "$FACADE" 'AvpnEngineQml::AvpnEngineQml(')"
@@ -314,8 +327,17 @@ order "$plan_fn" 'if (in.watch && in.watchSwitch)' 'in.candidates = m_engine.ext
 [ "$(grep -c 'adoptExtensionSwitch(' "$FACADE")" = "1" ] || bad "A10: a switch is adopted from one place"
 resume_fn="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
 has "$resume_fn" 'if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),' \
-    && has "$resume_fn" '                                           currentNetworkMemoryKey()))' \
-    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan), and the evidence is filed under the network the phone is on"
+    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan)"
+# Third review, T7: the evidence against the node that was left is filed under the network and the moment
+# of the switch itself (the extension tells both), not of the adoption; the engine is told separately
+# which network the phone is on now.
+adopt_op="$(printf '%s\n' "$resume_fn" | awk '/ops.adoptSwitch = /{on=1} on{print} on && /^    };/{exit}')"
+order "$adopt_op" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' 'm_engine.adoptExtensionSwitch(' \
+    && has "$adopt_op" 'avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral("cellular"), diagCarrier()),' \
+    && has "$adopt_op" 'stamp.atMs))' \
+    || bad "A10: the evidence must carry the network and the time of the switch the extension reported"
+has "$glue" 'metadata\["switch_ms"\] = made.atMs' && has "$glue" 'metadata\["switch_net"\] = made.net' \
+    || bad "A10: every status reply after a switch must say when and on which kind of network it was made"
 # Second review, R3: a switch is adopted from ANY status reply - the facade passes every changed session
 # to the hand-over object before its own identity rules; and a Reasserting -> Connected asks for a reply.
 meta_ctx="$(code "$FACADE" | grep -A8 '&IosController::sessionMetadataChanged, this,')"
@@ -357,7 +379,9 @@ has "$down_ctx" 'emit tunnelEngineDown();' && has "$down_ctx" 'return;' && [ "$(
     || bad "A10: a reply without an engine must be told and judged by nothing else"
 # The engine: the node the extension left is evidence for one network, not a failure of the session.
 adopt_fn="$(body_of "$ENGINE/ServiceEngine.cpp" 'bool ServiceEngine::adoptExtensionSwitch(')"
-has "$adopt_fn" 'm_extEvidence.note(m_currentNodeId, netKey, nowMs());' || bad "A10: the node the extension left must be kept as evidence for the network"
+has "$adopt_fn" 'm_extEvidence.note(m_currentNodeId, netKey, atMs > 0 && atMs <= now ? atMs : now, now);' \
+    || bad "A10: the node the extension left must be kept as evidence for the network and the moment of the switch"
+has "$adopt_fn" 'm_extEvidenceNet = ' && bad "A10: adopting a switch must not decide which network the phone is on (the facade tells it)"
 has "$adopt_fn" 'm_failedThisSession' && bad "A10: an adopted switch must not mark the node failed for the session"
 [ "$(code "$ENGINE/ServiceEngine.cpp" | grep -c 'm_failedThisSession.contains\|m_failedThisSession.isEmpty\|, m_failedThisSession)')" = "0" ] \
     || bad "A10: the engine's picks must read the exclusions through sessionExclusions() (failed in the session + fresh evidence)"

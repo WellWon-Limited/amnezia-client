@@ -319,6 +319,7 @@ extension PacketTunnelProvider {
     func stopWireguard(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         wg_log(.info, message: "Stopping tunnel: reason: \(reason.amneziaDescription)")
         stopTribeStatsTimer()
+        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 140): the spare nodes' keys leave the plan file
         tribeDataWatch.detach() // AVPN (build 140, data watch)
 
         guard let adapter = wgAdapter else {

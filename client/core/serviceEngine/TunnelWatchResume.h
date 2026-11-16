@@ -24,8 +24,10 @@
 //  * what an adopted verdict means (TunnelWatchStatus.h::decideWatchConsume) and the re-check: only with
 //    the engine's consent (ServiceEngine::reenterVerifying), only once per verdict, only with
 //    features.node_scan;
-//  * the way back to the user's choice (TunnelWatchStatus.h::decideExtensionReturn): asked once per
-//    hand-over, after everything else, executed by the facade's ordinary restart.
+//  * the way back to the user's choice (TunnelWatchStatus.h::decideExtensionReturn): asked on the tick
+//    whenever nothing above holds, at most once in kWatchReturnCheckPeriodMs and right after a hand-over;
+//    only once a switch of the extension has been seen in this process; executed by the facade's
+//    ordinary restart.
 //
 // No timer of its own: the clock is the facade's existing 1 s transition tick.
 #pragma once
@@ -63,7 +65,8 @@ struct TunnelWatchResumeOps {
     // Stage 2: the extension moved the tunnel to `nodeId`. The engine takes it as its current node
     // (ServiceEngine::adoptExtensionSwitch) and the screen shows it; false = not a node of the pool.
     // Nothing of the app's own ladder runs, the pin is not touched.
-    std::function<bool(const QString &nodeId)> adoptSwitch;
+    // `stamp`: when and on which kind of network the extension left the node the app holds.
+    std::function<bool(const QString &nodeId, const WatchSwitchStamp &stamp)> adoptSwitch;
     // Stage 2: the facts of decideExtensionReturn, and the facade's ordinary restart to the user's choice.
     std::function<WatchReturnInputs()> returnFacts;
     std::function<void()> restartToChoice;
@@ -121,8 +124,10 @@ public:
                     m_replyAskedMs = -1;
                     m_ops.journal(QStringLiteral("watch_identity_wait released=timeout deferred=%1").arg(m_deferred.size()));
                 }
-                if (m_replyAskedMs < 0)
+                if (m_replyAskedMs < 0) {
                     runDeferred(); // nothing of ours holds: what waited goes on
+                    maybeReturn();
+                }
             }
             return;
         }
@@ -154,7 +159,7 @@ public:
     // number of its last switch and the node the tunnel stands on. Adopted whenever it arrives.
     void onSessionMetadata(const QVariantMap &session)
     {
-        if (adopt(session, 0, watchLabel(session.value(QStringLiteral("switch_why")).toString())) && m_ops.engineVerifying())
+        if (adopt(session, 0, watchLabel(session.value(QStringLiteral("switch_why")).toString()), {}) && m_ops.engineVerifying())
             m_ops.startVerification();
     }
 
@@ -170,7 +175,8 @@ public:
         // decisions that waited - is then about the node the tunnel is on.
         const bool adopted = adopt(session, w.switchSeq,
                                    w.lastSwitchWhy.isEmpty() ? watchLabel(session.value(QStringLiteral("switch_why")).toString())
-                                                             : w.lastSwitchWhy);
+                                                             : w.lastSwitchWhy,
+                                   snapshot.value(QStringLiteral("watch")).toMap().value(QStringLiteral("switches")).toList());
         ResumeFreezeInputs in;
         in.flagOn = m_ops.watchFlag();
         in.tunnelConnected = m_ops.tunnelConnected();
@@ -187,6 +193,7 @@ public:
             if (awaited)
                 m_ops.journal(QStringLiteral("watch_identity_wait released=reply deferred=%1").arg(m_deferred.size()));
             runDeferred();
+            m_returnAskedMs = -1; // where the tunnel stands is known again: the way back is asked at the next tick
             return;
         }
         if (!freezeReleases(step))
@@ -231,14 +238,9 @@ public:
         // The decisions that waited run after the snapshot was adopted; a re-check started above has a
         // new epoch, so a waiting completion of the old check returns without a verdict.
         runDeferred();
-        // Last: the extension moved the session earlier and its evidence has aged - back to the user's
-        // choice by the facade's ordinary restart. Never in the hand-over of a verdict about this
-        // session; and after an adoption the decision itself says no (where the app has a check the
-        // engine is in Verifying, where it has none there is nothing to return with).
-        if (consume != WatchConsume::Reverify && decideExtensionReturn(m_ops.returnFacts())) {
-            m_ops.journal(QStringLiteral("extension_return_to_choice from=%1").arg(m_ops.appNodeId()));
-            m_ops.restartToChoice();
-        }
+        // The way back to the user's choice is asked at the next tick - but not right after a verdict
+        // about this very session: that one is first given its re-check (a whole period).
+        m_returnAskedMs = consume == WatchConsume::Reverify ? in.nowMs : -1;
     }
 
     bool frozen() const { return m_freeze.active; }
@@ -269,7 +271,7 @@ private:
     // The one place a switch of the extension reaches the engine. true = the engine took the node.
     // Independent of the freeze and of the watch flag: where the tunnel stands is a fact. Not while
     // the app is awake only for the arming - then it waits for the return to the screen (onTick).
-    bool adopt(const QVariantMap &session, int watchSeq, const QString &why)
+    bool adopt(const QVariantMap &session, int watchSeq, const QString &why, const QVariantList &switches)
     {
         WatchAdoptInputs ai;
         ai.switchSeq = qMax(watchSeq, session.value(QStringLiteral("switch_seq")).toInt());
@@ -288,11 +290,31 @@ private:
             m_pendingSession.insert(QStringLiteral("switch_why"), why);
             return false;
         }
-        const bool taken = m_ops.adoptSwitch(ai.snapshotNodeId);
+        const bool taken = m_ops.adoptSwitch(ai.snapshotNodeId, watchSwitchStamp(session, switches, ai.appNodeId, m_ops.nowMs()));
         m_ops.journal(watchAdoptJournalLine(ai.appNodeId, ai.snapshotNodeId, ai.switchSeq, why, taken));
         m_adoptedSeq = ai.switchSeq;
         m_adoptedGeneration = ai.snapshotGeneration;
         return taken;
+    }
+
+    // The extension moved the session earlier and its evidence has aged: back to the user's choice by
+    // the facade's ordinary restart. Asked only when nothing of the hand-over holds (the caller), not
+    // in the background, and never before a switch of the extension has been seen in this process
+    // (without one there is nothing to return from - and nothing is asked).
+    // After an adoption the decision itself says no: where the app has a check the engine is in
+    // Verifying, where it has none there is nothing to return with.
+    void maybeReturn()
+    {
+        if (m_adoptedGeneration.isEmpty() || m_ops.backgroundArmOnly())
+            return;
+        const qint64 now = m_ops.nowMs();
+        if (!watchReturnCheckDue(m_returnAskedMs, now))
+            return;
+        m_returnAskedMs = now;
+        if (decideExtensionReturn(m_ops.returnFacts())) {
+            m_ops.journal(QStringLiteral("extension_return_to_choice from=%1").arg(m_ops.appNodeId()));
+            m_ops.restartToChoice();
+        }
     }
 
     void adoptPending()
@@ -361,6 +383,8 @@ private:
     qint64 m_replyAskedMs = -1;
     // A switch seen while the app was awake only for the arming: adopted at the return to the screen.
     QVariantMap m_pendingSession;
+    // When the way back to the user's choice was asked last; -1 = ask at the next tick.
+    qint64 m_returnAskedMs = -1;
 };
 
 } // namespace avpn

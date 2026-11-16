@@ -1149,17 +1149,17 @@ QSet<QString> ServiceEngine::sessionExclusions() const // AVPN (iOS data watch, 
     return out;
 }
 
-bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey) // AVPN (iOS data watch, stage 2)
+bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey, qint64 atMs) // AVPN (iOS data watch, stage 2)
 {
     if (m_state != EngineState::Connected && m_state != EngineState::Verifying)
         return false;
     if (nodeId == m_currentNodeId || !findNode(nodeId))
         return false;
-    m_extEvidenceNet = netKey;
     if (!m_currentNodeId.isEmpty()) {
-        // The extension's proof against the node it left: this network, half an hour. Not a failure
-        // of the app session.
-        m_extEvidence.note(m_currentNodeId, netKey, nowMs());
+        // The extension's proof against the node it left: the network and the moment of the switch
+        // itself (not of this adoption), half an hour. Not a failure of the app session.
+        const qint64 now = nowMs();
+        m_extEvidence.note(m_currentNodeId, netKey, atMs > 0 && atMs <= now ? atMs : now, now);
         if (m_extOriginNodeId.isEmpty())
             m_extOriginNodeId = m_currentNodeId; // where the user was
     }

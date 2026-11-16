@@ -124,6 +124,8 @@ enum TribeDataWatchRuntimeTests {
         var plansWritten: [Data] = []
         /// The write of the extension fails (a full disk, a locked file).
         var planWriteFails = false
+        /// Runs between the extension's check of the file and its write (the test of the two writers).
+        var betweenCheckAndWrite: (() -> Void)?
         let runtime = TribeDataWatchRuntime()
         let adapter = FakeAdapter()
 
@@ -155,10 +157,10 @@ enum TribeDataWatchRuntimeTests {
                 uptime: { [unowned self] in self.uptime },
                 nowMs: { [unowned self] in self.wallMs },
                 readState: { [unowned self] in self.stateReads += 1; return self.previousState },
-                writePlan: { [unowned self] data in
-                    self.plansWritten.append(data)
-                    if self.planWriteFails { return false }
-                    return (try? data.write(to: self.planURL, options: .atomic)) != nil
+                replacePlan: { [unowned self] expected, clean in
+                    self.plansWritten.append(clean)
+                    if self.planWriteFails { return .failed }
+                    return TribeWatchPlanFile.replaceIfUnchanged(in: self.directory, expected: expected, with: clean, afterCheck: self.betweenCheckAndWrite)
                 }))
             adapter.switchTarget = { [unowned self] node in self.runtime.switchTarget(node) }
         }
@@ -427,6 +429,10 @@ enum TribeDataWatchRuntimeTests {
             // Where the tunnel stands now, for everybody who asks - on every status reply.
             let made = b.runtime.sessionSwitch()
             check(made?.seq == 1 && made?.why == "no_data" && made?.nodeId == "12" && made?.endpoint == "198.51.100.12:585", "the status reply's session: the new node and the switch number: \(String(describing: made))")
+            let switchedAt = (b.lastState["switches"] as? [[String: Any]])?.last?["utc_ms"] as? Int64 ?? -1
+            check(made?.atMs == switchedAt && switchedAt > 0 && made?.net == "cellular", "and when and on which kind of network the switch was made: \(String(describing: made?.atMs)) \(String(describing: made?.net))")
+            dead(b, seconds: 3)
+            check(b.runtime.sessionSwitch()?.atMs == switchedAt, "the time of the switch does not move with the clock")
             check(b.runtime.statsSuffix.hasPrefix(" node=12 "), "the statistics line names the new node: \(b.runtime.statsSuffix)")
             let list = b.lastState["switches"] as? [[String: Any]]
             check(list?.count == 1 && list?.first?["from"] as? String == "16" && list?.first?["to"] as? String == "12"
@@ -527,6 +533,89 @@ enum TribeDataWatchRuntimeTests {
                   "a write that failed is told once and not retried on every tick: \(stuck.plansWritten.count) \(stuck.logs.filter { $0.contains("plan candidates") })")
             dead(stuck, seconds: 2)
             check(!stuck.adapter.policy.switchEnabled && stuck.adapter.lastInputs.candidates.isEmpty, "and switching is off all the same")
+            // Third review, T4 (the reviewer's interleaving on the real runtime): while the extension
+            // takes the keys out of plan 1, the app writes plan 2 with the watch OFF. The app's writer
+            // takes the same lock, so its plan lands after the extension's write and is what stays.
+            let race = Bench()
+            race.writePlan(switchOn: true, candidates: [12], leaseInMs: 60_000)
+            race.startSession()
+            dead(race, seconds: 70)
+            let appDone = DispatchSemaphore(value: 0)
+            race.betweenCheckAndWrite = {
+                DispatchQueue.global().async {
+                    _ = TribeWatchPlanFile.withLock(in: race.directory, wait: true) { race.writePlan(watch: false) }
+                    appDone.signal()
+                }
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+            race.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            appDone.wait()
+            race.betweenCheckAndWrite = nil
+            let afterRace = (try? JSONSerialization.jsonObject(with: Data(contentsOf: race.planURL))) as? [String: Any]
+            check(afterRace?["seq"] as? Int64 == 2 && (afterRace?["features"] as? [String: Any])?["ios_tunnel_watch"] as? Bool == false,
+                  "the app's fresh plan (seq 2, the watch off) is what the file holds: seq \(String(describing: afterRace?["seq"]))")
+            race.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            dead(race, seconds: 2)
+            check(!race.adapter.policy.enabled, "and the kill switch reaches the extension")
+            // The app wrote before the extension looked again: the file is not the judged one, nothing is written.
+            let moved = Bench()
+            moved.writePlan(switchOn: true, candidates: [12], leaseInMs: 60_000)
+            moved.startSession()
+            dead(moved, seconds: 70)
+            moved.betweenCheckAndWrite = { check(false, "a file that changed must not reach the write") }
+            let judged = try! Data(contentsOf: moved.planURL)
+            moved.writePlan(switchOn: true, candidates: [12, 9])
+            check(TribeWatchPlanFile.replaceIfUnchanged(in: moved.directory, expected: judged, with: TribeWatchPlan.scrubbed(judged)!, afterCheck: moved.betweenCheckAndWrite) == .changed,
+                  "the judged bytes are gone: the extension's write is refused")
+            // The app holds the lock (it is writing): the extension steps back and tries again at the next tick.
+            let busy = Bench()
+            busy.writePlan(switchOn: true, candidates: [12], leaseInMs: 60_000)
+            busy.startSession()
+            dead(busy, seconds: 70)
+            let holding = DispatchSemaphore(value: 0), letGo = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                _ = TribeWatchPlanFile.withLock(in: busy.directory, wait: true) { holding.signal(); letGo.wait() }
+                released.signal()
+            }
+            holding.wait()
+            busy.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            check(String(decoding: try! Data(contentsOf: busy.planURL), as: UTF8.self).contains(Bench.key32)
+                  && !busy.logs.contains { $0.contains("plan candidates removed") }, "the lock is taken: nothing is written and nothing is told")
+            letGo.signal()
+            released.wait()
+            busy.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            check(!String(decoding: try! Data(contentsOf: busy.planURL), as: UTF8.self).contains(Bench.key32)
+                  && busy.logs.filter { $0.contains("plan candidates removed") } == ["Tribe watch: plan candidates removed (switch permission is gone) result=done"],
+                  "the next tick: the keys are taken out: \(busy.logs.filter { $0.contains("plan candidates") })")
+            // A plan rejected as policy_stale (the config is older than allowed and the app sleeps)
+            // permits nothing: its keys leave the file too.
+            let staleBench = Bench()
+            staleBench.writePlan(fetchedAgoMs: 90_000_000, switchOn: true, candidates: [12, 9])
+            staleBench.startSession()
+            dead(staleBench, seconds: 2)
+            check(staleBench.logs.contains("Tribe watch: plan=policy_stale") && staleBench.plansWritten.count == 1
+                  && !String(decoding: (try? Data(contentsOf: staleBench.planURL)) ?? Data(), as: UTF8.self).contains(Bench.key32),
+                  "a rejected plan: the keys are taken out: \(staleBench.logs.suffix(2))")
+            for _ in 1...3 { staleBench.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {}) }
+            check(staleBench.plansWritten.count == 1, "once")
+            // The tunnel is stopped by the user: no session is left that may use the keys.
+            let stopped = Bench()
+            stopped.writePlan(switchOn: true, candidates: [12, 9])
+            stopped.startSession()
+            dead(stopped, seconds: 5)
+            stopped.runtime.noteStop(userInitiated: false)
+            check(stopped.plansWritten.isEmpty && String(decoding: try! Data(contentsOf: stopped.planURL), as: UTF8.self).contains(Bench.key32),
+                  "a stop by the system: the plan is left as it is (the start that follows chooses from it)")
+            stopped.runtime.noteStop(userInitiated: true)
+            let afterStop = (try? JSONSerialization.jsonObject(with: Data(contentsOf: stopped.planURL))) as? [String: Any]
+            check((afterStop?["candidates"] as? [Any])?.isEmpty == true && afterStop?["seq"] as? Int64 == stopped.planSeq
+                  && (afterStop?["features"] as? [String: Any])?["ios_tunnel_watch_switch"] as? Bool == true,
+                  "a stop by the user: the keys leave the file, the rest stays as the app wrote it")
+            let noSwitch = Bench()
+            noSwitch.writePlan()
+            noSwitch.startSession()
+            noSwitch.runtime.noteStop(userInitiated: true)
+            check(noSwitch.plansWritten.isEmpty, "a plan without candidates is not touched at a stop")
             // The app renews the lease with its next plan: switching works again.
             b.writePlan(switchOn: true, candidates: [12, 9])
             b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})

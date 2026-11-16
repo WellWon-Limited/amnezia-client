@@ -32,7 +32,8 @@ struct TribeWatchPlan {
     /// other field - the order of plans too - stays as the app wrote it. nil = not a plan.
     static func scrubbed(_ data: Data) -> Data? {
         guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              int(object["schema"]) == Int64(schema) else { return nil }
+              int(object["schema"]) == Int64(schema),
+              !(object["candidates"] as? [Any] ?? []).isEmpty else { return nil } // nothing to take out
         object["candidates"] = [Any]()
         return try? JSONSerialization.data(withJSONObject: object)
     }
@@ -320,6 +321,60 @@ enum TribeStartChoice {
             out = noting(LastFailure(nodeId: node, net: net, wallMs: at), in: out, nowMs: nowMs)
         }
         return out.filter { fresh($0, nowMs: nowMs) }
+    }
+}
+
+/// The plan file has TWO writers: the app (the whole plan, at its own moments) and the extension
+/// (only to take the candidates' keys out when nothing may be done with them). Each holds this
+/// lock - an flock on a file next to the plan - for its own write, so that the extension's
+/// "is the file still the one I judged?" and its write are one step for the app: a fresh plan of
+/// the app can never be replaced by a scrubbed copy of an older one (third review, T4).
+/// The app's writer (ios_controller.mm) follows the same protocol with the same lock file name.
+enum TribeWatchPlanFile {
+    static let lockName = "TribeWatchPlan.lock"
+
+    enum Outcome: String, Equatable {
+        case done
+        /// The file no longer holds the bytes that were judged: the app wrote a plan meanwhile.
+        case changed
+        /// The other writer holds the lock right now: try again at the next tick.
+        case busy
+        case failed
+    }
+
+    /// Runs `body` holding the plan's lock. nil = the other writer holds it (`wait` false) or
+    /// the lock file cannot be opened.
+    static func withLock<T>(in directory: URL, wait: Bool, _ body: () -> T) -> T? {
+        let descriptor = open(directory.appendingPathComponent(lockName).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var taken = flock(descriptor, wait ? LOCK_EX : (LOCK_EX | LOCK_NB))
+        while taken != 0 && wait && errno == EINTR { taken = flock(descriptor, LOCK_EX) }
+        guard taken == 0 else { return nil }
+        defer { flock(descriptor, LOCK_UN) }
+        return body()
+    }
+
+    /// The extension's only write. Under the lock: the file must still hold exactly `expected`
+    /// (the bytes that were judged), then it is replaced by `clean` - atomically, with the
+    /// protection class the app uses, and kept out of device backups. `afterCheck` is a seam for
+    /// the test of the interleaving; nothing else passes it.
+    static func replaceIfUnchanged(in directory: URL, expected: Data, with clean: Data, afterCheck: (() -> Void)? = nil) -> Outcome {
+        var url = directory.appendingPathComponent(TribeWatchPlan.fileName)
+        let outcome: Outcome? = withLock(in: directory, wait: false) {
+            guard let current = try? Data(contentsOf: url), current == expected else { return .changed }
+            afterCheck?()
+            do {
+                try clean.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try? url.setResourceValues(values)
+                return .done
+            } catch {
+                return .failed
+            }
+        }
+        return outcome ?? .busy
     }
 }
 

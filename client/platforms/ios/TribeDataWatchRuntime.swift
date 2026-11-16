@@ -55,7 +55,9 @@ struct TribeDataWatchDeps {
     /// Stage 2: replaces TribeWatchPlan.json with the given bytes (the same protection class,
     /// excluded from backups); false = could not. Used for one thing only: to take the candidates'
     /// keys out of the file when the permission to switch is gone.
-    var writePlan: (_ plan: Data) -> Bool = { _ in false }
+    /// The extension's only write into the app's plan file: replace it by `clean` if it still holds
+    /// `expected` (TribeWatchPlanFile.replaceIfUnchanged - under the lock both writers take).
+    var replacePlan: (_ expected: Data, _ clean: Data) -> TribeWatchPlanFile.Outcome = { _, _ in .failed }
 }
 
 final class TribeDataWatchRuntime {
@@ -247,12 +249,16 @@ final class TribeDataWatchRuntime {
     /// so that the app learns of a switch from an ordinary poll too. nil = no switch was made (the
     /// reply is then the one of build 139). `nodeId` / `endpoint` are set while the tunnel is NOT
     /// on the profile's node: the app recognises a node by its id and its "host:port".
-    func sessionSwitch() -> (seq: Int, why: String, nodeId: String?, endpoint: String?)? {
+    /// `atMs` / `net`: when and on which kind of network that last switch was made - the app files
+    /// its evidence against the node that was left under them, whenever it learns of the switch.
+    func sessionSwitch() -> (seq: Int, why: String, atMs: Int64, net: String, nodeId: String?, endpoint: String?)? {
         lock.lock(); defer { lock.unlock() }
         guard switchSeq > 0 else { return nil }
         let why = switches.last?["why"] as? String ?? "unknown"
-        guard let endpoint = actualEndpoint else { return (switchSeq, why, nil, nil) }
-        return (switchSeq, why, nodeId, endpoint)
+        let atMs = switches.last?["utc_ms"] as? Int64 ?? 0
+        let net = switches.last?["net"] as? String ?? "unknown"
+        guard let endpoint = actualEndpoint else { return (switchSeq, why, atMs, net, nil, nil) }
+        return (switchSeq, why, atMs, net, nodeId, endpoint)
     }
 
     /// What the previous run of the extension left: the nodes it judged dead and the switches of
@@ -381,13 +387,17 @@ final class TribeDataWatchRuntime {
             lock.unlock()
             // The permission to switch is gone (key off, lease lapsed, list expired) and the file
             // still holds the candidates' keys: take them out. Not while the app is alive (it is
-            // the writer and may be writing a new plan), once per file, and only if the file is
-            // still the one that was read.
+            // about to write a plan of its own), once per file.
             if plan.holdsUnusableSecrets, !alive, let stamp, let data, scrubbedStampIs(not: stamp) {
-                scrub(data, stamp: stamp, url: url, deps: deps)
+                scrub(data, stamp: stamp, deps: deps)
             }
         case .failure(let rejection):
             state = unreadable ? "unreadable" : rejection.rawValue
+            // A plan that is rejected (its policy has grown too old with the app asleep, it is older
+            // than one already seen, its clock is wrong) permits nothing: its keys go as well.
+            if !alive, let stamp, let data, scrubbedStampIs(not: stamp) {
+                scrub(data, stamp: stamp, deps: deps)
+            }
         }
         lock.lock()
         planStamp = stamp
@@ -419,17 +429,38 @@ final class TribeDataWatchRuntime {
         return scrubbedStamp != stamp
     }
 
-    private func scrub(_ data: Data, stamp: String, url: URL, deps: TribeDataWatchDeps) {
+    /// Takes the candidates' keys out of the plan file `data` was read from. Whether the file is
+    /// still that plan is decided together with the write, under the lock both writers take
+    /// (TribeWatchPlanFile): a plan the app wrote meanwhile is never replaced.
+    private func scrub(_ data: Data, stamp: String?, deps: TribeDataWatchDeps) {
+        guard let clean = TribeWatchPlan.scrubbed(data) else {
+            if let stamp { markScrubbed(stamp) } // not a plan with candidates: nothing to do for this file
+            return
+        }
+        let outcome = deps.replacePlan(data, clean)
+        // The app is writing right now: its plan will be read at the next tick, and judged then.
+        if outcome == .busy { return }
+        if let stamp { markScrubbed(stamp) }
+        if outcome == .changed { return }
+        deps.log("Tribe watch: plan candidates removed (switch permission is gone) result=\(outcome.rawValue)")
+    }
+
+    private func markScrubbed(_ stamp: String) {
         lock.lock()
         scrubbedStamp = stamp
         lock.unlock()
-        guard let clean = TribeWatchPlan.scrubbed(data) else { return }
-        // The app may have written a newer plan since the read: then the file is not ours to touch.
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let now = attributes.map { "\(($0[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)/\(($0[.size] as? NSNumber)?.intValue ?? 0)" }
-        guard now == stamp else { return }
-        let done = deps.writePlan(clean)
-        deps.log("Tribe watch: plan candidates removed (switch permission is gone) result=\(done ? "done" : "failed")")
+    }
+
+    /// The tunnel is being stopped. A stop by the user (the app's own stop, Settings) means no
+    /// session is left that may use the spare nodes' keys and the system will not raise the tunnel
+    /// by itself: they are taken out of the plan file. After a stop by the system they stay - the
+    /// start that follows chooses its node from them - for as long as the lease allows.
+    func noteStop(userInitiated: Bool) {
+        guard userInitiated, let deps = currentDeps, let directory = deps.containerDirectory() else { return }
+        let url = directory.appendingPathComponent(TribeWatchPlan.fileName)
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? 0
+        guard size > 0, size <= TribeWatchPlan.maxBytes, let data = try? Data(contentsOf: url) else { return }
+        scrub(data, stamp: nil, deps: deps)
     }
 
     /// TribeWatchState.json, every time in full: the session's labels, the switches of this run,

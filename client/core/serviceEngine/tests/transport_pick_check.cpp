@@ -1032,6 +1032,7 @@ int main(int argc, char **argv)
             };
             CHECK(eng.loadSubscription(pool, err));
             eng.setMeasuredRtt(rtt);
+            eng.setExtensionEvidenceNetwork(wifi);                                  // the network the phone is on (the facade tells it)
             CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true, wifi));     // Disconnected: nothing to adopt
             CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
             eng.setVerifyEveryTransport(true);
@@ -1080,6 +1081,40 @@ int main(int argc, char **argv)
             CHECK(!eng.extensionReturnFacts().movedByExtension);
             CHECK(!offered("3") && !offered("9") && !offered("12"));                 // 3 and 9 were left within the half hour, 12 too
         }
+        {   // third review, T7: the evidence is stamped with the moment and the network of the SWITCH, not of
+            // its adoption. The extension left node 16 on cellular 25 minutes before the app (now on Wi-Fi)
+            // learned of it: the proof is about cellular and has five minutes left.
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            qint64 clock = 1800000000000LL;
+            eng.setNowMsForTest([&clock] { return clock; });
+            const QString wifi = QStringLiteral("wifi"), cell = QStringLiteral("cellular:250-02");
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            eng.setExtensionEvidenceNetwork(wifi);
+            CHECK(eng.connect(err) && eng.onTunnelConnected());
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, cell, clock - 25 * 60 * 1000));
+            CHECK(!eng.extensionReturnFacts().evidenceFresh);                    // on this Wi-Fi nothing was proved against node 16
+            eng.setExtensionEvidenceNetwork(cell);
+            CHECK(eng.extensionReturnFacts().evidenceFresh);                     // on that cellular network: yes, for five more minutes
+            clock += 5 * 60 * 1000 - 1;
+            CHECK(eng.extensionReturnFacts().evidenceFresh);
+            clock += 1;
+            CHECK(!eng.extensionReturnFacts().evidenceFresh);                    // half an hour after the SWITCH
+            // a time that is not usable (none, from the future) is the moment of the adoption
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("9"), false, cell, clock + 60000));
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("3"), false, cell, 0));
+            clock += kWatchEvidenceTtlMs - 1;
+            QStringList offeredNow;
+            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                offeredNow.append(x.nodeId);
+            CHECK(!offeredNow.contains(QStringLiteral("12")) && !offeredNow.contains(QStringLiteral("9")) && offeredNow.contains(QStringLiteral("16")));
+            clock += 1;
+            offeredNow.clear();
+            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                offeredNow.append(x.nodeId);
+            CHECK(offeredNow.contains(QStringLiteral("12")) && offeredNow.contains(QStringLiteral("9")));
+        }
         {   // no pin: nothing to return to, whatever the evidence ("auto" is satisfied by any node)
             ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
             qint64 clock = 1800000000000LL;
@@ -1102,6 +1137,7 @@ int main(int argc, char **argv)
             CHECK(eng.loadSubscription(pool, err));
             eng.setMeasuredRtt(rtt);
             eng.setNetworkMemoryNode(QStringLiteral("16"));
+            eng.setExtensionEvidenceNetwork(wifi);
             CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("16") && eng.onTunnelConnected()); // the remembered node
             CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, wifi));
             eng.requestStop();
@@ -1131,6 +1167,7 @@ int main(int argc, char **argv)
             CHECK(eng.loadSubscription(pool, err));
             eng.setMeasuredRtt(rtt);
             CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            eng.setExtensionEvidenceNetwork(wifi);
             CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("9") && eng.onTunnelConnected());
             CHECK(eng.adoptExtensionSwitch(QStringLiteral("3"), false, wifi));
             CHECK(eng.extensionReturnFacts().movedByExtension);

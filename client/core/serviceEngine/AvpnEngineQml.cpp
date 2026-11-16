@@ -2774,11 +2774,15 @@ void AvpnEngineQml::setupTunnelWatchResume()
     };
     // The app's own per-network memory forgets the node (§29 item 7, the same stored-copy function a
     // failed start uses); the key is the attempt's (computed with the tunnel down).
-    ops.adoptSwitch = [this](const QString &nodeId) {
+    ops.adoptSwitch = [this](const QString &nodeId, const avpn::WatchSwitchStamp &stamp) {
         // Stage 2: the extension moved the tunnel while the app slept. The engine takes the node; the
-        // app's own check of it runs only where the app has one (features.node_scan).
+        // app's own check of it runs only where the app has one (features.node_scan). The evidence
+        // against the node it left is filed under the network and the moment of the switch itself.
+        m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
         if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),
-                                           currentNetworkMemoryKey()))
+                                           avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral("cellular"), diagCarrier()),
+                                                                     currentNetworkMemoryKey()),
+                                           stamp.atMs))
             return false;
         writeTunnelWatchPlan("adopt"); // the candidates are counted from the node the tunnel stands on
         emit changed();

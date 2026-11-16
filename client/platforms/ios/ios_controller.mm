@@ -11,6 +11,9 @@
 #include <QTimer>
 #include <QUuid>
 #include <memory>
+#include <fcntl.h>    // AVPN (iOS data watch, 140): the lock of the watch plan file
+#include <sys/file.h>
+#include <unistd.h>
 #include "AvpnIntentController.h"
 #include "IosBackgroundArm.h" // AVPN (iOS data watch, 140): On-Demand arming in the background (pure)
 #if defined(Q_OS_IOS)
@@ -1692,14 +1695,34 @@ static bool writeTunnelWatchPlan(const QByteArray &json)
 #if defined(Q_OS_IOS)
     options |= NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication;
 #endif
+    // Third review, T4: the file has a second writer - the extension takes the spare nodes' keys out
+    // when nothing may be done with them (TribeWatchPlan.swift::TribeWatchPlanFile). Both hold this lock
+    // for their write, so the extension's "still the plan I judged?" and its write are one step for us.
+    // The extension holds it for one small write; we wait for it, but never longer than a quarter of a
+    // second and never give up the write: the kill switch must reach the file.
+    const int lockFd = open([dir URLByAppendingPathComponent:@"TribeWatchPlan.lock"].fileSystemRepresentation,
+                            O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    bool locked = false;
+    for (int i = 0; lockFd >= 0 && !locked && i < 25; ++i) {
+        locked = flock(lockFd, LOCK_EX | LOCK_NB) == 0;
+        if (!locked)
+            usleep(10 * 1000);
+    }
     NSError *error = nil;
-    if (![data writeToURL:url options:options error:&error]) {
+    const BOOL written = [data writeToURL:url options:options error:&error];
+    // Stage 2: the plan may hold node keys. It never goes into a device backup (an atomic write makes
+    // a new file every time, so the mark is set after every write).
+    if (written)
+        [url setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    if (lockFd >= 0) {
+        if (locked)
+            flock(lockFd, LOCK_UN);
+        close(lockFd);
+    }
+    if (!written) {
         qWarning() << "avpn: watch plan not written:" << QString::fromNSString(error.localizedDescription);
         return false;
     }
-    // Stage 2: the plan may hold node keys. It never goes into a device backup (an atomic write makes
-    // a new file every time, so the mark is set after every write).
-    [url setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
     return true;
 }
 

@@ -211,6 +211,47 @@ enum TribeWatchPlanTests {
         check(clean.map { !String(decoding: $0, as: UTF8.self).contains(key32) } == true, "no key is left")
         check(accepted(clean, last: accepted(full)!.order)?.policy.enabled == true, "and it is the same plan for the order of plans")
         check(TribeWatchPlan.scrubbed(Data("junk".utf8)) == nil && TribeWatchPlan.scrubbed(plan { $0["schema"] = 1 }) == nil, "what is not a plan is not rewritten")
+        check(TribeWatchPlan.scrubbed(plan()) == nil && clean.flatMap { TribeWatchPlan.scrubbed($0) } == nil, "a plan without candidates has nothing to take out")
+        // --- two writers of one file (third review, T4) ---
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("tribe-plan-lock-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(TribeWatchPlan.fileName)
+        func onDisk() -> Data? { try? Data(contentsOf: file) }
+        /// The app's writer as ios_controller.mm does it: the lock, then the atomic write.
+        func appWrites(_ data: Data) { _ = TribeWatchPlanFile.withLock(in: directory, wait: true) { try! data.write(to: file, options: .atomic) } }
+        let fresh = plan { $0["seq"] = 6; $0["features"] = ["ios_tunnel_watch": false, "ios_tunnel_watch_switch": false] }
+        appWrites(full)
+        check(TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: full, with: clean!) == .done && onDisk() == clean, "the file still holds the judged plan: replaced")
+        check((try? file.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup == true, "and the copy stays out of backups")
+        appWrites(fresh)
+        check(TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: full, with: clean!) == .changed && onDisk() == fresh, "the app wrote a plan meanwhile: nothing is written")
+        // The other writer holds the lock: not now.
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+        appWrites(full)
+        DispatchQueue.global().async {
+            _ = TribeWatchPlanFile.withLock(in: directory, wait: true) { held.signal(); release.wait() }
+            finished.signal()
+        }
+        held.wait()
+        check(TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: full, with: clean!) == .busy && onDisk() == full, "the app is writing: the extension steps back")
+        check(TribeWatchPlanFile.withLock(in: directory, wait: false) { true } == nil, "the lock excludes a second holder")
+        release.signal()
+        finished.wait()
+        // The reviewer's interleaving: the app's fresh plan (seq 6, the watch off) arrives between
+        // the extension's check and its write. It was replaced by the scrubbed seq 5 with the watch on.
+        var appWroteInside = true
+        let appDone = DispatchSemaphore(value: 0)
+        let outcome = TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: full, with: clean!, afterCheck: {
+            DispatchQueue.global().async { appWrites(fresh); appDone.signal() }
+            Thread.sleep(forTimeInterval: 0.2)
+            appWroteInside = onDisk() == fresh
+        })
+        appDone.wait()
+        check(outcome == .done && !appWroteInside, "the app's write waits for the extension's check-and-write to finish")
+        check(onDisk() == fresh, "and what stays in the file is the app's fresh plan, not the scrubbed copy of the old one")
+        check(TribeWatchPlanFile.replaceIfUnchanged(in: directory.appendingPathComponent("absent"), expected: full, with: clean!) == .busy, "no container: nothing is written")
+        check(TribeWatchPlanFile.lockName == "TribeWatchPlan.lock", "the lock's name is shared with the app's writer")
         let flying = TribeDataWatchJournal.parseProbeResult("state=pending id=6 ms=0 late=0 prev_late=5")
         check(flying.state == .pending && flying.id == 6 && flying.latePrevious == 5 && !flying.late, "the previous probe's late answer is read from the result line")
         check(TribeDataWatchJournal.parseProbeResult("state=silent id=6 ms=0 late=0").latePrevious == 0
