@@ -1021,36 +1021,203 @@ int main(int argc, char **argv)
         }
         {   // the app finds the tunnel on another node: the engine takes it, and only that
             ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            qint64 clock = 1800000000000LL;
+            eng.setNowMsForTest([&clock] { return clock; });
+            const QString wifi = QStringLiteral("wifi"), cell = QStringLiteral("cellular:250-02");
+            const auto offered = [&eng](const char *node) {
+                for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                    if (x.nodeId == QLatin1String(node))
+                        return true;
+                return false;
+            };
             CHECK(eng.loadSubscription(pool, err));
             eng.setMeasuredRtt(rtt);
-            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true));     // Disconnected: nothing to adopt
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true, wifi));     // Disconnected: nothing to adopt
             CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
             eng.setVerifyEveryTransport(true);
             CHECK(eng.connect(err));
-            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true));     // Connecting: the app's own start is in flight
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("12"), true, wifi));     // Connecting: the app's own start is in flight
             CHECK(eng.onTunnelConnected() && eng.verifyInconclusive() && eng.state() == EngineState::Connected);
+            CHECK(!eng.extensionReturnFacts().movedByExtension);                    // nobody moved anything yet
             const int streak = eng.dataPlaneFailStreak();
             const QByteArray history = eng.transportHistoryJson();
             const int ups = tun.upCalls, downs = tun.downCalls;
-            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("16"), true));     // the same node: nothing
-            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("404"), true));    // not a node of the pool
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("16"), true, wifi));     // the same node: nothing
+            CHECK(!eng.adoptExtensionSwitch(QStringLiteral("404"), true, wifi));    // not a node of the pool
             CHECK(eng.currentNodeId() == QLatin1String("16") && eng.state() == EngineState::Connected);
-            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), true));
+            CHECK(!eng.extensionReturnFacts().movedByExtension && !eng.extensionReturnFacts().evidenceFresh); // a refused adoption leaves no trace
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), true, wifi));
             CHECK(eng.currentNodeId() == QLatin1String("12") && eng.isVerifying()); // the new node, to be checked by the app
             CHECK(tun.upCalls == ups && tun.downCalls == downs);              // the tunnel is not touched
             CHECK(eng.pinnedNodeId() == QLatin1String("16"));                 // the pin stays: only a tap changes it
             CHECK(eng.dataPlaneFailStreak() == streak && eng.transportHistoryJson() == history); // not a step of the app's ladder
-            QStringList ids;
-            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
-                ids.append(x.nodeId);
-            CHECK(!ids.contains(QStringLiteral("16")) && !ids.contains(QStringLiteral("12"))); // the node it left failed in this session
+            CHECK(!offered("16") && !offered("12"));                          // the node it left: the evidence is fresh on this network
             CHECK(eng.verifySucceeded() && eng.state() == EngineState::Connected);
+
+            // Second review, R4: the node the extension left is NOT failed for the session. The proof
+            // is about one network and it lasts half an hour.
+            ServiceEngine::ExtensionReturnFacts facts = eng.extensionReturnFacts();
+            CHECK(facts.movedByExtension && facts.evidenceFresh && facts.pinRaisable); // out of the pinned location, and it is too early to go back
+            eng.setExtensionEvidenceNetwork(cell);
+            CHECK(offered("16") && !eng.extensionReturnFacts().evidenceFresh);       // on another network it says nothing
+            eng.setExtensionEvidenceNetwork(wifi);
+            clock += kWatchEvidenceTtlMs - 1;
+            CHECK(!offered("16") && eng.extensionReturnFacts().evidenceFresh);       // 29 min 59.999 s: still fresh here
+            clock += 1;
+            facts = eng.extensionReturnFacts();
+            CHECK(offered("16") && facts.movedByExtension && !facts.evidenceFresh && facts.pinRaisable); // aged: the way back is open
+
             // without a check of its own (features.node_scan off) the app only takes the node
-            CHECK(eng.adoptExtensionSwitch(QStringLiteral("9"), false));
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("9"), false, wifi));
             CHECK(eng.currentNodeId() == QLatin1String("9") && eng.state() == EngineState::Connected);
+            CHECK(eng.extensionReturnFacts().movedByExtension && !eng.extensionReturnFacts().evidenceFresh); // the user was on 16, not on 12
+            CHECK(!offered("12") && offered("16"));                                  // 12 was left just now, 16 long ago
             // from Verifying too (the app was checking the old node when it froze)
-            CHECK(eng.reenterVerifying() && eng.adoptExtensionSwitch(QStringLiteral("3"), true) && eng.isVerifying()
+            CHECK(eng.reenterVerifying() && eng.adoptExtensionSwitch(QStringLiteral("3"), true, wifi) && eng.isVerifying()
                   && eng.currentNodeId() == QLatin1String("3"));
+            // the extension itself came back to the user's node: nothing is left to return to
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("16"), false, wifi) && eng.currentNodeId() == QLatin1String("16"));
+            CHECK(!eng.extensionReturnFacts().movedByExtension);
+            CHECK(!offered("3") && !offered("9") && !offered("12"));                 // 3 and 9 were left within the half hour, 12 too
+        }
+        {   // no pin: nothing to return to, whatever the evidence ("auto" is satisfied by any node)
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            qint64 clock = 1800000000000LL;
+            eng.setNowMsForTest([&clock] { return clock; });
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.connect(err) && eng.onTunnelConnected());
+            const QString first = eng.currentNodeId();
+            CHECK(eng.adoptExtensionSwitch(first == QLatin1String("12") ? QStringLiteral("9") : QStringLiteral("12"), false, QStringLiteral("wifi")));
+            clock += 2 * kWatchEvidenceTtlMs;
+            const ServiceEngine::ExtensionReturnFacts facts = eng.extensionReturnFacts();
+            CHECK(!facts.movedByExtension && !facts.pinRaisable && !facts.evidenceFresh);
+        }
+        {   // the evidence in the app's own picks: skipped on its network while fresh, then as any other node;
+            // a session of the app's own (stop, start) forgets where the extension took the old one
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            qint64 clock = 1800000000000LL;
+            eng.setNowMsForTest([&clock] { return clock; });
+            const QString wifi = QStringLiteral("wifi");
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            eng.setNetworkMemoryNode(QStringLiteral("16"));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("16") && eng.onTunnelConnected()); // the remembered node
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, wifi));
+            eng.requestStop();
+            eng.setNetworkMemoryNode(QStringLiteral("16"));
+            CHECK(eng.connect(err) && tun.lastUpNodeId != QLatin1String("16"));  // a minute later on the same Wi-Fi: not the node the extension left
+            eng.requestStop();
+            eng.setExtensionEvidenceNetwork(QStringLiteral("cellular"));
+            eng.setNetworkMemoryNode(QStringLiteral("16"));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("16"));  // on another network the node is as good as any
+            eng.requestStop();
+            eng.setExtensionEvidenceNetwork(wifi);
+            clock += kWatchEvidenceTtlMs;
+            eng.setMeasuredRtt(rtt); // a fresh measuring round: the remembered node goes first only with one
+            eng.setNetworkMemoryNode(QStringLiteral("16"));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("16"));  // and on the same one after half an hour
+            eng.requestStop();
+            eng.setNetworkMemoryNode(QStringLiteral("12"));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("12") && eng.onTunnelConnected());
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));              // the user pins the node the extension once left
+            CHECK(!eng.extensionReturnFacts().movedByExtension);                 // this session is the app's own start: nobody moved it
+        }
+        {   // "moved by the extension" means: out of the PINNED LOCATION, by the extension, and still out
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            qint64 clock = 1800000000000LL;
+            eng.setNowMsForTest([&clock] { return clock; });
+            const QString wifi = QStringLiteral("wifi");
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("9"), err));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("9") && eng.onTunnelConnected());
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("3"), false, wifi));
+            CHECK(eng.extensionReturnFacts().movedByExtension);
+            // the session is found on the other transport of the pinned host (not the extension's doing -
+            // it raises AmneziaWG only): it is in the pinned location again, nothing to return to
+            const SubscriptionNode *xray9 = byId(nodes, "9:xray");
+            CHECK(xray9 != nullptr);
+            eng.adoptTunnelConnected(QStringLiteral("9:xray"), QStringLiteral("xray"), xray9 ? xray9->endpoint : QString());
+            CHECK(eng.currentNodeId() == QLatin1String("9:xray") && !eng.extensionReturnFacts().movedByExtension);
+            eng.adoptTunnelConnected(QStringLiteral("3"), QStringLiteral("awg"), QStringLiteral("203.0.113.3:585"));
+            CHECK(eng.currentNodeId() == QLatin1String("3") && eng.extensionReturnFacts().movedByExtension);
+            clock += kWatchEvidenceTtlMs;
+            eng.setMeasuredRtt(rtt);
+            ServiceEngine::ExtensionReturnFacts facts = eng.extensionReturnFacts();
+            CHECK(facts.movedByExtension && !facts.evidenceFresh && facts.pinRaisable);
+            // the pinned location can no longer be raised (the server drained it): nothing to return to
+            QByteArray drained = pool;
+            drained.replace(R"("203.0.113.9:585")", R"("203.0.113.9:585", "health": {"probe": 0})");
+            if (xray9)
+                drained.replace(QByteArray("\"") + xray9->endpoint.toUtf8() + "\"", QByteArray("\"") + xray9->endpoint.toUtf8() + "\", \"health\": {\"probe\": 0}");
+            CHECK(drained != pool && eng.loadSubscription(drained, err));
+            facts = eng.extensionReturnFacts();
+            if (facts.pinRaisable)
+                fprintf(stderr, "pinRaisable with a drained location\n");
+            CHECK(facts.movedByExtension && !facts.pinRaisable);
+        }
+        {   // the session was not in the pinned location when the extension moved it: not the extension's doing
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("16") && eng.onTunnelConnected());
+            CHECK(eng.setPinnedNode(QStringLiteral("3"), err));                 // pinned elsewhere while the session stands on 16
+            CHECK(eng.currentNodeId() == QLatin1String("16"));
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, QStringLiteral("wifi")));
+            CHECK(!eng.extensionReturnFacts().movedByExtension);
+        }
+        {   // a stop ends the session the extension moved: a tunnel found alive afterwards is a new one
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            CHECK(eng.connect(err) && eng.onTunnelConnected());
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, QStringLiteral("wifi")) && eng.extensionReturnFacts().movedByExtension);
+            eng.requestStop();
+            CHECK(eng.adoptTunnelConnected(QStringLiteral("12"), QStringLiteral("awg"), QStringLiteral("203.0.113.12:585")));
+            CHECK(eng.currentNodeId() == QLatin1String("12") && eng.state() == EngineState::Connected);
+            CHECK(!eng.extensionReturnFacts().movedByExtension);
+        }
+        {   // the tunnel was lost and the app starts again WITHOUT a stop in between: a new choice all the same.
+            // The pinned node fails the app's own check and the app's ladder leaves it - that is not undone.
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err) && eng.onTunnelConnected() && eng.verifySucceeded());
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, QStringLiteral("wifi")) && eng.extensionReturnFacts().movedByExtension);
+            eng.onTunnelDisconnected(); // the system took the tunnel down
+            if (eng.state() == EngineState::Disconnected || eng.state() == EngineState::Error) {
+                CHECK(eng.connect(err));
+            }
+            CHECK(tun.lastUpNodeId == QLatin1String("16")); // the user's pin is raised (as a last resort it is tried even with fresh evidence)
+            CHECK(eng.onTunnelConnected() && eng.isVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            if (eng.state() == EngineState::Switching)
+                eng.onTunnelDisconnected();
+            eng.onTunnelConnected();
+            CHECK(eng.currentNodeId() != QLatin1String("16") && !eng.currentNodeId().isEmpty());
+            CHECK(!eng.extensionReturnFacts().movedByExtension);
+        }
+        {   // the extension itself came back to the user's node; what the APP's own ladder does afterwards
+            // is the app's decision and is not undone
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt(rtt);
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), err));
+            eng.setVerifyEveryTransport(true);
+            CHECK(eng.connect(err) && eng.onTunnelConnected() && eng.verifySucceeded());
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("12"), false, QStringLiteral("wifi")));
+            CHECK(eng.adoptExtensionSwitch(QStringLiteral("16"), true, QStringLiteral("wifi")) && eng.isVerifying());
+            CHECK(eng.verifyFailed(QStringLiteral("whoami no data (failover)")));
+            if (eng.state() == EngineState::Switching)
+                eng.onTunnelDisconnected();
+            eng.onTunnelConnected();
+            CHECK(eng.currentNodeId() != QLatin1String("16") && !eng.currentNodeId().isEmpty());
+            CHECK(!eng.extensionReturnFacts().movedByExtension);
         }
     }
 

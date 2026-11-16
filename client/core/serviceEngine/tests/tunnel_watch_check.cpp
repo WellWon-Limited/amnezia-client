@@ -75,6 +75,8 @@ static void tableAndClamps()
         {"ios_tw_sanity_max_per_hour", 12, 1, 60, true},
         {"ios_tw_switch_heal_steps", 2, 0, 2, true},
         {"ios_tw_trial_probe_max_per_hour", 30, 1, 60, true},
+        {"ios_tw_switch_max_per_hour", 6, 1, 30, true},
+        {"ios_tw_switch_lease_min", 360, 10, 1440, true},
         {"ios_tw_sanity_required", 1, 0, 1, true},
         {"ios_tw_probe", 1, 0, 1, true},
         {"ios_tw_plan_ttl_h", 24, 1, 168, true},
@@ -137,12 +139,14 @@ static void planBuilder()
     const QStringList keyList = plan.keys();
     const QSet<QString> keys(keyList.begin(), keyList.end());
     const QSet<QString> expected{QStringLiteral("schema"), QStringLiteral("seq"), QStringLiteral("written_ms"), QStringLiteral("config_fetched_ms"),
-                                 QStringLiteral("expires_ms"), QStringLiteral("policy_max_age_ms"), QStringLiteral("pool_revision"),
+                                 QStringLiteral("expires_ms"), QStringLiteral("switch_lease_until_ms"),
+                                 QStringLiteral("policy_max_age_ms"), QStringLiteral("pool_revision"),
                                  QStringLiteral("transport_mode"), QStringLiteral("pin"), QStringLiteral("session"),
                                  QStringLiteral("net_keys"), QStringLiteral("net_memory"), QStringLiteral("features"),
                                  QStringLiteral("numbers"), QStringLiteral("candidates")};
     CHECK(keys == expected, "the plan has exactly the keys of contract C1 (no sanity_targets without a list)");
     CHECK(plan.value("schema").toInt() == 2 && plan.value("seq").toInt() == 0, "schema 2; the sequence is set by the writer");
+    CHECK(plan.value("switch_lease_until_ms").toDouble() == 0, "the switch key off: no lease is written");
     CHECK(tunnelWatchNumberSpec("ios_tw_min_heal_steps") == nullptr, "the verdict has no heal-step number any more (review A1)");
     CHECK(qint64(plan.value("written_ms").toDouble()) == 1800000000000LL, "written_ms");
     CHECK(qint64(plan.value("config_fetched_ms").toDouble()) == 1800000000000LL - 3600000, "config_fetched_ms");
@@ -570,6 +574,9 @@ struct ResumeBench {
     // Stage 2: the engine's side of an adopted switch (ServiceEngine::adoptExtensionSwitch).
     QStringList pool{QStringLiteral("16"), QStringLiteral("12"), QStringLiteral("9")};
     QStringList adoptions;
+    // Stage 2: the way back to the user's choice.
+    WatchReturnInputs returnFacts;
+    int returns = 0;
     QStringList forgotten;
     QStringList journal;
     TunnelWatchResume resume;
@@ -602,6 +609,12 @@ struct ResumeBench {
             engineConnected = !nodeScan;
             return true;
         };
+        o.returnFacts = [this] {
+            WatchReturnInputs in = returnFacts;
+            in.engineConnected = engineConnected && !verifying; // as the facade: Connected, not Verifying
+            return in;
+        };
+        o.restartToChoice = [this] { ++returns; };
         return o;
     }
     // The facade's 1 s tick ran `ms` after its previous run.
@@ -669,7 +682,9 @@ static void handOver()
         b.resume.onSnapshot(b.snapshot(QStringLiteral("none")));
         CHECK(ran == 1 && b.resume.deferredCount() == 0, "it runs once the snapshot is adopted");
     }
-    {   // review mutant W13: every way out runs what waited - the timeout too (a check stuck in Verifying)
+    {   // review mutant W13: every way out runs what waited (a check stuck in Verifying). Second review,
+        // R3: after the 3 s the health verdict goes on, but a data check does not attribute its result
+        // to a node before a status reply asked after the resume has been processed.
         ResumeBench b;
         b.tick(60000);
         int ran = 0;
@@ -678,10 +693,30 @@ static void handOver()
         b.tick(); b.tick();
         CHECK(ran == 0 && b.resume.frozen(), "two seconds: still waiting");
         b.tick();
-        CHECK(!b.resume.frozen() && ran == 2 && b.resume.deferredCount() == 0 && b.journaled("released=timeout verdict=- why=thaw deferred=2"),
-              "no answer in 3 s: released by the timeout, both decisions run");
+        CHECK(!b.resume.frozen() && !b.held() && b.journaled("released=timeout verdict=- why=thaw deferred=2"),
+              "no answer in 3 s: the freeze is released by the timeout, the health verdict goes on");
+        CHECK(ran == 0 && b.resume.deferredCount() == 2, "the data checks still wait for the reply");
+        int late = 0;
+        CHECK(b.defer(&late, "whoami_reply") && late == 0, "and one that completes now waits with them");
+        b.now += 2500; // the reply arrives 5.5 s after it was asked
+        b.resume.onSnapshot(b.snapshot(QStringLiteral("none")));
+        CHECK(ran == 2 && late == 1 && b.resume.deferredCount() == 0 && b.journaled("watch_identity_wait released=reply deferred=3"),
+              "the reply came: every one of them runs, once");
         b.tick();
-        CHECK(ran == 2, "exactly once");
+        CHECK(ran == 2 && late == 1 && !b.defer(&late), "exactly once; nothing waits any more");
+        // no reply at all: bounded (4 resume waits), then as build 139
+        ResumeBench silent;
+        int waited = 0;
+        silent.tick(60000);
+        silent.defer(&waited);
+        for (int i = 0; i < 11; ++i)
+            silent.tick();
+        CHECK(waited == 0 && silent.resume.deferredCount() == 1, "11 s without a reply: still waiting");
+        silent.tick();
+        CHECK(waited == 1 && silent.resume.deferredCount() == 0 && silent.journaled("watch_identity_wait released=timeout deferred=1"),
+              "12 s: the wait is given up and the check goes on");
+        CHECK(kIdentityWaitFactor == 4 && identityReplyAwaited(1000, 12999, 3000) && !identityReplyAwaited(1000, 13000, 3000)
+                  && !identityReplyAwaited(-1, 5000, 3000) && !identityReplyAwaited(9000, 5000, 3000), "the bound of that wait");
         // the flag goes off while waiting
         ResumeBench off;
         off.tick(60000);
@@ -696,6 +731,29 @@ static void handOver()
         down.connected = false;
         down.resume.onSnapshot(down.snapshot(QStringLiteral("no_data")));
         CHECK(!down.resume.frozen() && ran == 4 && down.verifications == 0, "tunnel no longer Connected: released, nothing is adopted");
+    }
+    {   // frozen again while waiting: the wait for the reply is counted from the second request too
+        ResumeBench b;
+        int ran = 0;
+        b.tick(60000);
+        b.defer(&ran);
+        b.tick(40000); // 40 s frozen inside the wait: asked again
+        b.tick(); b.tick(); b.tick();
+        CHECK(!b.resume.frozen() && ran == 0, "released by the timeout; the data check waits: the reply was asked 3 s ago, not 43");
+        for (int i = 0; i < 8; ++i)
+            b.tick();
+        CHECK(ran == 0, "11 s after the second request");
+        b.tick();
+        CHECK(ran == 1, "12 s after it: the wait is given up");
+    }
+    {   // the tunnel went down during the wait and came back: nobody is waited for any more
+        ResumeBench b;
+        int ran = 0;
+        b.tick(60000);
+        b.connected = false;
+        b.tick();
+        b.connected = true;
+        CHECK(!b.resume.frozen() && !b.defer(&ran, "verify") && ran == 0, "a data check of the new session does not wait for a reply nobody was asked for");
     }
     {   // frozen again while waiting: the wait starts over and the extension is asked again
         ResumeBench b;
@@ -879,6 +937,23 @@ static void stageTwo()
     CHECK(out.journal == QStringLiteral("watch_plan_written seq=7 candidates=5 switch=1 pool_rev=1794627422892 mode=auto pin=- watch=1 why=pin"), "the journal line counts them");
     CHECK(!out.journal.contains("PSK") && !out.journal.contains("203.0.113"), "and names nothing of a node");
     CHECK(kWatchPlanMaxCandidates == 5, "five spare nodes");
+    // second review, R7: the permission to switch is a lease the app renews with every plan
+    QJsonObject leased = buildWatchPlan(in);
+    CHECK(qint64(leased.value("switch_lease_until_ms").toDouble()) == in.nowMs + 360LL * 60 * 1000, "six hours from the write by default");
+    WatchPlanInputs shortLease = in;
+    for (auto &pair : shortLease.numbers)
+        if (pair.first == QLatin1String("ios_tw_switch_lease_min"))
+            pair.second = 10;
+    CHECK(qint64(buildWatchPlan(shortLease).value("switch_lease_until_ms").toDouble()) == in.nowMs + 10LL * 60 * 1000, "the server's number, in minutes");
+    WatchPlanInputs keyOff = in;
+    keyOff.watchSwitch = false;
+    CHECK(buildWatchPlan(keyOff).value("switch_lease_until_ms").toDouble() == 0, "the switch key off: no lease");
+    keyOff = in;
+    keyOff.watch = false;
+    CHECK(buildWatchPlan(keyOff).value("switch_lease_until_ms").toDouble() == 0, "the watch off: no lease");
+    CHECK(clampTunnelWatchNumber(spec("ios_tw_switch_lease_min"), 1) == 10 && clampTunnelWatchNumber(spec("ios_tw_switch_lease_min"), 1e9) == 1440
+              && clampTunnelWatchNumber(spec("ios_tw_switch_max_per_hour"), 0) == 1 && clampTunnelWatchNumber(spec("ios_tw_switch_max_per_hour"), 999) == 30,
+          "the lease is between ten minutes and a day; switches per hour between 1 and 30");
     // --- the switch the app finds made ---
     WatchAdoptInputs a;
     a.switchSeq = 1;
@@ -1000,17 +1075,244 @@ static void stageTwo()
         bench.resume.onSnapshot(m);
         CHECK(bench.adoptions == QStringList({"16->12"}) && bench.journaled("seq=4 why=unknown"), "the session's own switch number is enough");
     }
-    {   // in the background (awake only for the arming) nothing is adopted
+    {   // in the background (awake only for the arming) nothing is adopted - it waits for the screen
         ResumeBench bench;
         bench.tick(60000);
         bench.backgroundArmOnly = true;
         bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
         CHECK(bench.adoptions.isEmpty() && bench.node == "16", "left for the return to the screen");
+        for (int i = 0; i < 5; ++i)
+            bench.tick();
+        CHECK(bench.adoptions.isEmpty(), "for as long as the app is only holding background time");
+        bench.backgroundArmOnly = false;
+        bench.tick();
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.verifications == 1, "on the screen: adopted at the next tick, then checked");
+        bench.tick();
+        CHECK(bench.adoptions.size() == 1, "once");
     }
-    {   // not frozen: a snapshot nobody waits for adopts nothing
+    // ---- second review, R3: adoption does not depend on the resume freeze ----
+    const auto metadata = [](const QString &node, int seq, const QString &gen = QStringLiteral("gen-A")) {
+        return QVariantMap{{"node_id", node}, {"generation", gen}, {"switch_seq", seq}, {"switch_why", "no_data"}};
+    };
+    {   // reviewer's case 2: the reply is later than ios_tw_resume_wait_ms (the adapter's queue is busy
+        // with the switch itself). It was never adopted; the app showed node 16 while traffic left through 12.
         ResumeBench bench;
+        int ran = 0;
+        bench.tick(60000);
+        bench.defer(&ran, "whoami");
+        for (int i = 0; i < 4; ++i)
+            bench.tick();
+        CHECK(!bench.resume.frozen() && ran == 0, "released by the timeout; the data check does not run yet");
+        bench.now += 1500;
         bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
-        CHECK(bench.adoptions.isEmpty(), "outside a hand-over nothing is adopted");
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.node == "12", "the late reply is adopted all the same");
+        CHECK(bench.verifications == 1, "and the node is checked by the app");
+        CHECK(ran == 1, "the check that waited runs only now, after the adoption (it finds a new epoch)");
+    }
+    {   // reviewer's case 3: the tunnel reports Reasserting during the wait
+        ResumeBench bench;
+        bench.tick(60000);
+        bench.connected = false; // Reasserting is shown to the app as Connecting
+        bench.tick();
+        CHECK(!bench.resume.frozen() && bench.journaled("released=off"), "the freeze ends: the tunnel is not Connected");
+        bench.connected = true;
+        bench.resume.onReasserted();
+        CHECK(bench.resume.frozen() && bench.snapshotRequests == 2 && bench.journaled("begin why=reasserted"), "Reasserting -> Connected: one fresh snapshot is asked, decisions wait");
+        int ran = 0;
+        CHECK(bench.defer(&ran, "verify"), "a data check waits for it");
+        bench.now += 800;
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions == QStringList({"16->12"}) && ran == 1, "adopted, then the check goes on");
+        // with the flag off a Reasserting begins nothing (build 139)
+        ResumeBench off;
+        off.watchFlag = false;
+        off.resume.onReasserted();
+        CHECK(!off.resume.frozen() && off.snapshotRequests == 0 && off.journal.isEmpty() && !off.defer(&ran), "flag off: Reasserting is as in 139");
+    }
+    {   // reviewer's case 4: the app never slept - an ordinary status poll carries the switch
+        ResumeBench bench;
+        for (int i = 0; i < 5; ++i)
+            bench.tick();
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.verifications == 1 && bench.snapshotRequests == 0,
+              "adopted from an ordinary poll, without any freeze");
+        CHECK(bench.journaled("adopt_extension_switch from=16 to=12 seq=1 why=no_data result=adopted"), "journaled");
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        bench.resume.onSessionMetadata(QVariantMap{{"node_id", "16"}, {"generation", "gen-A"}}); // the profile's copy, no switch number
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.size() == 1 && bench.node == "12", "the same switch is adopted once, however the metadata flaps");
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("16"), 3)); // back on the profile's node (exhausted)
+        CHECK(bench.adoptions == QStringList({"16->12", "12->16"}), "a later switch back to the profile's node is adopted too");
+        // an ordinary poll of a session without switches changes nothing
+        ResumeBench plain;
+        plain.resume.onSessionMetadata(QVariantMap{{"node_id", "12"}, {"generation", "gen-A"}});
+        CHECK(plain.adoptions.isEmpty() && plain.journal.isEmpty(), "no switch number: the app's own identity rules, as before");
+        // the watch flag off does not hide where the tunnel stands
+        ResumeBench off;
+        off.watchFlag = false;
+        off.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        CHECK(off.adoptions == QStringList({"16->12"}), "a switch that was made is adopted even after the flag went off");
+        // free text of the reply never reaches the journal
+        ResumeBench junk;
+        QVariantMap m = metadata(QStringLiteral("12"), 1);
+        m.insert("switch_why", "x y; z=1");
+        junk.resume.onSessionMetadata(m);
+        CHECK(junk.journaled("why=unknown result=adopted"), "the reason is a label or 'unknown'");
+    }
+    {   // a newer reply replaces the switch that waited for the screen
+        ResumeBench bench;
+        bench.backgroundArmOnly = true;
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        CHECK(bench.adoptions.isEmpty(), "in the background: it waits");
+        bench.resume.onSessionMetadata(metadata(QStringLiteral("16"), 2)); // the extension went back to the profile's node meanwhile
+        bench.backgroundArmOnly = false;
+        bench.tick();
+        bench.tick();
+        CHECK(bench.adoptions.isEmpty() && bench.node == "16", "the app is where the tunnel stands: the older switch is not replayed");
+        ResumeBench two;
+        two.backgroundArmOnly = true;
+        two.resume.onSessionMetadata(metadata(QStringLiteral("12"), 1));
+        two.resume.onSessionMetadata(metadata(QStringLiteral("9"), 2));
+        two.backgroundArmOnly = false;
+        two.tick();
+        CHECK(two.adoptions == QStringList({"16->9"}), "only the newest switch is adopted");
+        // what waited and was adopted does not wait any more (another run of the extension would
+        // otherwise let it through again)
+        two.pool.append(QStringLiteral("3"));
+        two.resume.onSessionMetadata(metadata(QStringLiteral("3"), 1, QStringLiteral("gen-B")));
+        for (int i = 0; i < 3; ++i)
+            two.tick();
+        CHECK(two.node == "3" && two.adoptions.last() == QLatin1String("9->3") && two.adoptions.count(QStringLiteral("3->9")) == 0,
+              "a switch adopted from the wait is not adopted again later");
+    }
+    {   // the labels of the reply that go into the journal
+        CHECK(watchLabel(QStringLiteral("no_data")) == QLatin1String("no_data") && watchLabel(QStringLiteral("os_start_pin")) == QLatin1String("os_start_pin")
+                  && watchLabel(QStringLiteral("network_change")) == QLatin1String("network_change"), "a label passes as it is");
+        for (const QString &junk : {QString(), QStringLiteral("a b"), QStringLiteral("x=1"), QStringLiteral("a\nb"), QStringLiteral("a;b"), QStringLiteral("-")})
+            CHECK(watchLabel(junk) == QLatin1String("unknown"), "anything else is 'unknown'");
+        CHECK(watchLabel(QString(32, QLatin1Char('a'))).size() == 32 && watchLabel(QString(33, QLatin1Char('a'))) == QLatin1String("unknown"), "at most 32 characters");
+    }
+    {   // a snapshot nobody waits for: the identity is still adopted (the verdict is not consumed)
+        ResumeBench bench;
+        bench.resume.onSnapshot(switched(bench, QStringLiteral("no_data"), QStringLiteral("12"), 1));
+        CHECK(bench.adoptions == QStringList({"16->12"}) && bench.verifications == 1, "adopted and checked");
+        CHECK(!bench.journaled("data_watch_consumed"), "outside a hand-over the verdict itself is not consumed");
+    }
+    // ---- second review, R4: evidence instead of "failed for the session", and the way back ----
+    {
+        WatchEvidence e;
+        const qint64 t0 = 1800000000000LL;
+        e.note(QStringLiteral("16"), QStringLiteral("wifi"), t0);
+        CHECK(e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0) && e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 + kWatchEvidenceTtlMs - 1),
+              "fresh for half an hour");
+        CHECK(!e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 + kWatchEvidenceTtlMs), "then it has aged");
+        CHECK(!e.fresh(QStringLiteral("16"), QStringLiteral("cellular:250-02"), t0 + 1000), "it says nothing about another network");
+        CHECK(!e.fresh(QStringLiteral("12"), QStringLiteral("wifi"), t0 + 1000), "nor about another node");
+        CHECK(!e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 - 1), "a clock set back does not make it fresh");
+        e.note(QStringLiteral("12"), QStringLiteral("wifi"), t0 + 60000);
+        CHECK(e.freshNodes(QStringLiteral("wifi"), t0 + 120000) == QSet<QString>({QStringLiteral("16"), QStringLiteral("12")}), "the nodes to skip on this network");
+        CHECK(e.freshNodes(QStringLiteral("wifi"), t0 + kWatchEvidenceTtlMs + 1000) == QSet<QString>({QStringLiteral("12")}), "each ages by itself");
+        CHECK(e.freshNodes(QStringLiteral("cellular"), t0 + 1000).isEmpty(), "none on another network");
+        e.note(QStringLiteral("16"), QStringLiteral("wifi"), t0 + 20 * 60000);
+        CHECK(e.size() == 2 && e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 + 45 * 60000), "judged again: one record, the newest");
+        e.note(QString(), QStringLiteral("wifi"), t0);
+        CHECK(e.size() == 2, "no node, no record");
+        WatchEvidence many;
+        for (int i = 0; i < 40; ++i)
+            many.note(QString::number(i), QStringLiteral("wifi"), t0 + i);
+        CHECK(many.size() == kWatchEvidenceMax && many.fresh(QStringLiteral("39"), QStringLiteral("wifi"), t0 + 100) && !many.fresh(QStringLiteral("0"), QStringLiteral("wifi"), t0 + 100),
+              "bounded, the newest stay");
+        WatchEvidence old;
+        old.note(QStringLiteral("1"), QStringLiteral("wifi"), t0);
+        old.note(QStringLiteral("2"), QStringLiteral("wifi"), t0 + kWatchEvidenceTtlMs + 5);
+        CHECK(old.size() == 1, "aged records are dropped when a new one is noted");
+        e.clear();
+        CHECK(e.size() == 0 && kWatchEvidenceTtlMs == 30 * 60 * 1000, "half an hour, as in the extension");
+
+        WatchReturnInputs in;
+        in.movedByExtension = in.pinRaisable = in.nodeScanOn = in.engineConnected = in.wantConnected = true;
+        CHECK(decideExtensionReturn(in), "moved out of the pin, the evidence has aged, the app can check: back to the user's choice");
+        for (int i = 0; i < 7; ++i) {
+            WatchReturnInputs no = in;
+            if (i == 0) no.movedByExtension = false;
+            if (i == 1) no.pinRaisable = false;
+            if (i == 2) no.evidenceFresh = true;
+            if (i == 3) no.nodeScanOn = false;
+            if (i == 4) no.engineConnected = false;
+            if (i == 5) no.wantConnected = false;
+            if (i == 6) no.busy = true;
+            CHECK(!decideExtensionReturn(no), "every condition is needed (no pin, fresh evidence, no data check of its own, not Connected, intent off, busy)");
+        }
+    }
+    {   // second review, R5: the reply said the tunnel has no engine - the app's ordinary restart, once
+        EngineDownInputs in;
+        in.wantConnected = in.foreground = in.tunnelConnected = true;
+        CHECK(decideEngineDownRestart(in), "a wanted session on the screen without an engine: restart");
+        for (int i = 0; i < 6; ++i) {
+            EngineDownInputs no = in;
+            if (i == 0) no.wantConnected = false;
+            if (i == 1) no.restartPending = true;
+            if (i == 2) no.opInFlight = true;
+            if (i == 3) no.paused = true;
+            if (i == 4) no.foreground = false;
+            if (i == 5) no.tunnelConnected = false;
+            CHECK(!decideEngineDownRestart(no), "not wanted / already restarting / an operation in flight / paused / in the background / not Connected: nothing");
+        }
+        // Reasserting -> Connected of a session the engine holds
+        CHECK(sessionReasserted(true, true, QStringLiteral("connected")) && sessionReasserted(true, true, QStringLiteral("verifying")),
+              "Connecting -> Connected while the engine holds a session: the extension re-applied its settings");
+        CHECK(!sessionReasserted(false, true, QStringLiteral("connected")) && !sessionReasserted(true, false, QStringLiteral("connected")),
+              "another transition is not a Reasserting");
+        for (const char *state : {"connecting", "switching", "disconnected", "error", ""})
+            CHECK(!sessionReasserted(true, true, QLatin1String(state)), "a start or a switch of the app's own is not a Reasserting");
+    }
+    {   // the hand-over asks for the way back last, and only when nothing else happened in it
+        ResumeBench bench;
+        bench.returnFacts.movedByExtension = bench.returnFacts.pinRaisable = bench.returnFacts.nodeScanOn = bench.returnFacts.wantConnected = true;
+        bench.tick(60000);
+        bench.resume.onSnapshot(bench.snapshot(QStringLiteral("none")));
+        CHECK(bench.returns == 1 && bench.journaled("extension_return_to_choice from=16"), "a quiet hand-over with aged evidence: the ordinary restart to the user's choice");
+        // fresh evidence: stay
+        ResumeBench fresh;
+        fresh.returnFacts = bench.returnFacts;
+        fresh.returnFacts.evidenceFresh = true;
+        fresh.tick(60000);
+        fresh.resume.onSnapshot(fresh.snapshot(QStringLiteral("none")));
+        CHECK(fresh.returns == 0, "the extension's evidence is fresh: the session stays where it is");
+        // not in the hand-over that adopts a switch or starts a re-check
+        ResumeBench adopting;
+        adopting.returnFacts = bench.returnFacts;
+        adopting.tick(60000);
+        adopting.resume.onSnapshot(switched(adopting, QStringLiteral("none"), QStringLiteral("12"), 1));
+        CHECK(adopting.adoptions.size() == 1 && adopting.returns == 0, "an adoption and a way back never share a hand-over");
+        ResumeBench verdict;
+        verdict.returnFacts = bench.returnFacts;
+        verdict.tick(60000);
+        verdict.resume.onSnapshot(verdict.snapshot(QStringLiteral("no_data")));
+        CHECK(verdict.verifications == 1 && verdict.returns == 0, "nor a re-check and a way back");
+        // the engine refused the re-check of a verdict about this session: still no way back in that hand-over
+        ResumeBench refused;
+        refused.returnFacts = bench.returnFacts;
+        refused.engineAgrees = false;
+        refused.tick(60000);
+        refused.resume.onSnapshot(refused.snapshot(QStringLiteral("no_data")));
+        CHECK(refused.reenterCalls == 1 && refused.verifications == 0 && refused.returns == 0, "a verdict about this session and a way back never share a hand-over");
+        // released by the timeout or outside a freeze: nobody is asked
+        ResumeBench timeout;
+        timeout.returnFacts = bench.returnFacts;
+        timeout.tick(60000);
+        for (int i = 0; i < 4; ++i)
+            timeout.tick();
+        timeout.resume.onSnapshot(timeout.snapshot(QStringLiteral("none")));
+        timeout.resume.onSessionMetadata(QVariantMap{{"node_id", "16"}, {"generation", "gen-A"}});
+        CHECK(timeout.returns == 0, "the way back is asked only in a hand-over that got its snapshot in time");
+        // in the background: nothing
+        ResumeBench background;
+        background.returnFacts = bench.returnFacts;
+        background.tick(60000);
+        background.backgroundArmOnly = true;
+        background.resume.onSnapshot(background.snapshot(QStringLiteral("none")));
+        CHECK(background.returns == 0, "never from the background");
     }
     {   // no switch was made: the node of another session is not adopted (stage 1 behaviour)
         ResumeBench bench;

@@ -53,7 +53,10 @@ enum TribeWatchPlanTests {
 
     /// Stage 2: the candidates of the plan, the text of a switch, the node of a start by the system.
     static func stageTwo() {
-        let switchOn: (inout [String: Any]) -> Void = { $0["features"] = ["ios_tunnel_watch": true, "ios_tunnel_watch_switch": true] }
+        let switchOn: (inout [String: Any]) -> Void = {
+            $0["features"] = ["ios_tunnel_watch": true, "ios_tunnel_watch_switch": true]
+            $0["switch_lease_until_ms"] = now + 6 * hour
+        }
         func parsed(_ entries: [Any], _ more: (inout [String: Any]) -> Void = { _ in }) -> TribeWatchPlan? {
             accepted(plan { switchOn(&$0); $0["candidates"] = entries; more(&$0) })
         }
@@ -106,7 +109,7 @@ enum TribeWatchPlanTests {
         // --- a start by the system ---
         typealias Choice = TribeStartChoice
         func choose(_ plan: TribeWatchPlan?, net: String = "cellular", failed: Choice.LastFailure? = nil) -> String {
-            let c = Choice.choose(profileNodeId: "16", plan: plan, net: net, lastFailure: failed, nowMs: now)
+            let c = Choice.choose(profileNodeId: "16", plan: plan, net: net, failures: failed.map { [$0] } ?? [], nowMs: now)
             return "\(c.nodeId)/\(c.why)"
         }
         let twoSpare = parsed([candidate(12), candidate(9)])
@@ -136,11 +139,63 @@ enum TribeWatchPlanTests {
         check(choose(parsed([candidate(16)]), failed: recently) == "16/profile", "nothing else to raise: the profile's node")
         // --- its own last verdict, read back from the shared file ---
         let state: [String: Any] = ["verdict": "no_data", "node_id": "16", "net": "cellular", "last_no_data_ms": now - 5000]
-        check(Choice.lastFailure(state: state) == Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 5000), "the last verdict of the previous run")
+        check(Choice.failures(state: state, nowMs: now) == [Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 5000)], "the last verdict of the previous run")
         var other = state
         other["verdict"] = "none"
-        check(Choice.lastFailure(state: other) == nil && Choice.lastFailure(state: nil) == nil && Choice.lastFailure(state: ["verdict": "no_data"]) == nil, "no verdict, no file, half a record: nothing")
+        check(Choice.failures(state: other, nowMs: now).isEmpty && Choice.failures(state: nil, nowMs: now).isEmpty
+              && Choice.failures(state: ["verdict": "no_data"], nowMs: now).isEmpty, "no verdict, no file, half a record: nothing")
         check(Choice.failureMemoryMs == 30 * 60 * 1000, "half an hour")
+        // --- the list of nodes judged dead: it survives every rewrite of the file (review R6) ---
+        let f16 = Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 20 * 60_000)
+        let f12 = Choice.LastFailure(nodeId: "12", net: "cellular", wallMs: now - 60_000)
+        var list = Choice.noting(f16, in: [], nowMs: now)
+        list = Choice.noting(f12, in: list, nowMs: now)
+        check(list == [f16, f12], "records accumulate")
+        list = Choice.noting(Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now), in: list, nowMs: now)
+        check(list.map { $0.nodeId } == ["12", "16"] && list.last?.wallMs == now, "a node judged again: its newest record only")
+        list = Choice.noting(Choice.LastFailure(nodeId: "16", net: "wifi", wallMs: now), in: list, nowMs: now)
+        check(list.count == 3, "the same node on another kind of network is another record")
+        check(Choice.noting(f12, in: [Choice.LastFailure(nodeId: "3", net: "wifi", wallMs: now - 31 * 60_000)], nowMs: now) == [f12], "expired records are dropped")
+        var many: [Choice.LastFailure] = []
+        for n in 1...12 { many = Choice.noting(Choice.LastFailure(nodeId: String(n), net: "wifi", wallMs: now - Int64(n)), in: many, nowMs: now) }
+        check(many.count == Choice.maxFailuresKept && many.last?.nodeId == "12", "at most eight are kept, the newest stay")
+        let encoded = Choice.encode([f16, f12])
+        check(JSONSerialization.isValidJSONObject(encoded) && Choice.failures(state: ["dead": encoded, "verdict": "none"], nowMs: now) == [f16, f12], "they lie in the file and come back from it")
+        check(Choice.failures(state: ["dead": encoded, "verdict": "no_data", "node_id": "9", "net": "wifi", "last_no_data_ms": now - 1], nowMs: now).map { $0.nodeId } == ["16", "12", "9"],
+              "the verdict the file ends with joins the list")
+        check(Choice.failures(state: ["dead": encoded], nowMs: now + 25 * 60_000) == [f12], "read back half an hour after the older one: it is gone")
+        check(Choice.failures(state: ["dead": ["junk", ["node_id": "", "net": "wifi", "at_ms": 5], ["node_id": "7", "net": "wi fi", "at_ms": 5], ["node_id": "7", "net": "wifi"]]], nowMs: now).isEmpty, "junk entries are dropped")
+        let twoDead = Choice.choose(profileNodeId: "16", plan: twoSpare, net: "cellular", failures: [f16, f12], nowMs: now)
+        check(twoDead.nodeId == "9" && twoDead.why == "plan_order", "with two nodes known dead here the third is chosen: \(twoDead)")
+        // --- who started the tunnel (review R1) ---
+        check(Choice.startedBySystem(source: nil), "no source at all: the system")
+        for named in ["app", "intent", "os", "", "anything"] { check(!Choice.startedBySystem(source: named), "'\(named)' names somebody: not the system") }
+        // --- the lease of the switch permission (review R7) ---
+        let leased = parsed([candidate(12)])
+        check(leased?.policy.switchEnabled == true && leased?.switchLeaseUntilMs == now + 6 * hour && leased?.holdsUnusableSecrets == false, "inside the lease: switching is permitted")
+        let lapsed = parsed([candidate(12)]) { $0["switch_lease_until_ms"] = now }
+        check(lapsed?.policy.enabled == true && lapsed?.policy.switchEnabled == false && lapsed?.candidates.isEmpty == true, "the lease lapsed: the watch works, switching does not, no candidate is kept")
+        check(lapsed?.holdsUnusableSecrets == true, "and the file is known to hold keys nothing may be done with")
+        check(parsed([candidate(12)]) { $0["switch_lease_until_ms"] = now + 1 }?.policy.switchEnabled == true, "the lease boundary")
+        check(parsed([candidate(12)]) { $0["switch_lease_until_ms"] = nil }?.policy.switchEnabled == false, "no lease in the plan: no switching")
+        check(parsed([candidate(12)]) { $0["switch_lease_until_ms"] = now + 25 * hour }?.policy.switchEnabled == false, "a lease longer than a day is not a lease (the clock, or a broken writer)")
+        check(parsed([candidate(12)]) { $0["switch_lease_until_ms"] = now + 24 * hour }?.policy.switchEnabled == true, "a day is the longest")
+        check(accepted(plan { $0["candidates"] = [candidate(12)] })?.holdsUnusableSecrets == true, "the key off with candidates in the file: keys nothing may be done with")
+        let keyOff = accepted(plan { $0["candidates"] = [candidate(12)]; $0["switch_lease_until_ms"] = now + 6 * hour })
+        check(keyOff?.candidates.isEmpty == true && keyOff?.holdsUnusableSecrets == true && keyOff?.policy.switchEnabled == false,
+              "the key off inside a live lease: no node's keys are kept in memory either, and the file is known to hold them")
+        check(accepted(plan())?.holdsUnusableSecrets == false, "no candidates: nothing to take out")
+        check(parsed([candidate(12)]) { $0["expires_ms"] = now }?.holdsUnusableSecrets == true, "an expired list: the same")
+        let full = plan { switchOn(&$0); $0["candidates"] = [candidate(12), candidate(9)] }
+        let clean = TribeWatchPlan.scrubbed(full)
+        let cleanObject = clean.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        check((cleanObject?["candidates"] as? [Any])?.isEmpty == true && cleanObject?["seq"] as? Int == 5 && cleanObject?["written_ms"] as? Int64 == now - 1000
+              && (cleanObject?["numbers"] as? [String: Any])?["ios_tw_cycle_s"] as? Int == 25, "scrubbed: no candidates, everything else as it was")
+        check(clean.map { !String(decoding: $0, as: UTF8.self).contains(key32) } == true, "no key is left")
+        check(accepted(clean, last: accepted(full)!.order)?.policy.enabled == true, "and it is the same plan for the order of plans")
+        check(TribeWatchPlan.scrubbed(Data("junk".utf8)) == nil && TribeWatchPlan.scrubbed(plan { $0["schema"] = 1 }) == nil, "what is not a plan is not rewritten")
+        check(TribeDataWatchJournal.engineLine(down: true, nodeId: "16") == "Tribe watch: engine=down node=16"
+              && TribeDataWatchJournal.engineLine(down: false, nodeId: "16") == "Tribe watch: engine=up node=16", "the engine line")
         // --- the journal lines of a command ---
         check(TribeDataWatchJournal.commandLine(.switchPeer(to: "12", why: .noData), result: .performed, from: "16", seq: 3, net: "cellular")
               == "Tribe watch: peer_switch from=16 to=12 why=no_data seq=3 net=cellular result=performed", "the switch line")
@@ -209,6 +264,7 @@ enum TribeWatchPlanTests {
         // --- the switch flag needs a live candidate list (stage 2) ---
         let withCandidates: (inout [String: Any]) -> Void = {
             $0["features"] = ["ios_tunnel_watch": true, "ios_tunnel_watch_switch": true]
+            $0["switch_lease_until_ms"] = now + hour
             $0["candidates"] = [candidate(16)]
         }
         check(accepted(plan(withCandidates))?.policy.switchEnabled == true, "switch flag with candidates is carried")

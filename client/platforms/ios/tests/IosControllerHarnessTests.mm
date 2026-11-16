@@ -1178,6 +1178,73 @@ static void test_status_snapshot_drops_older_reply()
           "the snapshot is not the one asked for after the request");
 }
 
+// Stage 2, second review R5: the extension has no engine (an in-place switch failed and nothing could
+// be started again). Its reply says so and carries no counters: the app is told, and nothing judges a
+// handshake by a reply that has none.
+static void test_engine_down_reply_is_told_and_judges_nothing()
+{
+    HarnessSession *s = adoptLiveSession();
+    int told = 0;
+    std::vector<QVariantMap> metadata;
+    QObject::connect(IosController::Instance(), &IosController::tunnelEngineDown, [&told] { ++told; });
+    QObject::connect(IosController::Instance(), &IosController::sessionMetadataChanged,
+                     [&metadata](const QVariantMap &m) { metadata.push_back(m); });
+    const long long now = (long long)[[NSDate date] timeIntervalSince1970];
+    s.statusReply = statusReply(@"run-1", @"cfg-1", now, 5000);
+    IosController::Instance()->checkStatus();
+    spin(120);
+    CHECK(told == 0, "a healthy reply said the engine is down");
+    const size_t before = obs.states.size();
+    s.statusReply = @{@"session_metadata": @{@"schema_version": @1, @"generation": @"run-1", @"configuration_generation": @"cfg-1",
+                                             @"node_id": @"12", @"switch_seq": @2, @"switch_why": @"no_data"},
+                      @"engine_down": @YES};
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll.start(30);
+    spin(600);
+    poll.stop();
+    CHECK(told >= 1, "the reply without an engine was not told to the app");
+    CHECK(!metadata.empty() && metadata.back().value(QStringLiteral("node_id")).toString() == QLatin1String("12")
+              && metadata.back().value(QStringLiteral("switch_seq")).toInt() == 2,
+          "the session of that reply (where the tunnel stands) did not reach the app");
+    CHECK(obs.states.size() == before, "a reply without counters changed the connection state");
+    CHECK(!obs.has(Vpn::ConnectionState::Reconnecting) && !obs.has(Vpn::ConnectionState::Error),
+          "a reply without counters was judged as a handshake timeout");
+    CHECK(obs.reasons.empty(), "a disconnect reason for a live session");
+    // Not a flag of the reply's type: a string or a missing key is not "down".
+    const int toldBefore = told;
+    NSMutableDictionary *junk = [[statusReply(@"run-1", @"cfg-1", now, 9000) mutableCopy] autorelease];
+    junk[@"engine_down"] = @[@1];
+    s.statusReply = junk;
+    IosController::Instance()->checkStatus();
+    spin(120);
+    CHECK(told == toldBefore, "a garbled engine_down was taken for the truth");
+}
+
+// The same reply while a handshake is still awaited (the twin of handshake_timeout_stop_not_intentional,
+// whose reply with counters gives Reconnecting after two timeouts): no counters - no timeout is counted.
+static void test_engine_down_reply_is_not_a_handshake_timeout()
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(NEVPNStatusDisconnected);
+    s.runtimeGeneration = @"run-5";
+    s.statusReply = @{@"session_metadata": @{@"schema_version": @1, @"generation": @"run-5", @"configuration_generation": @"cfg-5",
+                                             @"node_id": @"9"},
+                      @"engine_down": @YES};
+    g_managers = [@[newManager(@"mgr-1", @"cfg-5", s)] retain];
+    int told = 0;
+    QObject::connect(IosController::Instance(), &IosController::tunnelEngineDown, [&told] { ++told; });
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, [] { IosController::Instance()->checkStatus(); });
+    poll.start(30);
+    IosController::Instance()->connectVpn(amnezia::Proto::Awg, awgConfig(150, 2));
+    spin(1200);
+    CHECK(s.startCalls == 1, "the tunnel did not start");
+    CHECK(told >= 1, "the reply without an engine was not told to the app");
+    CHECK(!obs.has(Vpn::ConnectionState::Reconnecting), "a reply without counters was counted as a handshake timeout");
+    CHECK(!obs.has(Vpn::ConnectionState::Error) && s.stopCalls == 0, "a reply without counters stopped the tunnel");
+}
+
 static NSURL *g_planContainer = nil;
 @interface NSFileManager (HarnessWatchPlan)
 - (NSURL *)harness_containerURLForSecurityApplicationGroupIdentifier:(NSString *)identifier;
@@ -1208,10 +1275,17 @@ static void test_watch_plan_file_written()
     CHECK(IosController::Instance()->writeTunnelWatchPlanFile(first), "the plan is not written");
     NSData *onDisk = [NSData dataWithContentsOfFile:file];
     CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == first, "the bytes on disk are not the plan");
+    // Stage 2: the plan may hold node keys - it never goes into a device backup.
+    NSNumber *excluded = nil;
+    [[NSURL fileURLWithPath:file] getResourceValue:&excluded forKey:NSURLIsExcludedFromBackupKey error:nil];
+    CHECK(excluded.boolValue, "the plan file is not excluded from backups");
     const QByteArray second = QByteArrayLiteral("{\"schema\":1,\"features\":{\"ios_tunnel_watch\":false}}");
     CHECK(IosController::Instance()->writeTunnelWatchPlanFile(second), "the plan is not rewritten");
     onDisk = [NSData dataWithContentsOfFile:file];
     CHECK(onDisk && QByteArray((const char *)onDisk.bytes, (qsizetype)onDisk.length) == second, "the kill switch did not reach the file");
+    excluded = nil; // an atomic write makes a new file: the mark has to be set after every write
+    [[NSURL fileURLWithPath:file] getResourceValue:&excluded forKey:NSURLIsExcludedFromBackupKey error:nil];
+    CHECK(excluded.boolValue, "the rewritten plan file is not excluded from backups");
     NSArray *left = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
     CHECK(left.count == 1, "the atomic write left a temporary file behind");
     [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
@@ -1851,6 +1925,8 @@ static const Test kTests[] = {
     {"bg_arm_keeps_restart_guard_time", test_bg_arm_keeps_restart_guard_time},
     {"watch_block_forwarded", test_watch_block_forwarded},
     {"status_snapshot_drops_older_reply", test_status_snapshot_drops_older_reply},
+    {"engine_down_reply_is_told_and_judges_nothing", test_engine_down_reply_is_told_and_judges_nothing},
+    {"engine_down_reply_is_not_a_handshake_timeout", test_engine_down_reply_is_not_a_handshake_timeout},
     {"watch_plan_file_written", test_watch_plan_file_written},
 #endif
     {"stop_disarms_on_demand_before_stop", test_stop_disarms_on_demand_before_stop},

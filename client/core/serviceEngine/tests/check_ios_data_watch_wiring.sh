@@ -21,7 +21,9 @@
 #    E5. the statistics tick is the runtime's (plan first, with the log on or off); neither the runtime
 #        nor the rule has a timer; the bypass request is bound to the physical interface; nothing
 #        notifies the user;
-#    E6. stage 1 moves nobody: no switching action is produced, no network settings are re-applied;
+#    E6. who may move the tunnel (stage 2): only the rule's arbiter orders, only the adapter executes, in
+#        one place, through the tested sequence and the shared budget; a switch that leaves no engine is
+#        told and retried on the same tick; the start goes by the start source the app really passes;
 #    E7. the package: tribe.13 = tribe.11 + 0012, both extension targets compile the new sources;
 #    E8. the Xray statistics line is written only through the statistics tick;
 #   app
@@ -35,6 +37,8 @@
 #        asks the system itself whether the app is on the screen;
 #    A8. the effects handed to the hand-over never touch the pin, the intent or the "data proven" marks;
 #    A9. the engine's way back to Verifying is called from one place;
+#    A10. stage 2 in the app: candidates only with both flags, one entry point for an adopted switch
+#        (from any status reply), the way back and the engine-down restart go through the ordinary restart;
 #    X1. the numbers the extension reads and their bounds are those of the app's table;
 #    X2. the extension's built-in bypass targets are the white-list detector's own defaults.
 # Run by build_check.sh.
@@ -80,9 +84,15 @@ added_swift() { # the added lines of the adapter only
 swift_added="$(added_swift)"
 [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatchTick(sample, handle: handle')" = "1" ] \
     || bad "E1: the adapter must feed the data watch from exactly one place"
-tick_ctx="$(grep -n -A2 'if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }' "$PATCH" | head -3)"
+tick_ctx="$(grep -n -A5 'if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }' "$PATCH" | head -6)"
 has "$tick_ctx" 'self.recovery.tick(sample, pathSatisfied' \
     || bad "E1: the data watch must be fed on the stall tick, right before the recovery ladder judges the same sample; a tick on which the watch acted is not judged by the ladder as well"
+# Second review, R6: one owner of recovery while the arbiter treats or leaves a node - the ladder's own
+# steps would spend the shared budget the switch needs (that the property is false with the switch key
+# off is tested: TribeDataWatchTests keys_off_the_arbiter_never_owns_recovery).
+order "$tick_ctx" 'if self.dataWatch.arbiterOwnsRecovery { return }' 'self.recovery.tick(sample, pathSatisfied' \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'arbiterOwnsRecovery')" = "1" ] \
+    || bad "E1: while the arbiter owns the recovery the ladder must not judge the same samples (one place, right before the ladder)"
 for token in 'makeTimerSource' 'asyncAfter' 'Timer(' 'scheduledTimer' 'DispatchWorkItem'; do
     has "$swift_added" "$token" && bad "E1: patch 0012 adds a timer or a delayed block to the adapter ($token)"
 done
@@ -96,11 +106,15 @@ has "$tick_body" 'self.dataWatchInputs?(handle)' && order "$tick_body" 'guard se
 path_body="$(printf '%s\n' "$swift_added" | awk '/private func dataWatchPathEvent/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 order "$path_body" 'guard self.dataWatchPolicy.enabled else { return }' 'self.dataWatch.notePathEvent(' \
     || bad "E2: a path event must not reach a switched-off watch"
-start_note="$(printf '%s\n' "$swift_added" | grep -B1 'self.dataWatch.noteDeviceStarted(' | head -1)"
-has "$start_note" 'if self.dataWatchPolicy.enabled {$' \
-    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteDeviceStarted(')" = "1" ] \
-    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteBackendRestarted(')" = "1" ] \
-    && has "$(printf '%s\n' "$swift_added" | grep -B1 'self.dataWatch.noteBackendRestarted(' | head -1)" 'if self.dataWatchPolicy.enabled {$' \
+# Every note to the watch about a (re)started device is under the policy flag: on the same line or on
+# the line above. Two of each: the start and the engine brought back after a failed switch; the ladder's
+# in-place restart and the switch that came back to the previous node.
+unguarded="$(printf '%s\n' "$swift_added" | awk '
+    /self\.dataWatch\.note(DeviceStarted|BackendRestarted)\(/ && !/self\.dataWatchPolicy\.enabled/ && prev !~ /if self\.dataWatchPolicy\.enabled \{$/ { print }
+    { prev = $0 }')"
+[ -z "$unguarded" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteDeviceStarted(')" = "2" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.dataWatch.noteBackendRestarted(')" = "2" ] \
     || bad "E2: the device-start and backend-restart notes must be under the policy flag"
 has "$swift_added" 'private var dataWatchPolicy = TribeDataWatchPolicy.disabled' \
     || bad "E2: the adapter's policy must start disabled"
@@ -177,7 +191,7 @@ has "$(added)" 'UNUserNotificationCenter' && bad "E5: patch 0012 notifies the us
 rule="$(code "$RECIPE/tribe/TribeDataWatch.swift")"
 [ "$(printf '%s\n' "$rule" | grep -c 'if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive {')" = "1" ] \
     || bad "E6: the arbiter must be gated by the switch key, the switch budget and the living app, in one place"
-[ "$(printf '%s\n' "$rule" | grep -c 'arbiterCommand(now: now, env: env, policy: policy)')" = "1" ] \
+[ "$(printf '%s\n' "$rule" | grep -c 'arbiterCommand(now: now, env: env, policy: policy, canSwitch: canSwitch)')" = "1" ] \
     || bad "E6: the arbiter must be asked from one place"
 arb="$(swift_func "$RECIPE/tribe/TribeDataWatch.swift" 'private mutating func arbiterCommand(')"
 [ "$(printf '%s\n' "$rule" | grep -c 'return (\.switchPeer(\|return (\.heal(')" = "$(printf '%s\n' "$arb" | grep -c 'return (\.switchPeer(\|return (\.heal(')" ] \
@@ -188,22 +202,63 @@ order "$swift_added" 'if let command = output.command {' 'self.performDataWatchC
     || bad "E6: the adapter may act only on a command the rule returned"
 [ "$(printf '%s\n' "$swift_added" | grep -c 'self.switchBackend(handle: handle, from: settingsGenerator, to: configuration)')" = "1" ] \
     || bad "E6: the peer may be replaced from exactly one place"
-has "$swift_added" 'guard let configuration = self.dataWatchCandidate?(nodeId) else { return .denied }' \
-    || bad "E6: without a configuration from the provider the switch must be refused"
-sw="$(awk '/^diff --git/ { on = ($0 ~ /WireGuardAdapter\.swift/) } on && /^\+/ && !/^\+\+\+/ { print substr($0, 2) }' "$PATCH" \
-        | awk '/private func switchBackend\(/ { on = 1 } on { print } on && /^    }$/ { exit }' | grep -v '^[[:space:]]*//' || true)"
-order "$sw" 'newGenerator = try self.makeSettingsGenerator(with: tunnelConfiguration)' 'wgTurnOff(handle)' \
-    || bad "E6: the new endpoint must be resolved before the old backend is stopped"
-order "$sw" 'wgTurnOff(handle)' 'try self.setNetworkSettings(newGenerator.generateNetworkSettings())' \
-    || bad "E6: the old backend must be stopped before the network settings change"
-order "$sw" 'try self.setNetworkSettings(newGenerator.generateNetworkSettings())' 'self.restartBackendInPlace(handle: handle, settingsGenerator: newGenerator)' \
-    || bad "E6: the new backend must start only after the new network settings are applied"
+has "$swift_added" 'guard let configuration = self.dataWatchCandidate?(nodeId) else { return .rejected }' \
+    || bad "E6: a node the provider has no usable configuration for must be rejected (never asked again while the plan lives)"
+# Second review, R6: a switch goes through the shared recovery budget, after the configuration is known
+# (a refused budget is 'denied' - asked again; nothing was spent for a node that cannot be raised).
+has "$swift_added" 'guard self.recovery.requestPeerSwitch(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }' \
+    && order "$swift_added" 'self.dataWatchCandidate?(nodeId)' 'self.recovery.requestPeerSwitch(' \
+    && order "$swift_added" 'self.recovery.requestPeerSwitch(' 'return self.switchBackend(handle: handle, from: settingsGenerator, to: configuration)' \
+    || bad "E6: a switch must ask the shared recovery budget, after the candidate's configuration and before the tunnel is touched"
+has "$(swift_func "$RECIPE/tribe/TribeRoaming.swift" 'mutating func requestPeerSwitch(')" 'if let denial = budget.request(at: sample.at, kind: .softRestart, persistent: true) { return .budget(denial) }' \
+    || bad "E6: the switch must be charged to the ladder's own budget as a new device (rolling cap and cooldown)"
+# Second review, R5: the order of a switch and every way it can fail are TribeSwitchSequence (pure, tested
+# with a fake engine: TribeDataWatchTests switch_sequence_every_way_it_can_fail). Here: the adapter runs
+# that sequence once, hands it the real effects in the right slots, and returns ITS verdict.
+sw="$(printf '%s\n' "$swift_added" | awk '/private func switchBackend\(/ { on = 1 } on { print } on && /^    }$/ { exit }')"
+[ "$(printf '%s\n' "$swift_added" | grep -c 'TribeSwitchSequence.run(')" = "1" ] && has "$sw" 'let outcome = TribeSwitchSequence.run(TribeSwitchSteps(' \
+    || bad "E6: the switch must be the tested sequence, run from one place"
+order "$sw" 'prepare: {' 'newGenerator = try? self.makeSettingsGenerator(with: tunnelConfiguration)' \
+    && order "$sw" 'newGenerator = try? self.makeSettingsGenerator(with: tunnelConfiguration)' 'stopEngine: {' \
+    || bad "E6: 'prepare' must resolve the new endpoint (while the old backend still runs)"
+order "$sw" 'stopEngine: {' 'wgTurnOff(handle)' && order "$sw" 'wgTurnOff(handle)' 'applySettings: { new in' \
+    || bad "E6: 'stopEngine' must turn the old backend off"
+order "$sw" 'applySettings: { new in' 'return self.applySettingsConfirmed(generator.generateNetworkSettings())' \
+    && order "$sw" 'return self.applySettingsConfirmed(generator.generateNetworkSettings())' 'startEngine: { new in' \
+    || bad "E6: 'applySettings' must apply the settings and wait for the system's confirmation"
+order "$sw" 'startEngine: { new in' 'self.startBackendForSwitch(generator)' \
+    || bad "E6: 'startEngine' must start a backend with the configuration it was asked for"
+[ "$(printf '%s\n' "$sw" | grep -c 'guard let generator = new ? newGenerator : oldGenerator')" = "2" ] \
+    || bad "E6: both steps must take the configuration the sequence names (new or previous)"
 has "$sw" 'self.packetTunnelProvider?.reasserting = true' && has "$sw" 'defer { self.packetTunnelProvider?.reasserting = false }' \
     || bad "E6: the switch must be announced to the system as a reconnect and the mark taken back"
-order "$sw" 'try? self.setNetworkSettings(oldGenerator.generateNetworkSettings())' 'self.restartBackendInPlace(handle: handle, settingsGenerator: oldGenerator)' \
-    || bad "E6: a switch that fails at the network settings must put the old settings and the old backend back"
-[ "$(printf '%s\n' "$swift_added" | grep -c 'wgTurnOff(')" = "1" ] && [ "$(printf '%s\n' "$swift_added" | grep -c 'setNetworkSettings(')" = "2" ] \
-    || bad "E6: patch 0012 stops a backend and applies network settings only inside the switch"
+has "$sw" 'return outcome.result' && ! has "$sw" 'return \.performed' && ! has "$sw" 'return \.failed' \
+    || bad "E6: the adapter must return the sequence's own verdict (never 'performed' by itself)"
+order "$sw" '} else if !outcome.engineUp {' 'self.state = .temporaryShutdown(oldGenerator)' \
+    && order "$sw" 'self.state = .temporaryShutdown(oldGenerator)' 'self.dataWatchEngineDown = (oldGenerator, outcome.settingsInForce, TribeEngineRetry(at: now))' \
+    && order "$sw" 'self.dataWatchEngineDown = (oldGenerator' 'self.dataWatchEngineHandler?(true)' \
+    || bad "E6: a switch that left no engine must say so and arm the retry of the previous configuration"
+confirm="$(printf '%s\n' "$swift_added" | awk '/private func applySettingsConfirmed\(/ { on = 1 } on { print } on && /^    }$/ { exit }')"
+has "$confirm" 'guard done, systemError == nil else {' && order "$confirm" 'guard done, systemError == nil else {' 'return true' \
+    || bad "E6: network settings count as applied only when the system confirmed them without an error (no answer = failure)"
+[ "$(printf '%s\n' "$swift_added" | grep -c 'wgTurnOff(')" = "1" ] && [ "$(printf '%s\n' "$swift_added" | grep -c 'setNetworkSettings(')" = "0" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'setTunnelNetworkSettings(')" = "1" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.applySettingsConfirmed(')" = "2" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.startBackendForSwitch(')" = "2" ] \
+    || bad "E6: patch 0012 stops a backend only inside the switch and applies settings / starts a backend only in the switch and in the retry"
+# The tick keeps running in every outcome: with no engine it retries, before anything asks for a handle.
+has "$(grep -A1 '     private func stallTick() {' "$PATCH")" '+        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return }' \
+    || bad "E6: with no engine the stall tick must retry first (it must not leave on the missing handle)"
+retry="$(printf '%s\n' "$swift_added" | awk '/private func dataWatchRetryEngine\(/ { on = 1 } on { print } on && /^    }$/ { exit }')"
+order "$retry" 'guard self.lastPathSatisfiable, down.retry.due(at: now) else { return }' 'self.startBackendForSwitch(down.generator)' \
+    || bad "E6: the retry must wait for its back-off and for a network"
+order "$retry" 'if !down.settingsInForce {' 'down.settingsInForce = self.applySettingsConfirmed(down.generator.generateNetworkSettings())' \
+    && has "$retry" 'if down.settingsInForce, let handle = self.startBackendForSwitch(down.generator) {' \
+    || bad "E6: the retry must put the settings in force before it starts an engine on them"
+order "$retry" 'down.retry.failed(at: now)' 'self.dataWatchEngineDown = down' \
+    || bad "E6: a failed retry must lengthen the back-off and stay armed"
+[ "$(printf '%s\n' "$retry" | grep -c 'self.dataWatchEngineHandler?(false)')" = "2" ] \
+    || bad "E6: an engine that runs again must be told (brought back by the retry or by the path handler)"
 has "$swift_added" 'update(tunnelConfiguration' && bad "E6: patch 0012 must not call the public update path (its backend keeps running across the settings change)"
 for token in 'setTunnelNetworkSettings' 'update(tunnelConfiguration' 'cancelTunnelWithError' 'stopTunnel' 'reasserting' 'wgTurnOff' 'wgTurnOn' 'wgSetConfig'; do
     has "$runtime" "$token" && bad "E6: the runtime must only report and answer ($token)"
@@ -213,17 +268,44 @@ wgfile="$(code "$IOS/PacketTunnelProvider+WireGuard.swift")"
 [ "$(printf '%s\n' "$wgfile" | grep -c 'adapter.dataWatchCandidate = ')" = "1" ] \
     && has "$wgfile" 'adapter.dataWatchCandidate = { \[weak self\] nodeId in self?.tribeSwitchConfiguration(nodeId) }' \
     || bad "E6: the adapter must get candidate configurations from the provider's one function"
-has "$wgfile" 'let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startedByApp: activationAttemptId != nil)' \
+# Second review, R1: who started the tunnel is the tribeStartSource the start options really carry (the
+# app and our commands always pass one; iOS passes none) - not the session id iOS hands to every start.
+has "$wgfile" 'let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startSource: tribeStartSource)' \
     && has "$wgfile" 'adapter.start(tunnelConfiguration: startConfiguration)' \
-    || bad "E6: the start must go through tribeStartConfiguration with the true origin of the start"
-has "$glue" 'guard !startedByApp, let choice = tribeDataWatch.chooseStartBySystem() else { return profile }' \
-    || bad "E6: a start by the app must always raise the profile's node"
+    || bad "E6: the start must go through tribeStartConfiguration with the start source of this start"
+has "$(code "$IOS/PacketTunnelProvider.swift")" 'tribeStartSource = options?\["tribeStartSource"\] as? String' \
+    && [ "$(cat "$IOS"/*.swift | grep -v '^[[:space:]]*//' | grep -c 'tribeStartSource = ')" = "1" ] \
+    || bad "E6: the start source must be exactly what the start options carry, set in one place"
+has "$glue" 'guard let choice = tribeDataWatch.chooseStart(source: startSource) else { return profile }' \
+    || bad "E6: which node a start raises is decided by the runtime's tested choice (a start by the app: the profile's node)"
+cat "$IOS"/*.swift "$RECIPE"/tribe/*.swift | grep -v '^[[:space:]]*//' | grep -q 'activationAttemptId != nil\|startedByApp' \
+    && bad "E6: nothing may tell an app start from a system start by the activation id (iOS passes one to every start)"
+has "$(swift_func "$IOS/TribeWatchPlan.swift" 'static func startedBySystem(')" 'source == nil' \
+    || bad "E6: only a start without any start source is a start by the system"
+has "$wgfile" 'completionHandler(self.tribeEngineDownReply())' \
+    || bad "E6: with no engine the status reply must say so"
+has "$runtime" 'adapter.dataWatchEngineHandler = { \[weak self\] down in self?.noteEngine(down: down) }' \
+    || bad "E6: the runtime must be told when the engine goes down and comes back"
 [ "$(printf '%s\n' "$wgfile" | grep -c 'self.tribeApplySessionOverride(&metadata)')" = "1" ] \
     || bad "E6: the status reply must carry the node the tunnel stands on"
-has "$glue" 'guard let actual = tribeDataWatch.sessionOverride() else { return }' \
+has "$glue" 'guard let made = tribeDataWatch.sessionSwitch() else { return }' \
     || bad "E6: without a switch the status reply's session must stay untouched"
+# Second review, R7: the plan is the app's file; the extension rewrites it only to take the spare nodes'
+# keys out, protected as the app writes it and kept out of device backups.
+[ "$(printf '%s\n' "$glue" | grep -c 'completeFileProtectionUntilFirstUserAuthentication')" = "1" ] \
+    && has "$glue" 'isExcludedFromBackup = true' \
+    || bad "E6: the extension's rewrite of the plan must keep the file's protection and stay out of backups"
+grep -q 'NSURLIsExcludedFromBackupKey' "$CONTROLLER" && grep -q 'NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication' "$CONTROLLER" \
+    || bad "E6: the app must write the plan protected and excluded from backups"
+# ... and only a file that is still the one it read (the app may have written a newer plan meanwhile),
+# never while the app is alive, once per file (the conditions themselves are tested in the runtime tests).
+scrub_fn="$(swift_func "$IOS/TribeDataWatchRuntime.swift" 'private func scrub(')"
+order "$scrub_fn" 'guard now == stamp else { return }' 'let done = deps.writePlan(clean)' \
+    && [ "$(printf '%s\n' "$runtime" | grep -c 'deps.writePlan(')" = "1" ] \
+    || bad "E6: the extension may rewrite the plan only if the file is still the one it read, from one place"
 
 # ---- A10: stage 2 in the app ------------------------------------------------------------------------------
+ctor="$(body_of "$FACADE" 'AvpnEngineQml::AvpnEngineQml(')"
 plan_fn="$(body_of "$FACADE" 'void AvpnEngineQml::writeTunnelWatchPlan(')"
 order "$plan_fn" 'if (in.watch && in.watchSwitch)' 'in.candidates = m_engine.extensionSwitchCandidates();' \
     && [ "$(printf '%s\n' "$plan_fn" | grep -A1 'if (in.watch && in.watchSwitch)' | grep -c 'in.candidates = m_engine.extensionSwitchCandidates();')" = "1" ] \
@@ -231,8 +313,48 @@ order "$plan_fn" 'if (in.watch && in.watchSwitch)' 'in.candidates = m_engine.ext
 [ "$(grep -c 'extensionSwitchCandidates()' "$FACADE")" = "1" ] || bad "A10: the candidates are asked from one place"
 [ "$(grep -c 'adoptExtensionSwitch(' "$FACADE")" = "1" ] || bad "A10: a switch is adopted from one place"
 resume_fn="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
-has "$resume_fn" 'm_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false))' \
-    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan)"
+has "$resume_fn" 'if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),' \
+    && has "$resume_fn" '                                           currentNetworkMemoryKey()))' \
+    || bad "A10: the adopted node is checked by the app only where the app has a check (node_scan), and the evidence is filed under the network the phone is on"
+# Second review, R3: a switch is adopted from ANY status reply - the facade passes every changed session
+# to the hand-over object before its own identity rules; and a Reasserting -> Connected asks for a reply.
+meta_ctx="$(code "$FACADE" | grep -A8 '&IosController::sessionMetadataChanged, this,')"
+order "$meta_ctx" 'm_watchResume->onSessionMetadata(metadata);' 'adoptNativeIdentity();' \
+    || bad "A10: every status reply's session must reach the hand-over before the app's own identity rules"
+[ "$(count "$FACADE" 'm_watchResume->onSessionMetadata(')" = "1" ] && [ "$(count "$FACADE" 'm_watchResume->onReasserted()')" = "1" ] \
+    || bad "A10: the hand-over hears of a session change and of a Reasserting from one place each"
+has "$(code "$FACADE")" 'if (m_watchResume && avpn::sessionReasserted(s == Vpn::Connected, m_lastTunnelState == Vpn::Connecting, engineStateBefore))' \
+    || bad "A10: a Reasserting is recognised by the tested rule, with the engine's state before the callback"
+# Second review, R4: the way back to the user's choice is the ordinary restart, asked by the hand-over.
+back="$(printf '%s\n' "$resume_fn" | awk '/ops.restartToChoice = /{on=1} on{print} on && /^    };/{exit}')"
+has "$back" 'm_needsRestart = true;' && has "$back" 'm_restartOrigin = QStringLiteral("extension_return");' && has "$back" 'reconcile();' \
+    || bad "A10: the way back must be the facade's ordinary restart through reconcile"
+for token in 'clearPin' 'setPinned' 'm_savedPin' 'm_wantConnected' 'verifySucceeded' 'verifyFailed' 'onDead' 'guardedStart' 'guardedStop' 'm_tunnel' 'QTimer'; do
+    has "$back" "$token" && bad "A10: the way back must only ask for the ordinary restart ($token)"
+done
+facts="$(printf '%s\n' "$resume_fn" | awk '/ops.returnFacts = /{on=1} on{print} on && /^    };/{exit}')"
+has "$facts" 'in.nodeScanOn = featureEnabled(QStringLiteral("node_scan"), false);' \
+    && has "$facts" 'in.busy = m_opInFlight || m_needsRestart || m_paused || !uiForeground();' \
+    && has "$facts" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' \
+    || bad "A10: the facts of the way back: the app's own check exists, nothing is in flight, on the screen, the evidence of THIS network"
+has "$plan_fn" 'm_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());' \
+    || bad "A10: every plan write must tell the engine which network the phone is on (evidence of another network excludes nothing)"
+# Second review, R5: no engine in the tunnel - the ordinary restart, by the tested decision.
+down_fn="$(body_of "$FACADE" 'void AvpnEngineQml::onTunnelEngineDown()')"
+order "$down_fn" 'if (!avpn::decideEngineDownRestart(in))' 'm_needsRestart = true;' && has "$down_fn" 'reconcile();' \
+    && has "$down_fn" 'in.foreground = uiForeground();' && has "$down_fn" 'in.restartPending = m_needsRestart;' \
+    || bad "A10: an engine-down reply must lead to the ordinary restart, by decideEngineDownRestart"
+has "$ctor" '&IosController::tunnelEngineDown' && has "$ctor" '&AvpnEngineQml::onTunnelEngineDown' \
+    || bad "A10: the facade must hear that the tunnel has no engine"
+down_ctx="$(code "$CONTROLLER" | grep -A3 'if (engineDown) {')"
+has "$down_ctx" 'emit tunnelEngineDown();' && has "$down_ctx" 'return;' && [ "$(count "$CONTROLLER" 'emit tunnelEngineDown()')" = "1" ] \
+    || bad "A10: a reply without an engine must be told and judged by nothing else"
+# The engine: the node the extension left is evidence for one network, not a failure of the session.
+adopt_fn="$(body_of "$ENGINE/ServiceEngine.cpp" 'bool ServiceEngine::adoptExtensionSwitch(')"
+has "$adopt_fn" 'm_extEvidence.note(m_currentNodeId, netKey, nowMs());' || bad "A10: the node the extension left must be kept as evidence for the network"
+has "$adopt_fn" 'm_failedThisSession' && bad "A10: an adopted switch must not mark the node failed for the session"
+[ "$(code "$ENGINE/ServiceEngine.cpp" | grep -c 'm_failedThisSession.contains\|m_failedThisSession.isEmpty\|, m_failedThisSession)')" = "0" ] \
+    || bad "A10: the engine's picks must read the exclusions through sessionExclusions() (failed in the session + fresh evidence)"
 for token in 'clearPin' 'setPinnedNode' 'm_savedPin' 'onDead' 'verifyFailed'; do
     has "$(printf '%s\n' "$resume_fn" | awk '/ops.adoptSwitch = /{on=1} on{print} on && /^    };/{exit}')" "$token" \
         && bad "A10: adopting a switch must not touch the pin or run the app's ladder ($token)"
@@ -406,9 +528,13 @@ has "$(body_of "$CONTROLLER" 'bool IosController::appIsActive() const')" 'applic
 # ---- A8: a reason to re-check, never a sentence ----------------------------------------------------------------
 # What the hand-over does with a verdict is tested (tunnel_watch_check: handOver). Here: the effects the
 # facade hands to it are what they claim to be and touch nothing else.
+# (The two effects of the way back - stage 2, checked in A10 - are the ordinary restart and its facts.)
+verdict_effects="$(printf '%s\n' "$setup" | awk '/ops.returnFacts = |ops.restartToChoice = /{skip=1} !skip{print} skip && /^    };/{skip=0}')"
+has "$verdict_effects" 'ops.adoptSwitch = ' && has "$verdict_effects" 'ops.forgetNode = ' && ! has "$verdict_effects" 'extension_return' \
+    || bad "A8: the scan of the verdict's effects lost its subject"
 for token in 'm_savedPin' 'clearPin' 'setPinned' 'm_wantConnected' 'verifySucceeded' 'verifyFailed' 'noteDataPlaneFailure' 'rememberNetworkPath' \
              'guardedStop' 'guardedStart' 'm_needsRestart' 'onDead' 'reconcile('; do
-    has "$setup" "$token" && bad "A8: the hand-over's effects must not touch $token (the extension's verdict is a reason to check, not a result)"
+    has "$verdict_effects" "$token" && bad "A8: the hand-over's effects must not touch $token (the extension's verdict is a reason to check, not a result)"
 done
 has "$setup" 'ops.reenterVerifying = \[this\] { return m_engine.reenterVerifying(); };' || bad "A8: the engine's consent is the engine's own answer"
 order "$setup" 'ops.startVerification = \[this\] {' 'startDataPathVerification();' || bad "A8: the re-check must be the app's own data check"
@@ -427,14 +553,16 @@ callers="$(grep -ln 'reenterVerifying()' "$ENGINE"/*.cpp "$ENGINE"/*.h "$IOS"/*.
 # The app clamps a server number (ConnectTunables.h) and the extension clamps it again (fromPlan):
 # a bound that differs between the two would make the journal of the app lie about what is in force.
 app_rows="$(sed -n 's/^ *{"\(ios_[a-z0-9_]*\)", *[0-9]*, *\([0-9]*\), *\([0-9]*\), *true}.*/\1 \2 \3/p' "$ENGINE/ConnectTunables.h" \
-    | grep -v -e '^ios_tw_plan_ttl_h ' -e '^ios_tw_policy_max_age_h ' | sort)"
+    | grep -v -e '^ios_tw_plan_ttl_h ' -e '^ios_tw_policy_max_age_h ' -e '^ios_tw_switch_lease_min ' | sort)"
 ext_rows="$(sed -n 's/.*numbers\["\(ios_[a-z0-9_]*\)"\].*min: *\([0-9_]*\), *max: *\([0-9_]*\)).*/\1 \2 \3/p' "$RECIPE/tribe/TribeDataWatch.swift" \
     | awk '{ gsub("_", "", $2); gsub("_", "", $3); print }' | sort)"
 [ -n "$app_rows" ] && [ "$(printf '%s\n' "$app_rows" | wc -l | tr -d ' ')" -ge 20 ] || bad "X1: the app's table of numbers was not found"
 [ "$app_rows" = "$ext_rows" ] || bad "X1: the numbers and bounds the extension reads differ from the app's table (ConnectTunables.h vs TribeDataWatch.swift fromPlan)"
-# The two terms the app turns into moments of time are carried as such, not as numbers.
+# The three terms the app turns into moments of time are carried as such, not as numbers.
 plan_h="$(code "$ENGINE/TunnelWatchPlan.h")"
-has "$plan_h" '"expires_ms"' && has "$plan_h" '"policy_max_age_ms"' || bad "X1: the plan must carry expires_ms and policy_max_age_ms"
+has "$plan_h" '"expires_ms"' && has "$plan_h" '"policy_max_age_ms"' && has "$plan_h" '"switch_lease_until_ms"' \
+    || bad "X1: the plan must carry expires_ms, policy_max_age_ms and switch_lease_until_ms"
+has "$(code "$IOS/TribeWatchPlan.swift")" '"switch_lease_until_ms"' || bad "X1: the extension must read the switch lease"
 
 # ---- X2: the same hosts as the white-list detector -----------------------------------------------------------------
 # The extension's built-in bypass targets must be the detector's compiled defaults (the marketplace tier
