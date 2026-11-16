@@ -36,6 +36,7 @@ link_directories(${CMAKE_CURRENT_SOURCE_DIR}/platforms/android)
 set(HEADERS ${HEADERS}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/android_controller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/android_utils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/avpn_selfupdate_android.h # AVPN (2026-11-16): site APK self-update
     ${CMAKE_CURRENT_SOURCE_DIR}/core/protocols/androidVpnProtocol.h
     ${CMAKE_CURRENT_SOURCE_DIR}/core/utils/installedAppsImageProvider.h
 )
@@ -43,6 +44,7 @@ set(HEADERS ${HEADERS}
 set(SOURCES ${SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/android_controller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/avpn_fcm_bridge.cpp # AVPN (Task 9): FCM-мост
+    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/avpn_selfupdate_android.cpp # AVPN (2026-11-16): site APK self-update
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/android/android_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/protocols/androidVpnProtocol.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/utils/installedAppsImageProvider.cpp

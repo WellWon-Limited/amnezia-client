@@ -236,7 +236,8 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Layout.topMargin: Theme.space.xs
-            visible: sheet.hasEngine && TribeEngine.canSelfUpdate === true
+            // Android always asks the person in its own dialog: no silent install, no rollback (2026-11-16).
+            visible: sheet.hasEngine && TribeEngine.canSelfUpdate === true && Qt.platform.os !== "android"
             spacing: Theme.space.md
 
             ColumnLayout {
