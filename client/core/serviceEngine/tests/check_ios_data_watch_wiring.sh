@@ -325,6 +325,12 @@ order "$meta_ctx" 'm_watchResume->onSessionMetadata(metadata);' 'adoptNativeIden
     || bad "A10: the hand-over hears of a session change and of a Reasserting from one place each"
 has "$(code "$FACADE")" 'if (m_watchResume && avpn::sessionReasserted(s == Vpn::Connected, m_lastTunnelState == Vpn::Connecting, engineStateBefore))' \
     || bad "A10: a Reasserting is recognised by the tested rule, with the engine's state before the callback"
+# The hook needs the PREVIOUS tunnel state, so it sits before the cache is assigned; the hand-over object
+# therefore must not ask the cache at that moment (tested: tunnel_watch_check, the reviewer's case 3).
+order "$(code "$FACADE")" 'm_watchResume->onReasserted();' 'm_lastTunnelState = s; // AVPN' \
+    || bad "A10: the Reasserting hook must run while the previous tunnel state is still known"
+has "$(code "$ENGINE/TunnelWatchResume.h")" 'begin(QStringLiteral("reasserted"), /\*connectedNow=\*/true);' \
+    || bad "A10: a Reasserting begins the hand-over without asking the facade's cached tunnel state"
 # Second review, R4: the way back to the user's choice is the ordinary restart, asked by the hand-over.
 back="$(printf '%s\n' "$resume_fn" | awk '/ops.restartToChoice = /{on=1} on{print} on && /^    };/{exit}')"
 has "$back" 'm_needsRestart = true;' && has "$back" 'm_restartOrigin = QStringLiteral("extension_return");' && has "$back" 'reconcile();' \

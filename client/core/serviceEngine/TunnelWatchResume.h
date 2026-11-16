@@ -100,9 +100,12 @@ public:
     // The native state went Reasserting -> Connected while the engine held a session: the extension
     // re-applied its network settings (an in-place switch does). Handled as a thaw: one fresh snapshot
     // before the app decides anything.
+    // The transition itself is the proof that the tunnel is Connected NOW: the facade calls this while
+    // its cached tunnel state still says Connecting (it needs the previous state to see the transition
+    // and assigns the new one a few lines later), so the cached state is not asked here.
     void onReasserted()
     {
-        begin(QStringLiteral("reasserted")); // begin() refuses with the flag off, in a freeze, without a tunnel
+        begin(QStringLiteral("reasserted"), /*connectedNow=*/true); // begin() refuses with the flag off or in a freeze
     }
 
     // The facade's 1 s tick; sinceLastTickMs - time since its previous run (negative = the first one).
@@ -248,11 +251,12 @@ private:
             && identityReplyAwaited(m_replyAskedMs, m_ops.nowMs(), m_ops.timeoutMs());
     }
 
-    void begin(const QString &why)
+    void begin(const QString &why, bool connectedNow = false)
     {
         // In the background the app decides nothing anyway (held above): the hand-over is done at
         // the return to the screen.
-        if (m_ops.backgroundArmOnly() || !resumeFreezeBegins(m_freeze, m_ops.watchFlag(), m_ops.tunnelConnected()))
+        if (m_ops.backgroundArmOnly()
+            || !resumeFreezeBegins(m_freeze, m_ops.watchFlag(), connectedNow || m_ops.tunnelConnected()))
             return;
         beginResumeFreeze(m_freeze, m_ops.nowMs());
         m_generation = m_ops.sessionGeneration();

@@ -1137,11 +1137,15 @@ static void stageTwo()
         bench.connected = false; // Reasserting is shown to the app as Connecting
         bench.tick();
         CHECK(!bench.resume.frozen() && bench.journaled("released=off"), "the freeze ends: the tunnel is not Connected");
-        bench.connected = true;
+        // The facade's real order (third review, T2): the hook is called from the state callback while the
+        // cached tunnel state is still Connecting - the new state is assigned only after it.
         bench.resume.onReasserted();
         CHECK(bench.resume.frozen() && bench.snapshotRequests == 2 && bench.journaled("begin why=reasserted"), "Reasserting -> Connected: one fresh snapshot is asked, decisions wait");
         int ran = 0;
-        CHECK(bench.defer(&ran, "verify"), "a data check waits for it");
+        CHECK(bench.defer(&ran, "verify"), "a data check that completes inside that same callback waits");
+        bench.connected = true; // ... and now the facade's cache says Connected
+        bench.tick();
+        CHECK(bench.resume.frozen() && ran == 0, "the freeze stands at the next tick");
         bench.now += 800;
         bench.resume.onSnapshot(switched(bench, QStringLiteral("none"), QStringLiteral("12"), 1));
         CHECK(bench.adoptions == QStringList({"16->12"}) && ran == 1, "adopted, then the check goes on");

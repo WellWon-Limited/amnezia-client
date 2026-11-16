@@ -137,7 +137,7 @@ PURE = [
     ("res-14", ENG + "TunnelWatchResume.h", "        if (consume == WatchConsume::Reverify || consume == WatchConsume::JournalOnly) {\n            m_consumedSinceMs = w.sinceMs;\n            m_consumedGeneration = ci.snapshotGeneration;\n        }\n", "", "watch", "the same verdict is consumed at every return"),
     ("res-15", ENG + "TunnelWatchResume.h", "        } else if (consume == WatchConsume::Reverify) {\n            reverify(w, ci.appNodeId, in.nowMs);\n        }", "        }", "watch", "a verdict of our session starts no re-check"),
     ("res-16", ENG + "TunnelWatchResume.h", "        // The decisions that waited run after the snapshot was adopted; a re-check started above has a\n        // new epoch, so a waiting completion of the old check returns without a verdict.\n        runDeferred();", "", "watch", "decisions dropped at a snapshot release"),
-    ("res-17", ENG + "TunnelWatchResume.h", "        if (m_ops.backgroundArmOnly() || !resumeFreezeBegins(m_freeze, m_ops.watchFlag(), m_ops.tunnelConnected()))", "        if (!resumeFreezeBegins(m_freeze, m_ops.watchFlag(), m_ops.tunnelConnected()))", "watch", "a hand-over is begun in the background"),
+    ("res-17", ENG + "TunnelWatchResume.h", "        if (m_ops.backgroundArmOnly()\n            || !resumeFreezeBegins(", "        if (!resumeFreezeBegins(", "watch", "a hand-over is begun in the background"),
     ("res-18", ENG + "TunnelWatchResume.h", "        m_generation = m_ops.sessionGeneration();\n", "", "watch", "the freeze does not remember which session it began with"),
     ("res-19", ENG + "TunnelWatchResume.h", "        m_replyAskedMs = m_ops.nowMs();\n        m_ops.requestSnapshot();\n    }", "        m_replyAskedMs = m_ops.nowMs();\n    }", "watch", "the freeze begins and nobody asks the extension"),
     ("res-19b", ENG + "TunnelWatchResume.h", "        m_replyAskedMs = m_ops.nowMs();\n        m_ops.requestSnapshot();\n    }", "        m_ops.requestSnapshot();\n    }", "watch", "second review R3: after a resume the data checks do not wait for the status reply"),
@@ -330,9 +330,9 @@ PURE = [
     ("dd-06", IOS + "TribeDataWatchRuntime.swift", "        guard !deadLoaded else { return }\n", "", "rt", "the previous run's file overwrites what this run has learned"),
     ("dd-07", IOS + "TribeDataWatchRuntime.swift", "            if next.switchEnabled { loadDeadLocked(deps) }\n", "            loadDeadLocked(deps)\n", "rt", "second review R8: with the switch key off the state file is read"),
     ("dd-08", IOS + "TribeDataWatchRuntime.swift", "            if next.switchEnabled { loadDeadLocked(deps) }\n", "", "rt", "the previous run's dead nodes are known only at a start by the system"),
-    ("st-01", IOS + "TribeDataWatchRuntime.swift", "guard TribeStartChoice.startedBySystem(source: source), let deps = currentDeps else { return nil }", "guard let deps = currentDeps else { return nil }", "rt", "second review R1 / rev2-G12: a start by the app may also choose another node"),
-    ("st-02", IOS + "TribeDataWatchRuntime.swift", "        guard policy.enabled, policy.switchEnabled, let base = switchBase, let plan, !plan.candidates.isEmpty else {\n            lock.unlock()\n            return nil\n        }", "        guard let base = switchBase, let plan, !plan.candidates.isEmpty else {\n            lock.unlock()\n            return nil\n        }", "rt", "(candidates are parsed only with both keys on: xl-02) the start choice does not ask the keys itself"),
-    ("st-03", IOS + "TribeDataWatchRuntime.swift", "        let choice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: net, failures: dead, nowMs: deps.nowMs())\n        guard choice.nodeId != home,", "        let choice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: net, failures: [], nowMs: deps.nowMs())\n        guard choice.nodeId != home,", "rt", "a start by the system raises a node judged dead on this network"),
+    ("sb-01", IOS + "TribeDataWatchRuntime.swift", "guard TribeStartChoice.startedBySystem(source: source), let deps = currentDeps else { return nil }", "guard let deps = currentDeps else { return nil }", "rt", "second review R1 / rev2-G12: a start by the app may also choose another node"),
+    ("sb-02", IOS + "TribeDataWatchRuntime.swift", "        guard policy.enabled, policy.switchEnabled, let base = switchBase, let plan, !plan.candidates.isEmpty else {\n            lock.unlock()\n            return nil\n        }", "        guard let base = switchBase, let plan, !plan.candidates.isEmpty else {\n            lock.unlock()\n            return nil\n        }", "rt", "(candidates are parsed only with both keys on: xl-02) the start choice does not ask the keys itself"),
+    ("sb-03", IOS + "TribeDataWatchRuntime.swift", "        let choice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: net, failures: dead, nowMs: deps.nowMs())\n        guard choice.nodeId != home,", "        let choice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: net, failures: [], nowMs: deps.nowMs())\n        guard choice.nodeId != home,", "rt", "a start by the system raises a node judged dead on this network"),
     ("sc-01", IOS + "TribeDataWatchRuntime.swift", "if plan.holdsUnusableSecrets, !alive, let stamp, let data, scrubbedStampIs(not: stamp) {", "if plan.holdsUnusableSecrets, let stamp, let data, scrubbedStampIs(not: stamp) {", "rt", "second review R7: the extension rewrites the plan while the app is alive"),
     ("sc-02", IOS + "TribeDataWatchRuntime.swift", "if plan.holdsUnusableSecrets, !alive, let stamp, let data, scrubbedStampIs(not: stamp) {", "if !alive, let stamp, let data, scrubbedStampIs(not: stamp) {", "rt", "a plan that may switch loses its candidates"),
     ("sc-03", IOS + "TribeDataWatchRuntime.swift", "if plan.holdsUnusableSecrets, !alive, let stamp, let data, scrubbedStampIs(not: stamp) {", "if plan.holdsUnusableSecrets, !alive, let stamp, let data {", "rt", "a rewrite that failed is tried again on every tick"),
@@ -363,7 +363,8 @@ PURE = [
     ("rs-16", IOS + "TribeDataWatchRuntime.swift", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n        self.switchSeq = 0\n        self.switches = []\n", "        self.homeNodeId = nodeId\n        self.switchBase = base\n        self.plan = nil\n", "rt", "(a new process starts from zero anyway) the switches of the previous session are kept"),
     # ---- second review, R3: adoption on any reply, and whose node is it until a reply came ----
     ("r3-01", ENG + "TunnelWatchResume.h", "if (!held(site, lastTickMs, tickPeriodMs) && !replyAwaited())", "if (!held(site, lastTickMs, tickPeriodMs))", "watch", "a data check attributes its result to a node before any reply said where the tunnel stands"),
-    ("r3-02", ENG + "TunnelWatchResume.h", "        begin(QStringLiteral(\"reasserted\")); // begin() refuses", "        // begin() refuses", "watch", "a Reasserting -> Connected begins no hand-over"),
+    ("r3-02", ENG + "TunnelWatchResume.h", "        begin(QStringLiteral(\"reasserted\"), /*connectedNow=*/true); // begin() refuses", "        // begin() refuses", "watch", "a Reasserting -> Connected begins no hand-over"),
+    ("t2-01", ENG + "TunnelWatchResume.h", "connectedNow || m_ops.tunnelConnected()))", "m_ops.tunnelConnected()))", "watch", "third review T2: the Reasserting hook asks the facade's cached tunnel state, which still says Connecting (the state of cdc7861ba)"),
     ("r3-03", ENG + "TunnelWatchResume.h", "        adoptPending();\n        if (!m_freeze.active) {", "        if (!m_freeze.active) {", "watch", "a switch seen in the background is never adopted on the screen"),
     ("r3-04", ENG + "TunnelWatchResume.h", "                if (m_replyAskedMs >= 0 && !replyAwaited()) {", "                if (false) {", "watch", "the wait for a reply that never comes has no end"),
     ("r3-05", ENG + "TunnelWatchResume.h", "                    m_replyAskedMs = -1;\n                    m_ops.journal(QStringLiteral(\"watch_identity_wait released=timeout", "                    m_ops.journal(QStringLiteral(\"watch_identity_wait released=timeout", "watch", "the wait is given up in the journal and goes on in fact"),
@@ -525,7 +526,7 @@ ACCEPTED = {
     "eng-11": "equivalent: buildWatchPlan cuts the list to five as well (plan-28); the engine's cut only saves work",
     "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
     "rs-01": "equivalent: a second lock - the parse keeps candidates only with the switch key on and a live lease (xl-01, xl-02, xp-06), so a plan with candidates always has the key on",
-    "st-02": "equivalent: the same second lock at the start choice (the pure function's own lock is pinned by xc-12)",
+    "sb-02": "equivalent: the same second lock at the start choice (the pure function's own lock is pinned by xc-12)",
 }
 
 COPY = [
@@ -594,6 +595,14 @@ def main():
         mutants += [(i, f, o, n, t, w) for (i, f, o, n, t, w) in PURE]
     if "wiring" in groups:
         mutants += [(i, f, o, n, "wiring", w) for (i, f, o, n, w) in WIRING]
+    # An id names ONE mutant: the accept list is keyed by it, so a repeated id could let an accepted
+    # equivalent stand in for a different mutant that survived.
+    every = [m[0] for m in PURE] + [m[0] for m in WIRING]
+    repeated = sorted({i for i in every if every.count(i) > 1})
+    unknown = sorted(set(ACCEPTED) - set(every))
+    if repeated or unknown:
+        print("the mutant list is not usable: repeated ids %s, accepted ids that name no mutant %s" % (repeated, unknown))
+        return 2
     if anchors_only:
         bad = 0
         for mutant_id, rel, old, _new, _kind, _what in mutants:
