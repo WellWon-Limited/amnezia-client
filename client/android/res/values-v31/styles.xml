@@ -9,8 +9,9 @@
         <item name="android:enforceNavigationBarContrast">false</item>
         <item name="android:enforceStatusBarContrast">false</item>
 
-        <item name="android:windowSplashScreenBackground">@color/ic_launcher_background</item>
-        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+        <!-- AVPN (2026-11-16): Tribe splash - app background colour, icon = Tribe adaptive icon -->
+        <item name="android:windowSplashScreenBackground">@color/tribe_launcher_background</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/tribe_launcher_background</item>
         <item name="android:windowSplashScreenAnimatedIcon">@mipmap/icon</item>
     </style>
 </resources>

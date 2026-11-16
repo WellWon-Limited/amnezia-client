@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AVPN (2026-11-16): themed (monochrome) launcher icon on Android 13+ - the Tribe bars mark. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_tribe_status"
+    android:insetLeft="30%"
+    android:insetTop="30%"
+    android:insetRight="30%"
+    android:insetBottom="30%" />
