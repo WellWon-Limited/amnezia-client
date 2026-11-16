@@ -24,6 +24,18 @@ struct TribeWatchPlan {
     static let maxSanityTargets = 4
     /// Stage 2: the app writes up to five spare nodes; one more is tolerated, the rest is cut.
     static let maxCandidates = 6
+    /// The longest switch lease the app may write (numbers.ios_tw_switch_lease_min is clamped to a day).
+    static let maxLeaseMs: Int64 = 24 * 3600 * 1000
+
+    /// The same plan without its candidates: what the extension leaves in the shared file when the
+    /// permission to switch is gone, so that the nodes' keys do not lie there for nothing. Every
+    /// other field - the order of plans too - stays as the app wrote it. nil = not a plan.
+    static func scrubbed(_ data: Data) -> Data? {
+        guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              int(object["schema"]) == Int64(schema) else { return nil }
+        object["candidates"] = [Any]()
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
 
     enum Rejection: String, Error, Equatable {
         case missing
@@ -61,8 +73,16 @@ struct TribeWatchPlan {
     var expiresMs: Int64
     /// Stage 2: the nodes the extension may switch to in place, in the order the app's own
     /// ladder would try them (the pinned country first). Entries that do not pass the strict check
-    /// are dropped here; an expired list is empty.
+    /// are dropped here; an expired list, or one whose switch lease has lapsed, is empty.
     var candidates: [TribeWatchCandidate]
+    /// Stage 2: the permission to switch is a LEASE the app renews with every plan it writes
+    /// (`switch_lease_until_ms`, numbers.ios_tw_switch_lease_min). After it lapses the verdict goes
+    /// on working and switching does not: this is how a server-side "off" reaches a phone whose
+    /// app is not running, hours and not a day later.
+    var switchLeaseUntilMs: Int64
+    /// The file still holds candidates (their keys) although nothing may be done with them: the
+    /// switch key is off, the lease has lapsed or the list has expired.
+    var holdsUnusableSecrets: Bool
     /// Stage 2, for a start by the system: the pin in force when the plan was written (labels;
     /// empty = no pin), the transport mode, and the node the app's network memory holds for
     /// "wifi" and for "cellular".
@@ -91,9 +111,13 @@ struct TribeWatchPlan {
         let numbers = object["numbers"] as? [String: Any] ?? [:]
         var policy = TribeDataWatchPolicy.fromPlan(features: features, numbers: numbers)
         let expires = int(object["expires_ms"]) ?? 0
+        let lease = int(object["switch_lease_until_ms"]) ?? 0
+        let rawCandidates = object["candidates"] as? [Any] ?? []
         var candidates: [TribeWatchCandidate] = []
-        if expires > nowMs {
-            for raw in (object["candidates"] as? [Any] ?? []).prefix(maxCandidates) {
+        // A lease from the future beyond the clock slack is not a lease (clock trouble).
+        let leaseAlive = lease > nowMs && lease - nowMs <= maxLeaseMs + futureSlackMs
+        if expires > nowMs && leaseAlive && policy.switchEnabled {
+            for raw in rawCandidates.prefix(maxCandidates) {
                 guard let entry = raw as? [String: Any], let candidate = TribeWatchCandidate(entry),
                       !candidates.contains(where: { $0.nodeId == candidate.nodeId }) else { continue }
                 candidates.append(candidate)
@@ -115,6 +139,8 @@ struct TribeWatchPlan {
         return .success(TribeWatchPlan(policy: policy, sanityTargets: Array(targets.prefix(maxSanityTargets)), order: order,
                                        poolRevision: int(object["pool_revision"]) ?? 0, configFetchedMs: fetched,
                                        expiresMs: expires, candidates: candidates,
+                                       switchLeaseUntilMs: lease,
+                                       holdsUnusableSecrets: !rawCandidates.isEmpty && candidates.isEmpty,
                                        pinNodeId: (int(pin["node_id"]) ?? 0) > 0 ? String(int(pin["node_id"]) ?? 0) : "",
                                        pinCountry: TribeWatchCandidate.label(pin["country"]) ?? "",
                                        transportMode: TribeWatchCandidate.label(object["transport_mode"]) ?? "",
@@ -216,32 +242,40 @@ struct TribeWatchCandidate: Equatable {
     }
 }
 
-/// Stage 2: which node a tunnel started by the SYSTEM (not by the app) comes up on. The profile
-/// holds the node of the last start by the app; the plan holds what the app knew last. Order
-/// (design 0a item 8): the pinned node first -> the node the app's network memory holds for this
-/// kind of network -> the profile's node -> the plan's order. A node this extension itself judged
-/// dead on this kind of network within the last half hour is skipped - that is the "proven failure
-/// in this network" which alone lets a start leave the pin. Only nodes the extension can raise:
-/// the profile's node and the plan's candidates (AmneziaWG, the mode in force, never manual-only -
-/// the app wrote no others). Without a usable plan or with the switch key off: the profile's node,
-/// as build 139.
+/// Stage 2: which node the tunnel should stand on for a given network. Used in two places only: a
+/// start by the SYSTEM (not by the app), and a change of network while a node reached by a switch
+/// has not proved itself. The profile holds the node of the last start by the app; the plan holds
+/// what the app knew last. Order (design 0a item 8): the pinned node first -> the node the app's
+/// network memory holds for this kind of network -> the profile's node -> the plan's order. A node
+/// this extension itself judged dead on this kind of network within the last half hour is skipped -
+/// that is the "proven failure in this network" which alone lets the choice leave the pin. Only
+/// nodes the extension can raise: the profile's node and the plan's candidates (AmneziaWG, the mode
+/// in force, never manual-only - the app wrote no others). Without a usable plan or with the switch
+/// permission off: the profile's node, as build 139.
 enum TribeStartChoice {
+    /// The extension judged this node dead (`no_data`) on this kind of network at this moment.
     struct LastFailure: Equatable {
         var nodeId: String
         var net: String
         var wallMs: Int64
     }
     static let failureMemoryMs: Int64 = 30 * 60 * 1000
+    static let maxFailuresKept = 8
+
+    /// Who started the tunnel. The app and our own commands pass `tribeStartSource` ("app",
+    /// "intent"); iOS (Settings, On-Demand after a stop by the system) passes nothing. Only a start
+    /// that carries no source at all is a start by the system: anything else - also a value this
+    /// build does not know - raises the profile's node, the one the user or the app asked for.
+    static func startedBySystem(source: String?) -> Bool { source == nil }
 
     static func choose(profileNodeId: String, plan: TribeWatchPlan?, net: String,
-                       lastFailure: LastFailure?, nowMs: Int64) -> (nodeId: String, why: String) {
+                       failures: [LastFailure], nowMs: Int64) -> (nodeId: String, why: String) {
         guard let plan, plan.policy.enabled, plan.policy.switchEnabled, !plan.candidates.isEmpty else {
             return (profileNodeId, "profile")
         }
         let known = [profileNodeId] + plan.candidates.map { $0.nodeId }
         func failed(_ node: String) -> Bool {
-            guard let last = lastFailure, last.nodeId == node, last.net == net else { return false }
-            return nowMs >= last.wallMs && nowMs - last.wallMs <= failureMemoryMs
+            failures.contains { $0.nodeId == node && $0.net == net && fresh($0, nowMs: nowMs) }
         }
         var order: [(String, String)] = []
         if !plan.pinNodeId.isEmpty, known.contains(plan.pinNodeId) { order.append((plan.pinNodeId, "pin")) }
@@ -252,13 +286,40 @@ enum TribeStartChoice {
         return (profileNodeId, "profile")
     }
 
-    /// The last verdict this extension wrote (TribeWatchState.json), read back at a start.
-    static func lastFailure(state: [String: Any]?) -> LastFailure? {
-        guard let state, state["verdict"] as? String == TribeDataVerdict.noData.rawValue,
-              let node = state["node_id"] as? String, !node.isEmpty,
-              let net = state["net"] as? String,
-              let at = TribeWatchPlan.int(state["last_no_data_ms"]), at > 0 else { return nil }
-        return LastFailure(nodeId: node, net: net, wallMs: at)
+    static func fresh(_ failure: LastFailure, nowMs: Int64) -> Bool {
+        nowMs >= failure.wallMs && nowMs - failure.wallMs <= failureMemoryMs
+    }
+
+    /// One more node judged dead: the newest record per node and network, the expired ones
+    /// dropped, at most eight kept.
+    static func noting(_ failure: LastFailure, in failures: [LastFailure], nowMs: Int64) -> [LastFailure] {
+        var kept = failures.filter { fresh($0, nowMs: nowMs) && !($0.nodeId == failure.nodeId && $0.net == failure.net) }
+        kept.append(failure)
+        return Array(kept.suffix(maxFailuresKept))
+    }
+
+    /// The records as they lie in TribeWatchState.json (`dead`), and back.
+    static func encode(_ failures: [LastFailure]) -> [[String: Any]] {
+        failures.map { ["node_id": $0.nodeId, "net": $0.net, "at_ms": $0.wallMs] }
+    }
+
+    /// What the previous run of the extension left in the shared file: its list of dead nodes,
+    /// and the verdict the file ends with (a `no_data` standing when that run stopped).
+    static func failures(state: [String: Any]?, nowMs: Int64) -> [LastFailure] {
+        guard let state else { return [] }
+        var out: [LastFailure] = []
+        for raw in (state["dead"] as? [Any] ?? []).prefix(maxFailuresKept * 2) {
+            guard let entry = raw as? [String: Any], let node = entry["node_id"] as? String, !node.isEmpty, node.count <= 16,
+                  let net = TribeWatchCandidate.label(entry["net"]), let at = TribeWatchPlan.int(entry["at_ms"]), at > 0 else { continue }
+            out = noting(LastFailure(nodeId: node, net: net, wallMs: at), in: out, nowMs: nowMs)
+        }
+        if state["verdict"] as? String == TribeDataVerdict.noData.rawValue,
+           let node = state["node_id"] as? String, !node.isEmpty,
+           let net = state["net"] as? String,
+           let at = TribeWatchPlan.int(state["last_no_data_ms"]), at > 0 {
+            out = noting(LastFailure(nodeId: node, net: net, wallMs: at), in: out, nowMs: nowMs)
+        }
+        return out.filter { fresh($0, nowMs: nowMs) }
     }
 }
 
@@ -391,6 +452,10 @@ enum TribeDataWatchJournal {
     }
 
     /// `stay` = the node the tunnel stands on until the next round (after the way back, if one was made).
+    static func engineLine(down: Bool, nodeId: String) -> String {
+        "Tribe watch: engine=\(down ? "down" : "up") node=\(nodeId)"
+    }
+
     static func exhaustedLine(snapshot: TribeDataWatchSnapshot, nodeId: String, net: String) -> String {
         "Tribe watch: exhausted tried=\(snapshot.arbiterTried) round=\(snapshot.arbiterRound) stay=\(nodeId) net=\(net)"
     }

@@ -125,7 +125,7 @@ extension PacketTunnelProvider {
             // AVPN (build 140, data watch stage 2): the adapter asks for a candidate's configuration
             // only on an order of the watch's arbiter (never with the switch key off).
             adapter.dataWatchCandidate = { [weak self] nodeId in self?.tribeSwitchConfiguration(nodeId) }
-            let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startedByApp: activationAttemptId != nil)
+            let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startSource: tribeStartSource)
             wg_log(.info, message: "Tribe roaming policy: keepBackend=\(roaming.keepBackendOnPathLoss) pauseAfter=\(Int(roaming.pauseAfterUnsatisfiedSeconds))s stallProbe=\(Int(roaming.stallProbeSeconds))s stallRebind=\(Int(roaming.stallRebindSeconds))s")
 
             adapter.start(tunnelConfiguration: startConfiguration) { adapterError in
@@ -179,7 +179,9 @@ extension PacketTunnelProvider {
         tribeDataWatch.noteAppStatusRequest() // AVPN (build 140, data watch): the app is alive
         wgAdapter.getRuntimeConfiguration { settings in
             guard let settings = settings else {
-                completionHandler(nil)
+                // AVPN (build 140, data watch stage 2): no engine after a failed switch - say so
+                // (nil without the watch, as before).
+                completionHandler(self.tribeEngineDownReply())
                 return
             }
             let components = settings.components(separatedBy: "\n")

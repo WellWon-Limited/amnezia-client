@@ -38,6 +38,21 @@ extension PacketTunnelProvider {
             readState: {
                 let state = TribeSharedState.appGroup?.read(TribeWatchPlan.stateFileName) ?? [:]
                 return state.isEmpty ? nil : state
+            },
+            writePlan: { plan in
+                // Only to take the candidates' keys out of the plan when the permission to switch
+                // is gone (TribeDataWatchRuntime.scrub). The same protection class the app writes
+                // the file with, and the file stays out of device backups.
+                guard var url = TribeSharedState.appGroup?.directory.appendingPathComponent(TribeWatchPlan.fileName) else { return false }
+                do {
+                    try plan.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                    var values = URLResourceValues()
+                    values.isExcludedFromBackup = true
+                    try? url.setResourceValues(values)
+                    return true
+                } catch {
+                    return false
+                }
             })
     }
 
@@ -62,11 +77,13 @@ extension PacketTunnelProvider {
 
     /// Called from startWireguard with the session's final configuration (the split-tunnel ranges
     /// already applied). Remembers it as the profile's configuration and answers what the adapter
-    /// starts with: for a start by the app always the profile's node; for a start by the system
-    /// the node TribeStartChoice picks from the plan (the pin first), only with the switch key on.
-    func tribeStartConfiguration(profile: TunnelConfiguration, startedByApp: Bool) -> TunnelConfiguration {
+    /// starts with. `startSource` is the `tribeStartSource` the start carried (nil = none): a start
+    /// by the app or by our own commands always raises the profile's node; only a start by the
+    /// system may be moved to the node TribeStartChoice picks from the plan (the pin first), and
+    /// only with the switch permission on. The decision is the runtime's (host-tested).
+    func tribeStartConfiguration(profile: TunnelConfiguration, startSource: String?) -> TunnelConfiguration {
         tribeHomeConfiguration = profile
-        guard !startedByApp, let choice = tribeDataWatch.chooseStartBySystem() else { return profile }
+        guard let choice = tribeDataWatch.chooseStart(source: startSource) else { return profile }
         guard let chosen = tribeCandidateConfiguration(wgQuick: choice.wgQuick) else {
             tribeDataWatch.cancelStartChoice()
             return profile
@@ -90,19 +107,42 @@ extension PacketTunnelProvider {
     /// The adapter's question during an in-place switch (asked on its work queue).
     func tribeSwitchConfiguration(_ nodeId: String) -> TunnelConfiguration? {
         switch tribeDataWatch.switchTarget(nodeId) {
-        case .home?: return tribeHomeConfiguration
-        case .candidate(let text)?: return tribeCandidateConfiguration(wgQuick: text)
-        case nil: return nil
+        case .home?:
+            return tribeHomeConfiguration
+        case .candidate(let text)?:
+            guard let configuration = tribeCandidateConfiguration(wgQuick: text) else {
+                tribeDataWatch.markRejected(nodeId) // never offered again while the plan lives
+                return nil
+            }
+            return configuration
+        case nil:
+            return nil
         }
     }
 
-    /// The status reply tells the app where the tunnel actually stands: after an in-place switch
-    /// (or a start by the system on another node) the node id and the endpoint are the node's, not
-    /// the profile's. Without a switch nothing is touched.
+    /// The status reply tells the app where the tunnel actually stands, on EVERY reply: the number
+    /// of the last switch of this run (the app adopts a switch by it, from an ordinary poll too)
+    /// and, while the tunnel is not on the profile's node, that node's id and endpoint. Without a
+    /// switch nothing is touched.
     func tribeApplySessionOverride(_ metadata: inout [String: Any]) {
-        guard let actual = tribeDataWatch.sessionOverride() else { return }
-        if metadata["node_id"] is String { metadata["node_id"] = actual.nodeId } else { metadata["node_id"] = Int(actual.nodeId) ?? 0 }
-        metadata["endpoint"] = actual.endpoint
+        guard let made = tribeDataWatch.sessionSwitch() else { return }
+        metadata["switch_seq"] = made.seq
+        metadata["switch_why"] = made.why
+        guard let node = made.nodeId, let endpoint = made.endpoint else { return }
+        if metadata["node_id"] is String { metadata["node_id"] = node } else { metadata["node_id"] = Int(node) ?? 0 }
+        metadata["endpoint"] = endpoint
+    }
+
+    /// The status reply of a tunnel that has NO engine (a switch failed and neither node's engine
+    /// could be started; the adapter keeps retrying). The app that sees `engine_down` restarts the
+    /// tunnel itself. nil = an engine runs, or the watch knows nothing: the reply is as before.
+    func tribeEngineDownReply() -> Data? {
+        guard tribeDataWatch.engineIsDown else { return nil }
+        var metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
+        metadata["configuration_generation"] = metadata["generation"]
+        metadata["generation"] = tribeRuntimeGeneration
+        tribeApplySessionOverride(&metadata)
+        return try? JSONSerialization.data(withJSONObject: ["session_metadata": metadata, "engine_down": true], options: [])
     }
 
     /// A number or a short label from the session metadata; never a config value.

@@ -23,6 +23,8 @@ import Network
 protocol TribeDataWatchAdapting: AnyObject {
     var dataWatchInputs: ((_ handle: Int32) -> TribeDataWatchInputs)? { get set }
     var dataWatchHandler: ((_ handle: Int32, TribeDataWatchOutput, TribeDataWatchSnapshot) -> Void)? { get set }
+    /// Stage 2: no engine runs after a failed switch (true) / one runs again (false).
+    var dataWatchEngineHandler: ((_ down: Bool) -> Void)? { get set }
     func setDataWatchPolicy(_ policy: TribeDataWatchPolicy)
     func dataWatchSnapshot(completionHandler: @escaping (TribeDataWatchSnapshot) -> Void)
 }
@@ -47,9 +49,13 @@ struct TribeDataWatchDeps {
     var sanityCheck: (_ targets: [TribeSanityTarget], _ completion: @escaping (TribeSanityResult) -> Void) -> Void
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var nowMs: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
-    /// Stage 2: TribeWatchState.json as the previous run of the extension left it (a start by the
-    /// system reads its own last verdict from it); nil = no file.
+    /// Stage 2: TribeWatchState.json as the previous run of the extension left it (its list of
+    /// nodes judged dead); nil = no file. Read only when the plan permits switching.
     var readState: () -> [String: Any]? = { nil }
+    /// Stage 2: replaces TribeWatchPlan.json with the given bytes (the same protection class,
+    /// excluded from backups); false = could not. Used for one thing only: to take the candidates'
+    /// keys out of the file when the permission to switch is gone.
+    var writePlan: (_ plan: Data) -> Bool = { _ in false }
 }
 
 final class TribeDataWatchRuntime {
@@ -91,6 +97,20 @@ final class TribeDataWatchRuntime {
     private var switchSeq = 0
     private var switches: [[String: Any]] = []
     static let maxSwitchesKept = 8
+    /// Nodes this extension judged dead, per kind of network, for half an hour (TribeStartChoice).
+    /// They survive every rewrite of the shared file and the end of the session: the next start
+    /// by the system and a change of network skip them.
+    private var dead: [TribeStartChoice.LastFailure] = []
+    private var deadLoaded = false
+    /// Candidates whose configuration could not be used (it does not parse, or the engine did not
+    /// start on it): not offered again while this plan lives.
+    private var rejected: Set<String> = []
+    /// Grows with every new plan the app wrote (the arbiter's long pause ends with one).
+    private var planEpoch = 0
+    /// No engine runs after a failed switch: the status reply and the shared file say so.
+    private var engineDown = false
+    /// The stamp of the plan file the candidates were last taken out of (once per file).
+    private var scrubbedStamp: String?
     /// "host:port" of the node the tunnel stands on when that is not the profile's node. Kept apart
     /// from the plan: a plan that is rewritten, rejected or expires later must not change what the
     /// status reply says about a switch already made.
@@ -136,6 +156,11 @@ final class TribeDataWatchRuntime {
         self.switches = []
         self.actualEndpoint = nil
         self.handedOut = nil
+        self.dead = []
+        self.deadLoaded = false
+        self.rejected = []
+        self.engineDown = false
+        self.scrubbedStamp = nil
         self.proto = proto
         self.generation = generation
         inputs = TribeDataWatchInputs()
@@ -164,6 +189,7 @@ final class TribeDataWatchRuntime {
         lock.unlock()
         adapter.dataWatchInputs = { [weak self] handle in self?.currentInputs(handle: handle) ?? TribeDataWatchInputs() }
         adapter.dataWatchHandler = { [weak self] handle, output, snapshot in self?.handle(handle: handle, output, snapshot) }
+        adapter.dataWatchEngineHandler = { [weak self] down in self?.noteEngine(down: down) }
         adapter.setDataWatchPolicy(current)
     }
 
@@ -180,10 +206,11 @@ final class TribeDataWatchRuntime {
 
     /// The nodes offered to the arbiter: the plan's candidates except the node the tunnel is on,
     /// and the profile's node whenever the tunnel has left it. Empty unless the switch key is on, the
-    /// list has not expired and the provider told what a switch keeps.
+    /// lease and the list are alive and the provider told what a switch keeps. A candidate whose
+    /// configuration was rejected is not offered again while the plan lives.
     private func offeredLocked() -> [String] {
         guard policy.enabled, policy.switchEnabled, switchBase != nil, let plan else { return [] }
-        var ids = plan.candidates.map { $0.nodeId }.filter { $0 != nodeId }
+        var ids = plan.candidates.map { $0.nodeId }.filter { $0 != nodeId && !rejected.contains($0) }
         if nodeId != homeNodeId && !ids.contains(homeNodeId) { ids.append(homeNodeId) }
         return ids
     }
@@ -199,27 +226,55 @@ final class TribeDataWatchRuntime {
         return .candidate(candidate.wgQuick(base: base))
     }
 
-    /// The identity of the session for the status reply when the tunnel is NOT on the profile's
-    /// node: the app recognises a node by its id and its "host:port". nil = the profile's own.
-    func sessionOverride() -> (nodeId: String, endpoint: String)? {
-        lock.lock(); defer { lock.unlock() }
-        guard let endpoint = actualEndpoint else { return nil } // nil on the profile's node
-        return (nodeId, endpoint)
+    /// The provider could not build a configuration from this candidate (the package's strict
+    /// parse refused it): never offered again while the plan lives.
+    func markRejected(_ node: String) {
+        lock.lock()
+        rejected.insert(node)
+        lock.unlock()
     }
 
-    /// A start by the system (not by the app): the node to come up on, when it is not the
-    /// profile's (TribeStartChoice). Call after `prepare`. The choice is recorded as the first
-    /// switch of this run, so the app adopts it like any other. nil = the profile's node.
-    func chooseStartBySystem() -> (nodeId: String, why: String, wgQuick: String)? {
-        guard let deps = currentDeps else { return nil }
-        let net = deps.uplinkKind()
-        let last = TribeStartChoice.lastFailure(state: deps.readState())
+    /// What the status reply says about switches of this run of the extension - on EVERY reply,
+    /// so that the app learns of a switch from an ordinary poll too. nil = no switch was made (the
+    /// reply is then the one of build 139). `nodeId` / `endpoint` are set while the tunnel is NOT
+    /// on the profile's node: the app recognises a node by its id and its "host:port".
+    func sessionSwitch() -> (seq: Int, why: String, nodeId: String?, endpoint: String?)? {
+        lock.lock(); defer { lock.unlock() }
+        guard switchSeq > 0 else { return nil }
+        let why = switches.last?["why"] as? String ?? "unknown"
+        guard let endpoint = actualEndpoint else { return (switchSeq, why, nil, nil) }
+        return (switchSeq, why, nodeId, endpoint)
+    }
+
+    /// The node dead-node records and the choice are about: read from the previous run's file
+    /// once, and only when the plan permits switching (with the keys off nothing is read).
+    private func loadDeadLocked(_ deps: TribeDataWatchDeps) {
+        guard !deadLoaded else { return }
+        deadLoaded = true
+        dead = TribeStartChoice.failures(state: deps.readState(), nowMs: deps.nowMs())
+    }
+
+    /// The node to come up on at a start, when it is not the profile's. `source` is what the
+    /// start carried (`tribeStartSource`): the app and our own commands always name themselves,
+    /// and a start that names anybody raises the profile's node - only a start by the system
+    /// (no source at all) may choose (TribeStartChoice). Call after `prepare`. The choice is
+    /// recorded as the first switch of this run, so the app adopts it like any other.
+    /// nil = the profile's node; nothing is read and nothing is written in that case unless the
+    /// plan permits switching.
+    func chooseStart(source: String?) -> (nodeId: String, why: String, wgQuick: String)? {
+        guard TribeStartChoice.startedBySystem(source: source), let deps = currentDeps else { return nil }
         lock.lock()
+        guard policy.enabled, policy.switchEnabled, let base = switchBase, let plan, !plan.candidates.isEmpty else {
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+        let net = deps.uplinkKind()
+        lock.lock()
+        loadDeadLocked(deps)
         let home = homeNodeId
-        let choice = TribeStartChoice.choose(profileNodeId: home, plan: switchBase == nil ? nil : plan, net: net,
-                                             lastFailure: last, nowMs: deps.nowMs())
-        guard choice.nodeId != home, let base = switchBase,
-              let candidate = plan?.candidates.first(where: { $0.nodeId == choice.nodeId }) else {
+        let choice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: net, failures: dead, nowMs: deps.nowMs())
+        guard choice.nodeId != home, let candidate = plan.candidates.first(where: { $0.nodeId == choice.nodeId }) else {
             lock.unlock()
             return nil
         }
@@ -299,9 +354,23 @@ final class TribeDataWatchRuntime {
             nextTargets = (plan.sanityTargets.isEmpty ? TribeSanityTarget.builtIn : plan.sanityTargets).compactMap { TribeSanityTarget(url: $0) }
             state = next.enabled ? "on" : "off"
             lock.lock()
+            if plan.order != lastOrder {
+                // A new plan from the app: the arbiter's long pause ends, rejected candidates
+                // get another chance (the app may have new data for them).
+                planEpoch += 1
+                rejected = []
+            }
             lastOrder = plan.order
             self.plan = plan
+            if next.switchEnabled { loadDeadLocked(deps) }
             lock.unlock()
+            // The permission to switch is gone (key off, lease lapsed, list expired) and the file
+            // still holds the candidates' keys: take them out. Not while the app is alive (it is
+            // the writer and may be writing a new plan), once per file, and only if the file is
+            // still the one that was read.
+            if plan.holdsUnusableSecrets, !alive, let stamp, let data, scrubbedStampIs(not: stamp) {
+                scrub(data, stamp: stamp, url: url, deps: deps)
+            }
         case .failure(let rejection):
             state = unreadable ? "unreadable" : rejection.rawValue
         }
@@ -325,14 +394,68 @@ final class TribeDataWatchRuntime {
         }
         // The watch went off: the shared file must not keep the verdict of a watch that is gone.
         if wasEnabled && !next.enabled {
-            lock.lock()
-            let made = (switchSeq, switches)
-            lock.unlock()
-            deps.writeState(["schema": 1, "enabled": false, "verdict": TribeDataVerdict.none.rawValue, "generation": labels.0,
-                             "node_id": labels.1, "proto": labels.2, "updated_ms": deps.nowMs(),
-                             "switch_seq": made.0, "switches": made.1])
+            writeState(["enabled": false, "verdict": TribeDataVerdict.none.rawValue], net: nil, deps: deps)
         }
         return next
+    }
+
+    private func scrubbedStampIs(not stamp: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return scrubbedStamp != stamp
+    }
+
+    private func scrub(_ data: Data, stamp: String, url: URL, deps: TribeDataWatchDeps) {
+        lock.lock()
+        scrubbedStamp = stamp
+        lock.unlock()
+        guard let clean = TribeWatchPlan.scrubbed(data) else { return }
+        // The app may have written a newer plan since the read: then the file is not ours to touch.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let now = attributes.map { "\(($0[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)/\(($0[.size] as? NSNumber)?.intValue ?? 0)" }
+        guard now == stamp else { return }
+        let done = deps.writePlan(clean)
+        deps.log("Tribe watch: plan candidates removed (switch permission is gone) result=\(done ? "done" : "failed")")
+    }
+
+    /// TribeWatchState.json, every time in full: the session's labels, the switches of this run,
+    /// the nodes judged dead and whether an engine runs. `fields` is the verdict part.
+    private func writeState(_ fields: [String: Any], net: String?, deps: TribeDataWatchDeps) {
+        var state = fields
+        lock.lock()
+        state["schema"] = 1
+        state["generation"] = generation
+        state["node_id"] = nodeId
+        state["proto"] = proto
+        state["switch_seq"] = switchSeq
+        state["switches"] = switches
+        state["dead"] = TribeStartChoice.encode(dead)
+        state["engine"] = engineDown ? "down" : "up"
+        lock.unlock()
+        if let net { state["net"] = net }
+        state["updated_ms"] = deps.nowMs()
+        deps.writeState(state)
+    }
+
+    /// Stage 2: the adapter lost its engine after a failed switch, or got one back.
+    private func noteEngine(down: Bool) {
+        guard let deps = currentDeps else { return }
+        lock.lock()
+        let changed = engineDown != down
+        engineDown = down
+        let labels = (nodeId, generation)
+        let verdict = lastVerdict
+        lock.unlock()
+        guard changed else { return }
+        deps.log(TribeDataWatchJournal.engineLine(down: down, nodeId: labels.0))
+        deps.record("watch_engine", ["state": down ? "down" : "up", "node_id": labels.0, "generation": labels.1])
+        writeState(["enabled": true, "verdict": verdict.rawValue], net: deps.uplinkKind(), deps: deps)
+    }
+
+    /// For the status reply: no engine runs (the adapter cannot answer with counters). The app
+    /// that sees it restarts the tunnel itself.
+    var engineIsDown: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return engineDown
     }
 
     // MARK: - The app
@@ -432,10 +555,19 @@ final class TribeDataWatchRuntime {
                 }
             }
         }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         var current = inputs
         current.nodeId = nodeId
         current.candidates = offeredLocked()
+        current.planEpoch = planEpoch
+        let choosing = !current.candidates.isEmpty ? (plan, homeNodeId, dead) : nil
+        lock.unlock()
+        // Where a start on the network the phone is on NOW would go (the rule uses it only right
+        // after a change of network, for a node that has not proved itself).
+        if let (plan, home, dead) = choosing {
+            current.networkChoice = TribeStartChoice.choose(profileNodeId: home, plan: plan, net: deps.uplinkKind(),
+                                                            failures: dead, nowMs: deps.nowMs()).nodeId
+        }
         return current
     }
 
@@ -460,7 +592,11 @@ final class TribeDataWatchRuntime {
         lock.lock()
         lastVerdict = snapshot.verdict
         let labels = (nodeId, proto, generation)
-        let made = (switchSeq, switches)
+        // A node judged dead is remembered for this kind of network for half an hour.
+        if output.verdict == .noData {
+            dead = TribeStartChoice.noting(TribeStartChoice.LastFailure(nodeId: nodeId, net: net, wallMs: deps.nowMs()),
+                                           in: dead, nowMs: deps.nowMs())
+        }
         lock.unlock()
         deps.log(TribeDataWatchJournal.line(report: report, verdict: output.verdict, snapshot: snapshot,
                                             nodeId: labels.0, proto: labels.1, net: net))
@@ -468,16 +604,7 @@ final class TribeDataWatchRuntime {
                                                                nodeId: labels.0, proto: labels.1, net: net, generation: labels.2))
         // Every report rewrites the file: it always holds the verdict the rule holds now (a
         // verdict that ended is a report too).
-        var state = snapshot.asDictionary
-        state["schema"] = 1
-        state["generation"] = labels.2
-        state["node_id"] = labels.0
-        state["proto"] = labels.1
-        state["net"] = net
-        state["updated_ms"] = deps.nowMs()
-        state["switch_seq"] = made.0
-        state["switches"] = made.1
-        deps.writeState(state)
+        writeState(snapshot.asDictionary, net: net, deps: deps)
     }
 
     /// The journal of a command, and after a performed switch the new identity of the session: the
@@ -489,6 +616,14 @@ final class TribeDataWatchRuntime {
         lock.lock()
         let from = nodeId
         var switched = false
+        // A candidate whose configuration cannot be used is not offered again while the plan lives.
+        if case .switchPeer(let to, _) = command, result == .rejected { rejected.insert(to) }
+        // The node being left for want of data is a node judged dead on this network - whatever
+        // came of the switch.
+        if case .switchPeer(_, .noData) = command, result != .denied {
+            dead = TribeStartChoice.noting(TribeStartChoice.LastFailure(nodeId: from, net: net, wallMs: deps.nowMs()),
+                                           in: dead, nowMs: deps.nowMs())
+        }
         if case .switchPeer(let to, let why) = command, result == .performed {
             switched = true
             nodeId = to
@@ -507,7 +642,6 @@ final class TribeDataWatchRuntime {
         }
         let seq = switchSeq
         let labels = (nodeId, proto, generation)
-        let made = (switchSeq, switches)
         lock.unlock()
         deps.log(TribeDataWatchJournal.commandLine(command, result: result, from: from, seq: seq, net: net))
         switch command {
@@ -519,16 +653,7 @@ final class TribeDataWatchRuntime {
                                         "result": result.rawValue, "generation": labels.2])
         }
         guard switched else { return }
-        var state = snapshot.asDictionary
-        state["schema"] = 1
-        state["generation"] = labels.2
-        state["node_id"] = labels.0
-        state["proto"] = labels.1
-        state["net"] = net
-        state["updated_ms"] = deps.nowMs()
-        state["switch_seq"] = made.0
-        state["switches"] = made.1
-        deps.writeState(state)
+        writeState(snapshot.asDictionary, net: net, deps: deps)
     }
 
     // MARK: - The probe through the tunnel

@@ -49,6 +49,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// AVPN (build 140, data watch stage 2): the configuration the session was started with (the
     /// profile's node); an in-place switch goes back to it when the candidates are exhausted.
     var tribeHomeConfiguration: TunnelConfiguration?
+    /// AVPN (build 140, data watch stage 2): who started this run of the tunnel - the
+    /// `tribeStartSource` of the start options (the app and our commands always pass one), nil
+    /// when the start carried none (iOS: Settings, On-Demand).
+    var tribeStartSource: String?
 
     // AVPN (D5): the adapter reference is cleared from the adapter's own workQueue (stop
     // completion) and read from the provider's message queue; guard every access with a lock.
@@ -312,7 +316,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
         // Кто поднял туннель: приложение и наши команды передают tribeStartSource, iOS (Настройки,
         // On-Demand после системной остановки) — нет.
-        let startSource = (options?["tribeStartSource"] as? String) ?? "os"
+        tribeStartSource = options?["tribeStartSource"] as? String // AVPN (build 140, data watch stage 2)
+        let startSource = tribeStartSource ?? "os"
         TribeSharedState.appGroup?.record(source: "ne", event: "start", fields: ["generation": tribeRuntimeGeneration, "configuration_generation": metadata["generation"] ?? "legacy", "node_id": metadata["node_id"] ?? "unknown", "proto": metadata["proto"] ?? "unknown", "start_source": startSource])
 
         let activationAttemptId = options?[Constants.kActivationAttemptId] as? String
