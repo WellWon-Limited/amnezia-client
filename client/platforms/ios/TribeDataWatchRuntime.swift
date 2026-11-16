@@ -81,6 +81,9 @@ final class TribeDataWatchRuntime {
     private var probeInFlight: Int32 = 0
     /// The last probe told as silent and until when (uptime) its late answer is looked for.
     private var lateWatch: (id: Int32, until: TimeInterval)?
+    /// The probe before the one in flight, while its reply may still come (third review, T3): a
+    /// path that answers later than one whole wait must refute the verdict, not disturb the next probe.
+    private var previousLateWatch: (id: Int32, until: TimeInterval)?
 
     // Session labels for the journal (never endpoints). `nodeId` is the node the tunnel stands on
     // NOW: after an in-place switch (stage 2) it is not the profile's node any more.
@@ -167,6 +170,7 @@ final class TribeDataWatchRuntime {
         sanityRunning = false
         probeInFlight = 0
         lateWatch = nil
+        previousLateWatch = nil
         lastVerdict = .none
         planStamp = nil
         planData = nil
@@ -199,6 +203,7 @@ final class TribeDataWatchRuntime {
         policy = .disabled
         probeInFlight = 0
         lateWatch = nil
+        previousLateWatch = nil
         lock.unlock()
     }
 
@@ -516,6 +521,7 @@ final class TribeDataWatchRuntime {
         lock.lock()
         let flying = probeInFlight
         let late = lateWatch
+        let previousLate = previousLateWatch
         let deps = self.deps
         lock.unlock()
         guard let deps else { return TribeDataWatchInputs() }
@@ -524,36 +530,47 @@ final class TribeDataWatchRuntime {
             let result = TribeDataWatchJournal.parseProbeResult(deps.probeResult(handle) ?? "")
             // Another id or "none" means our probe is gone (a new device): it was never judged.
             let state: TribeProbeResult = result.id == flying ? result.state : .notSent
-            if state != .pending {
-                lock.lock()
-                if probeInFlight == flying {
-                    probeInFlight = 0
-                    inputs.probe = state == .none ? .notSent : state
-                    inputs.probeAt = now
+            lock.lock()
+            // The reply to the probe before this one came in while this one flies: a late answer.
+            if let previous = previousLateWatch {
+                if now > previous.until || result.id != flying {
+                    previousLateWatch = nil
+                } else if result.latePrevious == previous.id {
+                    previousLateWatch = nil
+                    inputs.lateAnswerAt = now
+                }
+            }
+            if state != .pending, probeInFlight == flying {
+                probeInFlight = 0
+                inputs.probe = state == .none ? .notSent : state
+                inputs.probeAt = now
+                inputs.probeLatencyMs = result.latencyMs
+                // A probe judged silent (or staged) may still get its answer.
+                lateWatch = (state == .silent || state == .staged) ? (flying, now + Self.lateAnswerWatchSeconds) : nil
+            }
+            lock.unlock()
+        } else if late != nil || previousLate != nil {
+            // No probe in flight: the reply to the last one (and to the one before it) may still come.
+            let result = TribeDataWatchJournal.parseProbeResult(deps.probeResult(handle) ?? "")
+            lock.lock()
+            if let late, lateWatch?.id == late.id {
+                if now > late.until {
+                    lateWatch = nil
+                } else if result.state == .answered, result.id == late.id {
+                    lateWatch = nil
+                    inputs.lateAnswerAt = now
                     inputs.probeLatencyMs = result.latencyMs
-                    // A probe judged silent (or staged) may still get its answer.
-                    lateWatch = (state == .silent || state == .staged) ? (flying, now + Self.lateAnswerWatchSeconds) : nil
-                }
-                lock.unlock()
-            }
-        } else if let late {
-            if now > late.until {
-                lock.lock()
-                if lateWatch?.id == late.id { lateWatch = nil }
-                lock.unlock()
-            } else {
-                let result = TribeDataWatchJournal.parseProbeResult(deps.probeResult(handle) ?? "")
-                // (A new probe ends this look-out in startProbe, so the result is still that probe's.)
-                if result.state == .answered {
-                    lock.lock()
-                    if lateWatch?.id == late.id {
-                        lateWatch = nil
-                        inputs.lateAnswerAt = now
-                        inputs.probeLatencyMs = result.latencyMs
-                    }
-                    lock.unlock()
                 }
             }
+            if let previous = previousLate, previousLateWatch?.id == previous.id {
+                if now > previous.until {
+                    previousLateWatch = nil
+                } else if result.latePrevious == previous.id {
+                    previousLateWatch = nil
+                    inputs.lateAnswerAt = now
+                }
+            }
+            lock.unlock()
         }
         lock.lock()
         var current = inputs
@@ -592,10 +609,14 @@ final class TribeDataWatchRuntime {
         lock.lock()
         lastVerdict = snapshot.verdict
         let labels = (nodeId, proto, generation)
-        // A node judged dead is remembered for this kind of network for half an hour.
+        // A node judged dead is remembered for this kind of network for half an hour - unless the
+        // verdict is taken back: a refutation (a late answer too), an answered trial or returned
+        // data prove that the node passes data here, and the record goes with the verdict.
         if output.verdict == .noData {
             dead = TribeStartChoice.noting(TribeStartChoice.LastFailure(nodeId: nodeId, net: net, wallMs: deps.nowMs()),
                                            in: dead, nowMs: deps.nowMs())
+        } else if report == .refuted || report == .trial || output.verdict == .recovered {
+            dead.removeAll { $0.nodeId == nodeId && $0.net == net }
         }
         lock.unlock()
         deps.log(TribeDataWatchJournal.line(report: report, verdict: output.verdict, snapshot: snapshot,
@@ -636,6 +657,7 @@ final class TribeDataWatchRuntime {
             lastVerdict = .none
             probeInFlight = 0
             lateWatch = nil
+            previousLateWatch = nil
             if inputs.probe != .unavailable { inputs.probe = .none }
             inputs.probeAt = nil
             inputs.lateAnswerAt = nil
@@ -666,9 +688,12 @@ final class TribeDataWatchRuntime {
         let outcome = TribeDataWatchJournal.startOutcome(deps.probeStart(handle, Int32(timeout * 1000)))
         let now = deps.uptime()
         lock.lock()
-        lateWatch = nil // a new question: the old probe's late answer is not waited for any more
         switch outcome {
         case .started(let id):
+            // A new question. The old probe's late answer is still looked for while this one flies
+            // (the Go layer tells it as " prev_late=<id>").
+            previousLateWatch = lateWatch.flatMap { $0.until > now && $0.id != id ? $0 : nil }
+            lateWatch = nil
             probeInFlight = id
             inputs.probe = .pending
         case .noSession:

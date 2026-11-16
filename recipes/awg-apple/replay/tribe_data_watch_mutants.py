@@ -289,6 +289,10 @@ MUTANTS = [
     ("r2-S04", "} else if next == .noData && !arb.trialPending && probeRequestedAt == nil && !quiet\n", "} else if (next == .noData || next == .unconfirmed) && !arb.trialPending && probeRequestedAt == nil && !quiet\n", "rev2-S04: the arbiter acts on `unconfirmed`"),
     ("r2-N04", "let handshakeSilent = sessionEpoch.map { now - $0 >= policy.cycleSeconds * Double(policy.deadCycles) } ?? false", "let handshakeSilent = true", "rev2-N04: no session is judged at once"),
     ("r2-N10", "        case .lowRx:\n            lowRxProbeTimes.append(now)", "        case .lowRx:\n            probeTimes.append(now)", "rev2-N10: low-inbound probes spend the passive rule's hourly budget"),
+    # ---- third review, T3: a late answer that arrives while the next probe is in flight ----
+    ("t3-01", "                if probeRequestedAt != nil && probeRequestReason == .trial {\n                    probeRequestedAt = nil\n                    refundProbe(.trial)\n                }\n", "                if probeRequestedAt != nil && probeRequestReason == .trial { disturbedSinceProbe = true }\n", "the probe in flight at a late refutation is counted as disturbed and its budget is spent (the state of cdc7861ba)"),
+    ("t3-02", "                    probeRequestedAt = nil\n                    refundProbe(.trial)\n", "                    probeRequestedAt = nil\n", "the probe dropped at a late refutation stays charged to the trial budget"),
+    ("t3-03", "                arb.trialPending = false // the round ends with its verdict (below): no new trial on this step\n", "", "a new trial is started on the very step of the refutation and judges a verdict that was withdrawn"),
 ]
 
 # Survivors that are accepted, each with the reason no behavioural test can or should kill it.

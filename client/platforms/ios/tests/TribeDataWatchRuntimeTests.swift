@@ -249,6 +249,100 @@ enum TribeDataWatchRuntimeTests {
             _ = b.runtime.prepare(nodeId: "16", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
             return (b, b.runtime.chooseStart(source: source))
         }
+        func deadRecords(_ state: [String: Any]) -> [String] { (state["dead"] as? [[String: Any]] ?? []).compactMap { $0["node_id"] as? String } }
+        /// Pin and profile are node 12, the plan offers 16 and 9; the probe is silent up to the verdict.
+        func judgedOnTwelve() -> Bench {
+            let b = Bench()
+            b.writePlan(switchOn: true, candidates: [16, 9], pin: 12)
+            b.startSession(nodeId: "12")
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            for second in 1...200 where b.adapter.watch.verdict != .noData {
+                b.second(tx: 400, handshake: b.adapter.handshake == 0 ? second % 3 == 0 : false)
+            }
+            return b
+        }
+        /// iOS raises the tunnel again `minutes` later with the same plan and what the previous run left.
+        func startBySystem(after b: Bench, minutes: Int64) -> String {
+            let next = Bench()
+            next.wallMs = b.wallMs + minutes * 60_000
+            next.writePlan(switchOn: true, candidates: [16, 9], pin: 12)
+            next.previousState = b.lastState
+            _ = next.runtime.prepare(nodeId: "12", proto: "awg", generation: "gen-2", clientIP: "10.8.1.7/32", resolver: "1.1.1.1", base: Bench.base)
+            return next.runtime.chooseStart(source: nil)?.nodeId ?? "12"
+        }
+        run("refuted_verdict_takes_its_dead_record_back") {
+            // Third review, T1 (the reviewer's sequence on the real runtime): pin and profile are
+            // node 12; one silent probe; the answer arrives 6 s later; ten minutes later iOS restarts
+            // the tunnel. It came up on node 16: the record written at the verdict was never removed.
+            let b = judgedOnTwelve()
+            check(b.adapter.watch.verdict == .noData && deadRecords(b.lastState) == ["12"], "a verdict: node 12 is on record: \(deadRecords(b.lastState))")
+            check(startBySystem(after: b, minutes: 10) == "16", "while the verdict stands a start by the system avoids the node")
+            dead(b, seconds: 5)
+            b.probeResult = "state=answered id=5 ms=6000 late=1"
+            dead(b, seconds: 2)
+            check(b.logs.contains { $0.contains("event=refuted") } && b.adapter.watch.verdict != .noData, "the late answer refutes the verdict: \(b.logs.suffix(2))")
+            check(deadRecords(b.lastState).isEmpty, "and the record goes with it: \(deadRecords(b.lastState))")
+            check(startBySystem(after: b, minutes: 10) == "12", "ten minutes later iOS restarts the tunnel: the pinned node 12")
+            // Only the record of that node on that network goes: what was judged about another node, or
+            // about this node on another network, stands.
+            let k = Bench()
+            k.writePlan(switchOn: true, candidates: [16, 9], pin: 12)
+            k.previousState = ["verdict": "none", "dead": [["node_id": "9", "net": "cellular", "at_ms": k.wallMs - 60_000],
+                                                             ["node_id": "12", "net": "wifi", "at_ms": k.wallMs - 60_000]]]
+            k.startSession(nodeId: "12")
+            k.probeResult = "state=silent id=5 ms=0 late=0"
+            for second in 1...200 where k.adapter.watch.verdict != .noData { k.second(tx: 400, handshake: k.adapter.handshake == 0 ? second % 3 == 0 : false) }
+            func pairs(_ state: [String: Any]) -> Set<String> { Set((state["dead"] as? [[String: Any]] ?? []).map { "\($0["node_id"] ?? "")@\($0["net"] ?? "")" }) }
+            check(pairs(k.lastState) == ["9@cellular", "12@wifi", "12@cellular"], "three records at the verdict: \(pairs(k.lastState))")
+            dead(k, seconds: 5)
+            k.probeResult = "state=answered id=5 ms=6000 late=1"
+            dead(k, seconds: 2)
+            check(pairs(k.lastState) == ["9@cellular", "12@wifi"], "the refutation takes back its own record only: \(pairs(k.lastState))")
+            // An answered trial takes the record back as well.
+            let t = judgedOnTwelve()
+            let starts = t.probeStarts.count
+            for _ in 1...30 where t.probeStarts.count == starts { dead(t, seconds: 1) }
+            t.probeResult = "state=answered id=5 ms=40 late=0"
+            dead(t, seconds: 2)
+            check(t.logs.contains { $0.contains("event=trial") } && deadRecords(t.lastState).isEmpty && startBySystem(after: t, minutes: 10) == "12",
+                  "an answered second probe: no record, the next start by the system raises node 12: \(deadRecords(t.lastState))")
+            // Returned data (16 KiB) ends the verdict and the record too.
+            let r = judgedOnTwelve()
+            for _ in 1...3 { r.second(tx: 400, rx: 8000) }
+            check(r.adapter.watch.verdict != .noData && deadRecords(r.lastState).isEmpty, "data came back: no record: \(deadRecords(r.lastState))")
+        }
+        run("late_answer_to_the_previous_probe_is_a_refutation") {
+            // Third review, T3: the reply to the confirming probe arrives while the next probe is
+            // already in flight (the Go layer tells it as prev_late=<id>).
+            let b = judgedOnTwelve()
+            let starts = b.probeStarts.count
+            b.probeStartCode = 6
+            for _ in 1...30 where b.probeStarts.count == starts { dead(b, seconds: 1) }
+            check(b.probeStarts.count == starts + 1, "the second probe is in flight")
+            b.probeResult = "state=pending id=6 ms=0 late=0"
+            dead(b, seconds: 1)
+            check(b.adapter.watch.verdict == .noData, "nothing yet")
+            b.probeResult = "state=pending id=6 ms=0 late=0 prev_late=5"
+            dead(b, seconds: 1)
+            var snap = b.adapter.watch.snapshot(policy: b.adapter.policy)
+            check(b.logs.contains { $0.contains("event=refuted") } && b.adapter.watch.verdict != .noData && snap.refuted == 1,
+                  "the previous probe's late answer is a refutation: \(b.logs.suffix(2))")
+            check(deadRecords(b.lastState).isEmpty && b.adapter.switched.isEmpty, "no record of a dead node, nobody is moved")
+            b.probeResult = "state=silent id=6 ms=0 late=0 prev_late=5"
+            dead(b, seconds: 5)
+            snap = b.adapter.watch.snapshot(policy: b.adapter.policy)
+            check(snap.disturbed == 0 && snap.trialProbesLastHour == 0 && !b.logs.contains { $0.contains("event=disturbed") },
+                  "the probe that was in flight is neither a disturbed probe nor a spent one: \(snap.disturbed) \(snap.trialProbesLastHour)")
+            check(b.adapter.watch.verdict != .noData && b.logs.filter { $0.contains("event=refuted") }.count == 1, "told once: \(b.logs.suffix(6)) starts \(b.probeStarts.count - starts)")
+            // Outside its window the previous probe is not listened for.
+            let old = judgedOnTwelve()
+            let before = old.probeStarts.count
+            old.probeStartCode = 6
+            for _ in 1...30 where old.probeStarts.count == before { dead(old, seconds: 1) }
+            old.probeResult = "state=pending id=7 ms=0 late=0 prev_late=5" // another probe's line (a new device)
+            dead(old, seconds: 1)
+            check(!old.logs.contains { $0.contains("event=refuted") }, "a result line of another probe credits nobody")
+        }
         run("switch_goes_through_the_whole_extension") {
             let b = Bench()
             b.writePlan(switchOn: true, candidates: [12, 9])

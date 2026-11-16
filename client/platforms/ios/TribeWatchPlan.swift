@@ -463,11 +463,14 @@ enum TribeDataWatchJournal {
     /// "state=<s> id=<n> ms=<n> late=<0|1>" from wgTribeProbeResult. The Go layer's "no_session"
     /// here is a packet that WAS injected and found only staged: `.staged` for the rule (a start
     /// that was refused is told by the start's own return value, see `startOutcome`).
-    static func parseProbeResult(_ raw: String) -> (state: TribeProbeResult, id: Int32, latencyMs: Int, late: Bool) {
+    /// `latePrevious` = the id of the probe BEFORE this one whose reply has come in meanwhile
+    /// (" prev_late=<id>"; 0 = none): a path that answers later than one whole wait.
+    static func parseProbeResult(_ raw: String) -> (state: TribeProbeResult, id: Int32, latencyMs: Int, late: Bool, latePrevious: Int32) {
         var state = TribeProbeResult.unavailable
         var id: Int32 = 0
         var ms = 0
         var late = false
+        var latePrevious: Int32 = 0
         for part in raw.split(separator: " ") {
             let pair = part.split(separator: "=", maxSplits: 1)
             guard pair.count == 2 else { continue }
@@ -476,10 +479,11 @@ enum TribeDataWatchJournal {
             case "id": id = Int32(pair[1]) ?? 0
             case "ms": ms = Int(pair[1]) ?? 0
             case "late": late = pair[1] == "1"
+            case "prev_late": latePrevious = Int32(pair[1]) ?? 0
             default: break
             }
         }
-        return (state, id, ms, late)
+        return (state, id, ms, late, latePrevious)
     }
 
     /// What wgTribeProbeStart returned: an id (the probe is in flight), or why nothing was sent.

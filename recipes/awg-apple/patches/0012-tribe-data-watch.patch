@@ -321,10 +321,10 @@ index e104403..1b034c0 100644
  	err = dev.IpcSet(C.GoString(settings))
 diff --git a/Sources/WireGuardKitGo/tribeprobe.go b/Sources/WireGuardKitGo/tribeprobe.go
 new file mode 100644
-index 0000000..7811611
+index 0000000..94c69f9
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/tribeprobe.go
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,674 @@
 +/* SPDX-License-Identifier: MIT
 + *
 + * Tribe data watch probe (awg-apple tribe.13).
@@ -362,6 +362,10 @@ index 0000000..7811611
 + * A reply that comes after the verdict is still credited: for a while the write path keeps
 + * looking for it and the result turns into "answered late=1". The look-out ends by itself (a
 + * deadline checked on the write path), whether or not anybody asks for the result again.
++ * It also survives the start of the NEXT probe: a path that answers later than one whole wait
++ * would otherwise have every reply land in the following probe's wait as unexplained inbound
++ * data. The reply to the previous probe is taken off the write path all the same and every
++ * result carries " prev_late=<id>" from then on, until the probe after that is started.
 + *
 + * The wrapper is its own outermost tun.Device and is a pass-through: no pump goroutine, no copy
 + * per packet; Read and Write look at packets only while a probe needs it. How the packet gets in:
@@ -543,7 +547,11 @@ index 0000000..7811611
 +	tribeProbeCfg *tribeProbeConfig // nil = no probe in this session
 +	tribeProbeTun *tribeProbeTunDev // the wrapper of the device that is up now
 +	tribeProbeCur *tribeProbeState
-+	tribeProbeSeq uint32
++	// The probe before the current one, kept only while its reply may still come: it was told
++	// as silent (or staged) and its late window was open when the current probe was started.
++	tribeProbePrev      *tribeProbeState
++	tribeProbePrevUntil time.Time
++	tribeProbeSeq       uint32
 +	// Unix nanoseconds until which the write path looks for the probe's reply; 0 = it does not.
 +	// A deadline, not a flag: the look-out ends by itself even when nobody polls the result.
 +	tribeProbeUntil atomic.Int64
@@ -621,7 +629,12 @@ index 0000000..7811611
 +	if tribeProbeCfg != cfg || tribeProbeTun != dev {
 +		return tribeProbeStartNone // the session changed while the engine was asked
 +	}
++	before, beforeUntil := tribeProbeCur, time.Unix(0, tribeProbeUntil.Load())
 +	tribeProbeAbortLocked()
++	if before != nil && before.answered.IsZero() && !before.consumedAt.IsZero() &&
++		(before.final == "silent" || before.final == "no_session") && now.Before(beforeUntil) {
++		tribeProbePrev, tribeProbePrevUntil = before, beforeUntil
++	}
 +	if timeout <= 0 {
 +		timeout = tribeProbeDefaultTimeout
 +	}
@@ -683,6 +696,16 @@ index 0000000..7811611
 +}
 +
 +func tribeProbeResult(handle int32) string {
++	out := tribeProbeResultOfCurrent(handle)
++	tribeProbeMu.Lock()
++	if prev := tribeProbePrev; prev != nil && !prev.answered.IsZero() {
++		out += fmt.Sprintf(" prev_late=%d", prev.id)
++	}
++	tribeProbeMu.Unlock()
++	return out
++}
++
++func tribeProbeResultOfCurrent(handle int32) string {
 +	tribeProbeMu.Lock()
 +	cfg := tribeProbeCfg
 +	st := tribeProbeCur
@@ -742,7 +765,12 @@ index 0000000..7811611
 +		if st.resend != nil {
 +			st.resend.Stop()
 +		}
-+		tribeProbeUntil.Store(0) // nothing left the phone: no reply can come
++		// Nothing left the phone: no reply to THIS probe can come (the previous one's still may).
++		if tribeProbePrev != nil && tribeProbePrev.answered.IsZero() {
++			tribeProbeUntil.Store(tribeProbePrevUntil.UnixNano())
++		} else {
++			tribeProbeUntil.Store(0)
++		}
 +		tribeProbeAwaitTake.Store(false)
 +		return tribeProbeFormat(st.final, st, false), true
 +	}
@@ -759,8 +787,10 @@ index 0000000..7811611
 +	return now.Sub(st.consumedAt) < st.timeout
 +}
 +
-+// tribeProbeAbortLocked ends the probe in flight without a verdict (its state stays readable).
++// tribeProbeAbortLocked ends the probe in flight without a verdict (its state stays readable)
++// and stops looking for the reply to the one before it.
 +func tribeProbeAbortLocked() {
++	tribeProbePrev = nil
 +	if st := tribeProbeCur; st != nil {
 +		if st.resend != nil {
 +			st.resend.Stop()
@@ -925,7 +955,7 @@ index 0000000..7811611
 +}
 +
 +// tribeProbeTakeReply: true = this packet is the answer to the last probe (or to its repeat),
-+// in time or late.
++// in time or late, or the late answer to the probe before it.
 +func tribeProbeTakeReply(d *tribeProbeTunDev, pkt []byte) bool {
 +	m, ok := parseUDP4(pkt)
 +	if !ok || m.sport != 53 || m.dpt < tribeProbePortBase || m.dpt >= tribeProbePortBase+tribeProbePortSpan {
@@ -933,21 +963,31 @@ index 0000000..7811611
 +	}
 +	tribeProbeMu.Lock()
 +	defer tribeProbeMu.Unlock()
-+	st := tribeProbeCur
-+	if st == nil || st.aborted || tribeProbeCfg == nil || tribeProbeTun != d || m.dpt != st.port ||
-+		m.src != tribeProbeCfg.target || m.dst != tribeProbeCfg.client {
++	if tribeProbeCfg == nil || tribeProbeTun != d || m.src != tribeProbeCfg.target || m.dst != tribeProbeCfg.client ||
++		len(m.payload) < 2 {
 +		return false
 +	}
-+	if len(m.payload) < 2 || binary.BigEndian.Uint16(m.payload[0:2]) != st.dnsID {
-+		return false
-+	}
-+	if st.answered.IsZero() && !st.consumedAt.IsZero() {
-+		st.answered = tribeProbeNow()
-+		if st.resend != nil {
-+			st.resend.Stop()
++	dnsID := binary.BigEndian.Uint16(m.payload[0:2])
++	if st := tribeProbeCur; st != nil && !st.aborted && m.dpt == st.port && dnsID == st.dnsID {
++		if st.answered.IsZero() && !st.consumedAt.IsZero() {
++			st.answered = tribeProbeNow()
++			if st.resend != nil {
++				st.resend.Stop()
++			}
 +		}
++		return true
 +	}
-+	return true
++	if prev := tribeProbePrev; prev != nil && m.dpt == prev.port && dnsID == prev.dnsID {
++		now := tribeProbeNow()
++		if now.After(tribeProbePrevUntil) {
++			return false // its window is over: an unknown packet again
++		}
++		if prev.answered.IsZero() {
++			prev.answered = now
++		}
++		return true
++	}
++	return false
 +}
 +
 +func (d *tribeProbeTunDev) Close() error {
@@ -1000,10 +1040,10 @@ index 0000000..f06cfaf
 +}
 diff --git a/Sources/WireGuardKitGo/tribeprobe_test.go b/Sources/WireGuardKitGo/tribeprobe_test.go
 new file mode 100644
-index 0000000..7d4bfa0
+index 0000000..823857a
 --- /dev/null
 +++ b/Sources/WireGuardKitGo/tribeprobe_test.go
-@@ -0,0 +1,957 @@
+@@ -0,0 +1,1047 @@
 +/* SPDX-License-Identifier: MIT
 + *
 + * Tribe data watch probe - tests with a fake tun (no device, no network): what the wrapper hands
@@ -1700,6 +1740,96 @@ index 0000000..7d4bfa0
 +	writeBatch(t, dev, probeReply(q2))
 +	if got := wantState(t, "answered"); !strings.Contains(got, " late=0") || !strings.Contains(got, "id="+itoa(uint32(second))+" ") {
 +		t.Fatalf("result %q", got)
++	}
++}
++
++// Third review, T3: a path that answers later than one whole wait. The reply to the first probe
++// arrives while the second one flies: it is still taken off the write path and told as the previous
++// probe's late answer; the second probe is judged by its own reply only.
++func TestTribeProbeLateAnswerAfterTheNextProbeStarted(t *testing.T) {
++	inner, dev, clock := setupProbe(t)
++	first := startProbe(t, 4*time.Second)
++	q1 := readOne(t, dev)
++	clock.Advance(4 * time.Second)
++	wantState(t, "silent")
++	clock.Advance(10 * time.Second)
++	second := startProbe(t, 4*time.Second)
++	if second == first {
++		t.Fatal("the second probe did not start")
++	}
++	q2 := readOne(t, dev)
++	if got := wantState(t, "pending"); strings.Contains(got, "prev_late") {
++		t.Fatalf("no late answer yet: %q", got)
++	}
++	clock.Advance(2 * time.Second) // 16 s after the first probe left
++	if n, err := writeBatch(t, dev, probeReply(q1)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if len(inner.delivered()) != 0 {
++		t.Fatal("the late reply to the previous probe reached the OS")
++	}
++	got := wantState(t, "pending")
++	if !strings.Contains(got, " prev_late="+itoa(uint32(first))) || !strings.Contains(got, "id="+itoa(uint32(second))+" ") {
++		t.Fatalf("the previous probe's late answer is not told: %q", got)
++	}
++	clock.Advance(2 * time.Second)
++	if got := wantState(t, "silent"); !strings.Contains(got, " prev_late="+itoa(uint32(first))) || !strings.Contains(got, " late=0") {
++		t.Fatalf("the second probe must be judged by its own reply only: %q", got)
++	}
++	// The reply to the second probe, late too, while it is still the current one.
++	clock.Advance(1 * time.Second)
++	writeBatch(t, dev, probeReply(q2))
++	if got := wantState(t, "answered"); !strings.Contains(got, " late=1") || !strings.Contains(got, "id="+itoa(uint32(second))+" ") {
++		t.Fatalf("result %q", got)
++	}
++	// A third probe: an answered probe is not kept, and the first one is not looked for any more.
++	third := startProbe(t, 4*time.Second)
++	readOne(t, dev)
++	if got := wantState(t, "pending"); strings.Contains(got, "prev_late") || !strings.Contains(got, "id="+itoa(uint32(third))+" ") {
++		t.Fatalf("result %q", got)
++	}
++	if n, err := writeBatch(t, dev, probeReply(q1)); err != nil || n != 1 {
++		t.Fatalf("Write n=%d err=%v", n, err)
++	}
++	if len(inner.delivered()) != 1 {
++		t.Fatal("a reply to a probe nobody waits for must pass to the OS untouched")
++	}
++	if got := wantState(t, "pending"); strings.Contains(got, "prev_late") {
++		t.Fatalf("result %q", got)
++	}
++}
++
++// The previous probe's reply is looked for only inside its own late window, and never across a
++// new device.
++func TestTribeProbePreviousLookoutHasItsOwnEnd(t *testing.T) {
++	inner, dev, clock := setupProbe(t)
++	startProbe(t, 4*time.Second)
++	q1 := readOne(t, dev)
++	clock.Advance(4 * time.Second)
++	wantState(t, "silent") // the late window of the first probe: 30 s from here
++	clock.Advance(28 * time.Second)
++	startProbe(t, 4*time.Second)
++	readOne(t, dev)
++	clock.Advance(3 * time.Second) // 31 s after the first verdict
++	writeBatch(t, dev, probeReply(q1))
++	if len(inner.delivered()) != 1 {
++		t.Fatal("a reply after the previous probe's window was swallowed")
++	}
++	if got := wantState(t, "pending"); strings.Contains(got, "prev_late") {
++		t.Fatalf("result %q", got)
++	}
++	// A probe that was told silent, then the next one starts, then the device goes away.
++	clock.Advance(1 * time.Second)
++	wantState(t, "silent")
++	clock.Advance(5 * time.Second)
++	startProbe(t, 4*time.Second)
++	tribeProbeMu.Lock()
++	kept := tribeProbePrev != nil
++	tribeProbeAbortLocked()
++	gone := tribeProbePrev == nil
++	tribeProbeMu.Unlock()
++	if !kept || !gone {
++		t.Fatalf("the previous probe must be kept while its window is open (%v) and dropped with the device (%v)", kept, gone)
 +	}
 +}
 +

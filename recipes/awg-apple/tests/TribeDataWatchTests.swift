@@ -38,6 +38,8 @@ struct Sim {
     var probeLatency: TimeInterval = 0.3
     /// The answer to a probe told as silent arrives this long after the verdict; nil = never.
     var lateAnswerAfter: TimeInterval?
+    /// The late reply as the engine sees it: it is counted as inbound data whoever takes it.
+    var lateAnswerBytes: UInt64 = 0
     private var lateDue: TimeInterval?
     /// false = the provider leaves whatever probe result it had (an older one) until the new one arrives.
     var marksProbePending = true
@@ -100,6 +102,7 @@ struct Sim {
         }
         if let due = lateDue, uptime >= due {
             env.lateAnswerAt = due
+            rx += lateAnswerBytes
             lateDue = nil
         }
         let out = watch.step(TribeDataWatchSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, uptime: uptime, wall: wall),
@@ -1461,6 +1464,43 @@ run("two_silent_probes_before_a_node_is_left") {
           && afterRestart[0] - restart < TribeDataWatchPolicy.healTrialSeconds
           && (j.firstSwitchAt ?? 0) - restart >= TribeDataWatchPolicy.healTrialSeconds,
           "two silent probes 3 s apart do not move a session: \(afterRestart.map { $0 - restart }), left \((j.firstSwitchAt ?? 0) - restart) s after the restart")
+}
+
+run("late_answer_after_the_next_probe_started_is_a_refutation") {
+    // Third review, T3: the node answers every probe, but later than one whole wait - the reply to
+    // the confirming probe arrives while the arbiter's second probe is already in flight. It was
+    // counted as a disturbed probe: no_data stood, the trial budget burned (30 trials in about seven
+    // minutes), nothing reached the three-day `refuted` gate. It is a refutation.
+    var s = switching(["12"])
+    s.healResult = .denied
+    s.lateAnswerAfter = 12 // 12 s after the probe was told silent: 2 s into the next probe's flight
+    s.lateAnswerBytes = 60
+    for _ in 1...200 where s.count(.refuted) == 0 { s.silentSecond() }
+    var snap = s.watch.snapshot(policy: s.policy)
+    check(s.trials.count == 1 && s.noDataAt > 0 && (s.reports.last { $0.report == .refuted }?.at ?? 0) - s.trials[0] == 2,
+          "the late answer came 2 s into the second probe's flight: \(s.trials.map { $0 - s.noDataAt })")
+    check(s.count(.refuted) == 1 && snap.refuted == 1 && s.watch.verdict != .noData, "counted as refuted, the verdict is withdrawn: \(s.watch.verdict)")
+    check(snap.disturbed == 0 && s.count(.disturbed) == 0, "not as a disturbed probe: \(snap.disturbed)")
+    check(snap.trialProbesLastHour == 0 && !snap.arbiterActive && !snap.arbiterTrial, "the probe that was in flight is given back and the round is over: \(snap.trialProbesLastHour)")
+    // The same when the reply's bytes are not seen on that very sample (the counters are read a
+    // moment before the reply is taken): no new probe is started on the step of the refutation.
+    var quiet = switching(["12"])
+    quiet.healResult = .denied
+    quiet.lateAnswerAfter = 12
+    for _ in 1...200 where quiet.count(.refuted) == 0 { quiet.silentSecond() }
+    for _ in 1...6 { quiet.silentSecond() }
+    let quietSnap = quiet.watch.snapshot(policy: quiet.policy)
+    check(quiet.trials.count == 1 && quiet.count(.refuted) == 1 && quiet.watch.verdict != .noData && quietSnap.trialProbesLastHour == 0 && quietSnap.disturbed == 0,
+          "without the reply's bytes: one refutation, no second trial, no verdict from the cancelled probe: trials \(quiet.trials.count) verdict \(quiet.watch.verdict)")
+    // The cancelled probe's own result arrives and judges nothing.
+    for _ in 1...4 { s.silentSecond() }
+    snap = s.watch.snapshot(policy: s.policy)
+    check(snap.disturbed == 0 && s.watch.verdict != .noData && s.switches.isEmpty, "the cancelled probe judges nothing")
+    // Ten more minutes of the same path: every verdict is refuted, nobody is moved, nothing burns.
+    for _ in 1...600 { s.silentSecond() }
+    snap = s.watch.snapshot(policy: s.policy)
+    check(s.switches.isEmpty && s.count(.refuted) >= 2 && snap.disturbed == 0 && snap.trialProbesLastHour == 0,
+          "ten minutes of late answers: refuted \(s.count(.refuted)), disturbed \(snap.disturbed), trial probes \(snap.trialProbesLastHour), switches \(s.switches)")
 }
 
 run("arbiter_never_acts_on_unconfirmed") {

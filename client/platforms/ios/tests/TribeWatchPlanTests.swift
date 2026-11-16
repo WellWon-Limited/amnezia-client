@@ -203,6 +203,10 @@ enum TribeWatchPlanTests {
         check(clean.map { !String(decoding: $0, as: UTF8.self).contains(key32) } == true, "no key is left")
         check(accepted(clean, last: accepted(full)!.order)?.policy.enabled == true, "and it is the same plan for the order of plans")
         check(TribeWatchPlan.scrubbed(Data("junk".utf8)) == nil && TribeWatchPlan.scrubbed(plan { $0["schema"] = 1 }) == nil, "what is not a plan is not rewritten")
+        let flying = TribeDataWatchJournal.parseProbeResult("state=pending id=6 ms=0 late=0 prev_late=5")
+        check(flying.state == .pending && flying.id == 6 && flying.latePrevious == 5 && !flying.late, "the previous probe's late answer is read from the result line")
+        check(TribeDataWatchJournal.parseProbeResult("state=silent id=6 ms=0 late=0").latePrevious == 0
+              && TribeDataWatchJournal.parseProbeResult("state=silent id=6 prev_late=x").latePrevious == 0, "absent or junk: none")
         check(TribeDataWatchJournal.engineLine(down: true, nodeId: "16") == "Tribe watch: engine=down node=16"
               && TribeDataWatchJournal.engineLine(down: false, nodeId: "16") == "Tribe watch: engine=up node=16", "the engine line")
         // --- the journal lines of a command ---

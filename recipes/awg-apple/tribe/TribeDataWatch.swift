@@ -1016,8 +1016,14 @@ public struct TribeDataWatch: Equatable {
             silences = 0
             if verdict == .noData && evidence == .probe {
                 lateRefuted = true
-                // A trial in flight was asked about a verdict that no longer stands.
-                if probeRequestedAt != nil && probeRequestReason == .trial { disturbedSinceProbe = true }
+                // A trial in flight was asked about a verdict that no longer stands: it is not
+                // waited for, not counted as disturbed, and its charge is given back (a path that
+                // answers later than one whole wait must not burn the trial budget).
+                if probeRequestedAt != nil && probeRequestReason == .trial {
+                    probeRequestedAt = nil
+                    refundProbe(.trial)
+                }
+                arb.trialPending = false // the round ends with its verdict (below): no new trial on this step
                 refutedCount += 1
                 report = .refuted
                 lastProbe = .answered
