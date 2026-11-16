@@ -1,6 +1,6 @@
 // client/core/serviceEngine/TunnelWatchCandidates.h
 //
-// AVPN (iOS tunnel-side data watch, build 140, stage 2; design §5.3 and §0a item 8): the order in which the
+// AVPN (iOS tunnel-side data watch, build 141, stage 2; design §5.3 and §0a item 8): the order in which the
 // packet tunnel extension may switch to other nodes IN PLACE while the app sleeps. Pure: QtCore and the
 // engine's own pick (TransportPick.h); test - tests/transport_pick_check.cpp.
 //

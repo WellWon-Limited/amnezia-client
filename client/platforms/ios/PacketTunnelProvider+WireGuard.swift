@@ -46,7 +46,7 @@ extension PacketTunnelProvider {
                 _ = wgSetDirectSplit("", 0)
             }
 
-            // AVPN (build 140, data watch): the plan file decides whether the watch and its probe
+            // AVPN (build 141, data watch): the plan file decides whether the watch and its probe
             // through the tunnel run in this session. Configured BEFORE the adapter starts; off =
             // explicit reset, like the two blocks above (PacketTunnelProvider+DataWatch.swift).
             prepareTribeDataWatch(wgConfig)
@@ -122,8 +122,8 @@ extension PacketTunnelProvider {
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
             let roaming = wgConfig.roamingPolicy
             adapter.roamingPolicy = roaming
-            tribeDataWatch.attach(adapter: adapter) // AVPN (build 140, data watch)
-            // AVPN (build 140, data watch stage 2): the adapter asks for a candidate's configuration
+            tribeDataWatch.attach(adapter: adapter) // AVPN (build 141, data watch)
+            // AVPN (build 141, data watch stage 2): the adapter asks for a candidate's configuration
             // only on an order of the watch's arbiter (never with the switch key off).
             adapter.dataWatchCandidate = { [weak self] nodeId in self?.tribeSwitchConfiguration(nodeId) }
             let startConfiguration = tribeStartConfiguration(profile: tunnelConfiguration, startSource: tribeStartSource)
@@ -177,10 +177,10 @@ extension PacketTunnelProvider {
             completionHandler(nil)
             return
         }
-        tribeDataWatch.noteAppStatusRequest() // AVPN (build 140, data watch): the app is alive
+        tribeDataWatch.noteAppStatusRequest() // AVPN (build 141, data watch): the app is alive
         wgAdapter.getRuntimeConfiguration { settings in
             guard let settings = settings else {
-                // AVPN (build 140, data watch stage 2): no engine after a failed switch - say so
+                // AVPN (build 141, data watch stage 2): no engine after a failed switch - say so
                 // (nil without the watch, as before).
                 completionHandler(self.tribeEngineDownReply())
                 return
@@ -210,7 +210,7 @@ extension PacketTunnelProvider {
                 var metadata = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
                 metadata["configuration_generation"] = metadata["generation"]
                 metadata["generation"] = self.tribeRuntimeGeneration
-                self.tribeApplySessionOverride(&metadata) // AVPN (build 140, data watch stage 2)
+                self.tribeApplySessionOverride(&metadata) // AVPN (build 141, data watch stage 2)
                 let summary = counters.asDictionary.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
                 if summary != self.tribeLastRecoverySummary {
                     self.tribeLastRecoverySummary = summary
@@ -224,7 +224,7 @@ extension PacketTunnelProvider {
                     "roam": counters.asDictionary.mapValues { Int(clamping: $0) }
                 ]
 
-                // AVPN (build 140, data watch): the `watch` block. With the watch off there is no
+                // AVPN (build 141, data watch): the `watch` block. With the watch off there is no
                 // block and the reply is the one of build 139.
                 self.tribeDataWatch.statusBlock { watch in
                     if let watch { response["watch"] = watch }
@@ -322,8 +322,8 @@ extension PacketTunnelProvider {
     func stopWireguard(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         wg_log(.info, message: "Stopping tunnel: reason: \(reason.amneziaDescription)")
         stopTribeStatsTimer()
-        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 140): the spare nodes' keys leave the plan file
-        tribeDataWatch.detach() // AVPN (build 140, data watch)
+        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 141): the spare nodes' keys leave the plan file
+        tribeDataWatch.detach() // AVPN (build 141, data watch)
 
         guard let adapter = wgAdapter else {
             ErrorNotifier.removeLastErrorFile()
@@ -379,7 +379,7 @@ extension PacketTunnelProvider {
     }
 
     private func logTribeStats() {
-        // AVPN (build 140, data watch): the order of this tick is the runtime's (tested there): the
+        // AVPN (build 141, data watch): the order of this tick is the runtime's (tested there): the
         // plan file is re-read first and always - the kill switch reaches the extension here, with
         // the file log on or off - then the statistics line of the transport.
         tribeDataWatch.statsTick(isXray: protoType == .xray, loggingEnabled: Log.isLoggingEnabled,

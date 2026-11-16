@@ -1,6 +1,6 @@
 // client/platforms/ios/IosBackgroundArm.h
 //
-// AVPN (iOS data watch, build 140; design §5.5 step 1 and §0a item 7; features.ios_on_demand_bg_arm, off by
+// AVPN (iOS data watch, build 141; design §5.5 step 1 and §0a item 7; features.ios_on_demand_bg_arm, off by
 // default): the On-Demand rule (CONNECT-INVARIANTS §27) is armed only by the running app, from a status
 // reply with a confirmed handshake (IosController::armOnDemandForConfirmedSession). A user who leaves the
 // app in the first seconds after Connect (or after a switch to another node) froze the app before that

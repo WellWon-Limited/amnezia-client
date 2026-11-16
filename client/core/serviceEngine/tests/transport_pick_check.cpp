@@ -858,7 +858,7 @@ int main(int argc, char **argv)
         }
     }
 
-    // --- 9c) iOS data watch (build 140): the extension reported no_data for a session the app
+    // --- 9c) iOS data watch (build 141): the extension reported no_data for a session the app
     // holds as Connected - the engine goes back to Verifying and the EXISTING check decides
     // (reenterVerifying is called only from the facade's Q_OS_IOS block). It is not a verdict by
     // itself: the streak, the failed list and the heal budget move only by what the check says. ---
@@ -939,7 +939,7 @@ int main(int argc, char **argv)
         }
     }
 
-    // --- 9d) iOS data watch, stage 2 (build 140): where the packet tunnel extension may switch to in
+    // --- 9d) iOS data watch, stage 2 (build 141): where the packet tunnel extension may switch to in
     // place while the app sleeps, and how the app takes the node it finds the tunnel on. ---
     {
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);

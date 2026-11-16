@@ -10,7 +10,7 @@
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
 #include "LaunchGuard.h"     // AVPN (self-update v2): безопасный запуск после обновления + откат
-#include "TunnelWatchResume.h" // AVPN (iOS data watch, 140): the hand-over at a return of the app (tested)
+#include "TunnelWatchResume.h" // AVPN (iOS data watch, 141): the hand-over at a return of the app (tested)
 #include <memory>
 #include <functional>
 #include <vector>
@@ -1057,7 +1057,7 @@ private:
     // AVPN (разбор 2026-09-23): держать фоновое время iOS, пока намерение ON, а туннель не устоялся
     // (перезапуск «стоп → старт», начатый приложением, иначе замерзал между стопом и стартом).
     void syncRestartGuard();
-    // AVPN (iOS data watch, build 140; TunnelWatchPlan.h, TunnelWatchStatus.h). Called only under Q_OS_IOS;
+    // AVPN (iOS data watch, build 141; TunnelWatchPlan.h, TunnelWatchStatus.h). Called only under Q_OS_IOS;
     // with features.ios_tunnel_watch / ios_on_demand_bg_arm false (default) each is a no-op for decisions.
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
     void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
@@ -1348,7 +1348,7 @@ private:
     QTimer                      m_journalTimer;          // журнал тестирования: 15 мин, пока на экране
     QString                     m_journalLastState;      // журнал тестирования: прошлое состояние для перехода
     avpn::RestartGuardLatch     m_restartGuard;          // разбор 2026-09-23: удержание фонового времени iOS
-    // AVPN (iOS data watch, build 140): the hand-over at a return of the app - the resume freeze, the
+    // AVPN (iOS data watch, build 141): the hand-over at a return of the app - the resume freeze, the
     // background hold and the decisions that wait (TunnelWatchResume.h). Null outside iOS.
     std::unique_ptr<avpn::TunnelWatchResume> m_watchResume;
     SessionGeneration           m_stopGeneration;        // поколение гасимой сессии (A4: runtime/конфигурации)

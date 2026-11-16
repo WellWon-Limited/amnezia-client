@@ -39,7 +39,7 @@ namespace avpn {
 // sessions, and a stale "true" must not override a server-side "false" until a fresh verified response
 // authorizes it again:
 //  * node_scan - every platform (incident of 06.11.2026, 5.1.108);
-//  * ios_tunnel_watch_switch - iOS, build 140: the packet tunnel extension changes the server by itself.
+//  * ios_tunnel_watch_switch - iOS, build 141: the packet tunnel extension changes the server by itself.
 //    The extension learns the key only from the plan the app writes, so an app that starts on its
 //    cache writes the plan WITHOUT the key until the API answers.
 inline void freezeCachedFeatures(QMap<QString, bool> &features, bool ios)

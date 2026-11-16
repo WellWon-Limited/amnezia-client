@@ -63,7 +63,7 @@ public:
 
     void getBackendLogs(std::function<void(const QString &)> &&callback);
     void checkStatus();
-    // AVPN (iOS data watch, build 140; the facade calls these only under Q_OS_IOS and the flags).
+    // AVPN (iOS data watch, build 141; the facade calls these only under Q_OS_IOS and the flags).
     // requestStatusSnapshot: one consistent snapshot through the status path - replies of requests sent
     // before this call are no longer applied (IosStatusRequest::invalidate), then checkStatus(). The
     // first reply applied after it arrives as tunnelWatchSnapshot, once; without a request the signal
@@ -160,15 +160,15 @@ public:
 
 signals:
     void sessionMetadataChanged(const QVariantMap &metadata);
-    // AVPN (iOS data watch, build 140, contract C2): every applied status reply, after its session
+    // AVPN (iOS data watch, build 141, contract C2): every applied status reply, after its session
     // metadata was taken: {"session": <session_metadata of the reply>, "watch": <the extension's `watch`
     // object, only when the reply has one>}. A build 139 extension has no `watch` key.
     void tunnelWatchSnapshot(const QVariantMap &snapshot);
-    // AVPN (iOS data watch, build 140, stage 2): the status reply said `engine_down` - a failed in-place
+    // AVPN (iOS data watch, build 141, stage 2): the status reply said `engine_down` - a failed in-place
     // switch left the tunnel without an engine (the extension keeps retrying). Emitted for every such
     // reply; the facade restarts the tunnel by its ordinary restart, once.
     void tunnelEngineDown();
-    // AVPN (iOS data watch, build 140): journal lines of the On-Demand arming in the background
+    // AVPN (iOS data watch, build 141): journal lines of the On-Demand arming in the background
     // (on_demand_state ..., on_demand_bg_arm result=...); the facade writes them to the tester journal.
     void onDemandBackgroundEvent(const QString &line);
     void disconnectReason(const QString &reason, bool intentional);
@@ -332,7 +332,7 @@ private:
     // запуск того же профиля; снимается первым принятым status-ответом новой сессии.
     bool m_sessionRuntimeEnded = false;
     uint64_t m_rebindSeq = 0; // AVPN (REV-5): итог только последнего rebindTunnel()
-    // AVPN (iOS data watch, build 140): the On-Demand arming in the background (IosBackgroundArm.h) - the
+    // AVPN (iOS data watch, build 141): the On-Demand arming in the background (IosBackgroundArm.h) - the
     // hold of background time (reason OnDemandArm), when it began and its bound; judged on the status poll.
     std::atomic<bool> m_watchSnapshotWanted { false }; // set by requestStatusSnapshot, cleared by the reply that answers it
     bool m_bgArmHeld = false;

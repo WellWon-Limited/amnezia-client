@@ -80,7 +80,7 @@ message("CLIENT_ROOT_DIR is: ${CLIENT_ROOT_DIR}")
 target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/WireGuardAdapter.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeRoaming.swift
-    # AVPN (build 140, awg-apple tribe.13): pure verdict rule of the tunnel-side data watch
+    # AVPN (build 141, awg-apple tribe.14): pure verdict rule of the tunnel-side data watch
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeDataWatch.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/PacketTunnelSettingsGenerator.swift
     ${WG_APPLE_SOURCE_DIR}/WireGuardKit/DNSResolver.swift
@@ -110,7 +110,7 @@ target_sources(${CLIENT_MACOS_NE_TARGET_NAME} PRIVATE
     ${CLIENT_ROOT_DIR}/platforms/ios/LogRecord.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+WireGuard.swift
-    # AVPN (build 140, data watch): plan file reader, provider runtime, provider glue
+    # AVPN (build 141, data watch): plan file reader, provider runtime, provider glue
     ${CLIENT_ROOT_DIR}/platforms/ios/TribeWatchPlan.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/TribeDataWatchRuntime.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+DataWatch.swift

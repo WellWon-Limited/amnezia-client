@@ -227,7 +227,7 @@ static void requestThatOutlivedAFreeze()
     CHECK(!configRequestOutlivedFreeze(kNow + kHour, kNow, timeout));     // the clock went back: not judged frozen
 }
 
-// AVPN (iOS data watch, build 140): what a cached config may not switch on at a cold start.
+// AVPN (iOS data watch, build 141): what a cached config may not switch on at a cold start.
 static void cachedFeaturesThatMoveSessionsAreFrozen()
 {
     QMap<QString, bool> ios{{QStringLiteral("node_scan"), true},

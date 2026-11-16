@@ -1341,7 +1341,7 @@ bool ServiceEngine::verifyInconclusive() // plan v3 step 5 (review)
     return true;
 }
 
-bool ServiceEngine::reenterVerifying() // AVPN (iOS data watch, build 140)
+bool ServiceEngine::reenterVerifying() // AVPN (iOS data watch, build 141)
 {
     if (m_state != EngineState::Connected || m_currentNodeId.isEmpty())
         return false;

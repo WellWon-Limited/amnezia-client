@@ -11,13 +11,13 @@
 #include <QTimer>
 #include <QUuid>
 #include <memory>
-#include <fcntl.h>    // AVPN (iOS data watch, 140): the lock of the watch plan file
+#include <fcntl.h>    // AVPN (iOS data watch, 141): the lock of the watch plan file
 #include <sys/file.h>
 #include <unistd.h>
 #include "AvpnIntentController.h"
-#include "IosBackgroundArm.h" // AVPN (iOS data watch, 140): On-Demand arming in the background (pure)
+#include "IosBackgroundArm.h" // AVPN (iOS data watch, 141): On-Demand arming in the background (pure)
 #if defined(Q_OS_IOS)
-#include "AvpnBackgroundGuard.h" // AVPN (iOS data watch, 140): background time by reason
+#include "AvpnBackgroundGuard.h" // AVPN (iOS data watch, 141): background time by reason
 #endif
 
 #import "ios_controller_wrapper.h"
@@ -906,7 +906,7 @@ void IosController::armOnDemandForConfirmedSession()
                     Avpn_recordLifecycle(saveFailed ? QStringLiteral("on_demand_arm_failed") : QStringLiteral("on_demand_armed"),
                         {{QStringLiteral("session_generation"), m_sessionMetadata.value(QStringLiteral("generation"))}});
                     [tunnel release];
-                    // AVPN (iOS data watch, 140): the arming the background hold waited for has its result.
+                    // AVPN (iOS data watch, 141): the arming the background hold waited for has its result.
                     endBackgroundArmHold(saveFailed ? "not_needed" : "armed", saveFailed ? "save_failed" : "");
                     if (avpn_ios::armNeedsCleanup(saveFailed, onDemandIntentOff()))
                         stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::IntentCleanup);
@@ -1165,7 +1165,7 @@ void IosController::checkStatus()
         QMetaObject::invokeMethod(this, [this] { checkStatus(); }, Qt::QueuedConnection);
         return;
     }
-    tickBackgroundArmHold(); // AVPN (iOS data watch, 140): the hold's bound is judged on this poll's tick
+    tickBackgroundArmHold(); // AVPN (iOS data watch, 141): the hold's bound is judged on this poll's tick
 
     // AVPN (ревью 2026-07-11): менеджер — только retained-копией (гонка с release на реконнекте),
     // ответ — только для СВОЕЙ сессии (gen): стейл-ответ старой сессии, долетевший после
@@ -1224,7 +1224,7 @@ void IosController::checkStatus()
         // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
         // только для лога; у WG-ответа ключа нет (пусто).
         const QString runtimeState = stringFromResponse(response, @"runtime_state");
-        // AVPN (iOS data watch, build 140, stage 2): the tunnel has no engine after a failed in-place
+        // AVPN (iOS data watch, build 141, stage 2): the tunnel has no engine after a failed in-place
         // switch; the reply then carries the session metadata and nothing to judge.
         const bool engineDown = [response[@"engine_down"] respondsToSelector:@selector(boolValue)] && [response[@"engine_down"] boolValue];
         // AVPN: причину отказа старта ядра снимаем ЗДЕСЬ — NSDictionary* response живёт только
@@ -1284,7 +1284,7 @@ void IosController::checkStatus()
             }
             clearLocalStopIfNewSession(false); // AVPN (REV-3): runtime-поколение новой NE-сессии
             if (upstreamStatus.present) emitUpstreamStatus(upstreamStatus, false); // AVPN (upstream nodes)
-            if (engineDown) { // AVPN (iOS data watch, build 140, stage 2)
+            if (engineDown) { // AVPN (iOS data watch, build 141, stage 2)
                 emit tunnelEngineDown();
                 return; // no counters in this reply: nothing below may judge a handshake by it
             }
@@ -1445,7 +1445,7 @@ void IosController::checkStatus()
             m_rxBytes = rxBytes;
             m_txBytes = txBytes;
         }, Qt::QueuedConnection);
-        // AVPN (iOS data watch, build 140, contract C2): only when the facade asked for a snapshot
+        // AVPN (iOS data watch, build 141, contract C2): only when the facade asked for a snapshot
         // (requestStatusSnapshot; never with the flag off) the extension's `watch` object (absent in a 139
         // extension) goes to the facade with the session metadata of THIS reply. Queued after the lambda
         // above, so it runs only for the reply that lambda applied (lastAppliedIs) - never for a stale one.
@@ -1851,7 +1851,7 @@ static bool writeDirectSplitList(const QJsonArray &sites)
     return true;
 }
 
-// AVPN (iOS data watch, build 140, contract C1): the policy plan for the extension - same container and
+// AVPN (iOS data watch, build 141, contract C1): the policy plan for the extension - same container and
 // mechanism as the direct split list above, but protected until the first unlock (the stage 2 plan carries
 // node keys, the same secrets the VPN profile already holds). Body built by
 // serviceEngine/TunnelWatchPlan.h; only the app writes the file.
@@ -1909,7 +1909,7 @@ bool IosController::writeTunnelWatchPlanFile(const QByteArray &json)
 #endif
 }
 
-// AVPN (iOS data watch, build 140): one consistent snapshot after a return to the foreground - a reply to a
+// AVPN (iOS data watch, build 141): one consistent snapshot after a return to the foreground - a reply to a
 // request sent before the freeze is not applied any more; the fresh request goes the usual status path.
 void IosController::requestStatusSnapshot()
 {
@@ -1922,7 +1922,7 @@ void IosController::requestStatusSnapshot()
     checkStatus();
 }
 
-// AVPN (iOS data watch, build 140; design §5.5 step 1): see IosBackgroundArm.h.
+// AVPN (iOS data watch, build 141; design §5.5 step 1): see IosBackgroundArm.h.
 void IosController::noteAppBackground(bool bgArmFlag, int maxHoldMs)
 {
 #if defined(Q_OS_IOS)

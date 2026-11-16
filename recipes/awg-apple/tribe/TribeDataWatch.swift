@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Tribe data watch (awg-apple tribe.13, iOS build 140): pure verdict logic, no clocks and no I/O.
+// Tribe data watch (awg-apple tribe.14, iOS build 141): pure verdict logic, no clocks and no I/O.
 //
 // Why this file exists: on an iPhone the data-path check and the failover live in the app, and iOS
 // suspends the app. Field case 13.11.2026: the AmneziaWG handshake passes, data does not; for

@@ -34,7 +34,7 @@
 #ifndef HARNESS_OLD
 #include "IosNativePolicy.h"
 #ifndef HARNESS_OLD
-#include "BackgroundHoldBook.h" // AVPN (iOS data watch, 140): the real bookkeeping behind the fake guard
+#include "BackgroundHoldBook.h" // AVPN (iOS data watch, 141): the real bookkeeping behind the fake guard
 #include <cstring>
 #endif
 #include "core/serviceEngine/TuningStore.h"
@@ -75,7 +75,7 @@ QString Avpn_currentIntentGeneration() { return g_intent.value(QStringLiteral("g
 QVariantMap Avpn_lastStop() { return g_lastStop; }
 void Avpn_recordLifecycle(const QString &, const QVariantMap &) {}
 #ifndef HARNESS_OLD
-// AVPN (iOS data watch, 140): the one iOS background task behind AvpnBackgroundGuard, in memory. The
+// AVPN (iOS data watch, 141): the one iOS background task behind AvpnBackgroundGuard, in memory. The
 // REAL bookkeeping by reason (BackgroundHoldBook.h) runs over this fake system, as in the app.
 static int g_bgBegins = 0;
 static int g_bgEnds = 0;
@@ -936,7 +936,7 @@ static void test_arm_cleanup_when_pause_lands_during_save()
 
 // Connect пришёл, пока снималось правило для стопа: стоп отменён, живая сессия адоптируется.
 #ifndef HARNESS_OLD
-// ---- AVPN (iOS data watch, build 140): On-Demand arming after leaving the screen, the `watch` block of
+// ---- AVPN (iOS data watch, build 141): On-Demand arming after leaving the screen, the `watch` block of
 // the status reply, the plan file. Decisions: IosBackgroundArm.h, BackgroundHoldBook.h (pure tests in
 // IosDataWatchTests.cpp); here the real controller over the model of the system's rule store.
 // The app is on the screen again: the controller learns it from the system on its own status poll.
@@ -2178,7 +2178,7 @@ static const Test kTests[] = {
 #endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
 #ifndef HARNESS_OLD
-    // AVPN (iOS data watch, build 140)
+    // AVPN (iOS data watch, build 141)
     {"bg_arm_holds_until_handshake", test_bg_arm_holds_until_handshake},
     {"bg_arm_times_out", test_bg_arm_times_out},
     {"bg_arm_flag_off_is_silent", test_bg_arm_flag_off_is_silent},

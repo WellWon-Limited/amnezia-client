@@ -2,7 +2,7 @@ import Foundation
 import NetworkExtension
 import HevSocks5Tunnel
 
-// AVPN (build 140, data watch): the provider's glue for the tunnel-side data watch. The rule is in
+// AVPN (build 141, data watch): the provider's glue for the tunnel-side data watch. The rule is in
 // the awg-apple package (TribeDataWatch.swift), the I/O in TribeDataWatchRuntime.swift (host
 // tested); here is only what needs the provider itself and the Go layer.
 extension WireGuardAdapter: TribeDataWatchAdapting {}

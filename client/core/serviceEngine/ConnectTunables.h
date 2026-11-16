@@ -13,8 +13,8 @@
 
 #include <QtGlobal>
 
-#include <cmath>   // AVPN (iOS data watch, 140): std::isfinite / std::llround of the table below
-#include <cstring> // AVPN (iOS data watch, 140): std::strcmp
+#include <cmath>   // AVPN (iOS data watch, 141): std::isfinite / std::llround of the table below
+#include <cstring> // AVPN (iOS data watch, 141): std::strcmp
 
 namespace avpn {
 
@@ -110,7 +110,7 @@ inline int roamStallRebindSTuned()
 }
 
 // iOS tunnel-side data watch (design docs/specs/2026-11-14-ios-tunnel-side-data-watch-design.md §5.6 and
-// §0a, build 140, iOS only). ONE table of every number of the mechanism: a default or a bound moves by
+// §0a, build 141, iOS only). ONE table of every number of the mechanism: a default or a bound moves by
 // editing one row. toPlan: the number goes into TribeWatchPlan.json for the extension (it clamps again);
 // false = read by the app only. Every value is an integer: clamp, then round to the nearest integer.
 // Absent, non-finite or garbage from the server -> the default; out of range -> the nearest bound.

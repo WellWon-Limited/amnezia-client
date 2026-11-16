@@ -30,7 +30,7 @@ int main() {
         for (auto &thread : racers) thread.join();
         assert(completed == 1); // response/sendError/deadline/double callback: exactly once
     }
-    // AVPN (iOS data watch, 140): lastAppliedIs - the second consumer of a reply sees only the reply accept()
+    // AVPN (iOS data watch, 141): lastAppliedIs - the second consumer of a reply sees only the reply accept()
     // let through; a newer accepted reply, an invalidation or another session hide it.
     {
         IosStatusRequest g;

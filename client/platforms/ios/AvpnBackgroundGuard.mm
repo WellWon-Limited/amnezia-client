@@ -1,5 +1,5 @@
 // AVPN (разбор 2026-09-23): см. AvpnBackgroundGuard.h.
-// AVPN (iOS data watch, build 140): ownership by reason - the bookkeeping is BackgroundHoldBook.h (pure,
+// AVPN (iOS data watch, build 141): ownership by reason - the bookkeeping is BackgroundHoldBook.h (pure,
 // tested); here only the UIKit task behind it.
 #include "AvpnBackgroundGuard.h"
 

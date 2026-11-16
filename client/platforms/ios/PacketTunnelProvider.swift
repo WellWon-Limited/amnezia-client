@@ -43,13 +43,13 @@ struct Constants {
 class PacketTunnelProvider: NEPacketTunnelProvider {
     var tribeLastRecoverySummary = ""
     var tribeRuntimeGeneration = UUID().uuidString
-    // AVPN (build 140, data watch): the provider's half of the tunnel-side data watch
+    // AVPN (build 141, data watch): the provider's half of the tunnel-side data watch
     // (TribeDataWatchRuntime.swift). Idle unless the app's plan file switches the watch on.
     let tribeDataWatch = TribeDataWatchRuntime()
-    /// AVPN (build 140, data watch stage 2): the configuration the session was started with (the
+    /// AVPN (build 141, data watch stage 2): the configuration the session was started with (the
     /// profile's node); an in-place switch goes back to it when the candidates are exhausted.
     var tribeHomeConfiguration: TunnelConfiguration?
-    /// AVPN (build 140, data watch stage 2): who started this run of the tunnel - the
+    /// AVPN (build 141, data watch stage 2): who started this run of the tunnel - the
     /// `tribeStartSource` of the start options (the app and our commands always pass one), nil
     /// when the start carried none (iOS: Settings, On-Demand).
     var tribeStartSource: String?
@@ -330,7 +330,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
         // Кто поднял туннель: приложение и наши команды передают tribeStartSource, iOS (Настройки,
         // On-Demand после системной остановки) — нет.
-        tribeStartSource = options?["tribeStartSource"] as? String // AVPN (build 140, data watch stage 2)
+        tribeStartSource = options?["tribeStartSource"] as? String // AVPN (build 141, data watch stage 2)
         let startSource = tribeStartSource ?? "os"
         TribeSharedState.appGroup?.record(source: "ne", event: "start", fields: ["generation": tribeRuntimeGeneration, "configuration_generation": metadata["generation"] ?? "legacy", "node_id": metadata["node_id"] ?? "unknown", "proto": metadata["proto"] ?? "unknown", "start_source": startSource])
 
@@ -618,7 +618,7 @@ extension PacketTunnelProvider {
         return "\(path.status)/\(kind)\(path.isExpensive ? "/exp" : "")"
     }
 
-    /// AVPN (build 140, data watch): the physical interface of the current path, for the request
+    /// AVPN (build 141, data watch): the physical interface of the current path, for the request
     /// that must bypass the tunnel (private fields of the monitor are reachable only from this file).
     func tribeCurrentPhysicalInterface() -> NWInterface? {
         primaryPhysicalInterface(for: pathMonitor.currentPath)

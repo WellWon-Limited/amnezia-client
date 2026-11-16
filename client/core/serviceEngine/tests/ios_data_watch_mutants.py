@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mutation test of the app's half and of the extension's glue of the iOS tunnel-side data watch
-(build 140), and of its wiring.
+(build 141), and of its wiring.
 
 Groups:
   pure    - one rule changed in a pure header (ConnectTunables.h, TunnelWatchPlan.h, TunnelWatchStatus.h,
@@ -492,7 +492,7 @@ PURE = [
     ("ctl-02", IOS + "ios_controller.mm", "        if (m_watchSnapshotWanted.load()) {", "        if (true) {", "harness", "rev-W4: the snapshot signal fires on every status reply"),
     ("ctl-07", IOS + "ios_controller.mm", "                m_watchSnapshotWanted.store(false); // one request - one snapshot\n", "", "harness", "one request gives a snapshot on every later reply"),
     ("ctl-03", IOS + "ios_controller.mm", "    m_watchSnapshotWanted.store(true);\n    m_statusRequests.invalidate();\n    checkStatus();", "    m_watchSnapshotWanted.store(true);\n    checkStatus();", "harness", "rev-W10: a stale reply answers the snapshot request"),
-    ("ctl-04", IOS + "ios_controller.mm", "    tickBackgroundArmHold(); // AVPN (iOS data watch, 140): the hold's bound is judged on this poll's tick\n", "", "harness", "rev-W17: the hold's bound is never judged"),
+    ("ctl-04", IOS + "ios_controller.mm", "    tickBackgroundArmHold(); // AVPN (iOS data watch, 141): the hold's bound is judged on this poll's tick\n", "", "harness", "rev-W17: the hold's bound is never judged"),
     ("ctl-05", IOS + "ios_controller.mm", "    in.appActive = appIsActive();\n", "", "harness", "rev-W16: the controller does not ask whether the app is on the screen"),
     ("ctl-06", IOS + "ios_controller.mm", "AvpnBackgroundGuard_acquire(avpn_ios::BgReason::OnDemandArm, [this, token] {", "AvpnBackgroundGuard_acquire(avpn_ios::BgReason::TunnelRestart, [this, token] {", "harness", "the arming takes the restart guard's reason"),
 ]
@@ -521,14 +521,14 @@ WIRING = [
     ("w-s7d", IOS + "TribeWatchPlan.swift", "options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])", "options: [.atomic])", "the plan the extension rewrote loses its file protection"),
     ("w-t4a", IOS + "ios_controller.mm", "URLByAppendingPathComponent:@\"TribeWatchPlan.lock\"]", "URLByAppendingPathComponent:@\"TribeWatchPlan.lck\"]", "the two writers lock different files"),
     ("w-t4b", IOS + "PacketTunnelProvider+DataWatch.swift", "return TribeWatchPlanFile.replaceIfUnchanged(in: directory, expected: expected, with: clean)", "return (try? clean.write(to: directory.appendingPathComponent(TribeWatchPlan.fileName))) != nil ? .done : .failed", "the extension writes the plan without the lock and without the check"),
-    ("w-t4c", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 140): the spare nodes' keys leave the plan file\n", "", "a stop does not reach the runtime: the keys stay in the file with the tunnel off"),
+    ("w-t4c", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 141): the spare nodes' keys leave the plan file\n", "", "a stop does not reach the runtime: the keys stay in the file with the tunnel off"),
     ("w-t4d", IOS + "PacketTunnelProvider+WireGuard.swift", "tribeDataWatch.noteStop(userInitiated: reason == .userInitiated)", "tribeDataWatch.noteStop(userInitiated: true)", "every stop, also one by the system, takes the candidates away"),
     ("w-t7a", IOS + "PacketTunnelProvider+DataWatch.swift", "        metadata[\"switch_ms\"] = made.atMs\n", "", "the status reply does not say when the switch was made"),
     ("w-t7b", ENG + "AvpnEngineQml.cpp", "                                           stamp.atMs))", "                                           0))", "the facade drops the time of the switch"),
     ("w-t7c", ENG + "AvpnEngineQml.cpp", "avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral(\"cellular\"), diagCarrier()),\n                                                                     currentNetworkMemoryKey()),", "currentNetworkMemoryKey(),", "the facade files the evidence under the network of the adoption"),
     ("w-s7f", IOS + "PacketTunnelProvider+WireGuard.swift", "                completionHandler(self.tribeEngineDownReply())\n", "                completionHandler(nil)\n", "second review R5: a tunnel without an engine answers the status request with nothing"),
     ("w-s8", IOS + "PacketTunnelProvider+WireGuard.swift", "adapter.start(tunnelConfiguration: startConfiguration)", "adapter.start(tunnelConfiguration: tunnelConfiguration)", "the node chosen for a start by the system is not the one raised"),
-    ("w-s9", IOS + "PacketTunnelProvider+WireGuard.swift", "                self.tribeApplySessionOverride(&metadata) // AVPN (build 140, data watch stage 2)\n", "", "the status reply names the profile's node after a switch"),
+    ("w-s9", IOS + "PacketTunnelProvider+WireGuard.swift", "                self.tribeApplySessionOverride(&metadata) // AVPN (build 141, data watch stage 2)\n", "", "the status reply names the profile's node after a switch"),
     ("w-s10", IOS + "PacketTunnelProvider+WireGuard.swift", "startSource: tribeStartSource)", "startSource: nil)", "every start is treated as a start by the system"),
     ("w-s11", ENG + "AvpnEngineQml.cpp", "    if (in.watch && in.watchSwitch)\n        in.candidates = m_engine.extensionSwitchCandidates();", "    in.candidates = m_engine.extensionSwitchCandidates();", "candidates are collected with the switch key off"),
     ("w-s12", ENG + "AvpnEngineQml.cpp", "        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral(\"node_scan\"), false),\n", "        if (!m_engine.adoptExtensionSwitch(nodeId, true,\n", "an adopted node is sent to a check the app does not have"),
@@ -545,9 +545,9 @@ WIRING = [
     ("w-e2c", PATCH, "+        guard self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "+        guard !self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "rev-W6: the adapter's own guard is inverted (the rule itself still refuses a disabled policy - tested; this guard is the adapter's shortcut)"),
     ("w-e3", PATCH_GO, "+\tif tribeProbeCfg == nil {\n+\t\ttribeProbeTun = nil\n+\t\treturn inner\n+\t}\n", "", "the probe wrapper is created without a configuration"),
     ("w-e4a", IOS + "PacketTunnelProvider+DataWatch.swift", "setProbe: { clientIP, resolver, enabled in wgSetTribeProbe(clientIP, resolver, enabled ? 1 : 0) },", "setProbe: { clientIP, resolver, _ in wgSetTribeProbe(clientIP, resolver, 1) },", "the Go call ignores the runtime's on/off"),
-    ("w-e4b", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteAppStatusRequest() // AVPN (build 140, data watch): the app is alive\n", "", "a status request does not mark the app alive"),
+    ("w-e4b", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteAppStatusRequest() // AVPN (build 141, data watch): the app is alive\n", "", "a status request does not mark the app alive"),
     ("w-e4c", IOS + "PacketTunnelProvider+WireGuard.swift", 'if let watch { response["watch"] = watch }', 'response["watch"] = watch ?? [String: Any]()', "the status reply always carries a watch key"),
-    ("w-e4d", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.detach() // AVPN (build 140, data watch)\n", "", "the runtime is not detached on stop"),
+    ("w-e4d", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.detach() // AVPN (build 141, data watch)\n", "", "the runtime is not detached on stop"),
     ("w-e4e", IOS + "PacketTunnelProvider+WireGuard.swift", "            prepareTribeDataWatch(wgConfig)\n", "", "the runtime is never prepared (no probe, no plan at start)"),
     ("w-e5a", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.statsTick(isXray: protoType == .xray, loggingEnabled: Log.isLoggingEnabled,", "        guard Log.isLoggingEnabled else { return }\n        tribeDataWatch.statsTick(isXray: protoType == .xray, loggingEnabled: Log.isLoggingEnabled,", "rev-W11 at the call site: the whole statistics tick is gated on the file log"),
     ("w-e5b", IOS + "TribeDataWatchRuntime.swift", "        parameters.requiredInterface = interface\n", "", "the bypass request is not bound to the physical interface"),
@@ -566,13 +566,13 @@ WIRING = [
     ("w-e8", IOS + "PacketTunnelProvider+WireGuard.swift", "                                 logXray: { [weak self] in self?.logTribeXrayStats() },", "                                 logXray: { },", "the Xray statistics line is never written"),
     ("w-a1", ENG + "AvpnEngineQml.cpp", '#ifdef Q_OS_IOS\n    writeTunnelWatchPlan("start");', '#if 1\n    writeTunnelWatchPlan("start");', "a plan write outside Q_OS_IOS"),
     ("w-a2", ENG + "AvpnEngineQml.cpp", '    const bool watch = featureEnabled(QStringLiteral("ios_tunnel_watch"), false);\n    QSettings s;', '    const bool watch = featureEnabled(QStringLiteral("ios_tunnel_watch"), true);\n    QSettings s;', "the flag is read with the default true"),
-    ("w-a3a", ENG + "AvpnEngineQml.cpp", '#ifdef Q_OS_IOS\n    writeTunnelWatchPlan("start"); // AVPN (iOS data watch, 140): before the queued up() reaches the extension\n#endif\n', "", "a start does not rewrite the plan"),
+    ("w-a3a", ENG + "AvpnEngineQml.cpp", '#ifdef Q_OS_IOS\n    writeTunnelWatchPlan("start"); // AVPN (iOS data watch, 141): before the queued up() reaches the extension\n#endif\n', "", "a start does not rewrite the plan"),
     ("w-a3b", ENG + "AvpnEngineQml.cpp", "    s.setValue(QLatin1String(avpn::kWatchPlanSeqSettingsKey), out.seqAfter);\n", "", "the plan's sequence number is not persisted (every plan would be number 1)"),
     ("w-a3c", ENG + "AvpnEngineQml.cpp", "                    writeTunnelWatchPlan(\"foreground\");\n", "", "a return to the screen does not refresh the plan (the kill switch waits for the next start)"),
     ("w-a5a", ENG + "AvpnEngineQml.cpp", "    } else if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {", "    }\n    if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {", "rev-W12: the health verdict does not wait for the hand-over"),
     ("w-a5b", ENG + "AvpnEngineQml.cpp", '    if (deferWhileTunnelWatchFrozen("whoami", [this, epoch]() { whoamiAttempt(epoch); }))\n        return;\n', "", "a late whoami attempt is judged before the extension was asked"),
     ("w-a5c", ENG + "AvpnEngineQml.cpp", '    ops.watchFlag = [this] { return featureEnabled(QStringLiteral("ios_tunnel_watch"), false); };', '    ops.watchFlag = [] { return true; };', "rev-W1 at the call site: the hand-over is given a flag that is always on"),
-    ("w-a5d", ENG + "AvpnEngineQml.cpp", "        tickTunnelWatchFreeze(since); // AVPN (iOS data watch, 140): the resume freeze rides on this tick\n", "", "the hand-over is never driven (no thaw seen by the tick, no timeout)"),
+    ("w-a5d", ENG + "AvpnEngineQml.cpp", "        tickTunnelWatchFreeze(since); // AVPN (iOS data watch, 141): the resume freeze rides on this tick\n", "", "the hand-over is never driven (no thaw seen by the tick, no timeout)"),
     ("w-a5e", ENG + "AvpnEngineQml.cpp", "        return m_hiddenSeen && featureEnabled(QStringLiteral(\"ios_on_demand_bg_arm\"), false) && !m_restartGuard.held();", "        return m_hiddenSeen && featureEnabled(QStringLiteral(\"ios_on_demand_bg_arm\"), false);", "the background hold also stops the app's own restart in flight"),
     ("w-a5f", ENG + "AvpnEngineQml.cpp", "    setupTunnelWatchResume();\n", "", "the hand-over object is never built"),
     ("w-a7b", IOS + "ios_controller.mm", "    return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;", "    return false;", "on the phone the controller never learns that the app is on the screen (the harness has no UIKit)"),

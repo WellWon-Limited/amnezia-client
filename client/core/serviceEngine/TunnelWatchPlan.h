@@ -1,6 +1,6 @@
 // client/core/serviceEngine/TunnelWatchPlan.h
 //
-// AVPN (iOS tunnel-side data watch, build 140; design docs/specs/2026-11-14-ios-tunnel-side-data-watch-design.md
+// AVPN (iOS tunnel-side data watch, build 141; design docs/specs/2026-11-14-ios-tunnel-side-data-watch-design.md
 // §5.3 and §0a, contract C1): the policy plan the app hands to the packet tunnel extension in the App Group
 // file TribeWatchPlan.json. Only the app writes it; the extension validates and clamps again.
 //

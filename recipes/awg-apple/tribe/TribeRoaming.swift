@@ -649,7 +649,7 @@ public struct TribeRecoveryArbiter: Equatable {
         return .performed
     }
 
-    /// tribe.13 (data watch, stage 2): an in-place switch of the peer. It is a new device like a
+    /// tribe.14 (data watch, stage 2): an in-place switch of the peer. It is a new device like a
     /// soft restart, but on ANOTHER node, so the episode of the node being left does not limit it;
     /// the rolling cap of interventions and the cooldown between two new devices do. On
     /// `.performed` the caller replaces the backend and then calls `rebaseAfterBackendRestart`

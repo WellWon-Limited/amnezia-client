@@ -1,7 +1,7 @@
 // client/platforms/ios/BackgroundHoldBook.h
 //
-// AVPN (iOS data watch, build 140; design §0a item 9 / §5.5 step 1): ownership of the ONE iOS background
-// task (AvpnBackgroundGuard) by reason. Before 140 the task had a single owner - the tunnel restart guard
+// AVPN (iOS data watch, build 141; design §0a item 9 / §5.5 step 1): ownership of the ONE iOS background
+// task (AvpnBackgroundGuard) by reason. Before 141 the task had a single owner - the tunnel restart guard
 // (RestartGuard.h). Now the On-Demand arming after leaving the screen also needs background time; the two
 // must not take it from each other:
 //   * the system task runs while at least one reason holds it;
