@@ -1,0 +1,42 @@
+diff --git a/Sources/WireGuardKitGo/api-tribestats.go b/Sources/WireGuardKitGo/api-tribestats.go
+new file mode 100644
+index 0000000..7ecbf4c
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribestats.go
+@@ -0,0 +1,20 @@
++package main
++
++// AVPN (tribe.12): C export of libxray's in-process outbound counters (shared libxray patch
++// ../amnezia-libxray/patches/0007-libxray-outbound-stats.patch). ABI libxray-tribe-stats-v1.
++
++/*
++#include <stdlib.h>
++*/
++import "C"
++
++import "github.com/amnezia-vpn/amnezia-libxray/xray"
++
++// LibXrayTribeOutboundStats returns the running core's cumulative per-outbound bytes as a malloc'd
++// JSON string the caller frees with free(); never NULL:
++// {"running":bool,"outbounds":{"<tag>":{"uplink":n,"downlink":n}},"error":"","error_code":""}.
++//
++//export LibXrayTribeOutboundStats
++func LibXrayTribeOutboundStats() *C.char {
++	return C.CString(xray.OutboundStatsJSON())
++}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index a6debc9..23dd053 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -41,6 +41,11 @@ extern char* LibXraySetSockCallback(libxray_sockcallback cb, void* ctx);
+ extern char *LibXrayTribeHTTP(const char *socksAddr, const char *user, const char *pass,
+                               const char *method, const char *url, const char *headersJSON,
+                               const char *body, int64_t timeoutMs, int64_t maxBodyBytes);
++/* AVPN (awg-apple tribe.12, ABI libxray-tribe-stats-v1): cumulative per-outbound bytes of the running
++ * core, read in process (needs "stats":{} and policy.system.statsOutboundUplink/Downlink in the
++ * config). Never NULL; free() it:
++ * {"running":bool,"outbounds":{"<tag>":{"uplink":n,"downlink":n}},"error":"","error_code":""}. */
++extern char *LibXrayTribeOutboundStats(void);
+ 
+ /* AVPN split-DNS форвардер (dnsfwd.go): настроить ДО wgTurnOn; enabled=0 = сброс. 0=ok, -1=bad args.
+  * warmup=1 — прогреть WG-рукопожатие при подъёме (первый DNS не ловит холодный туннель). */

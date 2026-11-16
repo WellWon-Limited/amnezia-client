@@ -74,6 +74,26 @@ PageType {
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageConnectTribe.qml")
     }
 
+    // AVPN (Scanner): open the Scanner page (non-tab, back to `origin`: home | servers | chat); withCheck = the
+    // chat's run_diag (the full check starts with the scan). Only while the `scanner` switch is on.
+    function openScanner(origin, withCheck) {
+        if (!ScanSwitches.scanner) return
+        tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageScannerTribe.qml", { origin: origin, withCheck: withCheck === true })
+    }
+    function currentPageIs(name) {
+        return tabBarStackView.currentItem && String(tabBarStackView.currentItem.objectName).indexOf(name) !== -1
+    }
+    // AVPN (Scanner): the coordinator opens the Scanner itself (Wi-Fi intent: a Wi-Fi network after «Понял,
+    // подключусь к Wi-Fi»)
+    Connections {
+        target: (typeof TribeScanner !== "undefined") ? TribeScanner : null
+        ignoreUnknownSignals: true
+        function onOpenScreenRequested() {
+            if (root.avpnNav && !root.onboardingActive && !root.currentPageIs("PageScannerTribe.qml"))
+                root.openScanner("home", false)
+        }
+    }
+
     // AVPN (Support): тап по APNs-пушу «ответ поддержки» → сразу в чат (вкладка 1).
     Connections {
         target: (typeof AvpnPush !== "undefined") ? AvpnPush : null
@@ -147,7 +167,18 @@ PageType {
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN (Доктор v1): любая страница просит попап диагностики (главная/чат)
-        function onRequestDoctor() { doctorSheet.show() }
+        // AVPN (Scanner): with `scanner` on and `doctor_legacy` off the Doctor entries (chat run_diag / «+») open
+        // the Scanner with the full check of «Ваше подключение» instead of the sheet
+        function onRequestDoctor() {
+            if (ScanSwitches.replacesDoctor)
+                root.openScanner(root.currentPageIs("PageSupportTribe.qml") ? "chat" : "home", true)
+            else
+                doctorSheet.show()
+        }
+        // AVPN (Scanner): «Сканер» (home) / «Запустить сканер» (servers)
+        function onRequestScanner() {
+            root.openScanner(root.currentPageIs("PageServersTribe.qml") ? "servers" : "home", false)
+        }
         // AVPN in-app Legal: Privacy/Terms внутри приложения (кэш+fallback, без выброса в браузер)
         function onRequestLegalDoc(doc) { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLegalTribe.qml", { docKey: doc }) }
         // AVPN: онбординг пройден («Приступим») → запоминаем и уводим на Connect
@@ -272,6 +303,11 @@ PageType {
             }
 
             var pageName = tabBarStackView.currentItem.objectName
+            // AVPN (Scanner): a page that knows where «назад» leads (the Scanner: its origin) handles it itself
+            if (root.avpnNav && typeof tabBarStackView.currentItem.systemBack === "function") {
+                tabBarStackView.currentItem.systemBack()
+                return
+            }
             // AVPN: системный «назад» (Android Back / Escape) на наших OVERLAY-страницах
             // (Legal/Admin/Notifications/Locations — открыты через replace, depth=1) раньше
             // проваливался в closePage() → hideWindow(): Android сворачивал ВСЁ приложение.
@@ -754,6 +790,12 @@ PageType {
         function onError(message) {
             PageController.showErrorMessage(message)
         }
+        // AVPN (Scanner): with the `scanner` switch on the engine's short notices (release A: «подключаем
+        // следующую») show as the warning shade on every Tribe page; off = the toast of PageConnectTribe
+        function onNotice(message) {
+            if (ScanSwitches.scanner)
+                scanShade.enqueue("warning", message)
+        }
     }
 
     // AVPN (рассылки P-ANN v2): попап важной рассылки — ГЛОБАЛЬНЫЙ слой поверх любого
@@ -786,6 +828,14 @@ PageType {
     TribeDoctorSheet {
         id: doctorSheet
         z: 185   // под объявлениями/transferInResult; поверх вкладок и навигации
+    }
+
+    // AVPN (Scanner): the one top shade of the app (TribeShadeHost; plan scanner-client-plan.md §4) — above the
+    // Doctor (185), announcements (190) and the transfer result (200); nothing shows with `scanner` off
+    TribeShadeHost {
+        id: scanShade
+        z: 210
+        safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     }
 
     function maybeShowAnnouncement() {

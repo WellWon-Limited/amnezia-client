@@ -211,3 +211,23 @@ void MacOSFirewall::setAnchorWithRules(const QString& anchor, bool enabled, cons
     else
         return (void)execute(QStringLiteral("echo -e \"%1\" | pfctl -q -a '%2/%3' -f -").arg(ruleList.join('\n'), kRootAnchor, anchor), true);
 }
+
+// AVPN (Scanner, plan R6): the scan-lifetime exemption of the service's probe sockets (macosfirewall.h).
+static const QString kScanAnchor = QStringLiteral("160.allowScan");
+
+int MacOSFirewall::setScanExemption(const QString& uplinkIfname)
+{
+    clearScanExemption();
+    if (!isInstalled())
+        return 0;
+    const QStringList rules = scanExemptionRules(uplinkIfname);
+    if (rules.isEmpty())
+        return -1;
+    setAnchorWithRules(kScanAnchor, true, rules);
+    return isAnchorEnabled(kScanAnchor) ? 1 : -1;
+}
+
+void MacOSFirewall::clearScanExemption()
+{
+    setAnchorWithRules(kScanAnchor, false, {});
+}

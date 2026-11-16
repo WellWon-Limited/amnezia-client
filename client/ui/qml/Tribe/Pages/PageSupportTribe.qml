@@ -764,6 +764,20 @@ PageType {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                 }
+                // AVPN (support reports, F4): reports the server refused wait on the device; sendDiagReport() puts
+                // them back into the queue with these logs - a quiet line only while there are any
+                Text {
+                    readonly property int rejected: (root.hasChat && TribeSupport.reportsRejected !== undefined)
+                                                    ? TribeSupport.reportsRejected : 0
+                    visible: rejected > 0
+                    text: ScanTexts.rejectedWaiting.arg(rejected)
+                    textFormat: Text.PlainText
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.caption
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                }
                 TribeButton {
                     Layout.fillWidth: true
                     variant: "primary"

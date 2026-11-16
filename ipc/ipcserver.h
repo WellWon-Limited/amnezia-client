@@ -12,6 +12,7 @@
 #include "ipcserverprocess.h"
 
 #include "rep_ipc_interface_source.h"
+#include "tribe_scan.h" // AVPN (Scanner): the probe host's own QtRO source (ipc_scan_interface.rep)
 
 class IpcServer : public IpcInterfaceSource
 {
@@ -48,8 +49,12 @@ public:
     virtual bool startNetworkCheck(const QString& serverIpv4Gateway, const QString& deviceIpv4Address) override;
     virtual bool stopNetworkCheck() override;
 
+    // AVPN (Scanner): the IpcScanInterface source, remoted next to this one (localserver.cpp).
+    avpn::TribeScanHost *scanHost() { return &m_scanHost; }
+
 private:
     int m_localpid = 0;
+    avpn::TribeScanHost m_scanHost{avpn::tribeScanServiceDeps()}; // AVPN (Scanner)
 
     struct ProcessDescriptor {
         ProcessDescriptor (QObject *parent = nullptr) {

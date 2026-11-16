@@ -77,6 +77,34 @@ struct XrayParams {
 constexpr int kTransportRankAwg = 10;
 constexpr int kTransportRankXray = 20;
 
+// AVPN upstream nodes (plan provider-pool v2, D2): credential-free stub of an upstream profile - a
+// complete Xray config built by the backend and handed out only in the signed lease answer
+// (POST /v1/upstream/lease). The subscription carries no host, port or credential of it. Filled only by
+// the parser after validation (UpstreamNode.h::parseUpstreamStub) and only while the client kill switch
+// features.upstream_nodes is on; such a node is proto "xray" without `xray`. Identity of the node =
+// profileId + configSha256 (a new sha = the provider rotated its servers; the row stays the same).
+enum class UpstreamProbeClass { Single, Composite };
+
+struct UpstreamStub {
+    QString profileId;                   // opaque id for the lease request; node_id == "up:" + profileId
+    QString configSha256;                // lower-case hex of the normalized config the lease hands out
+    UpstreamProbeClass probeClass = UpstreamProbeClass::Composite;
+    QStringList protocols;               // normalizer summary ("proto:vless", "net:tcp", ...)
+    QStringList requiredGeo;             // "geosite:..."/"geoip:..." tags the profile routes by
+    int     sizeBytes = 0;               // size of the normalized config
+    int     tier = 1;                    // policy tier (D9), >= 1; 0 is reserved for own nodes
+    int     priority = 0;                // order inside the tier, lower first
+    // Synthesized by the app from a standby-pack entry because the subscription in force has no stub for
+    // that profile (cold start without the API; UpstreamEngine.h::standbyPackCandidates). Such a candidate
+    // runs only through the provisional path (direct acquire first; transport failure -> the pack).
+    bool    packSourced = false;
+    // Display name parts (release A, owner decision 14.11): our stable number of the profile inside its
+    // country (>= 1; 0 = not given) and whether the stub's `label` is the admin's own display name (false
+    // = a server fallback such as "NL 1", never shown - UpstreamNode.h::upstreamDisplayName).
+    int     ordinal = 0;
+    bool    labelCustom = false;
+};
+
 struct SubscriptionNode {
     QString nodeId;
     QString region;
@@ -94,6 +122,7 @@ struct SubscriptionNode {
     QString location;
     int     transportRank = kTransportRankAwg;
     std::optional<XrayParams> xray;      // AVPN: только у proto=="xray" и только валидные (парсер)
+    std::optional<UpstreamStub> upstream; // AVPN upstream nodes: proto "xray" without xray (kill switch upstream_nodes)
     double  weight = 1.0;                 // score = url_rtt / weight
     bool    manualOnly = false;          // AVPN: manual_only (openapi 0.6.1) — только ручной pin, вне авто-выбора
     QHash<QString, double> health;       // target -> [0..1]
@@ -119,6 +148,10 @@ struct Subscription {
     // триггер reseed пула на живом приложении (ServiceEngine::reseedPool, kill-switch
     // subscription_reseed_pool). 0 = поле не пришло (старый бэк/LKG) → reseed по ревизии не срабатывает.
     qint64      poolRevision = 0;
+    // AVPN upstream nodes: upstream_revision (epoch ms, monotonic) - present only for a device the server
+    // admits to upstream nodes. 0 = absent: the parser keeps no upstream node then (contract: "absence =
+    // no upstream entries are usable, drop them").
+    qint64      upstreamRevision = 0;
     QList<SubscriptionNode> nodes;
 };
 

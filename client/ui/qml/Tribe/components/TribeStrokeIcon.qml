@@ -14,6 +14,7 @@ Item {
 
     property string icon: ""
     property color tint: Theme.color.accent
+    property real weight: 2      // stroke width in the 24 grid (scales with the icon, like SVG)
 
     implicitWidth: 24
     implicitHeight: 24
@@ -35,7 +36,20 @@ Item {
         "x": "M18 6 6 18 M6 6l12 12",
         "clock": "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M12 6v6l4 2",
         "wifi": "M5 13a10 10 0 0 1 14 0 M8.5 16.5a5 5 0 0 1 7 0 M2 8.8a15 15 0 0 1 20 0 M12 20h.01",
-        "rocket": "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0 M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"
+        "rocket": "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0 M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5",
+        // Scanner keys (artboard vpn-scanner-kit.js P, Lucide), added 16.11 - mirror them into the admin ICONS
+        // table (backend repo, admin-ui/js/views/announcements.js) per the rule above.
+        "radar": "M19.07 4.93A10 10 0 0 0 6.99 3.34 M4 6h.01 M2.29 9.62A10 10 0 1 0 21.31 8.35 M16.24 7.76A6 6 0 1 0 8.23 16.67 M12 18h.01 M17.99 11.66A6 6 0 0 1 15.77 16.67 M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M13.41 10.59l5.66-5.66",
+        "users": "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0 M22 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
+        "wifi-off": "M12 20h.01 M8.5 16.429a5 5 0 0 1 7 0 M5 12.859a10 10 0 0 1 5.17-2.69 M19 12.859a10 10 0 0 0-2.007-1.523 M2 8.82a15 15 0 0 1 4.177-2.643 M22 8.82a15 15 0 0 0-11.288-3.764 M2 2l20 20",
+        "alert-circle": "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M12 7v6 M12 16.5h.01",
+        "shield-x": "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z M9.5 9.5l5 5 M14.5 9.5l-5 5",
+        "check-mark": "M5 12.5L9.5 17L19 7",   // the «Авто» card's check (PageServersTribe)
+        "chevron-down": "M6 9l6 6 6-6",
+        "chevron-up": "M6 15l6-6 6 6",
+        "info-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M12 16v-4 M12 8h.01",
+        "check-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 12l2 2 4-4",
+        "alert-triangle": "M21.73 18l-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z M12 9v4 M12 17h.01"
     })
     readonly property string pathD: paths[icon] || ""
 
@@ -50,7 +64,7 @@ Item {
         ShapePath {
             strokeColor: root.tint
             fillColor: "transparent"
-            strokeWidth: 2
+            strokeWidth: root.weight
             capStyle: ShapePath.RoundCap
             joinStyle: ShapePath.RoundJoin
             PathSvg { path: root.pathD }

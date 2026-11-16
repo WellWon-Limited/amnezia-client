@@ -75,6 +75,7 @@ list(APPEND HEADERS
     ${AVPN_SE}/ServiceEngine.h
     ${AVPN_SE}/AvpnEngineQml.h
     ${AVPN_SE}/TribeSupportChat.h
+    ${AVPN_SE}/SupportReportQueue.h
     ${AVPN_SE}/AvpnPushBridge.h
     ${AVPN_SE}/AvpnDeepLinkBridge.h
     ${AVPN_SE}/AvpnIntentBridge.h
@@ -101,6 +102,33 @@ list(APPEND HEADERS
     ${AVPN_SE}/JournalPolicy.h
     ${AVPN_SE}/TribeJournal.h
     ${AVPN_SE}/UplinkMonitor.h
+    ${AVPN_SE}/SignedContext.h
+    ${AVPN_SE}/UpstreamNode.h
+    ${AVPN_SE}/UpstreamLeaseWire.h
+    ${AVPN_SE}/UpstreamLeaseMachine.h
+    ${AVPN_SE}/UpstreamVerdict.h
+    ${AVPN_SE}/UpstreamTierRule.h
+    ${AVPN_SE}/UpstreamTier.h
+    ${AVPN_SE}/UpstreamStandbyPack.h
+    ${AVPN_SE}/UpstreamEngine.h
+    ${AVPN_SE}/UpstreamLeaseOwner.h
+    ${AVPN_SE}/UpstreamLeaseClient.h
+    ${AVPN_SE}/XrayProfileSanitizer.h
+    # AVPN Scanner (plan scanner-client-plan.md §5.4; writers in order L6a -> L9 -> L4 -> L5)
+    ${AVPN_SE}/ScanTypes.h
+    ${AVPN_SE}/ScanTunables.h
+    ${AVPN_SE}/ScanNetworkGeneration.h
+    ${AVPN_SE}/ScanClass.h
+    ${AVPN_SE}/ScanPlan.h
+    ${AVPN_SE}/ScanBudget.h
+    ${AVPN_SE}/ScanOutcomes.h
+    ${AVPN_SE}/ScanHostContract.h
+    ${AVPN_SE}/ShadeQueue.h
+    ${AVPN_SE}/ScanMachine.h
+    ${AVPN_SE}/ScanAutoRace.h
+    ${AVPN_SE}/IScanHost.h
+    ${AVPN_SE}/ScanApiClient.h
+    ${AVPN_SE}/TribeScanner.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -135,6 +163,9 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/TribeNetInfo.cpp
     ${AVPN_SE}/RuSplitSentinel.cpp
     ${AVPN_SE}/TribeJournal.cpp
+    ${AVPN_SE}/UpstreamLeaseClient.cpp
+    ${AVPN_SE}/ScanApiClient.cpp
+    ${AVPN_SE}/TribeScanner.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 
@@ -155,6 +186,24 @@ if(APPLE AND NOT IOS AND NOT MACOS_NE)
     # AVPN (P-ANN): бейдж непрочитанных на иконке дока (NSApp.dockTile).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/macos/AvpnDockBadge.mm)
+endif()
+
+# AVPN Scanner (plan scanner-client-plan.md §2.4, §2.6, §5.4; after L6a's entries): the desktop probe host
+# over the root service's QtRO source IpcScanInterface (ipc/ipc_scan_interface.rep) - macOS desktop and
+# Windows (Linux desktop compiles it too: the same service).
+if(NOT IOS AND NOT ANDROID AND NOT MACOS_NE)
+    list(APPEND HEADERS ${AVPN_SE}/DaemonScanHost.h)
+    list(APPEND SOURCES ${AVPN_SE}/DaemonScanHost.cpp)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/DaemonScanHost.cpp)
+    qt_add_repc_replicas(${PROJECT} ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipc_scan_interface.rep)
+endif()
+
+# AVPN Scanner (lane A3, plan §2.5): the Android probe host over AndroidController's scan channel to the Xray
+# service process (client/android/xray/src/main/kotlin/scan/).
+if(ANDROID)
+    list(APPEND HEADERS ${AVPN_SE}/AndroidScanHost.h)
+    list(APPEND SOURCES ${AVPN_SE}/AndroidScanHost.cpp)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/AndroidScanHost.cpp)
 endif()
 
 # AVPN: нативные iOS-исходники — только для iOS-таргета.
@@ -204,6 +253,11 @@ if(IOS)
     # AVPN (Доктор D-3): поколение сотовой — CoreTelephony (авто-линк clang-модулем).
     list(APPEND SOURCES ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeNetInfoIos.mm)
     list(APPEND AVPN_ENGINE_SRC ${CMAKE_CURRENT_LIST_DIR}/../platforms/ios/TribeNetInfoIos.mm)
+    # AVPN Scanner (lane L4, plan scanner-client-plan.md §5.4): the probe host over the tunnel extension
+    # (IScanHost) + the app process's network generation source.
+    list(APPEND HEADERS ${AVPN_SE}/IosScanHost.h)
+    list(APPEND SOURCES ${AVPN_SE}/IosScanHost.mm)
+    list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/IosScanHost.mm)
 endif()
 
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это

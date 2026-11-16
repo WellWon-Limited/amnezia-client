@@ -32,6 +32,7 @@ NOTARY_KEY=(--key "$HOME/.appstoreconnect/private_keys/AuthKey_BSDJAT949V.p8" --
 echo "=== 0. Чистка хвостов прошлых сборок (stale pkg/Helpers/tarball) ==="
 rm -f  "$APP/Contents/Resources/Tribe-service.pkg"
 rm -f  "$APP/Contents/Resources/tribe-svc.tar.gz" "$APP/Contents/Resources/tribe-svc-install.sh"
+rm -f  "$APP/Contents/Resources/tribe-svc-geo.sha256"
 rm -rf "$APP/Contents/Helpers"
 
 echo "=== 1. Qt в app (macdeployqt) ==="
@@ -50,40 +51,10 @@ find "$SRV/Frameworks" -type f \( -name '*.dylib' -o -path '*/Versions/A/Qt*' \)
 "${SIGN[@]}" "$SRV/tun2socks"
 "${SIGN[@]}" "$SRV/Tribe-service"
 
-echo "=== 4. Payload-tarball (подписанный демон) → Contents/Resources (непрозрачный ресурс) ==="
-# Бинари уже подписаны Developer ID+runtime (шаг 3). Tarball codesign пломбирует как ресурс,
-# нотаризация внутрь tar НЕ лезет → нет «unsigned nested code». Скрипт на установке распакует в /Library.
-ST="$(mktemp -d)"
-cp -f  "$SRV/Tribe-service" "$ST/Tribe-service"
-cp -f  "$SRV/amneziawg-go"  "$ST/amneziawg-go"
-cp -f  "$SRV/tun2socks"     "$ST/tun2socks"
-cp -aR "$SRV/Frameworks"    "$ST/Frameworks"
-mkdir -p "$ST/pf"; cp -f "$REPO/deploy/data/macos/pf/tribe."*.conf "$REPO/deploy/data/macos/pf/tribe.conf" "$ST/pf/"
-# AVPN: маркер версии демона = хэш бинарей (меняется ⟺ меняется демон). Кладём В tarball (установщик
-# перенесёт в /Library/.../VERSION) И в ресурс app (приложение сверяет с установленным → авто-
-# переустановка при апдейте, ноль терминала). См. MacServiceInstaller::macServiceOutdated.
-# AVPN 2026-09-04: хэш считаем по бинарям БЕЗ подписи. Подпись (шаг 3) несёт timestamp-токен,
-# из-за чего маркер менялся КАЖДУЮ сборку при неизменённом демоне, и каждое обновление приложения
-# спрашивало пароль на переустановку службы (MAC-23/24). Снятая подпись даёт одинаковые байты
-# и для Developer-ID-, и для ad-hoc-подписанного бинаря (проверено 2026-09-04).
-HT="$(mktemp -d)"
-cp -f "$SRV/Tribe-service" "$HT/Tribe-service"; cp -f "$SRV/amneziawg-go" "$HT/amneziawg-go"
-cp -f "$SRV/tun2socks" "$HT/tun2socks"
-codesign --remove-signature "$HT/Tribe-service"; codesign --remove-signature "$HT/amneziawg-go"
-codesign --remove-signature "$HT/tun2socks"
-# AVPN (волна-3, 2026-09-28): pf-правила — тоже часть службы (200.allowVPN и др.): правка только pf
-# иначе не доезжала до уже установленных пользователей (маркер не менялся).
-# 5.1.108: tun2socks входит в маркер — служба с ним ≠ служба без него (одна переустановка с паролем).
-DVER="$(cat "$HT/Tribe-service" "$HT/amneziawg-go" "$HT/tun2socks" "$ST"/pf/*.conf | shasum -a 256 | cut -c1-16)"
-rm -rf "$HT"
-echo "$DVER" > "$ST/VERSION"
-echo "$DVER" > "$APP/Contents/Resources/tribe-svc.version"
-echo "  daemon version: $DVER"
-( cd "$ST" && COPYFILE_DISABLE=1 tar czf "$APP/Contents/Resources/tribe-svc.tar.gz" Tribe-service amneziawg-go tun2socks Frameworks pf VERSION )
-rm -rf "$ST"
-cp -f "$REPO/deploy/tribe/tribe-svc-install.sh" "$APP/Contents/Resources/tribe-svc-install.sh"
-chmod +x "$APP/Contents/Resources/tribe-svc-install.sh"
-echo "  tarball: $(ls -la "$APP/Contents/Resources/tribe-svc.tar.gz" | awk '{print $5}') байт"
+echo "=== 4. Payload-tarball (подписанный демон + geo) → Contents/Resources (непрозрачный ресурс) ==="
+# Сборка tarball, маркера версии (DVER) и ожидаемых хэшей geo вынесена в make-svc-payload.sh
+# (без подписи — её можно прогнать отдельно на любом дереве сборки).
+bash "$REPO/deploy/tribe/make-svc-payload.sh" "$SRV" "$APP/Contents/Resources"
 
 echo "=== 5/6. Подпись app: фреймворки/плагины inside-out + app c entitlements ==="
 # Scripts are sealed resources, not nested Mach-O code. Keep the upstream executable

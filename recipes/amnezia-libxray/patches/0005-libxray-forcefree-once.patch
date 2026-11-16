@@ -1,0 +1,103 @@
+diff --git a/nodep/memory.go b/nodep/memory.go
+index 5e79eab..5524ea8 100644
+--- a/nodep/memory.go
++++ b/nodep/memory.go
+@@ -2,16 +2,34 @@ package nodep
+ 
+ import (
+ 	"runtime/debug"
++	"sync"
++	"sync/atomic"
+ 	"time"
+ )
+ 
++// Tribe: the release loop is process-wide. Upstream v1.0.3 started a new,
++// unstoppable FreeOSMemory goroutine on every RunXray, so each core restart
++// inside one long-lived process (iOS packet tunnel: reconnects, uplink
++// changes) added one more loop. The loop now starts once per process and
++// keeps running across StopXray/RunXray; a later call only updates the
++// interval (upstream libXray main does the same since PR #141).
++var (
++	forceFreeOnce     sync.Once
++	forceFreeInterval atomic.Int64 // time.Duration
++	forceFreeLoops    atomic.Int32 // loops started; 0 or 1 (read by tests)
++)
++
+ func forceFree(interval time.Duration) {
+-	go func() {
+-		for {
+-			time.Sleep(interval)
+-			debug.FreeOSMemory()
+-		}
+-	}()
++	forceFreeInterval.Store(int64(interval))
++	forceFreeOnce.Do(func() {
++		forceFreeLoops.Add(1)
++		go func() {
++			for {
++				time.Sleep(time.Duration(forceFreeInterval.Load()))
++				debug.FreeOSMemory()
++			}
++		}()
++	})
+ }
+ 
+ func InitForceFree(maxMemory int64, interval int) {
+diff --git a/nodep/memory_tribe_test.go b/nodep/memory_tribe_test.go
+new file mode 100644
+index 0000000..f9d18f4
+--- /dev/null
++++ b/nodep/memory_tribe_test.go
+@@ -0,0 +1,52 @@
++package nodep
++
++import (
++	"math"
++	"runtime"
++	"runtime/debug"
++	"testing"
++	"time"
++)
++
++// TestTribeForceFreeLoopStartsOnce: N RunXray-equivalent calls (each one calls
++// InitForceFree) leave exactly one release loop and no extra goroutines.
++func TestTribeForceFreeLoopStartsOnce(t *testing.T) {
++	prevGC := debug.SetGCPercent(100)
++	debug.SetGCPercent(prevGC)
++	prevLimit := debug.SetMemoryLimit(-1)
++	defer func() {
++		debug.SetGCPercent(prevGC)
++		debug.SetMemoryLimit(prevLimit)
++	}()
++
++	InitForceFree(math.MaxInt64, 1)
++	if got := forceFreeLoops.Load(); got != 1 {
++		t.Fatalf("after first start: loops=%d, want 1", got)
++	}
++	runtime.Gosched()
++	base := runtime.NumGoroutine()
++
++	const starts = 50
++	for i := 0; i < starts; i++ {
++		InitForceFree(30<<20, 1)
++	}
++	if got := forceFreeLoops.Load(); got != 1 {
++		t.Fatalf("after %d more starts: loops=%d, want 1", starts, got)
++	}
++	time.Sleep(10 * time.Millisecond)
++	if got := runtime.NumGoroutine(); got > base {
++		t.Fatalf("goroutines grew from %d to %d over %d starts", base, got, starts)
++	}
++	// The last call still applies its own soft limit (per-session tunable).
++	if got := debug.SetMemoryLimit(-1); got != 30<<20 {
++		t.Fatalf("memory limit=%d, want %d", got, 30<<20)
++	}
++	if got := time.Duration(forceFreeInterval.Load()); got != time.Second {
++		t.Fatalf("interval=%v, want 1s", got)
++	}
++	// interval <= 0 never starts or changes the loop.
++	InitForceFree(30<<20, 0)
++	if got := forceFreeLoops.Load(); got != 1 {
++		t.Fatalf("interval 0 changed loops=%d", got)
++	}
++}

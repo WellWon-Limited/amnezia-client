@@ -1,0 +1,211 @@
+diff --git a/tribe_exports.go b/tribe_exports.go
+index d8da98a..0ecab3f 100644
+--- a/tribe_exports.go
++++ b/tribe_exports.go
+@@ -1,12 +1,17 @@
+ package libXray
+ 
+-// Tribe (0009): root-level exports for gomobile. `gomobile bind` binds only this root package
++// Tribe (0011, scanner part 0013): root-level exports for gomobile. `gomobile bind` binds only this root package
+ // (Kotlin: static members of org.amnezia.vpn.protocol.xray.libXray.LibXray), so a Tribe
+ // function that lives in a sub-package is re-exported here with a Tribe prefix. Every export
+ // keeps the frozen ABI of its Apple twin (awg-apple), so one parser contract serves all
+ // platforms.
+ 
+ import (
++	"crypto/x509"
++	"errors"
++	"sync"
++
++	"github.com/amnezia-vpn/amnezia-libxray/tribescan"
+ 	"github.com/amnezia-vpn/amnezia-libxray/xray"
+ )
+ 
+@@ -31,10 +36,76 @@ func TribeOutboundStatsJSON() string {
+ 	return xray.OutboundStatsJSON()
+ }
+ 
+-// Scanner exports (reserved, not implemented in this patch).
++// Scanner exports (libxray 0013): the Scanner's probe engine (package tribescan, shared engine
++// patch 0012-tribe-scan-engine.patch, the same as awg-apple's and amnezia-xray-bindings'). Kotlin
++// relays the app's tribe-scan-v1 messages as they are and calls these on a worker thread; every call
++// returns at once except the bounded waits of scan_cancel (1.5 s), a replacing scan_start (3 s) and
++// TribeScanStopAll.
+ //
+-// TribeScanStart, TribeScanPoll and TribeScanCancel belong here, in this file and this patch,
+-// next to the other Tribe root exports. The scanner lane (Android host, scanner-client-plan.md)
+-// adds them with their own frozen ABI string (const TribeScanABI, package variable
+-// AMNEZIA_LIBXRAY_TRIBE_SCAN_ABI) and a build gate, then re-locks the AAR (two clean builds,
+-// same sha256). Until then the AAR has no scanner symbols and the Kotlin side must not call any.
++// Socket protection of probes is the probe's OWN (review F3): Kotlin registers a dedicated
++// TribeScanProtector whose ProtectFd calls VpnService.protect(fd) and returns its result - and NEVER
++// the tunnel's failure path. Probe sockets run only that protector, never the slot that
++// RegisterSocketControllers arms for the tunnel core (controller_slot.go); a false answer fails that
++// probe only ("bind_failed").
++
++// TribeScanABI names the scanner's message contract: the same string as the Apple export
++// (awg-apple AWG_APPLE_TRIBE_SCAN_ABI) and the package variable AMNEZIA_LIBXRAY_TRIBE_SCAN_ABI.
++const TribeScanABI = "libxray-tribe-scan-v1"
++
++// TribeScanProtector protects one probe socket (VpnService.protect). Must not touch the tunnel.
++type TribeScanProtector interface {
++	ProtectFd(fd int) bool
++}
++
++var (
++	tribeScanTestRootCAs *x509.CertPool // test seam; nil in production (system roots)
++	tribeScanProtectMu   sync.RWMutex
++	tribeScanProtector   TribeScanProtector
++)
++
++// TribeScanSetProtector installs (or, with nil, removes) the probe socket protector. Removing it
++// waits for every protect call in flight, so the Kotlin object may be released afterwards; a scan
++// that starts without one is refused (no_vpn).
++func TribeScanSetProtector(p TribeScanProtector) {
++	tribeScanProtectMu.Lock()
++	tribeScanProtector = p
++	tribeScanProtectMu.Unlock()
++}
++
++func tribeScanProtect(_, _ string, fd uintptr) error {
++	tribeScanProtectMu.RLock()
++	defer tribeScanProtectMu.RUnlock()
++	if tribeScanProtector == nil {
++		return errors.New("no probe protector")
++	}
++	if !tribeScanProtector.ProtectFd(int(fd)) {
++		return errors.New("probe protect refused")
++	}
++	return nil
++}
++
++func tribeScanProtectArmed() bool {
++	tribeScanProtectMu.RLock()
++	defer tribeScanProtectMu.RUnlock()
++	return tribeScanProtector != nil
++}
++
++func tribeScanPlatform() tribescan.Platform {
++	return tribescan.Platform{
++		Name: "android", MaxFull: 1, MaxLeg: 4, MaxInstances: 2,
++		RequireProtection: true, Protect: tribeScanProtect, ProtectArmed: tribeScanProtectArmed,
++		FootprintMB: tribescan.ProcessRSSMB, FreeOSMemoryAfterJob: true, RootCAs: tribeScanTestRootCAs,
++	}
++}
++
++// TribeScanMessage handles one tribe-scan-v1 message and returns its reply (hostOptionsJSON is read
++// by scan_start; "" = none).
++func TribeScanMessage(messageJSON string, hostOptionsJSON string) string {
++	return tribescan.Message(messageJSON, hostOptionsJSON, tribeScanPlatform())
++}
++
++// TribeScanStopAll ends the running scan (reason tunnel_stopped) and waits up to waitMs (max
++// 10000) until every probe instance is closed: {"stopped":bool}. Call it before the tunnel stops.
++func TribeScanStopAll(waitMs int64) string {
++	return tribescan.StopAllJSON(waitMs)
++}
+diff --git a/tribe_scan_test.go b/tribe_scan_test.go
+new file mode 100644
+index 0000000..9eb62f8
+--- /dev/null
++++ b/tribe_scan_test.go
+@@ -0,0 +1,99 @@
++//go:build tribescan_testkit
++
++package libXray
++
++// Gate of the Android scan entry points (libxray 0013, tribe_exports.go), -race: probe sockets run only the probe
++// protector (ProtectFd is called for them) and never the tunnel's slot - with the tunnel's
++// controller armed REJECTING every socket, probes still work; no protector = no_vpn; a refusing
++// protector fails the probes (bind_failed) and nothing else.
++
++import (
++	"encoding/json"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	clog "github.com/xtls/xray-core/common/log"
++
++	"github.com/amnezia-vpn/amnezia-libxray/tribescan"
++)
++
++type tribeScanQuiet struct{}
++
++func (tribeScanQuiet) Handle(clog.Message) {}
++
++type tribeScanTestProtector struct {
++	allow bool
++	calls atomic.Int64
++}
++
++func (p *tribeScanTestProtector) ProtectFd(int) bool { p.calls.Add(1); return p.allow }
++
++func tribeScanRun(t *testing.T, req string) *tribescan.KitResult {
++	t.Helper()
++	r := &tribescan.KitResult{}
++	raw := TribeScanMessage(req, "")
++	if json.Unmarshal([]byte(raw), &r.Ack); r.Ack.Type != "scan_ack" {
++		json.Unmarshal([]byte(raw), &r.Err)
++		r.Final = tribescan.Progress{Done: true, Reason: r.Err.Error}
++		return r
++	}
++	r.ScanID = r.Ack.ScanID
++	return tribescan.KitPoll(t, r, 30*time.Second, time.Now())
++}
++
++func TestTribeScanAndroidExport(t *testing.T) {
++	clog.RegisterHandler(tribeScanQuiet{})
++	// The tunnel core's protect slot (RegisterSocketControllers on Android) governs dials AND
++	// listeners process-wide: armed first so the local servers can listen; it counts every call.
++	tunnel := &tribeScanTestProtector{allow: true}
++	if err := armSocketControllers(tunnel); err != nil {
++		t.Fatal(err)
++	}
++	srv := tribescan.NewProbeServer(t)
++	vless := tribescan.StartVlessServer(t, srv.Port)
++	tribeScanTestRootCAs = srv.Pool
++	t.Cleanup(func() {
++		tribescan.StopAll(5 * time.Second)
++		tribeScanTestRootCAs = nil
++		TribeScanSetProtector(nil)
++		clearSocketControllers()
++	})
++	req := tribescan.KitRequest("android", srv.Base(), map[string]any{"concurrency": 1, "leg_concurrency": 4}, 30000,
++		tribescan.KitFullCandidate("full", vless), tribescan.KitLegCandidate("leg", tribescan.VlessOutbound("proxy", vless), nil, nil))
++
++	if r := tribeScanRun(t, req); r.Err.Error != "no_vpn" {
++		t.Fatalf("without a probe protector: %+v", r.Err)
++	}
++	probe := &tribeScanTestProtector{allow: true}
++	TribeScanSetProtector(probe)
++	tunnelBefore := tunnel.calls.Load()
++	r := tribeScanRun(t, req)
++	if r.Final.Reason != tribescan.ReasonComplete || len(r.Data()) != 2 {
++		t.Fatalf("protected: %+v %+v", r.Final, r.Items)
++	}
++	for _, d := range r.Data() {
++		if d.Error != "" {
++			t.Fatalf("%+v", d)
++		}
++	}
++	if probe.calls.Load() == 0 || tunnel.calls.Load() != tunnelBefore {
++		t.Fatalf("probe protector calls %d, tunnel slot calls during the scan %d (must be 0)",
++			probe.calls.Load(), tunnel.calls.Load()-tunnelBefore)
++	}
++	TribeScanSetProtector(&tribeScanTestProtector{allow: false})
++	seen := len(srv.Seen())
++	r = tribeScanRun(t, tribescan.KitRequest("android-refused", srv.Base(), map[string]any{"total_ms": 1200}, 30000,
++		tribescan.KitFullCandidate("full", vless)))
++	if d := r.Data(); len(d) != 1 || d[0].Error != tribescan.ErrBindFailed || len(srv.Seen()) != seen || tunnel.calls.Load() != tunnelBefore {
++		t.Fatalf("refusing protector: %+v (server %d -> %d)", d, seen, len(srv.Seen()))
++	}
++	if TribeScanABI != "libxray-tribe-scan-v1" {
++		t.Fatal(TribeScanABI)
++	}
++	var caps tribescan.Caps
++	json.Unmarshal([]byte(TribeScanMessage(`{"action":"scan_caps"}`, "")), &caps)
++	if caps.Platform == nil || *caps.Platform != "android" || caps.MaxFullConcurrent != 1 || caps.MaxLegConcurrent != 4 {
++		t.Fatalf("caps %+v", caps)
++	}
++}

@@ -523,6 +523,25 @@ bool WindowsFirewall::allowTrafficForAppOnAll(const QString& exePath,
       return false;
     }
   }
+  // AVPN (upstream nodes): the same permit on the IPv6 layers, as allowTrafficOfAdapter does, so
+  // the service's own IPv6 dials (Xray to a provider endpoint with an IPv6 address) pass the kill
+  // switch like its IPv4 dials. Same app id condition, weight, sublayer and hard-permit flag.
+  // #3 Permit outbound IPv6 traffic.
+  {
+    QString desc("Permit (out) IPv6 Traffic of: " + appName);
+    filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+    if (!enableFilter(&filter, title, desc)) {
+      return false;
+    }
+  }
+  // #4 Permit inbound IPv6 traffic.
+  {
+    QString desc("Permit (in) IPv6 Traffic of: " + appName);
+    filter.layerKey = FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6;
+    if (!enableFilter(&filter, title, desc)) {
+      return false;
+    }
+  }
   return true;
 }
 

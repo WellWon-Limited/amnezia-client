@@ -21,6 +21,11 @@ execute_process(
 execute_process(
     COMMAND ${CONAN_COMMAND} export "${CMAKE_SOURCE_DIR}/recipes/go" --version 1.23.12
 )
+# AVPN: amnezia-xray-core v1.261101.0 (awg-apple tribe.12, xray-bindings 1.4.0-tribe.1,
+# libxray 1.0.3-tribe.2 and 1.0.3-tribe.3, tribe-xray-geo) declares `go 1.27`.
+execute_process(
+    COMMAND ${CONAN_COMMAND} export "${CMAKE_SOURCE_DIR}/recipes/go" --version 1.27.4
+)
 
 execute_process(
     COMMAND ${CONAN_COMMAND} remote add amnezia "https://artifactory.amnezia.org/artifactory/api/conan/client-prebuilts" --force

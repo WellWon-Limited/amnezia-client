@@ -37,6 +37,7 @@
 #include "BackgroundHoldBook.h" // AVPN (iOS data watch, 140): the real bookkeeping behind the fake guard
 #include <cstring>
 #endif
+#include "core/serviceEngine/TuningStore.h"
 #endif
 
 // ------------------------------------------------------------------------------------------------
@@ -178,6 +179,8 @@ static void notifyStatus(NETunnelProviderSession *session);
 @property (nonatomic, copy) NSString *runtimeGeneration;
 @property (nonatomic, copy) NSString *configurationGeneration;
 @property (nonatomic, retain) NSDate *hConnectedDate; // nil — время подключения неизвестно
+@property (nonatomic, retain) NSDictionary *upstreamLeaseSetReply; // AVPN (upstream nodes)
+@property (nonatomic, retain) NSDictionary *lastUpstreamLeaseSet;  // the last upstream_lease_set message
 @end
 
 @implementation HarnessSession
@@ -222,6 +225,9 @@ static void notifyStatus(NETunnelProviderSession *session);
     } else if ([action isEqual:@"rebind"]) {
         if (self.rebindNoReply) return YES; // NE не ответил вовсе
         reply = self.rebindReply;
+    } else if ([action isEqual:@"upstream_lease_set"]) {
+        self.lastUpstreamLeaseSet = message;
+        reply = self.upstreamLeaseSetReply;
     }
     if (!handler) return YES;
     void (^h)(NSData *) = [handler copy];
@@ -1909,7 +1915,226 @@ static void test_fresh_session_waits_handshake()
     CHECK(!obs.has(Vpn::ConnectionState::Connected), "свежая сессия показана Connected без рукопожатия");
 }
 
+
+#ifndef HARNESS_OLD
+// ------------------------------------------------------------------------------------------------
+// AVPN upstream nodes (lane L3): the bridge half of client-envelope-contract.md.
+static std::vector<QVariantMap> g_upstreamEvents;
+static void tapUpstreamEvents()
+{
+    QObject::connect(IosController::Instance(), &IosController::upstreamLeaseEvent,
+                     [](const QVariantMap &m) { g_upstreamEvents.push_back(m); });
+}
+static NSDictionary *upstreamObject(NSString *state, NSString *code, long long seq, long long revision,
+                                    long long renewedMsAgo = 1000)
+{
+    return @{@"state": state, @"code": code, @"seq": @(seq), @"renewed_ms_ago": @(renewedMsAgo),
+             @"expires_in_ms": @(800000), @"revision": @(revision), @"config_changed": @NO,
+             @"applied_bytes": @(0), @"shadow_bytes": @(4096), @"meter_scope": @"tunnel"};
+}
+static NSDictionary *withUpstream(NSDictionary *reply, NSDictionary *upstream)
+{
+    NSMutableDictionary *r = [[reply mutableCopy] autorelease];
+    r[@"upstream"] = upstream;
+    return r;
+}
+static const char *kProfile = "3f9c2a7b1d4e8f60";
+static avpn_ios::UpstreamLeaseEnvelope upstreamLease(const char *scope = "tunnel")
+{
+    avpn_ios::UpstreamLeaseEnvelope l;
+    l.leaseId = "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    l.renewToken = "tlr1.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcde";
+    l.apiBase = "https://t.example.net";
+    l.renewAfterS = 300;
+    l.ttlS = 900;
+    l.expiresInMs = 900000;
+    l.seq = 1;
+    l.epoch = 7;
+    l.revision = 1763123456789LL;
+    l.meterScope = scope;
+    return l;
+}
+static avpn_ios::UpstreamStartEnvelope upstreamStart(bool withLease, const char *scope = "tunnel")
+{
+    avpn_ios::UpstreamStartEnvelope s;
+    s.profileId = kProfile;
+    s.nodeId = std::string("up:") + kProfile;
+    s.configSha256 = std::string(64, 'a');
+    s.hasLease = withLease;
+    if (withLease) s.lease = upstreamLease(scope);
+    return s;
+}
+static QJsonObject xrayConfigFor(const QString &nodeId)
+{
+    QJsonObject inner{{QStringLiteral("config"), QStringLiteral("{\"outbounds\":[]}")}};
+    return QJsonObject{{QStringLiteral("hostName"), QStringLiteral("upstream.tribe")},
+                       {QStringLiteral("awg_config_data"), inner},
+                       {QStringLiteral("tribeSessionMetadata"), QJsonObject{{QStringLiteral("schema_version"), 1},
+                                                                             {QStringLiteral("node_id"), nodeId}}}};
+}
+static NETunnelProviderManager *startXrayConnect(const QJsonObject &config, HarnessSession **sessionOut)
+{
+    setIntent("i-resume", "resume");
+    HarnessSession *s = newSession(NEVPNStatusDisconnected);
+    s.runtimeGeneration = @"run-1";
+    s.statusReply = statusReply(@"run-1", @"cfg-1", 0, 0);
+    NETunnelProviderManager *m = newManager(@"mgr-1", @"cfg-1", s);
+    g_managers = [@[m] retain];
+    g_loadMode = LoadMode::Deliver;
+    IosController::Instance()->connectVpn(amnezia::Proto::Xray, config);
+    spin(300);
+    if (sessionOut) *sessionOut = s;
+    return m;
+}
+static NSDictionary *providerConfig(NETunnelProviderManager *m)
+{
+    return ((NETunnelProviderProtocol *)m.protocolConfiguration).providerConfiguration;
+}
+static QJsonObject xrayBlob(NETunnelProviderManager *m)
+{
+    NSData *d = providerConfig(m)[@"xray"];
+    return d ? QJsonDocument::fromJson(QByteArray((const char *)d.bytes, int(d.length))).object() : QJsonObject();
+}
+
+// Status reply -> upstreamLeaseEvent: only when something the engine acts on changed.
+static void test_upstream_status_event_on_change()
+{
+    tapUpstreamEvents();
+    const long long now = QDateTime::currentSecsSinceEpoch();
+    HarnessSession *s = adoptLiveSession();
+    NSDictionary *base = statusReply(@"run-1", @"cfg-1", now, 50000);
+    s.statusReply = base; // AWG / own Xray reply: no `upstream`
+    IosController::Instance()->checkStatus();
+    spin(60);
+    CHECK(g_upstreamEvents.empty(), "event without an upstream object");
+    s.statusReply = withUpstream(base, upstreamObject(@"active", @"", 5, 100));
+    IosController::Instance()->checkStatus();
+    spin(60);
+    CHECK(g_upstreamEvents.size() == 1, "first upstream status not emitted");
+    if (!g_upstreamEvents.empty()) {
+        const QVariantMap &e = g_upstreamEvents.back();
+        CHECK(e.value("state").toString() == "active" && e.value("seq").toLongLong() == 5, "event fields");
+        CHECK(e.value("shadow_bytes").toLongLong() == 4096 && e.value("meter_scope").toString() == "tunnel", "bytes/scope");
+        CHECK(e.size() == 10, "contract section 5 has 10 keys");
+    }
+    s.statusReply = withUpstream(base, upstreamObject(@"active", @"", 5, 100, 9000)); // only ms moved
+    IosController::Instance()->checkStatus();
+    spin(60);
+    CHECK(g_upstreamEvents.size() == 1, "status poll without a change emitted");
+    s.statusReply = withUpstream(base, upstreamObject(@"active", @"", 6, 101));
+    IosController::Instance()->checkStatus();
+    spin(60);
+    CHECK(g_upstreamEvents.size() == 2, "renewal / newer revision not emitted");
+    s.statusReply = withUpstream(base, upstreamObject(@"terminal", @"lease_gone", 6, 101));
+    IosController::Instance()->checkStatus();
+    spin(60);
+    CHECK(g_upstreamEvents.size() == 3, "terminal not emitted");
+    if (g_upstreamEvents.size() == 3)
+        CHECK(g_upstreamEvents.back().value("code").toString() == "lease_gone", "terminal code");
+}
+
+// setUpstreamStart -> the Xray envelope carries upstream_lease + upstream metadata.
+static void test_upstream_start_envelope()
+{
+    IosController *c = IosController::Instance();
+    CHECK(c->setUpstreamStart(upstreamStart(true, "proxy")), "valid start refused");
+    HarnessSession *s = nullptr;
+    NETunnelProviderManager *m = startXrayConnect(xrayConfigFor(QStringLiteral("up:3f9c2a7b1d4e8f60")), &s);
+    CHECK(s.startCalls == 1, "tunnel not started");
+    NSDictionary *pc = providerConfig(m);
+    NSDictionary *lease = pc[@"upstream_lease"];
+    CHECK([lease isKindOfClass:[NSDictionary class]], "no upstream_lease in the envelope");
+    CHECK([lease[@"lease_id"] isEqual:@"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"], "lease_id");
+    CHECK([lease[@"renew_token"] hasPrefix:@"tlr1."], "renew_token");
+    CHECK([lease[@"api_base"] isEqual:@"https://t.example.net"], "api_base");
+    const long long expiresIn = [lease[@"expires_in_ms"] longLongValue];
+    CHECK(expiresIn <= 900000 && expiresIn > 800000, "expires_in_ms counts from the write");
+    CHECK([lease[@"seq"] longLongValue] == 1 && [lease[@"epoch"] longLongValue] == 7, "seq/epoch");
+    CHECK([lease[@"meter_scope"] isEqual:@"tunnel"], "proxy asked without meter_tags -> tunnel");
+    CHECK([lease[@"meter_tags"] isKindOfClass:[NSArray class]] && [lease[@"meter_tags"] count] == 0, "empty meter_tags");
+    NSDictionary *md = pc[@"tribeSessionMetadata"];
+    CHECK([md[@"upstream"] intValue] == 1 && [md[@"profile_id"] isEqual:@"3f9c2a7b1d4e8f60"], "metadata upstream");
+    CHECK([md[@"proto"] isEqual:@"xray"] && [md[@"node_id"] isEqual:@"up:3f9c2a7b1d4e8f60"], "metadata node");
+    CHECK([md[@"config_sha256"] length] == 64 && md[@"generation"] != nil, "metadata sha/generation");
+    CHECK(!xrayBlob(m).contains("xray_tunables"), "xray_tunables without server numbers");
+}
+
+// meter_tags pass through; with them the envelope keeps "proxy".
+static void test_upstream_meter_tags_in_envelope()
+{
+    avpn_ios::UpstreamStartEnvelope start = upstreamStart(true, "proxy");
+    start.lease.meterTags = {"proxy", "proxy-b"};
+    CHECK(IosController::Instance()->setUpstreamStart(start), "start with meter_tags refused");
+    NETunnelProviderManager *m = startXrayConnect(xrayConfigFor(QStringLiteral("up:3f9c2a7b1d4e8f60")), nullptr);
+    NSDictionary *lease = providerConfig(m)[@"upstream_lease"];
+    CHECK([lease[@"meter_scope"] isEqual:@"proxy"], "proxy with meter_tags");
+    CHECK([lease[@"meter_tags"] isEqual:(@[@"proxy", @"proxy-b"])], "meter_tags in the envelope");
+}
+
+// A provisional start: metadata, no lease. An armed start for another node is dropped.
+static void test_upstream_start_provisional_and_foreign()
+{
+    IosController *c = IosController::Instance();
+    CHECK(c->setUpstreamStart(upstreamStart(false)), "provisional start refused");
+    NETunnelProviderManager *m = startXrayConnect(xrayConfigFor(QStringLiteral("up:3f9c2a7b1d4e8f60")), nullptr);
+    NSDictionary *pc = providerConfig(m);
+    CHECK(pc[@"xray"] != nil, "provisional Xray start did not happen");
+    CHECK(pc[@"upstream_lease"] == nil, "provisional start has a lease");
+    CHECK([pc[@"tribeSessionMetadata"][@"upstream"] intValue] == 1, "provisional metadata");
+    // Armed for another node: this connect (own Xray "9:xray") must not carry it.
+    CHECK(c->setUpstreamStart(upstreamStart(true)), "start refused");
+    HarnessSession *s2 = nullptr;
+    NETunnelProviderManager *m2 = startXrayConnect(xrayConfigFor(QStringLiteral("9:xray")), &s2);
+    NSDictionary *pc2 = providerConfig(m2);
+    CHECK(s2.startCalls == 1 && pc2[@"xray"] != nil, "second (own Xray) start did not happen");
+    CHECK(pc2[@"upstream_lease"] == nil, "lease leaked into another node's start");
+    CHECK(pc2[@"tribeSessionMetadata"][@"upstream"] == nil, "upstream metadata leaked into own Xray");
+    // Invalid struct refused.
+    avpn_ios::UpstreamStartEnvelope bad = upstreamStart(true);
+    bad.lease.renewToken.clear();
+    CHECK(!c->setUpstreamStart(bad), "invalid start accepted");
+}
+
+// xray_tunables: only numbers the server publishes, clamped; own Xray too.
+static void test_xray_tunables_in_envelope()
+{
+    avpn::TuningStore::set({{QStringLiteral("xray_memory_limit_mib"), 100.0},
+                            {QStringLiteral("xray_hev_task_stack_size"), 24576.0}}, {});
+    NETunnelProviderManager *m = startXrayConnect(xrayConfigFor(QStringLiteral("9:xray")), nullptr);
+    CHECK(xrayBlob(m).contains("config"), "Xray start did not happen");
+    const QJsonObject t = xrayBlob(m).value("xray_tunables").toObject();
+    CHECK(t.value("memory_limit_mib").toInt() == 40, "memory limit clamped to 40");
+    CHECK(t.value("hev_task_stack_size").toInt() == 24576, "task stack");
+    CHECK(!t.contains("hev_tcp_buffer_size") && !t.contains("hev_max_session_count"), "absent numbers sent");
+}
+
+// upstream_lease_set: message to the live extension, reply -> upstreamLeaseEvent (always).
+static void test_upstream_lease_set_message()
+{
+    tapUpstreamEvents();
+    HarnessSession *s = adoptLiveSession();
+    s.upstreamLeaseSetReply = @{@"upstream": upstreamObject(@"active", @"", 1, 100, -1)};
+    CHECK(IosController::Instance()->sendUpstreamLeaseSet(upstreamLease()), "not sent");
+    spin(80);
+    NSDictionary *msg = s.lastUpstreamLeaseSet;
+    CHECK([msg[@"action"] isEqual:@"upstream_lease_set"], "action");
+    CHECK([msg[@"upstream_lease"][@"lease_id"] isEqual:@"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"], "lease in message");
+    CHECK(g_upstreamEvents.size() == 1 && g_upstreamEvents.back().value("state").toString() == "active", "reply not emitted");
+    avpn_ios::UpstreamLeaseEnvelope bad = upstreamLease();
+    bad.apiBase = "http://x";
+    CHECK(!IosController::Instance()->sendUpstreamLeaseSet(bad), "invalid lease sent");
+}
+#endif
+
 static const Test kTests[] = {
+#ifndef HARNESS_OLD
+    {"upstream_status_event_on_change", test_upstream_status_event_on_change},
+    {"upstream_start_envelope", test_upstream_start_envelope},
+    {"upstream_meter_tags_in_envelope", test_upstream_meter_tags_in_envelope},
+    {"upstream_start_provisional_and_foreign", test_upstream_start_provisional_and_foreign},
+    {"xray_tunables_in_envelope", test_xray_tunables_in_envelope},
+    {"upstream_lease_set_message", test_upstream_lease_set_message},
+#endif
     {"reconcile_deadline_no_error", test_reconcile_deadline_no_error},
     {"reconcile_error_no_error", test_reconcile_error_no_error},
     {"reconcile_late_answer_applied", test_reconcile_late_answer_applied},

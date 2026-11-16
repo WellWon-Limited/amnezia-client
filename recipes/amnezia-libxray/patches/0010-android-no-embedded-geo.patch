@@ -1,0 +1,29 @@
+diff --git a/build.sh b/build.sh
+index 5769722..313b32e 100644
+--- a/build.sh
++++ b/build.sh
+@@ -27,9 +27,10 @@ build_android() {
+     rm -fr *.jar
+     rm -fr *.aar
+     prepare_gomobile
++    # Tribe (0010): no geo data in the AAR. The Xray core stats geosite.dat/geoip.dat in datDir
++    # on disk before it opens them, so a pair inside the APK assets is never read; the app
++    # ships the cut tribe-xray-geo pair, copies it to a directory and passes that as datDir.
+     rm -fr assets
+-    mkdir -p assets/geo
+-    mv dat/* assets/geo
+     GOFLAGS='-mod=mod -trimpath -buildvcs=false' gomobile bind -target android -androidapi 24 -javapkg=org.amnezia.vpn.protocol.xray -o libxray.aar -ldflags="-w -s -buildid= -checklinkname=0 -X=runtime.modinfo= -extldflags=-Wl,-z,max-page-size=16384" -trimpath
+ }
+ 
+@@ -39,10 +40,10 @@ download_geo() {
+ 
+ echo "will build libxray for $1"
+ prepare_go
+-download_geo
+ if [ "$1" != "apple" ]; then
+ build_android
+ else
++download_geo
+ build_apple
+ fi
+ echo "build libxray done"

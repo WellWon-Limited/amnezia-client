@@ -25,6 +25,9 @@
 #ifdef Q_OS_WIN
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    // AVPN (upstream nodes): ConvertInterfaceAliasToLuid + GetIfEntry2 (netioapi.h, pulled in by
+    // iphlpapi.h; same include order as router_win.h); the service links iphlpapi (CMakeLists LIBS).
+    #include <iphlpapi.h>
 #endif
 #ifdef Q_OS_LINUX
     #include <sys/socket.h>
@@ -33,6 +36,7 @@
 
 // AVPN: чтение сырых счётчиков интерфейса tun2socks для runtimeStatus (macOS-демон).
 #include <QDateTime>
+#include "xrayassets.h" // AVPN: geo data only from the service's own directory
 #include <QRegularExpression>
 
 namespace {
@@ -77,6 +81,39 @@ IfaceCounters readIfaceCounters(const QString &ifaceName)
 }
 #endif
 
+#ifdef Q_OS_WIN
+// AVPN (upstream nodes): default = tunName of client/core/protocols/xrayProtocol.cpp on Windows.
+// tun2socks "-device tun://tun2" creates a wintun adapter whose alias is "tun2"; the same alias is
+// what RouterWin::createTun and DnsUtilsWindows::updateResolvers resolve for this tunnel.
+const char kDefaultXrayTunIface[] = "tun2";
+
+// Raw counters of the wintun adapter, resolved alias -> LUID on every call: tun2socks recreates
+// the adapter (a new LUID) when it restarts, so a LUID or an index kept from an earlier call could
+// name a gone or a reused interface. Both calls are local IP Helper queries (no network I/O).
+IfaceCounters readIfaceCounters(const QString &ifaceAlias)
+{
+    IfaceCounters result;
+    if (ifaceAlias.isEmpty()) {
+        return result;
+    }
+    NET_LUID luid = {};
+    if (ConvertInterfaceAliasToLuid(reinterpret_cast<const wchar_t *>(ifaceAlias.utf16()), &luid) != NO_ERROR) {
+        return result; // no adapter with this alias: tunnel not up yet or already torn down
+    }
+    MIB_IF_ROW2 row = {};
+    row.InterfaceLuid = luid;
+    if (GetIfEntry2(&row) != NO_ERROR) {
+        return result; // the adapter vanished between the two calls
+    }
+    result.found = true;
+    // In = packets tun2socks writes into the adapter (from the tunnel), Out = packets the system
+    // sends into it (into the tunnel): the same directions as ifi_ibytes/ifi_obytes of utun on macOS.
+    result.rxBytes = row.InOctets;
+    result.txBytes = row.OutOctets;
+    return result;
+}
+#endif
+
 // Имя интерфейса от клиента: только [A-Za-z0-9] до IFNAMSIZ-1 (16), иначе игнорируем хинт.
 bool isSaneIfaceName(const QString &name)
 {
@@ -89,6 +126,12 @@ bool isSaneIfaceName(const QString &name)
 bool Xray::startXray(const QString &cfg)
 {
     qDebug() << "Xray::startXray()";
+    // AVPN (upstream nodes): never let the core fall back to a foreign geo copy (xrayassets.h).
+    if (const QStringList missing = avpn::xrayMissingAssets(cfg, QCoreApplication::applicationDirPath());
+        !missing.isEmpty()) {
+        qWarning() << "[xray] refusing config: asset files missing next to the service:" << missing;
+        return false;
+    }
     const auto gatewayAndIface = NetworkUtilities::getGatewayAndIface();
     const QString defaultGateway = gatewayAndIface.first;
     const QNetworkInterface defaultIface = gatewayAndIface.second;
@@ -188,8 +231,24 @@ QJsonObject Xray::runtimeStatus(const QString &ifaceHint)
         }
     }
     status.insert(QStringLiteral("iface_found"), counters.found);
+#elif defined(Q_OS_WIN)
+    // AVPN (upstream nodes): the wintun adapter of tun2socks, same contract as the macOS branch
+    // (cumulative since the session start, reset-safe; no adapter = iface_found false, not unsupported).
+    if (iface.isEmpty()) {
+        iface = QString::fromLatin1(kDefaultXrayTunIface);
+    }
+    status.insert(QStringLiteral("unsupported"), false);
+    status.insert(QStringLiteral("source"), QStringLiteral("windows_getifentry2"));
+    IfaceCounters counters;
+    if (m_running) {
+        counters = readIfaceCounters(iface);
+        if (counters.found) {
+            m_traffic.sample(counters.rxBytes, counters.txBytes);
+        }
+    }
+    status.insert(QStringLiteral("iface_found"), counters.found);
 #else
-    // Windows/Linux: счётчики utun через getifaddrs недоступны — честные нули + unsupported.
+    // Linux: no counter source for the tun2socks interface - honest zeros + unsupported.
     status.insert(QStringLiteral("unsupported"), true);
     status.insert(QStringLiteral("source"), QStringLiteral("unavailable"));
     status.insert(QStringLiteral("iface_found"), false);

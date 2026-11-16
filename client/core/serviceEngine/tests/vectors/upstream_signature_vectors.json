@@ -1,0 +1,70 @@
+{
+    "cases": [
+        {
+            "body": "{\"type\":\"upstream_lease\",\"lease_id\":\"x\"}",
+            "context": "tribe-upstream-lease-v1",
+            "name": "lease_context",
+            "sig": "Ow8Y0JKFKcE0LHMR8YlkUSbRR8KFxv4gQgUVx9+QOJZFBUD7R0dZeICCJ66y/DHXOkXgr3ejR4uEhCmiNwh1AA==",
+            "signing_input_hex": "74726962652d757073747265616d2d6c656173652d76310a7b2274797065223a22757073747265616d5f6c65617365222c226c656173655f6964223a2278227d",
+            "verifies_bare": false,
+            "verifies_with_context": true
+        },
+        {
+            "body": "{\"features\":{\"upstream_nodes\":true}}",
+            "context": "",
+            "name": "no_context_config_body",
+            "sig": "xMDTjxA5gWrspTQVXY3j2SEWmCTh2OCx0WYMJlqkJ78yeHDvCbZ8SZ3nT4kccwX7yaPdoVeAHgXOH9yT1WszDg==",
+            "signing_input_hex": "7b226665617475726573223a7b22757073747265616d5f6e6f646573223a747275657d7d",
+            "verifies_bare": true,
+            "verifies_with_context": true
+        },
+        {
+            "body": "{\"entries\":[]}",
+            "context": "tribe-scan-manifest-v1",
+            "name": "scan_manifest_context",
+            "sig": "1n+oWBvn5jxhPccQ8DvcULtRSCV5S7KxIsRPtxc6narYVDQH9aE60+xYNwMYDBhasgJ5HoUQup0GXb4R75qQCw==",
+            "signing_input_hex": "74726962652d7363616e2d6d616e69666573742d76310a7b22656e7472696573223a5b5d7d",
+            "verifies_bare": false,
+            "verifies_with_context": true
+        },
+        {
+            "body": "{\"type\":\"upstream_lease\",\"lease_id\":\"x\"}",
+            "context": "tribe-upstream-lease-v1",
+            "name": "lease_signed_without_newline_fails",
+            "sig": "LpiwIViNRrhRWAxB2zd3cjiacU2p/NWf7l9/LwtyHQnnsQADIdzztkfP3U+prilapQ7NHTBNfbilJH7P/F9OCg==",
+            "signing_input_hex": "74726962652d757073747265616d2d6c656173652d76310a7b2274797065223a22757073747265616d5f6c65617365222c226c656173655f6964223a2278227d",
+            "verifies_bare": false,
+            "verifies_with_context": false
+        },
+        {
+            "body": "{\"type\":\"upstream_lease\",\"lease_id\":\"x\"}",
+            "context": "Tribe-Lease",
+            "name": "invalid_context_refused",
+            "sig": "EVgVQWMqG7VMVhZV/4Op8OcyfFX0Mh//ssV300wlpw90Jli9VVCsqhWElfFOMCv8pUH9nmDQEW4P7OxXVQrdCQ==",
+            "signing_input_hex": "",
+            "verifies_bare": false,
+            "verifies_with_context": false
+        },
+        {
+            "body": "{\"type\":\"upstream_standby\",\"version\":1,\"entries\":[]}",
+            "context": "tribe-upstream-standby-v1",
+            "name": "standby_context",
+            "sig": "amncGGy1j1Z17SSPmRikTP3BxrfLjEuSfO0jmQgDPGkK6yNxMM9gyNqWYQhihJ//2CZILznt6+FJMoVFd7O6CQ==",
+            "signing_input_hex": "74726962652d757073747265616d2d7374616e6462792d76310a7b2274797065223a22757073747265616d5f7374616e646279222c2276657273696f6e223a312c22656e7472696573223a5b5d7d",
+            "verifies_bare": false,
+            "verifies_with_context": true
+        },
+        {
+            "body": "{\"type\":\"upstream_standby\",\"version\":1,\"entries\":[]}",
+            "context": "tribe-upstream-standby-v1",
+            "name": "standby_body_signed_as_lease_fails",
+            "sig": "7QijpO8uYVTqFyxpktiIrqgXWrIV69dJWPhlO3OleOE/Cv4wH/3i2b6QYbqOTGolIbxxLMkZrYBrrqi3feE5Cw==",
+            "signing_input_hex": "74726962652d757073747265616d2d7374616e6462792d76310a7b2274797065223a22757073747265616d5f7374616e646279222c2276657273696f6e223a312c22656e7472696573223a5b5d7d",
+            "verifies_bare": false,
+            "verifies_with_context": false
+        }
+    ],
+    "pub_key_hex": "b340ca1942f62a7035b6fe42d17a08fe7379eb06634cec0cad33b40bc567d5c5",
+    "schema": 1,
+    "seed_hex": "b5df18adb96691c3b0ca24699bf54b2a76351466aec2494ce4ad9e8b21c87f1a"
+}

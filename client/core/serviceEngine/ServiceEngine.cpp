@@ -5,6 +5,7 @@
 #include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
 #include "SubscriptionParser.h"
 #include "TransportPick.h" // AVPN awg31-xray-v1: локации × транспорты, история
+#include "UpstreamTier.h"   // AVPN upstream nodes: policy tier of the automatic pick
 
 #include <QDateTime>
 #include <QDebug>
@@ -36,7 +37,7 @@ const SubscriptionNode *ServiceEngine::findNode(const QString &nodeId) const
 {
     if (nodeId.isEmpty())
         return nullptr;
-    for (const SubscriptionNode &n : m_pool.nodes())
+    for (const SubscriptionNode &n : m_merged)
         if (n.nodeId == nodeId)
             return &n;
     return nullptr;
@@ -44,7 +45,7 @@ const SubscriptionNode *ServiceEngine::findNode(const QString &nodeId) const
 
 bool ServiceEngine::anySupportedNode() const
 {
-    for (const SubscriptionNode &n : m_pool.nodes())
+    for (const SubscriptionNode &n : m_merged)
         if (isSupportedProtoNode(n) && healthAggregate(n) > 0.0)
             return true;
     return false;
@@ -173,6 +174,99 @@ QHash<QString, int> ServiceEngine::failoverRtt() const
     return out;
 }
 
+// Upstream nodes (point 4): the tier gate. Failures of this attempt = data-plane failures of the session
+// + start failures (excludeForAttempt). Off (features.upstream_nodes) = disabled: no stub can be in the
+// pool's candidates anyway (isSupportedProtoNode), and the pick is the pick without tiers.
+UpstreamTierGate ServiceEngine::tierGate() const
+{
+    UpstreamTierGate g;
+    if (!upstreamNodesEnabled())
+        return g;
+    g.enabled = true;
+    g.dataPlaneFailCap = dataPlaneFailMaxTriesTuned();
+    g.k = upstreamTierKTuned(g.dataPlaneFailCap);
+    g.failed = m_failedThisSession;
+    for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
+        g.failed.insert(it.key());
+    if (m_fastTierOpen)
+        for (const SubscriptionNode &n : m_merged)
+            if (!n.upstream.has_value())
+                g.ownPreFailed.insert(n.nodeId);
+    return g;
+}
+
+void ServiceEngine::excludeForAttempt(const QString &nodeId, const QString &code)
+{
+    if (nodeId.isEmpty())
+        return;
+    m_attemptExcluded.insert(nodeId, code);
+    if (m_networkMemoryStartNodeId == nodeId)
+        m_networkMemoryStartNodeId.clear();
+    appendSwitchLog(QStringLiteral("upstream start failed on %1 code=%2 (excluded for this attempt)").arg(nodeId, code));
+}
+
+void ServiceEngine::rebuildCandidates()
+{
+    m_merged = m_pool.nodes();
+    for (const SubscriptionNode &n : m_packCandidates) {
+        bool dup = false;
+        for (const SubscriptionNode &p : m_pool.nodes())
+            if (p.nodeId == n.nodeId)
+                dup = true;
+        if (!dup)
+            m_merged << n;
+    }
+}
+
+void ServiceEngine::setStandbyCandidates(const QList<SubscriptionNode> &nodes)
+{
+    // The node the session runs on keeps its record while it runs (identity for health and leave).
+    QList<SubscriptionNode> next = nodes;
+    for (const SubscriptionNode &old : m_packCandidates) {
+        if (old.nodeId != m_currentNodeId && old.nodeId != m_pendingSwitchNodeId)
+            continue;
+        bool kept = false;
+        for (const SubscriptionNode &n : next)
+            kept = kept || n.nodeId == old.nodeId;
+        if (!kept)
+            next << old;
+    }
+    m_packCandidates = next;
+    rebuildCandidates();
+}
+
+void ServiceEngine::noteStartFailedForTier(const QString &why)
+{
+    if (!upstreamNodesEnabled() || m_currentNodeId.isEmpty() || m_attemptExcluded.contains(m_currentNodeId))
+        return;
+    bool anyUpstream = false;
+    for (const SubscriptionNode &n : m_merged)
+        anyUpstream = anyUpstream || (n.upstream.has_value() && isSupportedProtoNode(n));
+    if (!anyUpstream)
+        return;
+    m_attemptExcluded.insert(m_currentNodeId, QStringLiteral("start_failed"));
+    appendSwitchLog(QStringLiteral("start failed on %1 (%2): counted for its tier in this attempt").arg(m_currentNodeId, why));
+}
+
+bool ServiceEngine::currentNodeIsUpstream() const
+{
+    const SubscriptionNode *n = findNode(m_currentNodeId);
+    return n && isUpstreamNode(*n);
+}
+
+bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail)
+{
+    if (m_state != EngineState::Connected && m_state != EngineState::Verifying)
+        return false;
+    if (!currentNodeIsUpstream())
+        return false;
+    m_attemptExcluded.insert(m_currentNodeId, code);
+    appendSwitchLog(QStringLiteral("upstream lease %1%2 on %3: leaving the node")
+                        .arg(code, detail.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(detail), m_currentNodeId));
+    onDead(/*tunnelStillUp=*/true, QStringLiteral("upstream lease %1 (failover)").arg(code));
+    return true;
+}
+
 void ServiceEngine::markUpStarted()
 {
     m_upStartedMs = nowMs(); // 5.1.109: the engine clock (tests) - QDateTime in the app
@@ -299,12 +393,16 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
         in.excluded = sessionExclusions();
     in.preferLocation = preferLocation;
     in.preferNodeId = preferNodeId;
+    // Upstream nodes: a start failure of this attempt is never retried in it; the automatic pick is tiered.
+    for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
+        in.hardExcluded.insert(it.key());
+    in.tierGate = tierGate();
     // Случайный индекс в ярусе равного weight — авто реально чередует равноценные локации.
     const auto randomIndex = [](int size) {
         return static_cast<int>(QRandomGenerator::global()->bounded(size));
     };
     // Decision 2026-11-05: an Xray listener ranks by its exit host, not by the shared RU entry.
-    return pickTransportNode(m_pool.nodes(), rankingRtt(useLastKnownRtt ? failoverRtt() : measuredRtt()),
+    return pickTransportNode(m_merged, rankingRtt(useLastKnownRtt ? failoverRtt() : measuredRtt()),
                              m_transportHistory, in, randomIndex);
 }
 
@@ -330,6 +428,16 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
         return nullptr;
     if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || sessionExclusions().contains(n->nodeId))
         return nullptr;
+    // Upstream nodes (point 5): the memory never crosses a tier - it is used only inside the tier the
+    // automatic pick commits to now (own nodes while tier 0 is open). An upstream node has no endpoint to
+    // ping: inside its tier "not failed in this attempt" stands in for the reachability gate below.
+    if (m_attemptExcluded.contains(n->nodeId))
+        return nullptr;
+    const int commitTier = autoCommitTier(m_merged, transportMode(), tierGate());
+    if (commitTier >= 0 && upstreamTierOf(*n) != commitTier)
+        return nullptr;
+    if (isUpstreamNode(*n))
+        return n;
     // Owner test 06.11 (device 36, build 135): the remembered EE2 was unreachable from that Wi-Fi
     // (ICMP -1 on every round, absent from the selection pool) and every start still raised it - no
     // handshake, rx=0. The remembered node goes first only with a fresh measured RTT (this round,
@@ -339,8 +447,62 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
     return n;
 }
 
+// AVPN Scanner (CONNECT-INVARIANTS §32 п. 2): a row tap's one-attempt order hint (see ServiceEngine.h).
+void ServiceEngine::setAttemptOrder(const QStringList &order, qint64 ttlMs)
+{
+    static constexpr int kMaxHintRows = 32;
+    static constexpr qint64 kMaxHintTtlMs = 10 * 60 * 1000;
+    m_attemptOrder.clear();
+    for (const QString &raw : order) {
+        const QString id = raw.trimmed();
+        if (!id.isEmpty() && !m_attemptOrder.contains(id))
+            m_attemptOrder << id;
+        if (m_attemptOrder.size() >= kMaxHintRows)
+            break;
+    }
+    const qint64 ttl = qBound<qint64>(0, ttlMs, kMaxHintTtlMs);
+    if (m_attemptOrder.isEmpty() || ttl <= 0) {
+        clearAttemptOrder();
+        return;
+    }
+    m_attemptOrderUntilMs = nowMs() + ttl;
+    appendSwitchLog(QStringLiteral("attempt order hint: %1 rows, %2 s").arg(m_attemptOrder.size()).arg(ttl / 1000));
+}
+
+QStringList ServiceEngine::attemptOrder() const
+{
+    if (m_attemptOrderUntilMs < 0 || nowMs() > m_attemptOrderUntilMs)
+        return {};
+    return m_attemptOrder;
+}
+
+// The first hinted node the ladder could take anyway: in the pool, a protocol this client raises, allowed
+// by the transport mode in force, alive, not manual_only/RU (they never enter an automatic choice, §14.3),
+// not failed in this session and not excluded in this attempt. Never `exclude` (the node being left).
+const SubscriptionNode *ServiceEngine::hintedCandidate(const QString &exclude) const
+{
+    if (m_attemptOrder.isEmpty() || m_attemptOrderUntilMs < 0 || nowMs() > m_attemptOrderUntilMs)
+        return nullptr;
+    const TransportMode mode = transportMode();
+    for (const QString &id : m_attemptOrder) {
+        if (id == exclude)
+            continue;
+        const SubscriptionNode *n = findNode(id);
+        if (!n || !isSupportedProtoNode(*n) || !transportAllowed(*n, mode) || healthAggregate(*n) <= 0.0
+            || isManualOnlyNode(*n))
+            continue;
+        if (sessionExclusions().contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId))
+            continue;
+        return n;
+    }
+    return nullptr;
+}
+
 const SubscriptionNode *ServiceEngine::nextCandidate() const
 {
+    // AVPN Scanner: a live hint of a row tap goes first (its head is the tapped row), as in connect().
+    if (const SubscriptionNode *hinted = hintedCandidate(QString()))
+        return hinted;
     if (const SubscriptionNode *pinned = pinnedCandidate())
         return pinned;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
@@ -364,7 +526,7 @@ QString ServiceEngine::networkMemorySkipReason() const
     if (m_networkMemoryNodeId.isEmpty() || networkMemoryCandidate())
         return QString();
     const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
-    if (n && !measuredRtt().contains(n->nodeId))
+    if (n && !isUpstreamNode(*n) && !measuredRtt().contains(n->nodeId))
         return QStringLiteral("unreachable");
     return QStringLiteral("ineligible");
 }
@@ -447,6 +609,11 @@ bool ServiceEngine::sameNodeIdentity(const SubscriptionNode &a, const Subscripti
 {
     if (a.nodeId != b.nodeId || protoOf(a) != protoOf(b) || a.endpoint != b.endpoint)
         return false;
+    // Upstream nodes (point 3, R2): a stub has no endpoint and no xray params - its identity is the
+    // profile and the config digest (a new sha = the provider rotated its servers: the running session
+    // is "changed", the new config applies at the next bring-up).
+    if (a.upstream.has_value() || b.upstream.has_value())
+        return sameUpstreamIdentity(a, b);
     if (isXrayProto(protoOf(a))) {
         if (!a.xray.has_value() || !b.xray.has_value())
             return false;
@@ -462,6 +629,13 @@ bool ServiceEngine::sameNodeContent(const SubscriptionNode &a, const Subscriptio
 {
     if (!sameNodeIdentity(a, b))
         return false;
+    if (a.upstream.has_value() && b.upstream.has_value()) {
+        const UpstreamStub &x = *a.upstream, &y = *b.upstream;
+        if (x.tier != y.tier || x.priority != y.priority || x.probeClass != y.probeClass
+            || x.protocols != y.protocols || x.requiredGeo != y.requiredGeo || x.sizeBytes != y.sizeBytes
+            || a.dns != b.dns)
+            return false;
+    }
     return a.weight == b.weight && a.manualOnly == b.manualOnly && a.transportRank == b.transportRank
         && a.health == b.health && a.hostId == b.hostId && a.location == b.location
         && a.name == b.name && a.region == b.region && a.countryCode == b.countryCode;
@@ -536,6 +710,7 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     }
 
     m_pool.setSubscription(sub);
+    rebuildCandidates();
     m_lkgActive = false;
     m_pendingReseed.reset();
 
@@ -557,6 +732,8 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     pruneRtt(m_rttFresh);
     pruneRtt(m_rttLastKnown);
     m_failedThisSession.intersect(newIds);
+    for (auto it = m_attemptExcluded.begin(); it != m_attemptExcluded.end();)
+        it = newIds.contains(it.key()) ? std::next(it) : m_attemptExcluded.erase(it);
 
     // Ревалидация pin по ЛОКАЦИИ: узел исчез → сосед той же локации (представитель), иначе снять.
     // Актуальный pin фасад берёт из pinnedNodeId() (A7: персистит его, старый id не восстанавливает).
@@ -643,15 +820,25 @@ bool ServiceEngine::applyPendingReseed()
 // ЕДИНСТВЕННАЯ нода пула с тем же endpoint и proto. Неоднозначно/нет — identity остаётся неизвестной.
 bool ServiceEngine::tryIdentifyCurrentNode()
 {
-    if (!m_currentNodeId.isEmpty() || m_sessionHintEndpoint.isEmpty())
+    // Upstream nodes (point 11): a stub session has no endpoint - it is identified by its node id
+    // ("up:<profile>") alone, proto xray; there is no endpoint-only fallback for it.
+    const bool upstreamHint = m_sessionHintNodeId.startsWith(QLatin1String("up:"));
+    if (!m_currentNodeId.isEmpty() || (m_sessionHintEndpoint.isEmpty() && !upstreamHint))
         return false;
     if (m_state != EngineState::Connected && m_state != EngineState::Verifying)
         return false;
     const QString hintProto = m_sessionHintProto.isEmpty() ? QStringLiteral("awg") : m_sessionHintProto;
     const SubscriptionNode *match = nullptr;
-    if (const SubscriptionNode *byId = findNode(m_sessionHintNodeId))
-        if (byId->endpoint == m_sessionHintEndpoint && protoOf(*byId) == hintProto)
-            match = byId;
+    if (upstreamHint) {
+        const SubscriptionNode *byId = findNode(m_sessionHintNodeId);
+        if (!byId || !isUpstreamNode(*byId) || protoOf(*byId) != hintProto)
+            return false;
+        match = byId;
+    }
+    if (!match)
+        if (const SubscriptionNode *byId = findNode(m_sessionHintNodeId))
+            if (byId->endpoint == m_sessionHintEndpoint && protoOf(*byId) == hintProto)
+                match = byId;
     if (!match) {
         int hits = 0;
         for (const SubscriptionNode &n : m_pool.nodes()) {
@@ -727,12 +914,46 @@ bool ServiceEngine::connect(QString &error)
     if (interrupted.active && !interrupted.target.isEmpty()) {
         const SubscriptionNode *t = findNode(interrupted.target);
         if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_modeGate.inForce())
-            && healthAggregate(*t) > 0.0 && !sessionExclusions().contains(t->nodeId))
+            && healthAggregate(*t) > 0.0 && !sessionExclusions().contains(t->nodeId)
+            && !m_attemptExcluded.contains(t->nodeId))
             candidate = *t;
     }
+    // AVPN Scanner (§32 п. 2): a row tap's order hint for this attempt - its head is the tapped row (the pin
+    // alone is a location: its best transport may be another row), then the rows after it; a hinted node
+    // that failed in this attempt is skipped, so the ladder takes the next row.
+    if (!candidate)
+        if (const SubscriptionNode *hinted = hintedCandidate(QString())) {
+            candidate = *hinted;
+            appendSwitchLog(QStringLiteral("attempt order hint: start on %1").arg(hinted->nodeId));
+        }
     if (!candidate)
         if (const SubscriptionNode *pinned = pinnedCandidate())
             candidate = *pinned;
+    // Upstream nodes: own tier pre-exhausted by evidence (decideFastTierOpen) - decided for this attempt
+    // before network memory and the automatic pick; never when a pin / an interrupted target decided.
+    m_fastTierOpen = false;
+    m_fastTierWhy.clear();
+    if (upstreamNodesEnabled()) {
+        int own = 0;
+        bool upstreamUsable = false;
+        const UpstreamTierGate g0 = tierGate();
+        for (const SubscriptionNode *n : autoTierPool(m_merged, m_modeGate.inForce())) {
+            if (n->upstream.has_value())
+                upstreamUsable = upstreamUsable || (!g0.failed.contains(n->nodeId));
+            else
+                ++own;
+        }
+        FastTierEvidence ev = m_fastEvidence;
+        if (ev.nowMs <= 0)
+            ev.nowMs = QDateTime::currentMSecsSinceEpoch();
+        const FastTierDecision fd = decideFastTierOpen(ev, TuningStore::flag(QLatin1String(kUpstreamFastTierFlag), true),
+                                                       candidate.has_value(), own, upstreamUsable,
+                                                       upstreamFastOpenWindowMsTuned());
+        m_fastTierOpen = fd.fire;
+        m_fastTierWhy = fd.why;
+        if (fd.fire)
+            appendSwitchLog(QStringLiteral("own tier pre-exhausted by evidence: %1 own=%2").arg(fd.evidence).arg(own));
+    }
     // Plan v3 step 5: network memory - the node that last carried data on this network goes first
     // after the manual choice (same eligibility as the automatic paths; no I/O).
     m_networkMemoryStartNodeId.clear();
@@ -756,6 +977,18 @@ bool ServiceEngine::connect(QString &error)
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, lastKnown);
         if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, lastKnown);
+        if (c)
+            candidate = *c;
+    }
+    // Upstream nodes: every candidate's start failed in this attempt (a long whitelist window, rounds of
+    // the facade's retry backoff) - the attempt exclusions are forgotten and the pick runs again, so the
+    // app keeps trying as it did before (never "no nodes" because of its own exclusions).
+    if (!candidate && !m_attemptExcluded.isEmpty() && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
+        appendSwitchLog(QStringLiteral("every candidate failed to start in this attempt: exclusions cleared"));
+        m_attemptExcluded.clear();
+        const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, interrupted.active);
+        if (!c && !sessionExclusions().isEmpty())
+            c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, interrupted.active);
         if (c)
             candidate = *c;
     }
@@ -1075,6 +1308,8 @@ bool ServiceEngine::onTunnelConnected() // AVPN
         // so "Connected" means data flows through our exit, not just a handshake.
         m_state = (currentNodeIsXray() || m_verifyEveryTransport) ? EngineState::Verifying
                                                                   : EngineState::Connected;
+        if (m_state == EngineState::Connected)
+            clearAttemptOrder(); // AVPN Scanner: no verify phase - the tap's attempt is over
         return true;
     }
     return false;
@@ -1085,6 +1320,7 @@ bool ServiceEngine::verifySucceeded() // AVPN awg31-xray-v1
     if (m_state != EngineState::Verifying)
         return false;
     m_state = EngineState::Connected;
+    clearAttemptOrder(); // AVPN Scanner: data passed - the tap's attempt is over
     m_health.reset();
     m_probeFailStreak = 0;
     // AVPN (независимое ревью волны, MAJOR-1): доказанный трафик через туннель = data-plane жив.
@@ -1264,6 +1500,7 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     m_switchUpPhase = false;
     m_pendingSwitchIsReup = false;
     m_interrupted = InterruptedSwitch{}; // туннель жив — повтор прерванного свитча не нужен
+    clearAttemptOrder(); // AVPN Scanner: an adopted session is no tap's attempt
     // 5.1.109 (S4.1): a live session this process did not start. The mode in force for it is decided
     // by the gate: a known transport the mode excludes -> Auto; the session found at startup takes
     // the stored choice unless its known transport contradicts it (TransportModeGate.h).
@@ -1330,6 +1567,7 @@ void ServiceEngine::requestStop() // AVPN
     // AVPN awg31-xray-v1: новая сессия пользователя — сессионные провалы транспортов и стрик проб забыты.
     m_failedThisSession.clear();
     m_extOriginNodeId.clear(); // AVPN (iOS data watch): the session the extension moved is over (the evidence ages by itself)
+    m_fastTierOpen = false; // the next connect() decides on fresh evidence
     m_networkMemoryStartNodeId.clear();
     m_probeFailStreak = 0;
     m_dataPlaneFailStreak = 0;  // AVPN (ревью волны, MAJOR-1): явный стоп = новая сессия наблюдения
@@ -1451,7 +1689,10 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
     // B3: identity неизвестна → локации нет, exclA пуст — авто-выбор из всего пула.
     std::optional<SubscriptionNode> candidate;
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
-    if (autoPick || m_modeGate.inForce() != TransportMode::Auto) {
+    // AVPN Scanner (§32 п. 2): inside a row tap's attempt the next hinted row goes first.
+    if (const SubscriptionNode *hinted = hintedCandidate(m_currentNodeId)) {
+        candidate = *hinted;
+    } else if (autoPick || m_modeGate.inForce() != TransportMode::Auto) {
         const QString loc = deadLocation.isEmpty() ? currentLocation() : deadLocation;
         const SubscriptionNode *c = nullptr;
         if (!loc.isEmpty())
@@ -1491,7 +1732,7 @@ bool ServiceEngine::requestSwitch(const QString &targetNodeId, bool tunnelUp, co
     // Task 10: цель с неподдерживаемым proto = «нет такой ноды» — up() на неё заведомо мёртв
     // (страховка последнего рубежа: все выборные пути её уже отфильтровали).
     bool found = false;
-    for (const SubscriptionNode &n : m_pool.nodes())
+    for (const SubscriptionNode &n : m_merged)
         if (n.nodeId == targetNodeId) { found = isSupportedProtoNode(n); break; }
     if (!found)
         return false;
@@ -1561,7 +1802,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
     }
     SubscriptionNode target;
     bool found = false;
-    for (const SubscriptionNode &n : m_pool.nodes())
+    for (const SubscriptionNode &n : m_merged)
         if (n.nodeId == m_pendingSwitchNodeId) { target = n; found = true; break; }
     if (!found || !m_tunnel) {
         noteSwitchInterrupted(QStringLiteral("error_down"));
@@ -1683,7 +1924,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 
     const QString curLoc = currentLocation();
     QHash<QString, QStringList> transportsByLoc; // кэш на снапшот: локация → транспорты
-    for (const SubscriptionNode &n : sub.nodes) {
+    for (const SubscriptionNode &n : m_merged) { // upstream nodes: pack candidates after the subscription's
         NodeDebugRow row;
         row.nodeId = n.nodeId;
         row.region = n.region;
@@ -1711,10 +1952,22 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         row.hostId = n.hostId;
         row.location = loc;
         if (!transportsByLoc.contains(loc))
-            transportsByLoc.insert(loc, locationTransports(sub.nodes, loc));
+            transportsByLoc.insert(loc, locationTransports(m_merged, loc));
         row.transports = transportsByLoc.value(loc);
         row.transportRank = n.transportRank;
         row.transportSupported = isSupportedProtoNode(n);
+        // Upstream nodes (point 16): the row is a provider profile - its tier and display name parts for the
+        // UI lane. The server's label reaches the row ONLY when the admin set it (label_custom); a fallback
+        // such as "NL 1" never does - the facade builds «<country> <n>» (UpstreamNode.h::upstreamDisplayName).
+        row.upstream = isUpstreamNode(n);
+        row.upstreamTier = upstreamTierOf(n);
+        row.packSourced = n.upstream.has_value() && n.upstream->packSourced;
+        if (row.upstream) {
+            row.upstreamOrdinal = n.upstream->ordinal;
+            row.upstreamLabelCustom = n.upstream->labelCustom;
+            if (!row.upstreamLabelCustom)
+                row.name.clear();
+        }
         row.activeProto = (!curLoc.isEmpty() && loc == curLoc) ? s.activeProto : QString();
         s.pool << row;
     }
@@ -1769,7 +2022,7 @@ ServiceEngine::LocationTransports ServiceEngine::locationTransportsFor(const QSt
                                                                       TransportMode mode) const
 {
     LocationTransports lt;
-    for (const SubscriptionNode &n : m_pool.nodes()) {
+    for (const SubscriptionNode &n : m_merged) {
         if (locationKeyOf(n) != loc || !isSupportedProtoNode(n))
             continue;
         lt.anySupported = true;

@@ -5,6 +5,8 @@
 #include "Ed25519Verify.h"
 #include "EdgeWalk.h"
 #include "NetAwait.h"
+#include "NodeRotation.h" // AVPN release C: xrayPlatformEnabledBy (Android/Windows platform switch)
+#include "UpstreamNode.h" // AVPN upstream nodes: the bounded trust of the cached features.upstream_nodes
 
 #include <QDateTime>
 #include <QNetworkAccessManager>
@@ -63,6 +65,11 @@ void ConfigService::start()
 #else
             freezeCachedFeatures(c.features, /*ios=*/false);
 #endif
+            // Upstream nodes: bounded trust of the signed cached value (UpstreamNode.h), its own bound
+            // from the same copy; judged with xray_client (one-way expiry within the run).
+            m_cachedUpstreamSigned = featureFlag(c, QLatin1String(kUpstreamNodesFlag), false);
+            m_cachedUpstreamMaxAgeMs = upstreamCacheMaxAgeMs(
+                numberOr(c, QLatin1String(kUpstreamCacheMaxAgeKey), kUpstreamCacheMaxAgeDefaultH));
             m_config = c;
             judgeCachedXray();
             emit configApplied(m_config);
@@ -97,23 +104,35 @@ qint64 ConfigService::cachedConfigAgeMin() const
 // frozen exactly as before 139, the config is asked for at the same moments, every transport failure
 // of a config request votes in the edge walk and an edge switch does not ask the new edge while a
 // request to the old one is in flight - as before.
-#if defined(Q_OS_IOS) || defined(Q_OS_MACOS)
-static constexpr bool kXrayPlatform = true;
-#else
-static constexpr bool kXrayPlatform = false;
-#endif
+// Release C (lane P1): Android and Windows get the same behaviour only while their own signed switch
+// (xray_client_android / xray_client_windows, default false) is on in the config this service holds and
+// the runtime is present (NodeRotation.h::xrayPlatformEnabledBy); iOS/macOS - always, as before.
+static bool xrayPlatformIn(const RemoteConfig &c)
+{
+    return xrayPlatformEnabledBy(c.features);
+}
 
 bool ConfigService::judgeCachedXray()
 {
     const qint64 now = nowMs();
     // One-way within a run (judgeCachedTrust): an expired trust is not revived by a clock change.
     const XrayClientDecision d = judgeCachedTrust(m_cachedTrust, m_cachedXraySigned, m_cachedAtMs, now,
-                                                  kXrayPlatform ? m_cachedMaxAgeMs : 0);
+                                                  xrayPlatformIn(m_config) ? m_cachedMaxAgeMs : 0);
     m_xrayPolicy = d.why;
     m_cachedAgeMs = (m_cachedAtMs > 0 && now >= m_cachedAtMs) ? now - m_cachedAtMs : -1;
     const QString key = QStringLiteral("xray_client");
-    const bool changed = featureFlag(m_config, key, !d.allowed) != d.allowed;
+    bool changed = featureFlag(m_config, key, !d.allowed) != d.allowed;
     m_config.features.insert(key, d.allowed);
+    // Upstream nodes: the same one-way judgement with its own bound (Apple platforms only, like Xray).
+    bool upstream = xrayPlatformIn(m_config)
+                    && upstreamTrustedFromCache(m_cachedUpstreamSigned, m_cachedAtMs, now, m_cachedUpstreamMaxAgeMs);
+    if (m_cachedUpstreamSigned && m_cachedAtMs > 0 && now - m_cachedAtMs >= m_cachedUpstreamMaxAgeMs)
+        m_upstreamTrustExpired = true;
+    if (m_upstreamTrustExpired)
+        upstream = false;
+    const QString ukey = QLatin1String(kUpstreamNodesFlag);
+    changed = changed || featureFlag(m_config, ukey, !upstream) != upstream;
+    m_config.features.insert(ukey, upstream);
     return changed;
 }
 
@@ -192,7 +211,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
             // a freeze of the process (its timer fired late - configRequestOutlivedFreeze; the stamp
             // is armTimeout's, on the system clock) count neither against the edge nor for the
             // white-list detector.
-            const bool frozen = kXrayPlatform
+            const bool frozen = xrayPlatformIn(m_config)
                 && configRequestOutlivedFreeze(reply->property("avpn_t0").toLongLong(),
                                                QDateTime::currentMSecsSinceEpoch(), kNetTimeoutMs);
             const ConfigFailure failure = classifyConfigFailure(m_fresh, startedByApiSuccess, frozen);
@@ -294,9 +313,9 @@ bool ConfigService::reportNetworkSuccess()
     // on requests the app makes anyway (bootstrap retry, subscription and account refresh). At once,
     // then never closer than the refresh throttle to the previous such refetch; its failure does not
     // vote in the edge walk and owes the next one after that spacing (ConfigCachePolicy.h).
-    // iOS and macOS only (kXrayPlatform): the other platforms keep their refresh moments unchanged.
+    // iOS and macOS only (xrayPlatformIn): the other platforms keep their refresh moments unchanged.
     const qint64 now = nowMs();
-    if (kXrayPlatform && m_nam
+    if (xrayPlatformIn(m_config) && m_nam
         && refetchConfigOnApiSuccess(m_fresh, m_configInFlight, m_refetchOwed, m_lastRefetchMs, now,
                                      kConfigRefreshThrottleMs)) {
         m_refetchOwed = false;
@@ -354,9 +373,9 @@ bool ConfigService::switchToNextEdge()
     // asked until the old request ended, and its failure was then counted against the new edge. Now
     // the new edge is asked at once and the old request is left to finish: its answer is applied if
     // it comes (signed, edge-independent), only its failure is ignored (the handler in requestConfig).
-    // iOS and macOS (kXrayPlatform), where the refetch on an API success makes a request in flight at
+    // iOS and macOS (xrayPlatformIn), where the refetch on an API success makes a request in flight at
     // this moment likely; the other platforms keep the behaviour they had.
-    if (kXrayPlatform) {
+    if (xrayPlatformIn(m_config)) {
         ++m_configSeq;
         m_configInFlight = false;
     }

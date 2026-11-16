@@ -1,0 +1,730 @@
+diff --git a/Sources/WireGuardKitGo/api-tribehttp.go b/Sources/WireGuardKitGo/api-tribehttp.go
+new file mode 100644
+index 0000000..6f12d32
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribehttp.go
+@@ -0,0 +1,31 @@
++package main
++
++// AVPN (tribe.12): C export of tribehttp.go. Kept apart so tribehttp.go stays cgo-free and
++// its host test needs no C toolchain.
++
++/*
++#include <stdint.h>
++*/
++import "C"
++
++// LibXrayTribeHTTP sends one HTTPS request through a local SOCKS5 inbound of the running core.
++// Every argument may be NULL (= empty). timeoutMs <= 0 -> 10 s, clamped to 60 s, covers the
++// whole call (socks, TLS, headers, body). maxBodyBytes <= 0 -> 64 KiB, clamped to 1 MiB.
++// Returns a malloc'd JSON string the caller frees with free():
++// {"status":int,"headers":{"Name":"v1, v2"},"body_base64":"...","error":"...","error_code":"..."}.
++//
++//export LibXrayTribeHTTP
++func LibXrayTribeHTTP(socksAddr, user, pass, method, url, headersJSON, body *C.char,
++	timeoutMs C.int64_t, maxBodyBytes C.int64_t) *C.char {
++	return C.CString(tribeHTTPJSON(tribeHTTPRequest{
++		SocksAddr:    C.GoString(socksAddr),
++		User:         C.GoString(user),
++		Pass:         C.GoString(pass),
++		Method:       C.GoString(method),
++		URL:          C.GoString(url),
++		HeadersJSON:  C.GoString(headersJSON),
++		Body:         C.GoString(body),
++		TimeoutMs:    int64(timeoutMs),
++		MaxBodyBytes: int64(maxBodyBytes),
++	}))
++}
+diff --git a/Sources/WireGuardKitGo/tribehttp.go b/Sources/WireGuardKitGo/tribehttp.go
+new file mode 100644
+index 0000000..a080806
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribehttp.go
+@@ -0,0 +1,278 @@
++package main
++
++// AVPN (tribe.12): one HTTPS request through the running core's own local SOCKS5 inbound.
++//
++// The iOS packet tunnel cannot send its own sockets into its own tunnel, and iOS 16 has no
++// URLSession SOCKS proxy. The upstream-lease renewer therefore asks the running Xray core to
++// carry the request: SOCKS5 with username/password to a loopback inbound, the host NAME is sent
++// to the proxy (remote resolution: the profile's routing and DNS decide where it goes), TLS is
++// Go's own with the platform verifier (system roots). Every call builds its own transport and
++// owns no global state, so it is safe to run next to a running core and concurrently with itself.
++// Frozen ABI and behaviour: recipes/awg-apple/README.md in the fork, "tribe.12".
++
++import (
++	"bytes"
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"net/http"
++	"net/netip"
++	"net/url"
++	"strings"
++	"time"
++
++	"golang.org/x/net/proxy"
++)
++
++const (
++	tribeHTTPDefaultTimeout   = 10 * time.Second
++	tribeHTTPMaxTimeout       = 60 * time.Second
++	tribeHTTPDefaultBodyCap   = 64 << 10
++	tribeHTTPMaxBodyCap       = 1 << 20
++	tribeHTTPMaxRequestBody   = 256 << 10
++	tribeHTTPMaxHeaderBytes   = 16 << 10
++	tribeHTTPMaxSameHostHops  = 3
++	tribeHTTPErrBadRequest    = "bad_request"
++	tribeHTTPErrSocksAuth     = "socks_auth"
++	tribeHTTPErrSocks         = "socks"
++	tribeHTTPErrTimeout       = "timeout"
++	tribeHTTPErrTLS           = "tls"
++	tribeHTTPErrRedirect      = "redirect_refused"
++	tribeHTTPErrBodyTooLarge  = "body_too_large"
++	tribeHTTPErrTransport     = "transport"
++	tribeHTTPRedirectRefusedM = "redirect to another origin refused"
++)
++
++var tribeHTTPMethods = map[string]bool{
++	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
++	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
++}
++
++// Request headers the caller may not set: the transport owns them.
++var tribeHTTPReservedHeaders = map[string]bool{
++	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
++	"Proxy-Authorization": true, "Proxy-Connection": true, "Upgrade": true, "Te": true,
++	"Trailer": true, "Keep-Alive": true,
++}
++
++type tribeHTTPRequest struct {
++	SocksAddr    string
++	User         string
++	Pass         string
++	Method       string
++	URL          string
++	HeadersJSON  string
++	Body         string
++	TimeoutMs    int64
++	MaxBodyBytes int64
++	// Test seam only: nil in production = platform verifier with system roots.
++	rootCAs *x509.CertPool
++}
++
++// tribeHTTPResponse is the JSON the export returns. status is 0 when no HTTP response arrived.
++type tribeHTTPResponse struct {
++	Status     int               `json:"status"`
++	Headers    map[string]string `json:"headers"`
++	BodyBase64 string            `json:"body_base64"`
++	Error      string            `json:"error"`
++	ErrorCode  string            `json:"error_code"`
++}
++
++type tribeHTTPRedirectError struct{}
++
++func (tribeHTTPRedirectError) Error() string { return tribeHTTPRedirectRefusedM }
++
++func tribeHTTPFail(status int, code string, err error) tribeHTTPResponse {
++	return tribeHTTPResponse{Status: status, Headers: map[string]string{}, Error: err.Error(), ErrorCode: code}
++}
++
++func tribeHTTPLoopback(addr string) error {
++	host, port, err := net.SplitHostPort(addr)
++	if err != nil {
++		return err
++	}
++	if port == "" || port == "0" {
++		return errors.New("socks port is missing")
++	}
++	ip, err := netip.ParseAddr(host)
++	if err != nil || !ip.IsLoopback() {
++		return errors.New("socks address must be a loopback IP literal")
++	}
++	return nil
++}
++
++func tribeHTTPClassify(ctx context.Context, err error) string {
++	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
++		return tribeHTTPErrTimeout
++	}
++	var redirect tribeHTTPRedirectError
++	if errors.As(err, &redirect) {
++		return tribeHTTPErrRedirect
++	}
++	var netErr net.Error
++	if errors.As(err, &netErr) && netErr.Timeout() {
++		return tribeHTTPErrTimeout
++	}
++	var unknownAuthority x509.UnknownAuthorityError
++	var hostname x509.HostnameError
++	var invalid x509.CertificateInvalidError
++	var verify *tls.CertificateVerificationError
++	var record tls.RecordHeaderError
++	var alert tls.AlertError
++	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
++		errors.As(err, &verify) || errors.As(err, &record) || errors.As(err, &alert) {
++		return tribeHTTPErrTLS
++	}
++	msg := err.Error()
++	// golang.org/x/net/internal/socks error texts (pinned by tribehttp_test.go).
++	if strings.Contains(msg, "username/password authentication failed") ||
++		strings.Contains(msg, "no acceptable authentication methods") {
++		return tribeHTTPErrSocksAuth
++	}
++	if strings.Contains(msg, "socks connect") {
++		return tribeHTTPErrSocks
++	}
++	return tribeHTTPErrTransport
++}
++
++func tribeHTTPDo(in tribeHTTPRequest) tribeHTTPResponse {
++	timeout := tribeHTTPDefaultTimeout
++	if in.TimeoutMs > 0 {
++		timeout = time.Duration(in.TimeoutMs) * time.Millisecond
++		if timeout > tribeHTTPMaxTimeout {
++			timeout = tribeHTTPMaxTimeout
++		}
++	}
++	bodyCap := int64(tribeHTTPDefaultBodyCap)
++	if in.MaxBodyBytes > 0 {
++		bodyCap = in.MaxBodyBytes
++		if bodyCap > tribeHTTPMaxBodyCap {
++			bodyCap = tribeHTTPMaxBodyCap
++		}
++	}
++
++	if err := tribeHTTPLoopback(in.SocksAddr); err != nil {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, err)
++	}
++	method := strings.ToUpper(in.Method)
++	if !tribeHTTPMethods[method] {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("unsupported method"))
++	}
++	target, err := url.Parse(in.URL)
++	if err != nil {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("invalid url"))
++	}
++	if target.Scheme != "https" || target.Hostname() == "" || target.User != nil {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("url must be https://host[:port]/... without userinfo"))
++	}
++	if len(in.Body) > tribeHTTPMaxRequestBody {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("request body too large"))
++	}
++	headers := map[string]string{}
++	if strings.TrimSpace(in.HeadersJSON) != "" {
++		if err := json.Unmarshal([]byte(in.HeadersJSON), &headers); err != nil {
++			return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("headers must be a JSON object of strings"))
++		}
++	}
++
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++
++	var auth *proxy.Auth
++	if in.User != "" || in.Pass != "" {
++		auth = &proxy.Auth{User: in.User, Password: in.Pass}
++	}
++	socks, err := proxy.SOCKS5("tcp", in.SocksAddr, auth, &net.Dialer{})
++	if err != nil {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, err)
++	}
++	contextDialer, ok := socks.(proxy.ContextDialer)
++	if !ok {
++		return tribeHTTPFail(0, tribeHTTPErrTransport, errors.New("socks dialer has no context support"))
++	}
++	transport := &http.Transport{
++		// Never read proxy settings from the environment; the local inbound is the only path.
++		Proxy:       nil,
++		DialContext: contextDialer.DialContext,
++		TLSClientConfig: &tls.Config{
++			MinVersion: tls.VersionTLS12,
++			RootCAs:    in.rootCAs,
++		},
++		DisableKeepAlives:      true,
++		MaxResponseHeaderBytes: tribeHTTPMaxHeaderBytes,
++		// The response body is read and capped here; ask for it uncompressed.
++		DisableCompression: true,
++	}
++	defer transport.CloseIdleConnections()
++
++	origin := target.Scheme + "://" + target.Host
++	client := &http.Client{
++		Transport: transport,
++		CheckRedirect: func(next *http.Request, via []*http.Request) error {
++			if next.URL.Scheme+"://"+next.URL.Host != origin {
++				return tribeHTTPRedirectError{}
++			}
++			if len(via) >= tribeHTTPMaxSameHostHops {
++				return tribeHTTPRedirectError{}
++			}
++			return nil
++		},
++	}
++
++	var reqBody io.Reader
++	if in.Body != "" {
++		reqBody = bytes.NewReader([]byte(in.Body))
++	}
++	req, err := http.NewRequestWithContext(ctx, method, target.String(), reqBody)
++	if err != nil {
++		return tribeHTTPFail(0, tribeHTTPErrBadRequest, err)
++	}
++	for name, value := range headers {
++		canonical := http.CanonicalHeaderKey(name)
++		if tribeHTTPReservedHeaders[canonical] {
++			return tribeHTTPFail(0, tribeHTTPErrBadRequest, errors.New("header "+canonical+" is owned by the transport"))
++		}
++		req.Header.Set(canonical, value)
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		status := 0
++		if resp != nil {
++			status = resp.StatusCode
++			resp.Body.Close()
++		}
++		return tribeHTTPFail(status, tribeHTTPClassify(ctx, err), err)
++	}
++	defer resp.Body.Close()
++
++	data, err := io.ReadAll(io.LimitReader(resp.Body, bodyCap+1))
++	if err != nil {
++		return tribeHTTPFail(resp.StatusCode, tribeHTTPClassify(ctx, err), err)
++	}
++	if int64(len(data)) > bodyCap {
++		return tribeHTTPFail(resp.StatusCode, tribeHTTPErrBodyTooLarge, errors.New("response body exceeds the cap"))
++	}
++	out := tribeHTTPResponse{
++		Status:     resp.StatusCode,
++		Headers:    make(map[string]string, len(resp.Header)),
++		BodyBase64: base64.StdEncoding.EncodeToString(data),
++	}
++	for name, values := range resp.Header {
++		out.Headers[name] = strings.Join(values, ", ")
++	}
++	return out
++}
++
++func tribeHTTPJSON(in tribeHTTPRequest) string {
++	encoded, err := json.Marshal(tribeHTTPDo(in))
++	if err != nil {
++		return `{"status":0,"headers":{},"body_base64":"","error":"encode failed","error_code":"transport"}`
++	}
++	return string(encoded)
++}
+diff --git a/Sources/WireGuardKitGo/tribehttp_test.go b/Sources/WireGuardKitGo/tribehttp_test.go
+new file mode 100644
+index 0000000..ac7c42b
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribehttp_test.go
+@@ -0,0 +1,384 @@
++package main
++
++// Host gate for tribehttp.go (awg-apple tribe.12): a local SOCKS5 server with username/password
++// auth that records the requested address type, and local HTTPS servers behind host names that
++// only the SOCKS server can resolve (proves remote resolution).
++
++import (
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type tribeTestSocks struct {
++	t        *testing.T
++	ln       net.Listener
++	user     string
++	pass     string
++	stall    atomic.Bool       // accept the TCP connection, never answer the greeting
++	hosts    map[string]string // host name -> real "ip:port" host part (port taken from the request)
++	mu       sync.Mutex
++	requests []string // "atyp=<n> host=<h> port=<p>"
++	connects atomic.Int32
++}
++
++func newTribeTestSocks(t *testing.T, user, pass string, hosts map[string]string) *tribeTestSocks {
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := &tribeTestSocks{t: t, ln: ln, user: user, pass: pass, hosts: hosts}
++	go s.serve()
++	t.Cleanup(func() { ln.Close() })
++	return s
++}
++
++func (s *tribeTestSocks) addr() string { return s.ln.Addr().String() }
++
++func (s *tribeTestSocks) seen() []string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return append([]string(nil), s.requests...)
++}
++
++func (s *tribeTestSocks) serve() {
++	for {
++		c, err := s.ln.Accept()
++		if err != nil {
++			return
++		}
++		go s.handle(c)
++	}
++}
++
++func (s *tribeTestSocks) handle(c net.Conn) {
++	defer c.Close()
++	if s.stall.Load() {
++		io.Copy(io.Discard, c)
++		return
++	}
++	buf := make([]byte, 262)
++	if _, err := io.ReadFull(c, buf[:2]); err != nil || buf[0] != 5 {
++		return
++	}
++	methods := make([]byte, buf[1])
++	if _, err := io.ReadFull(c, methods); err != nil {
++		return
++	}
++	hasUserPass := false
++	for _, m := range methods {
++		hasUserPass = hasUserPass || m == 2
++	}
++	if !hasUserPass {
++		c.Write([]byte{5, 0xff})
++		return
++	}
++	c.Write([]byte{5, 2})
++	// RFC 1929
++	if _, err := io.ReadFull(c, buf[:2]); err != nil || buf[0] != 1 {
++		return
++	}
++	user := make([]byte, buf[1])
++	io.ReadFull(c, user)
++	io.ReadFull(c, buf[:1])
++	pass := make([]byte, buf[0])
++	io.ReadFull(c, pass)
++	if string(user) != s.user || string(pass) != s.pass {
++		c.Write([]byte{1, 1})
++		return
++	}
++	c.Write([]byte{1, 0})
++	// CONNECT
++	if _, err := io.ReadFull(c, buf[:4]); err != nil || buf[1] != 1 {
++		return
++	}
++	atyp := buf[3]
++	var host string
++	switch atyp {
++	case 1:
++		ip := make([]byte, 4)
++		io.ReadFull(c, ip)
++		host = net.IP(ip).String()
++	case 3:
++		io.ReadFull(c, buf[:1])
++		name := make([]byte, buf[0])
++		io.ReadFull(c, name)
++		host = string(name)
++	case 4:
++		ip := make([]byte, 16)
++		io.ReadFull(c, ip)
++		host = net.IP(ip).String()
++	default:
++		return
++	}
++	io.ReadFull(c, buf[:2])
++	port := binary.BigEndian.Uint16(buf[:2])
++	s.mu.Lock()
++	s.requests = append(s.requests, fmt.Sprintf("atyp=%d host=%s port=%d", atyp, host, port))
++	s.mu.Unlock()
++	real, ok := s.hosts[host]
++	if !ok {
++		c.Write([]byte{5, 4, 0, 1, 0, 0, 0, 0, 0, 0}) // host unreachable
++		return
++	}
++	up, err := net.Dial("tcp", net.JoinHostPort(real, fmt.Sprint(port)))
++	if err != nil {
++		c.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
++		return
++	}
++	defer up.Close()
++	s.connects.Add(1)
++	c.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 0})
++	go io.Copy(up, c)
++	io.Copy(c, up)
++}
++
++type tribeTestHTTPS struct {
++	srv  *httptest.Server
++	port string
++	pool *x509.CertPool
++}
++
++func newTribeTestHTTPS(t *testing.T, h http.Handler) *tribeTestHTTPS {
++	srv := httptest.NewUnstartedServer(h)
++	srv.StartTLS()
++	t.Cleanup(srv.Close)
++	pool := x509.NewCertPool()
++	pool.AddCert(srv.Certificate())
++	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
++	return &tribeTestHTTPS{srv: srv, port: port, pool: pool}
++}
++
++func tribeTestDecode(t *testing.T, in tribeHTTPRequest) (tribeHTTPResponse, string) {
++	t.Helper()
++	raw := tribeHTTPJSON(in)
++	var out tribeHTTPResponse
++	if err := json.Unmarshal([]byte(raw), &out); err != nil {
++		t.Fatalf("export JSON does not parse: %v: %s", err, raw)
++	}
++	body, err := base64.StdEncoding.DecodeString(out.BodyBase64)
++	if err != nil {
++		t.Fatalf("body_base64: %v", err)
++	}
++	return out, string(body)
++}
++
++func TestTribeHTTPSuccessRemoteResolution(t *testing.T) {
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		w.Header().Set("X-Echo-Method", r.Method)
++		w.Header().Add("X-Multi", "a")
++		w.Header().Add("X-Multi", "b")
++		w.WriteHeader(201)
++		fmt.Fprintf(w, "%s|%s|%s|%s", r.Host, r.URL.Path, r.Header.Get("X-Tribe"), body)
++	}))
++	// example.com is in the httptest certificate; only the SOCKS server maps it to loopback.
++	socks := newTribeTestSocks(t, "u1", "p1", map[string]string{"example.com": "127.0.0.1"})
++	out, body := tribeTestDecode(t, tribeHTTPRequest{
++		SocksAddr: socks.addr(), User: "u1", Pass: "p1", Method: "post",
++		URL:         "https://example.com:" + api.port + "/v1/upstream/lease/7/renew",
++		HeadersJSON: `{"x-tribe":"renew","Content-Type":"application/json"}`,
++		Body:        `{"seq":1}`, TimeoutMs: 5000, rootCAs: api.pool,
++	})
++	if out.ErrorCode != "" || out.Error != "" || out.Status != 201 {
++		t.Fatalf("unexpected response: %+v", out)
++	}
++	want := "example.com:" + api.port + "|/v1/upstream/lease/7/renew|renew|{\"seq\":1}"
++	if body != want {
++		t.Fatalf("body=%q want %q", body, want)
++	}
++	if out.Headers["X-Echo-Method"] != "POST" || out.Headers["X-Multi"] != "a, b" {
++		t.Fatalf("headers=%v", out.Headers)
++	}
++	seen := socks.seen()
++	if len(seen) != 1 || seen[0] != "atyp=3 host=example.com port="+api.port {
++		t.Fatalf("socks must receive the host NAME (remote resolution), saw %v", seen)
++	}
++}
++
++func TestTribeHTTPWrongCredentials(t *testing.T) {
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
++	socks := newTribeTestSocks(t, "u1", "p1", map[string]string{"example.com": "127.0.0.1"})
++	for _, creds := range [][2]string{{"u1", "wrong"}, {"", ""}} {
++		out, _ := tribeTestDecode(t, tribeHTTPRequest{
++			SocksAddr: socks.addr(), User: creds[0], Pass: creds[1], Method: "GET",
++			URL: "https://example.com:" + api.port + "/", TimeoutMs: 3000, rootCAs: api.pool,
++		})
++		if out.ErrorCode != tribeHTTPErrSocksAuth || out.Status != 0 {
++			t.Fatalf("creds %v: want socks_auth, got %+v", creds, out)
++		}
++	}
++	if socks.connects.Load() != 0 {
++		t.Fatal("a connection was relayed with wrong credentials")
++	}
++}
++
++func TestTribeHTTPTimeoutIsTotal(t *testing.T) {
++	release := make(chan struct{})
++	slow := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(200)
++		w.Write([]byte("partial"))
++		w.(http.Flusher).Flush()
++		select { // the body never finishes within the caller's budget
++		case <-release:
++		case <-time.After(5 * time.Second):
++		}
++	}))
++	// Cleanups run last-in first-out: unblock the handler before the server waits for it.
++	t.Cleanup(func() { close(release) })
++	socks := newTribeTestSocks(t, "u", "p", map[string]string{"example.com": "127.0.0.1"})
++	stalled := newTribeTestSocks(t, "u", "p", nil)
++	stalled.stall.Store(true)
++	for name, addr := range map[string]string{"slow body": socks.addr(), "stalled socks": stalled.addr()} {
++		start := time.Now()
++		out, _ := tribeTestDecode(t, tribeHTTPRequest{
++			SocksAddr: addr, User: "u", Pass: "p", Method: "GET",
++			URL: "https://example.com:" + slow.port + "/", TimeoutMs: 300, rootCAs: slow.pool,
++		})
++		elapsed := time.Since(start)
++		if out.ErrorCode != tribeHTTPErrTimeout {
++			t.Fatalf("%s: want timeout, got %+v", name, out)
++		}
++		if elapsed > 1500*time.Millisecond {
++			t.Fatalf("%s: timeout not enforced: %v", name, elapsed)
++		}
++	}
++}
++
++func TestTribeHTTPBodyCap(t *testing.T) {
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		n := tribeHTTPDefaultBodyCap
++		if r.URL.Path == "/over" {
++			n++
++		}
++		w.Write([]byte(strings.Repeat("x", n)))
++	}))
++	socks := newTribeTestSocks(t, "u", "p", map[string]string{"example.com": "127.0.0.1"})
++	req := tribeHTTPRequest{SocksAddr: socks.addr(), User: "u", Pass: "p", Method: "GET",
++		TimeoutMs: 5000, rootCAs: api.pool}
++	req.URL = "https://example.com:" + api.port + "/exact"
++	out, body := tribeTestDecode(t, req)
++	if out.ErrorCode != "" || len(body) != tribeHTTPDefaultBodyCap {
++		t.Fatalf("exact cap: %d bytes, %+v", len(body), out.ErrorCode)
++	}
++	req.URL = "https://example.com:" + api.port + "/over"
++	out, body = tribeTestDecode(t, req)
++	if out.ErrorCode != tribeHTTPErrBodyTooLarge || out.Status != 200 || body != "" {
++		t.Fatalf("over cap: want body_too_large with status, got %+v", out)
++	}
++	req.MaxBodyBytes = 16
++	req.URL = "https://example.com:" + api.port + "/exact"
++	if out, _ = tribeTestDecode(t, req); out.ErrorCode != tribeHTTPErrBodyTooLarge {
++		t.Fatalf("explicit cap ignored: %+v", out)
++	}
++}
++
++func TestTribeHTTPRedirects(t *testing.T) {
++	var other *tribeTestHTTPS
++	other = newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Write([]byte("other host"))
++	}))
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/cross":
++			http.Redirect(w, r, "https://example.net:"+other.port+"/", http.StatusFound)
++		case "/same":
++			http.Redirect(w, r, "/final", http.StatusFound)
++		case "/loop":
++			http.Redirect(w, r, "/loop", http.StatusFound)
++		case "/final":
++			w.Write([]byte("final"))
++		}
++	}))
++	pool := x509.NewCertPool()
++	pool.AddCert(api.srv.Certificate())
++	pool.AddCert(other.srv.Certificate())
++	socks := newTribeTestSocks(t, "u", "p", map[string]string{"example.com": "127.0.0.1", "example.net": "127.0.0.1"})
++	req := tribeHTTPRequest{SocksAddr: socks.addr(), User: "u", Pass: "p", Method: "GET",
++		TimeoutMs: 5000, rootCAs: pool}
++
++	req.URL = "https://example.com:" + api.port + "/cross"
++	out, _ := tribeTestDecode(t, req)
++	if out.ErrorCode != tribeHTTPErrRedirect || out.Status != http.StatusFound {
++		t.Fatalf("cross-host redirect: %+v", out)
++	}
++	for _, s := range socks.seen() {
++		if strings.Contains(s, "example.net") {
++			t.Fatalf("redirect target was dialled: %v", socks.seen())
++		}
++	}
++	req.URL = "https://example.com:" + api.port + "/same"
++	if out, body := tribeTestDecode(t, req); out.ErrorCode != "" || body != "final" {
++		t.Fatalf("same-origin redirect: %+v %q", out, body)
++	}
++	req.URL = "https://example.com:" + api.port + "/loop"
++	if out, _ := tribeTestDecode(t, req); out.ErrorCode != tribeHTTPErrRedirect {
++		t.Fatalf("redirect loop: %+v", out)
++	}
++}
++
++func TestTribeHTTPRejectsBadInput(t *testing.T) {
++	cases := map[string]tribeHTTPRequest{
++		"non-loopback socks": {SocksAddr: "192.0.2.1:1080", Method: "GET", URL: "https://example.com/"},
++		"socks host name":    {SocksAddr: "localhost:1080", Method: "GET", URL: "https://example.com/"},
++		"plain http":         {SocksAddr: "127.0.0.1:1080", Method: "GET", URL: "http://example.com/"},
++		"userinfo":           {SocksAddr: "127.0.0.1:1080", Method: "GET", URL: "https://a:b@example.com/"},
++		"method":             {SocksAddr: "127.0.0.1:1080", Method: "CONNECT", URL: "https://example.com/"},
++		"headers json":       {SocksAddr: "[::1]:1080", Method: "GET", URL: "https://example.com/", HeadersJSON: `["x"]`},
++		"reserved header":    {SocksAddr: "[::1]:1080", Method: "GET", URL: "https://example.com/", HeadersJSON: `{"host":"evil"}`},
++	}
++	for name, req := range cases {
++		out, _ := tribeTestDecode(t, req)
++		if out.ErrorCode != tribeHTTPErrBadRequest || out.Status != 0 {
++			t.Fatalf("%s: want bad_request, got %+v", name, out)
++		}
++	}
++}
++
++// Production passes no roots: the platform verifier must refuse a self-signed server.
++func TestTribeHTTPSystemRootsRefuseUnknownCA(t *testing.T) {
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
++	socks := newTribeTestSocks(t, "u", "p", map[string]string{"example.com": "127.0.0.1"})
++	out, _ := tribeTestDecode(t, tribeHTTPRequest{SocksAddr: socks.addr(), User: "u", Pass: "p",
++		Method: "GET", URL: "https://example.com:" + api.port + "/", TimeoutMs: 5000})
++	if out.ErrorCode != tribeHTTPErrTLS {
++		t.Fatalf("want tls, got %+v", out)
++	}
++}
++
++func TestTribeHTTPConcurrentCalls(t *testing.T) {
++	api := newTribeTestHTTPS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Write([]byte(r.URL.Query().Get("n")))
++	}))
++	socks := newTribeTestSocks(t, "u", "p", map[string]string{"example.com": "127.0.0.1"})
++	var wg sync.WaitGroup
++	errs := make(chan string, 32)
++	for i := 0; i < 32; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			out, body := tribeTestDecode(t, tribeHTTPRequest{SocksAddr: socks.addr(), User: "u", Pass: "p",
++				Method: "GET", URL: fmt.Sprintf("https://example.com:%s/?n=%d", api.port, i),
++				TimeoutMs: 5000, rootCAs: api.pool})
++			if out.ErrorCode != "" || body != fmt.Sprint(i) {
++				errs <- fmt.Sprintf("call %d: %+v %q", i, out, body)
++			}
++		}(i)
++	}
++	wg.Wait()
++	close(errs)
++	for e := range errs {
++		t.Fatal(e)
++	}
++}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index 9f6a601..a6debc9 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -33,6 +33,14 @@ extern char *LibXrayRunXray(const char *datDir, const char *configPath, int64_t
+ extern char *LibXrayStopXray();
+ extern char *LibXrayXrayVersion();
+ extern char* LibXraySetSockCallback(libxray_sockcallback cb, void* ctx);
++/* AVPN (awg-apple tribe.12, tribehttp.go): one HTTPS request through the running core's local
++ * SOCKS5 inbound (loopback only, user/pass auth, host name resolved by the proxy). Any pointer may
++ * be NULL. timeoutMs <= 0 -> 10 s (max 60 s, whole call); maxBodyBytes <= 0 -> 64 KiB (max 1 MiB).
++ * Returns malloc'd JSON, free() it:
++ * {"status":int,"headers":{"Name":"v1, v2"},"body_base64":"","error":"","error_code":""}. */
++extern char *LibXrayTribeHTTP(const char *socksAddr, const char *user, const char *pass,
++                              const char *method, const char *url, const char *headersJSON,
++                              const char *body, int64_t timeoutMs, int64_t maxBodyBytes);
+ 
+ /* AVPN split-DNS форвардер (dnsfwd.go): настроить ДО wgTurnOn; enabled=0 = сброс. 0=ok, -1=bad args.
+  * warmup=1 — прогреть WG-рукопожатие при подъёме (первый DNS не ловит холодный туннель). */

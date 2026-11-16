@@ -112,6 +112,16 @@ target_sources(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE
     # AVPN (этап D3): runtime-статус + жизненный цикл protect-колбэка xray-пути (Foundation-only)
     ${CLIENT_ROOT_DIR}/platforms/ios/TunnelRuntimeStatus.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/XraySocketCallbackLifecycle.swift
+    # AVPN (upstream nodes): lease machine + renewer (Foundation-only), tunables, provider glue
+    ${CLIENT_ROOT_DIR}/platforms/ios/UpstreamLeaseMachine.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/UpstreamLeaseWire.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/UpstreamLeaseRenewer.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/UpstreamProxyMeter.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/XrayTunables.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+Upstream.swift
+    # AVPN (Scanner, lane L4): probe host relay (Foundation-only) + provider glue
+    ${CLIENT_ROOT_DIR}/platforms/ios/TribeScanHost.swift
+    ${CLIENT_ROOT_DIR}/platforms/ios/PacketTunnelProvider+Scan.swift
     ${CLIENT_ROOT_DIR}/platforms/ios/iosglue.mm
 )
 
@@ -121,6 +131,24 @@ target_sources(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE
 
 set_property(TARGET ${CLIENT_IOS_NE_TARGET_NAME} APPEND PROPERTY RESOURCE
     ${CMAKE_CURRENT_SOURCE_DIR}/PrivacyInfo.xcprivacy
+)
+
+# AVPN (upstream nodes): the pinned, cut geo pair (recipes/tribe-xray-geo) as plain resources at the
+# top of the appex bundle (<appex>/geosite.dat, <appex>/geoip.dat); the extension passes
+# Bundle.main.resourcePath as datDir (PacketTunnelProvider+Xray.swift).
+find_package(tribe-xray-geo REQUIRED)
+foreach(TRIBE_GEO_FILE IN ITEMS "${TRIBE_XRAY_GEOSITE_DAT_PATH}" "${TRIBE_XRAY_GEOIP_DAT_PATH}")
+    if(NOT EXISTS "${TRIBE_GEO_FILE}")
+        message(FATAL_ERROR "tribe-xray-geo did not provide ${TRIBE_GEO_FILE}")
+    endif()
+endforeach()
+target_sources(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE
+    ${TRIBE_XRAY_GEOSITE_DAT_PATH}
+    ${TRIBE_XRAY_GEOIP_DAT_PATH}
+)
+set_property(TARGET ${CLIENT_IOS_NE_TARGET_NAME} APPEND PROPERTY RESOURCE
+    ${TRIBE_XRAY_GEOSITE_DAT_PATH}
+    ${TRIBE_XRAY_GEOIP_DAT_PATH}
 )
 
 target_include_directories(${CLIENT_IOS_NE_TARGET_NAME} PRIVATE ${CLIENT_ROOT_DIR})

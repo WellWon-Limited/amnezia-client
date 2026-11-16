@@ -620,4 +620,22 @@ check(TribeSoftRestartResult.notStarted.responsePayload == ["soft_restart": "den
 check(TribeSoftRestartResult.offline.responsePayload == ["soft_restart": "denied", "reason": "offline"], "soft restart offline payload")
 check(TribeSoftRestartResult.failed.responsePayload == ["soft_restart": "denied", "reason": "failed"], "soft restart failure payload")
 
+// patch 0015: the backend hook runs the callback first, then the operation; nil changes nothing.
+do {
+    var events: [String] = []
+    let hook: (TribeBackendRestart) -> Void = { events.append("hook:\($0.rawValue)") }
+    for reason in [TribeBackendRestart.pause, .restart, .rebind, .stop] {
+        events.removeAll()
+        let r = TribeBackendHook.before(reason, hook) { () -> Int in events.append("op"); return 7 }
+        check(events == ["hook:\(reason.rawValue)", "op"] && r == 7, "hook fires before \(reason.rawValue): \(events)")
+        events.removeAll()
+        let n = TribeBackendHook.before(reason, nil) { () -> Int in events.append("op"); return 9 }
+        check(events == ["op"] && n == 9, "nil hook: only the operation (\(reason.rawValue))")
+    }
+    struct Boom: Error {}
+    var threw = false
+    do { try TribeBackendHook.before(.restart, nil) { throw Boom() } } catch { threw = true }
+    check(threw, "the operation's error passes through")
+}
+
 if failures == 0 { print("TribeRoamingTests: OK") } else { print("TribeRoamingTests: \(failures) failure(s)"); exit(1) }

@@ -363,8 +363,45 @@ list(APPEND CONAN_EXECS $<TARGET_FILE:openvpn::openvpn>)
 find_package(tun2socks REQUIRED)
 list(APPEND CONAN_EXECS $<TARGET_FILE:xjasonlyu::tun2socks>)
 
-find_package(v2ray-rules-dat REQUIRED)
-list(APPEND CONAN_BINS ${GEOSITE_DAT_PATH} ${GEOIP_DAT_PATH})
+# AVPN (upstream nodes): the one pinned, cut geo pair (recipes/tribe-xray-geo) instead of the
+# Loyalsoldier files; same names next to the service binary, where the core looks first.
+find_package(tribe-xray-geo REQUIRED)
+list(APPEND CONAN_BINS ${TRIBE_XRAY_GEOSITE_DAT_PATH} ${TRIBE_XRAY_GEOIP_DAT_PATH})
+if(APPLE)
+    # AVPN: expected sha256 of the pair for make-macos-dist.sh (packaging check + app resource
+    # tribe-svc-geo.sha256 read by MacServiceInstaller::macUpstreamGeoPresent). Build tree only.
+    add_custom_command(TARGET ${PROJECT} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${TRIBE_XRAY_GEO_SHA256SUMS_PATH}
+            "$<TARGET_FILE_DIR:${PROJECT}>/tribe-xray-geo.sha256"
+    )
+endif()
+if(WIN32)
+    # AVPN (upstream nodes): the same companion next to Tribe-service.exe on Windows, in the build
+    # tree and in the installer payload (CPack IFW packs the install rules of component AmneziaVPN;
+    # the pair itself is installed with CONAN_BINS below). The app verifies the installed pair
+    # against it (the Windows twin of MacUpstreamGeo.h); the installer smoke test checks it too.
+    add_custom_command(TARGET ${PROJECT} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${TRIBE_XRAY_GEO_SHA256SUMS_PATH}"
+            "$<TARGET_FILE_DIR:${PROJECT}>/tribe-xray-geo.sha256"
+    )
+    install(FILES "${TRIBE_XRAY_GEO_SHA256SUMS_PATH}"
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        RENAME tribe-xray-geo.sha256
+        COMPONENT AmneziaVPN
+    )
+endif()
+
+# AVPN (Scanner, plan scanner-client-plan.md §2.4, §5.4): the desktop probe host - a relay of the
+# tribe-scan-v1 messages to the bindings' Go engine (amnezia_xray_scan_message, ABI
+# libxray-tribe-scan-v1) behind its own QtRO source IpcScanInterface, remoted next to IpcInterface.
+target_sources(${PROJECT} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/tribe_scan.h
+    ${CMAKE_CURRENT_LIST_DIR}/tribe_scan.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../client/core/serviceEngine/ScanNetworkGeneration.h
+)
+qt_add_repc_sources(${PROJECT} ${CMAKE_CURRENT_LIST_DIR}/../../ipc/ipc_scan_interface.rep)
 
 add_custom_command(TARGET ${PROJECT} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

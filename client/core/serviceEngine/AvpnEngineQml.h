@@ -18,6 +18,7 @@
 #include "TribeJournal.h"    // AVPN (журнал тестирования, 2026-09-23): запись + досылка на /v1/diag/journal
 #include "TuningStore.h"     // AVPN backend-first (T10): probeServicesIntervalMs inline-геттер
 #include "VpnConnectionTunnelControl.h"
+#include "UpstreamEngine.h"  // AVPN upstream nodes: verdict / network key / status rules (pure)
 #include "WhoamiVerdict.h"   // plan v3 step 5: honest "Connected" (GET /v1/whoami verdict)
 
 #include "core/protocols/vpnProtocol.h" // AVPN: Vpn::ConnectionState
@@ -36,6 +37,7 @@
 #include <QVariantMap>
 
 #include <functional> // AVPN (Доктор D-6): sink большого DF-echo блок-профиля эндпоинта
+#include <memory>     // AVPN Scanner: the engine adapter and the gated probe host
 
 #include "DoctorReport.h" // AVPN (Доктор v1): чистые вердикты стадий диагностики (юнит-покрыты)
 
@@ -52,6 +54,16 @@ class BenchRunner;  // AVPN (панель администратора): in-app 
 class BypassListService; // AVPN server-driven АнтиВПН (Task 10): серверные bypass-списки (BypassListService.h)
 class WhitelistDetector; // AVPN (белые списки): детект РКН-режима «работает только whitelist» (WhitelistDetector.h)
 class RuSplitSentinel;   // AVPN (Доктор D-3 п.26): фоновый дозор RU-сайтов при вкл. сплите (RuSplitSentinel.h)
+// AVPN Scanner (CONNECT-INVARIANTS §32): the coordinator (TribeScanner.h), the support report queue
+// (TribeSupportChat.h), the engine interface the coordinator calls (IScanEngine, implemented in the .cpp)
+// and the switch-gated platform probe host (IScanHost.h).
+class TribeScanner;
+class TribeSupportChat;
+class IScanEngine;
+class IScanHost;
+struct ScanHostCaps;
+class ScanEngineAdapter;
+class GatedScanHost;
 
 class AvpnEngineQml : public QObject {
     Q_OBJECT
@@ -313,6 +325,28 @@ class AvpnEngineQml : public QObject {
     // и порядок ИЗ ЭТИХ ключей (неизвестный ключ скипается на QML-стороне, новые глифы требуют
     // релиза). Пусто/отсутствие ключа → фолбэк на вкомпиленный порядок (listOr «пусто=фолбэк»).
     Q_PROPERTY(QStringList onboardingBrandTiles READ onboardingBrandTiles NOTIFY changed)
+    // AVPN Scanner (plan scanner-client-plan.md §4.4-4.5, REMOTE-TUNING §1): the client switches, read-only.
+    // All ABSENT while the server switch v1_scanner is off = the Scanner does not exist: scannerEnabled
+    // false, every other switch false, doctorSheetAvailable true (the Doctor sheet as today).
+    //  scannerEnabled       features.scanner (absent = false)
+    //  scannerReturnHome    features.scanner_return_home: home after «Подключено» from a row (false = stay)
+    //  doctorLegacy         features.doctor_legacy: the old Doctor sheet stays for one release
+    //  scannerConnectOnOpen features.scanner_connect_on_open (compiled default true, only with scanner on)
+    //  scannerAwgMini       features.scanner_awg_mini (false)
+    //  doctorSheetAvailable the home «Доктор» / the sheet are reachable: !scannerEnabled || doctorLegacy
+    Q_PROPERTY(bool scannerEnabled READ scannerEnabled NOTIFY scannerSwitchesChanged)
+    Q_PROPERTY(bool scannerReturnHome READ scannerReturnHome NOTIFY scannerSwitchesChanged)
+    Q_PROPERTY(bool doctorLegacy READ doctorLegacy NOTIFY scannerSwitchesChanged)
+    Q_PROPERTY(bool scannerConnectOnOpen READ scannerConnectOnOpen NOTIFY scannerSwitchesChanged)
+    Q_PROPERTY(bool scannerAwgMini READ scannerAwgMini NOTIFY scannerSwitchesChanged)
+    Q_PROPERTY(bool doctorSheetAvailable READ doctorSheetAvailable NOTIFY scannerSwitchesChanged)
+    // AVPN Scanner: the one notification shade (ShadeQueue.h, owned by TribeScanner; timing scan_shade_ms of
+    // the manifest, compiled fallback before one): {visible, leaving, id, tone: info|success|warning,
+    // text_key, args}. Empty while the scanner switch is off (then the toasts of today speak).
+    Q_PROPERTY(QVariantMap shade READ shade NOTIFY shadeChanged)
+    // AVPN Scanner (item 6): the Scanner's own «Запустить службу» / «Обновить службу» runs (scannerEnsureService
+    // until scannerEnsureServiceFinished) - the button shows «Запускаем службу…» / «Обновляем службу…».
+    Q_PROPERTY(bool scannerEnsureServiceRunning READ scannerEnsureServiceRunning NOTIFY scannerEnsureServiceRunningChanged)
 public:
     // Волна-2: UI на экране (десктоп — видимость окна; мобильные — состояние приложения). Публичный:
     // им же пользуется TribeSupportChat для опроса бейджа.
@@ -340,6 +374,13 @@ public:
     bool verifying() const;
     QString activeProto() const;
     QString pathCheck() const { return m_pathCheck; } // plan v3 step 5, see Q_PROPERTY
+    // ---- Upstream nodes: status seam for the iOS bridge (contract §5; platform-neutral) ----
+    // The tunnel owner's `upstream` status object ({state, code, seq, renewed_ms_ago, expires_in_ms,
+    // revision, config_changed, applied_bytes, shadow_bytes, meter_scope}). Rules: terminal -> leave the
+    // node through the dead-session path (deferred, like every leave); a newer revision -> one refresh
+    // of /v1/subscription; config_changed is noted, never interrupts. The iOS bridge calls it with the
+    // object of every status reply; the macOS in-process owner applies the same rules itself.
+    Q_INVOKABLE void applyUpstreamTunnelStatus(const QJsonObject &upstream);
     bool dataFlowing() const { return m_dataFlowing; } // 5.1.108, see Q_PROPERTY
     // Переключатель «Авто / Amnezia / Xray» пикера (mode: "auto"|"awg"|"xray"; kill-switch не
     // нужен — локальная настройка). Режим "xray" при неподдерживаемом xray (платформа/kill-switch
@@ -823,6 +864,43 @@ public:
     // AVPN in-app Legal (Privacy/Terms, PageLegalTribe): кэш с диска + тихий fetch
     // tribevpn.com/legal/<doc>.<lang>.md (LegalDocs.h). Ошибки сети молчаливые:
     // страница живёт на кэше/qrc-снапшоте. doc ∈ privacy|terms, lang ∈ ru|en.
+    // ---- AVPN Scanner (CONNECT-INVARIANTS §32; plan scanner-client-plan.md §2.12, §3, §4.4) ----
+    bool scannerEnabled() const { return m_scanSwitches.scanner; }
+    bool scannerReturnHome() const { return m_scanSwitches.returnHome; }
+    bool doctorLegacy() const { return m_scanSwitches.doctorLegacy; }
+    bool scannerConnectOnOpen() const { return m_scanSwitches.connectOnOpen; }
+    bool scannerAwgMini() const { return m_scanSwitches.awgMini; }
+    bool doctorSheetAvailable() const { return m_scanSwitches.doctorSheet; }
+    QVariantMap shade() const;
+    // Enqueue a shade from anywhere (kind: "info" | "success" | "warning"; textId: the key the shade host
+    // translates; args: its placeholders). No-op while the scanner switch is off.
+    Q_INVOKABLE void shadeShow(const QString &kind, const QString &textId, const QStringList &args = {});
+    Q_INVOKABLE void shadeTapped();
+    // AVPN Scanner (item 6, desktop «служба не запущена»): ONLY from the user's tap on that state's button. Runs
+    // the EXISTING service step of Connect (guardedStart, macOS desktop): the same confirm dialog, the same bundled
+    // installer with the administrator prompt, or the same wait for launchd - never a tunnel start, nothing new
+    // privileged. Returns at once; the end: scannerEnsureServiceFinished(ok, detail) - ok = the service runs and
+    // is this app's (the page then calls TribeScanner.retry()); !ok detail (journal only): "declined" (the dialog
+    // was refused) | "failed:<installer error>" | "busy" (an install already runs) | "vpn_on" (an install /
+    // update would restart the service under the live tunnel: only with the VPN off) | "unsupported" (Windows: the
+    // installer owns the service; iOS / Android: no service). Serves service_off (install / start) and
+    // service_old / service_mismatch (update).
+    Q_INVOKABLE void scannerEnsureService();
+    // What that tap would do now, for an honest button text: "install" | "update" | "start" | "none" |
+    // "unsupported" (DebugSnapshot.h::macServiceActionName). Reads the service files and processes: call it when
+    // the state is shown, not in a binding.
+    Q_INVOKABLE QString scannerServiceAction() const;
+    bool scannerEnsureServiceRunning() const { return m_scanSvcBusy; }
+    // Wiring (coreController.cpp, // AVPN): the engine interface of the coordinator, the switch-gated probe
+    // host (the platform host is created by `make` only while features.scanner is on; `caps` until then),
+    // the support report queue, then the coordinator itself (owned by this engine from here on).
+    IScanEngine *scanEngine();
+    IScanHost *scanHost();
+    void setScanHostFactory(const ScanHostCaps &caps, std::function<IScanHost *()> make);
+    void attachSupport(TribeSupportChat *support);
+    void attachScanner(TribeScanner *scanner);
+    ~AvpnEngineQml() override;
+
     Q_INVOKABLE QString legalDocCached(const QString &doc, const QString &lang) const;
     Q_INVOKABLE void legalDocFetch(const QString &doc, const QString &lang);
 
@@ -836,6 +914,9 @@ signals:
     void rollbackNoticeChanged();
     void changed();
     void error(const QString &message);
+    // AVPN upstream nodes (release A): a short non-blocking message (the notification toast, never the error
+    // pop-up) - the app left an upstream node and is already connecting the next one.
+    void notice(const QString &message);
     // AVPN (macOS): на старте коннекта обнаружен другой активный VPN (чужой full-tunnel/демон) →
     // конфликт маршрутов («крутится, не подключается»). UI показывает уведомление «отключите другой VPN».
     void vpnConflict(const QString &name);
@@ -908,6 +989,16 @@ signals:
     // AVPN (sub-grace): движок инициировал управляемое отключение «подписка истекла и грейс
     // прошёл» (см. enforceSubscriptionGrace). Парный флаг — Q_PROPERTY subEnforcedStop.
     void subscriptionEnforcedStop();
+    // AVPN Scanner: one of the switches above changed (after a /v1/config apply).
+    void scannerSwitchesChanged();
+    // AVPN Scanner: the shade's visible item changed (re-read `shade`).
+    void shadeChanged();
+    // AVPN Scanner: a row tap reached «Подключено» and features.scanner_return_home is on - the Scanner page
+    // goes home (plan S9: after 1 s, the page's own timer). Off (default): the user stays in the Scanner.
+    void scannerReturnHomeRequested();
+    // AVPN Scanner (item 6): scannerEnsureServiceRunning changed / the end of scannerEnsureService.
+    void scannerEnsureServiceRunningChanged();
+    void scannerEnsureServiceFinished(bool ok, const QString &detail);
 
 private slots:
     void onTick();
@@ -1037,6 +1128,28 @@ private:
     // statuses) -> the existing generate_204 check with the rest of the budget is the tiebreak
     // (passes -> CheckLimited, fails -> NoData). Without the flag only xray verifies, as before.
     void startDataPathVerification();
+    // Upstream nodes (decision D): one sized GET /v1/probe on the lease's tunnel_api_base through the
+    // tunnel, digest computed locally (tribe-probe-v1), verdict UpstreamVerdict.h::judgeUpstreamCheck;
+    // whoami is never applied to an upstream session. Same verify epoch and budget as every check.
+    void startUpstreamVerification();
+    void upstreamVerifyAttempt(int epoch);
+    void finishUpstreamVerify(int epoch, const avpn::UpstreamVerdictResult &v, const QString &facts);
+    // The lease owner asked to leave the running upstream node (deferred from the adapter's signal).
+    void onUpstreamLeave(const QString &code, const QString &detail = QString());
+    // Release A: the notice (signal notice) for leaving an upstream node by its code; no text = nothing.
+    void noticeUpstreamLeft(const QString &code);
+    // Point 15 (macOS desktop): on aboutToQuit, a real quit ends an upstream session (no-op elsewhere).
+    void endUpstreamSessionOnQuit();
+    // A newer upstream_revision was seen (lease answer, renewal, status, standby pack): one refresh.
+    void noteUpstreamRevision(qint64 revision);
+    // Standby pack (contract §2): fetched while the API is reachable - at start, on foreground, when the
+    // revision moves, and every numbers.upstream_standby_refresh_s from the existing tick.
+    void maybeRefreshStandby(const char *why, bool force = false);
+    void loadStandbyPackFromDisk();
+    // Pack entries without a stub in the subscription in force become pack-sourced candidates
+    // (UpstreamEngine.h::standbyPackCandidates) - at pack load/fetch and before every start.
+    void syncStandbyCandidates();
+    QString upstreamNetworkKeyNow() const;
     void startWhoamiVerification();
     void whoamiAttempt(int epoch);
     // tiebreakDone: the verdict came from the generate_204 tiebreak and is final.
@@ -1064,6 +1177,9 @@ private:
     // AVPN (beachball-фикс): финиш фоновой установки root-демона (главный поток, queued из worker).
     // ok → reconcile() продолжает старт (намерение живо); fail → error + счёт попытки.
     void finishSvcInstall(bool ok, const QString &err);
+    // The privileged part of the service step in a background QThread (shared by Connect and the Scanner).
+    void startSvcWorker(bool needInstall, std::function<void(bool, const QString &)> done);
+    void finishScannerSvc(bool ok, const QString &err);
     // 5.1.108: Xray is supported only when the installed service carries tun2socks
     // (MacServiceInstaller::macXrayRuntimePresent -> NodeRotation.h::xrayPlatformRuntimeReady).
     // Called at construction and on every start after the service check/install.
@@ -1510,6 +1626,7 @@ private:
     // rebuildApiCarveOut()). Сев applyRuBypassSplit исключает их (+ вкомпиленный фолбэк) из
     // байпаса — control plane всегда через туннель, см. CidrCarve.h.
     QList<QHostAddress>          m_apiHostIps;
+    QHash<QString, QStringList>  m_apiHostIpsByHost;          // AVPN Scanner: the same IPs per host (knownHostIps)
     QString                      m_lastBypassSeedStamp; // AVPN: стамп последнего доехавшего сева АнтиВПН (BypassSeedStamp.h) — скип пересева при неизменных входах
     bool                         m_busy = false;
     // AVPN (macOS, beachball-фикс): установка root-демона идёт в фоновом потоке; флаг гейтит
@@ -1532,6 +1649,8 @@ private:
     QString                      m_lastRedeemedToken;         // AVPN: успешно принятый токен — дедуп повторных сканов того же QR (иначе 401-тост поверх успеха)
     // AVPN (reconcile-машина смены ноды): намерение vs факт + защита от гонок/шторма. См. reconcile().
     Vpn::ConnectionState         m_lastTunnelState = Vpn::Unknown; // ФАКТ: реальное состояние туннеля
+    // Upstream nodes (point 15): what ends the process - a quit unless our own relaunch said otherwise.
+    avpn::AppExitKind            m_appExitKind = avpn::AppExitKind::Quit;
     int                          m_trafficSyncTicks = 0;           // AVPN (#35): счётчик health-тиков для ре-синка /v1/account (каждый 5-й ≈20с)
     bool                         m_wantConnected = false;          // НАМЕРЕНИЕ: туннель должен быть поднят
     bool                         m_needsRestart  = false;          // цель сменилась на подключённом → stop→start
@@ -1552,6 +1671,25 @@ private:
     // Plan v3 step 5: data-path check (whoami) - verdict for QML (pathCheck), facts of the last
     // answer for the journal/bench report, network-memory key of the current attempt.
     QString                      m_pathCheck;
+    // AVPN upstream nodes (lane L1):
+    bool                         m_upstreamFlagWasOn = false; // R11: features.upstream_nodes at the last config
+    qint64                       m_upstreamRefreshAskedRev = 0; // the newest revision a refresh was asked for
+    bool                         m_upstreamFallbackVerify = false; // the generate_204 fallback runs for an upstream node
+    int                          m_upstreamVerifyAttempts = 0;
+    qint64                       m_standbyFetchedWallMs = 0;  // wall clock of the last successful pack fetch
+    qint64                       m_standbyLastTryWallMs = 0;  // wall clock of the last attempt (throttle)
+    int                          m_standbyEntries = -1;       // -1 = no usable pack
+    QString                      m_standbyNetKey;
+    QHash<QString, qint64>       m_accessAsnByNet;            // network-memory key -> access ASN of the last direct acquire
+    // Evidence of "own tier pre-exhausted" (UpstreamTier.h::decideFastTierOpen), wall clock ms:
+    qint64                       m_fastRoundAtMs = -1;        // the last completed off-tunnel ICMP round
+    int                          m_fastRoundProbed = 0;       // own nodes probed in it
+    int                          m_fastRoundAnsweredN = 0;    // of them answered
+    QSet<QString>                m_fastRoundAnswered;         // the round in flight
+    int                          m_fastRoundTargets = 0;
+    qint64                       m_apiTransportFailMs = -1;   // the last direct API request without an HTTP answer
+    qint64                       m_apiAnswerMs = -1;          // the last one with any HTTP answer
+    avpn::FastTierEvidence fastTierEvidenceNow() const;
     QString                      m_lastWhoamiFacts;
     bool                         m_whoamiTiebreak = false;         // generate_204 runs as the whoami tiebreak
     // Who asked for the next start (set by start/reprobe/rotate/pin/Doctor) and the snapshot for the
@@ -1613,6 +1751,71 @@ private:
     bool                         m_pushPermissionAsked = false;
     // AVPN (Task 9): один device token-POST за сессию на пару (token,env) — без дублей на каждый коннект.
     QString                      m_pushTokenSent;
+
+    // ---- AVPN Scanner (CONNECT-INVARIANTS §32) ----
+    // The ONLY three engine entries the Scanner reaches the tunnel through (the coordinator's
+    // UserConnectForScan / CancelPendingConnect / ConnectRow via IScanEngine; nothing else calls them):
+    //  scanUserConnect()  - path (b): the ordinary start() from VPN off (StartOrigin::User), recorded as the
+    //                       Scanner's own connect (m_scanOwnConnect);
+    //  scanCancelPendingConnect() - path (c): the ordinary stop() of THAT connect, only before «Подключено»
+    //                       (DebugSnapshot.h::decideScanCancel), journalled either way;
+    //  connectToNode()    - path (a): the user-start bookkeeping of start() when the tunnel is down, the order
+    //                       hint (ServiceEngine::setAttemptOrder, head = the tapped row), then
+    //                       pinAndReconnectImpl(force, StartOrigin::User) - review F4.
+    // Not Q_INVOKABLE on purpose: QML reaches them only through TribeScanner's machine.
+    friend class ScanEngineAdapter;
+    void scanUserConnect();
+    void scanCancelPendingConnect();
+    void connectToNode(const QString &nodeId, const QStringList &attemptOrder, qint64 hintTtlMs,
+                       bool machineUserOrigin, bool machineForce);
+    void noteUserStart();        // the user-start bookkeeping shared by start() and connectToNode()
+    void noteIntentChange();     // every action on the intent moves m_intentSerial (start/stop/pin/auto/rotate)
+    void scanApplySwitches(const char *why);
+    void scanSyncState();        // live status -> coordinator, the row tap's chain, the own connect latch
+    void scanNotifyNetwork();
+    void scanStartLightChecks(const QString &nodeId, quint64 askId, bool bound);
+    void scanStartReportCheck(const QString &reportId, const QJsonObject &report, bool withConnection);
+    void scanCheckStageDone(const doctor::StageResult &r);   // facts + progress of the report check
+    void scanCheckSubmit();                                   // the schema-5 report into the support queue
+    void scanCheckDelivery(bool guardFired);                  // the shade follows the support thread result
+    void scanCheckFinish(bool sent, bool notify = true);
+    void scanRefuseReportCheck(const QString &reportId, const char *why);
+    void scanJournal(const QString &line, const QJsonObject &fields); // reliability ring + testing journal
+    // The RU corpus (lists.rusplit_watch) through the current path, the Doctor's request semantics (GET cut
+    // after the headers, any HTTP answer < 500 = reachable), each request bounded by transferTimeoutMs.
+    void probeRuSites(int transferTimeoutMs, std::function<void(const QStringList &, const QList<bool> &)> done);
+    void docBeginRun(bool full, bool nodeScan); // the run state of startDoctor, shared with the Scanner's check
+    bool                         m_scanNetHooked = false;     // iOS: the app path monitor's change hook is set
+    bool                         m_scanSvcBusy = false;       // the Scanner's service step runs (item 6)
+    qint64                       m_scannerOffRefreshAskMs = 0; // the last /v1/config refresh asked for scanner_off
+    void scanServiceDone(const QString &result, const QString &message);
+    avpn::ScannerSwitches        m_scanSwitches;
+    TribeScanner                *m_scanner = nullptr;        // owned (child), deleted first in the destructor
+    TribeSupportChat            *m_support = nullptr;        // owned by CoreController, outlives this engine
+    std::unique_ptr<ScanEngineAdapter> m_scanAdapter;
+    std::unique_ptr<GatedScanHost> m_scanHost;
+    QString                      m_configPubKeyHex;          // the /v1/config key (the coordinator verifies with it)
+    quint64                      m_intentSerial = 0;
+    quint64                      m_processEpoch = 0;          // random per process: a record of another one is stale
+    quint64                      m_scanConnectSerial = 0;
+    avpn::ScanOwnConnect         m_scanOwnConnect;
+    avpn::ScanRowAttempt         m_scanRow;
+    int                          m_scanRowBackoffRound = 0;   // m_startBackoffRound when the row tap began
+    QString                      m_scanLastCurrent;           // the last ScanCurrent sent (dedupe, never secret)
+    quint64                      m_scanLightEpoch = 0;
+    // The full check of «Проверить и отправить отчёт» = the Doctor pipeline in scan mode (no start(), no
+    // alternatives, the report into the support queue).
+    struct ScanCheck {
+        bool active = false;
+        QString machineReportId;  // the machine's report id (reportCheckDone answers it)
+        QString reservation;      // TribeSupportChat::reserveReport() token until submitReport
+        QJsonObject machineReport;
+        bool withConnection = false;
+        QString queueReportId;    // the queue's report id after submitReport
+        bool submitted = false;
+        bool answered = false;
+    };
+    ScanCheck                    m_scanCheck;
 };
 
 } // namespace avpn

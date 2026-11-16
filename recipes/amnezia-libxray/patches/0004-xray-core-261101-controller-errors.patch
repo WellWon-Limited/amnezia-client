@@ -1,0 +1,99 @@
+diff --git a/transport/internet/system_listener.go b/transport/internet/system_listener.go
+index b651796..620fb5b 100644
+--- a/transport/internet/system_listener.go
++++ b/transport/internet/system_listener.go
+@@ -20,15 +20,26 @@ type DefaultListener struct {
+ 	controllers []func(network, address string, c syscall.RawConn) error
+ }
+ 
++// applyExternalControllers is deliberately fail-closed. A controller is the
++// platform's only opportunity to move a socket outside the VPN before the
++// socket starts carrying Xray traffic; logging and continuing can leak it.
++// (Since v1.261101.0 the system dialer already returns controller errors; the
++// listener still logged and continued.)
++func applyExternalControllers(controllers []func(network, address string, c syscall.RawConn) error, network, address string, c syscall.RawConn) error {
++	for _, controller := range controllers {
++		if err := controller(network, address, c); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
+ func getControlFunc(ctx context.Context, sockopt *SocketConfig, controllers []func(network, address string, c syscall.RawConn) error) func(network, address string, c syscall.RawConn) error {
+ 	return func(network, address string, c syscall.RawConn) error {
++		if err := applyExternalControllers(controllers, network, address, c); err != nil {
++			return err
++		}
+ 		return c.Control(func(fd uintptr) {
+-			for _, controller := range controllers {
+-				if err := controller(network, address, c); err != nil {
+-					errors.LogInfoInner(ctx, err, "failed to apply external controller")
+-				}
+-			}
+-
+ 			if sockopt != nil {
+ 				if err := applyInboundSocketOptions(network, fd, sockopt); err != nil {
+ 					errors.LogInfoInner(ctx, err, "failed to apply socket options to incoming connection")
+diff --git a/transport/internet/tribe_controller_test.go b/transport/internet/tribe_controller_test.go
+new file mode 100644
+index 0000000..1905e44
+--- /dev/null
++++ b/transport/internet/tribe_controller_test.go
+@@ -0,0 +1,56 @@
++package internet
++
++import (
++	"context"
++	"errors"
++	"syscall"
++	"testing"
++
++	"github.com/xtls/xray-core/common/net"
++)
++
++type tribeTestRawConn struct{}
++
++func (tribeTestRawConn) Control(callback func(uintptr)) error { callback(7); return nil }
++func (tribeTestRawConn) Read(func(uintptr) bool) error        { return nil }
++func (tribeTestRawConn) Write(func(uintptr) bool) error       { return nil }
++
++// TestTribeExternalControllerErrorsArePropagated pins the fail-closed contract
++// of every socket path an external (protect) controller sees: the listener
++// path (patched here) and both system dialer paths (upstream since 261101).
++func TestTribeExternalControllerErrorsArePropagated(t *testing.T) {
++	want := errors.New("protect rejected")
++	controllers := []func(string, string, syscall.RawConn) error{
++		func(string, string, syscall.RawConn) error { return want },
++	}
++	if got := applyExternalControllers(controllers, "tcp", "127.0.0.1:1", tribeTestRawConn{}); !errors.Is(got, want) {
++		t.Fatalf("controller error was not propagated: %v", got)
++	}
++	control := getControlFunc(nil, nil, controllers)
++	if got := control("tcp", "127.0.0.1:1", tribeTestRawConn{}); !errors.Is(got, want) {
++		t.Fatalf("listener controller error was not propagated: %v", got)
++	}
++
++	ControllersLock.Lock()
++	saved := Controllers
++	Controllers = controllers
++	ControllersLock.Unlock()
++	defer func() {
++		ControllersLock.Lock()
++		Controllers = saved
++		ControllersLock.Unlock()
++	}()
++	dialer := &DefaultSystemDialer{}
++	for _, dest := range []net.Destination{
++		net.TCPDestination(net.LocalHostIP, net.Port(9)),
++		net.UDPDestination(net.LocalHostIP, net.Port(9)),
++	} {
++		conn, err := dialer.Dial(context.Background(), nil, dest, nil)
++		if conn != nil {
++			conn.Close()
++		}
++		if !errors.Is(err, want) {
++			t.Fatalf("dialer controller error was not propagated for %v: %v", dest, err)
++		}
++	}
++}

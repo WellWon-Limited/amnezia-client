@@ -5,17 +5,25 @@
 
 #include "AwgConfigBuilder.h"
 #include "ITunnelControl.h"
+#include "UpstreamLeaseOwner.h"   // AVPN upstream nodes: the app-side lease owner (pure)
+#include "UpstreamStandbyPack.h"
 
 #include "core/utils/containerEnum.h" // AVPN awg31-xray-v1: DockerContainer по proto ноды (unscoped enum — форвард невозможен)
 
 #include <QObject>
 #include <QJsonObject>
 
+#include <functional>
+#include <optional>
+
 class VpnConnection;               // forward (vpnConnection.h в форке)
 class SecureAppSettingsRepository; // forward (core/repositories) — RU-direct-гейт в up()
 class QTimer;
+class QNetworkAccessManager;
 
 namespace avpn {
+
+class UpstreamLeaseClient;
 
 class VpnConnectionTunnelControl : public QObject, public ITunnelControl {
     Q_OBJECT
@@ -74,12 +82,81 @@ public:
     // поллинг. macOS-демон; на прочих платформах — no-op (там адопт xray в этой волне не живёт).
     void adoptXrayIfRunning();
 
+    // ---- Upstream nodes (plan provider-pool v2, lane L1: decisions A/B, points 6, 7, 9) ----
+    // up() of an upstream stub never builds a config from the subscription: it acquires the seat lease
+    // asynchronously (Connecting stays Connecting; the acquire's bound is below the reconcile watchdog),
+    // verifies, sanitizes and binds the signed config, and only then calls connectToVpn. A start that
+    // cannot happen (no seat, refused, bad answer, sanitizer refusal) is reported through the existing
+    // path: startFailureSink(nodeId, code) (the engine excludes the node for the attempt) and then a
+    // queued VpnConnection::setConnectionState(Error) - no new state anywhere.
+    void configureUpstream(QNetworkAccessManager *nam, std::function<QString()> directBase,
+                           const QString &pubKeyHex, std::function<QString()> token);
+    void setUpstreamStartFailureSink(std::function<void(const QString &, const QString &)> sink)
+    {
+        m_upStartFailureSink = std::move(sink);
+    }
+    // The standby pack in force (validated by the facade; nullopt = none). Looked up at bring-up only.
+    void setStandbyPack(const std::optional<StandbyPack> &pack) { m_standbyPack = pack; }
+    const std::optional<StandbyPack> &standbyPack() const { return m_standbyPack; }
+    UpstreamLeaseClient *upstreamClient() const { return m_leaseClient; }
+    // The platform reported the tunnel of the current session up (facade, Connected): a provisional
+    // session confirms its seat through the tunnel now.
+    void upstreamTunnelUp();
+    // macOS: adoption of a live upstream session after a GUI restart (decision B, point 9). Called from
+    // adoptXrayIfRunning; retryUpstreamAdoption asks the daemon again (the switch turned on later than the
+    // startup probe: it is frozen off on a cached config).
+    void adoptUpstreamFromRecord(qint64 daemonStartedAtWallMs);
+    // Runs fn once the release sent by the last down() answered (or at once when none is pending) -
+    // for a stop that bypasses down()'s own deferred disconnect (macOS adopted-without-protocol path).
+    void runAfterUpstreamRelease(std::function<void()> fn);
+    void retryUpstreamAdoption();
+    // macOS GUI owner (decision B): the facade's existing tick drives renewals at upstreamWakeAtMs().
+    void upstreamTick();
+    qint64 upstreamWakeAtMs() const { return m_upOwner.wakeAtMs(); }
+    bool upstreamActive() const { return m_upOwner.active(); }
+    bool upstreamProvisionalPending() const { return m_upOwner.provisionalPending(); }
+    QString upstreamNodeId() const { return m_upOwner.active() ? m_upOwner.nodeId() : QString(); }
+    QString upstreamProfileId() const { return m_upOwner.active() ? m_upOwner.profileId() : QString(); }
+    UpstreamProbeGrant upstreamProbeGrant() const { return m_upOwner.probeGrant(upstreamClockMs()); }
+    QString upstreamLeaseId() const { return m_upOwner.leaseId(); }
+    QString upstreamTunnelApiBase() const { return m_upOwner.tunnelApiBase(); }
+    // Contract §5 status of the in-process owner (macOS) - debug snapshot and the same rules as iOS.
+    QJsonObject upstreamStatus() const { return m_upOwner.statusJson(upstreamClockMs()); }
+    // Milliseconds of a clock that keeps running while the device sleeps (contract §7): Darwin
+    // clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); elsewhere the boot-time clock of the platform.
+    static qint64 upstreamClockMs();
+    // macOS lease record for adoption after a GUI restart (QSettings avpn/upstreamLease; no token).
+    static constexpr const char *kUpstreamLeaseRecordKey = "avpn/upstreamLease";
+
+signals:
+    // The running upstream session must leave its node (lease terminal / no seat on re-acquire / seat
+    // never confirmed). The facade leaves through the engine's dead-session path, deferred.
+    // code = the stable reason (the server's terminal code, no_seat_reacquire, standby_unconfirmed, …);
+    // detail = the server's optional reason (lease_gone shortly before expiry: the seat was taken; a
+    // source over capacity) - switch log only.
+    void upstreamLeaveRequested(const QString &code, const QString &detail);
+    // A lease answer, a renewal or the status carried an upstream_revision newer than known.
+    void upstreamRevisionSeen(qint64 revision);
+    // Seam for the iOS bridge (contract §2): a provisional session's seat was granted through the tunnel;
+    // the tunnel owner (the extension) must receive it as {"action":"upstream_lease_set","upstream_lease":…}.
+    // Emitted only where the app does not own renewals (iOS / macOS NE).
+    void upstreamLeaseHandover(const QJsonObject &upstreamLease);
+    // macOS: a restarted GUI found the daemon's Xray tunnel and a record of this upstream node - the
+    // facade identifies the engine's session by it (ServiceEngine::adoptTunnelConnected).
+    void upstreamSessionAdopted(const QString &nodeId);
+    // A direct acquire answered with the device's own access network facts (network key of the pack).
+    void upstreamAccessFacts(qint64 accessAsn);
+
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);
 
 private:
     bool invokeConnect(const QJsonObject &cfg, const QString &serverId, amnezia::DockerContainer container);
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+    TunnelResult upUpstream(const Subscription &sub, const SubscriptionNode &node);
+    void applyUpstreamEvents(const QVector<UpstreamOwnerEvent> &events);
+    void bringUpUpstream(const UpstreamOwnerEvent &e);
+    void failUpstreamStart(const QString &code, const QString &detail = QString());
+#if AVPN_UPSTREAM_GUI_OWNER // macOS desktop; Windows since release C (UpstreamEngine.h)
     // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона — async QtRO-вызов xrayRuntimeStatus
     // по таймеру, пока поднят xray (кумулятивы rx/tx с подъёма сессии, §17.1). Без nested QEventLoop.
     void pollXrayRuntimeStatus();
@@ -94,6 +171,15 @@ private:
     QJsonObject    m_lastConfigReport; // AVPN bench v5: снапшот конфига последнего up()
     QString        m_lastUpProto;      // AVPN awg31-xray-v1: proto последнего подъёма
     ::SecureAppSettingsRepository *m_appStore = nullptr; // AVPN RU-direct: флаг сплита по факт-ноде
+    // AVPN upstream nodes:
+    UpstreamLeaseClient *m_leaseClient = nullptr;  // owned (QObject child)
+    UpstreamLeaseOwner m_upOwner;
+    SubscriptionNode m_upStub;                     // the stub of the session being brought up / running
+    std::optional<StandbyPack> m_standbyPack;
+    std::function<void(const QString &, const QString &)> m_upStartFailureSink;
+    quint64 m_stopReleaseId = 0;                   // macOS: the stop waits for this release
+    bool m_stopAfterRelease = false;
+    std::function<void()> m_afterRelease;
 };
 
 } // namespace avpn

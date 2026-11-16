@@ -1,0 +1,243 @@
+diff --git a/nodep/memory.go b/nodep/memory.go
+index 5524ea8..638e34f 100644
+--- a/nodep/memory.go
++++ b/nodep/memory.go
+@@ -13,30 +13,75 @@ import (
+ // changes) added one more loop. The loop now starts once per process and
+ // keeps running across StopXray/RunXray; a later call only updates the
+ // interval (upstream libXray main does the same since PR #141).
++//
++// Tribe (0006): the memory regime belongs to the Xray session only. The first
++// InitForceFree of a session saves the process's GC percent and soft memory
++// limit; RestoreRuntime (StopXray, or a RunXray that failed) puts them back and
++// parks the release loop, so a later WireGuard session in the same process
++// runs with its own settings instead of GOGC=10, the Xray limit and a
++// FreeOSMemory call every second.
+ var (
+ 	forceFreeOnce     sync.Once
+-	forceFreeInterval atomic.Int64 // time.Duration
++	forceFreeInterval atomic.Int64 // time.Duration; <= 0 = parked
+ 	forceFreeLoops    atomic.Int32 // loops started; 0 or 1 (read by tests)
++	forceFreeRuns     atomic.Int64 // FreeOSMemory calls made by the loop (read by tests)
++	forceFreeWake     = make(chan struct{}, 1)
++
++	runtimeMu      sync.Mutex
++	runtimeSaved   bool
++	savedGCPercent int
++	savedMemLimit  int64
+ )
+ 
+ func forceFree(interval time.Duration) {
+ 	forceFreeInterval.Store(int64(interval))
++	select {
++	case forceFreeWake <- struct{}{}:
++	default:
++	}
+ 	forceFreeOnce.Do(func() {
+ 		forceFreeLoops.Add(1)
+ 		go func() {
+ 			for {
+-				time.Sleep(time.Duration(forceFreeInterval.Load()))
+-				debug.FreeOSMemory()
++				d := time.Duration(forceFreeInterval.Load())
++				if d <= 0 {
++					<-forceFreeWake
++					continue
++				}
++				time.Sleep(d)
++				if forceFreeInterval.Load() > 0 {
++					debug.FreeOSMemory()
++					forceFreeRuns.Add(1)
++				}
+ 			}
+ 		}()
+ 	})
+ }
+ 
+ func InitForceFree(maxMemory int64, interval int) {
+-	debug.SetGCPercent(10)
+-	debug.SetMemoryLimit(maxMemory)
++	runtimeMu.Lock()
++	gc := debug.SetGCPercent(10)
++	limit := debug.SetMemoryLimit(maxMemory)
++	if !runtimeSaved {
++		savedGCPercent, savedMemLimit, runtimeSaved = gc, limit, true
++	}
++	runtimeMu.Unlock()
+ 	if interval > 0 {
+ 		duration := time.Duration(interval) * time.Second
+ 		forceFree(duration)
+ 	}
+ }
++
++// RestoreRuntime undoes InitForceFree: the GC percent and memory limit the
++// process had before the session, release loop parked. No-op without a session.
++func RestoreRuntime() {
++	runtimeMu.Lock()
++	defer runtimeMu.Unlock()
++	forceFreeInterval.Store(0)
++	if !runtimeSaved {
++		return
++	}
++	debug.SetGCPercent(savedGCPercent)
++	debug.SetMemoryLimit(savedMemLimit)
++	runtimeSaved = false
++}
+diff --git a/nodep/memory_restore_tribe_test.go b/nodep/memory_restore_tribe_test.go
+new file mode 100644
+index 0000000..9fcf9a5
+--- /dev/null
++++ b/nodep/memory_restore_tribe_test.go
+@@ -0,0 +1,72 @@
++package nodep
++
++import (
++	"math"
++	"runtime/debug"
++	"testing"
++	"time"
++)
++
++// TestTribeRestoreRuntimeAfterSession: a session's GOGC=10 and soft limit do
++// not outlive it, the release loop parks and resumes, and stays one loop.
++func TestTribeRestoreRuntimeAfterSession(t *testing.T) {
++	RestoreRuntime() // a session left open by another test of this package
++	prevGC := debug.SetGCPercent(100)
++	prevLimit := debug.SetMemoryLimit(36 << 20) // e.g. a WireGuard session's own limit
++	defer func() {
++		RestoreRuntime()
++		debug.SetGCPercent(prevGC)
++		debug.SetMemoryLimit(prevLimit)
++	}()
++
++	InitForceFree(30<<20, 1)
++	InitForceFree(25<<20, 1) // a second start inside the session keeps the first saved values
++	forceFree(5 * time.Millisecond)
++	deadline := time.Now().Add(2 * time.Second)
++	for forceFreeRuns.Load() < 2 && time.Now().Before(deadline) {
++		time.Sleep(5 * time.Millisecond)
++	}
++	if forceFreeRuns.Load() < 2 {
++		t.Fatal("release loop did not run during the session")
++	}
++
++	RestoreRuntime()
++	if got := debug.SetGCPercent(100); got != 100 {
++		t.Fatalf("GC percent after restore=%d, want 100", got)
++	}
++	if got := debug.SetMemoryLimit(-1); got != 36<<20 {
++		t.Fatalf("memory limit after restore=%d, want %d", got, 36<<20)
++	}
++	time.Sleep(20 * time.Millisecond) // a sleep already in flight may finish once
++	parked := forceFreeRuns.Load()
++	time.Sleep(60 * time.Millisecond)
++	if got := forceFreeRuns.Load(); got != parked {
++		t.Fatalf("release loop kept running after restore: %d -> %d", parked, got)
++	}
++
++	// Restore without a session is a no-op.
++	debug.SetGCPercent(50)
++	RestoreRuntime()
++	if got := debug.SetGCPercent(100); got != 50 {
++		t.Fatalf("restore without a session changed GC percent to %d", got)
++	}
++
++	// The next session resumes the same loop.
++	debug.SetMemoryLimit(math.MaxInt64)
++	InitForceFree(30<<20, 1)
++	forceFree(5 * time.Millisecond)
++	deadline = time.Now().Add(2 * time.Second)
++	for forceFreeRuns.Load() == parked && time.Now().Before(deadline) {
++		time.Sleep(5 * time.Millisecond)
++	}
++	if forceFreeRuns.Load() == parked {
++		t.Fatal("release loop did not resume for the next session")
++	}
++	if got := forceFreeLoops.Load(); got != 1 {
++		t.Fatalf("loops=%d, want 1", got)
++	}
++	RestoreRuntime()
++	if got := debug.SetMemoryLimit(-1); got != math.MaxInt64 {
++		t.Fatalf("second session restore: limit=%d", got)
++	}
++}
+diff --git a/xray/xray.go b/xray/xray.go
+index 23f2ce2..ea536d3 100644
+--- a/xray/xray.go
++++ b/xray/xray.go
+@@ -48,10 +48,15 @@ func RunXray(datDir string, configPath string, maxMemory int64) (err error) {
+ 	}
+ 	coreServer, err = StartXray(configPath)
+ 	if err != nil {
++		// Tribe (0006): a session that never started gives the runtime back.
++		nodep.RestoreRuntime()
+ 		return
+ 	}
+ 
+ 	if err = coreServer.Start(); err != nil {
++		coreServer.Close()
++		coreServer = nil
++		nodep.RestoreRuntime()
+ 		return
+ 	}
+ 
+@@ -61,6 +66,8 @@ func RunXray(datDir string, configPath string, maxMemory int64) (err error) {
+ 
+ // Stop Xray instance.
+ func StopXray() error {
++	// Tribe (0006): GC percent and memory limit back to the pre-session values.
++	defer nodep.RestoreRuntime()
+ 	if coreServer != nil {
+ 		err := coreServer.Close()
+ 		coreServer = nil
+diff --git a/xray/xray_tribe_test.go b/xray/xray_tribe_test.go
+new file mode 100644
+index 0000000..131b313
+--- /dev/null
++++ b/xray/xray_tribe_test.go
+@@ -0,0 +1,45 @@
++package xray
++
++import (
++	"math"
++	"os"
++	"path/filepath"
++	"runtime/debug"
++	"testing"
++)
++
++// TestTribeXraySessionRestoresRuntime: RunXray applies the memory regime only
++// for the session; StopXray and a failed RunXray give the values back.
++func TestTribeXraySessionRestoresRuntime(t *testing.T) {
++	prevGC := debug.SetGCPercent(100)
++	prevLimit := debug.SetMemoryLimit(math.MaxInt64)
++	defer func() {
++		debug.SetGCPercent(prevGC)
++		debug.SetMemoryLimit(prevLimit)
++	}()
++
++	dir := t.TempDir()
++	if err := RunXray(dir, filepath.Join(dir, "missing.json"), 30<<20); err == nil {
++		t.Fatal("RunXray with a missing config succeeded")
++	}
++	if gc, limit := debug.SetGCPercent(100), debug.SetMemoryLimit(-1); gc != 100 || limit != math.MaxInt64 {
++		t.Fatalf("failed RunXray left gc=%d limit=%d", gc, limit)
++	}
++
++	cfg := filepath.Join(dir, "config.json")
++	if err := os.WriteFile(cfg, []byte(`{"log":{"loglevel":"none"},"outbounds":[{"protocol":"freedom"}]}`), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := RunXray(dir, cfg, 30<<20); err != nil {
++		t.Fatalf("RunXray: %v", err)
++	}
++	if gc, limit := debug.SetGCPercent(10), debug.SetMemoryLimit(-1); gc != 10 || limit != 30<<20 {
++		t.Fatalf("session regime gc=%d limit=%d, want 10 and %d", gc, limit, 30<<20)
++	}
++	if err := StopXray(); err != nil {
++		t.Fatalf("StopXray: %v", err)
++	}
++	if gc, limit := debug.SetGCPercent(100), debug.SetMemoryLimit(-1); gc != 100 || limit != math.MaxInt64 {
++		t.Fatalf("StopXray left gc=%d limit=%d", gc, limit)
++	}
++}

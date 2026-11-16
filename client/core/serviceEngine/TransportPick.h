@@ -16,6 +16,7 @@
 #pragma once
 
 #include "NodeRotation.h"
+#include "UpstreamTier.h"
 #include "dto/Subscription.h"
 
 #include <QByteArray>
@@ -163,6 +164,12 @@ struct TransportPickInput {
     QSet<QString> excluded;       // провалившиеся в этой сессии (nodeId) — failover не ходит по кругу
     QString preferLocation;       // pin по локации: кандидаты ТОЛЬКО из неё (пусто = все локации)
     QString preferNodeId;         // tie-break внутри локации (сам закреплённый/случайно выбранный узел)
+    // Upstream nodes (plan provider-pool v2, point 4): the policy tier of the AUTOMATIC pick (a pin -
+    // preferLocation - is the user's choice and is not tiered). Disabled = the pick without tiers.
+    UpstreamTierGate tierGate;
+    // Never picked in this attempt, not even by the retry without session exclusions: an upstream node
+    // whose start failed (no seat, refused, bad answer) - ServiceEngine::excludeForAttempt.
+    QSet<QString> hardExcluded;
 };
 
 namespace detail {
@@ -309,6 +316,31 @@ inline QStringList orderByRankingRtt(const QStringList &ids, const QHash<QString
     return out;
 }
 
+// Candidates of the automatic pick that the tier rule counts: every node the other gates admit, failed
+// ones included (their failures are what opens the next tier).
+inline QList<const SubscriptionNode *> autoTierPool(const QList<SubscriptionNode> &nodes, TransportMode mode)
+{
+    QList<const SubscriptionNode *> pool;
+    for (const SubscriptionNode &n : nodes) {
+        if (!isSupportedProtoNode(n) || !transportAllowed(n, mode))
+            continue;
+        if (mode == TransportMode::Auto && !isAutoEligibleNode(n))
+            continue;
+        if (healthAggregate(n) <= 0.0)
+            continue;
+        pool.append(&n);
+    }
+    return pool;
+}
+
+// The tier the automatic pick commits to (-1 = no gate). See UpstreamTier.h::upstreamCommitTier.
+inline int autoCommitTier(const QList<SubscriptionNode> &nodes, TransportMode mode, const UpstreamTierGate &gate)
+{
+    if (!gate.enabled)
+        return -1;
+    return upstreamCommitTier(autoTierPool(nodes, mode), gate);
+}
+
 // Полный выбор (см. шапку файла). pickIndex(size) — выбор индекса в ярусе равного weight
 // (по умолчанию первый; движок передаёт QRandomGenerator — «авто реально чередует равноценные»).
 // preferLocation задан → ТОЛЬКО эта локация (manual_only в ней разрешён — это pin), nullptr если в
@@ -326,7 +358,7 @@ inline const SubscriptionNode *pickTransportNode(const QList<SubscriptionNode> &
             continue;
         if (!in.exclB.isEmpty() && n.nodeId == in.exclB)
             continue;
-        if (in.excluded.contains(n.nodeId))
+        if (in.excluded.contains(n.nodeId) || in.hardExcluded.contains(n.nodeId))
             continue;
         if (!isSupportedProtoNode(n))
             continue;              // только реально поднимаемые протоколы (xray: гейт+kill-switch)
@@ -349,6 +381,17 @@ inline const SubscriptionNode *pickTransportNode(const QList<SubscriptionNode> &
             if (locationKeyOf(*n) == in.preferLocation)
                 loc.append(n);
         return bestInLocation(loc, rtt, hist, in.preferNodeId);
+    }
+
+    // Upstream nodes: only the commit tier (own nodes first; the next tier after K defined failures of
+    // this one). No upstream node in the pool = no gate, the pick below is unchanged.
+    if (in.tierGate.enabled) {
+        const int commit = autoCommitTier(nodes, in.mode, in.tierGate);
+        if (commit >= 0) {
+            eligible = upstreamTierFilter(eligible, commit);
+            if (eligible.isEmpty())
+                return nullptr;
+        }
     }
 
     // Ярусы: regular (не manual_only) — основной; manual_only (вкл. RU) — только если regular пуст

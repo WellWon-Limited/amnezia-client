@@ -67,11 +67,12 @@ public:
     bool startXray(const QString& cfg);
     bool stopXray();
 
-    // AVPN: статус xray-пути демона для health-контура GUI (IPC xrayRuntimeStatus).
-    // ifaceHint — имя utun tun2socks, которое знает клиент (xrayProtocol.cpp tunName, "utun22");
-    // пусто → дефолт демона. Поля: running, iface, iface_found, rx_bytes, tx_bytes (кумулятив
-    // с подъёма сессии, §17.1), resets, since_ms (аптайм сессии), started_at_ms (epoch),
-    // unsupported (true вне macOS — счётчики честные нули), source.
+    // AVPN: status of the service's Xray path for the GUI health loop (IPC xrayRuntimeStatus).
+    // ifaceHint - the tun2socks interface name the client knows (xrayProtocol.cpp tunName: "utun22"
+    // on macOS, the wintun adapter alias "tun2" on Windows); empty -> the service's default. Fields:
+    // running, iface, iface_found, rx_bytes, tx_bytes (cumulative since the session start, §17.1),
+    // resets, since_ms (session uptime), started_at_ms (epoch), unsupported (true only where no
+    // counter source exists, i.e. Linux - counters are honest zeros), source.
     QJsonObject runtimeStatus(const QString& ifaceHint);
 
 private:

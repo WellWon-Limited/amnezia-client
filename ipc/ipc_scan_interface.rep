@@ -1,0 +1,26 @@
+#include <QtCore>
+
+// AVPN (Scanner, plan scanner-client-plan.md §2.4): the desktop probe host of the root service
+// (service/server/tribe_scan.{h,cpp}, app side client/core/serviceEngine/DaemonScanHost.{h,cpp}).
+// A SEPARATE source next to IpcInterface on the same socket: an older service simply has no
+// IpcScanInterface (the app reports the host as unavailable, everything else keeps working), and a
+// change here never changes IpcInterface's signature. Messages are tribe-scan-v1 JSON
+// (client/core/serviceEngine/ScanHostContract.h) relayed to the Go engine unchanged; the reply comes
+// back through scanReply with the same requestId. Upstream Amnezia has no counterpart.
+class IpcScanInterface
+{
+    // 1 = this file. Raised only for a behaviour change the app must know about; a shape change
+    // changes the QtRO signature and an older app/service pair sees SignatureMismatch.
+    PROP(int scanIpcVersion = 1 READONLY);
+    // The service's path monitor element of the Scanner's strict generation tuple
+    // (ScanNetworkGeneration.h): compact JSON {"source":"service","epoch":hex16,"counter":n}.
+    PROP(QString scanGeneration READONLY);
+
+    // Queue one message; never blocks. 0 = accepted (exactly one scanReply follows), 1 = too large,
+    // 2 = rate limited, 3 = queue full, 4 = shutting down.
+    SLOT( int scanSubmit(quint64 requestId, const QString &message) );
+    // End every scan of the engine (the app's Scanner is switched off or the app quits). 0 = queued.
+    SLOT( int scanStopAll() );
+
+    SIGNAL( scanReply(quint64 requestId, const QString &reply) );
+};

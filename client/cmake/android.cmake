@@ -50,15 +50,23 @@ set(SOURCES ${SOURCES}
 
 
 find_package(awg-android REQUIRED)
-set(LIBS ${LIBS} amnezia::awg-android)
-set_property(TARGET ${PROJECT} APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${AMNEZIA_ANDROID_LIBWG_PATH} ${AMNEZIA_ANDROID_LIBWG_QUICK_PATH})
+set_property(TARGET ${PROJECT} APPEND PROPERTY QT_ANDROID_EXTRA_LIBS
+    $<TARGET_FILE:amnezia::awg-android>
+    ${AMNEZIA_ANDROID_LIBWG_PATH}
+    ${AMNEZIA_ANDROID_LIBWG_QUICK_PATH}
+)
 
 find_package(amnezia-libxray REQUIRED)
 file(COPY ${AMNEZIA_LIBXRAY_PATH} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/android/xray/libXray)
 
 find_package(openvpn-pt-android REQUIRED)
-set(LIBS ${LIBS} amnezia::openvpn-pt-android)
-set_property(TARGET ${PROJECT} APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${OPENVPN_PT_ANDROID_LIBCK_OVPN_PLUGIN_PATH})
+get_filename_component(OPENVPN_PT_ANDROID_LIB_DIR ${OPENVPN_PT_ANDROID_LIBCK_OVPN_PLUGIN_PATH} DIRECTORY)
+set_property(TARGET ${PROJECT} APPEND PROPERTY QT_ANDROID_EXTRA_LIBS
+    ${OPENVPN_PT_ANDROID_LIBCK_OVPN_PLUGIN_PATH}
+    ${OPENVPN_PT_ANDROID_LIB_DIR}/libovpn3.so
+    ${OPENVPN_PT_ANDROID_LIB_DIR}/libovpnutil.so
+    ${OPENVPN_PT_ANDROID_LIB_DIR}/librsapss.so
+)
 
 set(APP_ANDROID_PACKAGE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/android)
 
@@ -83,6 +91,21 @@ if(APP_ANDROID_MAX_SDK)
 endif()
 
 set_property(TARGET ${PROJECT} PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR ${APP_ANDROID_PACKAGE_SOURCE_DIR})
+
+# AVPN (upstream nodes, decision A-6): the pinned, cut geo pair (recipes/tribe-xray-geo). libxray tribe.2 embeds
+# no geo files, so the pair travels as APK assets tribe-geo/{geosite.dat,geoip.dat,SHA256SUMS}; Xray.kt
+# (XrayGeoInstall) copies them into filesDir/xray-geo, checks the hashes and passes that directory as datDir.
+# Copied into the package source dir at configure time, like the libxray AAR above (androiddeployqt copies its
+# assets/ into the APK).
+find_package(tribe-xray-geo REQUIRED)
+foreach(TRIBE_GEO_FILE IN ITEMS "${TRIBE_XRAY_GEOSITE_DAT_PATH}" "${TRIBE_XRAY_GEOIP_DAT_PATH}"
+                                "${TRIBE_XRAY_GEO_SHA256SUMS_PATH}")
+    if(NOT EXISTS "${TRIBE_GEO_FILE}")
+        message(FATAL_ERROR "tribe-xray-geo did not provide ${TRIBE_GEO_FILE}")
+    endif()
+endforeach()
+file(COPY "${TRIBE_XRAY_GEOSITE_DAT_PATH}" "${TRIBE_XRAY_GEOIP_DAT_PATH}" "${TRIBE_XRAY_GEO_SHA256SUMS_PATH}"
+     DESTINATION "${APP_ANDROID_PACKAGE_SOURCE_DIR}/assets/tribe-geo")
 
 if(QT_USE_TARGET_ANDROID_BUILD_DIR)
     set(_android_build_dir "${CMAKE_CURRENT_BINARY_DIR}/android-build-${PROJECT}")

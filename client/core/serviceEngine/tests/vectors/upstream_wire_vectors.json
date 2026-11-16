@@ -1,0 +1,795 @@
+{
+    "cases": [
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "grant": {
+                    "config": "{\"inbounds\":[],\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"proxy\"}]}",
+                    "config_changed": false,
+                    "config_sha256": "1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092",
+                    "expires_at_ms": 1763117900000,
+                    "kind": "session",
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "profile_id": "3f9c2a7b1d4e8f60",
+                    "renew_after_s": 300,
+                    "renew_token": "",
+                    "seq": 0,
+                    "traffic_accounting_epoch": 1,
+                    "ttl_s": 900,
+                    "tunnel_api_base": "",
+                    "upstream_revision": 100
+                },
+                "kind": "granted",
+                "may_start_provisional": false
+            },
+            "http_status": 200,
+            "name": "grant_ok",
+            "op": "acquire",
+            "sig": "NHwP+fHy/L48ScgXTLlWATCMiz9BbG91KasjQGU7tq8Ztn30jmi0qnzjwttsF3RRuUghtYa0MV1ducbV3WY/Bw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"renew_token\":\"rt.Opaque-123_~\",\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"tunnel_api_base\":\"https://t.example.net/api/\",\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "grant": {
+                    "config": "{\"inbounds\":[],\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"proxy\"}]}",
+                    "config_changed": false,
+                    "config_sha256": "1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092",
+                    "expires_at_ms": 1763117900000,
+                    "kind": "session",
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "profile_id": "3f9c2a7b1d4e8f60",
+                    "renew_after_s": 300,
+                    "renew_token": "rt.Opaque-123_~",
+                    "seq": 0,
+                    "traffic_accounting_epoch": 1,
+                    "ttl_s": 900,
+                    "tunnel_api_base": "https://t.example.net/api",
+                    "upstream_revision": 100
+                },
+                "kind": "granted",
+                "may_start_provisional": false
+            },
+            "http_status": 200,
+            "name": "grant_route",
+            "op": "acquire",
+            "sig": "MY38MtC0GUcm9TQe/sUE9x2UjiIIWuqirGsNTNy8/ZX3/oh8/9BjlzI3HHgRy4mJVxEq4PJIpt6cj43SiVbmAA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"probe\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":0,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "grant": {
+                    "config": "{\"inbounds\":[],\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"proxy\"}]}",
+                    "config_changed": false,
+                    "config_sha256": "1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092",
+                    "expires_at_ms": 1763117900000,
+                    "kind": "probe",
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "profile_id": "3f9c2a7b1d4e8f60",
+                    "renew_after_s": 0,
+                    "renew_token": "",
+                    "seq": 0,
+                    "traffic_accounting_epoch": 1,
+                    "ttl_s": 900,
+                    "tunnel_api_base": "",
+                    "upstream_revision": 100
+                },
+                "kind": "granted",
+                "may_start_provisional": false
+            },
+            "http_status": 200,
+            "name": "grant_probe",
+            "op": "acquire",
+            "sig": "r35LqyTFMRpWs/NUJ82oqrxU+3LUwYZoGHItY/K4L9xCJioDPMGE0IsXa3koqbgIAw+JGP9icy7EJgAdZ69JCw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "signature"
+            },
+            "http_status": 200,
+            "name": "bare_signature_refused",
+            "op": "acquire",
+            "sig": "7ajPJxO6KoU83UbIZUXXKcXM2pmHOBdaAFLBTX9gmLhYWD/2eiPTgZXlIqH+4ZDHazDzykah4TBKOLXoPYMZDw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "signature"
+            },
+            "http_status": 200,
+            "name": "no_signature",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100} ",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "signature"
+            },
+            "http_status": 200,
+            "name": "body_changed_after_signing",
+            "op": "acquire",
+            "sig": "NHwP+fHy/L48ScgXTLlWATCMiz9BbG91KasjQGU7tq8Ztn30jmi0qnzjwttsF3RRuUghtYa0MV1ducbV3WY/Bw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_renewal\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "type"
+            },
+            "http_status": 200,
+            "name": "type_wrong",
+            "op": "acquire",
+            "sig": "62chmhga7zVBXKnchR3sT33Jgh3gDpqcJItQ6mlntV5e+9ZKS/hr0rtRNY0OG4RNO+uHlo3lh1Z1yImiWKvKAQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "type"
+            },
+            "http_status": 200,
+            "name": "type_missing",
+            "op": "acquire",
+            "sig": "rB1yb80Ms/iUC4AMSWvRwrU5wnNHDQpPx+RPPTHmZf+m9JAQZhshyphH7o52AM4lTZPN977g9qSAeR0EUp0PBQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]} \",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "config_sha256_mismatch"
+            },
+            "http_status": 200,
+            "name": "config_sha_mismatch",
+            "op": "acquire",
+            "sig": "KsO8daEJTd84L23MSm3GrL01tvZ22yIGqIMB4qouF4AZlZMaE7LN3Galjia+iZdE5su9ZPK849IOYvm6eqrnCw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "lease_id"
+            },
+            "http_status": 200,
+            "name": "missing_lease_id",
+            "op": "acquire",
+            "sig": "iqzm//Qsw/cvYxHkGJm9yOfwH4XGIpBKh6kxSvXo/Ci6GsK2Wm8T/jX5S1j9DdlIvrRFwyYXSebYhp9GiuINBg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "profile_id"
+            },
+            "http_status": 200,
+            "name": "missing_profile_id",
+            "op": "acquire",
+            "sig": "twVXXHpyuyNAaGQhIAkEXhCaHqzZpSvZ6FufoQ/IfbN+EWHxTEEAO4G8BtNI6d6g09YjsNdhmYhkIJVAt/1GCw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "kind"
+            },
+            "http_status": 200,
+            "name": "missing_kind",
+            "op": "acquire",
+            "sig": "3OztYp5nHFhvpPwxKXeOj43zNwTG1KUfiIxvYlOQm2/RQV9WF/rj5C86oqRyl9sJdgTpH7Y2c8cu83I72I9JAA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "expires_at"
+            },
+            "http_status": 200,
+            "name": "missing_expires_at",
+            "op": "acquire",
+            "sig": "FO7u4GrJ9qbsapRXwQ/D4eG0P2CbmkCCf3OCUkj6FYl+QifoHeNI5D6+hbbpzhTJThdsi9ubhWYqtgp3oDb9DA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "ttl_s"
+            },
+            "http_status": 200,
+            "name": "missing_ttl_s",
+            "op": "acquire",
+            "sig": "MWstk+bkqYXxeXjXLfOdqzBIjjRAPshJemEbD255MUbYW6PZiPnkLKcnzEJ7RRNzRSa2nSmnCwCaq6roIy9QDA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "renew_after_s"
+            },
+            "http_status": 200,
+            "name": "missing_renew_after_s",
+            "op": "acquire",
+            "sig": "gRIVtd4uC/meZTzasvnFmIJMhwCjwJNEiyqgbA5jekfbG8hwdcjzPe0ms5v9twuHm5ds6QUJh2RVq9iS9XobCA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "seq"
+            },
+            "http_status": 200,
+            "name": "missing_seq",
+            "op": "acquire",
+            "sig": "4QbPagGsil9DANY6rDZydkyzvJVCyl7I2Sn2IwaFBElw0NARLQSKayf6fJzq8sE9R7nr/AQZEXAJsypI8FzpAQ=="
+        },
+        {
+            "body": "{\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "config"
+            },
+            "http_status": 200,
+            "name": "missing_config",
+            "op": "acquire",
+            "sig": "9L1ZFwGtWxcb/GgmttJwCYK41uAvcJ1rHWKr+O5AUm40sUrH+DmaIXAQGV/1beRzpZvcrkxZEmmWnctnGCsUBg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "config_sha256"
+            },
+            "http_status": 200,
+            "name": "missing_config_sha256",
+            "op": "acquire",
+            "sig": "eFFFx6n2zQ4F+NOfm+8nvZxNrI7CIo6XyB3Ho4b48I8/8YtcHHVtwtOo+ZE7Usxl7c5Q65oY50WSc/8qXvZZAw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\"}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "upstream_revision"
+            },
+            "http_status": 200,
+            "name": "missing_upstream_revision",
+            "op": "acquire",
+            "sig": "BtPC2a91l8JJXMqy+X0TR5ubHj0aBUdvOWQrzA6zqkaK1ptExgndVejg4r+qDgMiP+ZKtsv2LU+/y0Wqu9jRAg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "traffic_accounting_epoch"
+            },
+            "http_status": 200,
+            "name": "missing_traffic_accounting_epoch",
+            "op": "acquire",
+            "sig": "517jsFGPc0iFWmK6wqNuGIFz39RQVh6C2OTm2bCOfjVwlYNw52nr+Y01BeaDae/3WHDvI7jUJ/j5XxeVoiKXAQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"short\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "lease_id"
+            },
+            "http_status": 200,
+            "name": "lease_id_short",
+            "op": "acquire",
+            "sig": "KbE+A1CBT4IhPEIrPMFvkSrqW8s3nKk51UNrk9nm1rlc4T3jS3G0RCcs/yIWu+UQDb+Y7r9kGu0dxbOTo9GNDg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"lease/../../AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "lease_id"
+            },
+            "http_status": 200,
+            "name": "lease_id_path",
+            "op": "acquire",
+            "sig": "d2NfjGYL+aYr/WbZd/rOcTl04PImgQI14BYopYcOxLk8FQqkckRn33IdC6KTaQ4p1UOyrI8bJRfg+HHWjra/Bg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":-1,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "seq"
+            },
+            "http_status": 200,
+            "name": "seq_negative",
+            "op": "acquire",
+            "sig": "oL985nRuFw9dX7VOtusyIhT2G0OOwwEp2yrgwZK+UAwVDOySgeAPPAlDbBAFPVLZG664q6ttLmsuuqL1WU1qCA=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":0,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "traffic_accounting_epoch"
+            },
+            "http_status": 200,
+            "name": "epoch_zero",
+            "op": "acquire",
+            "sig": "Vpri7cKIQ0Ng/+ox/FEY0UOe0Ow8J75+9/Zmv5yY++PjYQ/M8aND2zFjLTPSGO7g0GQ2TNzEJbJ7C86kUGNIDw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"tomorrow\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "expires_at"
+            },
+            "http_status": 200,
+            "name": "expires_at_garbage",
+            "op": "acquire",
+            "sig": "AebrljHemwXiPLjbdPWdSXukSzehSdK5uSTHxDzrPu3tqfMolNx0ikxtWoV/yRO4g5jMXrUU/b9WJhz3PxXaDQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"renew_token\":\"has space\",\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "renew_token"
+            },
+            "http_status": 200,
+            "name": "renew_token_space",
+            "op": "acquire",
+            "sig": "MI7yUmVaV1U7LQOoSLflA15KcvR6Fw2vt7PWmV6gVdEpi/2M7rtMS0kNqosSWDuIZF44Dq1GOR86/z7wXejPAw=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"renew_token\":\"\",\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "renew_token"
+            },
+            "http_status": 200,
+            "name": "renew_token_empty",
+            "op": "acquire",
+            "sig": "Z4npaPUQcX70xbMBtcWnyqh31OwERD5g8h9FXos9GBerAqOC5FXqNNP3xjxtqYjY31lKRnoYMwZkKZ3R5yWIBQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"tunnel_api_base\":\"http://t.example.net\",\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "tunnel_api_base"
+            },
+            "http_status": 200,
+            "name": "api_base_http",
+            "op": "acquire",
+            "sig": "0ukAD/A7bDUum4lZPtgaD/JP1Vjea0krYB0eX8feGi4qQSA/rC+tFO5F9SWHIiD8b42xiOH+NLKu6V/V9WBQAg=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"tunnel_api_base\":\"https://u:p@t.example.net\",\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "tunnel_api_base"
+            },
+            "http_status": 200,
+            "name": "api_base_userinfo",
+            "op": "acquire",
+            "sig": "cYse897NXrmOgZ+FpetNk7NZZc/+yDfBNI7ooKMQ/ZHj4IqNl8Ncz9b0KnBA/dGmcm66KHrJCyzA3oVv8GDXAQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"tunnel_api_base\":null,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "grant": {
+                    "config": "{\"inbounds\":[],\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"proxy\"}]}",
+                    "config_changed": false,
+                    "config_sha256": "1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092",
+                    "expires_at_ms": 1763117900000,
+                    "kind": "session",
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "profile_id": "3f9c2a7b1d4e8f60",
+                    "renew_after_s": 300,
+                    "renew_token": "",
+                    "seq": 0,
+                    "traffic_accounting_epoch": 1,
+                    "ttl_s": 900,
+                    "tunnel_api_base": "",
+                    "upstream_revision": 100
+                },
+                "kind": "granted",
+                "may_start_provisional": false
+            },
+            "http_status": 200,
+            "name": "api_base_null_is_absent",
+            "op": "acquire",
+            "sig": "oLbfbWUKtUc8FiBvHPF5rY0PUT0YLpzgg6uGnNzdUYgQRE19x86dpdF/x7+gk/Cj643mW7a15b0XBTKNCpRUBQ=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_changed\":true,\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "grant": {
+                    "config": "{\"inbounds\":[],\"outbounds\":[{\"protocol\":\"vless\",\"tag\":\"proxy\"}]}",
+                    "config_changed": true,
+                    "config_sha256": "1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092",
+                    "expires_at_ms": 1763117900000,
+                    "kind": "session",
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "profile_id": "3f9c2a7b1d4e8f60",
+                    "renew_after_s": 300,
+                    "renew_token": "",
+                    "seq": 0,
+                    "traffic_accounting_epoch": 1,
+                    "ttl_s": 900,
+                    "tunnel_api_base": "",
+                    "upstream_revision": 100
+                },
+                "kind": "granted",
+                "may_start_provisional": false
+            },
+            "http_status": 200,
+            "name": "grant_config_changed",
+            "op": "acquire",
+            "sig": "pACwJ/fRn4YhiwTA5Grwg0iG/XpUQEhB8X3v7+vwROHn9GTpbMifBdfPBMonUhgAd3GbFdCjQZNYgcS+ton1Ag=="
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_changed\":\"yes\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "config_changed"
+            },
+            "http_status": 200,
+            "name": "grant_config_changed_not_bool",
+            "op": "acquire",
+            "sig": "8XqnSVVqrLmOJylBRJLRdsxWtOGiuiqCjThf5bTDwO/bZ5et6DpVd50mSk0VONS8IwMcUT8oolkOkwwHkTBMDA=="
+        },
+        {
+            "body": "{\"code\":\"no_seat\",\"retry_after_s\":30,\"upstream_revision\":200}",
+            "expect": {
+                "error": {
+                    "code": "no_seat",
+                    "retry_after_s": 30,
+                    "upstream_revision": 200
+                },
+                "kind": "refused",
+                "may_start_provisional": false
+            },
+            "http_status": 409,
+            "name": "acquire_no_seat",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"not_entitled\"}",
+            "expect": {
+                "error": {
+                    "code": "not_entitled",
+                    "retry_after_s": -1,
+                    "upstream_revision": 0
+                },
+                "kind": "refused",
+                "may_start_provisional": false
+            },
+            "http_status": 403,
+            "name": "acquire_not_entitled",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "<html>blocked</html>",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "http_403"
+            },
+            "http_status": 403,
+            "name": "acquire_403_html_is_transient",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"new_code\"}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "http_403"
+            },
+            "http_status": 403,
+            "name": "acquire_unknown_code_is_transient",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "transport"
+            },
+            "http_status": 0,
+            "name": "acquire_transport",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"detail\":\"rate limit exceeded\"}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "http_429"
+            },
+            "http_status": 429,
+            "name": "acquire_429_tribe_api_unknown_body",
+            "op": "acquire",
+            "sig": "",
+            "tribe_api": true
+        },
+        {
+            "body": "{\"detail\":\"rate limit exceeded\"}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": true,
+                "why": "http_429"
+            },
+            "http_status": 429,
+            "name": "acquire_429_no_header_unknown_body",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"rate_limited\",\"retry_after_s\":60}",
+            "expect": {
+                "error": {
+                    "code": "rate_limited",
+                    "retry_after_s": 60,
+                    "upstream_revision": 0
+                },
+                "kind": "refused",
+                "may_start_provisional": false
+            },
+            "http_status": 429,
+            "name": "acquire_rate_limited_tribe_api",
+            "op": "acquire",
+            "sig": "",
+            "tribe_api": true
+        },
+        {
+            "body": "{\"detail\":\"Not authenticated\"}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "http_401"
+            },
+            "http_status": 401,
+            "name": "acquire_401_tribe_api",
+            "op": "acquire",
+            "sig": "",
+            "tribe_api": true
+        },
+        {
+            "body": "{\"config\":\"{\\\"inbounds\\\":[],\\\"outbounds\\\":[{\\\"protocol\\\":\\\"vless\\\",\\\"tag\\\":\\\"proxy\\\"}]}\",\"config_sha256\":\"1cb4c824cf1db47a7b14e59b2d5d9ee272ca67f29713c20817b43a4c25040092\",\"expires_at\":\"2025-11-14T10:58:20.000Z\",\"kind\":\"session\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile_id\":\"3f9c2a7b1d4e8f60\",\"renew_after_s\":300,\"seq\":0,\"traffic_accounting_epoch\":1,\"ttl_s\":900,\"type\":\"upstream_lease\",\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "may_start_provisional": false,
+                "why": "signature"
+            },
+            "http_status": 200,
+            "name": "bare_signature_tribe_api",
+            "op": "acquire",
+            "sig": "7ajPJxO6KoU83UbIZUXXKcXM2pmHOBdaAFLBTX9gmLhYWD/2eiPTgZXlIqH+4ZDHazDzykah4TBKOLXoPYMZDw==",
+            "tribe_api": true
+        },
+        {
+            "body": "{\"code\":\"invalid_request\"}",
+            "expect": {
+                "error": {
+                    "code": "invalid_request",
+                    "retry_after_s": -1,
+                    "upstream_revision": 0
+                },
+                "kind": "refused",
+                "may_start_provisional": false
+            },
+            "http_status": 422,
+            "name": "acquire_422_invalid_request",
+            "op": "acquire",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"config_changed\":false,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"status\":\"ok\",\"traffic_accounting_epoch\":1,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "granted",
+                "renewal": {
+                    "applied_bytes": 4096,
+                    "config_changed": false,
+                    "expires_at_ms": 1763118200000,
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "renew_after_s": 300,
+                    "seq": 1,
+                    "shadow_bytes": 0,
+                    "status": "ok",
+                    "traffic_accounting_epoch": 1,
+                    "upstream_revision": 100
+                }
+            },
+            "http_status": 200,
+            "name": "renew_ok",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"config_changed\":true,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"status\":\"rebaseline\",\"traffic_accounting_epoch\":3,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "granted",
+                "renewal": {
+                    "applied_bytes": 4096,
+                    "config_changed": true,
+                    "expires_at_ms": 1763118200000,
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "renew_after_s": 300,
+                    "seq": 1,
+                    "shadow_bytes": 0,
+                    "status": "rebaseline",
+                    "traffic_accounting_epoch": 3,
+                    "upstream_revision": 100
+                }
+            },
+            "http_status": 200,
+            "name": "renew_rebaseline",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"config_changed\":false,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"shadow_bytes\":8192,\"status\":\"ok\",\"traffic_accounting_epoch\":1,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "granted",
+                "renewal": {
+                    "applied_bytes": 4096,
+                    "config_changed": false,
+                    "expires_at_ms": 1763118200000,
+                    "lease_id": "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "renew_after_s": 300,
+                    "seq": 1,
+                    "shadow_bytes": 8192,
+                    "status": "ok",
+                    "traffic_accounting_epoch": 1,
+                    "upstream_revision": 100
+                }
+            },
+            "http_status": 200,
+            "name": "renew_shadow_bytes",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"config_changed\":false,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"shadow_bytes\":-1,\"status\":\"ok\",\"traffic_accounting_epoch\":1,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "why": "shadow_bytes"
+            },
+            "http_status": 200,
+            "name": "renew_shadow_bytes_negative",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"config_changed\":false,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"status\":\"fine\",\"traffic_accounting_epoch\":1,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "why": "status"
+            },
+            "http_status": 200,
+            "name": "renew_status_unknown",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"applied_bytes\":4096,\"expires_at\":\"2025-11-14T11:03:20.000Z\",\"lease_id\":\"leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"renew_after_s\":300,\"seq\":1,\"status\":\"ok\",\"traffic_accounting_epoch\":1,\"upstream_revision\":100}",
+            "expect": {
+                "kind": "failed",
+                "why": "config_changed"
+            },
+            "http_status": 200,
+            "name": "renew_missing_config_changed",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"lease_gone\"}",
+            "expect": {
+                "error": {
+                    "code": "lease_gone",
+                    "retry_after_s": -1,
+                    "upstream_revision": 0
+                },
+                "kind": "refused"
+            },
+            "http_status": 404,
+            "name": "renew_lease_gone",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"rate_limited\",\"retry_after_s\":42}",
+            "expect": {
+                "error": {
+                    "code": "rate_limited",
+                    "retry_after_s": 42,
+                    "upstream_revision": 0
+                },
+                "kind": "refused"
+            },
+            "http_status": 429,
+            "name": "renew_rate_limited",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "",
+            "expect": {
+                "kind": "failed",
+                "why": "http_502"
+            },
+            "http_status": 502,
+            "name": "renew_502_empty",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"code\":\"invalid_request\"}",
+            "expect": {
+                "error": {
+                    "code": "invalid_request",
+                    "retry_after_s": -1,
+                    "upstream_revision": 0
+                },
+                "kind": "refused"
+            },
+            "http_status": 422,
+            "name": "renew_422_invalid_request",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "{\"detail\":[{\"loc\":[\"body\",\"epoch\"],\"type\":\"missing\"}]}",
+            "expect": {
+                "kind": "failed",
+                "why": "http_422"
+            },
+            "http_status": 422,
+            "name": "renew_422_no_code",
+            "op": "renew",
+            "sig": ""
+        },
+        {
+            "body": "",
+            "expect": {
+                "kind": "failed",
+                "why": "transport"
+            },
+            "http_status": 0,
+            "name": "renew_transport",
+            "op": "renew",
+            "sig": ""
+        }
+    ],
+    "context": "tribe-upstream-lease-v1",
+    "pub_key_hex": "b340ca1942f62a7035b6fe42d17a08fe7379eb06634cec0cad33b40bc567d5c5",
+    "schema": 1
+}

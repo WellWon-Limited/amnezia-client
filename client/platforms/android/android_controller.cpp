@@ -74,6 +74,10 @@ AndroidController::AndroidController() : QObject()
             emit importConfigFromOutside(config);
         },
         Qt::QueuedConnection);
+
+    // AVPN (upstream nodes, release C): the Xray service's lease status hops from the Android thread here.
+    connect(this, &AndroidController::upstreamStatusReceived, this,
+            [this](const QByteArray &json) { applyUpstreamStatusEvent(json); }, Qt::QueuedConnection);
 }
 
 AndroidController *AndroidController::instance()
@@ -114,6 +118,31 @@ bool AndroidController::initialize()
         qCritical() << "Failed native method registration";
         return false;
     }
+    // AVPN (upstream nodes, release C): registered on its own and optional - an APK whose Kotlin half does
+    // not declare QtAndroidController.onUpstreamStatus yet must keep every other native (one failing entry
+    // fails a whole RegisterNatives batch). Without it the app gets no lease status: upstream nodes stay off
+    // there anyway (features.xray_client_android).
+    {
+        const JNINativeMethod upstreamMethods[] = {
+            {"onUpstreamStatus", "(Ljava/lang/String;)V", reinterpret_cast<void *>(onUpstreamStatus)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, upstreamMethods, 1)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no onUpstreamStatus in the Kotlin half - upstream lease status off";
+        }
+    }
+    // AVPN (Scanner, lane A3): the probe host's reply and state, optional the same way (without them the Scanner's
+    // host stays NeedsVpn on Android: every scan ends «Не проверено» / NoScan host_no_vpn).
+    {
+        const JNINativeMethod scanMethods[] = {
+            {"onScanReply", "(JLjava/lang/String;)V", reinterpret_cast<void *>(onScanReply)},
+            {"onScanHostState", "(Ljava/lang/String;)V", reinterpret_cast<void *>(onScanHostState)},
+        };
+        if (!env.registerNativeMethods(QT_ANDROID_CONTROLLER_CLASS, scanMethods, 2)) {
+            env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent);
+            qWarning() << "AndroidController: no scan natives in the Kotlin half - the Scanner's host is off";
+        }
+    }
 
     // AVPN (Task 9, FCM): natives пуш-сервиса + старт Kotlin-половины (см. avpn_fcm_bridge.cpp).
     // Неуспех НЕ валит контроллер: без Play Services пуши деградируют до поллинга чата.
@@ -142,6 +171,7 @@ void AndroidController::callActivityMethod(const char *methodName, const char *s
 ErrorCode AndroidController::start(const QJsonObject &vpnConfig)
 {
     isWaitingStatus = false;
+    resetUpstreamStatus(); // AVPN (release C): the status of the previous session is not this one's
     auto config = QJsonDocument(vpnConfig).toJson();
     callActivityMethod("start", "(Ljava/lang/String;)V",
                        QJniObject::fromString(config).object<jstring>());
@@ -152,6 +182,71 @@ ErrorCode AndroidController::start(const QJsonObject &vpnConfig)
 void AndroidController::stop()
 {
     callActivityMethod("stop", "()V");
+}
+
+// AVPN (upstream nodes, release C): android-ipc-contract.md §2. The message carries the renew token: only the
+// method name is logged. A missing Kotlin method (NoSuchMethodError) is cleared and reads as "not sent".
+bool AndroidController::sendUpstreamLeaseSet(const QByteArray &message)
+{
+    if (message.isEmpty())
+        return false;
+    QJniObject activity = AndroidUtils::getActivity();
+    if (!activity.isValid())
+        return false;
+    const jboolean sent = activity.callMethod<jboolean>(
+        "upstreamLeaseSet", "(Ljava/lang/String;)Z",
+        QJniObject::fromString(QString::fromUtf8(message)).object<jstring>());
+    QJniEnvironment env;
+    if (env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent)) {
+        qWarning() << "AndroidController::sendUpstreamLeaseSet : the activity has no upstreamLeaseSet";
+        return false;
+    }
+    return sent;
+}
+
+// AVPN (Scanner, lane A3): the request carries the scan token and candidate configs - only the id is logged by the
+// caller. A missing Kotlin method is cleared and reads as "not sent".
+bool AndroidController::sendScanMessage(qint64 id, const QByteArray &request)
+{
+    if (request.isEmpty())
+        return false;
+    QJniObject activity = AndroidUtils::getActivity();
+    if (!activity.isValid())
+        return false;
+    const jboolean sent = activity.callMethod<jboolean>(
+        "scanMessage", "(JLjava/lang/String;)Z", jlong(id),
+        QJniObject::fromString(QString::fromUtf8(request)).object<jstring>());
+    QJniEnvironment env;
+    if (env.checkAndClearExceptions(QJniEnvironment::OutputMode::Silent)) {
+        qWarning() << "AndroidController::sendScanMessage : the activity has no scanMessage";
+        return false;
+    }
+    return sent;
+}
+
+// AVPN (upstream nodes, release C): the controller's thread. The iOS bridge's rules (UpstreamStatusWire.h):
+// normalized, emitted only when state, code, seq, revision, config_changed or the scope changed.
+void AndroidController::applyUpstreamStatusEvent(const QByteArray &json)
+{
+    const avpn::UpstreamTunnelStatus next = avpn::decodeUpstreamStatusEvent(json);
+    if (!next.present) {
+        qWarning() << "AndroidController : upstream status event without an upstream object - ignored";
+        return;
+    }
+    if (!avpn::upstreamTunnelStatusChanged(m_lastUpstreamStatus, next))
+        return;
+    if (next.state != m_lastUpstreamStatus.state || next.code != m_lastUpstreamStatus.code)
+        qInfo() << "AndroidController : upstream lease" << next.state << next.code << "seq" << next.seq;
+    m_lastUpstreamStatus = next;
+    emit upstreamLeaseEvent(avpn::upstreamTunnelStatusMap(next));
+}
+
+void AndroidController::resetUpstreamStatus()
+{
+    // start() runs on the VpnConnection thread: the reset is queued to the controller's thread, ahead of any
+    // status of the session being started (the service reports it only after it got the start).
+    QMetaObject::invokeMethod(this, [this]() { m_lastUpstreamStatus = avpn::UpstreamTunnelStatus(); },
+                              Qt::QueuedConnection);
 }
 
 void AndroidController::resetLastServer(int serverIndex)
@@ -630,4 +725,31 @@ void AndroidController::onActivityResumed(JNIEnv *env, jobject thiz)
     Q_UNUSED(thiz);
 
     emit AndroidController::instance()->activityResumed();
+}
+
+// AVPN (Scanner, lane A3): ServiceEvent.SCAN_REPLY / SCAN_HOST_STATE forwarded by the activity, unchanged.
+// static
+void AndroidController::onScanReply(JNIEnv *env, jobject thiz, jlong id, jstring reply)
+{
+    Q_UNUSED(thiz);
+
+    emit AndroidController::instance()->scanReplyReceived(qint64(id), AndroidUtils::convertJString(env, reply).toUtf8());
+}
+
+// static
+void AndroidController::onScanHostState(JNIEnv *env, jobject thiz, jstring json)
+{
+    Q_UNUSED(thiz);
+
+    emit AndroidController::instance()->scanHostStateReceived(AndroidUtils::convertJString(env, json).toUtf8());
+}
+
+// AVPN (upstream nodes, release C): ServiceEvent.UPSTREAM_STATUS forwarded by the activity
+// (android-ipc-contract.md §3). Decoded on the controller's thread.
+// static
+void AndroidController::onUpstreamStatus(JNIEnv *env, jobject thiz, jstring json)
+{
+    Q_UNUSED(thiz);
+
+    emit AndroidController::instance()->upstreamStatusReceived(AndroidUtils::convertJString(env, json).toUtf8());
 }

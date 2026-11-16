@@ -1,0 +1,395 @@
+diff --git a/Sources/WireGuardKitGo/api-tribescan-log.go b/Sources/WireGuardKitGo/api-tribescan-log.go
+new file mode 100644
+index 0000000..35dd3a7
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribescan-log.go
+@@ -0,0 +1,16 @@
++package main
++
++// AVPN (awg-apple, patch 0013): a probe's redacted summary line goes to the extension's own log
++// (the WireGuard logger callback, when the adapter set one), not into the Xray core log whose tail
++// the tunnel's status reply carries. Kept apart from api-tribescan.go so the export tests build
++// without api-apple.go.
++
++func init() {
++	tribeScanLogSink = func(line string) bool {
++		if uintptr(loggerFunc) == 0 {
++			return false
++		}
++		CLogger(0).Printf("%s", line)
++		return true
++	}
++}
+diff --git a/Sources/WireGuardKitGo/api-tribescan.go b/Sources/WireGuardKitGo/api-tribescan.go
+new file mode 100644
+index 0000000..e324994
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribescan.go
+@@ -0,0 +1,94 @@
++package main
++
++// AVPN (awg-apple, patch 0013): C exports of the Scanner's probe engine (package tribescan, shared
++// engine patch ../amnezia-libxray/patches/0012-tribe-scan-engine.patch). ABI libxray-tribe-scan-v1,
++// frozen in recipes/awg-apple/README.md ("tribe-scan"). The extension relays the app's
++// tribe-scan-v1 messages as they are; the engine answers them.
++//
++// Socket protection of probes is the probe's OWN (review F3): the extension passes the physical
++// interface's index in the host options of scan_start ({"bind_interface_index": n}); every probe
++// socket is bound to it here in Go (IP_BOUND_IF / IPV6_BOUND_IF) and never passes the
++// LibXraySetSockCallback slot of the tunnel core, whose failure handler cancels the tunnel. A failed
++// probe bind is the probe's error "bind_failed"; the tunnel never hears of it.
++
++/*
++#include <stdint.h>
++#include <stdlib.h>
++#include <mach/mach.h>
++
++static double tribe_scan_footprint_mb(void) {
++	task_vm_info_data_t info;
++	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
++	if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
++		return -1;
++	}
++	return (double)info.phys_footprint / (1024.0 * 1024.0);
++}
++*/
++import "C"
++
++import (
++	"crypto/x509"
++
++	"github.com/amnezia-vpn/amneziawg-apple/tribescan"
++)
++
++// Test seams (nil in production).
++var (
++	tribeScanTestRootCAs *x509.CertPool
++	tribeScanTestJobHook func(string)
++)
++
++// tribeScanAwgOpen is the AmneziaWG mini-session runner (patch 0014, api-tribescan-awg.go); nil
++// without it, and then scan_caps offers no awg_mini.
++var tribeScanAwgOpen tribescan.AwgOpener
++
++// tribeScanLogSink takes a probe's one redacted log line (api-tribescan-log.go: the extension's
++// WireGuard logger when one is set). nil or false: the engine writes it to the process Xray log.
++var tribeScanLogSink func(line string) bool
++
++func tribeScanPlatform() tribescan.Platform {
++	p := tribescan.Platform{
++		RequireBindInterface: true,
++		RequireProtection:    true,
++		FootprintMB:          func() float64 { return float64(C.tribe_scan_footprint_mb()) },
++		FreeOSMemoryAfterJob: true,
++		MemStartMinMB:        12,
++		MemRunMinMB:          8,
++		RootCAs:              tribeScanTestRootCAs,
++		JobHook:              tribeScanTestJobHook,
++		Awg:                  tribeScanAwgOpen,
++		Log: func(line string) bool {
++			if sink := tribeScanLogSink; sink != nil {
++				return sink(line)
++			}
++			return false
++		},
++	}
++	tribeScanPlatformOS(&p)
++	return p
++}
++
++func tribeScanMessageJSON(messageJSON, hostOptionsJSON string) string {
++	return tribescan.Message(messageJSON, hostOptionsJSON, tribeScanPlatform())
++}
++
++// LibXrayTribeScanMessage handles one tribe-scan-v1 message (scan_caps, scan_start, scan_add,
++// scan_poll, scan_cancel) and returns its reply. hostOptionsJSON (read by scan_start; NULL = none):
++// {"bind_interface_index": <physical interface index>}. Never blocks on the network; scan_cancel
++// waits up to 2 s for the final byte total, a scan_start that replaces a running scan up to 3 s.
++// Returns malloc'd JSON, never NULL; free() it.
++//
++//export LibXrayTribeScanMessage
++func LibXrayTribeScanMessage(messageJSON, hostOptionsJSON *C.char) *C.char {
++	return C.CString(tribeScanMessageJSON(C.GoString(messageJSON), C.GoString(hostOptionsJSON)))
++}
++
++// LibXrayTribeScanStopAll ends the running scan (reason tunnel_stopped) and waits up to waitMs
++// (max 10000) until every probe instance is closed: call it under the lifecycle gate before the
++// tunnel core stops, restarts or changes peer. {"stopped":bool}; free() it.
++//
++//export LibXrayTribeScanStopAll
++func LibXrayTribeScanStopAll(waitMs C.int64_t) *C.char {
++	return C.CString(tribescan.StopAllJSON(int64(waitMs)))
++}
+diff --git a/Sources/WireGuardKitGo/api-tribescan_test.go b/Sources/WireGuardKitGo/api-tribescan_test.go
+new file mode 100644
+index 0000000..12b2450
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribescan_test.go
+@@ -0,0 +1,192 @@
++//go:build tribe_callback_test && tribescan_testkit
++
++package main
++
++// Gate of the awg-apple scan export (patch 0013), run with -race:
++//   go test -race -tags 'tribe_callback_test tribescan_testkit' api-xray.go api-xray_testhelper.go \
++//     api-tribescan.go tribescan_other.go api-tribescan_test.go
++// The "tunnel" is libXray's own RunXray/StopXray (what LibXrayRunXray/LibXrayStopXray call), with
++// its stats meter (libxray 0007) and the real LibXraySetSockCallback slot.
++
++import (
++	"encoding/json"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amnezia-libxray/xray"
++	clog "github.com/xtls/xray-core/common/log"
++
++	"github.com/amnezia-vpn/amneziawg-apple/tribescan"
++)
++
++type tribeScanQuietLog struct{}
++
++func (tribeScanQuietLog) Handle(clog.Message) {}
++
++type tribeScanEnv struct {
++	srv   *tribescan.ProbeServer
++	vless int
++	cfg   string // tunnel config path
++	opts  string // host options: bound to the loopback interface by index
++}
++
++func newTribeScanEnv(t *testing.T) *tribeScanEnv {
++	t.Helper()
++	clog.RegisterHandler(tribeScanQuietLog{})
++	srv := tribescan.NewProbeServer(t)
++	e := &tribeScanEnv{srv: srv, vless: tribescan.StartVlessServer(t, srv.Port)}
++	raw, _ := json.Marshal(tribescan.TunnelConfig(e.vless, tribescan.FreePort(t)))
++	e.cfg = filepath.Join(t.TempDir(), "tunnel.json")
++	if err := os.WriteFile(e.cfg, raw, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	lo, err := net.InterfaceByName("lo0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	e.opts = fmt.Sprintf(`{"bind_interface_index":%d}`, lo.Index)
++	tribeScanTestRootCAs = srv.Pool
++	t.Cleanup(func() {
++		tribescan.StopAll(5 * time.Second)
++		tribeScanTestRootCAs, tribeScanTestJobHook = nil, nil
++		xray.StopXray()
++		LibXraySetSockCallback(nil, nil)
++	})
++	return e
++}
++
++func (e *tribeScanEnv) request(id string, n int) string {
++	var cands []map[string]any
++	for i := 0; i < n; i++ {
++		cands = append(cands, tribescan.KitFullCandidate(fmt.Sprintf("full%d", i), e.vless))
++		cands = append(cands, tribescan.KitLegCandidate(fmt.Sprintf("leg%d", i), tribescan.VlessOutbound("proxy", e.vless), nil, nil))
++	}
++	return tribescan.KitRequest(id, e.srv.Base(), map[string]any{"concurrency": 1, "leg_concurrency": 6}, 30000, cands...)
++}
++
++func (e *tribeScanEnv) run(t *testing.T, req string) *tribescan.KitResult {
++	t.Helper()
++	r := &tribescan.KitResult{}
++	raw := tribeScanMessageJSON(req, e.opts)
++	if json.Unmarshal([]byte(raw), &r.Ack); r.Ack.Type != "scan_ack" {
++		json.Unmarshal([]byte(raw), &r.Err)
++		r.Final = tribescan.Progress{Done: true, Reason: r.Err.Error}
++		return r
++	}
++	r.ScanID = r.Ack.ScanID
++	return tribescan.KitPoll(t, r, 30*time.Second, time.Now())
++}
++
++func requireAllOK(t *testing.T, what string, r *tribescan.KitResult, n int) {
++	t.Helper()
++	if r.Final.Reason != tribescan.ReasonComplete || len(r.Data()) != n {
++		t.Fatalf("%s: final %+v err %+v items %d", what, r.Final, r.Err, len(r.Data()))
++	}
++	for _, d := range r.Data() {
++		if d.Error != "" || d.ShaOK == nil || !*d.ShaOK {
++			raw, _ := json.Marshal(d)
++			t.Fatalf("%s: %s", what, raw)
++		}
++	}
++}
++
++type tribeTunnelStats struct {
++	Running   bool                        `json:"running"`
++	Outbounds map[string]xray.TrafficPair `json:"outbounds"`
++}
++
++// Probes run while the tunnel core starts, stops and restarts (libXray's singleton, its runtime
++// regime and stats): every probe works, the tunnel's meter never counts a probe byte, the race
++// detector stays quiet.
++func TestTribeScanExportTunnelRestarts(t *testing.T) {
++	e := newTribeScanEnv(t)
++	if !tribeArmXraySockCallbackForTest() {
++		t.Fatal("arm callback slot")
++	}
++	var caps tribescan.Caps
++	json.Unmarshal([]byte(tribeScanMessageJSON(`{"action":"scan_caps"}`, "")), &caps)
++	if caps.Platform == nil || *caps.Platform != "macos-ne" || caps.MaxFullConcurrent != 2 || caps.MemMB == nil {
++		t.Fatalf("caps %+v", caps)
++	}
++	if err := xray.RunXray(t.TempDir(), e.cfg, 30<<20); err != nil {
++		t.Fatalf("tunnel: %v", err)
++	}
++	var stats tribeTunnelStats
++	json.Unmarshal([]byte(xray.OutboundStatsJSON()), &stats)
++	before := stats.Outbounds["proxy"]
++	requireAllOK(t, "steady", e.run(t, e.request("export-steady", 3)), 6)
++	json.Unmarshal([]byte(xray.OutboundStatsJSON()), &stats)
++	if !stats.Running || stats.Outbounds["proxy"] != before {
++		t.Fatalf("probe bytes reached the tunnel's meter: %+v -> %+v", before, stats.Outbounds["proxy"])
++	}
++
++	e.srv.SetMode("slow_first_byte", false) // every sized body waits 150 ms: restarts land mid-probe
++	e.srv.Delay.Store(150)
++	var restarts atomic.Int32
++	stop := make(chan struct{})
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		for {
++			select {
++			case <-stop:
++				return
++			default:
++			}
++			if err := xray.StopXray(); err != nil {
++				t.Error(err)
++				return
++			}
++			if err := xray.RunXray(t.TempDir(), e.cfg, 30<<20); err != nil {
++				t.Error(err)
++				return
++			}
++			restarts.Add(1)
++			time.Sleep(20 * time.Millisecond)
++		}
++	}()
++	for i := 0; i < 3; i++ {
++		requireAllOK(t, fmt.Sprintf("churn %d", i), e.run(t, e.request(fmt.Sprintf("export-churn-%d", i), 3)), 6)
++	}
++	close(stop)
++	wg.Wait()
++	t.Logf("tunnel restarts during 3 scans: %d", restarts.Load())
++	if restarts.Load() < 10 || tribescan.LiveInstances() != 0 {
++		t.Fatalf("restarts %d live %d", restarts.Load(), tribescan.LiveInstances())
++	}
++}
++
++// Review F3 with the real slot: probe sockets never reach LibXraySetSockCallback. With a REJECTING
++// callback armed (any socket reaching it would fail) and with the slot cleared, probes still work;
++// without an interface to bind to, the start is refused.
++func TestTribeScanExportOwnProtection(t *testing.T) {
++	e := newTribeScanEnv(t)
++	if !tribeArmRejectingXraySockCallbackForTest() {
++		t.Fatal("arm rejecting slot")
++	}
++	requireAllOK(t, "rejecting tunnel callback", e.run(t, e.request("export-rejecting", 2)), 4)
++	LibXraySetSockCallback(nil, nil)
++	requireAllOK(t, "cleared tunnel callback", e.run(t, e.request("export-cleared", 2)), 4)
++	var er tribescan.ErrorReply
++	json.Unmarshal([]byte(tribeScanMessageJSON(e.request("export-unbound", 1), "")), &er)
++	if er.Error != "bad_request" || er.Detail != "host_options.bind_interface" {
++		t.Fatalf("no interface: %+v", er)
++	}
++	// The lifecycle gate: StopAll drains a running scan before the tunnel core would stop.
++	e.srv.SetMode("stall", false)
++	tribeScanMessageJSON(e.request("export-gate", 1), e.opts)
++	time.Sleep(300 * time.Millisecond)
++	var stopped struct{ Stopped bool }
++	t0 := time.Now()
++	json.Unmarshal([]byte(tribescan.StopAllJSON(3000)), &stopped)
++	if !stopped.Stopped || tribescan.LiveInstances() != 0 || time.Since(t0) > 2*time.Second {
++		t.Fatalf("StopAll %+v live %d after %v", stopped, tribescan.LiveInstances(), time.Since(t0))
++	}
++}
+diff --git a/Sources/WireGuardKitGo/tribescan_ios.go b/Sources/WireGuardKitGo/tribescan_ios.go
+new file mode 100644
+index 0000000..437cc22
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribescan_ios.go
+@@ -0,0 +1,23 @@
++//go:build ios
++
++package main
++
++// AVPN (patch 0013): the iOS Network Extension (50 MB footprint ceiling, plan §2.3): one probe
++// instance at a time (a full probe or one leg instance with up to 24 legs), no composite profiles,
++// memory guard on os_proc_available_memory (12 MB before an instance, 8 MB while it runs).
++
++/*
++#include <os/proc.h>
++*/
++import "C"
++
++import "github.com/amnezia-vpn/amneziawg-apple/tribescan"
++
++func tribeScanPlatformOS(p *tribescan.Platform) {
++	p.Name = "ios"
++	p.MaxFull, p.MaxLeg, p.MaxInstances = 1, 6, 1
++	p.MaxAwg = 2 // AmneziaWG sessions (with patch 0014): ~2-3 MB each on a 6-core phone [est]
++	p.CanVerifyComposite = false
++	p.NeedsVPN = true
++	p.AvailableMB = func() float64 { return float64(C.os_proc_available_memory()) / (1024 * 1024) }
++}
+diff --git a/Sources/WireGuardKitGo/tribescan_other.go b/Sources/WireGuardKitGo/tribescan_other.go
+new file mode 100644
+index 0000000..f75b0a5
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribescan_other.go
+@@ -0,0 +1,17 @@
++//go:build !ios
++
++package main
++
++// AVPN (patch 0013): the macOS Network Extension build (the shipped macOS app scans from the service,
++// not from the NE): two instances at once, composites allowed, no memory guard
++// (os_proc_available_memory is iOS-only).
++
++import "github.com/amnezia-vpn/amneziawg-apple/tribescan"
++
++func tribeScanPlatformOS(p *tribescan.Platform) {
++	p.Name = "macos-ne"
++	p.MaxFull, p.MaxLeg, p.MaxInstances = 2, 6, 2
++	p.MaxAwg = 4 // AmneziaWG sessions (with patch 0014)
++	p.CanVerifyComposite = true
++	p.NeedsVPN = true
++}
+diff --git a/Sources/WireGuardKitGo/wireguard.h b/Sources/WireGuardKitGo/wireguard.h
+index 23dd053..21a709e 100644
+--- a/Sources/WireGuardKitGo/wireguard.h
++++ b/Sources/WireGuardKitGo/wireguard.h
+@@ -46,6 +46,18 @@ extern char *LibXrayTribeHTTP(const char *socksAddr, const char *user, const cha
+  * config). Never NULL; free() it:
+  * {"running":bool,"outbounds":{"<tag>":{"uplink":n,"downlink":n}},"error":"","error_code":""}. */
+ extern char *LibXrayTribeOutboundStats(void);
++/* AVPN (awg-apple patch 0013, ABI libxray-tribe-scan-v1): the Scanner's probe engine (tribescan/).
++ * LibXrayTribeScanMessage: one tribe-scan-v1 message of the app (scan_caps, scan_start, scan_add,
++ * scan_poll, scan_cancel) relayed as is -> its reply. hostOptionsJSON, read by scan_start (NULL =
++ * none): {"bind_interface_index": <physical interface index>} - required: every probe socket is bound
++ * to it in Go and never passes the LibXraySetSockCallback slot. Never blocks on the network;
++ * scan_cancel waits up to 2 s for the final byte total, a replacing scan_start up to 3 s.
++ * LibXrayTribeScanStopAll: end the running scan (tunnel_stopped) and wait up to waitMs (max 10000)
++ * until every probe instance is closed - call it under the lifecycle gate before the tunnel core
++ * stops; {"stopped":bool}. Safe from any thread, next to a tunnel core that starts or stops. Every
++ * answer is malloc'd JSON, never NULL; free() it. Formats: recipes/awg-apple/README.md "tribe-scan". */
++extern char *LibXrayTribeScanMessage(const char *messageJSON, const char *hostOptionsJSON);
++extern char *LibXrayTribeScanStopAll(int64_t waitMs);
+ 
+ /* AVPN split-DNS форвардер (dnsfwd.go): настроить ДО wgTurnOn; enabled=0 = сброс. 0=ok, -1=bad args.
+  * warmup=1 — прогреть WG-рукопожатие при подъёме (первый DNS не ловит холодный туннель). */

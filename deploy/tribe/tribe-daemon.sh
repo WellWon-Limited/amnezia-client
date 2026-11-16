@@ -161,6 +161,14 @@ install(){
   if [ -x "$(dirname "$src")/tun2socks" ]; then
     replace_file "$(dirname "$src")/tun2socks" "$T2S_BIN"
   fi
+  # Upstream nodes: the cut geo pair (service build dir, recipes/tribe-xray-geo). Without it the
+  # service refuses Xray configs with geosite:/geoip: rules (service/server/xrayassets.h).
+  local geo
+  for geo in geoip.dat geosite.dat; do
+    if [ -f "$(dirname "$src")/$geo" ]; then
+      replace_file "$(dirname "$src")/$geo" "${HELPER_DIR}/$geo"
+    fi
+  done
   rm -f "$PF_DIR"/*.conf 2>/dev/null || true
   cp -f "$pfsrc/${PF_ANCHOR}."*.conf "$PF_DIR/"
   [ -f "$pfsrc/${PF_ANCHOR}.conf" ] && cp -f "$pfsrc/${PF_ANCHOR}.conf" "$PF_DIR/" || true
@@ -169,6 +177,7 @@ install(){
   chmod 755 "$HELPER_DIR" "$PF_DIR" "$BIN"
   [ -e "$WG_BIN" ] && chmod 755 "$WG_BIN" || true
   [ -e "$T2S_BIN" ] && chmod 755 "$T2S_BIN" || true
+  chmod 644 "${HELPER_DIR}/geoip.dat" "${HELPER_DIR}/geosite.dat" 2>/dev/null || true
   # Снять карантин/provenance xattr → macOS не делает повторный скан подписи при первом
   # запуске демоном (иначе amneziawg-go не успевает создать utun за таймаут → туннель падает).
   xattr -cr "$HELPER_DIR" 2>/dev/null || true

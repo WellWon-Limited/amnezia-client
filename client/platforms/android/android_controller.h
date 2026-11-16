@@ -5,6 +5,7 @@
 #include <QPixmap>
 
 #include "core/protocols/vpnProtocol.h"
+#include "core/serviceEngine/UpstreamStatusWire.h" // AVPN (upstream nodes, release C): status of the Xray service
 
 using namespace amnezia;
 
@@ -61,6 +62,15 @@ public:
     QJsonObject upgradeSubscription(const QString &offerToken, const QString &oldPurchaseToken);
     QJsonObject acknowledgePurchase(const QString &purchaseToken);
     QJsonObject queryPurchases();
+    // AVPN (upstream nodes, release C): the late lease hand-over to the Xray service process, which owns the
+    // lease from then on (android-ipc-contract.md §2). message = {"action":"upstream_lease_set",
+    // "upstream_lease":{...}} - secret, never logged. true = the activity handed it to the bound service;
+    // false = no activity, no bound service, or the Kotlin half is missing (the seat lapses at TTL).
+    bool sendUpstreamLeaseSet(const QByteArray &message);
+    // AVPN (Scanner, lane A3): one tribe-scan-v1 message to the Xray service's probe host (activity
+    // scanMessage(id, request) -> Action.SCAN_MESSAGE). The reply comes as scanReplyReceived with the same id.
+    // request = secret (scan token, configs), never logged. true = handed to the bound service.
+    bool sendScanMessage(qint64 id, const QByteArray &request);
 
     static bool initLogging();
     static void messageHandler(QtMsgType type, const QMessageLogContext &context, const QString &message);
@@ -85,9 +95,22 @@ signals:
     void systemBarsInsetsChanged(int navBarHeightDp, int statusBarHeightDp);
     void activityPaused();
     void activityResumed();
+    // AVPN (upstream nodes, release C): the Xray service's lease status (contract §5, android-ipc-contract.md
+    // §3), normalized, emitted only when something the engine acts on changed - the same map as
+    // IosController::upstreamLeaseEvent (AvpnEngineQml::applyUpstreamTunnelStatus).
+    void upstreamLeaseEvent(const QVariantMap &upstream);
+    // AVPN: the raw JNI event (Android thread) -> decoded on the controller's thread.
+    void upstreamStatusReceived(const QByteArray &json);
+    // AVPN (Scanner, lane A3): emitted on the activity's thread (connect queued): the probe host's reply to request
+    // `id`, and its state {"open":bool,"gen":{...}} (ServiceEvent.SCAN_REPLY / SCAN_HOST_STATE).
+    void scanReplyReceived(qint64 id, const QByteArray &reply);
+    void scanHostStateReceived(const QByteArray &json);
 
 private:
     bool isWaitingStatus = true;
+    avpn::UpstreamTunnelStatus m_lastUpstreamStatus; // AVPN (release C): the controller's thread only
+    void applyUpstreamStatusEvent(const QByteArray &json); // AVPN (release C)
+    void resetUpstreamStatus(); // AVPN (release C): a new session starts from "nothing seen"
 
     static jclass log;
     static jmethodID logDebug;
@@ -118,6 +141,9 @@ private:
     static void onSystemBarsInsetsChanged(JNIEnv *env, jobject thiz, jint navBarHeightDp, jint statusBarHeightDp);
     static void onActivityPaused(JNIEnv *env, jobject thiz);
     static void onActivityResumed(JNIEnv *env, jobject thiz);
+    static void onUpstreamStatus(JNIEnv *env, jobject thiz, jstring json); // AVPN (release C), optional native
+    static void onScanReply(JNIEnv *env, jobject thiz, jlong id, jstring reply); // AVPN (Scanner A3), optional
+    static void onScanHostState(JNIEnv *env, jobject thiz, jstring json);        // AVPN (Scanner A3), optional
 
     template <typename Ret, typename ...Args>
     static auto callActivityMethod(const char *methodName, const char *signature, Args &&...args);

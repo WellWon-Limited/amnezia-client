@@ -15,7 +15,15 @@ Row {
     id: chips
     property var model: []           // TribeEngine.serviceStatus
     signal recheck()                 // тап по чипу → перепроверить
-    spacing: Theme.space.sm
+    // AVPN (Scanner, card «Ваше подключение», artboard vpn-scanner.css .chips.mini / .qs): opt-in variants,
+    // the defaults draw today's chips. dense = 26 high, logo 14, dot 6, gaps 4 / 5; askMarks = the services did
+    // not run in this connection: chips hug a 12 px logo at 55 % and a grey «?» instead of the dot.
+    property bool dense: false
+    property bool askMarks: false
+    readonly property int chipH: dense ? 26 : 32
+    readonly property int logoSize: askMarks ? 12 : (dense ? 14 : 18)
+    readonly property int dotSize: dense ? 6 : 8
+    spacing: askMarks ? 3 : (dense ? Theme.space.xs : Theme.space.sm)
     // AVPN: ВСЕ чипы в ОДНУ строку — делим ширину поровну (не Flow с переносом), чтобы три сервиса
     // всегда влезали в один ряд на любом экране; лейбл с эллипсисом, если узко.
     readonly property real chipW: (model && model.length > 0)
@@ -46,33 +54,53 @@ Row {
             readonly property bool stale: modelData && modelData.stale === true
             opacity: stale ? 0.45 : 1
             Behavior on opacity { NumberAnimation { duration: Theme.motion.fast } }
-            height: 32
-            width: chips.chipW           // равная доля ширины — гарантирует одну строку // AVPN
+            height: chips.chipH
+            width: chips.askMarks ? row.implicitWidth + 10 : chips.chipW   // равная доля ширины — одна строка // AVPN
             radius: Theme.radius.pill
             color: Theme.color.surface1
             border.width: 1
-            border.color: Qt.rgba(chips.stateColor(st).r, chips.stateColor(st).g, chips.stateColor(st).b, 0.45)
+            border.color: chips.askMarks ? Theme.color.border
+                          : Qt.rgba(chips.stateColor(st).r, chips.stateColor(st).g, chips.stateColor(st).b, 0.45)
 
             // AVPN (2026-07-17): подписи Telegram/YouTube/… УБРАНЫ — не влезали в чип (обрезались
             // «Telegr…»), тем более с 4-м сервисом (WhatsApp). Теперь только лого + статус-дот.
             Row {
                 id: row
                 anchors.centerIn: parent
-                spacing: Theme.space.sm
+                spacing: chips.askMarks ? 3 : (chips.dense ? 5 : Theme.space.sm)
 
-                // лого сервиса (фирменный цвет — бренд-исключение)
-                Loader {
+                // лого сервиса (фирменный цвет — бренд-исключение); 18-px логотипы масштабируются под logoSize
+                Item {
                     anchors.verticalCenter: parent.verticalCenter
-                    sourceComponent: chip.key === "telegram" ? logoTelegram
-                                   : chip.key === "youtube"  ? logoYoutube
-                                   : chip.key === "instagram" ? logoInstagram
-                                   : chip.key === "whatsapp" ? logoWhatsapp
-                                   : logoGeneric
+                    // default = the logo's own size (today's geometry, also for the generic tile)
+                    width: (chips.dense || chips.askMarks) ? chips.logoSize : logoLoader.width
+                    height: (chips.dense || chips.askMarks) ? chips.logoSize : logoLoader.height
+                    opacity: chips.askMarks ? 0.55 : 1
+                    Loader {
+                        id: logoLoader
+                        anchors.centerIn: parent
+                        scale: chips.logoSize / 18
+                        sourceComponent: chip.key === "telegram" ? logoTelegram
+                                       : chip.key === "youtube"  ? logoYoutube
+                                       : chip.key === "instagram" ? logoInstagram
+                                       : chip.key === "whatsapp" ? logoWhatsapp
+                                       : logoGeneric
+                    }
+                }
+                Text {
+                    visible: chips.askMarks
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "?"
+                    color: Theme.color.text3
+                    font.family: Theme.font.body
+                    font.pixelSize: Theme.font.micro
+                    font.weight: Theme.font.wBold
                 }
                 // статус-дот (цвет = статус)
                 Rectangle {
+                    visible: !chips.askMarks
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 8; height: 8; radius: 4
+                    width: chips.dotSize; height: chips.dotSize; radius: chips.dotSize / 2
                     color: chips.stateColor(chip.st)
                     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
                 }

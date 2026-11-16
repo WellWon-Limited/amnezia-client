@@ -1,6 +1,7 @@
 #include "SubscriptionParser.h"
 
 #include "NodeRotation.h" // AVPN (Task 10): isSupportedProtoNode — awg-контракт неприменим к чужим proto
+#include "UpstreamNode.h" // AVPN upstream nodes: kill switch upstream_nodes + stub parser
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -184,6 +185,13 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
     out.poolRevision = root.value("pool_revision").isDouble()
         ? static_cast<qint64>(root.value("pool_revision").toDouble())
         : 0;
+    // AVPN upstream nodes: upstream_revision (epoch ms). Read only with the kill switch on; absent ->
+    // 0 -> no upstream node is kept (switch off: the field is ignored, as on 138/139).
+    const bool upstreamOn = upstreamNodesEnabled();
+    qint64 upstreamRevision = 0;
+    if (upstreamOn && upstreamJsonInt(root.value("upstream_revision"), 1, kUpstreamMaxRevision, upstreamRevision))
+        out.upstreamRevision = upstreamRevision;
+    const bool acceptUpstream = upstreamOn && out.upstreamRevision > 0;
 
     for (const QJsonValue &nv : root.value("nodes").toArray()) {
         const QJsonObject no = nv.toObject();
@@ -231,9 +239,22 @@ bool SubscriptionParser::parse(const QByteArray &json, Subscription &out, QStrin
         if (isXray) {
             XrayParams xp;
             QString why;
-            if (!parseXrayParams(no.value("xray_params").toObject(), xp, why))
-                continue;
-            n.xray = xp;
+            if (!parseXrayParams(no.value("xray_params").toObject(), xp, why)) {
+                // AVPN upstream nodes: the one exception to the drop above - a stub without xray_params
+                // and with a valid upstream block, ONLY while features.upstream_nodes is on and the
+                // server admitted this device (upstream_revision present). Switch off = dropped here
+                // exactly as on 138/139.
+                const QJsonValue xpv = no.value("xray_params");
+                if (!acceptUpstream || !(xpv.isUndefined() || xpv.isNull()))
+                    continue;
+                UpstreamStub stub;
+                if (!parseUpstreamStub(no.value("upstream"), stub, why)
+                    || n.nodeId != upstreamNodeIdFor(stub.profileId))
+                    continue;
+                n.upstream = stub;
+            } else {
+                n.xray = xp;
+            }
         }
         out.nodes << n;
     }
@@ -255,6 +276,10 @@ QStringList SubscriptionParser::validate(const Subscription &sub)
         // AVPN awg31-xray-v1: xray-контракт — endpoint host:port + валидные xray_params (парсер
         // гарантирует xray.has_value(); здесь — страховка для DTO, собранных мимо парсера).
         if (n.proto == QLatin1String("xray")) {
+            // AVPN upstream nodes: a stub has no endpoint by contract (the hosts live in the leased
+            // profile); the parser already checked the stub.
+            if (n.upstream.has_value() && !n.xray.has_value())
+                continue;
             if (n.endpoint.isEmpty() || !n.endpoint.contains(QLatin1Char(':')))
                 issues << QStringLiteral("node %1: endpoint must be host:port").arg(id);
             if (!n.xray.has_value())

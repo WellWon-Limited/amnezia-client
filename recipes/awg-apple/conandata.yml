@@ -1,14 +1,25 @@
 patches:
-  "3.1.4-tribe.13":
-    # tribe.11 (all unchanged) + 0012: the data watch. Swift: the adapter feeds TribeDataWatch
-    # (tribe/TribeDataWatch.swift, pure logic with its own build gate) on the existing stall tick
-    # and exposes its snapshot; Go: tribeprobe.go, a pass-through TUN wrapper that sends one small
-    # DNS query THROUGH the tunnel and takes the reply off the write path (the judge of the passive
-    # rule). Off unless the app's plan file switches it on: a device without the probe configured
-    # reads the tunnel exactly as tribe.11.
-    # The number skips 12: 3.1.4-tribe.12 and patches 0010/0011 belong to an unmerged branch
-    # (upstream nodes, Xray core 1.261101.0); they are NOT part of this version.
-    # TribeRoaming.swift for this version = tribe/TribeRoaming.swift (same file as tribe.10/11).
+  "3.1.4-tribe.14":
+    # tribe.12 (0001-0011 and 0013-0015, all unchanged, byte for byte) + the data watch, in two
+    # patches of its own:
+    # + 0012 (the slot tribe.12 left for it): the Go half. tribeprobe.go, a pass-through TUN wrapper
+    # that sends one small DNS query THROUGH the tunnel and takes the reply off the write path (the
+    # judge of the passive rule), its engine reads and host test, the wgTurnOn hook in api-apple.go
+    # and the three declarations at the end of wireguard.h (below 0013's insertion point).
+    # + 0016 (after 0015): the adapter half. WireGuardAdapter.swift feeds TribeDataWatch
+    # (tribe/TribeDataWatch.swift, pure logic with its own build gate) on the existing stall tick,
+    # exposes its snapshot and executes the arbiter's commands (heal, in-place switch of the peer).
+    # The engine stop of an in-place switch runs through TribeBackendHook.before(.restart, ...) of
+    # 0015, so the Scanner's probe sessions end first; tests/check_backend_hook.sh gates it.
+    # Why two patches and not one in slot 0012: the recipe's patch tool (patch_ng) matches every
+    # hunk at its recorded line number, without offsets. 0015 was recorded on an adapter without
+    # the data watch, so no line may be added to WireGuardAdapter.swift before it; the adapter
+    # half therefore comes after it. The Go half adds nothing above a later hunk.
+    # Off unless the app's plan file switches it on: a device without the probe configured reads
+    # the tunnel exactly as tribe.12. TribeRoaming.swift = tribe/TribeRoaming.swift (tribe.12's
+    # file plus requestPeerSwitch, which only the data watch calls).
+    # 3.1.4-tribe.13 was the data watch branch's own number before this merge (tribe.11 + 0012 as
+    # one patch); it was never built outside that branch and is not kept here.
     - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
     - patch_file: "patches/0002-xray-socket-protection-result.patch"
     - patch_file: "patches/0003-tribe-seamless-roaming.patch"
@@ -17,7 +28,49 @@ patches:
     - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
     - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
     - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
     - patch_file: "patches/0012-tribe-data-watch.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
+    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"
+  "3.1.4-tribe.12":
+    # + 0015: WireGuardAdapter.tribeBackendWillRestart, an optional callback run synchronously right
+    # before the adapter stops, pauses, replaces or rebinds its backend (TribeBackendRestart in
+    # TribeRoaming.swift); nil = no call. The provider stops its probe sessions there.
+    # + 0014: the Scanner's AmneziaWG mini-session runner (package tribeawg + api-tribescan-awg.go,
+    # which hands it to 0013's engine host): a userspace device on an in-memory netstack with its own
+    # registry and logger; awg_mini in scan_caps (2 at once on iOS, 4 on the macOS NE). No new export.
+    # + 0013: the Scanner's probe engine exports LibXrayTribeScanMessage / LibXrayTribeScanStopAll
+    # (ABI libxray-tribe-scan-v1, api-tribescan.go + api-tribescan-log.go + tribescan_ios.go /
+    # tribescan_other.go + their host test, declarations in wireguard.h). The engine itself (package tribescan/) is the shared
+    # ../amnezia-libxray/patches/0012-tribe-scan-engine.patch and core 0011 makes the dialer state
+    # per instance; both are applied in build() and therefore not listed here. Slot 0012 is the
+    # data watch branch's; rebased onto it this version becomes 3.1.4-tribe.14.
+    # + 0011: LibXrayTribeOutboundStats (C export of libxray 0007; core 0008 counts the buffered
+    # first write of a stream outbound).
+    # tribe.11 (all unchanged) + 0010: LibXrayTribeHTTP, one HTTPS request through the running
+    # core's local SOCKS5 inbound (tribehttp.go + its host test, export in api-tribehttp.go,
+    # declaration in wireguard.h). The Xray core moves to amnezia-xray-core v1.261101.0 (Go
+    # 1.27.4) with ../amnezia-libxray/patches/0004-xray-core-261101-controller-errors.patch, and
+    # ../amnezia-libxray/patches/0005-libxray-forcefree-once.patch (FreeOSMemory loop once per
+    # process) + 0006-libxray-restore-runtime-on-stop.patch (StopXray restores GOGC and the memory
+    # limit, parks the loop) go to the vendored libxray; all are applied in build() after
+    # `go mod vendor` and are therefore not listed here.
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
   "3.1.4-tribe.11":
     # tribe.10 (all unchanged) + 0009: userspace direct split. The TUN wrapper hands TCP/UDP packets
     # whose destination is in the list (wgSetDirectSplit, a CIDR file) to a gVisor stack that

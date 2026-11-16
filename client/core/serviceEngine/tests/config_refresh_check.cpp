@@ -173,7 +173,7 @@ private slots:
     // A copy with a receive time inside the bound is trusted: the S4.1 tests below.
     void cachedXrayDoesNotThawUntilFreshSignedResponse()
     {
-        const QByteArray cached = R"({"features":{"xray_client":true,"node_scan":true}})";
+        const QByteArray cached = R"({"features":{"xray_client":true,"node_scan":true,"upstream_nodes":true}})";
         avpn::cachedConfig = cached;
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost));
@@ -182,7 +182,7 @@ private slots:
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
                 connect(socket, &QTcpSocket::readyRead, socket, [socket]() {
                     socket->readAll();
-                    const QByteArray body = R"({"features":{"xray_client":true,"node_scan":true},"recommended_version":{"macos":"fresh"}})";
+                    const QByteArray body = R"({"features":{"xray_client":true,"node_scan":true,"upstream_nodes":true},"recommended_version":{"macos":"fresh"}})";
                     socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\nX-Tribe-Sig: fixture-signature\r\nContent-Length: "
                                   + QByteArray::number(body.size()) + "\r\n\r\n" + body);
                     socket->disconnectFromHost();
@@ -195,11 +195,13 @@ private slots:
         service.start();
         QVERIFY(!service.config().features.value("xray_client", true));
         QVERIFY(!service.config().features.value("node_scan", true)); // 5.1.108: frozen like xray_client
+        QVERIFY(!service.config().features.value("upstream_nodes", true)); // upstream nodes: no receive time = outside the bounded trust
         QCOMPARE(avpn::cachedConfig, cached); // no forged write of the modified signed LKG.
         QCOMPARE(avpn::savedConfigs, 0);
         QTRY_COMPARE(service.config().recommendedVersion.value("macos"), QString("fresh"));
         QVERIFY(service.config().features.value("xray_client", false));
         QVERIFY(service.config().features.value("node_scan", false));   // fresh signed answer authorizes it
+        QVERIFY(service.config().features.value("upstream_nodes", false)); // and upstream nodes with it
         QCOMPARE(avpn::savedConfigs, 1);
     }
     // Owner test of 5.1.102 (2026-11-05): a cold start with the tunnel off - the engine's abort of
@@ -348,6 +350,65 @@ private slots:
         QTRY_COMPARE(srv.configRequests, 1);                             // the fresh one is asked for as before
         QTest::qWait(50);
         QCOMPARE(applied, 1);
+    }
+    // Upstream nodes: the cached signed upstream_nodes=true is trusted for its own bound (default 72 h,
+    // numbers.upstream_nodes_cache_max_age_h of the same copy), fail-closed beyond it; a cached false is
+    // never upgraded; node_scan stays frozen. The cold-start-in-a-whitelist-window case.
+    void cachedUpstreamBoundedTrust()
+    {
+        struct Case { const char *body; qint64 ageMs; bool expect; };
+        const Case cases[] = {
+            {R"({"features":{"xray_client":true,"upstream_nodes":true,"node_scan":true}})", kHourMs, true},
+            {R"({"features":{"xray_client":true,"upstream_nodes":true}})", 71 * kHourMs, true},
+            {R"({"features":{"xray_client":true,"upstream_nodes":true}})", 72 * kHourMs, false},
+            {R"({"features":{"xray_client":true,"upstream_nodes":false}})", kHourMs, false},
+            {R"({"features":{"xray_client":true}})", kHourMs, false},
+            {R"({"features":{"upstream_nodes":true},"numbers":{"upstream_nodes_cache_max_age_h":2}})", 3 * kHourMs, false},
+            {R"({"features":{"upstream_nodes":true},"numbers":{"upstream_nodes_cache_max_age_h":200}})", 100 * kHourMs, true},
+            {R"({"features":{"upstream_nodes":true},"numbers":{"upstream_nodes_cache_max_age_h":0}})", 30 * 60 * 1000, true}, // floor 1 h
+            {R"({"features":{"upstream_nodes":true},"numbers":{"upstream_nodes_cache_max_age_h":9999}})", 337 * kHourMs, false}, // ceil 336 h
+        };
+        for (const Case &c : cases) {
+            avpn::cachedConfig = c.body;
+            avpn::cachedConfigAtMs = kTestNowMs - c.ageMs;
+            ConfigServer srv([](int) { return QByteArray(); }); // the API never answers
+            LoopbackOnlyNam network;
+            avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+            service.setNowMsForTest([] { return kTestNowMs; });
+            service.start();
+            QCOMPARE(service.config().features.value("upstream_nodes", !c.expect), c.expect);
+            QVERIFY(!service.config().features.value("node_scan", true));
+            QCOMPARE(avpn::savedConfigs, 0); // the signed copy is not rewritten
+        }
+        // No receive time (a cache of a build before 139): off.
+        avpn::cachedConfig = R"({"features":{"upstream_nodes":true}})";
+        avpn::cachedConfigAtMs = 0;
+        ConfigServer srv([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        service.setNowMsForTest([] { return kTestNowMs; });
+        service.start();
+        QVERIFY(!service.config().features.value("upstream_nodes", true));
+    }
+    // The trust runs out while the process stays on the cache: off, and a clock moved back does not revive it.
+    void cachedUpstreamTrustRunsOutOneWay()
+    {
+        avpn::cachedConfig = R"({"features":{"upstream_nodes":true}})";
+        avpn::cachedConfigAtMs = kTestNowMs - 71 * kHourMs;
+        ConfigServer srv([](int) { return QByteArray(); });
+        LoopbackOnlyNam network;
+        avpn::ConfigService service(&network, srv.base(), "fixture-key", {srv.base()});
+        qint64 now = kTestNowMs;
+        service.setNowMsForTest([&now] { return now; });
+        service.start();
+        QVERIFY(service.config().features.value("upstream_nodes", false));
+        now = kTestNowMs + 2 * kHourMs;
+        service.reportNetworkSuccess(); // a rejudge point
+        QTRY_VERIFY(!service.config().features.value("upstream_nodes", true));
+        now = kTestNowMs;
+        service.reportNetworkSuccess();
+        QTest::qWait(20);
+        QVERIFY(!service.config().features.value("upstream_nodes", true));
     }
     // The copy is older than the bound: frozen exactly as on 138, until a fresh signed answer.
     void cachedXrayPastBoundIsFrozenUntilFreshAnswer()

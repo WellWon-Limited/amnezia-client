@@ -92,6 +92,7 @@ PageType {
     signal requestServerPicker()  // AVPN: страница выбора сервера (замена шторки TribeNodeSheet)
     signal requestSupportChat(string draft)  // AVPN (store-flow 2026-07-11): CTA мобилок → чат с черновиком
     signal requestDoctor()        // AVPN (Доктор v1): кнопка «Доктор» → попап диагностики (хост PageStart)
+    signal requestScanner()       // AVPN (Scanner): the home button «Сканер» -> PageScannerTribe (host PageStart)
 
     // AVPN: центр уведомлений — счётчик непрочитанных. Реальные пуши (#9) идут через мост
     // AvpnPush (APNs/FCM → C++ → QML). В dev-превью моста нет → фолбэк 2 (mock-бейдж).
@@ -253,6 +254,13 @@ PageType {
         ignoreUnknownSignals: true
         function onError(message) {
             Haptic.playArmed("error") // AVPN (haptics): ошибка коннекта после действия юзера
+        }
+        // AVPN upstream nodes (release A): the app left a provider node and is connecting the next one -
+        // the short non-blocking toast (closes by itself), never the error pop-up. Only an upstream node
+        // emits it (features.upstream_nodes off: never).
+        function onNotice(message) {
+            if (!ScanSwitches.scanner)   // Scanner on: the top shade in PageStart shows it on every page
+                PageController.showNotificationMessage(message)
         }
         // AVPN (device_fingerprint): rehome-гейт 403 при переносе по диплинку/QR — диплинк может
         // прилететь, когда живёт только эта вкладка. Терминально: тост без ретраев.
@@ -1006,7 +1014,9 @@ PageType {
                         Text {
                             id: nodeName
                             width: parent.width
-                            text: root.curNode.hasNode ? (root.curNode.name || root.curNode.countryCode || "")
+                            // AVPN upstream nodes: a provider node without a country - a neutral word, never a code
+                            text: root.curNode.hasNode ? (root.curNode.name || root.curNode.countryCode
+                                                          || (root.curNode.upstream === true ? qsTr("Сервер") : ""))
                                   : !root.subLoadedNow ? (root.subOfflineNow ? qsTr("Нет связи с Tribe")
                                                                              : qsTr("Загружаем серверы…"))
                                   : qsTr("Умный выбор сервера")
@@ -1026,7 +1036,9 @@ PageType {
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: root.shownProto.length > 0
                                 readonly property bool xray: root.shownProto === "xray"
-                                label: xray ? qsTr("Xray Reality")
+                                // AVPN upstream nodes: a provider profile is Xray, not necessarily Reality -
+                                // the same word as its badge in the server list
+                                label: xray ? (root.curNode.upstream === true ? qsTr("Xray") : qsTr("Xray Reality"))
                                             : (root.shownProtoVersion.length > 0
                                                ? qsTr("Amnezia v%1").arg(root.shownProtoVersion)
                                                : qsTr("Amnezia"))
@@ -1198,6 +1210,8 @@ PageType {
 
         // AVPN (Доктор v1, реш. владельца 2026-07-17): нижняя строка = кнопка «Доктор» слева
         // (компактная, диагностика «не работает») + «Сменить сервер» справа (на остаток ширины).
+        // AVPN (Scanner, artboard 16.11): with the `scanner` switch on and `doctor_legacy` off the row is
+        // «Заменить сервер» | «Сканер» - the Doctor's slot, same size, moved to the right; switch off = as before.
         Row {
             width: parent.width
             spacing: Theme.space.md
@@ -1207,7 +1221,7 @@ PageType {
         // (прозрачный фон + бордер, hover-заливка, height 52). Гейт kill-switch features.diag_v2.
         Rectangle {
             id: doctorBtn
-            visible: !root.hasEngine || TribeEngine.featureEnabled("diag_v2", true)
+            visible: (!root.hasEngine || TribeEngine.featureEnabled("diag_v2", true)) && !ScanSwitches.replacesDoctor
             width: visible ? Math.round((parent.width - Theme.space.md) * 0.38) : 0
             height: 49; radius: 16
             color: doctorMa.containsMouse ? Qt.rgba(0x1E/255,0x29/255,0x3B/255,0.5) : "transparent"
@@ -1245,6 +1259,7 @@ PageType {
         Rectangle {
             id: refreshBtn
             width: parent.width - (doctorBtn.visible ? doctorBtn.width + parent.spacing : 0)
+                                - (scannerBtn.visible ? scannerBtn.width + parent.spacing : 0)
             height: 49; radius: 16
             // AVPN (2026-07-17): без opacity-приглушения — единый стиль с кнопкой «Доктор»
             // (реш. владельца: обе кнопки строки выглядят идентично). Действие при !isOn = старт.
@@ -1303,7 +1318,41 @@ PageType {
                 }
             }
         }
-        } // Row (Доктор + Сменить сервер)
+
+        // AVPN (Scanner): «Сканер» — the Doctor button's style and size, Lucide radar, right of «Заменить сервер»
+        Rectangle {
+            id: scannerBtn
+            visible: ScanSwitches.replacesDoctor
+            width: visible ? Math.round((parent.width - Theme.space.md) * 0.38) : 0
+            height: 49; radius: Theme.radius.lg   // the row's height (Doctor / «Заменить сервер»)
+            color: scannerMa.containsMouse ? Theme.color.sceneButtonHover : "transparent"
+            border.width: 1
+            border.color: scannerMa.containsMouse ? Theme.color.sceneButtonBorderHover : Theme.color.sceneButtonBorder
+            Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
+            Accessible.role: Accessible.Button
+            Accessible.name: ScanTexts.homeButton
+            Row {
+                anchors.centerIn: parent; spacing: Theme.space.sm
+                TribeStrokeIcon {
+                    width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter
+                    icon: "radar"
+                    tint: Theme.color.accent
+                    weight: 1.8
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: ScanTexts.homeButton
+                    color: Theme.color.sceneButtonText; font.family: Theme.font.body
+                    font.pixelSize: Theme.font.bodyS; font.weight: Theme.font.wMedium
+                }
+            }
+            MouseArea {
+                id: scannerMa
+                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: { Haptic.play("light"); root.requestScanner() }
+            }
+        }
+        } // Row (Доктор + Сменить сервер | Сменить сервер + Сканер)
     }
 
     // AVPN (белые списки): попап «Действуют "Белые списки"» — функция ГЛАВНОГО экрана

@@ -1,0 +1,84 @@
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -55,6 +55,12 @@
+     // Wi-Fi <-> cellular) must NOT turn the device off. Set `roamingPolicy` before start();
+     // everything below is touched on workQueue only.
+     public var roamingPolicy = TribeRoamingPolicy.seamless
++
++    /// AVPN (patch 0015): called synchronously on the adapter's work queue right before the adapter
++    /// stops, pauses, replaces or rebinds its WireGuard backend (TribeBackendRestart says which), so
++    /// the provider can stop what runs next to the backend (the Scanner's probe sessions) first.
++    /// nil (the default) = no call, today's behaviour.
++    public var tribeBackendWillRestart: ((TribeBackendRestart) -> Void)?
+     private var roamCounters = TribeRoamingCounters()
+     private var lastPathSatisfiable = true
+     private var pathLostAt: Date?
+@@ -252,7 +258,7 @@
+             self.logHandler(.verbose, "Adapter stop requested (state=\(self.state))")
+             switch self.state {
+             case .started(let handle, _):
+-                wgTurnOff(handle)
++                TribeBackendHook.before(.stop, self.tribeBackendWillRestart) { wgTurnOff(handle) }
+ 
+             case .temporaryShutdown:
+                 break
+@@ -568,7 +574,7 @@
+ 
+         #if os(macOS)
+         if case .started(let handle, _) = self.state {
+-            wgBumpSockets(handle)
++            TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
+         }
+         #elseif os(iOS)
+         switch self.state {
+@@ -702,7 +708,7 @@
+             let (wgConfig, resolutionResults) = settingsGenerator.endpointUapiConfiguration()
+             self.logEndpointResolutionResults(resolutionResults)
+ 
+-            wgSetConfig(handle, wgConfig)
++            TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { _ = wgSetConfig(handle, wgConfig) }
+             wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+             if freshPort {
+                 // tribe.9: new local port (new 5-tuple through the carrier NAT) + keepalive, so the
+@@ -711,7 +717,7 @@
+                 self.roamCounters.roamFreshPorts += 1
+                 self.logHandler(.verbose, "Tribe roaming: path returned, fresh local port + keepalive on the live device (\(self.roamCounters.summary))")
+             } else {
+-                wgBumpSockets(handle)
++                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
+                 self.roamCounters.roamBumps += 1
+             }
+             self.noteRoamStep(handle: handle, freshPort: freshPort)
+@@ -741,7 +747,7 @@
+         self.cancelPendingPause()
+         self.roamCounters.pauses += 1
+         self.state = .temporaryShutdown(settingsGenerator)
+-        wgTurnOff(handle)
++        TribeBackendHook.before(.pause, self.tribeBackendWillRestart) { wgTurnOff(handle) }
+     }
+ 
+     // Stall watchdog: same-SSID roams sometimes produce NO path event at all, and a NAT/AP switch
+@@ -793,12 +799,12 @@
+         for op in ops {
+             switch op {
+             case .freshListenPort:
+-                wgSetConfig(handle, "listen_port=0\n")
++                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { _ = wgSetConfig(handle, "listen_port=0\n") }
+                 #if os(iOS)
+                 wgDisableSomeRoamingForBrokenMobileSemantics(handle)
+                 #endif
+             case .bumpWithKeepalive:
+-                wgBumpSockets(handle)
++                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgBumpSockets(handle) }
+             case .sendKeepalive:
+                 wgSendKeepalives(handle)
+             case .restartBackend:
+@@ -817,7 +823,7 @@
+     private func restartBackendInPlace(handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {
+         let (wgConfig, resolutionResults) = settingsGenerator.uapiConfiguration()
+         self.logEndpointResolutionResults(resolutionResults)
+-        wgTurnOff(handle)
++        TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }
+         do {
+             let newHandle = try self.startWireGuardBackend(wgConfig: wgConfig)
+             self.state = .started(newHandle, settingsGenerator)

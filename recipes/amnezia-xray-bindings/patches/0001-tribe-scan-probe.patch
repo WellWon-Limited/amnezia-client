@@ -1,0 +1,673 @@
+diff --git a/tribescan.go b/tribescan.go
+new file mode 100644
+index 0000000..e280890
+--- /dev/null
++++ b/tribescan.go
+@@ -0,0 +1,75 @@
++package main
++
++// AVPN (amnezia-xray-bindings 1.4.0-tribe.1, patch 0001): C exports of the tribe-scan-v1 probe
++// engine (package tribescan, shared engine patch ../amnezia-libxray/patches/0012-tribe-scan-engine.patch)
++// for the desktop service. A probe instance is a SECOND core in the service's Go runtime, next to
++// and independent of the amnezia_xray_configure/start singleton; it never touches `server`.
++//
++// Socket protection is the probe's OWN: the service passes host_options.bind_interface[_index]
++// (required on macOS) and every probe socket - each outbound's, DNS, the reach dial - is bound to that
++// interface in Go (IP_BOUND_IF / IPV6_BOUND_IF, SO_BINDTODEVICE on Linux, IP_UNICAST_IF on Windows)
++// instead of passing the callback registered with amnezia_xray_setsockcallback (core 0011,
++// ContextWithSocketProtector). A probe never enters a tunnel that owns the default route; a failed
++// bind is the probe's error "bind_failed".
++// HTTPS is Go's own crypto/tls with the system roots: the service needs no TLS stack.
++
++/*
++#include <stdint.h>
++#include <stdlib.h>
++*/
++import "C"
++
++import (
++	"crypto/x509"
++	"runtime"
++
++	"xray_binding/tribescan"
++)
++
++var tribeScanTestRootCAs *x509.CertPool // test seam; nil in production (system roots)
++
++// tribeScanPlatform is the service's platform for one message. awg_mini is offered only when the
++// host options name the probe binary (`"awg_probe_binary": "/abs/path/amneziawg-go"`, built with
++// recipes/awg-go option tribe_probe): 4 sessions at once, each a child process (tribescan_awg.go).
++func tribeScanPlatform(hostOptionsJSON string) tribescan.Platform {
++	name := map[string]string{"darwin": "macos", "windows": "windows", "linux": "linux"}[runtime.GOOS]
++	p := tribescan.Platform{
++		Name:    name,
++		MaxFull: 2, // plan §2.4: composites two at a time
++		MaxLeg:  6, // legs share one instance per batch of 24
++		// macOS: the service must bind probe sockets to the uplink (a live AWG/Xray tunnel owns the
++		// default route); Windows/Linux may.
++		RequireBindInterface: runtime.GOOS == "darwin",
++		CanVerifyComposite:   true,
++		FootprintMB:          tribeScanFootprintMB,
++		RootCAs:              tribeScanTestRootCAs,
++	}
++	if bin := tribeScanAwgBinary(hostOptionsJSON); bin != "" {
++		p.Awg, p.MaxAwg = awgExecOpener(bin), 4
++	}
++	return p
++}
++
++func tribeScanMessageJSON(messageJSON, hostOptionsJSON string) string {
++	return tribescan.Message(messageJSON, hostOptionsJSON, tribeScanPlatform(hostOptionsJSON))
++}
++
++// amnezia_xray_scan_message: one tribe-scan-v1 message (scan_caps / scan_start / scan_add /
++// scan_poll / scan_freeze / scan_cancel) and its reply; host options (NULL = none): scan_start reads
++// {"bind_interface": "en0"} or {"bind_interface_index": n} (required on macOS), "awg_live_peer"
++// and "awg_probe_binary"; every message may carry "gen". scan_caps reads "awg_probe_binary" too.
++// Returns JSON (free with amnezia_xray_free). Never blocks on the network; a scan_start that
++// replaces a running scan waits up to 3 s.
++//
++//export amnezia_xray_scan_message
++func amnezia_xray_scan_message(cMessage *C.char, cHostOptions *C.char) *C.char {
++	return C.CString(tribeScanMessageJSON(C.GoString(cMessage), C.GoString(cHostOptions)))
++}
++
++// amnezia_xray_scan_stop_all: end the running scan (reason tunnel_stopped) and wait up to waitMs
++// (max 10000) until every probe instance is closed. {"stopped":bool}.
++//
++//export amnezia_xray_scan_stop_all
++func amnezia_xray_scan_stop_all(waitMs C.int64_t) *C.char {
++	return C.CString(tribescan.StopAllJSON(int64(waitMs)))
++}
+diff --git a/tribescan_awg.go b/tribescan_awg.go
+new file mode 100644
+index 0000000..4fd04ae
+--- /dev/null
++++ b/tribescan_awg.go
+@@ -0,0 +1,175 @@
++//go:build darwin || linux
++
++package main
++
++// AVPN (amnezia-xray-bindings, patch 0001): awg_mini in the service. The live AmneziaWG tunnel is
++// the `amneziawg-go` daemon; each probe session runs in its own child `amneziawg-go probe`
++// (recipes/awg-go option tribe_probe, protocol tribe-awg-probe-v1), so a session never shares a
++// process with the live device. The engine here schedules it (pool, shared byte gate, spacing, one
++// per node, never the live peer) and runs the data probe over the child's stdin / stdout, which the
++// child pipes to its TCP connection inside the tunnel. The child is killed at the probe's deadline,
++// on cancel and on Close.
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"net/netip"
++	"os"
++	"os/exec"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"xray_binding/tribescan"
++)
++
++// tribeScanAwgBinary is the host option naming the probe binary (absolute path).
++func tribeScanAwgBinary(hostOptionsJSON string) string {
++	var o struct {
++		Binary string `json:"awg_probe_binary"`
++	}
++	if json.Unmarshal([]byte(hostOptionsJSON), &o) != nil || !strings.HasPrefix(o.Binary, "/") {
++		return ""
++	}
++	if st, err := os.Stat(o.Binary); err != nil || st.IsDir() || st.Mode()&0o111 == 0 {
++		return ""
++	}
++	return o.Binary
++}
++
++// awgExecChildren counts the probe children alive (started and not yet reaped).
++var awgExecChildren atomic.Int64
++
++// The engine's LiveWork and stop reply ("children") count them.
++func init() { tribescan.SetRunnerLive(nil, awgExecChildren.Load) }
++
++type awgExecSession struct {
++	cmd  *exec.Cmd
++	in   io.WriteCloser
++	out  *bufio.Reader
++	once sync.Once
++	st   struct {
++		HandshakeOK bool   `json:"handshake_ok"`
++		HandshakeMs int64  `json:"handshake_ms"`
++		EchoSent    int    `json:"echo_sent"`
++		EchoReplies int    `json:"echo_replies"`
++		EchoBytes   int64  `json:"echo_bytes"`
++		Error       string `json:"error"`
++	}
++}
++
++func awgExecOpener(binary string) tribescan.AwgOpener {
++	return func(ctx context.Context, job tribescan.AwgJob) (tribescan.AwgSession, error) {
++		cmd := exec.Command(binary, "probe")
++		cmd.Stderr = nil // the child logs nothing; whatever it might print never reaches a log
++		in, err := cmd.StdinPipe()
++		if err != nil {
++			return nil, err
++		}
++		out, err := cmd.StdoutPipe()
++		if err != nil {
++			return nil, err
++		}
++		if err := cmd.Start(); err != nil {
++			return nil, err
++		}
++		awgExecChildren.Add(1)
++		s := &awgExecSession{cmd: cmd, in: in, out: bufio.NewReader(out)}
++		// The probe's deadline, a cancel or a stop kills the child (the job's context ends when the
++		// session's job returns, so the registration never outlives it).
++		context.AfterFunc(ctx, func() { s.Close() })
++		var addrs []string
++		for _, p := range job.Addresses {
++			addrs = append(addrs, p.String())
++		}
++		target := ""
++		if job.EchoTarget.IsValid() {
++			target = job.EchoTarget.String()
++		}
++		raw, _ := json.Marshal(map[string]any{"uapi": job.UAPI, "address": addrs, "mtu": job.MTU, "bound_if": job.BoundIf,
++			"prime_echo_target": target, "prime_echoes": job.Echoes, "handshake_ms": job.Handshake.Milliseconds(),
++			"peer_key": job.PeerKey})
++		if _, err := in.Write(append(raw, '\n')); err != nil {
++			s.Close()
++			return nil, err
++		}
++		line, err := s.out.ReadBytes('\n')
++		if err != nil || json.Unmarshal(line, &s.st) != nil {
++			s.Close()
++			if ctx.Err() != nil {
++				return nil, ctx.Err()
++			}
++			return nil, errors.New("awg probe: no status")
++		}
++		switch s.st.Error {
++		case "":
++		case "config":
++			s.Close()
++			return nil, tribescan.ErrAwgConfig
++		case "bind_failed":
++			s.Close()
++			return nil, tribescan.ErrAwgBind
++		default:
++			s.Close()
++			return nil, errors.New("awg probe: " + s.st.Error)
++		}
++		return s, nil
++	}
++}
++
++func (s *awgExecSession) HandshakeOK() bool  { return s.st.HandshakeOK }
++func (s *awgExecSession) HandshakeMs() int64 { return s.st.HandshakeMs }
++func (s *awgExecSession) Echoes() (int, int, int64) {
++	return s.st.EchoSent, s.st.EchoReplies, s.st.EchoBytes
++}
++
++func (s *awgExecSession) DialTCP(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
++	stop := context.AfterFunc(ctx, func() { s.Close() })
++	defer stop()
++	raw, _ := json.Marshal(map[string]string{"connect": addr.String()})
++	if _, err := s.in.Write(append(raw, '\n')); err != nil {
++		return nil, err
++	}
++	line, err := s.out.ReadBytes('\n')
++	if err != nil {
++		return nil, err
++	}
++	var r struct {
++		Connected bool `json:"connected"`
++	}
++	if json.Unmarshal(line, &r) != nil || !r.Connected {
++		return nil, errors.New("awg probe: no connection")
++	}
++	return &awgExecConn{s: s}, nil
++}
++
++// Close kills the child at once (SIGKILL: a hung child cannot delay a stop) and reaps it; a
++// concurrent Close waits until it is reaped, so a session is gone when its job ends.
++func (s *awgExecSession) Close() error {
++	s.once.Do(func() {
++		s.in.Close()
++		if s.cmd.Process != nil {
++			s.cmd.Process.Kill()
++		}
++		s.cmd.Wait()
++		awgExecChildren.Add(-1)
++	})
++	return nil
++}
++
++// awgExecConn is the probe's stream: the child's stdout / stdin. Deadlines are the engine's watchdog.
++type awgExecConn struct{ s *awgExecSession }
++
++func (c *awgExecConn) Read(p []byte) (int, error)       { return c.s.out.Read(p) }
++func (c *awgExecConn) Write(p []byte) (int, error)      { return c.s.in.Write(p) }
++func (c *awgExecConn) Close() error                     { return c.s.Close() }
++func (c *awgExecConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
++func (c *awgExecConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
++func (c *awgExecConn) SetDeadline(time.Time) error      { return nil }
++func (c *awgExecConn) SetReadDeadline(time.Time) error  { return nil }
++func (c *awgExecConn) SetWriteDeadline(time.Time) error { return nil }
+diff --git a/tribescan_awg_other.go b/tribescan_awg_other.go
+new file mode 100644
+index 0000000..7ffc363
+--- /dev/null
++++ b/tribescan_awg_other.go
+@@ -0,0 +1,11 @@
++//go:build !darwin && !linux
++
++package main
++
++import "xray_binding/tribescan"
++
++// No awg_mini on this host (Windows: the AmneziaWG probe needs a per-socket interface binding the
++// service has not got yet).
++func tribeScanAwgBinary(string) string { return "" }
++
++func awgExecOpener(string) tribescan.AwgOpener { return nil }
+diff --git a/tribescan_awg_test.go b/tribescan_awg_test.go
+new file mode 100644
+index 0000000..9ab0758
+--- /dev/null
++++ b/tribescan_awg_test.go
+@@ -0,0 +1,128 @@
++//go:build tribescan_testkit && (darwin || linux)
++
++package main
++
++// The service's awg_mini path (tribescan_awg.go) against a stand-in child: this test binary run as
++// `<binary> probe` speaks tribe-awg-probe-v1 and "tunnels" by dialling the kit server directly
++// (the real child, `amneziawg-go probe`, is the awg-go recipe's own gate). Checks the protocol,
++// the data probe over the child's pipes, the refusals, and that every child is reaped.
++
++import (
++	"bufio"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"xray_binding/tribescan"
++)
++
++func init() {
++	if os.Getenv("TRIBESCAN_FAKE_AWG_CHILD") == "1" && len(os.Args) > 1 && os.Args[1] == "probe" {
++		os.Exit(tribeScanFakeAwgChild())
++	}
++}
++
++func tribeScanFakeAwgChild() int {
++	br := bufio.NewReader(os.Stdin)
++	line, err := br.ReadBytes('\n')
++	if err != nil {
++		return 1
++	}
++	var job struct {
++		PeerKey string `json:"peer_key"`
++		BoundIf int    `json:"bound_if"`
++		Echoes  int    `json:"prime_echoes"`
++	}
++	json.Unmarshal(line, &job)
++	if strings.HasPrefix(job.PeerKey, "ff") { // a node that never answers
++		fmt.Println(`{"handshake_ok":false,"handshake_ms":-1,"echo_sent":0,"echo_replies":0,"echo_bytes":0,"error":""}`)
++		return 0
++	}
++	if job.BoundIf == 0 {
++		fmt.Println(`{"handshake_ok":false,"handshake_ms":-1,"echo_sent":0,"echo_replies":0,"echo_bytes":0,"error":"bind_failed"}`)
++		return 0
++	}
++	fmt.Printf(`{"handshake_ok":true,"handshake_ms":4,"echo_sent":%d,"echo_replies":%d,"echo_bytes":%d,"error":""}`+"\n",
++		job.Echoes, job.Echoes, 168*job.Echoes)
++	line, err = br.ReadBytes('\n')
++	if err != nil {
++		return 0
++	}
++	var req struct {
++		Connect string `json:"connect"`
++	}
++	json.Unmarshal(line, &req)
++	c, err := net.Dial("tcp", req.Connect)
++	if err != nil {
++		fmt.Println(`{"connected":false,"error":"dial"}`)
++		return 0
++	}
++	fmt.Println(`{"connected":true,"error":""}`)
++	done := make(chan struct{}, 2)
++	go func() { io.Copy(c, br); c.(*net.TCPConn).CloseWrite(); done <- struct{}{} }()
++	go func() { io.Copy(os.Stdout, c); done <- struct{}{} }()
++	<-done
++	return 0
++}
++
++func tribeScanAwgCand(id, peerKey string, port int) map[string]any {
++	uapi := fmt.Sprintf("private_key=%s\nlisten_port=0\npublic_key=%s\nendpoint=127.0.0.1:51820\nallowed_ip=127.0.0.1/32\n",
++		strings.Repeat("11", 32), peerKey)
++	cfg, _ := json.Marshal(map[string]any{"uapi": uapi, "probe": map[string]any{"host": "example.com", "ip": "127.0.0.1", "port": port},
++		"prime_echo_target": "10.8.0.1", "bound_if": nil, "address": "10.8.0.2/32"})
++	return map[string]any{"id": id, "kind": tribescan.KindAwgMini, "config": string(cfg), "entry": nil, "reach_at_ms": -1,
++		"profile_id": nil, "early_retry": false, "dns_plan": false, "cost_bytes": 90000}
++}
++
++func TestTribeScanBindingsAwgChild(t *testing.T) {
++	srv := tribescan.NewProbeServer(t)
++	tribeScanTestRootCAs = srv.Pool
++	t.Cleanup(func() { tribescan.StopAllWait(5 * time.Second); tribeScanTestRootCAs = nil })
++	t.Setenv("TRIBESCAN_FAKE_AWG_CHILD", "1")
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Without the binary the service offers no awg_mini.
++	var caps tribescan.Caps
++	json.Unmarshal([]byte(tribeScanMessageJSON(`{"action":"scan_caps"}`, "")), &caps)
++	if caps.MaxAwgConcurrent != 0 {
++		t.Fatalf("caps without a probe binary: %+v", caps)
++	}
++	opts := fmt.Sprintf(`{"bind_interface":%q,"awg_probe_binary":%q}`, tribeScanLoopback(), self)
++	json.Unmarshal([]byte(tribeScanMessageJSON(`{"action":"scan_caps"}`, opts)), &caps)
++	if caps.MaxAwgConcurrent != 4 || caps.Kinds[len(caps.Kinds)-1] != tribescan.KindAwgMini {
++		t.Fatalf("caps with a probe binary: %+v", caps)
++	}
++	key := func(b byte) string { return strings.Repeat(fmt.Sprintf("%02x", b), 32) }
++	before := tribescan.OpenFDs()
++	req := tribescan.KitRequest("awg-child", srv.Base(), map[string]any{"awg_concurrency": 4, "concurrency": 0, "awg_prime_echoes": 1}, 30000,
++		tribeScanAwgCand("n1", key(1), srv.Port), tribeScanAwgCand("n2", key(2), srv.Port), tribeScanAwgCand("silent", key(0xff), srv.Port))
++	r := tribeScanRunExport(t, req, opts)
++	for _, id := range []string{"n1", "n2"} {
++		d, _ := r.DataByID(id)
++		if d.Error != "" || d.ShaOK == nil || !*d.ShaOK || d.HandshakeOK == nil || !*d.HandshakeOK || d.EchoSent == nil || *d.EchoSent != 1 {
++			raw, _ := json.Marshal(d)
++			t.Fatalf("%s: %s", id, raw)
++		}
++	}
++	if d, _ := r.DataByID("silent"); d.Error != tribescan.ErrDial {
++		t.Fatalf("silent node: %+v", d)
++	}
++	// The interface binding is the child's: without one it reports bind_failed.
++	r = tribeScanRunExport(t, tribescan.KitRequest("awg-child-unbound", srv.Base(), map[string]any{"awg_concurrency": 4, "concurrency": 0}, 30000,
++		tribeScanAwgCand("u", key(3), srv.Port)), fmt.Sprintf(`{"awg_probe_binary":%q}`, self))
++	if r.Err.Error == "" {
++		if d, _ := r.DataByID("u"); d.Error != tribescan.ErrBindFailed {
++			t.Fatalf("unbound child: %+v", d)
++		}
++	}
++	if fd := tribescan.OpenFDs(); before >= 0 && fd > before+2 {
++		t.Fatalf("fds %d after the children, %d before", fd, before)
++	}
++}
+diff --git a/tribescan_darwin.go b/tribescan_darwin.go
+new file mode 100644
+index 0000000..800b958
+--- /dev/null
++++ b/tribescan_darwin.go
+@@ -0,0 +1,21 @@
++//go:build darwin
++
++package main
++
++// AVPN (patch 0001): the service's physical footprint for progress.mem_mb.
++
++/*
++#include <mach/mach.h>
++
++static double amnezia_xray_scan_footprint_mb(void) {
++	task_vm_info_data_t info;
++	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
++	if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
++		return -1;
++	}
++	return (double)info.phys_footprint / (1024.0 * 1024.0);
++}
++*/
++import "C"
++
++func tribeScanFootprintMB() float64 { return float64(C.amnezia_xray_scan_footprint_mb()) }
+diff --git a/tribescan_other.go b/tribescan_other.go
+new file mode 100644
+index 0000000..5b1211b
+--- /dev/null
++++ b/tribescan_other.go
+@@ -0,0 +1,8 @@
++//go:build !darwin
++
++package main
++
++import "xray_binding/tribescan"
++
++// AVPN (patch 0001): resident set on Linux, -1 (unknown) on Windows.
++func tribeScanFootprintMB() float64 { return tribescan.ProcessRSSMB() }
+diff --git a/tribescan_stop_test.go b/tribescan_stop_test.go
+new file mode 100644
+index 0000000..3faffca
+--- /dev/null
++++ b/tribescan_stop_test.go
+@@ -0,0 +1,61 @@
++//go:build tribescan_testkit && (darwin || linux)
++
++package main
++
++// The service's probe child that hangs (never answers, ignores its stdin) cannot hold a stop:
++// StopAll kills it and reaps it before it returns true.
++
++import (
++	"bufio"
++	"encoding/json"
++	"fmt"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"xray_binding/tribescan"
++)
++
++func init() {
++	if os.Getenv("TRIBESCAN_HUNG_AWG_CHILD") == "1" && len(os.Args) > 1 && os.Args[1] == "probe" {
++		bufio.NewReader(os.Stdin).ReadBytes('\n')
++		select {} // hung: no status, ever
++	}
++}
++
++func TestTribeScanStopAllHungChild(t *testing.T) {
++	srv := tribescan.NewProbeServer(t)
++	t.Cleanup(func() { tribescan.StopAllWait(5 * time.Second) })
++	t.Setenv("TRIBESCAN_HUNG_AWG_CHILD", "1")
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	plat := tribescan.Platform{Name: "test", MaxAwg: 4, Awg: awgExecOpener(self), RootCAs: srv.Pool}
++	uapi := fmt.Sprintf("private_key=%s\nlisten_port=0\nreplace_peers=true\npublic_key=%s\nendpoint=127.0.0.1:51820\nreplace_allowed_ips=true\nallowed_ip=127.0.0.1/32\n",
++		strings.Repeat("11", 32), strings.Repeat("22", 32))
++	cfg, _ := json.Marshal(map[string]any{"uapi": uapi, "address": "10.8.0.2/32", "probe": map[string]any{"host": "example.com", "ip": "127.0.0.1", "port": srv.Port},
++		"prime_echo_target": nil, "bound_if": nil})
++	cand := map[string]any{"id": "hung", "kind": tribescan.KindAwgMini, "config": string(cfg), "entry": nil, "reach_at_ms": -1,
++		"profile_id": nil, "early_retry": false, "dns_plan": false, "cost_bytes": 90000}
++	var ack tribescan.Ack
++	tribescan.KitMessage(t, tribescan.KitRequest("hung-child", srv.Base(), map[string]any{"awg_concurrency": 2, "concurrency": 0,
++		"awg_handshake_ms": 5000, "total_ms": 30000}, 60000, cand), "", plat, &ack)
++	for end := time.Now().Add(5 * time.Second); awgExecChildren.Load() != 1; time.Sleep(5 * time.Millisecond) {
++		if time.Now().After(end) {
++			t.Fatalf("child not started: %+v", ack)
++		}
++	}
++	if w := tribescan.LiveWork(); w.Children != 1 { // the runner's count reaches LiveWork and the stop reply
++		t.Fatalf("LiveWork with one child: %+v", w)
++	}
++	t0 := time.Now()
++	if !tribescan.StopAll(3 * time.Second) {
++		t.Fatal("StopAll timed out on a hung child")
++	}
++	if n := awgExecChildren.Load(); n != 0 || tribescan.LiveWork() != (tribescan.Work{}) {
++		t.Fatalf("StopAll returned true with %d children, %+v alive", n, tribescan.LiveWork())
++	}
++	t.Logf("hung child killed and reaped %v after the stop", time.Since(t0))
++}
+diff --git a/tribescan_test.go b/tribescan_test.go
+new file mode 100644
+index 0000000..42c6949
+--- /dev/null
++++ b/tribescan_test.go
+@@ -0,0 +1,146 @@
++//go:build tribescan_testkit
++
++package main
++
++// Gate of the bindings scan export (patch 0001), -race: probes run while the service's singleton
++// core (amnezia_xray_configure/start/stop: core.LoadConfig("json") + core.New + Start + Close) is
++// restarted, with a process-wide dialer controller registered the way amnezia_xray_setsockcallback
++// does it, and every probe socket bound to the loopback interface by host_options.bind_interface.
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"runtime"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++
++	clog "github.com/xtls/xray-core/common/log"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/transport/internet"
++
++	"xray_binding/tribescan"
++)
++
++type tribeScanQuiet struct{}
++
++func (tribeScanQuiet) Handle(clog.Message) {}
++
++var tribeScanControllerOnce sync.Once
++var tribeScanControllerCalls atomic.Int64
++
++func tribeScanLoopback() string {
++	if runtime.GOOS == "linux" {
++		return "lo"
++	}
++	return "lo0"
++}
++
++func tribeScanRunExport(t *testing.T, req, opts string) *tribescan.KitResult {
++	t.Helper()
++	r := &tribescan.KitResult{}
++	raw := tribeScanMessageJSON(req, opts)
++	if json.Unmarshal([]byte(raw), &r.Ack); r.Ack.Type != "scan_ack" {
++		json.Unmarshal([]byte(raw), &r.Err)
++		r.Final = tribescan.Progress{Done: true, Reason: r.Err.Error}
++		return r
++	}
++	r.ScanID = r.Ack.ScanID
++	return tribescan.KitPoll(t, r, 30*time.Second, time.Now())
++}
++
++func TestTribeScanBindingsExport(t *testing.T) {
++	clog.RegisterHandler(tribeScanQuiet{})
++	srv := tribescan.NewProbeServer(t)
++	vless := tribescan.StartVlessServer(t, srv.Port)
++	tribeScanTestRootCAs = srv.Pool
++	t.Cleanup(func() { tribescan.StopAllWait(5 * time.Second); tribeScanTestRootCAs = nil })
++	tribeScanControllerOnce.Do(func() { // as amnezia_xray_setsockcallback (append-only, process-wide)
++		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
++			if address == fmt.Sprintf("127.0.0.1:%d", vless) {
++				tribeScanControllerCalls.Add(1)
++			}
++			return nil
++		})
++	})
++	opts := fmt.Sprintf(`{"bind_interface":%q}`, tribeScanLoopback())
++	var cands []map[string]any
++	for i := 0; i < 3; i++ {
++		cands = append(cands, tribescan.KitFullCandidate(fmt.Sprintf("full%d", i), vless))
++		cands = append(cands, tribescan.KitLegCandidate(fmt.Sprintf("leg%d", i), tribescan.VlessOutbound("proxy", vless), nil, nil))
++	}
++	req := func(id string) string { return tribescan.KitRequest(id, srv.Base(), nil, 30000, cands...) }
++
++	if runtime.GOOS == "darwin" {
++		if r := tribeScanRunExport(t, req("no-bind"), ""); r.Err.Error != "bad_request" {
++			t.Fatalf("macOS without bind_interface: %+v", r.Err)
++		}
++	}
++	var caps tribescan.Caps
++	json.Unmarshal([]byte(tribeScanMessageJSON(`{"action":"scan_caps"}`, "")), &caps)
++	if caps.MaxFullConcurrent != 2 || caps.MaxLegConcurrent != 6 || !caps.CanVerifyComposite || caps.NeedsVPN {
++		t.Fatalf("caps %+v", caps)
++	}
++	before := tribeScanControllerCalls.Load()
++	r := tribeScanRunExport(t, req("steady"), opts)
++	if r.Final.Reason != tribescan.ReasonComplete || len(r.Data()) != 6 {
++		t.Fatalf("steady %+v %+v", r.Final, r.Err)
++	}
++	// The service's own callback (amnezia_xray_setsockcallback) is bypassed: probe sockets are bound
++	// by the probe's protector (review F3).
++	if tribeScanControllerCalls.Load() != before {
++		t.Fatalf("%d probe sockets passed the service's process-wide callback", tribeScanControllerCalls.Load()-before)
++	}
++
++	// The service's singleton tunnel core restarts while probes run.
++	raw, _ := json.Marshal(tribescan.TunnelConfig(vless, tribescan.FreePort(t)))
++	srv.SetMode("slow_first_byte", false)
++	srv.Delay.Store(150)
++	var restarts atomic.Int32
++	stop := make(chan struct{})
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		for {
++			select {
++			case <-stop:
++				return
++			default:
++			}
++			cfg, err := core.LoadConfig("json", bytes.NewReader(raw))
++			if err != nil {
++				t.Error(err)
++				return
++			}
++			inst, err := core.New(cfg)
++			if err != nil || inst.Start() != nil {
++				t.Error("tunnel core did not start")
++				return
++			}
++			time.Sleep(15 * time.Millisecond)
++			inst.Close()
++			restarts.Add(1)
++		}
++	}()
++	for i := 0; i < 3; i++ {
++		r := tribeScanRunExport(t, req(fmt.Sprintf("churn%d", i)), opts)
++		for _, d := range r.Data() {
++			if d.Error != "" || d.ShaOK == nil || !*d.ShaOK {
++				t.Fatalf("scan %d during tunnel restarts: %+v", i, d)
++			}
++		}
++	}
++	close(stop)
++	wg.Wait()
++	t.Logf("tunnel restarts during 3 scans: %d; controller calls %d", restarts.Load(), tribeScanControllerCalls.Load())
++	if restarts.Load() < 10 || tribescan.LiveInstances() != 0 {
++		t.Fatalf("restarts %d live %d", restarts.Load(), tribescan.LiveInstances())
++	}
++	if mb := tribeScanFootprintMB(); runtime.GOOS == "darwin" && mb <= 0 {
++		t.Fatalf("footprint %v", mb)
++	}
++}

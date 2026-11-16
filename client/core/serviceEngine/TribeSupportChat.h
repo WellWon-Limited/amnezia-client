@@ -35,6 +35,10 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <memory>
+
+#include "SupportReportQueue.h" // AVPN (L9, F12): on-disk queue of support reports
+
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -91,9 +95,22 @@ class TribeSupportChat : public QObject {
     Q_PROPERTY(bool mediaPreparing READ mediaPreparing NOTIFY mediaPreparingChanged)
     // Прогресс аплоада вложения 0..1 (−1 = не идёт) — полоска над композером.
     Q_PROPERTY(qreal uploadProgress READ uploadProgress NOTIFY uploadProgressChanged)
+    // AVPN (L9, F12): support-report queue (SupportReportQueue.h). Reports not yet settled by the
+    // server, and "no room for a new full check" (backpressure: «Отчёты ждут связи: N. Новая
+    // проверка — после отправки»). reportsFull also turns false when an abandoned reservation
+    // expires; that edge is not signalled (read it again when the button is pressed).
+    Q_PROPERTY(int reportsPending READ reportsPending NOTIFY reportQueueChanged)
+    Q_PROPERTY(bool reportsFull READ reportsFull NOTIFY reportQueueChanged)
+    // F4: reports the server refused (terminal 4xx), kept with their payload in the rejected store
+    // (5 most recent / 16 MiB); retried once after an app update or a change of the server's support
+    // limits, and with the user's next «Отправить логи» (sendDiagReport / resendRejectedReports).
+    Q_PROPERTY(int reportsRejected READ reportsRejected NOTIFY reportQueueChanged)
 
 public:
-    explicit TribeSupportChat(QNetworkAccessManager *nam, QObject *parent = nullptr);
+    // reportQueueDir: tests only; empty = <AppDataLocation>/support-report-queue.
+    explicit TribeSupportChat(QNetworkAccessManager *nam, QObject *parent = nullptr,
+                              const QString &reportQueueDir = QString());
+    ~TribeSupportChat() override;
 
     QVariantList messages() const { return m_messages; }
     QObject *msgModel() const { return m_msgModel; }
@@ -115,7 +132,39 @@ public:
     // multipart text/plain на /v1/support/attachments, generic-имя diag.log (privacy-паттерн).
     // Гейт: kill-switch features.support_diag (default TRUE) — при false no-op с тостом.
     // 404/405/415 бэка = «эндпоинт ещё не принимает text/plain» → честный тост БЕЗ «Повторить».
+    // AVPN (L9): now goes through the report queue (one log part); kept for every existing caller.
     Q_INVOKABLE void sendDiagReport(const QString &reportText);
+
+    // AVPN (L9, F12) — the support-report queue for the Scanner's «Проверить и отправить отчёт».
+    // reserveReport(): admission of a full check at its start; "" = queue full (backpressure, do not
+    // start the check). The token keeps one slot for the report the check produces.
+    Q_INVOKABLE QString reserveReport();
+    Q_INVOKABLE void releaseReport(const QString &reservation); // the check was aborted
+    // Enqueues one report: humanText -> a thread message, diagText -> diag.log, benchJson -> POST
+    // /v1/bench/report (optional; empty = not part of this report). Returns {result, id}:
+    // result "queued" | "full" | "too_large" | "empty" | "invalid" | "disabled" (kill switch
+    // support_diag) | "unsupported" (server log_mime has no text/plain) | "unsaved_sending" (F3: the
+    // queue could not write it; ONE direct attempt is running, nothing survives the app - follow
+    // reportStatusChanged(id): "sent_unsaved" = both support parts acknowledged, "not_saved" = not
+    // persisted and not confirmed) | "not_saved" (not persisted and no direct attempt possible).
+    // Never "queued" for something that is not on disk. The reservation is consumed on "queued" and
+    // released on every other result.
+    Q_INVOKABLE QVariantMap submitReport(const QString &humanText, const QString &diagText,
+                                         const QString &benchJson = QString(),
+                                         const QString &reservation = QString());
+    // "queued" | "sending" | "delivered" | "rejected" (kept in the rejected store, or evicted from it:
+    // see reportStatus.kept) | "unsaved_sending" | "sent_unsaved" | "not_saved" | "unknown".
+    Q_INVOKABLE QString reportResult(const QString &reportId) const;
+    // {result, reason ("log:413", "evicted:log:413", "corrupt:checksum", "not_persisted", ...),
+    //  parts: {text|log|bench: pending|acked|rejected|failed}, kept (payload in the rejected store)}
+    Q_INVOKABLE QVariantMap reportStatus(const QString &reportId) const;
+    // F4: the user's explicit «Отправить логи»: every rejected report back into the queue. Returns how
+    // many moved (the queue's room permitting). sendDiagReport() calls it itself.
+    Q_INVOKABLE int resendRejectedReports();
+    int reportsPending() const;
+    bool reportsFull() const;
+    int reportsRejected() const;
+
     Q_INVOKABLE void retryMessage(int localId);    // повторить failed-эхо
     Q_INVOKABLE void discardMessage(int localId);  // убрать failed-эхо
     // Скачать оригинал вложения во временный файл → attachmentReady(file://…).
@@ -153,6 +202,9 @@ signals:
     void sendFailed(const QString &reason);
     void attachmentReady(int attachmentId, const QString &kind, const QUrl &fileUrl);
     void attachmentFailed(int attachmentId);
+    // AVPN (L9): pending count / full changed; one report's result changed (reportResult values).
+    void reportQueueChanged();
+    void reportStatusChanged(const QString &reportId, const QString &result);
 
 private:
     struct Echo {
@@ -199,6 +251,22 @@ private:
     void finishOriginal(int attachmentId, const QString &kind, const QString &mime,
                         const QByteArray &data);
     Echo *echoByLocalId(int localId);
+    // AVPN (L9): delivery of the report queue — one part in flight, triggers in the .cpp.
+    void pumpReportQueue();
+    void postQueuedPart(const srq::Due &due);
+    void kickReportQueue(bool foreground); // live answer (false) / app active (true), then pump
+    void reportQueueTouched(const QString &reportId);
+    void appendSavedServerMessage(const QByteArray &replyBody, const QString &echoLocalUrl);
+    // F3: a report the queue could not persist - one direct attempt, tracked by its own id.
+    struct Unsaved {
+        QString id;
+        QMap<QString, QString> parts; // text|log -> pending|acked|failed
+        QString result;               // "" while sending | "sent_unsaved" | "not_saved"
+    };
+    QString sendUnsaved(const QString &humanText, const QByteArray &diagBytes, const QByteArray &benchJson,
+                        QString *reportId);
+    const Unsaved *unsavedById(const QString &reportId) const;
+    void settleUnsavedEcho(int localId, bool ok);
     // Бэкофф-поллинг серверного постера видео (handoff Занавеса §C: постер генерится
     // асинхронно, один refresh после POST почти всегда рано): 2с→5с→10с×3, стоп по
     // появлению постера / исчерпанию попыток / уходу со страницы (mark-read-гигиена).
@@ -232,7 +300,13 @@ private:
     bool m_threadLoadedOnce = false;
     bool m_refreshInFlight = false;
     bool m_unreadInFlight = false;
-    bool m_diagAutoResent = false; // BUG-7: авто-досыл потерянной диагностики — 1 раз/запуск
+    // AVPN (L9, F12): replaces the single AvpnSupport/pendingDiag setting (migrated once in the ctor).
+    std::unique_ptr<srq::SupportReportQueue> m_reportQueue;
+    bool m_queuePostInFlight = false;
+    QHash<QString, int> m_queueRowIds; // "<report>/<part>" -> stable negative row id in the feed
+    QList<Unsaved> m_unsaved;                       // F3: last 16 unsaved reports (memory only, honest)
+    QHash<int, QPair<QString, QString>> m_unsavedEcho; // echo localId -> (unsaved report id, part kind)
+    QString m_limitsKey;                             // F4: digest of the server's support limits seen last
     // Пока наш POST в полёте, тред НЕ перечитываем: поллинг мог привезти уже
     // закоммиченную серверную копию при ещё живом эхе → дубль на экране.
     // Отложенные запросы (поллинг/пуш во время долгого аплоада) копятся во флаг

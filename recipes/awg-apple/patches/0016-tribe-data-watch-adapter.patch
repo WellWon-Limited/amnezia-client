@@ -1,0 +1,309 @@
+diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift b/Sources/WireGuardKit/WireGuardAdapter.swift
+index de324bf..6fd8466 100644
+--- a/Sources/WireGuardKit/WireGuardAdapter.swift
++++ b/Sources/WireGuardKit/WireGuardAdapter.swift
+@@ -78,6 +78,28 @@ public class WireGuardAdapter {
+     // whether the pending coalesced roam step is a fresh port (path returned after a real loss).
+     private var lastPathInterface: String?
+     private var roamWantsFreshPort = false
++    // tribe.14 data watch (TribeDataWatch.swift): a verdict about DATA, fed on the stall watchdog's
++    // own tick (no timer of its own; no stall watchdog = no data watch). It reports and asks, it
++    // never acts. Off until the provider sets an enabled policy: the hooks below are then
++    // no-ops and the adapter behaves as tribe.11. workQueue only.
++    private var dataWatch = TribeDataWatch()
++    private var dataWatchPolicy = TribeDataWatchPolicy.disabled
++    private var dataWatchActive = false
++    /// The provider's side of the watch (bypass check, probe, last status request of the app).
++    /// Called on workQueue at every tick while the watch is on, with the handle of the device
++    /// that is up (the probe's result is asked from that device).
++    public var dataWatchInputs: ((_ handle: Int32) -> TribeDataWatchInputs)?
++    /// Called on workQueue when the watch has something to report or asks for a check or a probe.
++    public var dataWatchHandler: ((_ handle: Int32, TribeDataWatchOutput, TribeDataWatchSnapshot) -> Void)?
++    /// tribe.14, stage 2: the configuration of a node the arbiter may switch to in place (the
++    /// provider builds it from the app's plan). nil = this node cannot be switched to.
++    public var dataWatchCandidate: ((_ nodeId: String) -> TunnelConfiguration?)?
++    /// tribe.14, stage 2: no engine runs after a failed switch (true) / one runs again (false).
++    public var dataWatchEngineHandler: ((_ down: Bool) -> Void)?
++    /// tribe.14, stage 2: a switch left the tunnel without an engine. The last configuration that
++    /// worked is retried on the stall tick with a bounded back-off; its network settings are
++    /// applied again first when they are not in force.
++    private var dataWatchEngineDown: (generator: PacketTunnelSettingsGenerator, settingsInForce: Bool, retry: TribeEngineRetry)?
+ 
+     /// Packet tunnel provider.
+     private weak var packetTunnelProvider: NEPacketTunnelProvider?
+@@ -407,6 +429,17 @@ public class WireGuardAdapter {
+         }
+     }
+ 
++    /// tribe.14: policy of the data watch (the provider re-reads it from the plan file). A
++    /// disabled policy makes the watch forget everything at the next tick.
++    public func setDataWatchPolicy(_ policy: TribeDataWatchPolicy) {
++        workQueue.async { self.dataWatchPolicy = policy }
++    }
++
++    /// tribe.14: the watch's counters for the status reply and the shared file.
++    public func dataWatchSnapshot(completionHandler: @escaping (TribeDataWatchSnapshot) -> Void) {
++        workQueue.async { completionHandler(self.dataWatch.snapshot(policy: self.dataWatchPolicy)) }
++    }
++
+     // MARK: - Private methods
+ 
+     /// Setup WireGuard log handler.
+@@ -593,6 +626,7 @@ public class WireGuardAdapter {
+                 let realLoss = self.pathLostAt != nil && self.everHadHandshake
+                     && self.remainingUnsatisfiedGraceSeconds() == 0
+                 let interfaceChanged = self.notePathInterface(path) && self.everHadHandshake
++                if realLoss || interfaceChanged { self.dataWatchPathEvent(interfaceChanged: interfaceChanged) } // tribe.14
+                 if let lostAt = self.pathLostAt {
+                     self.pathLostAt = nil
+                     self.roamCounters.pathRestored += 1
+@@ -679,6 +713,7 @@ public class WireGuardAdapter {
+         guard self.pathLostAt == nil else { return }
+         self.pathLostAt = Date()
+         self.roamCounters.pathLost += 1
++        self.dataWatchPathEvent(interfaceChanged: false) // tribe.14
+     }
+ 
+     /// tribe.9: remembers the physical interface of the satisfied path (utun/ipsec are `.other`
+@@ -766,6 +801,10 @@ public class WireGuardAdapter {
+         self.stallTimer = timer
+         self.recovery.resetTracker()
+         self.previousWatchdogSample = nil
++        // tribe.14: a (re)started device is a new subject for the data watch (start grace).
++        if self.dataWatchPolicy.enabled {
++            self.dataWatch.noteDeviceStarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++        }
+         timer.resume()
+     }
+ 
+@@ -829,6 +868,10 @@ public class WireGuardAdapter {
+             self.state = .started(newHandle, settingsGenerator)
+             self.roamCounters.softRestarts += 1
+             self.previousWatchdogSample = nil
++            // tribe.14: the new device's counters start from zero and it has no session yet.
++            if self.dataWatchPolicy.enabled {
++                self.dataWatch.noteBackendRestarted(at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++            }
+             if let sample = self.currentStallSample(handle: newHandle) {
+                 self.recovery.rebaseAfterBackendRestart(sample)
+             }
+@@ -866,6 +909,7 @@ public class WireGuardAdapter {
+     }
+ 
+     private func stallTick() {
++        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return } // tribe.14, stage 2
+         guard case .started(let handle, let settingsGenerator) = self.state,
+               let sample = self.currentStallSample(handle: handle) else { return }
+         if !self.everHadHandshake && sample.lastHandshakeSec > 0 {
+@@ -877,6 +921,12 @@ public class WireGuardAdapter {
+         self.previousWatchdogSample = sample
+         let interval: Double = (!self.lastPathSatisfiable || idle) ? 5 : 1
+         self.stallTimer?.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(300))
++        // tribe.14: the same sample, before the ladder acts on it. A command of the watch's arbiter
++        // (stage 2) is executed inside and the ladder skips this sample: one executor per tick.
++        if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }
++        // One owner of recovery while the arbiter treats or leaves a confirmed dead node (never
++        // with the switch key off): the ladder's steps would spend the budget the switch needs.
++        if self.dataWatch.arbiterOwnsRecovery { return }
+         let outcome = self.recovery.tick(sample, pathSatisfied: self.lastPathSatisfiable, policy: self.roamingPolicy)
+         switch outcome {
+         case .none:
+@@ -908,6 +958,198 @@ public class WireGuardAdapter {
+         }
+     }
+ 
++    // MARK: - Tribe data watch (tribe.14, workQueue only)
++
++    /// One step of the data watch on the stall watchdog's sample. With the policy off this is one
++    /// comparison; the watch is cleared once when the policy goes off. true = a command of the
++    /// arbiter was executed (stage 2; never with the switch key off).
++    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {
++        guard self.dataWatchPolicy.enabled else {
++            if self.dataWatchActive {
++                self.dataWatchActive = false
++                self.dataWatch = TribeDataWatch()
++            }
++            return false
++        }
++        self.dataWatchActive = true
++        let inputs = self.dataWatchInputs?(handle) ?? TribeDataWatchInputs()
++        var output = self.dataWatch.step(
++            TribeDataWatchSample(txBytes: sample.txBytes, rxBytes: sample.rxBytes, lastHandshakeSec: sample.lastHandshakeSec,
++                                 uptime: sample.at, wall: Date().timeIntervalSince1970),
++            env: inputs.env(pathSatisfied: self.lastPathSatisfiable),
++            policy: self.dataWatchPolicy)
++        guard !output.isQuiet else { return false }
++        var currentHandle = handle
++        if let command = output.command {
++            let result = self.performDataWatchCommand(command, sample: sample, handle: handle, settingsGenerator: settingsGenerator)
++            self.dataWatch.noteCommandResult(command, result: result, at: ProcessInfo.processInfo.systemUptime, policy: self.dataWatchPolicy)
++            output.commandResult = result
++            if case .started(let newHandle, _) = self.state { currentHandle = newHandle }
++        }
++        self.dataWatchHandler?(currentHandle, output, self.dataWatch.snapshot(policy: self.dataWatchPolicy))
++        return output.command != nil
++    }
++
++    /// Stage 2: what the arbiter ordered. Everything goes through the shared recovery budget: the
++    /// same-node heals as the stall ladder's own steps (a refusal = that step is already spent), a
++    /// switch through the rolling cap of interventions and the cooldown between new devices.
++    private func performDataWatchCommand(_ command: TribeWatchCommand, sample: TribeStallSample, handle: Int32,
++                                         settingsGenerator: PacketTunnelSettingsGenerator) -> TribeCommandResult {
++        switch command {
++        case .heal(.freshPort):
++            guard self.recovery.requestFreshPort(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }
++            self.performSocketOps(TribeRoaming.socketOps(for: .rebindPort), handle: handle, settingsGenerator: settingsGenerator)
++            return .performed
++        case .heal(.softRestart):
++            guard self.recovery.requestSoftRestart(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }
++            return self.restartBackendInPlace(handle: handle, settingsGenerator: settingsGenerator) ? .performed : .failed
++        case .switchPeer(let nodeId, _):
++            // No usable configuration for this node: never again while the plan lives.
++            guard let configuration = self.dataWatchCandidate?(nodeId) else { return .rejected }
++            guard self.recovery.requestPeerSwitch(sample, pathSatisfied: self.lastPathSatisfiable) == .performed else { return .denied }
++            return self.switchBackend(handle: handle, from: settingsGenerator, to: configuration)
++        }
++    }
++
++    /// Stage 2: replace the peer in place - the upstream `update(tunnelConfiguration:)` path (the
++    /// network settings ARE applied again: every peer endpoint has its own route that keeps it
++    /// outside the tunnel), with the backend stopped across the change. The order and every way it
++    /// can fail are `TribeSwitchSequence` (host-tested with a fake engine):
++    ///  1. the new endpoint is resolved while the old backend still runs (a failure changes nothing);
++    ///  2. the old backend is turned off. From here nothing reads the TUN: nothing is sent to
++    ///     either node, and the apps' packets stay in the interface, whose routes are untouched;
++    ///  3. the settings of the new configuration are applied and CONFIRMED: the route that keeps the
++    ///     new endpoint outside the tunnel exists before the first packet to it;
++    ///  4. a new backend is started on the same TUN with the new configuration.
++    /// An engine is started only right after its own settings were confirmed, so at no moment does
++    /// a running engine have a peer whose endpoint is routed into its own tunnel. `performed` is
++    /// told only when the new engine runs. If 3 or 4 fails, the previous node is put back (its
++    /// settings, then its engine). If no engine can be started at all, the adapter says so
++    /// (`dataWatchEngineHandler`) and keeps retrying the previous configuration on the tick.
++    private func switchBackend(handle: Int32, from oldGenerator: PacketTunnelSettingsGenerator,
++                               to tunnelConfiguration: TunnelConfiguration) -> TribeCommandResult {
++        var newGenerator: PacketTunnelSettingsGenerator?
++        var started: (handle: Int32, generator: PacketTunnelSettingsGenerator, new: Bool)?
++        defer { self.packetTunnelProvider?.reasserting = false }
++        let outcome = TribeSwitchSequence.run(TribeSwitchSteps(
++            prepare: {
++                newGenerator = try? self.makeSettingsGenerator(with: tunnelConfiguration)
++                return newGenerator != nil
++            },
++            stopEngine: {
++                self.packetTunnelProvider?.reasserting = true
++                // What runs next to the backend (the Scanner's probe sessions, patch 0015) ends first:
++                // the engine is about to stop and come up with another peer.
++                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }
++            },
++            applySettings: { new in
++                guard let generator = new ? newGenerator : oldGenerator else { return false }
++                return self.applySettingsConfirmed(generator.generateNetworkSettings())
++            },
++            startEngine: { new in
++                guard let generator = new ? newGenerator : oldGenerator,
++                      let handle = self.startBackendForSwitch(generator) else { return false }
++                started = (handle, generator, new)
++                return true
++            }))
++        let now = ProcessInfo.processInfo.systemUptime
++        if let started {
++            self.state = .started(started.handle, started.generator)
++            self.roamCounters.softRestarts += 1
++            self.previousWatchdogSample = nil
++            if let first = self.currentStallSample(handle: started.handle) { self.recovery.rebaseAfterBackendRestart(first) }
++            // Back on the previous node: for the watch that is a restart of the same node's backend.
++            if !started.new && self.dataWatchPolicy.enabled { self.dataWatch.noteBackendRestarted(at: now, policy: self.dataWatchPolicy) }
++        } else if !outcome.engineUp {
++            // No engine runs. The path handler resumes a paused adapter on a path event (settings,
++            // then engine); the tick retries in between.
++            self.state = .temporaryShutdown(oldGenerator)
++            self.dataWatchEngineDown = (oldGenerator, outcome.settingsInForce, TribeEngineRetry(at: now))
++            self.logHandler(.error, "Tribe watch: switch \(outcome.result.rawValue), no engine could be started; retrying the previous node")
++            self.dataWatchEngineHandler?(true)
++        }
++        if outcome.result != .performed {
++            self.logHandler(.error, "Tribe watch: switch \(outcome.result.rawValue), the tunnel is on the previous node")
++        }
++        return outcome.result
++    }
++
++    /// As `setNetworkSettings`, but a call the system did not confirm within 5 s is a FAILURE: an
++    /// engine must never be started on settings that may not be in force.
++    private func applySettingsConfirmed(_ networkSettings: NEPacketTunnelNetworkSettings) -> Bool {
++        guard let provider = self.packetTunnelProvider else { return false }
++        let condition = NSCondition()
++        var done = false
++        var systemError: Error?
++        condition.lock()
++        defer { condition.unlock() }
++        provider.setTunnelNetworkSettings(networkSettings) { error in
++            condition.lock()
++            systemError = error
++            done = true
++            condition.signal()
++            condition.unlock()
++        }
++        let deadline = Date().addingTimeInterval(5)
++        while !done {
++            if !condition.wait(until: deadline) { break }
++        }
++        guard done, systemError == nil else {
++            self.logHandler(.error, "Tribe watch: network settings not confirmed (\(done ? "refused" : "no answer in 5 s"))")
++            return false
++        }
++        self.lastNetworkSettingsUpdateAt = Date()
++        return true
++    }
++
++    private func startBackendForSwitch(_ generator: PacketTunnelSettingsGenerator) -> Int32? {
++        let (wgConfig, resolutionResults) = generator.uapiConfiguration()
++        self.logEndpointResolutionResults(resolutionResults)
++        return try? self.startWireGuardBackend(wgConfig: wgConfig)
++    }
++
++    /// Stage 2: no engine runs after a failed switch. Called from the stall tick (which keeps
++    /// running): the previous configuration is tried again - 2, 4, 8 ... 60 s apart, for as long
++    /// as it takes; a path event resumes the paused adapter through the upstream path as well.
++    private func dataWatchRetryEngine() {
++        guard var down = self.dataWatchEngineDown else { return }
++        if case .started = self.state { // resumed by the path handler meanwhile
++            self.dataWatchEngineDown = nil
++            self.dataWatchEngineHandler?(false)
++            return
++        }
++        guard case .temporaryShutdown = self.state else {
++            self.dataWatchEngineDown = nil
++            return
++        }
++        let now = ProcessInfo.processInfo.systemUptime
++        guard self.lastPathSatisfiable, down.retry.due(at: now) else { return }
++        if !down.settingsInForce {
++            down.settingsInForce = self.applySettingsConfirmed(down.generator.generateNetworkSettings())
++        }
++        if down.settingsInForce, let handle = self.startBackendForSwitch(down.generator) {
++            self.state = .started(handle, down.generator)
++            self.dataWatchEngineDown = nil
++            self.roamCounters.softRestarts += 1
++            self.previousWatchdogSample = nil
++            self.recovery.noteBackendResumed()
++            if self.dataWatchPolicy.enabled { self.dataWatch.noteDeviceStarted(at: now, policy: self.dataWatchPolicy) }
++            self.logHandler(.verbose, "Tribe watch: the engine is up again on the previous node")
++            self.dataWatchEngineHandler?(false)
++        } else {
++            down.retry.failed(at: now)
++            self.dataWatchEngineDown = down
++            self.logHandler(.error, "Tribe watch: the engine is still down, next attempt in \(Int(down.retry.pause)) s")
++        }
++    }
++
++    /// A real path change (lost, back after a loss, another physical interface). Path updates that
++    /// change neither are not passed on: on cellular there are hundreds per hour.
++    private func dataWatchPathEvent(interfaceChanged: Bool) {
++        guard self.dataWatchPolicy.enabled else { return }
++        self.dataWatch.notePathEvent(at: ProcessInfo.processInfo.systemUptime, interfaceChanged: interfaceChanged, policy: self.dataWatchPolicy)
++    }
++
+     // MARK: - iOS offline detection helpers
+ 
+     private var unsatisfiedGracePeriodAfterNetworkSettings: TimeInterval {

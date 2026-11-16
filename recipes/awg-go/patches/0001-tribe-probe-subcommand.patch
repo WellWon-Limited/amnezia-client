@@ -1,0 +1,571 @@
+diff --git a/main.go b/main.go
+index b0d479c..fbfb2f3 100644
+--- a/main.go
++++ b/main.go
+@@ -63,6 +63,11 @@ func main() {
+ 		return
+ 	}
+ 
++	// AVPN: the Scanner's AmneziaWG mini-session (main_tribe_probe.go); never the daemon path.
++	if len(os.Args) >= 2 && os.Args[1] == "probe" {
++		os.Exit(tribeProbeMain(os.Args[2:]))
++	}
++
+ 	warning()
+ 
+ 	var foreground bool
+diff --git a/main_tribe_probe.go b/main_tribe_probe.go
+new file mode 100644
+index 0000000..6a8fbed
+--- /dev/null
++++ b/main_tribe_probe.go
+@@ -0,0 +1,300 @@
++//go:build !windows
++
++/* SPDX-License-Identifier: MIT */
++
++package main
++
++// AVPN (awg-go patch 0001): `amneziawg-go probe` - one AmneziaWG mini-session for the Scanner's
++// probe engine in the macOS (Linux) service (awg-probe-plan.md §3, contract "One awg_mini
++// session"). The live tunnel is this same binary in another process; a probe never touches it.
++//
++// A userspace device on an in-memory netstack (no system interface, no route, no DNS), its UDP
++// socket bound to the physical interface BEFORE its first packet (IP_BOUND_IF / SO_BINDTODEVICE;
++// without it the service's UDP to the node would enter the live tunnel). Nothing is logged.
++// Protocol on stdin / stdout (protocol tribe-awg-probe-v1):
++//
++//	in  1: {"uapi": SECRET, "address": ["10.8.0.2/32"], "mtu": 1280, "bound_if": <index>|0,
++//	        "bound_if_name": "en0"|"", "prime_echo_target": "10.8.0.1"|"", "prime_echoes": 1,
++//	        "handshake_ms": 1500, "peer_key": "<hex>"}
++//	out 1: {"handshake_ok": bool, "handshake_ms": n|-1, "echo_sent": n, "echo_replies": n,
++//	        "echo_bytes": n, "error": ""|"config"|"bind_failed"|"internal"}
++//	in  2: {"connect": "ip:port"}            (only after a handshake)
++//	out 2: {"connected": bool, "error": ""|"dial"}
++//	then:  raw bytes both ways between stdin / stdout and that TCP connection inside the tunnel.
++//
++// The process ends when stdin closes or the connection ends; the engine kills it at its deadline.
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"net/netip"
++	"os"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
++	"golang.org/x/net/icmp"
++	"golang.org/x/net/ipv4"
++	"golang.org/x/net/ipv6"
++)
++
++const tribeProbeABI = "tribe-awg-probe-v1"
++
++type tribeProbeJob struct {
++	UAPI        string   `json:"uapi"`
++	Address     []string `json:"address"`
++	MTU         int      `json:"mtu"`
++	BoundIf     int      `json:"bound_if"`
++	BoundIfName string   `json:"bound_if_name"`
++	EchoTarget  string   `json:"prime_echo_target"`
++	Echoes      int      `json:"prime_echoes"`
++	HandshakeMs int      `json:"handshake_ms"`
++	PeerKey     string   `json:"peer_key"`
++}
++
++type tribeProbeStatus struct {
++	HandshakeOK bool   `json:"handshake_ok"`
++	HandshakeMs int64  `json:"handshake_ms"`
++	EchoSent    int    `json:"echo_sent"`
++	EchoReplies int    `json:"echo_replies"`
++	EchoBytes   int64  `json:"echo_bytes"`
++	Error       string `json:"error"`
++}
++
++func tribeProbeMain(args []string) int {
++	if len(args) == 1 && args[0] == "--abi" {
++		os.Stdout.WriteString(tribeProbeABI + "\n")
++		return 0
++	}
++	if err := tribeProbeRun(context.Background(), os.Stdin, os.Stdout); err != nil {
++		return 1
++	}
++	return 0
++}
++
++// tribeProbeRun runs one session over r / w (the process's stdin / stdout, or pipes in a test).
++func tribeProbeRun(ctx context.Context, r io.Reader, w io.Writer) error {
++	br := bufio.NewReader(r)
++	line, err := br.ReadBytes('\n')
++	if err != nil {
++		return err
++	}
++	var job tribeProbeJob
++	st := tribeProbeStatus{HandshakeMs: -1}
++	send := func(v any) error {
++		raw, _ := json.Marshal(v)
++		_, err := w.Write(append(raw, '\n'))
++		return err
++	}
++	if json.Unmarshal(line, &job) != nil || job.UAPI == "" || len(job.PeerKey) != 64 || len(job.Address) == 0 {
++		st.Error = "config"
++		return send(st)
++	}
++	var addrs []netip.Addr
++	for _, a := range job.Address {
++		p, err := netip.ParsePrefix(strings.TrimSpace(a))
++		if err != nil {
++			ad, aerr := netip.ParseAddr(strings.TrimSpace(a))
++			if aerr != nil {
++				st.Error = "config"
++				return send(st)
++			}
++			p = netip.PrefixFrom(ad, ad.BitLen())
++		}
++		addrs = append(addrs, p.Addr())
++	}
++	mtu := job.MTU
++	if mtu <= 0 {
++		mtu = 1280
++	}
++	tdev, tnet, err := netstack.CreateNetTUN(addrs, nil, mtu)
++	if err != nil {
++		st.Error = "config"
++		return send(st)
++	}
++	bind := conn.NewStdNetBind()
++	dev := device.NewDevice(tdev, bind, &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf})
++	defer dev.Close()
++	var uapi strings.Builder
++	for _, l := range strings.Split(job.UAPI, "\n") {
++		if !strings.HasPrefix(strings.TrimSpace(l), "persistent_keepalive_interval=") {
++			uapi.WriteString(l + "\n")
++		}
++	}
++	if err := dev.IpcSet(uapi.String()); err != nil {
++		st.Error = "config"
++		return send(st)
++	}
++	if err := dev.Up(); err != nil {
++		st.Error = "bind_failed"
++		return send(st)
++	}
++	if err := tribeProbeBind(bind, job.BoundIf, job.BoundIfName); err != nil {
++		st.Error = "bind_failed"
++		return send(st)
++	}
++	t0 := time.Now()
++	if err := dev.IpcSet("public_key=" + job.PeerKey + "\nupdate_only=true\npersistent_keepalive_interval=1\n"); err != nil {
++		st.Error = "config"
++		return send(st)
++	}
++	timeout := time.Duration(job.HandshakeMs) * time.Millisecond
++	if timeout <= 0 {
++		timeout = 1500 * time.Millisecond
++	}
++	for deadline := t0.Add(timeout); ; time.Sleep(5 * time.Millisecond) {
++		if tribeProbeHandshaken(dev, job.PeerKey) {
++			st.HandshakeOK, st.HandshakeMs = true, time.Since(t0).Milliseconds()
++			break
++		}
++		if !time.Now().Before(deadline) {
++			break
++		}
++	}
++	_ = dev.IpcSet("public_key=" + job.PeerKey + "\nupdate_only=true\npersistent_keepalive_interval=0\n")
++	if st.HandshakeOK && job.Echoes > 0 {
++		if target, err := netip.ParseAddr(job.EchoTarget); err == nil {
++			st.EchoSent, st.EchoReplies, st.EchoBytes = tribeProbeEcho(ctx, tnet, addrs[0], target, job.Echoes)
++		}
++	}
++	if err := send(st); err != nil || !st.HandshakeOK {
++		return err
++	}
++	line, err = br.ReadBytes('\n')
++	if err != nil {
++		return nil // the engine did not want the data probe
++	}
++	var req struct {
++		Connect string `json:"connect"`
++	}
++	ap, perr := netip.AddrPort{}, json.Unmarshal(line, &req)
++	if perr == nil {
++		ap, perr = netip.ParseAddrPort(req.Connect)
++	}
++	if perr != nil {
++		return send(map[string]any{"connected": false, "error": "config"})
++	}
++	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
++	c, err := tnet.DialContextTCPAddrPort(dctx, ap)
++	cancel()
++	if err != nil {
++		return send(map[string]any{"connected": false, "error": "dial"})
++	}
++	defer c.Close()
++	if err := send(map[string]any{"connected": true, "error": ""}); err != nil {
++		return err
++	}
++	done := make(chan struct{}, 2)
++	go func() { io.Copy(c, br); c.CloseWrite(); done <- struct{}{} }()
++	go func() { io.Copy(w, c); done <- struct{}{} }()
++	<-done
++	return nil
++}
++
++func tribeProbeBind(bind conn.Bind, index int, name string) error {
++	peek, ok := bind.(conn.PeekLookAtSocketFd)
++	if !ok {
++		return errors.New("bind without socket access")
++	}
++	if index <= 0 && name == "" {
++		return nil // the engine allows an unbound session only where its platform does
++	}
++	if index <= 0 || name == "" {
++		var ifc *net.Interface
++		var err error
++		if index > 0 {
++			ifc, err = net.InterfaceByIndex(index)
++		} else {
++			ifc, err = net.InterfaceByName(name)
++		}
++		if err != nil {
++			return err
++		}
++		index, name = ifc.Index, ifc.Name
++	}
++	fd4, err4 := peek.PeekLookAtSocketFd4()
++	if err4 == nil {
++		if err := tribeProbeBindFd(fd4, false, index, name); err != nil {
++			return err
++		}
++	}
++	fd6, err6 := peek.PeekLookAtSocketFd6()
++	if err6 == nil {
++		if err := tribeProbeBindFd(fd6, true, index, name); err != nil {
++			return err
++		}
++	}
++	if err4 != nil && err6 != nil {
++		return errors.New("no socket")
++	}
++	return nil
++}
++
++func tribeProbeHandshaken(dev *device.Device, peerKey string) bool {
++	text, err := dev.IpcGet()
++	if err != nil {
++		return false
++	}
++	in := false
++	for _, l := range strings.Split(text, "\n") {
++		k, v, _ := strings.Cut(l, "=")
++		switch k {
++		case "public_key":
++			in = v == peerKey
++		case "last_handshake_time_sec":
++			if in {
++				n, _ := strconv.ParseInt(v, 10, 64)
++				return n > 0
++			}
++		}
++	}
++	return false
++}
++
++func tribeProbeEcho(ctx context.Context, tnet *netstack.Net, local, target netip.Addr, n int) (sent, replies int, wire int64) {
++	pc, err := tnet.DialPingAddr(local, target)
++	if err != nil {
++		return
++	}
++	defer pc.Close()
++	hdr, proto := int64(20), 1
++	var typ icmp.Type = ipv4.ICMPTypeEcho
++	if target.Is6() {
++		hdr, proto, typ = 40, 58, ipv6.ICMPTypeEchoRequest
++	}
++	buf := make([]byte, 1500)
++	for i := 1; i <= n && ctx.Err() == nil; i++ {
++		raw, err := (&icmp.Message{Type: typ, Body: &icmp.Echo{ID: 0x7462, Seq: i, Data: make([]byte, 56)}}).Marshal(nil)
++		if err != nil {
++			return
++		}
++		end := time.Now().Add(150 * time.Millisecond)
++		pc.SetDeadline(end)
++		if _, err := pc.Write(raw); err != nil {
++			continue
++		}
++		sent++
++		wire += hdr + int64(len(raw))
++		for time.Now().Before(end) {
++			m, err := pc.Read(buf)
++			if err != nil {
++				break
++			}
++			if reply, err := icmp.ParseMessage(proto, buf[:m]); err == nil {
++				if e, ok := reply.Body.(*icmp.Echo); ok && e.Seq == i {
++					replies++
++					wire += hdr + int64(m)
++					break
++				}
++			}
++		}
++	}
++	return
++}
+diff --git a/main_tribe_probe_darwin.go b/main_tribe_probe_darwin.go
+new file mode 100644
+index 0000000..93da706
+--- /dev/null
++++ b/main_tribe_probe_darwin.go
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: MIT */
++
++package main
++
++import "golang.org/x/sys/unix"
++
++// tribeProbeBindFd pins the session's UDP socket to the physical interface (IP_BOUND_IF /
++// IPV6_BOUND_IF): its packets leave through it whatever the routing table (the live utun) says.
++func tribeProbeBindFd(fd int, v6 bool, index int, _ string) error {
++	if v6 {
++		return unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_BOUND_IF, index)
++	}
++	return unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_BOUND_IF, index)
++}
+diff --git a/main_tribe_probe_linux.go b/main_tribe_probe_linux.go
+new file mode 100644
+index 0000000..e82dfcc
+--- /dev/null
++++ b/main_tribe_probe_linux.go
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: MIT */
++
++package main
++
++import "golang.org/x/sys/unix"
++
++// tribeProbeBindFd pins the session's UDP socket to the physical interface (SO_BINDTODEVICE).
++func tribeProbeBindFd(fd int, _ bool, _ int, name string) error {
++	return unix.BindToDevice(fd, name)
++}
+diff --git a/main_tribe_probe_other.go b/main_tribe_probe_other.go
+new file mode 100644
+index 0000000..b689506
+--- /dev/null
++++ b/main_tribe_probe_other.go
+@@ -0,0 +1,11 @@
++//go:build !windows && !darwin && !linux
++
++/* SPDX-License-Identifier: MIT */
++
++package main
++
++import "errors"
++
++func tribeProbeBindFd(int, bool, int, string) error {
++	return errors.New("tribe probe: interface binding is not supported here")
++}
+diff --git a/main_tribe_probe_test.go b/main_tribe_probe_test.go
+new file mode 100644
+index 0000000..931e772
+--- /dev/null
++++ b/main_tribe_probe_test.go
+@@ -0,0 +1,190 @@
++//go:build darwin || linux
++
++/* SPDX-License-Identifier: MIT */
++
++package main
++
++// AVPN (awg-go patch 0001): `probe` against a userspace node on 127.0.0.1 (a device on its own
++// netstack with an HTTPS server inside it); nothing leaves the machine.
++
++import (
++	"bufio"
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
++)
++
++var (
++	tpAPI    = netip.MustParseAddr("203.0.113.10")
++	tpEcho   = netip.MustParseAddr("10.8.0.1")
++	tpClient = netip.MustParseAddr("10.8.0.2")
++)
++
++func tpKey(t *testing.T) (priv, pub string) {
++	k, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return hex.EncodeToString(k.Bytes()), hex.EncodeToString(k.PublicKey().Bytes())
++}
++
++const tpParams = "jc=4\njmin=40\njmax=70\ns1=15\ns2=18\ns3=20\ns4=0\nh1=123456\nh2=234567\nh3=345678\nh4=456789\n"
++
++type tpNode struct {
++	pub  string
++	port int
++	pool *x509.CertPool
++}
++
++func tpStartNode(t *testing.T, clientPub string) *tpNode {
++	t.Helper()
++	priv, pub := tpKey(t)
++	uc, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	port := uc.LocalAddr().(*net.UDPAddr).Port
++	uc.Close()
++	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{tpEcho, tpAPI}, nil, 1280)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dev := device.NewDevice(tdev, conn.NewStdNetBind(), &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf})
++	if err := dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n%spublic_key=%s\nallowed_ip=%s/32\n", priv, port, tpParams, clientPub, tpClient)); err != nil {
++		t.Fatal(err)
++	}
++	dev.Up()
++	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		io.WriteString(w, strings.Repeat("x", 65536))
++	}))
++	ts.StartTLS()
++	ln, err := tnet.ListenTCPAddrPort(netip.AddrPortFrom(tpAPI, 443))
++	if err != nil {
++		t.Fatal(err)
++	}
++	hs := &http.Server{Handler: ts.Config.Handler, TLSConfig: ts.TLS.Clone()}
++	go hs.Serve(tls.NewListener(ln, hs.TLSConfig))
++	pool := x509.NewCertPool()
++	pool.AddCert(ts.Certificate())
++	t.Cleanup(func() { hs.Close(); ts.Close(); dev.Close() })
++	return &tpNode{pub: pub, port: port, pool: pool}
++}
++
++// tpRun starts a session over pipes; it returns the status line and the stream.
++func tpRun(t *testing.T, job tribeProbeJob) (tribeProbeStatus, *bufio.Reader, io.WriteCloser, chan error) {
++	t.Helper()
++	inR, inW := io.Pipe()
++	outR, outW := io.Pipe()
++	done := make(chan error, 1)
++	go func() { done <- tribeProbeRun(context.Background(), inR, outW); outW.Close() }()
++	raw, _ := json.Marshal(job)
++	go inW.Write(append(raw, '\n'))
++	br := bufio.NewReader(outR)
++	line, err := br.ReadBytes('\n')
++	if err != nil {
++		t.Fatal(err)
++	}
++	var st tribeProbeStatus
++	if err := json.Unmarshal(line, &st); err != nil {
++		t.Fatalf("status %q", line)
++	}
++	return st, br, inW, done
++}
++
++type tpPipeConn struct {
++	r *bufio.Reader
++	w io.WriteCloser
++}
++
++func (c tpPipeConn) Read(p []byte) (int, error)     { return c.r.Read(p) }
++func (c tpPipeConn) Write(p []byte) (int, error)    { return c.w.Write(p) }
++func (c tpPipeConn) Close() error                   { return c.w.Close() }
++func (tpPipeConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
++func (tpPipeConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
++func (tpPipeConn) SetDeadline(time.Time) error      { return nil }
++func (tpPipeConn) SetReadDeadline(time.Time) error  { return nil }
++func (tpPipeConn) SetWriteDeadline(time.Time) error { return nil }
++
++func TestTribeProbe(t *testing.T) {
++	cpriv, cpub := tpKey(t)
++	n := tpStartNode(t, cpub)
++	uapi := func(n *tpNode) string {
++		return fmt.Sprintf("private_key=%s\nlisten_port=0\nreplace_peers=true\n%spublic_key=%s\nendpoint=127.0.0.1:%d\nallowed_ip=%s/32\nallowed_ip=%s/32\npersistent_keepalive_interval=25\n",
++			cpriv, tpParams, n.pub, n.port, tpAPI, tpEcho)
++	}
++	lo, _ := net.InterfaceByName("lo0")
++	if lo == nil {
++		lo, _ = net.InterfaceByName("lo")
++	}
++	job := tribeProbeJob{UAPI: uapi(n), Address: []string{tpClient.String() + "/32"}, EchoTarget: tpEcho.String(), Echoes: 1,
++		HandshakeMs: 1500, PeerKey: n.pub}
++	if lo != nil {
++		job.BoundIfName = lo.Name // bound to the loopback interface: the node is on 127.0.0.1
++	}
++	st, br, w, done := tpRun(t, job)
++	if !st.HandshakeOK || st.HandshakeMs < 0 || st.EchoSent != 1 || st.Error != "" {
++		t.Fatalf("status %+v", st)
++	}
++	fmt.Fprintf(w, `{"connect":"%s:443"}`+"\n", tpAPI)
++	line, _ := br.ReadBytes('\n')
++	if !strings.Contains(string(line), `"connected":true`) {
++		t.Fatalf("connect: %s", line)
++	}
++	tc := tls.Client(tpPipeConn{br, w}, &tls.Config{ServerName: "example.com", RootCAs: n.pool})
++	fmt.Fprintf(tc, "GET /v1/probe HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
++	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode != 200 || len(body) != 65536 {
++		t.Fatalf("status %d body %d", resp.StatusCode, len(body))
++	}
++	w.Close()
++	select {
++	case <-done:
++	case <-time.After(3 * time.Second):
++		t.Fatal("the session did not end with its stdin")
++	}
++	t.Logf("handshake %d ms, echoes %d/%d (%d bytes), 64 KiB through the tunnel", st.HandshakeMs, st.EchoReplies, st.EchoSent, st.EchoBytes)
++
++	// A node that does not know the key: no handshake, and the session ends.
++	_, otherPub := tpKey(t)
++	stranger := tpStartNode(t, otherPub)
++	job.UAPI, job.PeerKey, job.HandshakeMs = uapi(stranger), stranger.pub, 300
++	st, _, w, done = tpRun(t, job)
++	w.Close()
++	if st.HandshakeOK || st.HandshakeMs != -1 || st.Error != "" {
++		t.Fatalf("unknown key: %+v", st)
++	}
++	<-done
++	// A malformed job and a binding that cannot work.
++	st, _, w, _ = tpRun(t, tribeProbeJob{UAPI: "x"})
++	w.Close()
++	if st.Error != "config" {
++		t.Fatalf("bad job: %+v", st)
++	}
++	job.BoundIfName, job.BoundIf = "", 65000
++	st, _, w, _ = tpRun(t, job)
++	w.Close()
++	if st.Error != "bind_failed" {
++		t.Fatalf("bad interface: %+v", st)
++	}
++}
