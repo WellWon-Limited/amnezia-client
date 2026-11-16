@@ -67,7 +67,7 @@ bad() { echo "FAIL: $1"; fail=1; }
 
 code() { grep -v '^[[:space:]]*//' "$1" || true; }             # a file without full-line comments
 count() { code "$1" | grep -c -- "$2" || true; }
-has() { printf '%s\n' "$1" | grep -q -- "$2"; }
+has() { printf '%s\n' "$1" | grep -- "$2" > /dev/null; } # not -q: grep leaving early breaks printf's pipe on a long text
 order() { # $1 text, $2 first pattern, $3 second pattern: 0 when both occur and the first comes first
     local a b
     a="$(printf '%s\n' "$1" | grep -n -- "$2" | head -1 | cut -d: -f1)"
