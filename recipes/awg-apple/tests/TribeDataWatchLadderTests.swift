@@ -654,6 +654,49 @@ do {
     check(after.isEmpty, "and nobody is moved once the nodes answer again: \(after.map { "\($0.t):\($0.to)" })")
 }
 
+// 14. Merged with the Scanner (tribe.14): the engine stop of an in-place switch is announced through
+// the adapter's backend hook of patch 0015 (TribeBackendHook.before(.restart, ...)), so what runs next
+// to the backend - the Scanner's probe sessions - ends BEFORE the engine stops and comes up with
+// another peer. The steps are composed here exactly as WireGuardAdapter.switchBackend composes them
+// (patch 0016; the adapter itself has no host harness - its line is pinned by tests/check_backend_hook.sh
+// in the package gate and by the wiring check of the client repo).
+do {
+    struct Fail { var prepare = false, applyNew = false, startNew = false, applyOld = false, startOld = false }
+    func runWith(_ fail: Fail, hooked: Bool) -> (TribeSwitchOutcome, [String]) {
+        var calls: [String] = []
+        let record: (String) -> Void = { calls.append($0) }
+        let outcome = withoutActuallyEscaping(record) { record in
+            let willRestart: ((TribeBackendRestart) -> Void)? = hooked ? { record("hook:\($0.rawValue)") } : nil
+            return TribeSwitchSequence.run(TribeSwitchSteps(
+                prepare: { record("prepare"); return !fail.prepare },
+                stopEngine: { TribeBackendHook.before(.restart, willRestart) { record("stop") } },
+                applySettings: { new in record(new ? "settings:new" : "settings:old"); return new ? !fail.applyNew : !fail.applyOld },
+                startEngine: { new in record(new ? "engine:new" : "engine:old"); return new ? !fail.startNew : !fail.startOld }))
+        }
+        return (outcome, calls)
+    }
+    let (done, order) = runWith(Fail(), hooked: true)
+    check(done.result == .performed && order == ["prepare", "hook:restart", "stop", "settings:new", "engine:new"],
+          "a switch: the endpoint is resolved, the hook runs, only then the engine stops: \(order)")
+    check(runWith(Fail(prepare: true), hooked: true).1 == ["prepare"], "a switch that cannot begin stops nothing and announces nothing")
+    for mask in 0..<32 {
+        let fail = Fail(prepare: mask & 1 != 0, applyNew: mask & 2 != 0, startNew: mask & 4 != 0, applyOld: mask & 8 != 0, startOld: mask & 16 != 0)
+        let (hookedOutcome, hooked) = runWith(fail, hooked: true)
+        let (plainOutcome, plain) = runWith(fail, hooked: false)
+        let hooks = hooked.indices.filter { hooked[$0].hasPrefix("hook:") }
+        let stops = hooked.indices.filter { hooked[$0] == "stop" }
+        check(hooks.count == stops.count && stops.count <= 1, "mask \(mask): one announcement per engine stop: \(hooked)")
+        if let stop = stops.first {
+            check(stop > 0 && hooked[stop - 1] == "hook:restart", "mask \(mask): the announcement is the step right before the stop: \(hooked)")
+            check(!hooked[..<stop].contains { $0.hasPrefix("engine:") || $0.hasPrefix("settings:") }, "mask \(mask): nothing of the new node is touched before it: \(hooked)")
+        }
+        // The roll-back and the retry only START an engine: no further announcement after the stop.
+        check(hooked.last.map { !$0.hasPrefix("hook:") } ?? true, "mask \(mask): nothing is announced after the stop: \(hooked)")
+        // Without a listener (no Scanner, or a package without 0015's property set) the switch is the same.
+        check(plainOutcome == hookedOutcome && plain == hooked.filter { !$0.hasPrefix("hook:") }, "mask \(mask): the hook changes nothing else: \(plain) / \(hooked)")
+    }
+}
+
 if failures > 0 {
     print("TribeDataWatch + ladder: \(failures) check(s) FAILED")
     exit(1)

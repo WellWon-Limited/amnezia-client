@@ -24,7 +24,11 @@
 #    E6. who may move the tunnel (stage 2): only the rule's arbiter orders, only the adapter executes, in
 #        one place, through the tested sequence and the shared budget; a switch that leaves no engine is
 #        told and retried on the same tick; the start goes by the start source the app really passes;
-#    E7. the package: tribe.13 = tribe.11 + 0012, both extension targets compile the new sources;
+#        the engine stop of a switch is announced through the backend hook of patch 0015 (the Scanner's
+#        probe sessions end first), and a provider node is never a candidate;
+#    E7. the package: tribe.14 = tribe.12 + 0012 (the Go half, in its slot) + 0016 (the adapter half,
+#        after 0015), the patches of tribe.12 in between untouched in number and order; both extension
+#        targets compile the new sources;
 #    E8. the Xray statistics line is written only through the statistics tick;
 #   app
 #    A1. every new call in the facade is inside a Q_OS_IOS block;
@@ -48,7 +52,14 @@ ROOT="$(cd "$HERE/../../../.." && pwd)"
 ENGINE="$HERE/.."
 IOS="$ROOT/client/platforms/ios"
 RECIPE="$ROOT/recipes/awg-apple"
-PATCH="$RECIPE/patches/0012-tribe-data-watch.patch"
+# The data watch is two patches of the package (conandata.yml says why): 0012, the Go half, in the slot
+# tribe.12 left for it, and 0016, the adapter half, after the Scanner's 0015. The checks below read
+# them as one text.
+PATCH_GO="$RECIPE/patches/0012-tribe-data-watch.patch"
+PATCH_ADAPTER="$RECIPE/patches/0016-tribe-data-watch-adapter.patch"
+PATCH="$(mktemp "${TMPDIR:-/tmp}/tribe-data-watch-wiring.XXXXXX")"
+trap 'rm -f "${PATCH:?}"' EXIT
+cat "$PATCH_GO" "$PATCH_ADAPTER" > "$PATCH"
 FACADE="$ENGINE/AvpnEngineQml.cpp"
 CONTROLLER="$IOS/ios_controller.mm"
 fail=0
@@ -74,7 +85,7 @@ swift_func() { # $1 file, $2 text of the func line; the lines up to the next lin
         on && NR > first && match($0, /^[[:space:]]*}/) && RLENGTH == indent + 1 { exit }
         on && !first { first = NR }' "$1" | grep -v '^[[:space:]]*//' || true
 }
-added() { grep '^+' "$PATCH" | grep -v '^+++' || true; }        # what patch 0012 adds
+added() { grep '^+' "$PATCH" | grep -v '^+++' || true; }        # what patches 0012 and 0016 add
 added_swift() { # the added lines of the adapter only
     awk '/^diff --git/ { on = ($0 ~ /WireGuardAdapter\.swift/) } on && /^\+/ && !/^\+\+\+/ { print substr($0, 2) }' "$PATCH" \
         | grep -v '^[[:space:]]*//' || true
@@ -94,10 +105,10 @@ order "$tick_ctx" 'if self.dataWatch.arbiterOwnsRecovery { return }' 'self.recov
     && [ "$(printf '%s\n' "$swift_added" | grep -c 'arbiterOwnsRecovery')" = "1" ] \
     || bad "E1: while the arbiter owns the recovery the ladder must not judge the same samples (one place, right before the ladder)"
 for token in 'makeTimerSource' 'asyncAfter' 'Timer(' 'scheduledTimer' 'DispatchWorkItem'; do
-    has "$swift_added" "$token" && bad "E1: patch 0012 adds a timer or a delayed block to the adapter ($token)"
+    has "$swift_added" "$token" && bad "E1: the data watch adds a timer or a delayed block to the adapter ($token)"
 done
 
-# ---- E2: off = tribe.11 ------------------------------------------------------------------------------
+# ---- E2: off = tribe.12 ------------------------------------------------------------------------------
 tick_body="$(printf '%s\n' "$swift_added" | awk '/private func dataWatchTick/ { on = 1 } on { print } on && /^    }$/ { exit }')"
 order "$tick_body" 'guard self.dataWatchPolicy.enabled else' 'self.dataWatch.step(' \
     || bad "E2: dataWatchTick must leave before the step when the policy is off"
@@ -183,7 +194,7 @@ for f in "$IOS"/TribeDataWatchRuntime.swift "$IOS"/TribeWatchPlan.swift "$IOS/Pa
     grep -q 'UNUserNotificationCenter\|UserNotifications\|UNMutableNotificationContent\|displayMessage' "$f" \
         && bad "E5/A6: $(basename "$f") notifies the user - the owner's decision is no notifications at all"
 done
-has "$(added)" 'UNUserNotificationCenter' && bad "E5: patch 0012 notifies the user"
+has "$(added)" 'UNUserNotificationCenter' && bad "E5: the data watch's patches notify the user"
 
 # ---- E6: who may move the tunnel (stage 2) ---------------------------------------------------------------
 # Only the rule's arbiter orders, only behind its own key; only the adapter executes, in one place, in
@@ -245,7 +256,23 @@ has "$confirm" 'guard done, systemError == nil else {' && order "$confirm" 'guar
     && [ "$(printf '%s\n' "$swift_added" | grep -c 'setTunnelNetworkSettings(')" = "1" ] \
     && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.applySettingsConfirmed(')" = "2" ] \
     && [ "$(printf '%s\n' "$swift_added" | grep -c 'self.startBackendForSwitch(')" = "2" ] \
-    || bad "E6: patch 0012 stops a backend only inside the switch and applies settings / starts a backend only in the switch and in the retry"
+    || bad "E6: the data watch stops a backend only inside the switch and applies settings / starts a backend only in the switch and in the retry"
+# Merged with the Scanner (tribe.14): that one stop is announced through the adapter's backend hook of
+# patch 0015, with the reason the provider acts on (.restart: its probe sessions end first; .rebind
+# keeps them). The same line is what tests/check_backend_hook.sh of the package gate requires of the
+# fully patched adapter; the order hook -> stop -> settings -> engine is TribeDataWatchLadderTests 14.
+[ "$(printf '%s\n' "$sw" | grep -c 'TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }')" = "1" ] \
+    && [ "$(printf '%s\n' "$swift_added" | grep 'wgTurnOff(\|wgBumpSockets(\|wgSetConfig(' | grep -vc 'TribeBackendHook.before(.restart, self.tribeBackendWillRestart)')" = "0" ] \
+    && order "$sw" 'self.packetTunnelProvider?.reasserting = true' 'TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }' \
+    || bad "E6: the engine stop of a switch must run through TribeBackendHook.before(.restart, ...) (the Scanner's probes end before the peer changes)"
+# ... and it is the only announcement the data watch makes: one more would end scans for nothing.
+[ "$(printf '%s\n' "$swift_added" | grep -c 'TribeBackendHook\|tribeBackendWillRestart')" = "1" ] \
+    || bad "E6: the data watch announces a backend restart in one place only (the engine stop of a switch)"
+grep -q '"tribe_backend_hook": True' "$RECIPE/conanfile.py" && grep -q '_xray_pins\["3.1.4-tribe.14"\] = _xray_pins\["3.1.4-tribe.12"\]' "$RECIPE/conanfile.py" \
+    && grep -q 'check_backend_hook.sh' "$RECIPE/conanfile.py" \
+    || bad "E6: the package of the data watch must be gated on the backend-hook structure check (tribe.14 keeps the pins of tribe.12)"
+order "$(code "$ENGINE/TunnelWatchCandidates.h")" 'isXrayProto(current->proto) || isUpstreamNode(\*current)' 'isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n)' \
+    || bad "E6: a provider (upstream) node is never a switch candidate and a session on one is not switched (transport_pick_check 9d)"
 # The tick keeps running in every outcome: with no engine it retries, before anything asks for a handle.
 has "$(grep -A1 '     private func stallTick() {' "$PATCH")" '+        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return }' \
     || bad "E6: with no engine the stall tick must retry first (it must not leave on the missing handle)"
@@ -259,7 +286,7 @@ order "$retry" 'down.retry.failed(at: now)' 'self.dataWatchEngineDown = down' \
     || bad "E6: a failed retry must lengthen the back-off and stay armed"
 [ "$(printf '%s\n' "$retry" | grep -c 'self.dataWatchEngineHandler?(false)')" = "2" ] \
     || bad "E6: an engine that runs again must be told (brought back by the retry or by the path handler)"
-has "$swift_added" 'update(tunnelConfiguration' && bad "E6: patch 0012 must not call the public update path (its backend keeps running across the settings change)"
+has "$swift_added" 'update(tunnelConfiguration' && bad "E6: the data watch must not call the public update path (its backend keeps running across the settings change)"
 for token in 'setTunnelNetworkSettings' 'update(tunnelConfiguration' 'cancelTunnelWithError' 'stopTunnel' 'reasserting' 'wgTurnOff' 'wgTurnOn' 'wgSetConfig'; do
     has "$runtime" "$token" && bad "E6: the runtime must only report and answer ($token)"
     has "$(code "$IOS/PacketTunnelProvider+DataWatch.swift")" "$token" && bad "E6: the provider glue must only report and answer ($token)"
@@ -396,12 +423,24 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 [ "$(grep -c 'freezeCachedFeatures(' "$ENGINE/ConfigService.cpp")" = "2" ] || bad "A10: the freeze is applied in one place"
 
 # ---- E7: the package and the targets ----------------------------------------------------------------------
-grep -q 'self.requires("awg-apple/3.1.4-tribe.13")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.13"
-grep -q '^    version = "3.1.4-tribe.13"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.13"
-list13="$(awk '/^  "3.1.4-tribe.13":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
-list11="$(awk '/^  "3.1.4-tribe.11":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
-[ "$list13" = "$list11
-patches/0012-tribe-data-watch.patch" ] || bad "E7: tribe.13 must be the patches of tribe.11 plus 0012, nothing else"
+grep -q 'self.requires("awg-apple/3.1.4-tribe.14")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.14"
+grep -q '^    version = "3.1.4-tribe.14"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.14"
+list14="$(awk '/^  "3.1.4-tribe.14":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+list12="$(awk '/^  "3.1.4-tribe.12":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+# tribe.14 = the list of tribe.12, untouched in number and order, with 0012 right after 0011 and 0016 last.
+[ -n "$list12" ] && [ "$(printf '%s\n' "$list14" | grep -v 'tribe-data-watch')" = "$list12" ] \
+    || bad "E7: tribe.14 must carry the patches of tribe.12 unchanged, in the same order"
+[ "$(printf '%s\n' "$list14" | grep -A1 'patches/0011-' | tail -1)" = "patches/0012-tribe-data-watch.patch" ] \
+    && [ "$(printf '%s\n' "$list14" | grep -B1 'patches/0013-' | head -1)" = "patches/0012-tribe-data-watch.patch" ] \
+    && [ "$(printf '%s\n' "$list14" | tail -1)" = "patches/0016-tribe-data-watch-adapter.patch" ] \
+    && [ "$(printf '%s\n' "$list14" | grep -c 'tribe-data-watch')" = "2" ] \
+    || bad "E7: the data watch must be 0012 in its slot (between 0011 and 0013) and 0016 after everything else"
+# Why two patches: the recipe's patch tool matches hunks at exact line numbers, and 0015 was recorded on
+# an adapter without the data watch. So nothing of the data watch may touch the adapter before 0015, and
+# the Go half must not touch it at all.
+grep -q '^diff --git a/Sources/WireGuardKit/' "$PATCH_GO" && bad "E7: patch 0012 must not touch the Swift sources (it is applied before 0015)"
+[ "$(grep -c '^diff --git ' "$PATCH_ADAPTER")" = "1" ] && grep -q '^diff --git a/Sources/WireGuardKit/WireGuardAdapter.swift ' "$PATCH_ADAPTER" \
+    || bad "E7: patch 0016 must be the adapter's changes and nothing else"
 for cm in "$ROOT/client/ios/networkextension/CMakeLists.txt" "$ROOT/client/macos/networkextension/CMakeLists.txt"; do
     for src in 'WireGuardKit/TribeDataWatch.swift' 'platforms/ios/TribeWatchPlan.swift' 'platforms/ios/TribeDataWatchRuntime.swift' \
                'platforms/ios/PacketTunnelProvider+DataWatch.swift'; do

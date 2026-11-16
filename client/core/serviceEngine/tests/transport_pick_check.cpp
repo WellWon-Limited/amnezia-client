@@ -986,6 +986,70 @@ int main(int argc, char **argv)
         // What failed in this app session is not offered again.
         CHECK(order(TransportMode::Auto, "16", "", {QStringLiteral("3"), QStringLiteral("9")}) == QStringList({QStringLiteral("12"), QStringLiteral("8")}));
 
+        {   // Merged with provider (upstream) nodes, build 141: a node that runs on a seat lease is never
+            // offered to the extension, whatever its transport, and a session on one is not the watch's.
+            TuningStore::set({}, {{QStringLiteral("xray_client"), true}, {QStringLiteral("transport_auto_pick"), true},
+                                  {QStringLiteral("upstream_nodes"), true}}, {}, {});
+            QList<SubscriptionNode> withProviders = nodes;
+            SubscriptionNode stub; // what the subscription carries today: proto "xray" without an xray block
+            stub.nodeId = QStringLiteral("up:00000000000000a1");
+            stub.proto = QStringLiteral("xray");
+            stub.countryCode = QStringLiteral("FI");
+            stub.upstream = UpstreamStub();
+            stub.upstream->profileId = QStringLiteral("00000000000000a1");
+            withProviders.append(stub);
+            SubscriptionNode leased = *byId(nodes, "12"); // a provider profile that is an AmneziaWG node in every other field
+            leased.nodeId = QStringLiteral("up:00000000000000b2");
+            leased.endpoint = QStringLiteral("203.0.113.112:585");
+            leased.hostId = 112;
+            leased.upstream = UpstreamStub();
+            leased.upstream->profileId = QStringLiteral("00000000000000b2");
+            withProviders.append(leased);
+            QHash<QString, int> rttUp = rtt; // both faster than every own node
+            rttUp.insert(stub.nodeId, 1);
+            rttUp.insert(leased.nodeId, 1);
+            CHECK(isUpstreamNode(stub) && isUpstreamNode(leased) && !isXrayProto(leased.proto));
+            const auto orderUp = [&](const QString &current, const char *pinCountry) {
+                return watchSwitchCandidateOrder(withProviders, rttUp, hist, TransportMode::Auto, current, QLatin1String(pinCountry), {});
+            };
+            CHECK(orderUp(QStringLiteral("16"), "") == plain);                          // exactly the own nodes, in the same order
+            CHECK(orderUp(QStringLiteral("16"), "FI") == order(TransportMode::Auto, "16", "FI")); // a pinned country does not bring them in
+            CHECK(orderUp(leased.nodeId, "").isEmpty());                                 // a session on a provider node is not switched
+            CHECK(orderUp(stub.nodeId, "").isEmpty());
+
+            // The engine with provider stubs in its subscription: they are in the pool and are not offered.
+            QByteArray withStubs = subJson({
+                awgNodeJson("16", 16, "RS", 1.0, 10, "203.0.113.16:585"),
+                awgNodeJson("12", 12, "FI", 1.0, 10, "203.0.113.12:585"),
+                awgNodeJson("3", 3, "EE", 1.0, 10, "203.0.113.3:585"),
+                QByteArray(R"({ "node_id": "up:00000000000000a1", "region": "upstream", "label": "Provider", "country_code": "FI",
+                    "endpoint": "", "proto": "xray", "health": {}, "allowed_ips": ["0.0.0.0/0"], "dns": ["1.1.1.1"],
+                    "upstream": { "profile_id": "00000000000000a1",
+                        "config_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "probe_class": "single",
+                        "protocols": ["proto:vless", "net:tcp"], "required_geo": ["geoip:ru"], "size_bytes": 4096,
+                        "tier": 1, "priority": 0 } })"),
+            });
+            CHECK(withStubs.contains("\"pool_revision\": 1,"));
+            withStubs.replace("\"pool_revision\": 1,", "\"pool_revision\": 1, \"upstream_revision\": 1763117000123,");
+            QString upErr;
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            CHECK(eng.loadSubscription(withStubs, upErr));
+            bool stubInPool = false;
+            for (const NodeDebugRow &row : eng.debugSnapshot().pool)
+                stubInPool = stubInPool || row.nodeId == QLatin1String("up:00000000000000a1");
+            CHECK(stubInPool);                                                           // the parser kept it: the kill switch is on
+            eng.setMeasuredRtt({{QStringLiteral("3"), 10}, {QStringLiteral("12"), 20}, {QStringLiteral("16"), 50},
+                                {QStringLiteral("up:00000000000000a1"), 1}});
+            CHECK(eng.setPinnedNode(QStringLiteral("16"), upErr));
+            CHECK(eng.connect(upErr));
+            CHECK(tun.lastUpNodeId == QLatin1String("16"));
+            QStringList offered;
+            for (const WatchPlanCandidate &x : eng.extensionSwitchCandidates())
+                offered.append(x.nodeId);
+            CHECK(offered == QStringList({QStringLiteral("3"), QStringLiteral("12")}));
+            setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        }
+
         QString err;
         {   // the engine's list: the same order, in-place nodes only, each with its own half of the configuration
             ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);

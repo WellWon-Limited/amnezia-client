@@ -42,7 +42,10 @@ QT = os.environ.get("QT_ROOT", os.path.expanduser("~/Qt/6.11.1/macos"))
 
 ENG = "client/core/serviceEngine/"
 IOS = "client/platforms/ios/"
-PATCH = "recipes/awg-apple/patches/0012-tribe-data-watch.patch"
+# The data watch is two patches of the package: the adapter half (0016, after the Scanner's 0015) and
+# the Go half (0012, in the slot tribe.12 left for it). conandata.yml says why.
+PATCH = "recipes/awg-apple/patches/0016-tribe-data-watch-adapter.patch"
+PATCH_GO = "recipes/awg-apple/patches/0012-tribe-data-watch.patch"
 
 # (id, file, exact text occurring ONCE, replacement, test, what is broken)
 PURE = [
@@ -240,12 +243,14 @@ PURE = [
     ("res-27", ENG + "TunnelWatchResume.h", "        } else if (adopted && m_ops.engineVerifying()) {", "        } else if (false) {", "watch", "the node the extension moved to is not checked by the app"),
     ("res-28", ENG + "TunnelWatchResume.h", "ci.appGeneration = ci.snapshotGeneration == m_adoptedGeneration ? ci.snapshotGeneration : m_generation;", "ci.appGeneration = m_generation;", "watch", "after a start by the system the verdict of the adopted session is another session's"),
     ("cand-01", ENG + "TunnelWatchCandidates.h", "    if (mode == TransportMode::Xray)\n        return out;\n", "", "pick", "Xray-only mode offers AmneziaWG candidates"),
-    ("cand-02", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "if (isXrayProto(n.proto))", "pick", "a manual-only node is offered"),
-    ("cand-03", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto))", "if (!current)", "pick", "an Xray session gets candidates"),
+    ("cand-02", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isXrayProto(n.proto) || isUpstreamNode(n))", "pick", "a manual-only node is offered"),
+    ("cand-03", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto) || isUpstreamNode(*current))", "if (!current || isUpstreamNode(*current))", "pick", "an Xray session gets candidates"),
     ("cand-04", ENG + "TunnelWatchCandidates.h", "        in.excluded = failedThisSession;\n", "", "pick", "a node that failed in this session is offered again"),
     ("cand-05", ENG + "TunnelWatchCandidates.h", "    take(pinned);\n", "", "pick", "the pinned country does not come first"),
     ("cand-06", ENG + "TunnelWatchCandidates.h", "        in.exclA = currentNodeId;\n", "", "pick", "the current node is offered as a candidate"),
-    ("cand-07", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "if (isManualOnlyNode(n))", "pick", "(the Awg mode filters them too) Xray listeners enter the pool"),
+    ("cand-07", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isManualOnlyNode(n) || isUpstreamNode(n))", "pick", "(the Awg mode filters them too) Xray listeners enter the pool"),
+    ("cand-08", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "pick", "merge with provider nodes, I5: a node that runs on a seat lease is offered to the extension"),
+    ("cand-09", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto) || isUpstreamNode(*current))", "if (!current || isXrayProto(current->proto))", "pick", "a session that stands on a provider node gets switch candidates"),
     ("eng-05", ENG + "ServiceEngine.cpp", "        if (!watchPlanInPlace(currentInner, inner))\n            continue; // another DNS, MTU or routed range: that switch is the app's own\n", "", "pick", "a node with another DNS is put into the plan"),
     ("eng-06", ENG + "ServiceEngine.cpp", "    if (m_state != EngineState::Connected && m_state != EngineState::Verifying)\n        return false;\n    if (nodeId == m_currentNodeId || !findNode(nodeId))", "    if (nodeId == m_currentNodeId || !findNode(nodeId))", "pick", "a switch is adopted while the app's own start is in flight"),
     ("eng-07", ENG + "ServiceEngine.cpp", "    if (nodeId == m_currentNodeId || !findNode(nodeId))\n        return false;", "    if (nodeId == m_currentNodeId)\n        return false;", "pick", "a node the pool does not know is adopted"),
@@ -497,14 +502,14 @@ WIRING = [
     ("w-e1c", PATCH, "+        if self.dataWatch.arbiterOwnsRecovery { return }\n", "", "second review R6: the ladder steps while the arbiter treats or leaves a node (it spends the budget the switch needs)"),
     ("w-e1b", PATCH, "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {\n", "+    private func dataWatchTick(_ sample: TribeStallSample, handle: Int32, settingsGenerator: PacketTunnelSettingsGenerator) -> Bool {\n+        self.workQueue.asyncAfter(deadline: .now() + 1) { }\n", "the adapter patch grows a delayed block"),
     ("w-s1", PATCH, "+        if self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator) { return }\n", "+        _ = self.dataWatchTick(sample, handle: handle, settingsGenerator: settingsGenerator)\n", "the stall ladder acts on the tick the watch's arbiter acted on"),
-    ("w-s2", PATCH, "+                self.packetTunnelProvider?.reasserting = true\n+                wgTurnOff(handle)\n", "+                self.packetTunnelProvider?.reasserting = true\n", "the old backend still runs while the network settings change (a peer routed into its own tunnel)"),
+    ("w-s2", PATCH, "+                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }\n", "", "the old backend still runs while the network settings change (a peer routed into its own tunnel)"),
     ("w-s3", PATCH, "+                newGenerator = try? self.makeSettingsGenerator(with: tunnelConfiguration)\n", "+                wgTurnOff(handle)\n+                newGenerator = try? self.makeSettingsGenerator(with: tunnelConfiguration)\n", "the backend is stopped before the new endpoint is known to resolve"),
     ("w-s4", PATCH, "+            guard let configuration = self.dataWatchCandidate?(nodeId) else { return .rejected }\n", "+            guard let configuration = self.dataWatchCandidate?(nodeId) else { return .performed }\n", "a switch without a configuration is told as performed"),
     ("w-s5", PATCH, "+                return self.applySettingsConfirmed(generator.generateNetworkSettings())\n", "+                try? self.setNetworkSettings(generator.generateNetworkSettings())\n+                return true\n", "second review R5: settings count as applied without the system's confirmation"),
     ("w-s5b", PATCH, "+        guard done, systemError == nil else {\n", "+        guard systemError == nil else {\n", "a call the system never answered counts as applied"),
     ("w-s5c", PATCH, "+        return outcome.result\n", "+        return .performed\n", "second review R5: the adapter tells `performed` whatever the sequence said"),
     ("w-s5d", PATCH, "+            self.dataWatchEngineHandler?(true)\n", "", "a tunnel left without an engine tells nobody"),
-    ("w-s5e", PATCH, "+        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return } // tribe.13, stage 2\n", "", "with no engine the tick leaves on the missing handle and nothing is retried"),
+    ("w-s5e", PATCH, "+        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return } // tribe.14, stage 2\n", "", "with no engine the tick leaves on the missing handle and nothing is retried"),
     ("w-s5f", PATCH, "+        if !down.settingsInForce {\n+            down.settingsInForce = self.applySettingsConfirmed(down.generator.generateNetworkSettings())\n+        }\n", "", "the retry starts an engine on settings that are not in force"),
     ("w-s5g", PATCH, "+        guard self.lastPathSatisfiable, down.retry.due(at: now) else { return }\n", "+        guard self.lastPathSatisfiable else { return }\n", "the engine is retried on every tick, without the back-off"),
     ("w-s5h", PATCH, "+            self.state = .temporaryShutdown(oldGenerator)\n", "", "a tunnel without an engine is still marked as started"),
@@ -538,7 +543,7 @@ WIRING = [
     ("w-e2a", PATCH, "+        guard self.dataWatchPolicy.enabled else { return }\n+        self.dataWatch.notePathEvent(", "+        self.dataWatch.notePathEvent(", "a path event reaches a switched-off watch"),
     ("w-e2b", PATCH, "+            if self.dataWatchPolicy.enabled {\n+                self.dataWatch.noteBackendRestarted(", "+            do {\n+                self.dataWatch.noteBackendRestarted(", "a backend restart reaches a switched-off watch"),
     ("w-e2c", PATCH, "+        guard self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "+        guard !self.dataWatchPolicy.enabled else {\n+            if self.dataWatchActive {", "rev-W6: the adapter's own guard is inverted (the rule itself still refuses a disabled policy - tested; this guard is the adapter's shortcut)"),
-    ("w-e3", PATCH, "+\tif tribeProbeCfg == nil {\n+\t\ttribeProbeTun = nil\n+\t\treturn inner\n+\t}\n", "", "the probe wrapper is created without a configuration"),
+    ("w-e3", PATCH_GO, "+\tif tribeProbeCfg == nil {\n+\t\ttribeProbeTun = nil\n+\t\treturn inner\n+\t}\n", "", "the probe wrapper is created without a configuration"),
     ("w-e4a", IOS + "PacketTunnelProvider+DataWatch.swift", "setProbe: { clientIP, resolver, enabled in wgSetTribeProbe(clientIP, resolver, enabled ? 1 : 0) },", "setProbe: { clientIP, resolver, _ in wgSetTribeProbe(clientIP, resolver, 1) },", "the Go call ignores the runtime's on/off"),
     ("w-e4b", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteAppStatusRequest() // AVPN (build 140, data watch): the app is alive\n", "", "a status request does not mark the app alive"),
     ("w-e4c", IOS + "PacketTunnelProvider+WireGuard.swift", 'if let watch { response["watch"] = watch }', 'response["watch"] = watch ?? [String: Any]()', "the status reply always carries a watch key"),
@@ -548,9 +553,15 @@ WIRING = [
     ("w-e5b", IOS + "TribeDataWatchRuntime.swift", "        parameters.requiredInterface = interface\n", "", "the bypass request is not bound to the physical interface"),
     ("w-e5c", IOS + "TribeDataWatchRuntime.swift", "    /// Pick up a rewritten plan and let a policy that has grown too old lapse.", "    private var tick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in }\n    /// Pick up a rewritten plan and let a policy that has grown too old lapse.", "the runtime gets a timer of its own"),
     ("w-e6", IOS + "TribeDataWatchRuntime.swift", "        guard output.action == .report, let report = output.report else { return }", "        if output.action == .switchPeer { deps.log(\"reasserting\") }\n        guard output.action == .report, let report = output.report else { return }", "the runtime acts on a switching action"),
-    ("w-e7a", "recipes/awg-apple/conandata.yml", '    - patch_file: "patches/0012-tribe-data-watch.patch"\n', '    - patch_file: "patches/0010-tribe-upstream-http.patch"\n    - patch_file: "patches/0012-tribe-data-watch.patch"\n', "tribe.13 pulls in a patch of the unmerged branch"),
+    ("w-e7a", "recipes/awg-apple/conandata.yml", '    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"\n    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"\n', '    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"\n', "tribe.14 is built without the adapter half of the data watch"),
+    ("w-e7e", "recipes/awg-apple/conandata.yml", '    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"\n    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"\n', '    - patch_file: "patches/0016-tribe-data-watch-adapter.patch"\n    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"\n', "the adapter half is applied before the Scanner's 0015 (its hunks no longer match at their recorded lines)"),
+    ("w-e7f", "recipes/awg-apple/conandata.yml", '    - patch_file: "patches/0011-tribe-outbound-stats.patch"\n    - patch_file: "patches/0012-tribe-data-watch.patch"\n    - patch_file: "patches/0013-tribe-scan-probe.patch"\n    - patch_file: "patches/0014-tribe-scan-awg.patch"\n', '    - patch_file: "patches/0011-tribe-outbound-stats.patch"\n    - patch_file: "patches/0012-tribe-data-watch.patch"\n    - patch_file: "patches/0013-tribe-scan-probe.patch"\n', "tribe.14 loses a patch of tribe.12"),
+    ("w-e7g", "recipes/awg-apple/conanfile.py", '    _xray_pins["3.1.4-tribe.14"] = _xray_pins["3.1.4-tribe.12"]\n', "", "tribe.14 is built with the pins of tribe.11: no core bump, no Scanner engine, no backend-hook gate"),
+    ("w-i4a", PATCH, "+                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }\n", "+                wgTurnOff(handle)\n", "merge with the Scanner, I4: the engine stop of a switch is not announced - its probe sessions run across a change of the peer"),
+    ("w-i4b", PATCH, "+                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { wgTurnOff(handle) }\n", "+                TribeBackendHook.before(.rebind, self.tribeBackendWillRestart) { wgTurnOff(handle) }\n", "the stop is announced as a rebind, which the provider answers by keeping the probes"),
+    ("w-i4c", PATCH, "+                self.packetTunnelProvider?.reasserting = true\n+                // What runs next to the backend", "+                TribeBackendHook.before(.restart, self.tribeBackendWillRestart) { }\n+                self.packetTunnelProvider?.reasserting = true\n+                // What runs next to the backend", "a second announcement outside the stop itself"),
     ("w-e7b", "client/macos/networkextension/CMakeLists.txt", "    ${WG_APPLE_SOURCE_DIR}/WireGuardKit/TribeDataWatch.swift\n", "", "the macOS extension target does not compile the rule"),
-    ("w-e7c", "conanfile.py", 'self.requires("awg-apple/3.1.4-tribe.13")', 'self.requires("awg-apple/3.1.4-tribe.11")', "the app still requires the package without the watch"),
+    ("w-e7c", "conanfile.py", 'self.requires("awg-apple/3.1.4-tribe.14")', 'self.requires("awg-apple/3.1.4-tribe.12")', "the app still requires the package without the watch"),
     ("w-e7d", "recipes/awg-apple/conanfile.py", ' "{os.path.join(self.source_folder, "tests", "TribeDataWatchLadderTests.swift")}"', "", "the package is not gated on the vectors with the stall ladder"),
     ("w-e8", IOS + "PacketTunnelProvider+WireGuard.swift", "                                 logXray: { [weak self] in self?.logTribeXrayStats() },", "                                 logXray: { },", "the Xray statistics line is never written"),
     ("w-a1", ENG + "AvpnEngineQml.cpp", '#ifdef Q_OS_IOS\n    writeTunnelWatchPlan("start");', '#if 1\n    writeTunnelWatchPlan("start");', "a plan write outside Q_OS_IOS"),
@@ -585,7 +596,7 @@ ACCEPTED = {
 
 COPY = [
     "conanfile.py",
-    "recipes/awg-apple/conanfile.py", "recipes/awg-apple/conandata.yml", PATCH, "recipes/awg-apple/tribe/TribeDataWatch.swift",
+    "recipes/awg-apple/conanfile.py", "recipes/awg-apple/conandata.yml", PATCH, PATCH_GO, "recipes/awg-apple/tribe/TribeDataWatch.swift",
     "recipes/awg-apple/tribe/TribeRoaming.swift",
     "recipes/awg-apple/tests/run_tribe_data_watch_tests.sh", "recipes/awg-apple/tests/TribeDataWatchLadderTests.swift",
     "client/ios/networkextension/CMakeLists.txt", "client/macos/networkextension/CMakeLists.txt",

@@ -11,6 +11,8 @@
 //    repeated pick of the best location with a growing list of exclusions;
 //  * the transport mode in force: Xray-only - no candidates at all;
 //  * never a manual-only node (the ladder keeps them as a last tier; a switch nobody watches does not);
+//  * never a provider (upstream) node, whatever its transport: it runs on a seat lease that only the app
+//    can take and renew (CONNECT-INVARIANTS 31), and a session that stands on one is not the watch's;
 //  * never a node the server reports dead (pickTransportNode already skips health 0 - this is how a
 //    drained node leaves), never one that already failed in this app session, never the current one.
 // The pin. A pinned node that is proven dead is left - as the app's own ladder leaves it - but the
@@ -41,11 +43,11 @@ inline QStringList watchSwitchCandidateOrder(const QList<SubscriptionNode> &node
     for (const SubscriptionNode &n : nodes)
         if (n.nodeId == currentNodeId)
             current = &n;
-    if (!current || isXrayProto(current->proto))
-        return out; // the watch switches AmneziaWG sessions only
+    if (!current || isXrayProto(current->proto) || isUpstreamNode(*current))
+        return out; // the watch switches own AmneziaWG sessions only
     QList<SubscriptionNode> pool, pinned;
     for (const SubscriptionNode &n : nodes) {
-        if (isXrayProto(n.proto) || isManualOnlyNode(n))
+        if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))
             continue;
         pool.append(n);
         if (!pinCountry.isEmpty() && n.countryCode == pinCountry)
