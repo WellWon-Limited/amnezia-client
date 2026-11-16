@@ -210,7 +210,8 @@ enum TribeWatchPlanTests {
               && (cleanObject?["numbers"] as? [String: Any])?["ios_tw_cycle_s"] as? Int == 25, "scrubbed: no candidates, everything else as it was")
         check(clean.map { !String(decoding: $0, as: UTF8.self).contains(key32) } == true, "no key is left")
         check(accepted(clean, last: accepted(full)!.order)?.policy.enabled == true, "and it is the same plan for the order of plans")
-        check(TribeWatchPlan.scrubbed(Data("junk".utf8)) == nil && TribeWatchPlan.scrubbed(plan { $0["schema"] = 1 }) == nil, "what is not a plan is not rewritten")
+        check(TribeWatchPlan.scrubbed(Data("junk".utf8)) == nil
+              && TribeWatchPlan.scrubbed(plan { $0["schema"] = 1; $0["candidates"] = [candidate(12)] }) == nil, "what is not a plan of this schema is not rewritten, whatever it holds")
         check(TribeWatchPlan.scrubbed(plan()) == nil && clean.flatMap { TribeWatchPlan.scrubbed($0) } == nil, "a plan without candidates has nothing to take out")
         // --- two writers of one file (third review, T4) ---
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("tribe-plan-lock-\(UUID().uuidString)")

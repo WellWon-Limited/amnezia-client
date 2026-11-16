@@ -1401,6 +1401,18 @@ static void stageTwo()
         CHECK(late.returns == 0, "the reply itself starts nothing");
         late.tick();
         CHECK(late.returns == 1, "the next tick after the late reply: back to the user's choice");
+        // ... also when the question had been asked a moment before that short freeze
+        ResumeBench brief;
+        movedAndChecked(brief, true);
+        brief.tick(); // asked here: the evidence is fresh
+        brief.returnFacts.evidenceFresh = false;
+        brief.tick(5000);
+        for (int i = 0; i < 4; ++i)
+            brief.tick();
+        brief.now += 500;
+        brief.resume.onSnapshot(brief.snapshot(QStringLiteral("none"), QStringLiteral("12")));
+        brief.tick();
+        CHECK(brief.returns == 1, "a late reply ends the wait for the next period as well: the question is asked at the next tick");
         // no reply at all: after the bounded wait the question is asked too
         ResumeBench silent;
         movedAndChecked(silent, true);
