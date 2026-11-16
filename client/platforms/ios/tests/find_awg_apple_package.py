@@ -49,7 +49,7 @@ def matches(root, export_folder):
 
 def main():
     root, want_os = sys.argv[1], sys.argv[2]
-    ref = sys.argv[3] if len(sys.argv) > 3 else "awg-apple/3.1.4-tribe.12"
+    ref = sys.argv[3] if len(sys.argv) > 3 else "awg-apple/3.1.4-tribe.14"
     try:
         listing = json.loads(conan("list", f"{ref}#*:*", "--format=json") or "{}").get("Local Cache", {})
     except json.JSONDecodeError:
