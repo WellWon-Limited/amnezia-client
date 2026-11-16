@@ -225,7 +225,11 @@ both independent reviews (stage 1; stage 2 with the server-change key).
   tunnel (the provider sends it; no reply = `network`, a foreign reply = `captive`), then for the
   probe:
   - `answered` refutes the rule (`refuted` counter), also when the answer comes after the poll
-    (`lateAnswerAt`: a `no_data` confirmed by the probe is taken back);
+    (`lateAnswerAt`: a `no_data` confirmed by the probe is taken back) and also when it comes
+    after the NEXT probe was started (third review: the provider turns the engine's
+    ` prev_late=<id>` into the same `lateAnswerAt`). A late refutation is a refutation in full:
+    counted as `refuted`, the verdict withdrawn, a trial probe in flight cancelled and its budget
+    given back, no new trial ordered on that step;
   - `silent` confirms `no_data` (`evidence=probe`) only when the wait was UNDISTURBED: no inbound
     data, no quiet period, no device restart, no new handshake, no path event. A disturbed wait is
     void: report `disturbed`, counted separately, asked again after `probeRetryGapSeconds` (10)
@@ -250,7 +254,8 @@ both independent reviews (stage 1; stage 2 with the server-change key).
   shared file) never keep a verdict the rule no longer holds.
 - `tribeprobe.go` + `tribeprobe_engine.go`: `wgSetTribeProbe(clientIp, target, enabled)` before
   `wgTurnOn`, `wgTribeProbeStart(handle, timeoutMs)`, `wgTribeProbeResult(handle)` ->
-  `state=<pending|answered|silent|no_session|not_sent|unavailable|none> id=<n> ms=<n> late=<0|1>`.
+  `state=<pending|answered|silent|no_session|not_sent|unavailable|none> id=<n> ms=<n> late=<0|1>`,
+  followed by ` prev_late=<id>` once the reply to the probe BEFORE this one has come in.
   `wrapTribeProbeIfEnabled` is the outermost pass-through wrapper of the TUN device. The probe is one
   DNS query for the root name (type A, 17 bytes of payload: the query the split-DNS forwarder warms
   up with) from the tunnel address to the session's first DNS server, source port 50100-50199,
@@ -270,7 +275,10 @@ both independent reviews (stage 1; stage 2 with the server-change key).
     could still send and the handshake time has not changed by the end of the wait; otherwise
     `no_session`. The timeout counts from the consumption, not from the request.
   A late answer is accepted for 30 s after the timeout (`late=1`); the look-out on the write path
-  ends by a deadline of its own, without polling.
+  ends by a deadline of its own, without polling. The look-out survives the start of the next
+  probe (`tribeProbePrev`, only for a probe told `silent` / `no_session` whose 30 s are not over):
+  its reply is still taken off the write path and told as ` prev_late=<id>`, the current probe is
+  judged by its own reply only. A new device or an aborted probe drops it.
 - Limits of the probe, to be read literally: it is a DNS root query to the session's `dns1`; an
   answer proves the path phone -> node -> forwarding -> that resolver and back for a SMALL packet.
   `silent` proves that the engine had a sending keypair and took the packet; it does not prove the
@@ -303,7 +311,9 @@ both independent reviews (stage 1; stage 2 with the server-change key).
     nothing and is asked again 10 s later; `failed` / `rejected` count as tried and against the
     hourly ceiling `switchMaxPerHour` (6, `ios_tw_switch_max_per_hour`, 1..30) - every switch counts
     against it, also the way back and the move at a network change; at the ceiling the arbiter
-    waits and declares nothing;
+    waits and declares nothing. The rule does not keep the history itself (third review): it
+    compares `env.switchesLastHour`, counted by the provider, which keeps the switch times across
+    a policy off/on and across an extension restart (`switch_times` in its state file);
   - while a round is in progress (`arbiterOwnsRecovery`: active and not exhausted) the adapter
     does not run the stall ladder: its steps would spend the shared budget the switch needs. Between
     rounds and with the key off the ladder works as in tribe.11;
@@ -363,7 +373,8 @@ hits every node and a change of network - and `go test -run '^TestTribeProbe'` (
 fake engine dump: packet layout and checksums, answer, silence, repeat, one probe at a time, a
 foreign packet passed through untouched, restart during the wait, no configuration, departure
 through the forwarder, a refused start without a keypair, a staged packet, an expired keypair, a
-handshake during the wait, a late answer, a resolver in the direct list). `replay/` holds the
+handshake during the wait, a late answer, a late answer after the next probe started and the end
+of that look-out, a resolver in the direct list). `replay/` holds the
 offline tooling (not exported): the replay of a tester journal through the real function
 (aggregates only) and the mutation run of the rule
 (`python3 recipes/awg-apple/replay/tribe_data_watch_mutants.py`).
