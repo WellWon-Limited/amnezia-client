@@ -746,6 +746,28 @@ static void handOver()
         b.tick();
         CHECK(ran == 1, "12 s after it: the wait is given up");
     }
+    {   // after the timeout the data checks wait for the reply - but not with the flag off, and not without a tunnel
+        ResumeBench off;
+        int ran = 0;
+        off.tick(60000);
+        off.defer(&ran);
+        for (int i = 0; i < 3; ++i)
+            off.tick();
+        CHECK(!off.resume.frozen() && ran == 0, "released by the timeout: the data check waits for the reply");
+        off.watchFlag = false;
+        off.tick();
+        CHECK(ran == 1 && off.resume.deferredCount() == 0, "the flag went off: nothing of the watch holds a decision any more");
+        CHECK(!off.defer(&ran) && ran == 1, "and a new data check is not held either");
+        ResumeBench gone;
+        gone.tick(60000);
+        gone.defer(&ran);
+        for (int i = 0; i < 3; ++i)
+            gone.tick();
+        CHECK(!gone.resume.frozen() && ran == 1, "released by the timeout: the data check waits");
+        gone.connected = false;
+        gone.tick();
+        CHECK(ran == 2 && gone.resume.deferredCount() == 0, "the tunnel is not Connected any more: nobody will answer, the check goes on");
+    }
     {   // the tunnel went down during the wait and came back: nobody is waited for any more
         ResumeBench b;
         int ran = 0;
@@ -1217,6 +1239,12 @@ static void stageTwo()
         CHECK(e.size() == 2 && e.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 + 45 * 60000), "judged again: one record, the newest");
         e.note(QString(), QStringLiteral("wifi"), t0);
         CHECK(e.size() == 2, "no node, no record");
+        WatchEvidence two;
+        two.note(QStringLiteral("16"), QStringLiteral("wifi"), t0);
+        two.note(QStringLiteral("16"), QStringLiteral("cellular:250-02"), t0 + 1000);
+        CHECK(two.size() == 2 && two.fresh(QStringLiteral("16"), QStringLiteral("wifi"), t0 + 2000)
+                  && two.fresh(QStringLiteral("16"), QStringLiteral("cellular:250-02"), t0 + 2000),
+              "the same node judged on a second network: both records stand");
         WatchEvidence many;
         for (int i = 0; i < 40; ++i)
             many.note(QString::number(i), QStringLiteral("wifi"), t0 + i);

@@ -310,7 +310,7 @@ enum TribeStartChoice {
         var out: [LastFailure] = []
         for raw in (state["dead"] as? [Any] ?? []).prefix(maxFailuresKept * 2) {
             guard let entry = raw as? [String: Any], let node = entry["node_id"] as? String, !node.isEmpty, node.count <= 16,
-                  let net = TribeWatchCandidate.label(entry["net"]), let at = TribeWatchPlan.int(entry["at_ms"]), at > 0 else { continue }
+                  let net = TribeWatchCandidate.label(entry["net"]), let at = TribeWatchPlan.int(entry["at_ms"]) else { continue }
             out = noting(LastFailure(nodeId: node, net: net, wallMs: at), in: out, nowMs: nowMs)
         }
         if state["verdict"] as? String == TribeDataVerdict.noData.rawValue,

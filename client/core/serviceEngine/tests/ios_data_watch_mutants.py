@@ -302,7 +302,6 @@ PURE = [
     ("xd-04", IOS + "TribeWatchPlan.swift", "        return Array(kept.suffix(maxFailuresKept))\n", "        return Array(kept.prefix(maxFailuresKept))\n", "plan", "the newest record is the one dropped"),
     ("xd-05", IOS + "TribeWatchPlan.swift", "        return out.filter { fresh($0, nowMs: nowMs) }\n", "        return out\n", "plan", "a record that aged in the file is read as fresh"),
     ("xd-06", IOS + "TribeWatchPlan.swift", "for raw in (state[\"dead\"] as? [Any] ?? []).prefix(maxFailuresKept * 2) {", "for raw in [Any]() {", "plan", "second review R6: the dead nodes of the previous run are not read"),
-    ("xd-07", IOS + "TribeWatchPlan.swift", "let net = TribeWatchCandidate.label(entry[\"net\"]), let at = TribeWatchPlan.int(entry[\"at_ms\"]), at > 0 else { continue }", "let net = TribeWatchCandidate.label(entry[\"net\"]), let at = TribeWatchPlan.int(entry[\"at_ms\"]) else { continue }", "plan", "(a record without a time is aged anyway) a record without a time is read"),
     ("xd-08", IOS + "TribeWatchPlan.swift", "failures.map { [\"node_id\": $0.nodeId, \"net\": $0.net, \"at_ms\": $0.wallMs] }", "failures.map { [\"node_id\": $0.nodeId, \"net\": $0.net, \"at_ms\": $0.wallMs / 1000] }", "plan", "the records are written in seconds and read in milliseconds"),
     ("xc-16", IOS + "TribeWatchPlan.swift", "        if !plan.pinNodeId.isEmpty, known.contains(plan.pinNodeId) { order.append((plan.pinNodeId, \"pin\")) }\n", "", "plan", "the pin does not come first at a start by the system"),
     ("xc-17", IOS + "TribeWatchPlan.swift", "        if let remembered = plan.memory[net], known.contains(remembered) { order.append((remembered, \"memory\")) }\n", "", "plan", "the app's memory of the network is not used"),
@@ -375,7 +374,6 @@ PURE = [
     ("r3-10", ENG + "TunnelWatchResume.h", "        if (m_ops.backgroundArmOnly()) {\n            m_pendingSession = session;", "        if (false) {\n            m_pendingSession = session;", "watch", "rev2-G10: a switch is adopted while the app is only holding background time"),
     ("r3-11", ENG + "TunnelWatchResume.h", "            m_pendingSession.insert(QStringLiteral(\"switch_seq\"), ai.switchSeq);\n", "", "watch", "a switch told only in the watch block is lost while it waits for the screen"),
     ("r3-12", ENG + "TunnelWatchResume.h", "        if (ai.switchSeq > 0)\n            m_pendingSession.clear(); // a newer word", "        if (false)\n            m_pendingSession.clear(); // a newer word", "watch", "a switch that waited for the screen is replayed although the extension has moved on"),
-    ("r3-13", ENG + "TunnelWatchResume.h", "        if (m_pendingSession.isEmpty() || m_ops.backgroundArmOnly())\n            return;", "        if (m_pendingSession.isEmpty())\n            return;", "watch", "(adopt() refuses in the background itself) the pending switch is offered while still in the background"),
     ("r3-14", ENG + "TunnelWatchResume.h", "        const bool adopted = adopt(session, w.switchSeq,", "        const bool adopted = adopt(session, 0,", "watch", "the switch number of the watch block is not passed on"),
     ("idw-01", ENG + "TunnelWatchStatus.h", "return askedMs >= 0 && nowMs >= askedMs && nowMs - askedMs < kIdentityWaitFactor * timeoutMs;", "return nowMs >= askedMs && nowMs - askedMs < kIdentityWaitFactor * timeoutMs;", "watch", "nobody was asked and the checks wait"),
     ("idw-02", ENG + "TunnelWatchStatus.h", "return askedMs >= 0 && nowMs >= askedMs && nowMs - askedMs < kIdentityWaitFactor * timeoutMs;", "return askedMs >= 0 && nowMs - askedMs < kIdentityWaitFactor * timeoutMs;", "watch", "a clock set back makes the wait endless"),
@@ -526,6 +524,8 @@ ACCEPTED = {
     "cand-07": "equivalent: with Xray listeners in the pool the Awg mode of the pick still refuses them (transportAllowed)",
     "eng-11": "equivalent: buildWatchPlan cuts the list to five as well (plan-28); the engine's cut only saves work",
     "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
+    "rs-01": "equivalent: a second lock - the parse keeps candidates only with the switch key on and a live lease (xl-01, xl-02, xp-06), so a plan with candidates always has the key on",
+    "st-02": "equivalent: the same second lock at the start choice (the pure function's own lock is pinned by xc-12)",
 }
 
 COPY = [

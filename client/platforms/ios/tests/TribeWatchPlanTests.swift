@@ -118,6 +118,12 @@ enum TribeWatchPlanTests {
         check(choose(accepted(plan { $0["candidates"] = [candidate(12)] }), failed: Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 60_000)) == "16/profile",
               "the switch key off: the profile's node even when it failed here a minute ago (build 139)")
         check(choose(parsed([])) == "16/profile", "nothing to choose from: the profile's node")
+        // The function's own lock, whatever the struct holds: with the switch key off in the policy
+        // it returns the profile's node (a parsed plan never has candidates then - that is the other lock).
+        var forged = parsed([candidate(12), candidate(9)])
+        forged?.policy.switchEnabled = false
+        check(forged?.candidates.count == 2 && choose(forged, failed: Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 60_000)) == "16/profile",
+              "the key off in the policy: the profile's node even with candidates in hand")
         check(choose(twoSpare) == "16/profile", "a healthy profile node is kept")
         let recently = Choice.LastFailure(nodeId: "16", net: "cellular", wallMs: now - 10 * 60 * 1000)
         check(choose(twoSpare, failed: recently) == "12/plan_order", "the profile's node failed here ten minutes ago: the plan's first")
@@ -164,6 +170,9 @@ enum TribeWatchPlanTests {
         check(Choice.failures(state: ["dead": encoded, "verdict": "no_data", "node_id": "9", "net": "wifi", "last_no_data_ms": now - 1], nowMs: now).map { $0.nodeId } == ["16", "12", "9"],
               "the verdict the file ends with joins the list")
         check(Choice.failures(state: ["dead": encoded], nowMs: now + 25 * 60_000) == [f12], "read back half an hour after the older one: it is gone")
+        check(Choice.failures(state: ["dead": Choice.encode([f12, f16])], nowMs: now + 25 * 60_000) == [f12], "also when the aged record is the last one in the file")
+        check(Choice.failures(state: ["dead": Choice.encode([f16])], nowMs: now + 25 * 60_000).isEmpty, "and when it is the only one")
+        check(Choice.failures(state: ["dead": [["node_id": "7", "net": "wifi", "at_ms": 0], ["node_id": "8", "net": "wifi", "at_ms": -5]]], nowMs: now).isEmpty, "a record without a real time is an aged one")
         check(Choice.failures(state: ["dead": ["junk", ["node_id": "", "net": "wifi", "at_ms": 5], ["node_id": "7", "net": "wi fi", "at_ms": 5], ["node_id": "7", "net": "wifi"]]], nowMs: now).isEmpty, "junk entries are dropped")
         let twoDead = Choice.choose(profileNodeId: "16", plan: twoSpare, net: "cellular", failures: [f16, f12], nowMs: now)
         check(twoDead.nodeId == "9" && twoDead.why == "plan_order", "with two nodes known dead here the third is chosen: \(twoDead)")

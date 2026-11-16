@@ -122,6 +122,8 @@ enum TribeDataWatchRuntimeTests {
         var uplink = "cellular"
         /// What the extension wrote into the plan file itself (only ever a scrubbed copy).
         var plansWritten: [Data] = []
+        /// The write of the extension fails (a full disk, a locked file).
+        var planWriteFails = false
         let runtime = TribeDataWatchRuntime()
         let adapter = FakeAdapter()
 
@@ -155,6 +157,7 @@ enum TribeDataWatchRuntimeTests {
                 readState: { [unowned self] in self.stateReads += 1; return self.previousState },
                 writePlan: { [unowned self] data in
                     self.plansWritten.append(data)
+                    if self.planWriteFails { return false }
                     return (try? data.write(to: self.planURL, options: .atomic)) != nil
                 }))
             adapter.switchTarget = { [unowned self] node in self.runtime.switchTarget(node) }
@@ -365,6 +368,18 @@ enum TribeDataWatchRuntimeTests {
             b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
             b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
             check(b.plansWritten.count == 1 && b.adapter.policy.enabled, "and the scrubbed file is read as the same plan: nothing more is written")
+            // The extension cannot write the file: one attempt per file, not one per tick.
+            let stuck = Bench()
+            stuck.planWriteFails = true
+            stuck.writePlan(switchOn: true, candidates: [12], leaseInMs: 60_000)
+            stuck.startSession()
+            dead(stuck, seconds: 70)
+            for _ in 1...4 { stuck.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {}) }
+            check(stuck.plansWritten.count == 1 && stuck.logs.filter { $0.contains("plan candidates removed") }
+                    == ["Tribe watch: plan candidates removed (switch permission is gone) result=failed"],
+                  "a write that failed is told once and not retried on every tick: \(stuck.plansWritten.count) \(stuck.logs.filter { $0.contains("plan candidates") })")
+            dead(stuck, seconds: 2)
+            check(!stuck.adapter.policy.switchEnabled && stuck.adapter.lastInputs.candidates.isEmpty, "and switching is off all the same")
             // The app renews the lease with its next plan: switching works again.
             b.writePlan(switchOn: true, candidates: [12, 9])
             b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
@@ -466,9 +481,42 @@ enum TribeDataWatchRuntimeTests {
             let b = Bench()
             b.writePlan(numbers: ["ios_tw_trial_probe_max_per_hour": 60], switchOn: true, candidates: [12, 9])
             b.startSession()
+            for _ in 1...3 { b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {}) }
+            check(b.stateReads == 1, "the previous run's file is read once per run, not at every re-read of the plan: \(b.stateReads)")
             b.probeResult = "state=silent id=5 ms=0 late=0"
             untilSwitched(b)
             func deadNodes(_ state: [String: Any]) -> [String] { (state["dead"] as? [[String: Any]] ?? []).compactMap { $0["node_id"] as? String } }
+            // A verdict alone is a record - also when nobody is moved (the app is alive and decides itself).
+            let watched = Bench()
+            watched.writePlan(switchOn: true, candidates: [12])
+            watched.startSession()
+            watched.probeResult = "state=silent id=5 ms=0 late=0"
+            for second in 1...200 {
+                watched.runtime.noteAppStatusRequest()
+                watched.second(tx: 400, handshake: watched.adapter.handshake == 0 ? second % 3 == 0 : false)
+            }
+            check(watched.adapter.watch.verdict == .noData && watched.adapter.commands.isEmpty && deadNodes(watched.lastState) == ["16"],
+                  "a verdict with a living app: nobody is moved, the node is on record: \(deadNodes(watched.lastState))")
+            // A session started by the APP knows what the previous run judged, and keeps it in the file
+            // it rewrites (the next start by the system needs it).
+            let byApp = Bench()
+            byApp.writePlan(numbers: ["ios_tw_trial_probe_max_per_hour": 60], switchOn: true, candidates: [12, 9])
+            byApp.previousState = ["verdict": "none", "dead": [["node_id": "9", "net": "cellular", "at_ms": byApp.wallMs - 60_000]]]
+            byApp.startSession()
+            check(byApp.runtime.chooseStart(source: "app") == nil, "a start by the app: the profile's node")
+            byApp.probeResult = "state=silent id=5 ms=0 late=0"
+            untilSwitched(byApp)
+            check(Set(deadNodes(byApp.lastState)) == ["9", "16"], "the previous run's record is carried through this run's rewrites: \(deadNodes(byApp.lastState))")
+            // A node left long after its verdict (the half-hour pause between rounds) is noted at the
+            // moment it is left: the record must not have aged by then.
+            let slow = Bench()
+            slow.writePlan(numbers: ["ios_tw_trial_probe_max_per_hour": 60], switchOn: true, candidates: [12])
+            slow.startSession()
+            slow.probeResult = "state=silent id=5 ms=0 late=0"
+            untilSwitched(slow, 5, limit: 4500)
+            check(slow.adapter.switched.map { $0.node } == ["12", "16", "12", "16", "12"], "two rounds and the first switch of the third: \(slow.adapter.switched.map { $0.node })")
+            let left = (slow.lastState["dead"] as? [[String: Any]])?.last { $0["node_id"] as? String == "16" }
+            check(slow.wallMs - (left?["at_ms"] as? Int64 ?? 0) <= 1000, "the node is on record as of the moment it was left: \(slow.wallMs - (left?["at_ms"] as? Int64 ?? 0)) ms")
             check(deadNodes(b.lastState) == ["16"] && (b.lastState["dead"] as? [[String: Any]])?.first?["net"] as? String == "cellular",
                   "the node the tunnel left is in the file written after the switch: \(b.lastState["dead"] ?? "-")")
             untilSwitched(b, 2)
@@ -512,6 +560,12 @@ enum TribeDataWatchRuntimeTests {
             check(!b.adapter.commands.dropFirst(3).contains { if case .switchPeer(let to, _) = $0.command { return to == "12" } else { return false } },
                   "node 12 is not asked again in later rounds: \(b.adapter.commands.map { "\($0.command)" }.suffix(6))")
             check(!b.adapter.lastInputs.candidates.contains("12"), "it is not on offer")
+            // The plan is re-read every 10 s: the same plan is not a new plan.
+            let epoch = b.adapter.lastInputs.planEpoch
+            for _ in 1...3 { b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {}) }
+            dead(b, seconds: 2)
+            check(b.adapter.lastInputs.planEpoch == epoch && !b.adapter.lastInputs.candidates.contains("12"),
+                  "re-reading the same plan neither tells the rule of a new plan nor offers the rejected node: \(b.adapter.lastInputs.planEpoch) \(b.adapter.lastInputs.candidates)")
             // The provider's own parse refused a candidate: the same.
             b.runtime.markRejected("9")
             dead(b, seconds: 2)

@@ -293,8 +293,8 @@ private:
 
     void adoptPending()
     {
-        if (m_pendingSession.isEmpty() || m_ops.backgroundArmOnly())
-            return;
+        if (m_pendingSession.isEmpty())
+            return; // (in the background adopt() just keeps it waiting)
         const QVariantMap session = m_pendingSession;
         onSessionMetadata(session);
     }
