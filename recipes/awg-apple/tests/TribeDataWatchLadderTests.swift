@@ -410,6 +410,8 @@ final class SwitchRig {
         var current = inputs
         current.nodeId = net.current
         current.candidates = offered()
+        // The provider keeps the hourly history of switches (a refused one does not count).
+        current.switchesLastHour = switches.filter { $0.result != .denied && net.t - $0.t < 3600 }.count
         return current
     }
     private func startProbe(_ reason: TribeProbeReason) {

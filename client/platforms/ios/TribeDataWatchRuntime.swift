@@ -105,6 +105,9 @@ final class TribeDataWatchRuntime {
     /// by the system and a change of network skip them.
     private var dead: [TribeStartChoice.LastFailure] = []
     private var deadLoaded = false
+    /// Stage 2: the switches of the last hour (TribeSwitchHistory): the rule is told their number
+    /// at every step. Kept here, not in the rule: it must survive a policy toggle and a restart.
+    private var switchTimesMs: [Int64] = []
     /// Candidates whose configuration could not be used (it does not parse, or the engine did not
     /// start on it): not offered again while this plan lives.
     private var rejected: Set<String> = []
@@ -160,6 +163,7 @@ final class TribeDataWatchRuntime {
         self.actualEndpoint = nil
         self.handedOut = nil
         self.dead = []
+        self.switchTimesMs = []
         self.deadLoaded = false
         self.rejected = []
         self.engineDown = false
@@ -251,12 +255,18 @@ final class TribeDataWatchRuntime {
         return (switchSeq, why, nodeId, endpoint)
     }
 
-    /// The node dead-node records and the choice are about: read from the previous run's file
-    /// once, and only when the plan permits switching (with the keys off nothing is read).
+    /// What the previous run of the extension left: the nodes it judged dead and the switches of
+    /// the last hour. Read from its file once, and only when the plan permits switching (with the
+    /// keys off nothing is read); what this run has learned meanwhile is kept.
     private func loadDeadLocked(_ deps: TribeDataWatchDeps) {
         guard !deadLoaded else { return }
         deadLoaded = true
-        dead = TribeStartChoice.failures(state: deps.readState(), nowMs: deps.nowMs())
+        let previous = deps.readState()
+        let now = deps.nowMs()
+        var merged = TribeStartChoice.failures(state: previous, nowMs: now)
+        for record in dead { merged = TribeStartChoice.noting(record, in: merged, nowMs: now) }
+        dead = merged
+        switchTimesMs = TribeSwitchHistory.fresh(TribeSwitchHistory.read(state: previous, nowMs: now) + switchTimesMs, nowMs: now)
     }
 
     /// The node to come up on at a start, when it is not the profile's. `source` is what the
@@ -434,6 +444,7 @@ final class TribeDataWatchRuntime {
         state["switch_seq"] = switchSeq
         state["switches"] = switches
         state["dead"] = TribeStartChoice.encode(dead)
+        state["switch_times"] = TribeSwitchHistory.fresh(switchTimesMs, nowMs: deps.nowMs())
         state["engine"] = engineDown ? "down" : "up"
         lock.unlock()
         if let net { state["net"] = net }
@@ -577,6 +588,8 @@ final class TribeDataWatchRuntime {
         current.nodeId = nodeId
         current.candidates = offeredLocked()
         current.planEpoch = planEpoch
+        switchTimesMs = TribeSwitchHistory.fresh(switchTimesMs, nowMs: deps.nowMs())
+        current.switchesLastHour = switchTimesMs.count
         let choosing = !current.candidates.isEmpty ? (plan, homeNodeId, dead) : nil
         lock.unlock()
         // Where a start on the network the phone is on NOW would go (the rule uses it only right
@@ -637,6 +650,13 @@ final class TribeDataWatchRuntime {
         lock.lock()
         let from = nodeId
         var switched = false
+        // Every attempt that touched the tunnel or the candidate counts against the hourly ceiling
+        // (as the rule's own bookkeeping of a round does); one the shared budget refused does not.
+        var counted = false
+        if case .switchPeer = command, result != .denied {
+            counted = true
+            switchTimesMs = TribeSwitchHistory.noting(deps.nowMs(), in: switchTimesMs, nowMs: deps.nowMs())
+        }
         // A candidate whose configuration cannot be used is not offered again while the plan lives.
         if case .switchPeer(let to, _) = command, result == .rejected { rejected.insert(to) }
         // The node being left for want of data is a node judged dead on this network - whatever
@@ -674,7 +694,7 @@ final class TribeDataWatchRuntime {
             deps.record("peer_switch", ["from": from, "to": to, "why": why.rawValue, "seq": seq, "net": net,
                                         "result": result.rawValue, "generation": labels.2])
         }
-        guard switched else { return }
+        guard switched || counted else { return }
         writeState(snapshot.asDictionary, net: net, deps: deps)
     }
 

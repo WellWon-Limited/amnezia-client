@@ -323,6 +323,31 @@ enum TribeStartChoice {
     }
 }
 
+/// Stage 2: when the tunnel was switched in place during the last hour (wall clock, ms). The hourly
+/// ceiling of switches is judged by this list, and the list is the PROVIDER's: it survives a watch
+/// policy that goes off and on inside one run and - through TribeWatchState.json (`switch_times`) -
+/// a restart of the extension, where the rule itself starts from nothing.
+enum TribeSwitchHistory {
+    static let windowMs: Int64 = 60 * 60 * 1000
+    static let maxKept = 64
+
+    /// The entries that still count at `nowMs`. A time "in the future" (the clock was set back) is
+    /// counted as made now: the ceiling holds for at most one more hour, never less.
+    static func fresh(_ times: [Int64], nowMs: Int64) -> [Int64] {
+        Array(times.map { Swift.min($0, nowMs) }.filter { nowMs - $0 < windowMs }.sorted().suffix(maxKept))
+    }
+
+    static func noting(_ atMs: Int64, in times: [Int64], nowMs: Int64) -> [Int64] {
+        fresh(times + [atMs], nowMs: nowMs)
+    }
+
+    /// What the previous run of the extension left in the shared file.
+    static func read(state: [String: Any]?, nowMs: Int64) -> [Int64] {
+        let raw = (state?["switch_times"] as? [Any] ?? []).prefix(maxKept * 2)
+        return fresh(raw.compactMap { TribeWatchPlan.int($0) }, nowMs: nowMs)
+    }
+}
+
 /// One target of the request that bypasses the tunnel. It answers one question: is the physical
 /// network a real path to the Internet right now (and not absent, and not a login page)?
 ///

@@ -176,6 +176,14 @@ enum TribeWatchPlanTests {
         check(Choice.failures(state: ["dead": ["junk", ["node_id": "", "net": "wifi", "at_ms": 5], ["node_id": "7", "net": "wi fi", "at_ms": 5], ["node_id": "7", "net": "wifi"]]], nowMs: now).isEmpty, "junk entries are dropped")
         let twoDead = Choice.choose(profileNodeId: "16", plan: twoSpare, net: "cellular", failures: [f16, f12], nowMs: now)
         check(twoDead.nodeId == "9" && twoDead.why == "plan_order", "with two nodes known dead here the third is chosen: \(twoDead)")
+        // --- the switches of the last hour (third review, T5) ---
+        typealias History = TribeSwitchHistory
+        check(History.fresh([now - 3_600_000, now - 3_599_999, now - 5, now], nowMs: now) == [now - 3_599_999, now - 5, now], "an hour, exclusive at the far end")
+        check(History.fresh([now + 600_000, now - 10], nowMs: now) == [now - 10, now], "a time from the future (the clock went back) counts as made now")
+        check(History.noting(now, in: [now - 7_200_000, now - 100], nowMs: now) == [now - 100, now], "a new one is added, an old one is dropped")
+        check(History.fresh((0..<200).map { now - Int64($0) }, nowMs: now).count == History.maxKept, "bounded")
+        check(History.read(state: ["switch_times": [now - 100, "junk", now - 4_000_000, 0, -5, Double(now - 50)]], nowMs: now) == [now - 100, now - 50], "read from the state file: numbers of the last hour only")
+        check(History.read(state: nil, nowMs: now).isEmpty && History.read(state: ["switch_times": "x"], nowMs: now).isEmpty, "no file, no list: nothing")
         // --- who started the tunnel (review R1) ---
         check(Choice.startedBySystem(source: nil), "no source at all: the system")
         for named in ["app", "intent", "os", "", "anything"] { check(!Choice.startedBySystem(source: named), "'\(named)' names somebody: not the system") }

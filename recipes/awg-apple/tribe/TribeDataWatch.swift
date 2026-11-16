@@ -456,11 +456,17 @@ public struct TribeDataWatchEnv: Equatable {
     public var networkChoice: String
     /// Stage 2: grows by one with every new plan the app wrote.
     public var planEpoch: Int
+    /// Stage 2: how many in-place switches were attempted in the last hour (every reason; one the
+    /// shared budget refused does not count). Kept by the PROVIDER, not here: the hourly ceiling
+    /// must survive a policy that goes off and on and a restart of the extension, and this struct
+    /// forgets everything at both.
+    public var switchesLastHour: Int
 
     public init(pathSatisfied: Bool, sanity: TribeSanityResult = .unknown,
                 sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none, probeAt: TimeInterval? = nil,
                 probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil, appSeenAt: TimeInterval? = nil,
-                nodeId: String = "", candidates: [String] = [], networkChoice: String = "", planEpoch: Int = 0) {
+                nodeId: String = "", candidates: [String] = [], networkChoice: String = "", planEpoch: Int = 0,
+                switchesLastHour: Int = 0) {
         self.pathSatisfied = pathSatisfied
         self.sanity = sanity
         self.sanityAt = sanityAt
@@ -473,6 +479,7 @@ public struct TribeDataWatchEnv: Equatable {
         self.candidates = candidates
         self.networkChoice = networkChoice
         self.planEpoch = planEpoch
+        self.switchesLastHour = switchesLastHour
     }
 }
 
@@ -490,11 +497,12 @@ public struct TribeDataWatchInputs: Equatable {
     public var candidates: [String]
     public var networkChoice: String
     public var planEpoch: Int
+    public var switchesLastHour: Int
 
     public init(sanity: TribeSanityResult = .unknown, sanityAt: TimeInterval? = nil, probe: TribeProbeResult = .none,
                 probeAt: TimeInterval? = nil, probeLatencyMs: Int = 0, lateAnswerAt: TimeInterval? = nil,
                 appSeenAt: TimeInterval? = nil, nodeId: String = "", candidates: [String] = [],
-                networkChoice: String = "", planEpoch: Int = 0) {
+                networkChoice: String = "", planEpoch: Int = 0, switchesLastHour: Int = 0) {
         self.sanity = sanity
         self.sanityAt = sanityAt
         self.probe = probe
@@ -506,13 +514,15 @@ public struct TribeDataWatchInputs: Equatable {
         self.candidates = candidates
         self.networkChoice = networkChoice
         self.planEpoch = planEpoch
+        self.switchesLastHour = switchesLastHour
     }
 
     public func env(pathSatisfied: Bool) -> TribeDataWatchEnv {
         TribeDataWatchEnv(pathSatisfied: pathSatisfied, sanity: sanity, sanityAt: sanityAt,
                           probe: probe, probeAt: probeAt, probeLatencyMs: probeLatencyMs,
                           lateAnswerAt: lateAnswerAt, appSeenAt: appSeenAt,
-                          nodeId: nodeId, candidates: candidates, networkChoice: networkChoice, planEpoch: planEpoch)
+                          nodeId: nodeId, candidates: candidates, networkChoice: networkChoice, planEpoch: planEpoch,
+                          switchesLastHour: switchesLastHour)
     }
 }
 
@@ -759,7 +769,6 @@ public struct TribeDataWatch: Equatable {
     private var arb = Arbiter()
     private var trialProbeTimes: [TimeInterval] = []
     /// In-place switches of the last hour (performed or failed; a refused one changed nothing).
-    private var switchTimes: [TimeInterval] = []
     /// Silent, undisturbed judgments (a probe, or the handshake of a node without a session) of
     /// the node the tunnel stands on, with not one inbound transport packet since the first of
     /// them. A node is left only with two of them at least `healTrialSeconds` apart.
@@ -775,10 +784,10 @@ public struct TribeDataWatch: Equatable {
     /// the session's gate counters, and what the outputs were last told.
     public mutating func noteDeviceStarted(at uptime: TimeInterval, policy: TribeDataWatchPolicy) {
         let kept = (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported)
-        let keptTrials = (trialProbeTimes, switchTimes, planEpochSeen)
+        let keptTrials = (trialProbeTimes, planEpochSeen)
         self = TribeDataWatch()
         (probeTimes, lowRxProbeTimes, lowRxNotBefore, lowRxBackoff, sanityTimes, refutedCount, disturbedCount, lastReported) = kept
-        (trialProbeTimes, switchTimes, planEpochSeen) = keptTrials
+        (trialProbeTimes, planEpochSeen) = keptTrials
         startGraceUntil = uptime + policy.startGraceSeconds
         sessionEpoch = uptime
     }
@@ -806,7 +815,6 @@ public struct TribeDataWatch: Equatable {
                 if why == .network { arb.rechoose = true } // the move to the new network's node is still owed
                 return
             }
-            switchTimes.append(uptime)
             if why == .noData {
                 arb.switchesDone += 1
                 if !arb.tried.contains(node) {
@@ -1006,7 +1014,6 @@ public struct TribeDataWatch: Equatable {
         lowRxProbeTimes.removeAll { now - $0 >= hour }
         sanityTimes.removeAll { now - $0 >= hour }
         trialProbeTimes.removeAll { now - $0 >= hour }
-        switchTimes.removeAll { now - $0 >= hour }
         var report: TribeDataWatchReport?
 
         // 7. An answer that came after its probe had been judged silent: the verdict was wrong.
@@ -1247,7 +1254,7 @@ public struct TribeDataWatch: Equatable {
                     arb.trialDueAt = Swift.max(arb.trialDueAt, now + TribeDataWatchPolicy.healTrialSeconds)
                 }
             }
-            let canSwitch = switchTimes.count < policy.switchMaxPerHour
+            let canSwitch = env.switchesLastHour < policy.switchMaxPerHour
             if arb.rechoose && env.pathSatisfied {
                 // Another network and an unproven node: where a start on this network would go.
                 if !env.networkChoice.isEmpty && env.networkChoice != env.nodeId
@@ -1413,7 +1420,7 @@ public struct TribeDataWatch: Equatable {
         snapshot.arbiterExhausted = arb.exhausted
         snapshot.trialProbesLastHour = trialProbeTimes.count
         snapshot.silences = silences
-        snapshot.switchesLastHour = switchTimes.count
+        snapshot.switchesLastHour = lastEnv.switchesLastHour // the provider's count as of the last step
         return snapshot
     }
 

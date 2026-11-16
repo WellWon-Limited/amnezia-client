@@ -343,6 +343,59 @@ enum TribeDataWatchRuntimeTests {
             dead(old, seconds: 1)
             check(!old.logs.contains { $0.contains("event=refuted") }, "a result line of another probe credits nobody")
         }
+        run("hourly_ceiling_survives_a_policy_toggle_and_a_restart") {
+            // Third review, T5: the ceiling of switches per hour was forgotten when the watch policy
+            // went off and on inside one run (the rule forgets everything at the kill switch) and at
+            // every restart of the extension - 36 switches an hour were reached. The history is the
+            // provider's now, and it lies in the state file.
+            let numbers: [String: Any] = ["ios_tw_switch_max_per_hour": 2, "ios_tw_trial_probe_max_per_hour": 60]
+            let b = Bench()
+            b.writePlan(numbers: numbers, switchOn: true, candidates: [12, 9, 3])
+            b.startSession()
+            b.probeResult = "state=silent id=5 ms=0 late=0"
+            untilSwitched(b, 2)
+            check(b.adapter.switched.count == 2 && (b.lastState["switch_times"] as? [Int64])?.count == 2, "two switches, both in the state file: \(b.lastState["switch_times"] ?? "-")")
+            dead(b, seconds: 400)
+            check(b.adapter.switched.count == 2 && b.adapter.lastInputs.switchesLastHour == 2, "the ceiling holds: \(b.adapter.switched.count)")
+            // The watch goes off and on (a plan rewrite): the rule starts from nothing, the ceiling does not.
+            b.writePlan(watch: false)
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            dead(b, seconds: 5)
+            check(!b.adapter.policy.enabled, "the watch is off")
+            b.writePlan(numbers: numbers, switchOn: true, candidates: [12, 9, 3])
+            b.runtime.statsTick(isXray: false, loggingEnabled: false, logXray: {}, logWireGuard: {})
+            dead(b, seconds: 900)
+            check(b.adapter.policy.switchEnabled && b.adapter.watch.verdict == .noData && b.adapter.switched.count == 2,
+                  "off and on inside the hour: not one more switch: \(b.adapter.switched.count)")
+            // The extension is restarted (iOS, a crash): the new run reads the history.
+            let next = Bench()
+            next.wallMs = b.wallMs + 60_000
+            next.writePlan(numbers: numbers, switchOn: true, candidates: [12, 9, 3])
+            next.previousState = b.lastState
+            next.startSession()
+            next.probeResult = "state=silent id=5 ms=0 late=0"
+            dead(next, seconds: 900)
+            check(next.adapter.watch.verdict == .noData && next.adapter.switched.isEmpty && next.adapter.lastInputs.switchesLastHour == 2,
+                  "a new run inside the hour: the ceiling of the previous run holds: \(next.adapter.switched.count) \(next.adapter.lastInputs.switchesLastHour)")
+            // An hour after the first two the ceiling frees up.
+            for _ in 1...3000 where next.adapter.switched.isEmpty { dead(next, seconds: 1) }
+            check(next.adapter.switched.count == 1 && next.wallMs - b.wallMs < 3_600_000, "the hour of the old switches has passed: the next one is made: \(next.adapter.switched.count)")
+            // An attempt that failed counts and is written at once; one the budget refused is not the runtime's to count.
+            let f = Bench()
+            f.writePlan(numbers: numbers, switchOn: true, candidates: [12, 9])
+            f.startSession()
+            f.adapter.switchFails = true
+            f.probeResult = "state=silent id=5 ms=0 late=0"
+            for _ in 1...600 where !f.logs.contains(where: { $0.contains("result=failed") }) { dead(f, seconds: 1) }
+            check((f.lastState["switch_times"] as? [Int64])?.count == 1 && f.adapter.switched.isEmpty, "a failed attempt is in the file: \(f.lastState["switch_times"] ?? "-")")
+            // With the switch key off the previous run's file is not read at all (build 139).
+            let off = Bench()
+            off.writePlan()
+            off.previousState = b.lastState
+            off.startSession()
+            dead(off, seconds: 30)
+            check(off.stateReads == 0 && off.adapter.lastInputs.switchesLastHour == 0, "key off: nothing is read")
+        }
         run("switch_goes_through_the_whole_extension") {
             let b = Bench()
             b.writePlan(switchOn: true, candidates: [12, 9])

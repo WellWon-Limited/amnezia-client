@@ -65,6 +65,9 @@ struct Sim {
     var switchResult = TribeCommandResult.performed
     var commands: [(at: TimeInterval, command: TribeWatchCommand)] = []
     var exhausted: [TimeInterval] = []
+    /// The provider's side of the hourly ceiling: when a switch was attempted (one the shared
+    /// budget refused does not count). `forgetsSwitches` = a provider that does not keep it.
+    var switchLog: [TimeInterval] = []
 
     init(_ policy: TribeDataWatchPolicy = basePolicy(), started: Bool = true) {
         self.policy = policy
@@ -105,6 +108,7 @@ struct Sim {
             rx += lateAnswerBytes
             lateDue = nil
         }
+        env.switchesLastHour = switchLog.filter { uptime - $0 < 3600 }.count
         let out = watch.step(TribeDataWatchSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, uptime: uptime, wall: wall),
                              env: env, policy: policy)
         if out.needsSanityCheck {
@@ -137,6 +141,7 @@ struct Sim {
                     rx = 0
                     handshake = 0
                 }
+                if switchResult != .denied { switchLog.append(uptime) }
                 watch.noteCommandResult(command, result: switchResult, at: uptime, policy: policy)
             }
         }
@@ -596,7 +601,7 @@ run("ipv6_only_cellular") {
     let fields = Mirror(reflecting: TribeDataWatchSample(txBytes: 0, rxBytes: 0, lastHandshakeSec: 0, uptime: 0, wall: 0)).children.compactMap { $0.label }
     check(fields == ["txBytes", "rxBytes", "lastHandshakeSec", "uptime", "wall"], "the sample has no address field: \(fields)")
     let envFields = Mirror(reflecting: TribeDataWatchEnv(pathSatisfied: true)).children.compactMap { $0.label }
-    check(envFields == ["pathSatisfied", "sanity", "sanityAt", "probe", "probeAt", "probeLatencyMs", "lateAnswerAt", "appSeenAt", "nodeId", "candidates", "networkChoice", "planEpoch"], "nor has the environment (node ids are labels): \(envFields)")
+    check(envFields == ["pathSatisfied", "sanity", "sanityAt", "probe", "probeAt", "probeLatencyMs", "lateAnswerAt", "appSeenAt", "nodeId", "candidates", "networkChoice", "planEpoch", "switchesLastHour"], "nor has the environment (node ids are labels): \(envFields)")
 }
 
 run("start_grace") {
@@ -2031,16 +2036,17 @@ run("arbiter_snapshot") {
     for _ in 1...300 where s.switches.count < 1 { s.world(seconds: 1) }
     snap = s.watch.snapshot(policy: s.policy)
     check(snap.arbiterHeals == 2 && snap.arbiterSwitches == 1 && snap.arbiterTried == 2 && snap.arbiterTrial, "after the first switch: \(snap)")
-    check(snap.silences == 0 && snap.switchesLastHour == 1, "the new node starts with no judgment; one switch this hour")
+    check(snap.silences == 0, "the new node starts with no judgment")
     let reportsBefore = s.reports.count
     s.world(seconds: 2) // the first sample of a new device only primes the counters
+    check(s.watch.snapshot(policy: s.policy).switchesLastHour == 1, "one switch this hour (the provider's count, shown from the next sample on)")
     check(snap.verdict == .none && s.verdicts.last == TribeDataVerdict.none, "the verdict about the previous node does not follow the tunnel to the new one")
     check(s.reports.count == reportsBefore + 1 && s.reports.last?.verdict == TribeDataVerdict.none, "and the outputs are told so")
     let d = snap.asDictionary
     check(d["arb_active"] as? Bool == true && d["arb_heals"] as? Int == 2 && d["arb_switches"] as? Int == 1 && d["arb_tried"] as? Int == 2
           && d["arb_trial"] as? Bool == true && d["arb_exhausted"] as? Bool == false && d["arb_round"] as? Int == 0, "the status block carries the arbiter: \(d)")
     check((d["probes_trial_hour"] as? Int ?? -1) == s.trials.count && (d["probes_trial_hour"] as? Int ?? 0) >= 2, "and its probes: \(String(describing: d["probes_trial_hour"]))")
-    check(d["silences"] as? Int == 0 && d["switches_hour"] as? Int == 1, "and what it has spent")
+    check(d["silences"] as? Int == 0 && s.watch.snapshot(policy: s.policy).asDictionary["switches_hour"] as? Int == 1, "and what it has spent")
 }
 
 // MARK: - stage 2: the in-place switch as a sequence
