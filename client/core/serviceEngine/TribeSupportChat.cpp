@@ -19,7 +19,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSaveFile>
-#include <QSettings> // BUG-7: персист pendingDiag
+#include <QSettings> // L9: one-time migration of the legacy AvpnSupport/pendingDiag key
 #include <QStandardPaths>
 #include <QUrl>
 
@@ -27,6 +27,7 @@
 
 #include "Enrollment.h"
 #include "NetAwait.h"
+#include "ReportDelivery.h" // L9: bench receipt (reportAcknowledgement)
 #include "TuningStore.h" // AVPN backend-first (T10): server-tunable chat_poll_active_ms/chat_poll_idle_ms
 
 namespace avpn {
@@ -270,10 +271,54 @@ void TribeSupportMsgModel::applyList(const QVariantList &msgs)
     }
 }
 
-TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
+TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent,
+                                   const QString &reportQueueDir)
     : QObject(parent), m_nam(nam), m_baseUrl(QStringLiteral("https://api.tribevpn.com"))
 {
     m_msgModel = new TribeSupportMsgModel(this); // ДО loadThreadCache (rebuild кормит модель)
+
+    // L9 (F12): the support-report queue, loaded before the thread cache so pending reports show in
+    // the feed at once. The app's private data dir; the legacy single-report key moves in once.
+    {
+        const QString dir = !reportQueueDir.isEmpty()
+            ? reportQueueDir
+            : QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                  + QStringLiteral("/support-report-queue");
+        m_reportQueue = std::make_unique<srq::SupportReportQueue>(
+            dir, [] { return QDateTime::currentMSecsSinceEpoch(); });
+        // F4: the line support reads about an evicted earlier report (on the next report's text).
+        m_reportQueue->setNoticeFormatter([](const srq::Notice &n) {
+            auto part = [](const QString &kind) {
+                return kind == QLatin1String("text") ? TribeSupportChat::tr("текст")
+                     : kind == QLatin1String("log")  ? TribeSupportChat::tr("лог")
+                                                     : TribeSupportChat::tr("отчёт для разработчиков");
+            };
+            QStringList refused;
+            for (auto it = n.refused.constBegin(); it != n.refused.constEnd(); ++it)
+                refused << TribeSupportChat::tr("%1 на %2").arg(it.value()).arg(part(it.key()));
+            QStringList delivered;
+            for (const QString &k : n.delivered)
+                delivered << part(k);
+            return TribeSupportChat::tr("Более ранний отчёт от %1 не доставлен: сервер ответил %2; доставлено: %3.")
+                .arg(QDateTime::fromMSecsSinceEpoch(n.createdAtMs).toString(QStringLiteral("dd.MM.yyyy HH:mm")),
+                     refused.join(QStringLiteral(", ")),
+                     delivered.isEmpty() ? TribeSupportChat::tr("ничего") : delivered.join(QStringLiteral(", ")));
+        });
+        m_reportQueue->load();
+        for (const QString &p : m_reportQueue->loadProblems())
+            qWarning().noquote() << "[support-queue] load" << p;
+        QSettings st;
+        const srq::EnqueueOutcome mig = m_reportQueue->migrateLegacySetting(st);
+        if (!mig.reportId.isEmpty() || mig.result != srq::EnqueueResult::Empty)
+            qInfo().noquote() << "[support-queue] legacy pendingDiag migrated result="
+                              << srq::enqueueResultName(mig.result) << "id=" << mig.reportId;
+        // F4: rejected reports are retried once in a new context (here: another app version).
+        m_reportQueue->setContext(QCoreApplication::applicationVersion(), QString());
+        const int retried = m_reportQueue->retryRejected();
+        qInfo().noquote() << "[support-queue] loaded pending=" << m_reportQueue->count()
+                          << "bytes=" << m_reportQueue->diskBytes()
+                          << "rejected=" << m_reportQueue->rejected().size() << "retried=" << retried;
+    }
     // dev/E2E: тот же оверрайд control plane, что у AvpnEngineQml.
     const QByteArray envUrl = qgetenv("AVPN_API_URL");
     if (!envUrl.isEmpty())
@@ -284,6 +329,9 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
 
     m_pollTimer.setInterval(pollMs(false));
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
+        // L9: the existing poll tick is the report queue's backoff clock (no timer of its own);
+        // the queue decides what is due. Not gated by support_chat_poll: reports are not polling.
+        pumpReportQueue();
         // AVPN backend-first (T11): kill-switch — выключенный флаг гасит весь поллинг чата.
         if (!TuningStore::flag(QStringLiteral("support_chat_poll")))
             return;
@@ -296,6 +344,8 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
     // Вернулись на экран — бейдж сразу, не через минуту (фоновый опрос выше выключен).
     if (auto *guiApp = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
         connect(guiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState st) {
+            if (st == Qt::ApplicationActive)
+                kickReportQueue(/*foreground=*/true); // L9: the user is back — held reports go now
             if (st == Qt::ApplicationActive && !m_active
                 && TuningStore::flag(QStringLiteral("support_chat_poll")))
                 refreshUnread();
@@ -332,6 +382,12 @@ TribeSupportChat::TribeSupportChat(QNetworkAccessManager *nam, QObject *parent)
         else
             m_posterWatch.clear(); // сдаёмся — при открытом чате доберёт общий поллинг
     });
+}
+
+TribeSupportChat::~TribeSupportChat()
+{
+    if (s_instance == this)
+        s_instance = nullptr;
 }
 
 void TribeSupportChat::watchPoster(int attachmentId)
@@ -445,20 +501,9 @@ void TribeSupportChat::refresh()
                 m_unread = 0;
                 emit unreadChanged();
             }
-            // BUG-7: живой ответ бэка = сеть починилась → дошлём диагностику,
-            // потерянную прошлым запуском (персист в sendDiagReport). Один раз
-            // за запуск и только без живых log-эх (иначе задвоим ручной ретрай).
-            if (!m_diagAutoResent) {
-                const QString pending = QSettings()
-                        .value(QStringLiteral("AvpnSupport/pendingDiag")).toString();
-                bool logEchoAlive = false;
-                for (const auto &e : m_echoes)
-                    if (e.kind == QLatin1String("log")) { logEchoAlive = true; break; }
-                if (!pending.isEmpty() && !logEchoAlive && m_postsInFlight == 0) {
-                    m_diagAutoResent = true;
-                    sendDiagReport(pending);
-                }
-            }
+            // BUG-7 / L9: a live answer from the backend = the network is back → the report
+            // queue sends what is due (per-report acks, nothing is re-sent by content).
+            kickReportQueue(/*foreground=*/false);
         }
         if (m_loading) {
             m_loading = false;
@@ -481,6 +526,7 @@ void TribeSupportChat::refreshUnread()
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (code < 200 || code >= 300)
             return;
+        kickReportQueue(/*foreground=*/false); // L9: live answer (also the +3 s start fetch)
         const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
         const int n = o.value(QStringLiteral("count")).toInt();
         // Рост счётчика при работающем приложении = прилетело сообщение → хаптика в QML.
@@ -595,6 +641,24 @@ void TribeSupportChat::applyThread(const QByteArray &json, bool fromCache)
     // «дублируем support.py»). Пусто/отсутствует → маркер 0/пустой список, эффективные
     // геттеры (eff*) падают на вкомпиленные kImageMaxBytes/kVideoMaxBytes/whitelist.
     const QJsonObject lim = root.value(QStringLiteral("limits")).toObject();
+    if (!lim.isEmpty() && m_reportQueue) {
+        // F4: a change of the server's own support limits (as /thread states them) gives every
+        // rejected report its one automatic retry. Key = digest of the limits object.
+        const QString key = QString::fromLatin1(
+            QCryptographicHash::hash(QJsonDocument(lim).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256)
+                .toHex()
+                .left(16));
+        if (key != m_limitsKey) {
+            m_limitsKey = key;
+            m_reportQueue->setContext(QCoreApplication::applicationVersion(), key);
+            const int n = m_reportQueue->retryRejected();
+            if (n > 0) {
+                qInfo().noquote() << "[support-queue] limits changed, rejected re-queued=" << n;
+                reportQueueTouched(QString());
+                pumpReportQueue();
+            }
+        }
+    }
     if (!lim.isEmpty()) {
         if (lim.contains(QStringLiteral("image_max_bytes")))
             m_imageMaxBytes = qint64(lim.value(QStringLiteral("image_max_bytes")).toDouble(0));
@@ -716,6 +780,47 @@ void TribeSupportChat::rebuildMessages()
         }
         mm.insert(QStringLiteral("attachments"), atts);
         list.append(mm);
+    }
+
+    // L9: support parts of queued reports are pending bubbles until the server stores them (the
+    // queue retries by itself: never "failed", no Retry/Discard — a report is never dropped here).
+    if (m_reportQueue) {
+        for (const srq::Entry &e : m_reportQueue->entries()) {
+            for (const srq::PartInfo &p : e.parts) {
+                if (p.state != srq::PartState::Pending || !srq::isSupportKind(p.kind))
+                    continue;
+                int &rowId = m_queueRowIds[e.id + QLatin1Char('/') + p.id];
+                if (rowId == 0)
+                    rowId = -(++m_localSeq);
+                QVariantMap mm;
+                mm.insert(QStringLiteral("id"), rowId);
+                mm.insert(QStringLiteral("sender"), QStringLiteral("client"));
+                mm.insert(QStringLiteral("body"),
+                          p.kind == srq::PartKind::Text ? e.text : QString());
+                mm.insert(QStringLiteral("operatorName"), QString());
+                mm.insert(QStringLiteral("isAuto"), false);
+                mm.insert(QStringLiteral("atMs"), e.createdAtMs);
+                mm.insert(QStringLiteral("pending"), true);
+                mm.insert(QStringLiteral("failed"), false);
+                QVariantList atts;
+                if (p.kind == srq::PartKind::Log) {
+                    QVariantMap am;
+                    am.insert(QStringLiteral("id"), rowId);
+                    am.insert(QStringLiteral("kind"), QStringLiteral("log"));
+                    am.insert(QStringLiteral("mime"), QStringLiteral("text/plain"));
+                    am.insert(QStringLiteral("name"), QStringLiteral("diag.log"));
+                    am.insert(QStringLiteral("bytes"), p.bytes);
+                    am.insert(QStringLiteral("width"), 0);
+                    am.insert(QStringLiteral("height"), 0);
+                    am.insert(QStringLiteral("hasThumb"), false);
+                    am.insert(QStringLiteral("thumbUrl"), QString());
+                    am.insert(QStringLiteral("localUrl"), QString());
+                    atts.append(am);
+                }
+                mm.insert(QStringLiteral("attachments"), atts);
+                list.append(mm);
+            }
+        }
     }
 
     // Анти-дребезг: поллинг каждые 5с не должен перерисовывать ListView без
@@ -871,24 +976,394 @@ void TribeSupportChat::sendDiagReport(const QString &reportText)
 
     // BUG-7 (2026-07-24): диагностику ЧАЩЕ ВСЕГО шлют в момент сетевой беды
     // («connected, но данные не проходят» — control plane за мёртвым туннелем) —
-    // именно тогда fire-and-forget терял отчёт навсегда. Персистим текст ДО
-    // отправки; сносим на успехе (postEcho) или на терминальном 404/405/415.
-    // Авто-ресенд — в refresh() при первом живом ответе бэка (сеть починилась).
-    {
-        QSettings st;
-        st.setValue(QStringLiteral("AvpnSupport/pendingDiag"), reportText);
-        st.sync();
+    // именно тогда fire-and-forget терял отчёт навсегда.
+    // L9 (F12): the report goes into the on-disk queue (its own id, written before the first send,
+    // settled per part) instead of the single overwritten AvpnSupport/pendingDiag setting.
+    // F4: the user asks to send logs - reports the server rejected earlier go again with this one.
+    resendRejectedReports();
+    const QVariantMap r = submitReport(QString(), reportText);
+    const QString result = r.value(QStringLiteral("result")).toString();
+    if (result == QLatin1String("full"))
+        emit sendFailed(tr("Отчёты ждут связи: %1. Новая проверка — после отправки").arg(reportsPending()));
+    else if (result == QLatin1String("too_large"))
+        emit sendFailed(tr("Диагностика больше %1 МБ").arg(m_reportQueue->limits().maxLogBytes / (1024 * 1024)));
+    else if (result == QLatin1String("not_saved"))
+        emit sendFailed(tr("Не удалось сохранить отчёт на устройстве — он не отправлен"));
+    else if (result != QLatin1String("queued") && result != QLatin1String("unsaved_sending"))
+        emit sendFailed(tr("Не отправлено (ошибка %1)").arg(result));
+    // unsaved_sending: a direct attempt; its bubble turns «не отправлено» with a toast if it fails.
+}
+
+QString TribeSupportChat::reserveReport()
+{
+    const QString token = m_reportQueue->reserve();
+    qInfo().noquote() << "[support-queue] reserve" << (token.isEmpty() ? "full" : "ok")
+                      << "pending=" << m_reportQueue->count();
+    emit reportQueueChanged();
+    return token;
+}
+
+void TribeSupportChat::releaseReport(const QString &reservation)
+{
+    if (m_reportQueue->release(reservation))
+        emit reportQueueChanged();
+}
+
+QVariantMap TribeSupportChat::submitReport(const QString &humanText, const QString &diagText,
+                                           const QString &benchJson, const QString &reservation)
+{
+    // A reservation ends with the check: consumed when queued, freed on every other outcome.
+    auto answer = [this, &reservation](const QString &result, const QString &id = QString()) {
+        if (!reservation.isEmpty() && result != QLatin1String("queued") && m_reportQueue->release(reservation))
+            emit reportQueueChanged();
+        return QVariantMap{{QStringLiteral("result"), result}, {QStringLiteral("id"), id}};
+    };
+    if (!TuningStore::flag(QStringLiteral("support_diag")))
+        return answer(QStringLiteral("disabled"));
+    const QString human = humanText.trimmed();
+    const QByteArray diag = diagText.toUtf8();
+    QList<srq::PartInput> parts;
+    if (!human.isEmpty())
+        parts.append({srq::PartKind::Text, human.toUtf8()});
+    if (!diag.isEmpty()) {
+        if (!effAllowedLogMime(QStringLiteral("text/plain")))
+            return answer(QStringLiteral("unsupported"));
+        if (diag.size() > effLogMaxBytes()) // the server may announce a lower cap than the queue's
+            return answer(QStringLiteral("too_large"));
+        parts.append({srq::PartKind::Log, diag});
     }
-    Echo e;
-    e.localId = -(++m_localSeq);
-    e.atMs = QDateTime::currentMSecsSinceEpoch();
-    e.kind = QStringLiteral("log");
-    e.mime = mime;
-    e.fileName = QStringLiteral("diag.log");
-    e.imageBytes = bytes; // text/plain грузится из памяти, как пережатое фото
-    m_echoes.append(e);
+    if (!benchJson.isEmpty())
+        parts.append({srq::PartKind::Bench, benchJson.toUtf8()});
+
+    const srq::EnqueueOutcome out = m_reportQueue->enqueue(parts, reservation);
+    qint64 total = 0;
+    for (const auto &p : parts)
+        total += p.data.size();
+    qInfo().noquote() << "[support-queue] enqueue result=" << srq::enqueueResultName(out.result)
+                      << "id=" << out.reportId << "parts=" << parts.size() << "bytes=" << total;
+    if (out.result == srq::EnqueueResult::IoError) {
+        // F3: nothing is on disk (storage full, no data dir). One direct attempt while the app runs,
+        // reported as such: "unsaved_sending" -> "sent_unsaved" | "not_saved"; never "queued".
+        QString unsavedId;
+        const QString r = sendUnsaved(human, diag, benchJson.toUtf8(), &unsavedId);
+        return answer(r, unsavedId);
+    }
+    if (out.result == srq::EnqueueResult::Queued) {
+        reportQueueTouched(out.reportId);
+        rebuildMessages();
+        pumpReportQueue();
+    }
+    return answer(srq::enqueueResultName(out.result), out.reportId);
+}
+
+QString TribeSupportChat::reportResult(const QString &reportId) const
+{
+    if (const Unsaved *u = unsavedById(reportId))
+        return u->result.isEmpty() ? QStringLiteral("unsaved_sending") : u->result;
+    return srq::reportStateName(m_reportQueue->status(reportId).state);
+}
+
+QVariantMap TribeSupportChat::reportStatus(const QString &reportId) const
+{
+    QVariantMap parts;
+    if (const Unsaved *u = unsavedById(reportId)) {
+        for (auto it = u->parts.constBegin(); it != u->parts.constEnd(); ++it)
+            parts.insert(it.key(), it.value());
+        return {{QStringLiteral("result"), reportResult(reportId)},
+                {QStringLiteral("reason"), QStringLiteral("not_persisted")},
+                {QStringLiteral("parts"), parts},
+                {QStringLiteral("kept"), false}};
+    }
+    const srq::Status s = m_reportQueue->status(reportId);
+    for (auto it = s.parts.constBegin(); it != s.parts.constEnd(); ++it)
+        parts.insert(it.key(), it.value());
+    return {{QStringLiteral("result"), srq::reportStateName(s.state)},
+            {QStringLiteral("reason"), s.reason},
+            {QStringLiteral("parts"), parts},
+            {QStringLiteral("kept"), s.kept}};
+}
+
+int TribeSupportChat::reportsRejected() const
+{
+    return int(m_reportQueue->rejected().size());
+}
+
+int TribeSupportChat::resendRejectedReports()
+{
+    const int n = m_reportQueue->resendRejected();
+    if (n > 0) {
+        qInfo().noquote() << "[support-queue] rejected re-queued by the user=" << n;
+        reportQueueTouched(QString());
+        rebuildMessages();
+        pumpReportQueue();
+    }
+    return n;
+}
+
+int TribeSupportChat::reportsPending() const
+{
+    return m_reportQueue->count();
+}
+
+bool TribeSupportChat::reportsFull() const
+{
+    return m_reportQueue->full();
+}
+
+// F3: the queue could not persist the report. The text and the log go once through ordinary chat
+// echoes (they turn «не отправлено» with Retry/Discard on failure - the chat's normal unsaved state);
+// the bench copy is attempted once without tracking. The report's result follows the support parts:
+// both acknowledged -> "sent_unsaved", any failure -> "not_saved" at once. No retry, no "queued".
+QString TribeSupportChat::sendUnsaved(const QString &humanText, const QByteArray &diagBytes,
+                                      const QByteArray &benchJson, QString *reportId)
+{
+    if (!m_nam || authToken().isEmpty() || (humanText.isEmpty() && diagBytes.isEmpty())) {
+        qInfo().noquote() << "[support-queue] not_saved: no direct attempt possible";
+        return QStringLiteral("not_saved");
+    }
+    Unsaved u;
+    u.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QList<int> echoIds;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!humanText.isEmpty()) {
+        Echo e;
+        e.localId = -(++m_localSeq);
+        e.body = humanText;
+        e.atMs = now;
+        m_echoes.append(e);
+        echoIds << e.localId;
+        u.parts.insert(QStringLiteral("text"), QStringLiteral("pending"));
+        m_unsavedEcho.insert(e.localId, {u.id, QStringLiteral("text")});
+    }
+    if (!diagBytes.isEmpty()) {
+        Echo e;
+        e.localId = -(++m_localSeq);
+        e.atMs = now;
+        e.kind = QStringLiteral("log");
+        e.mime = QStringLiteral("text/plain");
+        e.fileName = QStringLiteral("diag.log");
+        e.imageBytes = diagBytes; // text/plain грузится из памяти, как пережатое фото
+        m_echoes.append(e);
+        echoIds << e.localId;
+        u.parts.insert(QStringLiteral("log"), QStringLiteral("pending"));
+        m_unsavedEcho.insert(e.localId, {u.id, QStringLiteral("log")});
+    }
+    m_unsaved.append(u);
+    while (m_unsaved.size() > 16)
+        m_unsaved.removeFirst();
+    *reportId = u.id;
+    qInfo().noquote() << "[support-queue] not persisted, direct attempt id=" << u.id
+                      << "parts=" << echoIds.size() << "bytes=" << (humanText.toUtf8().size() + diagBytes.size());
     rebuildMessages();
-    postEcho(m_echoes.last());
+    for (const int localId : std::as_const(echoIds))
+        if (Echo *e = echoByLocalId(localId))
+            postEcho(*e);
+    if (!benchJson.isEmpty()) {
+        QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/bench/report"))};
+        req.setRawHeader(QByteArrayLiteral("Authorization"), QByteArrayLiteral("Bearer ") + authToken().toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        QNetworkReply *reply = m_nam->post(req, benchJson);
+        armTimeout(reply, kNetTimeoutMs);
+        const QString id = u.id;
+        connect(reply, &QNetworkReply::finished, this, [reply, id]() {
+            reply->deleteLater();
+            qInfo().noquote() << "[support-queue] not persisted, bench id=" << id << "http="
+                              << reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        });
+    }
+    const Unsaved *now2 = unsavedById(*reportId);
+    return now2 && !now2->result.isEmpty() ? now2->result : QStringLiteral("unsaved_sending");
+}
+
+const TribeSupportChat::Unsaved *TribeSupportChat::unsavedById(const QString &reportId) const
+{
+    for (const Unsaved &u : m_unsaved)
+        if (u.id == reportId)
+            return &u;
+    return nullptr;
+}
+
+void TribeSupportChat::settleUnsavedEcho(int localId, bool ok)
+{
+    const auto it = m_unsavedEcho.find(localId);
+    if (it == m_unsavedEcho.end())
+        return;
+    const QString id = it->first;
+    const QString kind = it->second;
+    m_unsavedEcho.erase(it);
+    for (Unsaved &u : m_unsaved) {
+        if (u.id != id)
+            continue;
+        u.parts.insert(kind, ok ? QStringLiteral("acked") : QStringLiteral("failed"));
+        if (!u.result.isEmpty())
+            return; // already final ("not_saved" at the first failure)
+        if (!ok) {
+            u.result = QStringLiteral("not_saved");
+        } else {
+            bool all = true;
+            for (const QString &st : std::as_const(u.parts))
+                all = all && st == QLatin1String("acked");
+            if (all)
+                u.result = QStringLiteral("sent_unsaved");
+        }
+        if (!u.result.isEmpty()) {
+            qInfo().noquote() << "[support-queue] not persisted id=" << id << "result=" << u.result;
+            emit reportStatusChanged(id, u.result);
+        }
+        return;
+    }
+}
+
+void TribeSupportChat::reportQueueTouched(const QString &reportId)
+{
+    // Forget feed row ids of parts that are no longer pending (the server copy replaces them).
+    QSet<QString> live;
+    for (const srq::Entry &e : m_reportQueue->entries())
+        for (const srq::PartInfo &p : e.parts)
+            if (p.state == srq::PartState::Pending)
+                live.insert(e.id + QLatin1Char('/') + p.id);
+    for (auto it = m_queueRowIds.begin(); it != m_queueRowIds.end();) {
+        if (live.contains(it.key()))
+            ++it;
+        else
+            it = m_queueRowIds.erase(it);
+    }
+    emit reportQueueChanged();
+    if (!reportId.isEmpty())
+        emit reportStatusChanged(reportId, reportResult(reportId));
+}
+
+void TribeSupportChat::kickReportQueue(bool foreground)
+{
+    if (foreground)
+        m_reportQueue->foreground();
+    else
+        m_reportQueue->networkBack();
+    pumpReportQueue();
+}
+
+// One part in flight. Triggers (all existing, no timer of the queue's own): the chat poll tick
+// (5 s open / 60 s idle — the backoff clock), any 2xx of /thread or /unread (incl. the +3 s start
+// fetch) and of a chat message, the app becoming active, a new report, a settled part.
+void TribeSupportChat::pumpReportQueue()
+{
+    if (!m_reportQueue || m_queuePostInFlight)
+        return;
+    if (!TuningStore::flag(QStringLiteral("support_diag")))
+        return; // the server switched reports off: they wait on disk, nothing is dropped
+    if (!m_nam || authToken().isEmpty())
+        return; // before enroll — the next trigger tries again
+    const std::optional<srq::Due> due = m_reportQueue->takeNext();
+    if (!due)
+        return;
+    postQueuedPart(*due);
+}
+
+void TribeSupportChat::postQueuedPart(const srq::Due &due)
+{
+    const QString token = authToken();
+    const QByteArray bearer = QByteArrayLiteral("Bearer ") + token.toUtf8();
+    QNetworkReply *reply = nullptr;
+    if (due.kind == srq::PartKind::Text) {
+        QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/support/messages"))};
+        req.setRawHeader(QByteArrayLiteral("Authorization"), bearer);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        const QJsonObject body{{QStringLiteral("body"), QString::fromUtf8(due.data)}};
+        reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        armTimeout(reply, kNetTimeoutMs);
+    } else if (due.kind == srq::PartKind::Log) {
+        QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/support/attachments"))};
+        req.setRawHeader(QByteArrayLiteral("Authorization"), bearer);
+        auto *multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+        QHttpPart part;
+        part.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("text/plain"));
+        part.setHeader(QNetworkRequest::ContentDispositionHeader,
+                       QStringLiteral("form-data; name=\"file\"; filename=\"diag.log\""));
+        part.setBody(due.data);
+        multi->append(part);
+        reply = m_nam->post(req, multi);
+        multi->setParent(reply);
+        armTimeout(reply, mediaTimeoutMs());
+    } else {
+        QNetworkRequest req{QUrl(m_baseUrl + QStringLiteral("/v1/bench/report"))};
+        req.setRawHeader(QByteArrayLiteral("Authorization"), bearer);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        reply = m_nam->post(req, due.data);
+        armTimeout(reply, kNetTimeoutMs);
+    }
+
+    const bool support = srq::isSupportKind(due.kind);
+    m_queuePostInFlight = true;
+    if (support)
+        ++m_postsInFlight; // no /thread re-read while our copy may arrive twice (see postEcho)
+    emit reportStatusChanged(due.reportId, reportResult(due.reportId));
+    const QString reportId = due.reportId;
+    const QString partId = due.partId;
+    const srq::PartKind kind = due.kind;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reportId, partId, kind, support]() {
+        reply->deleteLater();
+        m_queuePostInFlight = false;
+        if (support)
+            m_postsInFlight = qMax(0, m_postsInFlight - 1);
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const bool receipt = kind == srq::PartKind::Bench
+            && !reportAcknowledgement(code, /*transportOk=*/true, body).isEmpty();
+        const srq::Response r = srq::classify(kind, code, receipt);
+        if (r == srq::Response::Ack) {
+            if (support) {
+                appendSavedServerMessage(body, QString()); // no flicker between bubble and copy
+                m_refreshPending = true;                   // pull an auto-reply (below)
+            }
+            m_reportQueue->ack(reportId, partId); // exactly this (report, part)
+        } else {
+            m_reportQueue->fail(reportId, partId, r, code);
+        }
+        qInfo().noquote() << "[support-queue] part id=" << reportId << "part=" << partId
+                          << "kind=" << srq::kindName(kind) << "http=" << code
+                          << "result=" << reportResult(reportId);
+        if (r == srq::Response::Terminal) {
+            if (kind == srq::PartKind::Log && (code == 404 || code == 405 || code == 415))
+                emit sendFailed(tr("Сервер ещё не принимает диагностику — обновление скоро"));
+            else
+                emit sendFailed(humanSendError(code, false));
+        }
+        reportQueueTouched(reportId);
+        rebuildMessages();
+        if (m_postsInFlight == 0 && m_refreshPending) {
+            m_refreshPending = false;
+            refresh();
+        }
+        // Settled → the next part right away; a retry waits for the next trigger (backoff).
+        if (r == srq::Response::Ack || r == srq::Response::Terminal)
+            pumpReportQueue();
+    });
+}
+
+void TribeSupportChat::appendSavedServerMessage(const QByteArray &replyBody, const QString &echoLocalUrl)
+{
+    const QJsonObject saved = QJsonDocument::fromJson(replyBody).object();
+    const int savedId = saved.value(QStringLiteral("id")).toInt();
+    if (savedId <= 0)
+        return;
+    for (const auto &mv : std::as_const(m_serverMessages))
+        if (mv.toMap().value(QStringLiteral("id")).toInt() == savedId)
+            return;
+    const QVariantMap savedMsg = parseMessage(saved);
+    const QVariantList savedAtts = savedMsg.value(QStringLiteral("attachments")).toList();
+    if (!savedAtts.isEmpty()) {
+        const QVariantMap att = savedAtts.first().toMap();
+        const int attId = att.value(QStringLiteral("id")).toInt();
+        // attId серверного вложения → локальное превью эха (впрыск в rebuild).
+        if (attId > 0 && !echoLocalUrl.isEmpty())
+            m_localUrlByAttId.insert(attId, echoLocalUrl);
+        // Постер видео сервер жуёт асинхронно — подтянуть бэкофф-поллингом
+        // (handoff §C: один refresh сразу после POST почти всегда рано).
+        if (attId > 0 && att.value(QStringLiteral("kind")) == QLatin1String("video")
+            && !att.value(QStringLiteral("hasThumb")).toBool())
+            watchPoster(attId);
+    }
+    m_serverMessages.append(savedMsg);
 }
 
 void TribeSupportChat::postEcho(Echo &echo)
@@ -900,6 +1375,7 @@ void TribeSupportChat::postEcho(Echo &echo)
         echo.failed = true;
         rebuildMessages();
         emit sendFailed(tr("Нет авторизации"));
+        settleUnsavedEcho(localId, false); // F3
         return;
     }
 
@@ -980,53 +1456,23 @@ void TribeSupportChat::postEcho(Echo &echo)
             // Сервер вернул сохранённое сообщение — эхо больше не нужно, но его
             // локальное превью (фото/постер) ПЕРЕНОСИТСЯ на серверную копию
             // (handoff Занавеса §B: замена эха без превью = мигание пустой карточкой).
+            // L9: a log echo here is only the unqueued fallback (submitReport io_error); queued
+            // reports are acknowledged by their own id in postQueuedPart, never by an echo.
             QString echoLocalUrl;
-            QString echoKind;
             for (int i = 0; i < m_echoes.size(); ++i) {
                 if (m_echoes[i].localId == localId) {
                     echoLocalUrl = m_echoes[i].localUrl;
-                    echoKind = m_echoes[i].kind;
                     m_echoes.removeAt(i);
                     break;
                 }
             }
-            if (echoKind == QLatin1String("log")) { // диагностика доехала — персист не нужен
-                QSettings st;
-                st.remove(QStringLiteral("AvpnSupport/pendingDiag"));
-                st.sync();
-            }
             // Кладём серверную копию в историю СРАЗУ (иначе сообщение мигает:
             // эхо уже снято, а поллинг ещё не привёз строку) и перечитываем тред
             // (подтянет автоответ и постер видео после постпроцесса).
-            const QJsonObject saved = QJsonDocument::fromJson(reply->readAll()).object();
-            const int savedId = saved.value(QStringLiteral("id")).toInt();
-            bool known = false;
-            for (const auto &mv : m_serverMessages) {
-                if (mv.toMap().value(QStringLiteral("id")).toInt() == savedId) {
-                    known = true;
-                    break;
-                }
-            }
-            if (savedId > 0 && !known) {
-                const QVariantMap savedMsg = parseMessage(saved);
-                const QVariantList savedAtts =
-                    savedMsg.value(QStringLiteral("attachments")).toList();
-                if (!savedAtts.isEmpty()) {
-                    const QVariantMap att = savedAtts.first().toMap();
-                    const int attId = att.value(QStringLiteral("id")).toInt();
-                    // attId серверного вложения → локальное превью эха (впрыск в rebuild).
-                    if (attId > 0 && !echoLocalUrl.isEmpty())
-                        m_localUrlByAttId.insert(attId, echoLocalUrl);
-                    // Постер видео сервер жуёт асинхронно — подтянуть бэкофф-поллингом
-                    // (handoff §C: один refresh сразу после POST почти всегда рано).
-                    if (attId > 0 && att.value(QStringLiteral("kind")) == QLatin1String("video")
-                        && !att.value(QStringLiteral("hasThumb")).toBool())
-                        watchPoster(attId);
-                }
-                m_serverMessages.append(savedMsg);
-            }
+            appendSavedServerMessage(reply->readAll(), echoLocalUrl);
             rebuildMessages();
             m_refreshPending = true; // подтянуть автоответ/постер (уйдёт в хвосте ниже)
+            m_reportQueue->networkBack(); // L9: a live answer; the pump runs after this POST
         } else {
             Echo *e = echoByLocalId(localId);
             // AVPN (diag, Task 5 bff-3): 404/405/415 на диагностике = бэк ещё не принимает
@@ -1034,11 +1480,6 @@ void TribeSupportChat::postEcho(Echo &echo)
             // (ретрай бессмысленен до обновления бэка; образец uploadReport AvpnEngineQml).
             if (e && e->kind == QLatin1String("log")
                 && (code == 404 || code == 405 || code == 415)) {
-                { // терминальный отказ — ретрай бессмыслен, персист снимаем (BUG-7)
-                    QSettings st;
-                    st.remove(QStringLiteral("AvpnSupport/pendingDiag"));
-                    st.sync();
-                }
                 discardMessage(localId); // убирает эхо + rebuildMessages
                 emit sendFailed(tr("Сервер ещё не принимает диагностику — обновление скоро"));
             } else {
@@ -1056,6 +1497,9 @@ void TribeSupportChat::postEcho(Echo &echo)
             m_refreshPending = false;
             refresh();
         }
+        settleUnsavedEcho(localId, code >= 200 && code < 300); // F3: an unsaved report's part, if it is one
+        if (code >= 200 && code < 300)
+            pumpReportQueue(); // L9: the chat just reached the server — due reports go too
     });
 }
 

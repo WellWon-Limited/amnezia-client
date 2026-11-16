@@ -1,0 +1,7 @@
+patches:
+  "1.4.0-tribe.1":
+    # The Scanner's probe engine for the desktop service: C exports amnezia_xray_scan_message / amnezia_xray_scan_stop_all
+    # (ABI libxray-tribe-scan-v1). The engine (package tribescan/) is the shared
+    # ../amnezia-libxray/patches/0012-tribe-scan-engine.patch, core 0011 is applied to a local copy of
+    # the pinned core; both are applied in build() and therefore not listed here.
+    - patch_file: "patches/0001-tribe-scan-probe.patch"

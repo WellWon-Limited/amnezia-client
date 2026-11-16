@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #include "MacServiceInstaller.h"
+#include "MacUpstreamGeo.h"
 #include <QProcess>
 #include <QThread>
 
@@ -61,11 +62,30 @@ bool macXrayRuntimePresent()
             isExecutableFileAtPath:@"/Library/PrivilegedHelperTools/TribeVPN/tun2socks"];
 }
 
+bool macUpstreamGeoPresent()
+{
+    @autoreleasepool {
+        NSString *res = [[NSBundle mainBundle] pathForResource:@"tribe-svc-geo" ofType:@"sha256"];
+        if (res == nil)
+            return false;
+        return upstreamGeoPresentAt(QStringLiteral("/Library/PrivilegedHelperTools/TribeVPN"),
+                                    QString::fromNSString(res));
+    }
+}
+
 QString macForeignVpnName()
 {
     // Наш туннель уже поднят (наш amneziawg-go жив)? Тогда utun-egress = НАШ → не конфликт (reconnect).
-    if (pgrepFull(QStringLiteral("/Library/PrivilegedHelperTools/TribeVPN/amneziawg-go")))
-        return QString();
+    // AVPN Scanner: only the tunnel's own process line counts - the Scanner's `amneziawg-go probe ...` child
+    // runs the same binary and must not hide another VPN (macOwnTunnelProcessLine, MacServiceInstaller.h).
+    {
+        const QString wg = QStringLiteral("/Library/PrivilegedHelperTools/TribeVPN/amneziawg-go");
+        QProcess p;
+        p.start(QStringLiteral("/usr/bin/pgrep"), {QStringLiteral("-fl"), wg});
+        if (p.waitForFinished(3000) && p.exitCode() == 0
+            && macOwnTunnelRunning(QString::fromUtf8(p.readAllStandardOutput()), wg))
+            return QString();
+    }
 
     // Официальная Amnezia активно туннелирует (её wireguard-go) — гарантированный конфликт.
     if (pgrepFull(QStringLiteral("AmneziaVPN.app/Contents/MacOS/wireguard-go")))

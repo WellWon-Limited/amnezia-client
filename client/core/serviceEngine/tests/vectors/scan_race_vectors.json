@@ -1,0 +1,1358 @@
+{
+    "cases": [
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": false,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "disabled",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "disabled",
+                        "tier": -1,
+                        "wake_at_ms": -1
+                    },
+                    "id": "",
+                    "now_ms": 1000
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": true,
+            "name": "live_session_never_moved",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "refused",
+                        "tier": -1,
+                        "wake_at_ms": -1
+                    },
+                    "id": "",
+                    "now_ms": 1000
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "refused",
+                        "tier": -1,
+                        "wake_at_ms": -1
+                    },
+                    "id": "",
+                    "now_ms": 2000
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "lkg_first_then_alternates_commit",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1250
+                    },
+                    "id": "",
+                    "now_ms": 1000
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1500
+                    },
+                    "id": "",
+                    "now_ms": 1250
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-b",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1750
+                    },
+                    "id": "",
+                    "now_ms": 1500
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-c",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "",
+                    "now_ms": 1750
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "",
+                    "now_ms": 2000
+                },
+                {
+                    "bytes": 12000,
+                    "event": "progress",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "own-b",
+                    "now_ms": 2100
+                },
+                {
+                    "bytes": 24576,
+                    "event": "progress",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "cancel_probe",
+                                "reason": "other_committed",
+                                "tier": 0
+                            },
+                            {
+                                "id": "own-a",
+                                "kind": "cancel_probe",
+                                "reason": "other_committed",
+                                "tier": 0
+                            },
+                            {
+                                "id": "own-c",
+                                "kind": "cancel_probe",
+                                "reason": "other_committed",
+                                "tier": 0
+                            },
+                            {
+                                "id": "own-b",
+                                "kind": "commit",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "committed",
+                        "tier": 0,
+                        "wake_at_ms": -1
+                    },
+                    "id": "own-b",
+                    "now_ms": 2300
+                },
+                {
+                    "bytes": 30000,
+                    "event": "progress",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "committed",
+                        "tier": 0,
+                        "wake_at_ms": -1
+                    },
+                    "id": "own-a",
+                    "now_ms": 2400
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "failure_frees_slot_with_stagger",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1250
+                    },
+                    "id": "",
+                    "now_ms": 1000
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1500
+                    },
+                    "id": "",
+                    "now_ms": 1250
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-b",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1750
+                    },
+                    "id": "",
+                    "now_ms": 1500
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-c",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "",
+                    "now_ms": 1750
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 2000
+                    },
+                    "id": "own-lkg",
+                    "now_ms": 1800
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-d",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6250
+                    },
+                    "id": "",
+                    "now_ms": 2000
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6500
+                    },
+                    "id": "own-a",
+                    "now_ms": 2100
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6500
+                    },
+                    "id": "",
+                    "now_ms": 2350
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "tier_blocked_until_exhausted",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 250
+                    },
+                    "id": "",
+                    "now_ms": 0
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 500
+                    },
+                    "id": "",
+                    "now_ms": 250
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-b",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 750
+                    },
+                    "id": "",
+                    "now_ms": 500
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-c",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5000
+                    },
+                    "id": "",
+                    "now_ms": 750
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1000
+                    },
+                    "id": "own-lkg",
+                    "now_ms": 900
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1000
+                    },
+                    "id": "own-a",
+                    "now_ms": 950
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-d",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5500
+                    },
+                    "id": "",
+                    "now_ms": 1000
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5750
+                    },
+                    "id": "own-b",
+                    "now_ms": 1100
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "own-c",
+                    "now_ms": 1200
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "",
+                    "now_ms": 5250
+                },
+                {
+                    "bytes": 24576,
+                    "event": "progress",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 6000
+                    },
+                    "id": "up-2",
+                    "now_ms": 5600
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "commit_failed_resumes",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 250
+                    },
+                    "id": "",
+                    "now_ms": 0
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 500
+                    },
+                    "id": "",
+                    "now_ms": 250
+                },
+                {
+                    "bytes": 24576,
+                    "event": "progress",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "cancel_probe",
+                                "reason": "other_committed",
+                                "tier": 0
+                            },
+                            {
+                                "id": "own-lkg",
+                                "kind": "commit",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "committed",
+                        "tier": 0,
+                        "wake_at_ms": -1
+                    },
+                    "id": "own-lkg",
+                    "now_ms": 400
+                },
+                {
+                    "bytes": 0,
+                    "event": "commit_failed",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 1750
+                    },
+                    "id": "own-lkg",
+                    "now_ms": 1500
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-b",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 2000
+                    },
+                    "id": "",
+                    "now_ms": 1750
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "solo",
+                    "lkg": true,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "give_up",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "solo",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5000
+                    },
+                    "id": "",
+                    "now_ms": 0
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "solo",
+                                "kind": "cancel_probe",
+                                "reason": "timeout",
+                                "tier": 0
+                            },
+                            {
+                                "id": "",
+                                "kind": "tier_exhausted",
+                                "reason": "",
+                                "tier": 0
+                            },
+                            {
+                                "id": "",
+                                "kind": "give_up",
+                                "reason": "exhausted",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "gave_up",
+                        "tier": 0,
+                        "wake_at_ms": -1
+                    },
+                    "id": "",
+                    "now_ms": 5000
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 0,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "no_alternates",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5000
+                    },
+                    "id": "",
+                    "now_ms": 0
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5000
+                    },
+                    "id": "",
+                    "now_ms": 250
+                },
+                {
+                    "bytes": 0,
+                    "event": "failed",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 5300
+                    },
+                    "id": "own-lkg",
+                    "now_ms": 300
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "eligible": true,
+                    "id": "own-a",
+                    "lkg": false,
+                    "rank": 1,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-lkg",
+                    "lkg": true,
+                    "rank": 5,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-b",
+                    "lkg": false,
+                    "rank": 2,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-c",
+                    "lkg": false,
+                    "rank": 3,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "own-d",
+                    "lkg": false,
+                    "rank": 4,
+                    "tier": 0
+                },
+                {
+                    "eligible": true,
+                    "id": "up-1",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 1
+                },
+                {
+                    "eligible": true,
+                    "id": "up-2",
+                    "lkg": true,
+                    "rank": 1,
+                    "tier": 1
+                },
+                {
+                    "eligible": false,
+                    "id": "own-x",
+                    "lkg": false,
+                    "rank": 0,
+                    "tier": 0
+                }
+            ],
+            "config": {
+                "alternates": 3,
+                "commit_bytes": 24576,
+                "enabled": true,
+                "probe_total_ms": 5000,
+                "stagger_ms": 250
+            },
+            "live": false,
+            "name": "cancel",
+            "steps": [
+                {
+                    "bytes": 0,
+                    "event": "start",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 250
+                    },
+                    "id": "",
+                    "now_ms": 0
+                },
+                {
+                    "bytes": 0,
+                    "event": "tick",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-a",
+                                "kind": "start_probe",
+                                "reason": "",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "racing",
+                        "tier": 0,
+                        "wake_at_ms": 500
+                    },
+                    "id": "",
+                    "now_ms": 250
+                },
+                {
+                    "bytes": 0,
+                    "event": "cancel",
+                    "expect": {
+                        "actions": [
+                            {
+                                "id": "own-lkg",
+                                "kind": "cancel_probe",
+                                "reason": "cancelled",
+                                "tier": 0
+                            },
+                            {
+                                "id": "own-a",
+                                "kind": "cancel_probe",
+                                "reason": "cancelled",
+                                "tier": 0
+                            }
+                        ],
+                        "state": "idle",
+                        "tier": 0,
+                        "wake_at_ms": -1
+                    },
+                    "id": "",
+                    "now_ms": 300
+                }
+            ]
+        }
+    ],
+    "schema": 1
+}

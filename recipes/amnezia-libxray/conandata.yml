@@ -1,4 +1,35 @@
 patches:
+  "1.0.3-tribe.3":
+    # tribe.2 (all unchanged) + 0012: the Scanner's probe engine (package tribescan/, new files only,
+    # module-agnostic: the same patch builds into awg-apple and amnezia-xray-bindings); 0013: its root
+    # gomobile exports in tribe_exports.go (TribeScanMessage, TribeScanStopAll, TribeScanSetProtector,
+    # TribeScanABI). Core 0011 (per-instance dialer state, the probe's own socket protector) is applied
+    # to vendor/ in build() with the other core patches.
+    - patch_file: "patches/0001-add-16kb-page-support-amnezia-libxray.patch"
+    - patch_file: "patches/0002-use-pinned-geo-data.patch"
+    - patch_file: "patches/0003-android-controller-slot.patch"
+    - patch_file: "patches/0005-libxray-forcefree-once.patch"
+    - patch_file: "patches/0006-libxray-restore-runtime-on-stop.patch"
+    - patch_file: "patches/0007-libxray-outbound-stats.patch"
+    - patch_file: "patches/0009-tribe-root-exports.patch"
+    - patch_file: "patches/0010-android-no-embedded-geo.patch"
+    - patch_file: "patches/0012-tribe-scan-engine.patch"
+    - patch_file: "patches/0013-libxray-tribe-scan-exports.patch"
+  "1.0.3-tribe.2":
+    # tribe.1 (all unchanged) + 0005: the FreeOSMemory loop starts once per process; 0006: StopXray
+    # (and a failed RunXray) restores GOGC/the memory limit and parks the loop; 0007: in-process
+    # per-outbound counters (xray.OutboundStatsJSON); 0009: root gomobile exports
+    # (TribeOutboundStatsJSON, TribeStatsABI; reserved place for TribeScan*); 0010: no geo data in
+    # the AAR. The core patches (0004-xray-core-261101-controller-errors.patch,
+    # 0008-xray-core-261101-counted-buffered-flush.patch) are applied to vendor/ in build().
+    - patch_file: "patches/0001-add-16kb-page-support-amnezia-libxray.patch"
+    - patch_file: "patches/0002-use-pinned-geo-data.patch"
+    - patch_file: "patches/0003-android-controller-slot.patch"
+    - patch_file: "patches/0005-libxray-forcefree-once.patch"
+    - patch_file: "patches/0006-libxray-restore-runtime-on-stop.patch"
+    - patch_file: "patches/0007-libxray-outbound-stats.patch"
+    - patch_file: "patches/0009-tribe-root-exports.patch"
+    - patch_file: "patches/0010-android-no-embedded-geo.patch"
   "1.0.3-tribe.1":
     - patch_file: "patches/0001-add-16kb-page-support-amnezia-libxray.patch"
     - patch_file: "patches/0002-use-pinned-geo-data.patch"

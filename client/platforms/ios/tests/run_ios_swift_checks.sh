@@ -14,6 +14,7 @@
 # Использование:
 #   bash client/platforms/ios/tests/run_ios_swift_checks.sh            # только хостовый тест
 #   bash client/platforms/ios/tests/run_ios_swift_checks.sh --ne       # + сборка цели NE
+#   bash client/platforms/ios/tests/run_ios_swift_checks.sh --ne-typecheck  # + typecheck NE (без проекта)
 #   IOS_BUILD_DIR=~/my-ios-build bash .../run_ios_swift_checks.sh --ne
 set -euo pipefail
 
@@ -33,6 +34,116 @@ xcrun --sdk macosx swiftc -Onone -parse-as-library \
     "$IOS_DIR/IPv6RouteSpec.swift" \
     "$SCRIPT_DIR/XraySocketCallbackLifecycleTests.swift"
 "$WORK_DIR/xray_lifecycle_tests"
+
+# AVPN (upstream nodes, lane L3): lease machine twin + renewer + tunables, replaying the shared C++
+# vectors (client/core/serviceEngine/tests/vectors).
+echo "== 1b хостовый Swift-тест аренды upstream (векторы C++) =="
+xcrun --sdk macosx swiftc -Onone -parse-as-library \
+    -o "$WORK_DIR/upstream_lease_tests" \
+    "$IOS_DIR/UpstreamLeaseMachine.swift" \
+    "$IOS_DIR/UpstreamLeaseWire.swift" \
+    "$IOS_DIR/UpstreamLeaseRenewer.swift" \
+    "$IOS_DIR/UpstreamProxyMeter.swift" \
+    "$IOS_DIR/XrayTunables.swift" \
+    "$IOS_DIR/XrayConfig.swift" \
+    "$SCRIPT_DIR/UpstreamLeaseTests.swift"
+"$WORK_DIR/upstream_lease_tests" "$REPO_ROOT/client/core/serviceEngine/tests/vectors"
+
+# AVPN (Scanner, lane L4): the extension's probe host relay (TribeScanHost.swift) against stub engine symbols,
+# replaying scan_host_vectors.json byte for byte, + the source gate of its wiring into the provider (nothing
+# of the scan host reaches xraySocketProtectionFailed / cancelTunnelWithError; stop-all before every core
+# stop, restart and peer change).
+echo "== 1b-scan хостовый Swift-тест хоста сканера (векторы C++) + проверка точек вызова =="
+xcrun --sdk macosx swiftc -Onone -parse-as-library \
+    -o "$WORK_DIR/scan_bridge_tests" \
+    "$IOS_DIR/TribeScanHost.swift" \
+    "$IOS_DIR/XraySocketCallbackLifecycle.swift" \
+    "$SCRIPT_DIR/ScanBridgeTests.swift"
+"$WORK_DIR/scan_bridge_tests" "$REPO_ROOT/client/core/serviceEngine/tests/vectors"
+bash "$SCRIPT_DIR/check_ios_scan_wiring.sh"
+# The same relay linked with the REAL engine (awg-apple's macOS libwg-go.a from the conan cache; SKIPPED without
+# it): every request vector, the real caps, one local scan bound to lo0 through freeze, cancel and final.
+bash "$SCRIPT_DIR/run_scan_engine_replay.sh"
+# The app side's pure parts (IosScanHost.h) against the app's decoder; needs Qt for macOS.
+if [[ -d "${QT_ROOT:-$HOME/Qt/6.11.1/macos}" ]]; then
+    OUT_DIR="$WORK_DIR/ios-scan-host" bash "$SCRIPT_DIR/build_ios_scan_host_check.sh"
+else
+    echo "iOS scan host check: SKIPPED (no Qt for macOS; set QT_ROOT)"
+fi
+
+# AVPN (upstream nodes): --ne-typecheck = every Swift source of the NE target (list as in
+# client/ios/networkextension/CMakeLists.txt) typechecked for iphoneos against the conan packages
+# awg-apple 3.1.4-tribe.12 (wireguard.h with LibXrayTribeHTTP), hev-socks5-tunnel 2.15.0 and
+# openvpnadapter 1.0.0 from the local cache. No Xcode project, no build, no signing.
+if [[ "${1:-}" == "--ne-typecheck" ]]; then
+    echo "== 1c typecheck цели NE (iphoneos, пакеты conan) =="
+    PATH="$HOME/Library/Python/3.13/bin:$PATH"
+    # AVPN (Scanner, L4): the newest recipe revision that HAS a matching binary - a newer revision exported
+    # without one (a configure that failed in build()) no longer hides the packages that exist.
+    pkg() { # <ref> <python filter on the package settings/options> -> package folder
+        local ref="$1" filter="$2" id
+        id=$(conan list "$ref#*:*" --format=json 2>/dev/null | python3 -I -c "
+import json, sys
+d = json.load(sys.stdin)['Local Cache']
+for rr in d.values():
+    for rid, rev in sorted(rr['revisions'].items(), key=lambda kv: -float(kv[1].get('timestamp', 0))):
+        for pid, p in rev.get('packages', {}).items():
+            s = p['info'].get('settings', {}); o = p['info'].get('options', {})
+            if $filter: print(rid + ':' + pid); sys.exit(0)
+")
+        [[ -n "$id" ]] || { echo "СТОП: нет пакета $ref для iOS в кеше conan" >&2; exit 1; }
+        conan cache path "$ref#$id" 2>/dev/null
+    }
+    # AVPN (Scanner, L4): the awg-apple package of THIS tree's recipe (find_awg_apple_package.py), not merely the
+    # newest revision (re-exporting an older recipe makes it the newest again).
+    AWG="${AWG_APPLE_PACKAGE_DIR:-$(python3 -I "$SCRIPT_DIR/find_awg_apple_package.py" "$REPO_ROOT" iOS || true)}"
+    [[ -n "$AWG" ]] || AWG="$(pkg awg-apple/3.1.4-tribe.12 "s.get('os') == 'iOS'")"
+    HEVP="${HEV_PACKAGE_DIR:-$(pkg hev-socks5-tunnel/2.15.0 "s.get('os') == 'iOS' and o.get('as_framework') == 'True'")}"
+    OVPN="${OPENVPNADAPTER_PACKAGE_DIR:-$(pkg openvpnadapter/1.0.0 "s.get('os') == 'iOS'")}"
+    WGS="$AWG/src/Sources"
+    grep -q LibXrayTribeHTTP "$AWG/include/wireguard.h" || { echo "СТОП: $AWG без LibXrayTribeHTTP" >&2; exit 1; }
+    grep -q LibXrayTribeOutboundStats "$AWG/include/wireguard.h" || { echo "СТОП: $AWG без LibXrayTribeOutboundStats" >&2; exit 1; }
+    grep -q LibXrayTribeScanMessage "$AWG/include/wireguard.h" || { echo "СТОП: $AWG без LibXrayTribeScanMessage (патч 0013)" >&2; exit 1; }
+    # AVPN (Scanner, review F2): WireGuardAdapter conforms to TribeBackendRestartObservable exactly when the package's
+    # adapter has the backend-restart callback (otherwise the conformance does not compile, or the callback is left unset).
+    CONFORMS=0; grep -q '^extension WireGuardAdapter: TribeBackendRestartObservable' "$IOS_DIR/PacketTunnelProvider+Scan.swift" && CONFORMS=1
+    HAS_CB=0; grep -q 'tribeBackendWillRestart' "$AWG/src/Sources/WireGuardKit/WireGuardAdapter.swift" && HAS_CB=1
+    if [[ "$CONFORMS" != "$HAS_CB" ]]; then
+        echo "СТОП: адаптер пакета tribeBackendWillRestart=$HAS_CB, а conformance в PacketTunnelProvider+Scan.swift=$CONFORMS" >&2
+        exit 1
+    fi
+    echo "backend-restart callback: package=$HAS_CB conformance=$CONFORMS"
+    sed 's/@BUILD_IOS_GROUP_IDENTIFIER@/group.typecheck/' "$IOS_DIR/GroupIdentifier.swift.in" > "$WORK_DIR/GroupIdentifier.swift"
+    SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+    xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios16.0 -sdk "$SDK" -swift-version 5 \
+        -import-objc-header "$REPO_ROOT/client/ios/networkextension/WireGuardNetworkExtension-Bridging-Header.h" \
+        -I "$AWG/include" -I "$WGS/WireGuardKitC" \
+        -I "$HEVP/HevSocks5Tunnel.xcframework/ios-arm64/Headers" -F "$OVPN" -module-name NETypecheck \
+        "$WGS/WireGuardKit/WireGuardAdapter.swift" "$WGS/WireGuardKit/TribeRoaming.swift" \
+        "$WGS/WireGuardKit/PacketTunnelSettingsGenerator.swift" "$WGS/WireGuardKit/DNSResolver.swift" \
+        "$WGS/WireGuardNetworkExtension/ErrorNotifier.swift" "$WGS/Shared/Keychain.swift" \
+        "$WGS/Shared/Model/TunnelConfiguration+WgQuickConfig.swift" \
+        "$WGS/Shared/Model/NETunnelProviderProtocol+Extension.swift" \
+        "$WGS/Shared/Model/String+ArrayConversion.swift" "$WGS/WireGuardKit/TunnelConfiguration.swift" \
+        "$WGS/WireGuardKit/IPAddressRange.swift" "$WGS/WireGuardKit/Endpoint.swift" \
+        "$WGS/WireGuardKit/DNSServer.swift" "$WGS/WireGuardKit/InterfaceConfiguration.swift" \
+        "$WGS/WireGuardKit/PeerConfiguration.swift" "$WGS/Shared/FileManager+Extension.swift" \
+        "$WGS/WireGuardKit/Array+ConcurrentMap.swift" "$WGS/WireGuardKit/IPAddress+AddrInfo.swift" \
+        "$WGS/WireGuardKit/PrivateKey.swift" \
+        "$IOS_DIR/HevSocksTunnel.swift" "$IOS_DIR/NELogController.swift" "$IOS_DIR/Log.swift" \
+        "$IOS_DIR/TribeSharedState.swift" "$WORK_DIR/GroupIdentifier.swift" "$IOS_DIR/LogRecord.swift" \
+        "$IOS_DIR/PacketTunnelProvider.swift" "$IOS_DIR/PacketTunnelProvider+WireGuard.swift" \
+        "$IOS_DIR/PacketTunnelProvider+OpenVPN.swift" "$IOS_DIR/PacketTunnelProvider+Xray.swift" \
+        "$IOS_DIR/IPv4RouteSpec.swift" "$IOS_DIR/IPv6RouteSpec.swift" "$IOS_DIR/WGConfig.swift" \
+        "$IOS_DIR/XrayConfig.swift" "$IOS_DIR/TunnelRuntimeStatus.swift" \
+        "$IOS_DIR/XraySocketCallbackLifecycle.swift" "$IOS_DIR/UpstreamLeaseMachine.swift" \
+        "$IOS_DIR/UpstreamLeaseWire.swift" "$IOS_DIR/UpstreamLeaseRenewer.swift" \
+        "$IOS_DIR/UpstreamProxyMeter.swift" \
+        "$IOS_DIR/XrayTunables.swift" "$IOS_DIR/PacketTunnelProvider+Upstream.swift" \
+        "$IOS_DIR/TribeScanHost.swift" "$IOS_DIR/PacketTunnelProvider+Scan.swift"
+    echo "NE typecheck passed (awg-apple: $AWG)"
+    exit 0
+fi
 
 if [[ "${1:-}" != "--ne" ]]; then
     echo "== 2/2 сборка цели NE пропущена (запусти с --ne) =="

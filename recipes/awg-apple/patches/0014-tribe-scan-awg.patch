@@ -1,0 +1,1136 @@
+diff --git a/Sources/WireGuardKitGo/api-tribescan-awg.go b/Sources/WireGuardKitGo/api-tribescan-awg.go
+new file mode 100644
+index 0000000..75362bb
+--- /dev/null
++++ b/Sources/WireGuardKitGo/api-tribescan-awg.go
+@@ -0,0 +1,16 @@
++package main
++
++// AVPN (awg-apple, patch 0014): the Scanner's AmneziaWG mini-session runner (package tribeawg) for
++// awg_mini candidates: a userspace device on an in-memory netstack next to the live tunnel, with
++// its own registry and logger and its UDP socket bound to the physical interface by the probe's
++// protector. scan_caps offers awg_mini (2 at once on iOS, 4 on the macOS NE) only with this file.
++
++import (
++	"github.com/amnezia-vpn/amneziawg-apple/tribeawg"
++	"github.com/amnezia-vpn/amneziawg-apple/tribescan"
++)
++
++func init() {
++	tribeScanAwgOpen = tribeawg.Open
++	tribescan.SetRunnerLive(tribeawg.Live, nil) // the devices count in LiveWork and the stop reply ("awg")
++}
+diff --git a/Sources/WireGuardKitGo/tribeawg/race_off_test.go b/Sources/WireGuardKitGo/tribeawg/race_off_test.go
+new file mode 100644
+index 0000000..b0c1f93
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeawg/race_off_test.go
+@@ -0,0 +1,5 @@
++//go:build tribescan_testkit && !race
++
++package tribeawg
++
++const raceOn = false
+diff --git a/Sources/WireGuardKitGo/tribeawg/race_on_test.go b/Sources/WireGuardKitGo/tribeawg/race_on_test.go
+new file mode 100644
+index 0000000..9531ec7
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeawg/race_on_test.go
+@@ -0,0 +1,7 @@
++//go:build tribescan_testkit && race
++
++package tribeawg
++
++// Under the race detector gVisor and the AmneziaWG crypto run ~100x slower: the harness keeps its
++// functional checks with relaxed limits and drops the timing ones.
++const raceOn = true
+diff --git a/Sources/WireGuardKitGo/tribeawg/session.go b/Sources/WireGuardKitGo/tribeawg/session.go
+new file mode 100644
+index 0000000..25ec6de
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeawg/session.go
+@@ -0,0 +1,318 @@
++// Package tribeawg is the Scanner's AmneziaWG mini-session runner (awg-probe-plan.md §3, §6.3,
++// contract "One awg_mini session"): a userspace AmneziaWG device on an in-memory gVisor netstack,
++// next to the live tunnel in the same process, with its own registry and its own (silent) logger,
++// never the extension's tunnelHandles, global C logger or dnsfwd / directsplit wrappers.
++//
++// One session: the device's OWN key from the candidate's UAPI lines; its UDP socket bound to the
++// physical interface by the probe's protector BEFORE the first packet; the handshake triggered by
++// one persistent keepalive and awaited up to the job's timeout; the prime ICMP echoes; then the
++// engine's data probe over DialTCP (no DNS inside the session). Close tears the device down; the
++// engine calls it on every path.
++//
++// Process rules (defence in depth next to the engine's): one open session per node (peer key) -
++// a second Open for it fails with ErrAwgBusy; initiations of the identity at least job.Spacing apart.
++package tribeawg
++
++import (
++	"bufio"
++	"context"
++	"net"
++	"net/netip"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
++	"golang.org/x/net/icmp"
++	"golang.org/x/net/ipv4"
++	"golang.org/x/net/ipv6"
++
++	"github.com/amnezia-vpn/amneziawg-apple/tribescan"
++)
++
++// The registry of open sessions (not tunnelHandles: locked, and only probe sessions).
++var reg = struct {
++	sync.Mutex
++	open     map[string]*session
++	lastInit time.Time
++}{open: map[string]*session{}}
++
++var live atomic.Int64
++
++// Live is the number of open sessions (tests, leak checks).
++func Live() int64 { return live.Load() }
++
++const (
++	echoWait    = 150 * time.Millisecond
++	echoPayload = 56
++	defaultMTU  = 1280
++	pollEvery   = 5 * time.Millisecond
++)
++
++type session struct {
++	key      string
++	dev      *device.Device
++	tnet     *netstack.Net
++	local    netip.Addr
++	hsOK     bool
++	hsMs     int64
++	sent     int
++	replies  int
++	echoWire int64
++	once     sync.Once
++}
++
++var _ tribescan.AwgOpener = Open
++
++// Open opens one session (a tribescan.AwgOpener). It returns once the handshake succeeded (and the
++// prime echoes ran) or timed out; errors: tribescan.ErrAwgConfig, ErrAwgBind, ErrAwgBusy, or the
++// context's error.
++func Open(ctx context.Context, job tribescan.AwgJob) (_ tribescan.AwgSession, err error) {
++	if job.PeerKey == "" || len(job.Addresses) == 0 {
++		return nil, tribescan.ErrAwgConfig
++	}
++	s := &session{key: job.PeerKey, hsMs: -1}
++	reg.Lock()
++	if reg.open[job.PeerKey] != nil {
++		reg.Unlock()
++		return nil, tribescan.ErrAwgBusy
++	}
++	reg.open[job.PeerKey] = s
++	reg.Unlock()
++	live.Add(1)
++	ok := false
++	defer func() {
++		if !ok {
++			s.Close()
++		}
++	}()
++	addrs := make([]netip.Addr, 0, len(job.Addresses))
++	for _, p := range job.Addresses {
++		addrs = append(addrs, p.Addr())
++	}
++	s.local = addrs[0]
++	mtu := job.MTU
++	if mtu <= 0 {
++		mtu = defaultMTU
++	}
++	tdev, tnet, terr := netstack.CreateNetTUN(addrs, nil, mtu)
++	if terr != nil {
++		return nil, tribescan.ErrAwgConfig
++	}
++	s.tnet = tnet
++	bind := conn.NewStdNetBind()
++	// Its own logger: nothing of a session (endpoints, keys) reaches the extension's log.
++	s.dev = device.NewDevice(tdev, bind, &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf})
++	if err := s.dev.IpcSet(withoutKeepalive(job.UAPI)); err != nil {
++		return nil, tribescan.ErrAwgConfig
++	}
++	if err := s.dev.Up(); err != nil {
++		return nil, tribescan.ErrAwgBind
++	}
++	// The probe's own protection on every socket of the session before its first packet (nothing is
++	// sent before the trigger below: no keepalive, no traffic).
++	if err := protect(bind, job.Protect); err != nil {
++		return nil, err
++	}
++	if err := waitSpacing(ctx, job.Spacing); err != nil {
++		return nil, err
++	}
++	t0 := time.Now()
++	if err := s.dev.IpcSet("public_key=" + job.PeerKey + "\nupdate_only=true\npersistent_keepalive_interval=1\n"); err != nil {
++		return nil, tribescan.ErrAwgConfig
++	}
++	timeout := job.Handshake
++	if timeout <= 0 {
++		timeout = 1500 * time.Millisecond
++	}
++	deadline := t0.Add(timeout)
++	for {
++		if s.handshaken(job.PeerKey) {
++			s.hsOK, s.hsMs = true, time.Since(t0).Milliseconds()
++			break
++		}
++		if !time.Now().Before(deadline) {
++			break
++		}
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(pollEvery):
++		}
++	}
++	// One keepalive was the trigger; the session sends nothing else of its own.
++	_ = s.dev.IpcSet("public_key=" + job.PeerKey + "\nupdate_only=true\npersistent_keepalive_interval=0\n")
++	if s.hsOK && job.Echoes > 0 && job.EchoTarget.IsValid() {
++		s.echo(ctx, job.EchoTarget, job.Echoes)
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	ok = true
++	return s, nil
++}
++
++// withoutKeepalive drops persistent keepalive lines: a keepalive at Up would send the first packet
++// before the socket is protected.
++func withoutKeepalive(uapi string) string {
++	var b strings.Builder
++	for _, line := range strings.Split(uapi, "\n") {
++		if strings.HasPrefix(strings.TrimSpace(line), "persistent_keepalive_interval=") {
++			continue
++		}
++		b.WriteString(line)
++		b.WriteByte('\n')
++	}
++	return b.String()
++}
++
++func protect(bind conn.Bind, fn func(network string, fd uintptr) error) error {
++	if fn == nil {
++		return nil
++	}
++	peek, ok := bind.(conn.PeekLookAtSocketFd)
++	if !ok {
++		return tribescan.ErrAwgBind
++	}
++	fd4, err4 := peek.PeekLookAtSocketFd4()
++	if err4 == nil {
++		if err := fn("udp4", uintptr(fd4)); err != nil {
++			return tribescan.ErrAwgBind
++		}
++	}
++	fd6, err6 := peek.PeekLookAtSocketFd6()
++	if err6 == nil {
++		if err := fn("udp6", uintptr(fd6)); err != nil {
++			return tribescan.ErrAwgBind
++		}
++	}
++	if err4 != nil && err6 != nil {
++		return tribescan.ErrAwgBind
++	}
++	return nil
++}
++
++// waitSpacing keeps initiations of the identity (every session uses the device's key) apart:
++// two initiations closer than ~50 ms lose handshakes (awg-probe-plan.md §1.2).
++func waitSpacing(ctx context.Context, gap time.Duration) error {
++	for {
++		reg.Lock()
++		next := reg.lastInit.Add(gap)
++		now := time.Now()
++		if reg.lastInit.IsZero() || !now.Before(next) {
++			reg.lastInit = now
++			reg.Unlock()
++			return nil
++		}
++		reg.Unlock()
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-time.After(next.Sub(now)):
++		}
++	}
++}
++
++// handshaken reads the peer's last handshake time through the device's own UAPI.
++func (s *session) handshaken(peerKey string) bool {
++	text, err := s.dev.IpcGet()
++	if err != nil {
++		return false
++	}
++	inPeer := false
++	sc := bufio.NewScanner(strings.NewReader(text))
++	for sc.Scan() {
++		k, v, _ := strings.Cut(sc.Text(), "=")
++		switch k {
++		case "public_key":
++			inPeer = v == peerKey
++		case "last_handshake_time_sec":
++			if inPeer {
++				n, _ := strconv.ParseInt(v, 10, 64)
++				return n > 0
++			}
++		}
++	}
++	return false
++}
++
++// echo sends n ICMP echoes to target inside the tunnel, 150 ms each (the first packet after the
++// handshake is lost with S4 obfuscation; these absorb it). Diagnostic only; their IP bytes both
++// ways are counted.
++func (s *session) echo(ctx context.Context, target netip.Addr, n int) {
++	pc, err := s.tnet.DialPingAddr(s.local, target)
++	if err != nil {
++		return
++	}
++	defer pc.Close()
++	stop := context.AfterFunc(ctx, func() { pc.Close() })
++	defer stop()
++	ipHeader := int64(20)
++	var typ icmp.Type = ipv4.ICMPTypeEcho
++	proto := 1
++	if target.Is6() {
++		ipHeader, typ, proto = 40, ipv6.ICMPTypeEchoRequest, 58
++	}
++	buf := make([]byte, 1500)
++	for i := 1; i <= n && ctx.Err() == nil; i++ {
++		msg := icmp.Message{Type: typ, Body: &icmp.Echo{ID: 0x7462, Seq: i, Data: make([]byte, echoPayload)}}
++		raw, err := msg.Marshal(nil)
++		if err != nil {
++			return
++		}
++		end := time.Now().Add(echoWait)
++		pc.SetDeadline(end)
++		if _, err := pc.Write(raw); err != nil {
++			continue
++		}
++		s.sent++
++		s.echoWire += ipHeader + int64(len(raw))
++		for time.Now().Before(end) {
++			m, err := pc.Read(buf)
++			if err != nil {
++				break
++			}
++			reply, err := icmp.ParseMessage(proto, buf[:m])
++			if err != nil {
++				continue
++			}
++			if e, ok := reply.Body.(*icmp.Echo); ok && e.Seq == i {
++				s.replies++
++				s.echoWire += ipHeader + int64(m)
++				// The rest of the 150 ms is not waited: the next echo (if any) goes now.
++				break
++			}
++		}
++	}
++}
++
++func (s *session) HandshakeOK() bool  { return s.hsOK }
++func (s *session) HandshakeMs() int64 { return s.hsMs }
++func (s *session) Echoes() (int, int, int64) {
++	return s.sent, s.replies, s.echoWire
++}
++
++// DialTCP opens a TCP connection inside the tunnel to an IP literal.
++func (s *session) DialTCP(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
++	return s.tnet.DialContextTCPAddrPort(ctx, addr)
++}
++
++// Close closes the device (its netstack, socket and goroutines) and leaves the registry.
++func (s *session) Close() error {
++	s.once.Do(func() {
++		if s.dev != nil {
++			s.dev.Close()
++		}
++		reg.Lock()
++		if reg.open[s.key] == s {
++			delete(reg.open, s.key)
++		}
++		reg.Unlock()
++		live.Add(-1)
++	})
++	return nil
++}
+diff --git a/Sources/WireGuardKitGo/tribeawg/session_test.go b/Sources/WireGuardKitGo/tribeawg/session_test.go
+new file mode 100644
+index 0000000..47e438d
+--- /dev/null
++++ b/Sources/WireGuardKitGo/tribeawg/session_test.go
+@@ -0,0 +1,760 @@
++//go:build tribescan_testkit
++
++package tribeawg
++
++// Loopback harness of awg-probe-plan.md §6.4: userspace AmneziaWG "nodes" on 127.0.0.1 (each a
++// device on its own netstack with the kit's HTTPS /v1/probe inside it at an "API" IP), and the
++// runner's sessions driven through the real engine (tribescan.Message). No system interface, no
++// VPN, nothing leaves 127.0.0.1.
++
++import (
++	"bufio"
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"crypto/tls"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/netip"
++	"os"
++	"os/exec"
++	"runtime"
++	"runtime/debug"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
++	clog "github.com/xtls/xray-core/common/log"
++
++	"github.com/amnezia-vpn/amneziawg-apple/tribescan"
++)
++
++var (
++	apiIP     = netip.MustParseAddr("203.0.113.10") // the "API" address the probe dials (node NAT stand-in)
++	echoIP    = netip.MustParseAddr("10.8.0.1")     // the nodes' tunnel address (prime echo target)
++	clientIP  = netip.MustParseAddr("10.8.0.2")     // the device's one /32 on every node
++	silentLog = &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}
++)
++
++type quiet struct{}
++
++func (quiet) Handle(clog.Message) {}
++
++func TestMain(m *testing.M) {
++	clog.RegisterHandler(quiet{})
++	if os.Getenv("TRIBEAWG_NODE_PROCESS") == "1" {
++		os.Exit(nodeProcess())
++	}
++	os.Exit(m.Run())
++}
++
++type key struct{ priv, pub string }
++
++func newKey() key {
++	k, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		panic(err)
++	}
++	return key{hex.EncodeToString(k.Bytes()), hex.EncodeToString(k.PublicKey().Bytes())}
++}
++
++// params are the AmneziaWG obfuscation lines both ends share.
++type params struct {
++	S4     int
++	H1     uint32
++	H2, H3 uint32
++	H4     uint32
++}
++
++func newParams(s4 int) params {
++	var b [16]byte
++	rand.Read(b[:])
++	h := func(i int) uint32 {
++		return 5 + (uint32(b[i])<<24|uint32(b[i+1])<<16|uint32(b[i+2])<<8|uint32(b[i+3]))%2000000000
++	}
++	return params{S4: s4, H1: h(0), H2: h(4), H3: h(8), H4: h(12)}
++}
++
++func (p params) lines() string {
++	return fmt.Sprintf("jc=4\njmin=40\njmax=70\ns1=15\ns2=18\ns3=20\ns4=%d\nh1=%d\nh2=%d\nh3=%d\nh4=%d\n", p.S4, p.H1, p.H2, p.H3, p.H4)
++}
++
++// node is one userspace AmneziaWG server on 127.0.0.1 with the kit's probe server inside its netstack.
++type node struct {
++	key   key
++	port  int
++	psk   string // hex, "" = none
++	dev   *device.Device
++	close func()
++}
++
++func freeUDPPort(t testing.TB) int {
++	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	return c.LocalAddr().(*net.UDPAddr).Port
++}
++
++func startNode(t testing.TB, p params, clientPub string, handler http.Handler, tlsConf *tls.Config, psk ...string) *node {
++	t.Helper()
++	n := &node{key: newKey(), port: freeUDPPort(t)}
++	pskLine := ""
++	if len(psk) > 0 && psk[0] != "" {
++		n.psk = psk[0]
++		pskLine = "preshared_key=" + n.psk + "\n"
++	}
++	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{echoIP, apiIP}, nil, 1280)
++	if err != nil {
++		t.Fatal(err)
++	}
++	n.dev = device.NewDevice(tdev, conn.NewStdNetBind(), silentLog)
++	cfg := fmt.Sprintf("private_key=%s\nlisten_port=%d\n%spublic_key=%s\n%sallowed_ip=%s/32\n", n.key.priv, n.port, p.lines(),
++		clientPub, pskLine, clientIP)
++	if err := n.dev.IpcSet(cfg); err != nil {
++		t.Fatal(err)
++	}
++	if err := n.dev.Up(); err != nil {
++		t.Fatal(err)
++	}
++	ln, err := tnet.ListenTCPAddrPort(netip.AddrPortFrom(apiIP, 443))
++	if err != nil {
++		t.Fatal(err)
++	}
++	hs := &http.Server{Handler: handler, TLSConfig: tlsConf.Clone(), ErrorLog: nil}
++	go hs.Serve(tls.NewListener(ln, hs.TLSConfig))
++	var once sync.Once
++	n.close = func() {
++		once.Do(func() {
++			hs.Close()
++			n.dev.Close()
++		})
++	}
++	t.Cleanup(n.close)
++	return n
++}
++
++// endpointOf reads the node's current endpoint for a peer (where it answers that key).
++func (n *node) endpointOf(pub string) string {
++	text, _ := n.dev.IpcGet()
++	in := false
++	for _, line := range strings.Split(text, "\n") {
++		k, v, _ := strings.Cut(line, "=")
++		if k == "public_key" {
++			in = v == pub
++		}
++		if in && k == "endpoint" {
++			return v
++		}
++	}
++	return ""
++}
++
++// clientUAPI is the UAPI text exactly as the app's scanAwgMiniConfig builds it (ScanHostContract.h):
++// interface lines, the obfuscation lines, then replace_peers, the peer, an optional preshared key,
++// the endpoint, replace_allowed_ips and the allowed IPs.
++func clientUAPI(client key, p params, n *node) string {
++	psk := ""
++	if n.psk != "" {
++		psk = "preshared_key=" + n.psk + "\n"
++	}
++	return fmt.Sprintf("private_key=%s\nlisten_port=0\n%sreplace_peers=true\npublic_key=%s\n%sendpoint=127.0.0.1:%d\n"+
++		"replace_allowed_ips=true\nallowed_ip=%s/32\nallowed_ip=%s/32\n", client.priv, p.lines(), n.key.pub, psk, n.port, apiIP, echoIP)
++}
++
++func awgCandidate(id string, client key, p params, n *node, echo bool) map[string]any {
++	cfg := map[string]any{"uapi": clientUAPI(client, p, n), "probe": map[string]any{"host": "example.com", "ip": apiIP.String(), "port": 443},
++		"prime_echo_target": nil, "bound_if": nil, "address": clientIP.String() + "/32", "mtu": 1280}
++	if echo {
++		cfg["prime_echo_target"] = echoIP.String()
++	}
++	raw, _ := json.Marshal(cfg)
++	return map[string]any{"id": id, "kind": tribescan.KindAwgMini, "config": string(raw), "entry": nil, "reach_at_ms": -1,
++		"profile_id": nil, "early_retry": false, "dns_plan": false, "cost_bytes": 90000}
++}
++
++type harness struct {
++	srv    *tribescan.ProbeServer
++	client key
++	plat   tribescan.Platform
++	nodes  []*node
++}
++
++func newHarness(t *testing.T) *harness {
++	srv := tribescan.NewProbeServer(t)
++	t.Cleanup(func() { tribescan.StopAllWait(5 * time.Second) })
++	return &harness{srv: srv, client: newKey(), plat: tribescan.Platform{Name: "test", MaxAwg: 4, Awg: Open, RootCAs: srv.Pool}}
++}
++
++func (h *harness) node(t *testing.T, p params) *node {
++	n := startNode(t, p, h.client.pub, h.srv.Srv.Config.Handler, h.srv.Srv.TLS)
++	h.nodes = append(h.nodes, n)
++	return n
++}
++
++func (h *harness) scan(t *testing.T, id string, limits map[string]any, opts string, cands ...map[string]any) *tribescan.KitResult {
++	t.Helper()
++	l := map[string]any{"awg_concurrency": 4, "concurrency": 0}
++	if raceOn {
++		l["ttfb_ms"], l["stall_ms"], l["total_ms"], l["awg_handshake_ms"] = 15000, 10000, 30000, 5000
++	}
++	for k, v := range limits {
++		l[k] = v
++	}
++	return tribescan.KitRun(t, tribescan.KitRequest(id, h.srv.Base(), l, 30000, cands...), opts, h.plat, 30*time.Second)
++}
++
++func deref[T any](p *T) T {
++	var z T
++	if p == nil {
++		return z
++	}
++	return *p
++}
++
++func waitLive(t *testing.T, want int64, d time.Duration) {
++	t.Helper()
++	for end := time.Now().Add(d); Live() != want; time.Sleep(5 * time.Millisecond) {
++		if time.Now().After(end) {
++			t.Fatalf("%d sessions open, want %d", Live(), want)
++		}
++	}
++}
++
++func TestTribeAwgSessions(t *testing.T) {
++	goBefore := runtime.NumGoroutine()
++	fdBefore := tribescan.OpenFDs()
++	h := newHarness(t)
++	p := newParams(0)
++	a, b := h.node(t, p), h.node(t, p)
++
++	t.Run("happy path through the engine", func(t *testing.T) {
++		r := h.scan(t, "awg-ok", map[string]any{"awg_prime_echoes": 1}, "", awgCandidate("A", h.client, p, a, true),
++			awgCandidate("B", h.client, p, b, true))
++		for _, id := range []string{"A", "B"} {
++			d, _ := r.DataByID(id)
++			raw, _ := json.Marshal(d)
++			t.Logf("%s", raw)
++			if d.Error != "" || !deref(d.ShaOK) || deref(d.Bytes) != 65536 || !deref(d.HandshakeOK) || d.HandshakeMs == nil ||
++				deref(d.EchoSent) != 1 || deref(d.EgressNode) != tribescan.KitEgressNode || deref(d.EgressClass) != tribescan.KitEgressClass {
++				t.Fatalf("item %s", raw)
++			}
++			if low := int64(1024 + 65536 + 8192); deref(d.SpentBytes) < low || deref(d.SpentBytes) > low+4096+2*84 {
++				t.Fatalf("spent %d", deref(d.SpentBytes))
++			}
++		}
++		waitLive(t, 0, time.Second)
++	})
++
++	t.Run("a preshared key on the peer line", func(t *testing.T) {
++		var b [32]byte
++		rand.Read(b[:])
++		withPSK := startNode(t, p, h.client.pub, h.srv.Srv.Config.Handler, h.srv.Srv.TLS, hex.EncodeToString(b[:]))
++		h.nodes = append(h.nodes, withPSK)
++		r := h.scan(t, "awg-psk", nil, "", awgCandidate("psk", h.client, p, withPSK, true))
++		if d, _ := r.DataByID("psk"); d.Error != "" || !deref(d.ShaOK) || !deref(d.HandshakeOK) {
++			t.Fatalf("preshared key: %+v", d)
++		}
++	})
++
++	t.Run("unknown key and wrong H1: no handshake", func(t *testing.T) {
++		stranger := startNode(t, p, newKey().pub, h.srv.Srv.Config.Handler, h.srv.Srv.TLS) // does not know our key
++		other := newParams(0)
++		wrongH1 := startNode(t, other, h.client.pub, h.srv.Srv.Config.Handler, h.srv.Srv.TLS)
++		h.nodes = append(h.nodes, stranger, wrongH1)
++		t0 := time.Now()
++		r := h.scan(t, "awg-silent", map[string]any{"awg_handshake_ms": 400}, "", awgCandidate("unknown", h.client, p, stranger, true),
++			awgCandidate("h1", h.client, p, wrongH1, true))
++		for _, id := range []string{"unknown", "h1"} {
++			d, _ := r.DataByID(id)
++			if d.Error != tribescan.ErrDial || deref(d.HandshakeOK) || d.HandshakeMs != nil || deref(d.EchoSent) != 0 {
++				t.Fatalf("%s: %+v", id, d)
++			}
++		}
++		if el := time.Since(t0); el > 2*time.Second && !raceOn {
++			t.Fatalf("the silent sessions took %v", el)
++		}
++		waitLive(t, 0, time.Second)
++	})
++
++	t.Run("a live session on A with the same key, a probe to B", func(t *testing.T) {
++		// The live tunnel: another device with the same key on node A, a request every ~20 ms.
++		ltun, lnet, err := netstack.CreateNetTUN([]netip.Addr{clientIP}, nil, 1280)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ldev := device.NewDevice(ltun, conn.NewStdNetBind(), silentLog)
++		defer ldev.Close()
++		uapi := clientUAPI(h.client, p, a)
++		if err := ldev.IpcSet(uapi + "persistent_keepalive_interval=1\n"); err != nil {
++			t.Fatal(err)
++		}
++		ldev.Up()
++		tc := &http.Client{Transport: &http.Transport{
++			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
++				return lnet.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(apiIP, 443))
++			},
++			TLSClientConfig: &tls.Config{ServerName: "example.com", RootCAs: h.srv.Pool}}, Timeout: 3 * time.Second}
++		get := func() error {
++			req, _ := http.NewRequest("GET", "https://example.com/v1/probe?bytes=1024&nonce=live-session-1", nil)
++			req.Header.Set("Authorization", "Bearer "+tribescan.KitToken)
++			resp, err := tc.Do(req)
++			if err != nil {
++				return err
++			}
++			defer resp.Body.Close()
++			n, _ := io.Copy(io.Discard, resp.Body)
++			if resp.StatusCode != 200 || n != 1024 {
++				return fmt.Errorf("status %d bytes %d", resp.StatusCode, n)
++			}
++			return nil
++		}
++		if err := get(); err != nil {
++			t.Fatalf("live session does not work: %v", err)
++		}
++		liveEP := a.endpointOf(h.client.pub)
++		var reqs, fails atomic.Int64
++		var worst atomic.Int64
++		stop := make(chan struct{})
++		done := make(chan struct{})
++		go func() {
++			defer close(done)
++			for {
++				select {
++				case <-stop:
++					return
++				default:
++				}
++				t0 := time.Now()
++				if err := get(); err != nil {
++					fails.Add(1)
++				}
++				reqs.Add(1)
++				if d := time.Since(t0).Milliseconds(); d > worst.Load() {
++					worst.Store(d)
++				}
++				time.Sleep(20 * time.Millisecond)
++			}
++		}()
++		time.Sleep(200 * time.Millisecond)
++		r := h.scan(t, "awg-live", map[string]any{"awg_prime_echoes": 1}, "", awgCandidate("B", h.client, p, b, true))
++		time.Sleep(300 * time.Millisecond)
++		close(stop)
++		<-done
++		d, _ := r.DataByID("B")
++		t.Logf("live: %d requests, %d failed, worst %d ms; probe to B: %s sha_ok=%v; A's endpoint %s -> %s, B's %s",
++			reqs.Load(), fails.Load(), worst.Load(), d.Error, deref(d.ShaOK), liveEP, a.endpointOf(h.client.pub), b.endpointOf(h.client.pub))
++		minReqs := int64(10)
++		if raceOn {
++			minReqs = 3
++		}
++		if fails.Load() != 0 || reqs.Load() < minReqs || d.Error != "" || !deref(d.ShaOK) {
++			t.Fatalf("live failures %d of %d, probe %+v", fails.Load(), reqs.Load(), d)
++		}
++		if ep := a.endpointOf(h.client.pub); ep != liveEP {
++			t.Fatalf("A moved its endpoint for the key: %s -> %s", liveEP, ep)
++		}
++		if ep := b.endpointOf(h.client.pub); ep == "" || ep == liveEP {
++			t.Fatalf("B's endpoint for the key is %q (live %s)", ep, liveEP)
++		}
++		// The live tunnel then moves to B.
++		if err := ldev.IpcSet(clientUAPI(h.client, p, b) + "persistent_keepalive_interval=1\n"); err != nil {
++			t.Fatal(err)
++		}
++		var err2 error
++		for i := 0; i < 20; i++ {
++			if err2 = get(); err2 == nil {
++				break
++			}
++			time.Sleep(100 * time.Millisecond)
++		}
++		if err2 != nil {
++			t.Fatalf("the live tunnel did not move to B: %v", err2)
++		}
++	})
++
++	t.Run("one session per node in the process, spacing", func(t *testing.T) {
++		job := func(n *node, gap time.Duration) tribescan.AwgJob {
++			hs := time.Second
++			if raceOn {
++				hs = 5 * time.Second
++			}
++			return tribescan.AwgJob{UAPI: clientUAPI(h.client, p, n), Addresses: []netip.Prefix{netip.PrefixFrom(clientIP, 32)},
++				Handshake: hs, Spacing: gap, PeerKey: n.key.pub}
++		}
++		s1, err := Open(context.Background(), job(a, 50*time.Millisecond))
++		if err != nil || !s1.HandshakeOK() {
++			t.Fatalf("first: %v", err)
++		}
++		if _, err := Open(context.Background(), job(a, 50*time.Millisecond)); !errors.Is(err, tribescan.ErrAwgBusy) {
++			t.Fatalf("a second session to the same node: %v", err)
++		}
++		s1.Close()
++		// Two sessions to two nodes at once: their initiations are spaced.
++		var wg sync.WaitGroup
++		var times [2]time.Time
++		for i, n := range []*node{a, b} {
++			wg.Add(1)
++			go func() {
++				defer wg.Done()
++				s, err := Open(context.Background(), job(n, 150*time.Millisecond))
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				times[i] = time.Now().Add(-time.Duration(s.HandshakeMs()) * time.Millisecond)
++				s.Close()
++			}()
++		}
++		wg.Wait()
++		gap := times[0].Sub(times[1])
++		if gap < 0 {
++			gap = -gap
++		}
++		if gap < 140*time.Millisecond {
++			t.Fatalf("initiations %v apart, want >= 150 ms", gap)
++		}
++		waitLive(t, 0, time.Second)
++	})
++
++	t.Run("cancel mid-transfer closes the device at once", func(t *testing.T) {
++		h.srv.SetMode("stall", false)
++		defer h.srv.SetMode("ok", false)
++		var ack tribescan.Ack
++		tribescan.KitMessage(t, tribescan.KitRequest("awg-cancel", h.srv.Base(), map[string]any{"awg_concurrency": 2, "concurrency": 0,
++			"stall_ms": 10000, "total_ms": 30000, "ttfb_ms": 15000, "awg_handshake_ms": 5000}, 60000, awgCandidate("A", h.client, p, a, true)), "", h.plat, &ack)
++		for end := time.Now().Add(20 * time.Second); Live() != 1 || len(h.srv.Seen()) == 0; time.Sleep(10 * time.Millisecond) {
++			if time.Now().After(end) {
++				t.Fatal("session not up")
++			}
++		}
++		time.Sleep(200 * time.Millisecond)
++		t0 := time.Now()
++		tribescan.KitMessage(t, `{"action":"scan_cancel","scan_id":"awg-cancel"}`, "", h.plat, &ack)
++		closeBound := 100 * time.Millisecond
++		if raceOn {
++			closeBound = 3 * time.Second
++		}
++		waitLive(t, 0, closeBound)
++		t.Logf("device closed %v after the cancel", time.Since(t0))
++		fin := tribescan.KitPollFinal(t, "awg-cancel", 5*time.Second)
++		if d, _ := (&tribescan.KitResult{Items: fin.Items}).DataByID("A"); d.Error != tribescan.ErrCancelled {
++			t.Fatalf("item %+v", d)
++		}
++	})
++
++	t.Run("StopAll during a session: device closed when it returns", func(t *testing.T) {
++		h.srv.SetMode("stall", false)
++		defer h.srv.SetMode("ok", false)
++		var ack tribescan.Ack
++		tribescan.KitMessage(t, tribescan.KitRequest("awg-stopall", h.srv.Base(), map[string]any{"awg_concurrency": 2, "concurrency": 0,
++			"stall_ms": 10000, "total_ms": 30000, "ttfb_ms": 15000, "awg_handshake_ms": 5000}, 60000,
++			awgCandidate("A", h.client, p, a, true), awgCandidate("B", h.client, p, b, true)), "", h.plat, &ack)
++		for end := time.Now().Add(20 * time.Second); Live() != 2 || len(h.srv.Seen()) < 2; time.Sleep(10 * time.Millisecond) {
++			if time.Now().After(end) {
++				t.Fatal("sessions not up")
++			}
++		}
++		tribescan.SetRunnerLive(Live, nil) // as the extension registers it (api-tribescan-awg.go)
++		defer tribescan.SetRunnerLive(nil, nil)
++		if w := tribescan.LiveWork(); w.Awg != 2 {
++			t.Fatalf("LiveWork with two devices: %+v", w)
++		}
++		if !tribescan.StopAll(5 * time.Second) {
++			t.Fatal("StopAll timed out")
++		}
++		if Live() != 0 || tribescan.LiveWork() != (tribescan.Work{}) {
++			t.Fatalf("StopAll returned true with %d sessions, %+v alive", Live(), tribescan.LiveWork())
++		}
++	})
++
++	t.Run("bound to the interface by the probe protector", func(t *testing.T) {
++		lo, err := net.InterfaceByName("lo0")
++		if err != nil {
++			t.Skip("no lo0")
++		}
++		r := h.scan(t, "awg-bound", nil, fmt.Sprintf(`{"bind_interface_index":%d}`, lo.Index), awgCandidate("A", h.client, p, a, false))
++		if d, _ := r.DataByID("A"); d.Error != "" || !deref(d.ShaOK) {
++			t.Fatalf("bound to lo0: %+v", d)
++		}
++		r = h.scan(t, "awg-unbound", nil, `{"bind_interface_index":65000}`, awgCandidate("B", h.client, p, b, false))
++		if d, _ := r.DataByID("B"); d.Error != tribescan.ErrBindFailed {
++			t.Fatalf("a failed binding: %+v", d)
++		}
++	})
++
++	// Leaks: with the nodes and the kit server's connections gone too, the process is back where it
++	// started (the kit server's listener and its idle goroutines stay until the test ends).
++	tribescan.StopAllWait(5 * time.Second)
++	waitLive(t, 0, time.Second)
++	for _, n := range h.nodes {
++		n.close()
++	}
++	h.srv.Srv.CloseClientConnections()
++	runtime.GC()
++	if n := tribescan.Settle(goBefore+4, 5*time.Second); n > goBefore+4 {
++		buf := make([]byte, 1<<20)
++		t.Fatalf("goroutines %d after the sessions, %d before\n%s", n, goBefore, buf[:runtime.Stack(buf, true)])
++	}
++	if fd := tribescan.OpenFDs(); fdBefore >= 0 && fd > fdBefore+2 {
++		t.Fatalf("fds %d after, %d before", fd, fdBefore)
++	}
++	t.Logf("goroutines %d -> %d, fds %d -> %d", goBefore, runtime.NumGoroutine(), fdBefore, tribescan.OpenFDs())
++}
++
++// S4 obfuscation loses the first packet after the handshake; one prime echo absorbs it, so the
++// first byte of the warm-up comes about a second earlier (gVisor's first SYN retransmit).
++func TestTribeAwgPrimeEcho(t *testing.T) {
++	if raceOn {
++		t.Skip("timing: not under the race detector")
++	}
++	h := newHarness(t)
++	p := newParams(4)
++	var unprimed, primed []int64
++	for i := 0; i < 3; i++ {
++		n := h.node(t, p)
++		for _, echo := range []bool{false, true} {
++			limits := map[string]any{"awg_prime_echoes": 0}
++			if echo {
++				limits["awg_prime_echoes"] = 1
++			}
++			r := h.scan(t, fmt.Sprintf("awg-s4-%d-%v", i, echo), limits, "", awgCandidate("n", h.client, p, n, echo))
++			d, _ := r.DataByID("n")
++			if d.Error != "" || !deref(d.ShaOK) {
++				t.Fatalf("s4 probe (echo %v): %+v", echo, d)
++			}
++			if echo {
++				primed = append(primed, deref(d.Ttfb1Ms))
++			} else {
++				unprimed = append(unprimed, deref(d.Ttfb1Ms))
++			}
++			time.Sleep(60 * time.Millisecond)
++		}
++	}
++	med := func(v []int64) int64 {
++		s := append([]int64(nil), v...)
++		sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
++		return s[len(s)/2]
++	}
++	t.Logf("S4=4 ttfb1_ms: no prime echo %v, one prime echo %v", unprimed, primed)
++	if med(unprimed)-med(primed) < 500 {
++		t.Fatalf("the prime echo did not absorb the lost first packet: %v vs %v", unprimed, primed)
++	}
++}
++
++// --- memory: sessions in this process, nodes in another (TRIBEAWG_MEASURE=1) ---------------------
++
++type nodeInfo struct {
++	Pub    string `json:"pub"`
++	Port   int    `json:"port"`
++	Client key    `json:"-"`
++}
++
++type nodeSet struct {
++	ClientPriv string     `json:"client_priv"`
++	ClientPub  string     `json:"client_pub"`
++	Params     params     `json:"params"`
++	Nodes      []nodeInfo `json:"nodes"`
++	CertPEM    string     `json:"cert_pem"`
++	ServerPort int        `json:"server_port"`
++}
++
++// nodeProcess serves N nodes until stdin closes (the measurement's other process).
++func nodeProcess() int {
++	n, _ := strconv.Atoi(os.Getenv("TRIBEAWG_NODES"))
++	srv := tribescan.NewProbeServerStandalone()
++	defer srv.Close()
++	client := newKey()
++	p := newParams(0)
++	set := nodeSet{ClientPriv: client.priv, ClientPub: client.pub, Params: p, CertPEM: srv.CertPEM(), ServerPort: srv.Port}
++	var closers []func()
++	for i := 0; i < n; i++ {
++		nd, closeFn, err := startNodeStandalone(p, client.pub, srv.Srv.Config.Handler, srv.Srv.TLS)
++		if err != nil {
++			fmt.Fprintln(os.Stderr, err)
++			return 1
++		}
++		closers = append(closers, closeFn)
++		set.Nodes = append(set.Nodes, nodeInfo{Pub: nd.key.pub, Port: nd.port})
++	}
++	raw, _ := json.Marshal(set)
++	fmt.Println(string(raw))
++	io.Copy(io.Discard, os.Stdin)
++	for _, c := range closers {
++		c()
++	}
++	return 0
++}
++
++func startNodeStandalone(p params, clientPub string, handler http.Handler, tlsConf *tls.Config) (*node, func(), error) {
++	n := &node{key: newKey()}
++	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		return nil, nil, err
++	}
++	n.port = c.LocalAddr().(*net.UDPAddr).Port
++	c.Close()
++	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{echoIP, apiIP}, nil, 1280)
++	if err != nil {
++		return nil, nil, err
++	}
++	n.dev = device.NewDevice(tdev, conn.NewStdNetBind(), silentLog)
++	if err := n.dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n%spublic_key=%s\nallowed_ip=%s/32\n", n.key.priv, n.port,
++		p.lines(), clientPub, clientIP)); err != nil {
++		return nil, nil, err
++	}
++	n.dev.Up()
++	ln, err := tnet.ListenTCPAddrPort(netip.AddrPortFrom(apiIP, 443))
++	if err != nil {
++		return nil, nil, err
++	}
++	hs := &http.Server{Handler: handler, TLSConfig: tlsConf.Clone()}
++	go hs.Serve(tls.NewListener(ln, hs.TLSConfig))
++	return n, func() { hs.Close(); n.dev.Close() }, nil
++}
++
++func rssKB(t *testing.T) int64 {
++	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
++	if err != nil {
++		t.Fatal(err)
++	}
++	v, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
++	return v
++}
++
++func TestTribeAwgMemory(t *testing.T) {
++	if os.Getenv("TRIBEAWG_MEASURE") != "1" {
++		t.Skip("measurement: TRIBEAWG_MEASURE=1")
++	}
++	cmd := exec.Command(os.Args[0], "-test.run=^$")
++	cmd.Env = append(os.Environ(), "TRIBEAWG_NODE_PROCESS=1", "TRIBEAWG_NODES=4")
++	stdin, _ := cmd.StdinPipe()
++	stdout, _ := cmd.StdoutPipe()
++	cmd.Stderr = os.Stderr
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { stdin.Close(); cmd.Wait() }()
++	line, err := bufio.NewReader(stdout).ReadString('\n')
++	if err != nil {
++		t.Fatal(err)
++	}
++	var set nodeSet
++	if err := json.Unmarshal([]byte(line), &set); err != nil {
++		t.Fatal(err)
++	}
++	pool := tribescan.PoolFromPEM(set.CertPEM)
++	client := key{set.ClientPriv, set.ClientPub}
++	fetch := func(s tribescan.AwgSession) error {
++		c, err := s.DialTCP(context.Background(), netip.AddrPortFrom(apiIP, 443))
++		if err != nil {
++			return err
++		}
++		tc := tls.Client(c, &tls.Config{ServerName: "example.com", RootCAs: pool})
++		br := bufio.NewReader(tc)
++		for _, size := range []int{1024, 65536} {
++			fmt.Fprintf(tc, "GET /v1/probe?bytes=%d&nonce=mem-measure-%d HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer %s\r\n\r\n",
++				size, size, tribescan.KitToken)
++			resp, err := http.ReadResponse(br, nil)
++			if err != nil {
++				return err
++			}
++			io.Copy(io.Discard, resp.Body)
++			resp.Body.Close()
++		}
++		// Held open at the sample point (the connection stays up until Close).
++		return nil
++	}
++	runtime.GC()
++	var ms runtime.MemStats
++	counts := []int{1, 2, 4}
++	if v := os.Getenv("TRIBEAWG_SESSIONS"); v != "" { // one count per process gives clean baselines
++		k, _ := strconv.Atoi(v)
++		counts = []int{k}
++	}
++	for _, k := range counts {
++		runtime.GC()
++		debug.FreeOSMemory()
++		time.Sleep(300 * time.Millisecond)
++		base := rssKB(t)
++		runtime.ReadMemStats(&ms)
++		heap0, stack0, g0 := ms.HeapInuse, ms.StackInuse, runtime.NumGoroutine()
++		var sessions []tribescan.AwgSession
++		for i := 0; i < k; i++ {
++			nd := &node{key: key{pub: set.Nodes[i].Pub}, port: set.Nodes[i].Port}
++			s, err := Open(context.Background(), tribescan.AwgJob{UAPI: clientUAPI(client, set.Params, nd),
++				Addresses: []netip.Prefix{netip.PrefixFrom(clientIP, 32)}, EchoTarget: echoIP, Echoes: 1,
++				Handshake: 2 * time.Second, Spacing: 50 * time.Millisecond, PeerKey: nd.key.pub})
++			if err != nil || !s.HandshakeOK() {
++				t.Fatalf("session %d: %v", i, err)
++			}
++			if err := fetch(s); err != nil {
++				t.Fatalf("fetch %d: %v", i, err)
++			}
++			sessions = append(sessions, s)
++		}
++		runtime.ReadMemStats(&ms)
++		rss := rssKB(t)
++		t.Logf("%d session(s) at once: RSS +%.1f MB (base %.1f MB), heap in use +%.1f MB, stacks +%.1f MB, goroutines +%d",
++			k, float64(rss-base)/1024, float64(base)/1024, float64(int64(ms.HeapInuse)-int64(heap0))/(1<<20),
++			float64(int64(ms.StackInuse)-int64(stack0))/(1<<20), runtime.NumGoroutine()-g0)
++		for _, s := range sessions {
++			s.Close()
++		}
++	}
++	_ = set.ServerPort
++}
++
++// The app's own fixture (ScanHostContract.h scanAwgMiniConfig of tests/scan_world.h testAwgInput(),
++// as recorded in the host vector start_awg_mini_typed_config_and_base_ips): the device takes every
++// line of it as it is - listen_port=0, the obfuscation keys incl. i1, replace_peers,
++// replace_allowed_ips, both allowed IPs - and a preshared key line too. Nothing is dropped.
++const contractUAPI = "private_key=1111111111111111111111111111111111111111111111111111111111111111\nlisten_port=0\njc=4\njmin=40\n" +
++	"jmax=70\ns1=50\ns2=100\nh1=1234\nh2=5678\nh3=91011\nh4=121314\ni1=<b 0xf6ab3267fa>\nreplace_peers=true\n" +
++	"public_key=2222222222222222222222222222222222222222222222222222222222222222\nendpoint=203.0.113.5:51820\n" +
++	"replace_allowed_ips=true\nallowed_ip=198.51.100.7/32\nallowed_ip=10.8.1.1/32\n"
++
++func TestTribeAwgContractConfig(t *testing.T) {
++	psk := strings.Repeat("ab", 32)
++	for _, uapi := range []string{contractUAPI, strings.Replace(contractUAPI, "\nendpoint=", "\npreshared_key="+psk+"\nendpoint=", 1)} {
++		tdev, _, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("100.64.0.250")}, nil, 1280)
++		if err != nil {
++			t.Fatal(err)
++		}
++		dev := device.NewDevice(tdev, conn.NewStdNetBind(), silentLog)
++		if err := dev.IpcSet(withoutKeepalive(uapi)); err != nil {
++			dev.Close()
++			t.Fatalf("the device refused the contract's UAPI: %v", err)
++		}
++		got, _ := dev.IpcGet()
++		dev.Close()
++		// listen_port=0 is taken (a random port at Up); IpcGet leaves a zero port out.
++		want := []string{"jc=4", "jmin=40", "jmax=70", "s1=50", "s2=100", "h1=1234", "h2=5678", "h3=91011",
++			"h4=121314", "i1=<b 0xf6ab3267fa>", "public_key=2222222222222222222222222222222222222222222222222222222222222222",
++			"endpoint=203.0.113.5:51820", "allowed_ip=198.51.100.7/32", "allowed_ip=10.8.1.1/32"}
++		if strings.Contains(uapi, "preshared_key") {
++			want = append(want, "preshared_key="+psk)
++		}
++		for _, w := range want {
++			if !strings.Contains("\n"+got, "\n"+w+"\n") {
++				t.Fatalf("the device ignored %q:\n%s", w, got)
++			}
++		}
++		if strings.Count(got, "allowed_ip=") != 2 {
++			t.Fatalf("allowed IPs: %s", got)
++		}
++	}
++}

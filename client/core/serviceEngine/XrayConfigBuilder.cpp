@@ -2,6 +2,7 @@
 
 #include "../utils/constants/protocolConstants.h"
 #include "TuningStore.h"
+#include "UpstreamEngine.h" // AVPN upstream nodes: kUpstreamDisplayHost
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -174,6 +175,62 @@ QJsonObject XrayConfigBuilder::reportSummary(const Subscription &sub, const Subs
         o.insert(QStringLiteral("server_name"), x.serverName);
         o.insert(QStringLiteral("short_id_len"), int(x.shortId.size()));
     }
+    return o;
+}
+
+// ---- AVPN upstream nodes (contract §1, §3) ----------------------------------------------------------
+
+QJsonObject XrayConfigBuilder::upstreamSessionMetadata(const QString &nodeId, const QString &profileId,
+                                                       const QString &configSha256)
+{
+    return QJsonObject{{QStringLiteral("schema_version"), 1},
+                       {QStringLiteral("node_id"), nodeId},
+                       {QStringLiteral("proto"), QStringLiteral("xray")},
+                       {QStringLiteral("upstream"), 1},
+                       {QStringLiteral("profile_id"), profileId},
+                       {QStringLiteral("config_sha256"), configSha256}};
+}
+
+QJsonObject XrayConfigBuilder::buildUpstream(const UpstreamEnvelopeInput &in)
+{
+    if (in.coreConfig.isEmpty() || in.nodeId.isEmpty() || in.profileId.isEmpty())
+        return {};
+    const QString host = QLatin1String(kUpstreamDisplayHost);
+    QJsonObject inner;
+    inner.insert(QStringLiteral("config"), QString::fromUtf8(in.coreConfig));
+    inner.insert(QStringLiteral("hostName"), host);
+    inner.insert(QStringLiteral("port"), QString::fromLatin1(amnezia::protocols::xray::defaultPort).toInt());
+    QJsonObject root;
+    root.insert(QStringLiteral("protocol"), QStringLiteral("xray"));
+    root.insert(QStringLiteral("xray_config_data"), inner);
+    root.insert(QStringLiteral("hostName"), host);
+    const QStringList dns = dnsOrDefault(in.dns);
+    root.insert(QStringLiteral("dns1"), dns.value(0));
+    root.insert(QStringLiteral("dns2"), dns.value(dns.size() > 1 ? 1 : 0));
+    root.insert(QStringLiteral("splitTunnelType"), 0);
+    root.insert(QStringLiteral("config_version"), 0);
+    root.insert(QStringLiteral("tribeSessionMetadata"), upstreamSessionMetadata(in.nodeId, in.profileId, in.configSha256));
+    if (!in.lease.isEmpty())
+        root.insert(QStringLiteral("upstream_lease"), in.lease);
+    if (!in.tunables.isEmpty())
+        root.insert(QStringLiteral("xray_tunables"), in.tunables);
+    return root;
+}
+
+QJsonObject XrayConfigBuilder::reportSummaryUpstream(const SubscriptionNode &stub, bool provisional,
+                                                     const QString &meterScope)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("proto"), QStringLiteral("xray"));
+    o.insert(QStringLiteral("upstream"), true);
+    if (stub.upstream) {
+        o.insert(QStringLiteral("profile_id"), stub.upstream->profileId);
+        o.insert(QStringLiteral("config_sha256"), stub.upstream->configSha256);
+        o.insert(QStringLiteral("tier"), stub.upstream->tier);
+        o.insert(QStringLiteral("protocols"), QJsonArray::fromStringList(stub.upstream->protocols));
+    }
+    o.insert(QStringLiteral("provisional"), provisional);
+    o.insert(QStringLiteral("meter_scope"), meterScope);
     return o;
 }
 

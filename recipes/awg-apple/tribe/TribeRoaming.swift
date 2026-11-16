@@ -746,3 +746,30 @@ public enum TribeRoaming {
         return TribeStallSample(txBytes: tx, rxBytes: rx, lastHandshakeSec: handshake, at: at)
     }
 }
+
+// MARK: - Backend restart hook (tribe.12, patch 0015)
+
+/// What the adapter is about to do to its WireGuard backend by itself (or on the provider's stop).
+public enum TribeBackendRestart: String, Equatable {
+    /// pauseBackend: wgTurnOff, the adapter goes to temporaryShutdown (a lost path).
+    case pause
+    /// restartBackendInPlace: wgTurnOff + wgTurnOn (soft restart, stall watchdog ladder).
+    case restart
+    /// The device's UDP socket is rebound or the endpoints re-set (roam, stall ladder, fresh port).
+    case rebind
+    /// stop(): the provider's own stop.
+    case stop
+}
+
+/// Runs the adapter's `tribeBackendWillRestart` callback (when set) synchronously, then the
+/// backend operation. nil = only the operation (the behaviour without the hook). A provider may see
+/// more than one call for one recovery step (a roam re-sets endpoints and rebinds the port); its
+/// reaction (stop the probes next to the backend) must be idempotent.
+public enum TribeBackendHook {
+    @discardableResult
+    public static func before<T>(_ reason: TribeBackendRestart, _ willRestart: ((TribeBackendRestart) -> Void)?,
+                                 _ operation: () throws -> T) rethrows -> T {
+        willRestart?(reason)
+        return try operation()
+    }
+}

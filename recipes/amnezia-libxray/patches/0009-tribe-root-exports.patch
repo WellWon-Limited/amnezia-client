@@ -1,0 +1,231 @@
+diff --git a/tribe_exports.go b/tribe_exports.go
+new file mode 100644
+index 0000000..d8da98a
+--- /dev/null
++++ b/tribe_exports.go
+@@ -0,0 +1,40 @@
++package libXray
++
++// Tribe (0009): root-level exports for gomobile. `gomobile bind` binds only this root package
++// (Kotlin: static members of org.amnezia.vpn.protocol.xray.libXray.LibXray), so a Tribe
++// function that lives in a sub-package is re-exported here with a Tribe prefix. Every export
++// keeps the frozen ABI of its Apple twin (awg-apple), so one parser contract serves all
++// platforms.
++
++import (
++	"github.com/amnezia-vpn/amnezia-libxray/xray"
++)
++
++// TribeStatsABI names the reply format of TribeOutboundStatsJSON. Same string as the Apple
++// export LibXrayTribeOutboundStats (awg-apple AWG_APPLE_TRIBE_STATS_ABI) and the Android
++// package variable AMNEZIA_LIBXRAY_TRIBE_STATS_ABI.
++const TribeStatsABI = "libxray-tribe-stats-v1"
++
++// TribeOutboundStatsJSON returns the running core's cumulative per-outbound bytes, read in
++// process (no gRPC API inbound, no listener). ABI libxray-tribe-stats-v1, the same JSON as the
++// Apple export LibXrayTribeOutboundStats (libxray patch 0007, xray.OutboundStatsJSON):
++//
++//	{"running":true,"outbounds":{"proxy":{"uplink":150034,"downlink":250002}},"error":"","error_code":""}
++//
++// running=false with "outbounds":{} when no core runs (also right after StopXray);
++// error_code "stats_disabled" when the running config has no stats feature. The caller enables
++// the counters before RunXray by MERGING into the config: "stats":{} and
++// policy.system.statsOutboundUplink / statsOutboundDownlink = true; only tagged outbounds count.
++// Counters are cumulative since this core instance started; a new RunXray starts from zero.
++// Safe from any thread, concurrently with traffic and with RunXray/StopXray.
++func TribeOutboundStatsJSON() string {
++	return xray.OutboundStatsJSON()
++}
++
++// Scanner exports (reserved, not implemented in this patch).
++//
++// TribeScanStart, TribeScanPoll and TribeScanCancel belong here, in this file and this patch,
++// next to the other Tribe root exports. The scanner lane (Android host, scanner-client-plan.md)
++// adds them with their own frozen ABI string (const TribeScanABI, package variable
++// AMNEZIA_LIBXRAY_TRIBE_SCAN_ABI) and a build gate, then re-locks the AAR (two clean builds,
++// same sha256). Until then the AAR has no scanner symbols and the Kotlin side must not call any.
+diff --git a/tribe_exports_test.go b/tribe_exports_test.go
+new file mode 100644
+index 0000000..af75b61
+--- /dev/null
++++ b/tribe_exports_test.go
+@@ -0,0 +1,179 @@
++package libXray
++
++// Tribe (0009): the root exports Kotlin calls read the instance that the root RunXray (the one
++// Kotlin starts) runs, with the Android protect callback armed as Xray.kt arms it.
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/amnezia-vpn/amnezia-libxray/xray"
++)
++
++const tribeIdleStatsJSON = `{"running":false,"outbounds":{},"error":"","error_code":""}`
++
++type tribeAllowProtect struct{ calls atomic.Int32 }
++
++func (p *tribeAllowProtect) ProtectFd(int) bool {
++	p.calls.Add(1)
++	return true
++}
++
++type tribeRootStatsReply struct {
++	Running   bool                        `json:"running"`
++	Outbounds map[string]xray.TrafficPair `json:"outbounds"`
++	Error     string                      `json:"error"`
++	ErrorCode string                      `json:"error_code"`
++}
++
++func tribeRootStats(t *testing.T) tribeRootStatsReply {
++	t.Helper()
++	var r tribeRootStatsReply
++	if err := json.Unmarshal([]byte(TribeOutboundStatsJSON()), &r); err != nil {
++		t.Fatalf("stats JSON: %v", err)
++	}
++	if r.Outbounds == nil {
++		t.Fatal("outbounds must be an object, never null")
++	}
++	return r
++}
++
++func tribeRootListen(t *testing.T) net.Listener {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { ln.Close() })
++	return ln
++}
++
++// tribeRootSink reads exactly up bytes per connection, answers with down bytes and closes.
++func tribeRootSink(t *testing.T, up, down int64) int {
++	t.Helper()
++	ln := tribeRootListen(t)
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func(c net.Conn) {
++				defer c.Close()
++				if _, err := io.CopyN(io.Discard, c, up); err != nil {
++					return
++				}
++				c.Write(make([]byte, down))
++			}(c)
++		}
++	}()
++	return ln.Addr().(*net.TCPAddr).Port
++}
++
++func TestTribeRootExports(t *testing.T) {
++	if TribeStatsABI != "libxray-tribe-stats-v1" {
++		t.Fatalf("TribeStatsABI = %q", TribeStatsABI)
++	}
++	if got := TribeOutboundStatsJSON(); got != tribeIdleStatsJSON {
++		t.Fatalf("no core: %s", got)
++	}
++	if got, want := TribeOutboundStatsJSON(), xray.OutboundStatsJSON(); got != want {
++		t.Fatalf("root export %s differs from xray.OutboundStatsJSON %s", got, want)
++	}
++
++	protect := &tribeAllowProtect{}
++	// Xray.kt registers its VpnService.protect callback before RunXray (RegisterSocketControllers,
++	// android-only wrapper of this slot).
++	if err := armSocketControllers(protect); err != nil {
++		t.Fatalf("arm socket controllers: %v", err)
++	}
++
++	const up, down = 70_000, 90_000
++	sinkPort := tribeRootSink(t, up, down)
++	probe := tribeRootListen(t)
++	socksPort := probe.Addr().(*net.TCPAddr).Port
++	probe.Close()
++
++	dir := t.TempDir()
++	cfg := map[string]any{
++		"log": map[string]any{"loglevel": "none"},
++		"inbounds": []any{map[string]any{"tag": "socks-in", "listen": "127.0.0.1", "port": socksPort,
++			"protocol": "socks", "settings": map[string]any{"auth": "noauth", "udp": false}}},
++		"outbounds": []any{map[string]any{"tag": "direct", "protocol": "freedom"}},
++		"stats":     map[string]any{},
++		"policy": map[string]any{"system": map[string]any{
++			"statsOutboundUplink": true, "statsOutboundDownlink": true}},
++	}
++	raw, err := json.Marshal(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cfgPath := filepath.Join(dir, "config.json")
++	if err := os.WriteFile(cfgPath, raw, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if msg := RunXray(dir, cfgPath, 0); msg != "" {
++		t.Fatalf("RunXray: %s", msg)
++	}
++	stopped := false
++	defer func() {
++		if !stopped {
++			StopXray()
++		}
++	}()
++	if r := tribeRootStats(t); !r.Running || r.ErrorCode != "" || r.Error != "" {
++		t.Fatalf("running core: %+v", r)
++	}
++
++	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), 5*time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	c.SetDeadline(time.Now().Add(20 * time.Second))
++	if _, err := c.Write([]byte{5, 1, 0}); err != nil {
++		t.Fatal(err)
++	}
++	var greet [2]byte
++	if _, err := io.ReadFull(c, greet[:]); err != nil || greet != [2]byte{5, 0} {
++		t.Fatalf("socks greeting: %v %v", greet, err)
++	}
++	if _, err := c.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1, byte(sinkPort >> 8), byte(sinkPort)}); err != nil {
++		t.Fatal(err)
++	}
++	var rep [10]byte
++	if _, err := io.ReadFull(c, rep[:]); err != nil || rep[1] != 0 {
++		t.Fatalf("socks connect: %v %v", rep, err)
++	}
++	if _, err := c.Write(make([]byte, up)); err != nil {
++		t.Fatal(err)
++	}
++	if got, err := io.CopyN(io.Discard, c, down); err != nil || got != down {
++		t.Fatalf("download %d/%d: %v", got, down, err)
++	}
++
++	r := tribeRootStats(t)
++	d := r.Outbounds["direct"]
++	t.Logf("payload up=%d down=%d; counted direct=%+v", up, down, d)
++	if d.Uplink < up || d.Uplink > up+up/100+1024 || d.Downlink < down || d.Downlink > down+down/100+1024 {
++		t.Fatalf("direct=%+v for payload up=%d down=%d", d, up, down)
++	}
++	if protect.calls.Load() == 0 {
++		t.Fatal("the core dialled without the Android protect callback")
++	}
++
++	stopped = true
++	if msg := StopXray(); msg != "" {
++		t.Fatalf("StopXray: %s", msg)
++	}
++	if got := TribeOutboundStatsJSON(); got != tribeIdleStatsJSON {
++		t.Fatalf("after stop: %s", got)
++	}
++}

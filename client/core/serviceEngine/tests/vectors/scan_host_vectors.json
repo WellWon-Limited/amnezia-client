@@ -1,0 +1,5090 @@
+{
+    "byte_gate": [
+        {
+            "max_bytes": 200000,
+            "name": "two_pools_share_one_cap",
+            "ops": [
+                {
+                    "bytes": 83968,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 83968,
+                        "spent": 0
+                    },
+                    "id": "4:xray",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 85292,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 169260,
+                        "spent": 0
+                    },
+                    "id": "2",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 82944,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 169260,
+                        "spent": 0
+                    },
+                    "id": "up:00000000000000a2#full",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 70000,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 85292,
+                        "spent": 70000
+                    },
+                    "id": "4:xray",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 82944,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 85292,
+                        "spent": 70000
+                    },
+                    "id": "up:00000000000000a2#full",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 85292,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 0,
+                        "spent": 155292
+                    },
+                    "id": "2",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 30000,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 0,
+                        "spent": 155292
+                    },
+                    "id": "up:00000000000000a2#full",
+                    "op": "finish"
+                }
+            ]
+        },
+        {
+            "max_bytes": 100000,
+            "name": "retry_stays_inside_its_reservation",
+            "ops": [
+                {
+                    "bytes": 83456,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 83456,
+                        "spent": 0
+                    },
+                    "id": "up:00000000000000a1",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 83456,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 83456,
+                        "spent": 0
+                    },
+                    "id": "up:00000000000000a1",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 99999,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 0,
+                        "spent": 83456
+                    },
+                    "id": "up:00000000000000a1",
+                    "op": "finish"
+                }
+            ]
+        },
+        {
+            "max_bytes": 1000,
+            "name": "reach_bytes_charged_only_if_they_fit",
+            "ops": [
+                {
+                    "bytes": 512,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 0,
+                        "spent": 512
+                    },
+                    "id": "",
+                    "op": "charge"
+                },
+                {
+                    "bytes": 512,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 0,
+                        "spent": 512
+                    },
+                    "id": "",
+                    "op": "charge"
+                },
+                {
+                    "bytes": 400,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 400,
+                        "spent": 512
+                    },
+                    "id": "x",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 100,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 400,
+                        "spent": 512
+                    },
+                    "id": "",
+                    "op": "charge"
+                }
+            ]
+        },
+        {
+            "max_bytes": -1,
+            "name": "no_cap",
+            "ops": [
+                {
+                    "bytes": 1048576,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 1048576,
+                        "spent": 0
+                    },
+                    "id": "a",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 1048576,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 2097152,
+                        "spent": 0
+                    },
+                    "id": "b",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 5,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 1048576,
+                        "spent": 5
+                    },
+                    "id": "a",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 7,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 1048576,
+                        "spent": 5
+                    },
+                    "id": "unknown",
+                    "op": "finish"
+                }
+            ]
+        },
+        {
+            "max_bytes": 300000,
+            "name": "freeze_then_drain_with_closing_attempt",
+            "ops": [
+                {
+                    "bytes": 10240,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 10240,
+                        "spent": 0
+                    },
+                    "id": "netinfo_open",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 10240,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 20480,
+                        "spent": 0
+                    },
+                    "id": "netinfo_close",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 3100,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 10240,
+                        "spent": 3100
+                    },
+                    "id": "netinfo_open",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 83968,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 94208,
+                        "spent": 3100
+                    },
+                    "id": "4:xray",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 83968,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 178176,
+                        "spent": 3100
+                    },
+                    "id": "up:00000000000000a1",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 0,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 178176,
+                        "spent": 3100
+                    },
+                    "id": "",
+                    "op": "freeze"
+                },
+                {
+                    "bytes": 83968,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 178176,
+                        "spent": 3100
+                    },
+                    "id": "5:xray",
+                    "op": "admit"
+                },
+                {
+                    "bytes": 512,
+                    "expect": {
+                        "ok": false,
+                        "reserved": 178176,
+                        "spent": 3100
+                    },
+                    "id": "",
+                    "op": "charge"
+                },
+                {
+                    "bytes": 83968,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 94208,
+                        "spent": 87068
+                    },
+                    "id": "4:xray",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 20000,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 10240,
+                        "spent": 107068
+                    },
+                    "id": "up:00000000000000a1",
+                    "op": "finish"
+                },
+                {
+                    "bytes": 1200,
+                    "expect": {
+                        "ok": true,
+                        "reserved": 0,
+                        "spent": 108268
+                    },
+                    "id": "netinfo_close",
+                    "op": "finish"
+                }
+            ]
+        }
+    ],
+    "replies": [
+        {
+            "expect": {
+                "decoded": {
+                    "can_verify_composite": false,
+                    "dns_plan": false,
+                    "max_awg_concurrent": 0,
+                    "max_full_concurrent": 1,
+                    "max_leg_concurrent": 0,
+                    "mem_mb": 31,
+                    "needs_vpn": true,
+                    "platform": "",
+                    "reach_stage": true
+                },
+                "error": "",
+                "kind": "caps"
+            },
+            "json": {
+                "can_verify_composite": false,
+                "kinds": [
+                    "xray_full"
+                ],
+                "max_full_concurrent": 1,
+                "mem_mb": 31,
+                "needs_vpn": true,
+                "type": "scan_caps",
+                "version": "tribe-scan-v1"
+            },
+            "name": "caps_minimal_ios_host"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "can_verify_composite": true,
+                    "dns_plan": true,
+                    "max_awg_concurrent": 4,
+                    "max_full_concurrent": 2,
+                    "max_leg_concurrent": 6,
+                    "mem_mb": -1,
+                    "needs_vpn": false,
+                    "platform": "macos",
+                    "reach_stage": true
+                },
+                "error": "",
+                "kind": "caps"
+            },
+            "json": {
+                "can_verify_composite": true,
+                "dns_plan": true,
+                "kinds": [
+                    "xray_full",
+                    "xray_leg",
+                    "awg_mini"
+                ],
+                "max_awg_concurrent": 4,
+                "max_full_concurrent": 2,
+                "max_leg_concurrent": 6,
+                "mem_mb": null,
+                "needs_vpn": false,
+                "platform": "macos",
+                "reach_stage": true,
+                "type": "scan_caps",
+                "version": "tribe-scan-v1"
+            },
+            "name": "caps_macos_service"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "can_verify_composite": false,
+                    "dns_plan": true,
+                    "max_awg_concurrent": 2,
+                    "max_full_concurrent": 1,
+                    "max_leg_concurrent": 4,
+                    "mem_mb": -1,
+                    "needs_vpn": false,
+                    "platform": "android",
+                    "reach_stage": true
+                },
+                "error": "",
+                "kind": "caps"
+            },
+            "json": {
+                "can_verify_composite": false,
+                "dns_plan": true,
+                "kinds": [
+                    "xray_full",
+                    "xray_leg",
+                    "awg_mini"
+                ],
+                "max_awg_concurrent": 2,
+                "max_full_concurrent": 1,
+                "max_leg_concurrent": 4,
+                "mem_mb": null,
+                "needs_vpn": false,
+                "platform": "android",
+                "reach_stage": true,
+                "type": "scan_caps",
+                "version": "tribe-scan-v1"
+            },
+            "name": "caps_android_vpnservice"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "can_verify_composite": true,
+                    "dns_plan": false,
+                    "max_awg_concurrent": 0,
+                    "max_full_concurrent": 2,
+                    "max_leg_concurrent": 0,
+                    "mem_mb": -1,
+                    "needs_vpn": false,
+                    "platform": "macos",
+                    "reach_stage": true
+                },
+                "error": "",
+                "kind": "caps"
+            },
+            "json": {
+                "can_verify_composite": true,
+                "dns_plan": true,
+                "kinds": [
+                    "xray_full"
+                ],
+                "max_awg_concurrent": 4,
+                "max_full_concurrent": 2,
+                "max_leg_concurrent": 6,
+                "mem_mb": null,
+                "needs_vpn": false,
+                "platform": "macos",
+                "reach_stage": true,
+                "type": "scan_caps",
+                "version": "tribe-scan-v1"
+            },
+            "name": "caps_pools_without_kinds"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "version",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "version",
+                "kind": "error"
+            },
+            "json": {
+                "type": "scan_caps",
+                "version": "tribe-scan-v9"
+            },
+            "name": "caps_version_mismatch"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "accepted": 12,
+                    "bytes_spent": -1,
+                    "final": false,
+                    "mem_mb": 38,
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": "",
+                "kind": "ack"
+            },
+            "json": {
+                "accepted": 12,
+                "mem_mb": 38,
+                "scan_id": "scan-1789000000000-1",
+                "type": "scan_ack"
+            },
+            "name": "ack"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "accepted": 0,
+                    "bytes_spent": 412345,
+                    "final": true,
+                    "mem_mb": 36,
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": "",
+                "kind": "ack"
+            },
+            "json": {
+                "accepted": 0,
+                "bytes_spent": 412345,
+                "final": true,
+                "mem_mb": 36,
+                "scan_id": "scan-1789000000000-1",
+                "type": "scan_ack"
+            },
+            "name": "ack_cancel_final_total"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "accepted": 0,
+                "final": true,
+                "mem_mb": 36,
+                "scan_id": "scan-1789000000000-1",
+                "type": "scan_ack"
+            },
+            "name": "malformed_final_ack_without_total"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "reserved": 165888,
+                    "scan_id": "scan-1789000000000-1",
+                    "spent": 182528
+                },
+                "error": "",
+                "kind": "freeze_ack"
+            },
+            "json": {
+                "reserved": 165888,
+                "scan_id": "scan-1789000000000-1",
+                "spent": 182528,
+                "type": "scan_freeze_ack"
+            },
+            "name": "freeze_ack"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "scan_id": "scan-1789000000000-1",
+                "spent": 182528,
+                "type": "scan_freeze_ack"
+            },
+            "name": "malformed_freeze_ack_without_reserved"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 64500,
+                        "at_ms": 0,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": true,
+                        "net_token_len": 10
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 94208,
+                    "bytes_spent": 265984,
+                    "done": false,
+                    "final": false,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "items": [
+                        {
+                            "error": "",
+                            "id": "4:xray",
+                            "ms": 84,
+                            "ok": true,
+                            "seq": 1,
+                            "stage": "reach"
+                        },
+                        {
+                            "error": "reach_timeout",
+                            "id": "7:xray",
+                            "ms": 1500,
+                            "ok": false,
+                            "seq": 2,
+                            "stage": "reach"
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "dns_exercised": true,
+                            "duration_ms": 760,
+                            "egress_asn": 64600,
+                            "egress_class": "other",
+                            "egress_node": null,
+                            "end_ms": 1010,
+                            "error": "",
+                            "http_status": 200,
+                            "id": "up:00000000000000a1",
+                            "net_token": "net-exit",
+                            "retries": 0,
+                            "rtt_ms": 62,
+                            "seq": 3,
+                            "sha_ok": true,
+                            "spent_bytes": 83456,
+                            "stage": "data",
+                            "start_ms": 250,
+                            "t64_ms": 180,
+                            "ttfb1_ms": 410
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "duration_ms": 650,
+                            "echo_replies": 0,
+                            "echo_sent": 1,
+                            "egress_asn": null,
+                            "egress_class": "tribe-node",
+                            "egress_node": "2",
+                            "end_ms": 950,
+                            "error": "",
+                            "handshake_ms": 70,
+                            "handshake_ok": true,
+                            "http_status": 200,
+                            "id": "2",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": 51,
+                            "seq": 4,
+                            "sha_ok": true,
+                            "spent_bytes": 85292,
+                            "stage": "data",
+                            "start_ms": 300,
+                            "t64_ms": 230,
+                            "ttfb1_ms": 390
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "duration_ms": 520,
+                            "egress_asn": null,
+                            "egress_class": "tribe-node",
+                            "egress_node": "4",
+                            "end_ms": 870,
+                            "error": "",
+                            "http_status": 200,
+                            "id": "4:xray",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": 44,
+                            "seq": 5,
+                            "sha_ok": true,
+                            "spent_bytes": 83456,
+                            "stage": "data",
+                            "start_ms": 350,
+                            "t64_ms": 150,
+                            "ttfb1_ms": 300
+                        }
+                    ],
+                    "phase": "data",
+                    "reason": "",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 5
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "done": false,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 0,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "progress_reach_data_awg"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 182528,
+                    "done": true,
+                    "final": false,
+                    "gen": null,
+                    "items": [
+                    ],
+                    "phase": "done",
+                    "reason": "deadline",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 4
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": null,
+                "access_close": null,
+                "bytes_reserved": 0,
+                "bytes_spent": 182528,
+                "done": true,
+                "gen": null,
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "deadline",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "progress_done_deadline"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 64500,
+                        "at_ms": 0,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": true,
+                        "net_token_len": 10
+                    },
+                    "access_close": {
+                        "asn": 64500,
+                        "at_ms": 7400,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": true,
+                        "net_token_len": 10
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 271360,
+                    "done": true,
+                    "final": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "items": [
+                    ],
+                    "phase": "done",
+                    "reason": "cancelled",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 4
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": {
+                    "asn": 64500,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": true,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "progress_final_after_cancel"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 0,
+                        "at_ms": 0,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": 7400,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 271360,
+                    "done": true,
+                    "final": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "items": [
+                    ],
+                    "phase": "done",
+                    "reason": "cancelled",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 4
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": {
+                    "asn": null,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": false,
+                    "net_token": null
+                },
+                "access_close": {
+                    "asn": null,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": false,
+                    "net_token": null
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": true,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "progress_final_attempts_network_error"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": {
+                    "asn": 64500,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": false,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "malformed_final_without_done"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "attempted": true
+                },
+                "access_close": {
+                    "asn": 64500,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": true,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "malformed_attempt_without_http_answered"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": {
+                    "asn": 64500,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": true,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": 12345,
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "malformed_gen_epoch_as_number"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 182528,
+                    "done": true,
+                    "final": false,
+                    "gen": null,
+                    "items": [
+                        {
+                            "bytes": 0,
+                            "bytes_requested": 65536,
+                            "duration_ms": null,
+                            "egress_asn": null,
+                            "egress_class": null,
+                            "egress_node": null,
+                            "end_ms": null,
+                            "error": "budget",
+                            "http_status": 0,
+                            "id": "10:xray",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": null,
+                            "seq": 5,
+                            "sha_ok": false,
+                            "spent_bytes": 0,
+                            "stage": "data",
+                            "start_ms": null,
+                            "t64_ms": null,
+                            "ttfb1_ms": null
+                        }
+                    ],
+                    "phase": "data",
+                    "reason": "complete",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 4
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": null,
+                "access_close": null,
+                "bytes_reserved": 0,
+                "bytes_spent": 182528,
+                "done": true,
+                "gen": null,
+                "items": [
+                    {
+                        "bytes": 0,
+                        "bytes_requested": 65536,
+                        "duration_ms": null,
+                        "egress_asn": null,
+                        "egress_class": null,
+                        "egress_node": null,
+                        "end_ms": null,
+                        "error": "budget",
+                        "http_status": 0,
+                        "id": "10:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": null,
+                        "seq": 5,
+                        "sha_ok": false,
+                        "spent_bytes": 0,
+                        "stage": "data",
+                        "start_ms": null,
+                        "t64_ms": null,
+                        "ttfb1_ms": null
+                    }
+                ],
+                "mem_mb": null,
+                "phase": "data",
+                "reason": "complete",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "progress_item_budget_refusal"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "done": false,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 2,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "malformed_more_replies_than_echoes"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "done": false,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes": "65536",
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 0,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "malformed_bytes_as_string"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 0,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "malformed_missing_done"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "done": false,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 0,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "malformed_data_item_without_bytes"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 64500,
+                        "at_ms": 0,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": true,
+                        "net_token_len": 10
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 94208,
+                    "bytes_spent": 265984,
+                    "done": false,
+                    "final": false,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "items": [
+                        {
+                            "error": "",
+                            "id": "4:xray",
+                            "ms": 84,
+                            "ok": true,
+                            "seq": 1,
+                            "stage": "reach"
+                        },
+                        {
+                            "error": "reach_timeout",
+                            "id": "7:xray",
+                            "ms": 1500,
+                            "ok": false,
+                            "seq": 2,
+                            "stage": "reach"
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "dns_exercised": true,
+                            "duration_ms": 760,
+                            "egress_asn": 64600,
+                            "egress_class": "other",
+                            "egress_node": null,
+                            "end_ms": 1010,
+                            "error": "",
+                            "http_status": 200,
+                            "id": "up:00000000000000a1",
+                            "net_token": "net-exit",
+                            "retries": 0,
+                            "rtt_ms": 62,
+                            "seq": 3,
+                            "sha_ok": true,
+                            "spent_bytes": 83456,
+                            "stage": "data",
+                            "start_ms": 250,
+                            "t64_ms": 180,
+                            "ttfb1_ms": 410
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "duration_ms": 650,
+                            "echo_replies": 0,
+                            "echo_sent": 1,
+                            "egress_asn": null,
+                            "egress_class": "tribe-node",
+                            "egress_node": "2",
+                            "end_ms": 950,
+                            "error": "",
+                            "handshake_ms": 70,
+                            "handshake_ok": true,
+                            "http_status": 200,
+                            "id": "2",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": 51,
+                            "seq": 4,
+                            "sha_ok": true,
+                            "spent_bytes": 85292,
+                            "stage": "data",
+                            "start_ms": 300,
+                            "t64_ms": 230,
+                            "ttfb1_ms": 390
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "duration_ms": 520,
+                            "egress_asn": null,
+                            "egress_class": "tribe-node",
+                            "egress_node": "4",
+                            "end_ms": 870,
+                            "error": "",
+                            "http_status": 200,
+                            "id": "4:xray",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": 44,
+                            "seq": 5,
+                            "sha_ok": true,
+                            "spent_bytes": 83456,
+                            "stage": "data",
+                            "start_ms": 350,
+                            "t64_ms": 150,
+                            "ttfb1_ms": 300
+                        }
+                    ],
+                    "phase": "data",
+                    "reason": "",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 5
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": {
+                    "asn": 64500,
+                    "at_ms": 0,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": true,
+                    "net_token": "net-access"
+                },
+                "access_close": null,
+                "bytes_reserved": 94208,
+                "bytes_spent": 265984,
+                "done": false,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                    {
+                        "error": "",
+                        "id": "4:xray",
+                        "ms": 84,
+                        "ok": true,
+                        "seq": 1,
+                        "stage": "reach"
+                    },
+                    {
+                        "error": "reach_timeout",
+                        "id": "7:xray",
+                        "ms": 1500,
+                        "ok": false,
+                        "seq": 2,
+                        "stage": "reach"
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 3,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 650,
+                        "echo_replies": 0,
+                        "echo_sent": 1,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "2",
+                        "end_ms": 950,
+                        "error": "",
+                        "handshake_ms": 70,
+                        "handshake_ok": true,
+                        "http_status": 200,
+                        "id": "2",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 51,
+                        "seq": 4,
+                        "sha_ok": true,
+                        "spent_bytes": 85292,
+                        "stage": "data",
+                        "start_ms": 300,
+                        "t64_ms": 230,
+                        "ttfb1_ms": 390
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "duration_ms": 520,
+                        "egress_asn": null,
+                        "egress_class": "tribe-node",
+                        "egress_node": "4",
+                        "end_ms": 870,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "4:xray",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": 44,
+                        "seq": 5,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 350,
+                        "t64_ms": 150,
+                        "ttfb1_ms": 300
+                    }
+                ],
+                "mem_mb": 34,
+                "phase": "data",
+                "platform_detail": {
+                    "whatever": 1
+                },
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 5,
+                "type": "scan_progress"
+            },
+            "name": "unknown_field_ignored"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "unknown_action",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "unknown_action",
+                "kind": "error"
+            },
+            "json": {
+                "error": "unknown_action"
+            },
+            "name": "error_unknown_action"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "memory",
+                    "mem_mb": 44,
+                    "need_mb": 12
+                },
+                "error": "memory",
+                "kind": "error"
+            },
+            "json": {
+                "error": "memory",
+                "mem_mb": 44,
+                "need_mb": 12
+            },
+            "name": "error_memory_guard"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "no_vpn",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "no_vpn",
+                "kind": "error"
+            },
+            "json": {
+                "error": "no_vpn"
+            },
+            "name": "error_no_vpn"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "unknown_scan",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "unknown_scan",
+                "kind": "error"
+            },
+            "json": {
+                "error": "unknown_scan",
+                "scan_id": "old"
+            },
+            "name": "error_unknown_scan"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "thermal_throttle",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "other",
+                "kind": "error"
+            },
+            "json": {
+                "error": "thermal_throttle"
+            },
+            "name": "error_open_set"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": "<html>captive portal</html>",
+            "name": "raw_not_json"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "malformed",
+                "kind": "error"
+            },
+            "json": "",
+            "name": "raw_empty"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 75708,
+                    "done": false,
+                    "final": false,
+                    "gen": null,
+                    "items": [
+                        {
+                            "bytes": 0,
+                            "bytes_requested": 65536,
+                            "duration_ms": null,
+                            "egress_asn": null,
+                            "egress_class": null,
+                            "egress_node": null,
+                            "end_ms": null,
+                            "error": "bind_failed",
+                            "http_status": 0,
+                            "id": "up:00000000000000a1",
+                            "net_token": null,
+                            "retries": 0,
+                            "rtt_ms": null,
+                            "seq": 1,
+                            "sha_ok": false,
+                            "spent_bytes": 0,
+                            "stage": "data",
+                            "start_ms": null,
+                            "t64_ms": null,
+                            "ttfb1_ms": null
+                        },
+                        {
+                            "bytes": 65536,
+                            "bytes_requested": 65536,
+                            "dns_exercised": true,
+                            "duration_ms": 760,
+                            "egress_asn": 64600,
+                            "egress_class": "other",
+                            "egress_node": null,
+                            "end_ms": 1010,
+                            "error": "",
+                            "http_status": 200,
+                            "id": "up:00000000000000a1",
+                            "net_token": "net-exit",
+                            "retries": 0,
+                            "rtt_ms": 62,
+                            "seq": 2,
+                            "sha_ok": true,
+                            "spent_bytes": 83456,
+                            "stage": "data",
+                            "start_ms": 250,
+                            "t64_ms": 180,
+                            "ttfb1_ms": 410
+                        }
+                    ],
+                    "phase": "data",
+                    "reason": "",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 2
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": null,
+                "access_close": null,
+                "bytes_reserved": 0,
+                "bytes_spent": 75708,
+                "done": false,
+                "gen": null,
+                "items": [
+                    {
+                        "bytes": 0,
+                        "bytes_requested": 65536,
+                        "duration_ms": null,
+                        "egress_asn": null,
+                        "egress_class": null,
+                        "egress_node": null,
+                        "end_ms": null,
+                        "error": "bind_failed",
+                        "http_status": 0,
+                        "id": "up:00000000000000a1",
+                        "net_token": null,
+                        "retries": 0,
+                        "rtt_ms": null,
+                        "seq": 1,
+                        "sha_ok": false,
+                        "spent_bytes": 0,
+                        "stage": "data",
+                        "start_ms": null,
+                        "t64_ms": null,
+                        "ttfb1_ms": null
+                    },
+                    {
+                        "bytes": 65536,
+                        "bytes_requested": 65536,
+                        "dns": [
+                            {
+                                "address": "1.1.1.1",
+                                "answers": 1,
+                                "error": "",
+                                "ms": 41,
+                                "ok": true,
+                                "rcode": 0,
+                                "transport": "udp"
+                            }
+                        ],
+                        "dns_exercised": true,
+                        "duration_ms": 760,
+                        "egress_asn": 64600,
+                        "egress_class": "other",
+                        "egress_node": null,
+                        "end_ms": 1010,
+                        "error": "",
+                        "http_status": 200,
+                        "id": "up:00000000000000a1",
+                        "net_token": "net-exit",
+                        "retries": 0,
+                        "rtt_ms": 62,
+                        "seq": 2,
+                        "sha_ok": true,
+                        "spent_bytes": 83456,
+                        "stage": "data",
+                        "start_ms": 250,
+                        "t64_ms": 180,
+                        "ttfb1_ms": 410
+                    }
+                ],
+                "mem_mb": null,
+                "phase": "data",
+                "reason": "",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 2,
+                "type": "scan_progress"
+            },
+            "name": "progress_item_bind_failed_and_dns_detail"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "bind_failed",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "bind_failed",
+                "kind": "error"
+            },
+            "json": {
+                "error": "bind_failed"
+            },
+            "name": "error_bind_failed"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "code": "internal",
+                    "mem_mb": -1,
+                    "need_mb": -1
+                },
+                "error": "internal",
+                "kind": "error"
+            },
+            "json": {
+                "detail": "kill_switch_exemption",
+                "error": "internal"
+            },
+            "name": "error_internal_kill_switch_detail"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "access": {
+                        "asn": 0,
+                        "at_ms": -1,
+                        "attempted": false,
+                        "gen": null,
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "access_close": {
+                        "asn": 0,
+                        "at_ms": 7400,
+                        "attempted": true,
+                        "gen": {
+                            "counter": 3,
+                            "epoch": "5eed5eed5eed5eed",
+                            "source": "ne"
+                        },
+                        "http_answered": false,
+                        "net_token_len": 0
+                    },
+                    "bytes_reserved": 0,
+                    "bytes_spent": 271360,
+                    "done": true,
+                    "final": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "items": [
+                    ],
+                    "phase": "done",
+                    "reason": "cancelled",
+                    "scan_id": "scan-1789000000000-1",
+                    "seq": 4
+                },
+                "error": "",
+                "kind": "progress"
+            },
+            "json": {
+                "access": null,
+                "access_close": {
+                    "asn": null,
+                    "at_ms": 7400,
+                    "attempted": true,
+                    "gen": {
+                        "counter": 3,
+                        "epoch": "5eed5eed5eed5eed",
+                        "source": "ne"
+                    },
+                    "http_answered": false,
+                    "net_token": null
+                },
+                "bytes_reserved": 0,
+                "bytes_spent": 271360,
+                "done": true,
+                "final": true,
+                "gen": {
+                    "counter": 3,
+                    "epoch": "5eed5eed5eed5eed",
+                    "source": "ne"
+                },
+                "items": [
+                ],
+                "mem_mb": null,
+                "phase": "done",
+                "reason": "cancelled",
+                "scan_id": "scan-1789000000000-1",
+                "seq": 4,
+                "type": "scan_progress"
+            },
+            "name": "progress_final_opening_not_attempted_closing_failed"
+        }
+    ],
+    "requests": [
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_caps"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_caps"
+            },
+            "name": "caps"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "2:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 0
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "4:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:443",
+                            "id": "5:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 100
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:8443",
+                            "id": "7:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 600
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.3:443",
+                            "id": "8:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 200
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:8443",
+                            "id": "9:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 400
+                        },
+                        {
+                            "config_len": 29,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.4:443",
+                            "id": "10:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 1,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 0,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 1,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 0,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "start_minimal_ios_host"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "2:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 0
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "4:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:443",
+                            "id": "5:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 100
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:8443",
+                            "id": "7:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 600
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.3:443",
+                            "id": "8:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 200
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:8443",
+                            "id": "9:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 400
+                        },
+                        {
+                            "config_len": 29,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.4:443",
+                            "id": "10:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 2,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 6,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "start_full_host_legs_awg"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_add",
+                    "candidates": [
+                        {
+                            "config_len": 13,
+                            "cost_bytes": 82944,
+                            "dns_plan": false,
+                            "early_retry": true,
+                            "entry": "",
+                            "id": "up:00000000000000a3#full",
+                            "kind": "xray_full",
+                            "profile_id": "00000000000000a3",
+                            "reach_at_ms": -1
+                        }
+                    ],
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_add",
+                "candidates": [
+                    {
+                        "config": "{\"test\":true}",
+                        "cost_bytes": 82944,
+                        "dns_plan": false,
+                        "early_retry": true,
+                        "entry": null,
+                        "id": "up:00000000000000a3#full",
+                        "kind": "xray_full",
+                        "profile_id": "00000000000000a3",
+                        "reach_at_ms": -1
+                    }
+                ],
+                "scan_id": "scan-1789000000000-1"
+            },
+            "name": "add_follow_up"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_poll",
+                    "scan_id": "scan-1789000000000-1",
+                    "since": 12
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_poll",
+                "scan_id": "scan-1789000000000-1",
+                "since": 12
+            },
+            "name": "poll"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_freeze",
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_freeze",
+                "scan_id": "scan-1789000000000-1"
+            },
+            "name": "freeze"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_cancel",
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_cancel",
+                "scan_id": "scan-1789000000000-1"
+            },
+            "name": "cancel"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "probe.netinfo_path",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "relative_netinfo_path"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "error": "unknown_action"
+            },
+            "json": {
+                "action": "scan_teleport"
+            },
+            "name": "unknown_action"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "error": "unknown_action"
+            },
+            "json": {
+                "action": "status"
+            },
+            "name": "other_channel_action"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "error": "version"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v2"
+            },
+            "name": "version_mismatch"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "probe.token",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "missing_token"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "probe.base",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "http://plain.example",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "plain_http_base"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "candidates",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "candidate_without_config"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "concurrency",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 999,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "limit_out_of_range"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "2:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 0
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "4:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:443",
+                            "id": "5:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 100
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:8443",
+                            "id": "7:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 600
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.3:443",
+                            "id": "8:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 200
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:8443",
+                            "id": "9:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 400
+                        },
+                        {
+                            "config_len": 29,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.4:443",
+                            "id": "10:xray",
+                            "kind": "xray_full",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 1,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 0,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_full",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "concurrency": 1,
+                    "entry_ip_spacing_ms": 300,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "app_without_pool_fields"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "2:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 0
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "4:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:443",
+                            "id": "5:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 100
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:8443",
+                            "id": "7:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 600
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.3:443",
+                            "id": "8:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 200
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:8443",
+                            "id": "9:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 400
+                        },
+                        {
+                            "config_len": 29,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.4:443",
+                            "id": "10:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 2,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 6,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "future_field": {
+                    "x": 1
+                },
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "unknown_field_ignored"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "json",
+                "error": "bad_request"
+            },
+            "json": "{nope",
+            "name": "not_json"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "since",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_poll",
+                "scan_id": "s",
+                "since": -1
+            },
+            "name": "poll_negative_since"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "config_len": 557,
+                            "cost_bytes": 85292,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "",
+                            "id": "2",
+                            "kind": "awg_mini",
+                            "profile_id": "",
+                            "reach_at_ms": -1
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 2,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 6,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "probe_base_ips": [
+                        "198.51.100.7",
+                        "2001:db8::7"
+                    ],
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"address\":\"100.64.0.250/32\",\"bound_if\":4,\"mtu\":1280,\"prime_echo_target\":\"10.8.1.1\",\"probe\":{\"host\":\"api.tribe.example\",\"ip\":\"198.51.100.7\",\"port\":443},\"uapi\":\"private_key=1111111111111111111111111111111111111111111111111111111111111111\\nlisten_port=0\\njc=4\\njmin=40\\njmax=70\\ns1=50\\ns2=100\\nh1=1234\\nh2=5678\\nh3=91011\\nh4=121314\\ni1=<b 0xf6ab3267fa>\\nreplace_peers=true\\npublic_key=2222222222222222222222222222222222222222222222222222222222222222\\nendpoint=203.0.113.5:51820\\nreplace_allowed_ips=true\\nallowed_ip=198.51.100.7/32\\nallowed_ip=10.8.1.1/32\\n\"}",
+                        "cost_bytes": 85292,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": null,
+                        "id": "2",
+                        "kind": "awg_mini",
+                        "profile_id": null,
+                        "reach_at_ms": -1
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "base_ips": [
+                        "198.51.100.7",
+                        "2001:db8::7"
+                    ],
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "start_awg_mini_typed_config_and_base_ips"
+        },
+        {
+            "expect": {
+                "decoded": {
+                    "action": "scan_start",
+                    "candidates": [
+                        {
+                            "bytes": 24576,
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "2:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 0,
+                            "total_ms": 3000
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:443",
+                            "id": "4:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:443",
+                            "id": "5:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 100
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.1:8443",
+                            "id": "7:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 600
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.3:443",
+                            "id": "8:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 200
+                        },
+                        {
+                            "config_len": 28,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.2:8443",
+                            "id": "9:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 400
+                        },
+                        {
+                            "config_len": 29,
+                            "cost_bytes": 83456,
+                            "dns_plan": false,
+                            "early_retry": false,
+                            "entry": "10.0.0.4:443",
+                            "id": "10:xray",
+                            "kind": "xray_leg",
+                            "profile_id": "",
+                            "reach_at_ms": 300
+                        }
+                    ],
+                    "deadline_ms": 9000,
+                    "limits": {
+                        "awg_concurrency": 0,
+                        "awg_handshake_ms": 1500,
+                        "awg_prime_echoes": 1,
+                        "awg_spacing_ms": 50,
+                        "concurrency": 2,
+                        "entry_ip_spacing_ms": 300,
+                        "leg_concurrency": 6,
+                        "netinfo_cost_bytes": 10240,
+                        "per_entry_ip": 2,
+                        "stage1_sockets": 16,
+                        "stage1_stagger_ms": 50,
+                        "stage1_timeout_ms": 1500,
+                        "stall_after_bytes": 16384,
+                        "stall_ms": 1500,
+                        "total_ms": 5000,
+                        "ttfb_ms": 3000
+                    },
+                    "max_bytes": -1,
+                    "probe": {
+                        "access_asn": 64500,
+                        "access_net_token_len": 10,
+                        "base": "https://api.example.test",
+                        "bytes": 65536,
+                        "netinfo_path": "/v1/netinfo",
+                        "path": "/v1/probe",
+                        "token_len": 21,
+                        "warm_bytes": 1024
+                    },
+                    "scan_id": "scan-1789000000000-1"
+                },
+                "error": ""
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "bytes": 24576,
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0,
+                        "total_ms": 3000
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "start_candidate_job_bytes_total_ms"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "probe.base_ips",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"address\":\"100.64.0.250/32\",\"bound_if\":4,\"mtu\":1280,\"prime_echo_target\":\"10.8.1.1\",\"probe\":{\"host\":\"api.tribe.example\",\"ip\":\"198.51.100.7\",\"port\":443},\"uapi\":\"private_key=1111111111111111111111111111111111111111111111111111111111111111\\nlisten_port=0\\njc=4\\njmin=40\\njmax=70\\ns1=50\\ns2=100\\nh1=1234\\nh2=5678\\nh3=91011\\nh4=121314\\ni1=<b 0xf6ab3267fa>\\nreplace_peers=true\\npublic_key=2222222222222222222222222222222222222222222222222222222222222222\\nendpoint=203.0.113.5:51820\\nreplace_allowed_ips=true\\nallowed_ip=198.51.100.7/32\\nallowed_ip=10.8.1.1/32\\n\"}",
+                        "cost_bytes": 85292,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": null,
+                        "id": "2",
+                        "kind": "awg_mini",
+                        "profile_id": null,
+                        "reach_at_ms": -1
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "base_ips": [
+                        "api.tribe.example"
+                    ],
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "base_ips_with_a_host_name"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "probe.base_ips",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "config": "{\"address\":\"100.64.0.250/32\",\"bound_if\":4,\"mtu\":1280,\"prime_echo_target\":\"10.8.1.1\",\"probe\":{\"host\":\"api.tribe.example\",\"ip\":\"198.51.100.7\",\"port\":443},\"uapi\":\"private_key=1111111111111111111111111111111111111111111111111111111111111111\\nlisten_port=0\\njc=4\\njmin=40\\njmax=70\\ns1=50\\ns2=100\\nh1=1234\\nh2=5678\\nh3=91011\\nh4=121314\\ni1=<b 0xf6ab3267fa>\\nreplace_peers=true\\npublic_key=2222222222222222222222222222222222222222222222222222222222222222\\nendpoint=203.0.113.5:51820\\nreplace_allowed_ips=true\\nallowed_ip=198.51.100.7/32\\nallowed_ip=10.8.1.1/32\\n\"}",
+                        "cost_bytes": 85292,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": null,
+                        "id": "2",
+                        "kind": "awg_mini",
+                        "profile_id": null,
+                        "reach_at_ms": -1
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "base_ips": [
+                        "198.51.100.1",
+                        "198.51.100.2",
+                        "198.51.100.3",
+                        "198.51.100.4",
+                        "198.51.100.5",
+                        "198.51.100.6",
+                        "198.51.100.7",
+                        "198.51.100.8",
+                        "198.51.100.9"
+                    ],
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "base_ips_more_than_eight"
+        },
+        {
+            "expect": {
+                "decoded": null,
+                "detail": "candidates",
+                "error": "bad_request"
+            },
+            "json": {
+                "action": "scan_start",
+                "candidates": [
+                    {
+                        "bytes": 24576,
+                        "config": "{\"test-config-for\":\"2:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "2:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 0,
+                        "total_ms": 60000
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"4:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 443
+                        },
+                        "id": "4:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"5:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 443
+                        },
+                        "id": "5:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 100
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"7:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.1",
+                            "port": 8443
+                        },
+                        "id": "7:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 600
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"8:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.3",
+                            "port": 443
+                        },
+                        "id": "8:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 200
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"9:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.2",
+                            "port": 8443
+                        },
+                        "id": "9:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 400
+                    },
+                    {
+                        "config": "{\"test-config-for\":\"10:xray\"}",
+                        "cost_bytes": 83456,
+                        "dns_plan": false,
+                        "early_retry": false,
+                        "entry": {
+                            "ip": "10.0.0.4",
+                            "port": 443
+                        },
+                        "id": "10:xray",
+                        "kind": "xray_leg",
+                        "profile_id": null,
+                        "reach_at_ms": 300
+                    }
+                ],
+                "deadline_ms": 9000,
+                "limits": {
+                    "awg_concurrency": 0,
+                    "awg_handshake_ms": 1500,
+                    "awg_prime_echoes": 1,
+                    "awg_spacing_ms": 50,
+                    "concurrency": 2,
+                    "entry_ip_spacing_ms": 300,
+                    "leg_concurrency": 6,
+                    "netinfo_cost_bytes": 10240,
+                    "per_entry_ip": 2,
+                    "stage1_sockets": 16,
+                    "stage1_stagger_ms": 50,
+                    "stage1_timeout_ms": 1500,
+                    "stall_after_bytes": 16384,
+                    "stall_ms": 1500,
+                    "total_ms": 5000,
+                    "ttfb_ms": 3000
+                },
+                "max_bytes": null,
+                "probe": {
+                    "access_asn": 64500,
+                    "access_net_token": "net-access",
+                    "base": "https://api.example.test",
+                    "bytes": 65536,
+                    "netinfo_path": "/v1/netinfo",
+                    "path": "/v1/probe",
+                    "token": "tsc1.TEST-NOT-A-TOKEN",
+                    "warm_bytes": 1024
+                },
+                "scan_id": "scan-1789000000000-1",
+                "version": "tribe-scan-v1"
+            },
+            "name": "job_total_ms_out_of_range"
+        }
+    ],
+    "schema": 1,
+    "version": "tribe-scan-v1"
+}

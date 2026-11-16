@@ -1,7 +1,7 @@
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.layout import basic_layout
-from conan.tools.files import get, chdir, save
+from conan.tools.files import get, chdir, save, patch
 from conan.tools.apple import XCRun
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.apple import is_apple_os
@@ -17,6 +17,13 @@ class AwgGo(ConanFile):
     version = "3.1.20260828"
     package_type = "application"
     settings = "os", "arch"
+    # AVPN tribe_probe: `amneziawg-go probe`, the Scanner's AmneziaWG mini-session for the service's
+    # probe engine (patches/0001-tribe-probe-subcommand.patch; protocol tribe-awg-probe-v1). Off by
+    # default: the shipped daemon stays byte-identical until the service lane turns it on. With it the
+    # binary also links gVisor's netstack (about +5 MB on macOS arm64).
+    options = {"tribe_probe": [True, False]}
+    default_options = {"tribe_probe": False}
+    exports_sources = "patches/*"
 
     _binary_name = "amneziawg-go"
 
@@ -47,6 +54,10 @@ class AwgGo(ConanFile):
 
     def build_requirements(self):
         self.tool_requires("go/1.26.0")
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            del self.options.tribe_probe  # the probe needs a per-socket interface binding
 
     def validate(self):
         if not self._goos or not all(arch in self._arch_map for arch in self._archs):
@@ -91,7 +102,20 @@ class AwgGo(ConanFile):
             os.path.join(self.source_folder, "version.go"),
             f'package main\n\nconst Version = "{self.version}"\n',
         )
+        tribe_probe = bool(self.options.get_safe("tribe_probe"))
+        if tribe_probe:
+            patch(self, base_path=self.source_folder,
+                  patch_file=os.path.join(self.source_folder, "patches", "0001-tribe-probe-subcommand.patch"))
         with chdir(self, self.source_folder):
+            if tribe_probe:
+                # The probe against a userspace node on 127.0.0.1 (handshake, prime echo, 64 KiB
+                # over TLS through the tunnel, unknown key, bad job, impossible binding), native
+                # architecture only.
+                test_env = Environment()
+                test_env.define("GOARCH", "")
+                test_env.define("CGO_ENABLED", "1")
+                with test_env.vars(self).apply():
+                    self.run("go test -count=1 -run '^TestTribeProbe$' .")
             for arch in self._archs:
                 goarch = self._arch_map.get(arch)
 
@@ -145,4 +169,5 @@ class AwgGo(ConanFile):
             "AWG_GO_ENGINE_VERSION": self.version,
             "AWG_GO_SOURCE_COMMIT": "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1",
             "AWG_GO_UAPI_ABI": "awg-uapi-v3.1",
+            "AWG_GO_TRIBE_PROBE_ABI": "tribe-awg-probe-v1" if self.options.get_safe("tribe_probe") else "",
         })

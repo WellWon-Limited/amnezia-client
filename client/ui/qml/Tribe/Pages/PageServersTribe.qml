@@ -15,6 +15,10 @@ import "../../Controls2" // PageType
 // реконнект-семантика — в TribeEngine.pinAndReconnect (kill-switch features.picker_instant_reconnect).
 // AVPN awg31-xray-v1 (спека 2026-09-01 §2.3): у локации может быть несколько транспортов
 // (Amnezia/Xray) — бейджи в строке + селектор режима «Авто / Amnezia / Xray» над списком.
+// AVPN upstream nodes (release A, point 16): a provider profile (role `upstream`) is an ordinary row - our
+// label (the engine never passes the server's text), flag or a globe tile, the Xray badge, neutral RTT
+// ("—", bars off: no ICMP target). The engine keys it as a location of its own (never merged with ours);
+// such rows come after ours in the engine's order (tier, then pool order). Flag off: no such row exists.
 PageType {
     id: root
 
@@ -24,6 +28,8 @@ PageType {
     // AVPN awg31-xray-v1: смена режима транспорта — тоже через PageStart (движок может
     // переподнять туннель ⇒ инвариант §5 «уход с UI выбора сначала» действует и здесь).
     signal pickTransport(string mode)
+    // AVPN (Scanner): the pinned «Запустить сканер» (the second entry into the Scanner; back returns here)
+    signal requestScanner()
 
 
     // iOS: PageController.safeArea* только для Android → max с SafeArea (как PageNotificationsTribe)
@@ -101,11 +107,12 @@ PageType {
 
     function computeCountries() {
         const byLoc = {}
+        const firstAt = {}   // AVPN upstream nodes: the engine's order of a location (its first pool row)
         for (let i = 0; i < pool.length; ++i) {
             const n = pool[i]
             if (!n || n.alive !== true) continue
             const key = root.locationKeyOf(n)
-            if (!byLoc[key]) byLoc[key] = []
+            if (!byLoc[key]) { byLoc[key] = []; firstAt[key] = i }
             byLoc[key].push(n)
         }
         const q = query.trim().toLowerCase()
@@ -130,9 +137,12 @@ PageType {
             const disabled = usable.length === 0
             const best = root.bestOf(disabled ? nodes : usable)
             const cc = String(best.countryCode || "??").toUpperCase()
+            // AVPN upstream nodes: a provider profile row (its location holds only itself).
+            const isUp = best.upstream === true
             // Имя локации: движок отдаёт подпись самой ноды, иначе подпись соседа по хосту (AWG),
             // иначе название страны (nodePool, pickerDisplay) — код региона («ee») не показываем.
-            const name = best.name || cc
+            // Upstream without a country: a neutral word, never a code.
+            const name = best.name || (isUp ? qsTr("Сервер") : cc)
             if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
                        || String(best.region || "").toLowerCase().includes(q)))
                 continue
@@ -162,8 +172,13 @@ PageType {
             }
             out.push({ key: key, cc: cc, name: name, nodeId: best.nodeId,
                        rtt: best.measuredRttMs,
+                       // upstream: no RTT is ever measured (no ICMP target) - bars stay off, not a
+                       // health guess that would read as a signal
                        bars: best.measuredBars >= 0 ? best.measuredBars
-                                                    : Math.round((best.health || 0) * 5),
+                                                    : (isUp ? 0 : Math.round((best.health || 0) * 5)),
+                       upstream: isUp,
+                       tier: isUp ? Number(best.upstreamTier || 0) : 0,
+                       order: isUp ? firstAt[key] : 0,
                        badges: badges,
                        disabled: disabled,
                        // причина серой строки: транспорт есть, но не тот режим — или клиент его не умеет
@@ -174,6 +189,9 @@ PageType {
         }
         out.sort(function(a, b) {
             if (a.disabled !== b.disabled) return a.disabled ? 1 : -1   // серые — вниз
+            // AVPN upstream nodes: provider rows after ours, in the engine's order (tier, then pool)
+            if (a.upstream !== b.upstream) return a.upstream ? 1 : -1
+            if (a.upstream) return (a.tier - b.tier) || (a.order - b.order)
             const am = a.rtt >= 0, bm = b.rtt >= 0
             if (am !== bm) return am ? -1 : 1
             if (am) return a.rtt - b.rtt
@@ -191,6 +209,24 @@ PageType {
     }
 
     Rectangle { anchors.fill: parent; color: Theme.color.bg800 }
+
+    // AVPN upstream nodes: placeholder of a row without a flag - the kit's "globe" stroke icon on the flag tile.
+    Component {
+        id: globeTile
+        Rectangle {
+            radius: width / 2
+            color: Theme.color.surface3
+            border.width: 1
+            border.color: Theme.color.border
+            TribeStrokeIcon {
+                anchors.centerIn: parent
+                width: parent.width * 0.5
+                height: parent.height * 0.5
+                icon: "globe"
+                tint: Theme.color.text3
+            }
+        }
+    }
 
     // свайп слева-направо = «назад» (жалоба 2026-07-11)
     TribeEdgeBack { onTriggered: root.back() }
@@ -386,8 +422,10 @@ PageType {
             onModeRequested: (m) => root.pickTransport(m)
         }
 
+        // AVPN (Scanner, artboard 16.11): with the `scanner` switch on the hint under the mode is removed (the
+        // mode is visible anyway); switch off = as before
         Text {
-            visible: root.showTransportSelector
+            visible: root.showTransportSelector && !ScanSwitches.scanner
             Layout.fillWidth: true
             Layout.leftMargin: Theme.space.xl
             Layout.rightMargin: Theme.space.xl
@@ -430,6 +468,8 @@ PageType {
                 anchors.fill: parent
                 clip: true
                 topMargin: Theme.space.sm   // воздух под лейблом — скроллится со списком
+                // AVPN (Scanner): air under the last row inside the scroll, above the pinned button
+                bottomMargin: ScanSwitches.scanner ? Theme.space.lg : 0
                 spacing: Theme.space.sm
                 model: root.countries
                 boundsBehavior: Flickable.StopAtBounds
@@ -458,6 +498,9 @@ PageType {
                             Layout.preferredWidth: 38
                             Layout.preferredHeight: 38
                             code: row.modelData.cc
+                            // AVPN upstream nodes: a provider row without a country - the kit's globe on a
+                            // flag tile (own rows keep their previous look)
+                            fallback: row.modelData.upstream ? globeTile : null
                         }
 
                         ColumnLayout {
@@ -601,6 +644,26 @@ PageType {
                     text: qsTr("Повторить")
                     onClicked: TribeEngine.kickBootstrap()
                 }
+            }
+        }
+
+        // AVPN (Scanner, artboard «Экран выбора сервера»): «Запустить сканер» pinned on its own band above the
+        // nav (border-top, bg800, padding 12 / 24 / 16), TribeButton primary full width with the radar icon
+        Rectangle {
+            visible: ScanSwitches.scanner
+            Layout.fillWidth: true
+            Layout.preferredHeight: scanButton.implicitHeight + Theme.space.md + Theme.space.lg
+            color: Theme.color.bg800
+            Rectangle { width: parent.width; height: 1; color: Theme.color.border }
+            TribeButton {
+                id: scanButton
+                x: Theme.space.xl
+                y: Theme.space.md
+                width: parent.width - 2 * Theme.space.xl
+                variant: "primary"
+                strokeIcon: "radar"
+                text: ScanTexts.serversButton
+                onClicked: { Haptic.play("light"); root.requestScanner() }
             }
         }
     }

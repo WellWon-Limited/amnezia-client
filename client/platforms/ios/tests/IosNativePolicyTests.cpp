@@ -3,6 +3,7 @@
 #include "../IosNativePolicy.h"
 #include "../IosStatusRequest.h"
 #include <cassert>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -417,6 +418,148 @@ static void testUserspaceSplitPolicy()
     assert(!useUserspaceSplit(true, kSplitTunnelExceptSites, 0));      // список пуст
 }
 
+// AVPN upstream nodes (lane L3): the bridge's envelope validation, scope capability, hev clamps and the
+// status decode / event decision.
+static UpstreamLeaseEnvelope validLease()
+{
+    UpstreamLeaseEnvelope l;
+    l.leaseId = "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    l.renewToken = "tlr1.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcde";
+    l.apiBase = "https://t.example.net";
+    l.renewAfterS = 300;
+    l.ttlS = 900;
+    l.expiresInMs = 900000;
+    l.seq = 1;
+    l.epoch = 7;
+    l.revision = 1763123456789LL;
+    l.meterScope = "tunnel";
+    return l;
+}
+
+static void testUpstreamEnvelope()
+{
+    std::string why;
+    assert(upstreamLeaseEnvelopeValid(validLease(), why) && why.empty());
+    auto refused = [](void (*mutate)(UpstreamLeaseEnvelope &)) {
+        UpstreamLeaseEnvelope l = validLease();
+        mutate(l);
+        std::string w;
+        assert(!upstreamLeaseEnvelopeValid(l, w));
+        return w;
+    };
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.leaseId = "short"; }) == "lease_id");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.leaseId = "leaseAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../x"; }) == "lease_id");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.renewToken.clear(); }) == "renew_token");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.renewToken = "tlr1.with space"; }) == "renew_token");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.apiBase = "http://t.example.net"; }) == "api_base");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.apiBase = "https://u:p@t.example.net"; }) == "api_base");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.apiBase = "https://t.example.net/"; }) == "api_base");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.apiBase = "https://"; }) == "api_base");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.ttlS = 0; }) == "ttl_s");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.epoch = 0; }) == "epoch");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.seq = -1; }) == "seq");
+    assert(refused([](UpstreamLeaseEnvelope &l) { l.meterScope = "bytes"; }) == "meter_scope");
+
+    UpstreamStartEnvelope start;
+    start.profileId = "3f9c2a7b1d4e8f60";
+    start.nodeId = "up:3f9c2a7b1d4e8f60";
+    start.configSha256 = std::string(64, 'a');
+    assert(upstreamStartEnvelopeValid(start, why)); // provisional (no lease)
+    start.hasLease = true;
+    start.lease = validLease();
+    assert(upstreamStartEnvelopeValid(start, why));
+    start.lease.renewToken.clear();
+    assert(!upstreamStartEnvelopeValid(start, why) && why == "renew_token");
+    start.lease = validLease();
+    start.nodeId = "9:xray";
+    assert(!upstreamStartEnvelopeValid(start, why) && why == "node_id");
+    start.nodeId = "up:3f9c2a7b1d4e8f60";
+    start.configSha256 = "xyz";
+    assert(!upstreamStartEnvelopeValid(start, why) && why == "config_sha256");
+
+    // "proxy" only with meter_tags (contract section 1); this build measures it.
+    assert(kUpstreamProxyMeterSupported);
+    assert(upstreamEnvelopeScope("proxy", {"proxy"}) == "proxy");
+    assert(upstreamEnvelopeScope("proxy", {}) == "tunnel");
+    assert(upstreamEnvelopeScope("tunnel", {"proxy"}) == "tunnel");
+    {
+        UpstreamLeaseEnvelope l = validLease();
+        l.meterTags = {"proxy", "proxy-b"};
+        assert(upstreamLeaseEnvelopeValid(l, why));
+        l.meterTags = {""};
+        assert(!upstreamLeaseEnvelopeValid(l, why) && why == "meter_tags");
+        l.meterTags = {std::string("a\nb")};
+        assert(!upstreamLeaseEnvelopeValid(l, why) && why == "meter_tags");
+        l.meterTags = std::vector<std::string>(65, "t");
+        assert(!upstreamLeaseEnvelopeValid(l, why) && why == "meter_tags");
+    }
+}
+
+static void testHevClamps()
+{
+    assert(hevTcpBufferSizeFrom(4096) == 4096);
+    assert(hevTcpBufferSizeFrom(1) == 4096);
+    assert(hevTcpBufferSizeFrom(1e9) == 65536);
+    assert(hevTcpBufferSizeFrom(NAN) == 4096);
+    assert(hevMaxSessionCountFrom(1200) == 1200);
+    assert(hevMaxSessionCountFrom(0) == 128);
+    assert(hevMaxSessionCountFrom(1e12) == 65535);
+    assert(hevTaskStackSizeFrom(24576) == 24576);
+    assert(hevTaskStackSizeFrom(8) == 20480); // never below what shipped before
+    assert(hevTaskStackSizeFrom(INFINITY) == 24576);
+}
+
+static void testUpstreamStatusDecode()
+{
+    UpstreamStatusFields raw;
+    raw.present = true;
+    raw.state = "terminal";
+    raw.code = "lease_gone";
+    raw.seq = 12;
+    raw.renewedMsAgo = 41000;
+    raw.expiresInMs = -5;
+    raw.revision = 1763123456999LL;
+    raw.meterScope = "tunnel";
+    UpstreamStatusFields n = normalizeUpstreamStatus(raw);
+    assert(n.state == "terminal" && n.code == "lease_gone" && n.expiresInMs == 0);
+    raw.code = "made_up";
+    assert(normalizeUpstreamStatus(raw).code.empty()); // only contract codes
+    raw.state = "active";
+    raw.code = "lease_gone";
+    assert(normalizeUpstreamStatus(raw).code.empty()); // a code only on terminal
+    raw.state = "exploded";
+    assert(normalizeUpstreamStatus(raw).state == "none");
+    raw.state = "active";
+    raw.meterScope = "nonsense";
+    assert(normalizeUpstreamStatus(raw).meterScope == "tunnel");
+    raw.appliedBytes = -1;
+    raw.shadowBytes = -1;
+    raw.renewedMsAgo = -9;
+    n = normalizeUpstreamStatus(raw);
+    assert(n.appliedBytes == 0 && n.shadowBytes == 0 && n.renewedMsAgo == -1);
+
+    UpstreamStatusFields prev; // nothing seen yet
+    UpstreamStatusFields next = n;
+    assert(upstreamStatusChanged(prev, next));                 // first status of a session
+    assert(!upstreamStatusChanged(next, next));                // same reply again: quiet
+    UpstreamStatusFields msOnly = next;
+    msOnly.renewedMsAgo += 4000;
+    msOnly.expiresInMs += 1;
+    assert(!upstreamStatusChanged(next, msOnly));              // only the ms counters moved
+    UpstreamStatusFields renewed = next;
+    renewed.seq += 1;
+    assert(upstreamStatusChanged(next, renewed));              // a renewal landed
+    UpstreamStatusFields rev = next;
+    rev.revision += 1;
+    assert(upstreamStatusChanged(next, rev));                  // refresh /v1/subscription
+    UpstreamStatusFields term = next;
+    term.state = "terminal";
+    term.code = "disabled";
+    assert(upstreamStatusChanged(next, term));                 // leave the node
+    UpstreamStatusFields absent;
+    assert(!upstreamStatusChanged(next, absent));              // no `upstream` key (AWG / own Xray)
+}
+
 int main()
 {
     testOnDemandPolicy();
@@ -433,6 +576,9 @@ int main()
     testEstablishedSession();
     testNeverConnectedAdoptedSession();
     testDeadAdoptedSessionJournal();
+    testUpstreamEnvelope();
+    testHevClamps();
+    testUpstreamStatusDecode();
     std::cout << "IosNativePolicyTests: all checks passed\n";
     return 0;
 }

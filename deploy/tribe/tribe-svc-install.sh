@@ -2,7 +2,8 @@
 # tribe-svc-install.sh — ВШИВАЕТСЯ в TribeVPN.app/Contents/Resources/. Запускается приложением
 # через osascript «with administrator privileges» (один системный промпт пароля, без терминала).
 # Распаковывает payload-tarball (аргумент $1: tribe-svc.tar.gz с Tribe-service + amneziawg-go +
-# tun2socks (с 5.1.108, рантайм Xray) + Frameworks(вшитый Qt) + pf, бинари подписаны Developer ID+runtime) в
+# tun2socks (с 5.1.108, рантайм Xray) + geoip.dat/geosite.dat/geo.sha256 (upstream nodes, cut geo pair) +
+# Frameworks(вшитый Qt) + pf, бинари подписаны Developer ID+runtime) в
 # /Library/PrivilegedHelperTools/TribeVPN, пишет LaunchDaemon + bootstrap.
 # Payload — tarball-РЕСУРС (а не loose-файлы в бандле): не ломает подпись app, нотаризация внутрь
 # tar не лезет. НЕ трогает официальную Amnezia (имена: Tribe-service / tribevpn / анкор tribe).
@@ -26,6 +27,11 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 [ -x "$SRC/amneziawg-go" ]  || { echo "нет amneziawg-go в tarball"; exit 1; }
 [ -x "$SRC/tun2socks" ]     || { echo "нет tun2socks в tarball"; exit 1; }
 [ -d "$SRC/Frameworks" ]    || { echo "нет Frameworks в tarball"; exit 1; }
+# AVPN (upstream nodes): the cut geo pair, verified BEFORE the running service is touched (the core
+# reads it next to Tribe-service; a bad pair must not replace a working service).
+[ -f "$SRC/geoip.dat" ] && [ -f "$SRC/geosite.dat" ] && [ -f "$SRC/geo.sha256" ] \
+  || { echo "нет geoip.dat/geosite.dat/geo.sha256 в tarball"; exit 1; }
+( cd "$SRC" && shasum -a 256 -c geo.sha256 ) || { echo "geo-файлы в tarball не совпадают с geo.sha256"; exit 1; }
 
 # AVPN (инцидент 5.1.92, 2026-09-25): замена бинарей поверх РАБОТАЮЩЕГО демона через `cp -f` пишет
 # в тот же файл (тот же inode) — ядро держит закэшированную подпись старой версии, и каждый новый
@@ -43,6 +49,9 @@ mkdir -p "$DEST"
 replace_file "$SRC/Tribe-service" "$DEST/Tribe-service"
 replace_file "$SRC/amneziawg-go"  "$DEST/amneziawg-go"
 replace_file "$SRC/tun2socks"     "$DEST/tun2socks"
+# Geo data: same tmp + mv discipline (new inode; a reader never sees a half-written file).
+replace_file "$SRC/geoip.dat"     "$DEST/geoip.dat"
+replace_file "$SRC/geosite.dat"   "$DEST/geosite.dat"
 rm -rf "$DEST/Frameworks.new"; cp -aR "$SRC/Frameworks" "$DEST/Frameworks.new" \
   && rm -rf "$DEST/Frameworks" && mv "$DEST/Frameworks.new" "$DEST/Frameworks" \
   || { echo "замена Frameworks не удалась"; exit 1; }
@@ -53,6 +62,7 @@ mkdir -p "$DEST/pf"; cp -f "$SRC/pf/"*.conf "$DEST/pf/" 2>/dev/null || true
 [ -f "$SRC/VERSION" ] && cp -f "$SRC/VERSION" "$DEST/VERSION" || echo "legacy" > "$DEST/VERSION"
 chown -R root:wheel "$DEST"
 chmod 755 "$DEST" "$DEST/Tribe-service" "$DEST/amneziawg-go" "$DEST/tun2socks"
+chmod 644 "$DEST/geoip.dat" "$DEST/geosite.dat"
 xattr -cr "$DEST" 2>/dev/null || true
 
 # Группа для xray-фильтрации (своя, не amnvpn).

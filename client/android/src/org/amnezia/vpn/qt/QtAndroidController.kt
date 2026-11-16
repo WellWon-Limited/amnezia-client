@@ -20,6 +20,13 @@ object QtAndroidController {
     external fun onNotificationStateChanged()
     external fun onVpnStateChanged(stateCode: Int)
     external fun onStatisticsUpdate(rxBytes: Long, txBytes: Long, lastHandshakeSec: Long) // AVPN: + handshake
+    // AVPN (upstream nodes, android-ipc-contract.md section 3): {"upstream":{...}} of the Xray service,
+    // registered by AndroidController::initialize as "(Ljava/lang/String;)V".
+    external fun onUpstreamStatus(json: String)
+    // AVPN (Scanner, lane A3): the probe host's reply to request `id`, and its state {"open","gen"}; registered by
+    // AndroidController::initialize as "(JLjava/lang/String;)V" / "(Ljava/lang/String;)V", optional natives.
+    external fun onScanReply(id: Long, reply: String)
+    external fun onScanHostState(json: String)
 
     external fun onFileOpened(uri: String)
 

@@ -288,6 +288,216 @@ int main()
               "report: нет ключей и IP");
     }
 
+    // ==== AVPN Scanner (lane L6b): the check of «Ваше подключение» - schema 5 (openapi DoctorCheckReport) ====
+    {
+        // A summary as ScanMachine::buildSummary writes it (keys, types, ranges of DoctorScanSummary).
+        const QJsonObject scan{
+            {"schema", 1}, {"network_key", "cell:250-02:4g"}, {"manifest_revision", 12}, {"candidates", 23},
+            {"counts", QJsonObject{{"works", 8}, {"slow", 2}, {"not_verified", 3}}},
+            {"top", QJsonArray{QJsonObject{{"kind", "node"}, {"id", "9"}, {"class", "works"}, {"ms", 41}, {"probe", "tunnel"}},
+                               QJsonObject{{"kind", "node"}, {"id", "9:xray"}, {"class", "slow"}, {"ms", 380}, {"probe", "leg"}},
+                               QJsonObject{{"kind", "upstream"}, {"id", "0123456789abcdef"}, {"class", "not_verified"}}}},
+            {"not_verified_reasons", QJsonObject{{"composite", 2}, {"no_seat", 1}}},
+            {"stop_reason", "works"}, {"duration_ms", 4100}, {"bytes_spent", 812345},
+            {"caps", QJsonObject{{"leg_probe", true}, {"full_profile", false}, {"full_profile_parallel", false},
+                                 {"awg_mini", false}, {"probe_with_vpn_off", false}}}};
+        CHECK(scanSummaryValid(scan), "check: a summary of the machine's shape passes");
+        QList<StageResult> st;
+        st << networkStage(0, "cellular", "lte", -1, -1, -1) << connectStageNoVpn()
+           << serverStage("Латвия", "LV", 120) << servicesStage(4, 4, {}, false, false)
+           << ruSplitStage({"Яндекс"}, {true}) << speedStage(24.0, 40, 90)
+           << altNodesStage({"x"}, {true}, QString()); // not a check stage: dropped by the builder
+        const QJsonObject extra{{"app_ver", "test"}};
+        const QJsonObject good = buildCheckReport(st, extra, scan);
+        QString why;
+        CHECK(checkReportValid(good, &why), "check: good report valid");
+        CHECK(good.value("schema").toInt() == 5 && good.value("mode").toString() == "check", "check: schema 5, mode check");
+        CHECK(good.value("stages").toArray().size() == 6, "check: six stages, altnodes dropped");
+        CHECK(good.value("scan").toObject() == scan, "check: the machine's summary is the scan block");
+        // No summary of the scan: no `scan` key (the schema has no null for it).
+        CHECK(!buildCheckReport(st, extra, QJsonObject()).contains("scan") && checkReportValid(buildCheckReport(st, extra, {})),
+              "check: without a scan summary the key is absent and the report valid");
+        // The connect stage of a VPN-off check: skipped, never "connected".
+        CHECK(connectStageNoVpn().status == Skip && !connectStageNoVpn().data.value("could_connect").toBool(),
+              "check: connect stage with the VPN off is skipped");
+
+        auto bad = [&](QJsonObject o, const char *msg) {
+            QString w;
+            CHECK(!checkReportValid(o, &w) && !w.isEmpty(), msg);
+        };
+        { QJsonObject o = good; o.remove("mode"); bad(o, "check: missing mode rejected"); }
+        { QJsonObject o = good; o.insert("mode", "Check!"); bad(o, "check: malformed mode rejected"); }
+        { QJsonObject o = good; o.insert("schema", 4); bad(o, "check: schema 4 is not this report"); }
+        { QJsonObject o = good; o.insert("type", "bench"); bad(o, "check: type must be doctor"); }
+        for (const char *k : {"cellular", "cell", "wifi:asn:0", "cell:250-2:4g", "wifi:aa:bb:cc:dd:ee:ff", "cell:250-02"}) {
+            QJsonObject sc = scan; sc.insert("network_key", k);
+            QJsonObject o = good; o.insert("scan", sc);
+            bad(o, "check: a bare or malformed network class rejected");
+        }
+        for (const char *k : {"wifi", "unknown", "wifi:asn:12389", "cell:asn:31133:5g", "cell:250-99:unknown"}) {
+            QJsonObject sc = scan; sc.insert("network_key", k);
+            QJsonObject o = good; o.insert("scan", sc);
+            CHECK(checkReportValid(o), "check: a full network key passes");
+        }
+        auto withTop = [&](const QJsonObject &row) {
+            QJsonObject sc = scan; sc.insert("top", QJsonArray{row});
+            QJsonObject o = good; o.insert("scan", sc);
+            return o;
+        };
+        bad(withTop(QJsonObject{{"kind", "node"}, {"id", "203.0.113.7"}, {"class", "works"}}), "check: an address-like node id rejected");
+        bad(withTop(QJsonObject{{"kind", "upstream"}, {"id", "up:0123456789abcdef"}, {"class", "works"}}), "check: an engine id up:... rejected");
+        bad(withTop(QJsonObject{{"kind", "upstream"}, {"id", "10.0.0.1"}, {"class", "works"}}), "check: an address as a profile id rejected");
+        // contract 1.7.0: the row's evidence (direct | exclusion) and the summary's seats_requested (0..48)
+        for (const char *e : {"direct", "exclusion"})
+            CHECK(checkReportValid(withTop(QJsonObject{{"kind", "upstream"}, {"id", "0123456789abcdef"}, {"class", "works"}, {"evidence", e}})),
+                  "check: a row with evidence direct / exclusion passes (1.7.0)");
+        bad(withTop(QJsonObject{{"kind", "node"}, {"id", "9"}, {"class", "works"}, {"evidence", "guess"}}), "check: an unknown evidence rejected");
+        bad(withTop(QJsonObject{{"kind", "node"}, {"id", "9"}, {"class", "works"}, {"evidence", 1}}), "check: a non-string evidence rejected");
+        for (int n : {0, 12, 48}) {
+            QJsonObject sc = scan; sc.insert("seats_requested", n);
+            QJsonObject o = good; o.insert("scan", sc);
+            CHECK(checkReportValid(o), "check: seats_requested 0..48 passes (1.7.0)");
+        }
+        for (const QJsonValue &v : {QJsonValue(49), QJsonValue(-1), QJsonValue(2.5), QJsonValue("3")}) {
+            QJsonObject sc = scan; sc.insert("seats_requested", v);
+            QJsonObject o = good; o.insert("scan", sc);
+            bad(o, "check: seats_requested out of 0..48 or not an integer rejected");
+        }
+        for (const char *k : {"wifi:asn:064500", "cell:asn:0123:4g"}) {
+            QJsonObject sc = scan; sc.insert("network_key", k);
+            QJsonObject o = good; o.insert("scan", sc);
+            bad(o, "check: an ASN with a leading zero rejected (as the server's pattern)");
+        }
+        bad(withTop(QJsonObject{{"kind", "node"}, {"id", "9"}, {"class", "fast"}}), "check: an unknown class rejected");
+        bad(withTop(QJsonObject{{"kind", "node"}, {"id", "9"}, {"class", "works"}, {"ms", -1}}), "check: negative ms rejected");
+        { QJsonObject sc = scan; sc.insert("leg", "vless://x"); QJsonObject o = good; o.insert("scan", sc); bad(o, "check: an unknown scan key rejected"); }
+        { QJsonObject sc = scan; sc.insert("counts", QJsonObject{{"works", 1.5}}); QJsonObject o = good; o.insert("scan", sc); bad(o, "check: a non-integer count rejected"); }
+        { QJsonObject sc = scan; sc.insert("candidates", 2000); QJsonObject o = good; o.insert("scan", sc); bad(o, "check: candidates over 1024 rejected"); }
+        {
+            QJsonArray a = good.value("stages").toArray();
+            a.append(a.first());
+            QJsonObject o = good; o.insert("stages", a);
+            bad(o, "check: a duplicate stage id rejected");
+        }
+        {
+            QJsonArray a = good.value("stages").toArray();
+            QJsonObject e = a.first().toObject(); e.insert("id", "altnodes"); a[0] = e;
+            QJsonObject o = good; o.insert("stages", a);
+            bad(o, "check: a stage outside the six rejected");
+        }
+        {
+            QJsonArray a = good.value("stages").toArray();
+            QJsonObject e = a.first().toObject(); e.insert("status", 3); a[0] = e;
+            QJsonObject o = good; o.insert("stages", a);
+            bad(o, "check: status 3 rejected");
+        }
+        {
+            QJsonArray a = good.value("stages").toArray();
+            QJsonObject e = a.first().toObject(); e.insert("note", QString(501, QChar('x'))); a[0] = e;
+            QJsonObject o = good; o.insert("stages", a);
+            bad(o, "check: a note over 500 rejected");
+        }
+        { QJsonObject o = good; o.insert("summary", QString(4001, QChar('x'))); bad(o, "check: a summary over 4000 rejected"); }
+        // Over 256 KiB: rejected as it is; fitCheckReport gives up `extra` first and the report passes.
+        {
+            QJsonObject big = extra;
+            big.insert("bench", QString(300 * 1024, QChar('b')));
+            const QJsonObject huge = buildCheckReport(st, big, scan);
+            QString w;
+            CHECK(checkReportBytes(huge) > kCheckReportMaxBytes && !checkReportValid(huge, &w) && w == "size",
+                  "check: over 256 KiB rejected");
+            const QJsonObject fit = fitCheckReport(huge);
+            CHECK(checkReportBytes(fit) <= kCheckReportMaxBytes && checkReportValid(fit), "check: fitted report valid");
+            CHECK(fit.value("scan").toObject() == scan && fit.value("stages").toArray().size() == 6,
+                  "check: fitting never cuts stages or the scan block");
+            CHECK(!fit.value("extra").toObject().contains("bench") && fit.value("extra").toObject().value("app_ver") == "test",
+                  "check: the bench goes first, the small context stays");
+        }
+        // The builder itself clamps what the server would refuse.
+        {
+            QList<StageResult> long1;
+            StageResult r = serverStage("x", "LV", 1);
+            r.note = QString(800, QChar('n'));
+            long1 << r;
+            CHECK(checkReportValid(buildCheckReport(long1, {}, {})), "check: the builder clamps a long note");
+        }
+
+        // diag.log: the report first, never cut; the whole within the attachment cap, cut on a UTF-8 boundary.
+        {
+            const QString json = QString::fromUtf8(QJsonDocument(good).toJson(QJsonDocument::Compact));
+            const QString diag = checkDiagText(json, QString(600 * 1024, QChar(0x0416)), 300 * 1024); // 'Ж' = 2 bytes
+            CHECK(diag.toUtf8().size() <= 300 * 1024, "diag: within the cap");
+            CHECK(diag.contains(json), "diag: the report is whole");
+            CHECK(diag.endsWith("[truncated]\n") && !diag.contains(QChar::ReplacementCharacter), "diag: cut cleanly");
+            CHECK(checkDiagText(json, "short", 300 * 1024).endsWith("short"), "diag: a short diag stays whole");
+        }
+
+        // The shade follows the support thread: both parts acked = sent; else wait, and the bound = queued.
+        CHECK(checkDelivery("queued", "acked", "acked", false) == CheckDelivery::Sent, "delivery: text + log acked -> sent (bench pending)");
+        CHECK(checkDelivery("delivered", "acked", "acked", false) == CheckDelivery::Sent, "delivery: delivered -> sent");
+        CHECK(checkDelivery("sending", "acked", "pending", false) == CheckDelivery::Wait, "delivery: log still pending -> wait");
+        CHECK(checkDelivery("queued", "acked", "pending", false) == CheckDelivery::Wait, "delivery: between parts -> wait");
+        CHECK(checkDelivery("queued", "pending", "pending", true) == CheckDelivery::Queued, "delivery: the Send bound -> queued");
+        // Queue lane F3/F4: refused by the server -> kept, retried after an update: rejected, never «уйдёт».
+        CHECK(checkDelivery("rejected", "rejected", "acked", false) == CheckDelivery::Rejected, "delivery: text refused -> rejected");
+        CHECK(checkDelivery("rejected", "acked", "rejected", false) == CheckDelivery::Rejected, "delivery: log refused -> rejected");
+        CHECK(checkDelivery("rejected", "acked", "acked", false) == CheckDelivery::Sent, "delivery: only the bench refused -> sent");
+        CHECK(checkDelivery("queued", "rejected", "pending", false) == CheckDelivery::Wait, "delivery: text refused, log pending -> wait");
+        CHECK(checkDelivery("queued", "rejected", "pending", true) == CheckDelivery::Rejected, "delivery: ... at the bound -> rejected");
+        // Not written to disk: never «уйдёт».
+        CHECK(checkDelivery("unknown", "", "", false) == CheckDelivery::NotSaved, "delivery: unknown id -> not saved");
+        CHECK(checkDelivery("not_saved", "failed", "pending", false) == CheckDelivery::NotSaved, "delivery: not_saved -> not saved");
+        CHECK(checkDelivery("sent_unsaved", "acked", "acked", false) == CheckDelivery::Sent, "delivery: sent_unsaved -> sent");
+        CHECK(checkDelivery("sent_unsaved", "", "", false) == CheckDelivery::Sent, "delivery: sent_unsaved without parts -> sent");
+        CHECK(checkDelivery("unsaved_sending", "acked", "pending", false) == CheckDelivery::Wait, "delivery: unsaved, sending -> wait");
+        CHECK(checkDelivery("unsaved_sending", "acked", "pending", true) == CheckDelivery::NotSaved, "delivery: unsaved at the bound -> not saved");
+        CHECK(checkDelivery("queued", "acked", "", false) == CheckDelivery::Sent, "delivery: a report without a log part");
+
+        // The card's facts.
+        CHECK(!speedCardFact(-1, Skip).known, "speed card: not measured");
+        CHECK(speedCardFact(24.0, Ok).bars == 5 && speedCardFact(24.0, Ok).word == "comfortable", "speed card: fast");
+        CHECK(speedCardFact(3.0, Warn).bars == 2 && speedCardFact(3.0, Warn).word == "slow", "speed card: slow");
+        bool fresh = true;
+        const QVariantList svc{QVariantMap{{"key", "whatsapp"}, {"state", 2}, {"stale", false}},
+                               QVariantMap{{"key", "telegram"}, {"state", 0}, {"stale", true}},
+                               QVariantMap{{"key", "youtube"}, {"state", -1}, {"stale", false}}};
+        const QList<int> chips = scanChipStates(svc, &fresh);
+        CHECK(chips == (QList<int>{-1, -1, -1, 2}) && fresh, "chips: order Telegram YouTube Instagram WhatsApp, stale = unknown");
+        scanChipStates({QVariantMap{{"key", "telegram"}, {"state", 2}, {"stale", true}}}, &fresh);
+        CHECK(!fresh, "chips: only stale ones = «проверим по кнопке»");
+    }
+
+    // ==== AVPN Scanner, second pass: the check's speed = one /v1/probe sample (TribeScanner::sampleSpeed) ====
+    {
+        const StageResult ok = speedStageFromSample(true, 1048576, 800, true, QString());
+        CHECK(ok.id == "speed" && ok.status == Ok, "speed sample: 1 MiB in 0.8 s -> ok");
+        CHECK(qAbs(ok.data.value("down_mbit").toDouble() - 10.48576) < 0.001, "speed sample: Mbit/s = bytes*8/ms/1000");
+        CHECK(ok.data.value("method").toString() == "probe", "speed sample: the method is in the report");
+        CHECK(speedCardFact(ok.data.value("down_mbit").toDouble(), ok.status).word == "comfortable", "speed sample: card comfortable");
+        const StageResult slow = speedStageFromSample(true, 262144, 1500, true, QString());
+        CHECK(slow.status == Warn, "speed sample: 1.4 Mbit/s -> warn");
+        const StageResult bad = speedStageFromSample(true, 1048576, 800, /*digestOk=*/false, QString());
+        CHECK(bad.status == Warn && bad.data.value("error").toString() == "digest", "speed sample: a failed digest is not a speed");
+        CHECK(speedStageFromSample(false, 0, -1, false, "no_tunnel").data.value("skipped").toString() == "no_connection",
+              "speed sample: no tunnel -> skipped, no connection");
+        for (const char *e : {"busy", "no_base", "no_token", "budget"}) {
+            const StageResult r = speedStageFromSample(false, 0, -1, false, e);
+            CHECK(r.status == Skip && r.data.value("skipped").toString() == e, "speed sample: a refusal -> skipped with its code");
+        }
+        const StageResult tr = speedStageFromSample(false, 0, -1, false, "transport");
+        CHECK(tr.status == Warn && tr.data.value("error").toString() == "transport", "speed sample: no 200 -> warn");
+        CHECK(speedStageFromSample(false, 0, -1, false, "weird").data.value("skipped").toString() == "other",
+              "speed sample: an unknown error code -> skipped other");
+        // Every sample result is a stage the server accepts.
+        QList<StageResult> st;
+        st << networkStage(0, "wifi", QString(), -1, -1, -1);
+        for (const StageResult &r : {ok, slow, bad, tr, speedStageFromSample(false, 0, -1, false, "budget")}) {
+            QList<StageResult> one = st;
+            one << r;
+            CHECK(checkReportValid(buildCheckReport(one, {}, {})), "speed sample: the stage passes schema 5");
+        }
+    }
+
     if (g_fail) { std::printf(">>> ПРОВАЛОВ: %d\n", g_fail); return 1; }
     std::printf(">>> doctor_report_check: все проверки зелёные\n");
     return 0;

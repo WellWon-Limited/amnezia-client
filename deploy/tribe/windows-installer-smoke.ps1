@@ -69,7 +69,41 @@ function CheckInstalledFresh($label) {
         $actual = (Get-FileHash $svcExe -Algorithm SHA256).Hash
         Check ($expected -contains $actual) "${label}: Tribe-service.exe из новой сборки, а не старый залоченный"
     }
+    CheckXrayPayload $label
     CheckAmneziaIntact $label
+}
+
+# Xray runtime next to the service: without any of these files the Xray path cannot start on a user's
+# machine (tun2socks.exe + wintun.dll make the tunnel adapter, amnezia_xray.dll is the core linked into
+# Tribe-service.exe, geoip.dat/geosite.dat are the routing data the core reads from the exe directory).
+# tribe-xray-geo.sha256 = SHA256SUMS of the pinned cut pair ("<sha256>  <name>" per line); the installed
+# pair must be exactly that pair, not a leftover of an older install.
+$xrayPayload = @('amnezia_xray.dll', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat', 'tribe-xray-geo.sha256')
+
+function CheckXrayPayload($label) {
+    foreach ($name in $xrayPayload) {
+        $path = Join-Path $installDir $name
+        Check (Test-Path $path -PathType Leaf) "${label}: Xray payload file next to Tribe-service.exe: $path"
+    }
+    $sums = Join-Path $installDir 'tribe-xray-geo.sha256'
+    if (-not (Test-Path $sums -PathType Leaf)) { return }  # already reported as missing above
+    $lines = @(Get-Content $sums | Where-Object { $_.Trim() -ne '' })
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line.Trim() -match '^([0-9A-Fa-f]{64})\s+\*?(\S+)$') {
+            $want = $Matches[1].ToUpperInvariant()
+            $name = $Matches[2]
+            $names.Add($name)
+            $file = Join-Path $installDir $name
+            $got = 'missing'
+            if (Test-Path $file -PathType Leaf) { $got = (Get-FileHash $file -Algorithm SHA256).Hash }
+            Check ($got -eq $want) "${label}: $name matches tribe-xray-geo.sha256 (expected $want, installed $got)"
+        } else {
+            Check $false "${label}: tribe-xray-geo.sha256 line is not '<sha256>  <name>': '$line'"
+        }
+    }
+    $pair = ($names.Count -eq 2) -and ($names -contains 'geoip.dat') -and ($names -contains 'geosite.dat')
+    Check $pair "${label}: tribe-xray-geo.sha256 lists exactly geoip.dat and geosite.dat (lists: $($names -join ', '))"
 }
 
 function CheckAmneziaIntact($label) {

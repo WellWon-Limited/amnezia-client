@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.amnezia.vpn.protocol.BadConfigException
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
@@ -49,7 +50,10 @@ import org.amnezia.vpn.protocol.ProtocolState.RECONNECTING
 import org.amnezia.vpn.protocol.ProtocolState.UNKNOWN
 import org.amnezia.vpn.protocol.VpnException
 import org.amnezia.vpn.protocol.VpnStartException
+import org.amnezia.vpn.protocol.putStatistics
 import org.amnezia.vpn.protocol.putStatus
+import org.amnezia.vpn.protocol.xray.UpstreamStatusChange
+import org.amnezia.vpn.protocol.xray.Xray
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
 import org.amnezia.vpn.util.Prefs
@@ -72,7 +76,7 @@ const val AFTER_PERMISSION_CHECK = "AFTER_PERMISSION_CHECK"
 private const val PREFS_CONFIG_KEY = "LAST_CONF"
 private const val PREFS_SERVER_NAME = "LAST_SERVER_NAME"
 private const val PREFS_SERVER_INDEX = "LAST_SERVER_INDEX"
-// private const val STATISTICS_SENDING_TIMEOUT = 1000L
+private const val STATISTICS_SENDING_TIMEOUT = 1000L // AVPN: restored for the Xray path (decision A-5)
 private const val TRAFFIC_STATS_UPDATE_TIMEOUT = 1000L
 private const val DISCONNECT_TIMEOUT = 5000L
 private const val STOP_SERVICE_TIMEOUT = 5000L
@@ -100,7 +104,7 @@ open class AmneziaVpnService : VpnService() {
     private var connectionJob: Job? = null
     private var disconnectionJob: Job? = null
     private var trafficStatsUpdateJob: Job? = null
-    // private var statisticsSendingJob: Job? = null
+    private var statisticsSendingJob: Job? = null // AVPN: Xray path only (decision A-5)
     private lateinit var networkState: NetworkState
     private lateinit var trafficStats: TrafficStats
     private var controlReceiver: BroadcastReceiver? = null
@@ -111,6 +115,15 @@ open class AmneziaVpnService : VpnService() {
 
     private val isActivityConnected
         get() = clientMessengers.any { it.value.name == ACTIVITY_MESSENGER_NAME }
+
+    // AVPN (decisions A-1, A-5): the Xray protocol object of this session, or null. Every AVPN addition below
+    // (statistics sender, upstream status, seat hand-over) runs only through it, so the AWG, WireGuard and
+    // OpenVPN paths do exactly what they did before.
+    private val xrayProtocol: Xray?
+        get() = when (vpnProto) {
+            VpnProto.XRAY, VpnProto.SSXRAY -> vpnProto?.protocol as? Xray
+            else -> null
+        }
 
     private val connectionExceptionHandler = CoroutineExceptionHandler { _, e ->
         connectionJob?.cancel()
@@ -145,13 +158,13 @@ open class AmneziaVpnService : VpnService() {
                         val messenger = IpcMessenger(msg.replyTo, clientName)
                         clientMessengers[msg.replyTo] = messenger
                         Log.d(TAG, "Messenger client '$clientName' was registered")
-                        // if (clientName == ACTIVITY_MESSENGER_NAME && isConnected) launchSendingStatistics()
+                        if (clientName == ACTIVITY_MESSENGER_NAME && isConnected) launchSendingStatistics()
                     }
 
                     Action.UNREGISTER_CLIENT -> {
                         clientMessengers.remove(msg.replyTo)?.let {
                             Log.d(TAG, "Messenger client '${it.name}' was unregistered")
-                            // if (it.name == ACTIVITY_MESSENGER_NAME) stopSendingStatistics()
+                            if (it.name == ACTIVITY_MESSENGER_NAME && !isActivityConnected) stopSendingStatistics()
                         }
                     }
 
@@ -174,7 +187,31 @@ open class AmneziaVpnService : VpnService() {
                                     putStatus(this@AmneziaVpnService.protocolState.value)
                                 }
                             }
+                            // AVPN (android-ipc-contract.md section 3 rule 3): a recreated activity learns the
+                            // upstream state right after STATUS; nothing for a session without upstream metadata.
+                            xrayProtocol?.upstreamStatusEvent()?.let { sendUpstreamStatus(it, clientMessenger) }
+                            // AVPN (Scanner, lane A3): the probe host's state, Xray sessions only.
+                            xrayProtocol?.scanHost?.stateJson()?.let { sendScanHostState(it, clientMessenger) }
                         }
+                    }
+
+                    Action.SCAN_MESSAGE -> {
+                        // AVPN (Scanner, lane A3): relayed to the Xray service's probe host; the reply goes back to
+                        // replyTo with the request's id. Not an Xray session (AmneziaWG, OpenVPN): no probe host
+                        // here (decision A-7) - no_vpn.
+                        val id = msg.data?.getLong(MSG_SCAN_ID) ?: 0L
+                        val request = msg.data?.getString(MSG_SCAN_REQUEST) ?: ""
+                        val replyTo = msg.replyTo?.let { clientMessengers[it] ?: IpcMessenger(it, "ScanReply") }
+                        val reply: (String) -> Unit = { answer -> mainScope.launch { sendScanReply(id, answer, replyTo) } }
+                        val host = if (isConnected) xrayProtocol?.scanHost else null
+                        if (host != null) host.submit(request, reply) else reply("{\"error\":\"no_vpn\"}")
+                    }
+
+                    Action.UPSTREAM_LEASE_SET -> {
+                        // AVPN (android-ipc-contract.md section 2): always answered with UPSTREAM_STATUS.
+                        val message = msg.data?.getString(MSG_UPSTREAM_LEASE_SET)
+                        val replyTo = msg.replyTo?.let { clientMessengers[it] ?: IpcMessenger(it, "UpstreamReply") }
+                        handleUpstreamLeaseSet(message, replyTo)
                     }
 
                     Action.NOTIFICATION_PERMISSION_GRANTED -> {
@@ -389,26 +426,26 @@ open class AmneziaVpnService : VpnService() {
                 when (protocolState) {
                     CONNECTED -> {
                         networkState.bindNetworkListener()
-                        // if (isActivityConnected) launchSendingStatistics()
+                        if (isActivityConnected) launchSendingStatistics()
                         launchTrafficStatsUpdate()
                     }
 
                     DISCONNECTED -> {
                         networkState.unbindNetworkListener()
                         stopTrafficStatsUpdateJob()
-                        // stopSendingStatistics()
+                        stopSendingStatistics()
                         if (!isServiceBound) stopService()
                     }
 
                     DISCONNECTING -> {
                         networkState.unbindNetworkListener()
                         stopTrafficStatsUpdateJob()
-                        // stopSendingStatistics()
+                        stopSendingStatistics()
                     }
 
                     RECONNECTING -> {
                         stopTrafficStatsUpdateJob()
-                        // stopSendingStatistics()
+                        stopSendingStatistics()
                     }
 
                     CONNECTING, UNKNOWN -> {}
@@ -417,18 +454,29 @@ open class AmneziaVpnService : VpnService() {
         }
     }
 
-/*  @MainThread
+    // AVPN (decision A-5): the upstream statistics sender, restored for the Xray protocol only - the engine's
+    // health loop needs rx/tx (CONNECT-INVARIANTS §17.1: cumulative since tunnel start; the Xray protocol
+    // reads the tunnel interface counters). Every second while connected and the activity is registered,
+    // to the activity only (the one STATISTICS_UPDATE consumer). Never for AWG/WireGuard/OpenVPN: their
+    // behaviour stays as before (no sender at all).
+    @MainThread
     private fun launchSendingStatistics() {
-        if (isServiceBound && isConnected) {
-            statisticsSendingJob = mainScope.launch {
-                while (true) {
-                    clientMessenger.send {
-                        ServiceEvent.STATISTICS_UPDATE.packToMessage {
-                            putStatistics(protocol?.statistics ?: Statistics.EMPTY_STATISTICS)
+        stopSendingStatistics()
+        val xray = xrayProtocol ?: return
+        if (!isConnected || !isActivityConnected) return
+        statisticsSendingJob = mainScope.launch {
+            while (true) {
+                val statistics = xray.statistics
+                clientMessengers.values
+                    .filter { it.name == ACTIVITY_MESSENGER_NAME }
+                    .forEach { messenger ->
+                        messenger.send {
+                            ServiceEvent.STATISTICS_UPDATE.packToMessage {
+                                putStatistics(statistics)
+                            }
                         }
                     }
-                    delay(STATISTICS_SENDING_TIMEOUT)
-                }
+                delay(STATISTICS_SENDING_TIMEOUT)
             }
         }
     }
@@ -436,7 +484,55 @@ open class AmneziaVpnService : VpnService() {
     @MainThread
     private fun stopSendingStatistics() {
         statisticsSendingJob?.cancel()
-    } */
+        statisticsSendingJob = null
+    }
+
+    // AVPN (upstream nodes, android-ipc-contract.md section 3): the payload {"upstream":{contract section 5}}
+    // to one messenger (a reply) or to every registered client (a change). Status fields only - no lease id,
+    // token or host.
+    @MainThread
+    private fun sendUpstreamStatus(payload: String, to: IpcMessenger? = null) {
+        val message = {
+            ServiceEvent.UPSTREAM_STATUS.packToMessage {
+                putString(MSG_UPSTREAM_STATUS, payload)
+            }
+        }
+        if (to != null) to.send(message) else clientMessengers.send(message)
+    }
+
+    // AVPN (android-ipc-contract.md section 2): the hand-over runs off the main thread (the lease session
+    // may wait for its state thread); the reply goes back on the main thread, always.
+    @MainThread
+    private fun sendScanReply(id: Long, reply: String, to: IpcMessenger?) {
+        val message = {
+            ServiceEvent.SCAN_REPLY.packToMessage {
+                putLong(MSG_SCAN_ID, id)
+                putString(MSG_SCAN_REPLY, reply)
+            }
+        }
+        if (to != null) to.send(message) else clientMessengers.send(message)
+    }
+
+    // AVPN (Scanner, lane A3): {"open":bool,"gen":{...}} of the probe host, to one messenger or every client.
+    @MainThread
+    private fun sendScanHostState(state: String, to: IpcMessenger? = null) {
+        val message = {
+            ServiceEvent.SCAN_HOST_STATE.packToMessage {
+                putString(MSG_SCAN_STATE, state)
+            }
+        }
+        if (to != null) to.send(message) else clientMessengers.send(message)
+    }
+
+    private fun handleUpstreamLeaseSet(message: String?, replyTo: IpcMessenger?) {
+        val xray = xrayProtocol
+        mainScope.launch {
+            val payload = withContext(Dispatchers.IO) {
+                runCatching { xray?.upstreamLeaseSetMessage(message) }.getOrNull()
+            } ?: JSONObject().put("upstream", UpstreamStatusChange.none()).toString()
+            sendUpstreamStatus(payload, replyTo)
+        }
+    }
 
     @MainThread
     private fun enableNotification() {
@@ -521,6 +617,13 @@ open class AmneziaVpnService : VpnService() {
         }
 
         protocolState.value = CONNECTING
+
+        // AVPN (android-ipc-contract.md section 3 rule 1): changes of an upstream session's status go to every
+        // client. Called from the lease session's worker thread. Xray only.
+        xrayProtocol?.upstreamStatusSink = { payload -> mainScope.launch { sendUpstreamStatus(payload) } }
+        // AVPN (Scanner, lane A3): the probe host's state changes (open / close / network generation) go to every
+        // client. Called from the host's threads. Xray only.
+        xrayProtocol?.scanStateSink = { state -> mainScope.launch { sendScanHostState(state) } }
 
         if (!checkPermission()) {
             protocolState.value = DISCONNECTED

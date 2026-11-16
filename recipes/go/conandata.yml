@@ -49,3 +49,30 @@ sources:
       x86_64:
         url: "https://go.dev/dl/go1.26.0.windows-amd64.zip"
         sha256: "9bbe0fc64236b2b51f6255c05c4232532b8ecc0e6d2e00950bd3021d8a4d07d4"
+  "1.27.4":
+    # amnezia-xray-core v1.261101.0 declares `go 1.27` (Xray 26.10.31). Hashes from the
+    # official https://go.dev/dl/?mode=json listing.
+    Macos:
+      x86_64:
+        url: "https://go.dev/dl/go1.27.4.darwin-amd64.tar.gz"
+        sha256: "2b799377704ef12db39bd254995d5c348c9cc8d86562ca817724390e56c38f43"
+      armv8:
+        url: "https://go.dev/dl/go1.27.4.darwin-arm64.tar.gz"
+        sha256: "91a44a2b8a716600ad94a4f143e156116620db8828086a6e3602291be9bd0bb4"
+    Linux:
+      x86:
+        url: "https://go.dev/dl/go1.27.4.linux-386.tar.gz"
+        sha256: "6ecb45737d2315acb0dbbc97ea8e13e7c19d4c796abe8d68907c40bce6f50bf7"
+      x86_64:
+        url: "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz"
+        sha256: "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
+      armv8:
+        url: "https://go.dev/dl/go1.27.4.linux-arm64.tar.gz"
+        sha256: "3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92"
+    Windows:
+      x86:
+        url: "https://go.dev/dl/go1.27.4.windows-386.zip"
+        sha256: "ef86c83de402573f0dea26727032e239906ca1ba4f42130ce21c02e789a687f8"
+      x86_64:
+        url: "https://go.dev/dl/go1.27.4.windows-amd64.zip"
+        sha256: "178ab98950ac69ab25069307dc6ade79f3816e414cce95b4da166a115cde1e7e"

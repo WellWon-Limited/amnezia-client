@@ -4,8 +4,32 @@
 // с системным промптом администратора (как auto-update в Amnezia, см. mac_installer.sh).
 // Реализация — MacServiceInstaller.mm (компилируется только под macOS-desktop, НЕ NE/iOS).
 #include <QString>
+#include <QStringList>
 
 namespace avpn {
+
+// The service's own amneziawg-go of the LIVE tunnel (wireguardutilsmacos.cpp: `<dir>/amneziawg-go -f utun`), as one
+// line of `pgrep -fl <path>` ("PID argv0 args..."). The Scanner's AmneziaWG mini-probe runs the same binary as
+// `amneziawg-go probe ...` (service/server/tribe_scan.cpp): it is not our tunnel, so it never hides another VPN
+// from the warning before connecting. Pure (tests/build_mac_service_match.sh).
+inline bool macOwnTunnelProcessLine(const QString &pgrepLine, const QString &binaryPath)
+{
+    const QStringList t = pgrepLine.trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (t.size() < 2 || t.at(1) != binaryPath)
+        return false;
+    bool pid = false;
+    t.at(0).toLongLong(&pid);
+    if (!pid)
+        return false;
+    return t.size() == 2 || t.at(2) != QLatin1String("probe");
+}
+inline bool macOwnTunnelRunning(const QString &pgrepOutput, const QString &binaryPath)
+{
+    for (const QString &line : pgrepOutput.split(QLatin1Char('\n')))
+        if (macOwnTunnelProcessLine(line, binaryPath))
+            return true;
+    return false;
+}
 
 // Демон установлен? (существует /Library/LaunchDaemons/Tribe-service.plist)
 bool macServiceInstalled();
@@ -40,5 +64,13 @@ QString macForeignVpnName();
 // (/Library/PrivilegedHelperTools/TribeVPN/tun2socks, executable). Services up to 5.1.107 never shipped
 // it: without it the Xray path cannot start, so the client treats Xray as unsupported (NodeRotation.h).
 bool macXrayRuntimePresent();
+
+// Upstream nodes: the cut geo pair (geoip.dat + geosite.dat, recipes/tribe-xray-geo) sits next to the
+// installed service and matches, byte for byte, the hashes this app build carries (resource
+// tribe-svc-geo.sha256, written by deploy/tribe/make-svc-payload.sh). false when the resource is
+// missing (a build without the pair), a file is missing, or a hash differs. Reads both files
+// (~380 KB): call at the same points as macXrayRuntimePresent, not per tick. Pure part with an
+// injectable directory: MacUpstreamGeo.h (avpn::upstreamGeoPresentAt).
+bool macUpstreamGeoPresent();
 
 }

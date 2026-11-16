@@ -1,0 +1,1721 @@
+diff --git a/app/dispatcher/default.go b/app/dispatcher/default.go
+index cae9735..2d5ae31 100644
+--- a/app/dispatcher/default.go
++++ b/app/dispatcher/default.go
+@@ -501,7 +501,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
+ 				accessMessage.Detour = inTag + " >> " + tag
+ 			}
+ 		}
+-		log.Record(accessMessage)
++		log.RecordContext(ctx, accessMessage)
+ 	}
+ 
+ 	handler.Dispatch(ctx, link)
+diff --git a/app/dns/nameserver_cached.go b/app/dns/nameserver_cached.go
+index cbd2f03..9fef022 100644
+--- a/app/dns/nameserver_cached.go
++++ b/app/dns/nameserver_cached.go
+@@ -29,12 +29,12 @@ func queryIP(ctx context.Context, s CachedNameserver, domain string, option dns.
+ 			if !go_errors.Is(err, errRecordNotFound) {
+ 				if ttl > 0 {
+ 					errors.LogDebugInner(ctx, err, cache.name, " cache HIT ", fqdn, " -> ", ips)
+-					log.Record(&log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheHit, Elapsed: 0, Error: err})
++					log.RecordContext(ctx, &log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheHit, Elapsed: 0, Error: err})
+ 					return ips, uint32(ttl), err
+ 				}
+ 				if cache.serveStale && (cache.serveExpiredTTL == 0 || cache.serveExpiredTTL < ttl) {
+ 					errors.LogDebugInner(ctx, err, cache.name, " cache OPTIMISTE ", fqdn, " -> ", ips)
+-					log.Record(&log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheOptimiste, Elapsed: 0, Error: err})
++					log.RecordContext(ctx, &log.DNSLog{Server: cache.name, Domain: fqdn, Result: ips, Status: log.DNSCacheOptimiste, Elapsed: 0, Error: err})
+ 					go pull(ctx, s, fqdn, option)
+ 					return ips, 1, err
+ 				}
+@@ -123,7 +123,7 @@ func doFetch(ctx context.Context, s CachedNameserver, fqdn string, option dns.IP
+ 		rTTL = 1
+ 	}
+ 
+-	log.Record(&log.DNSLog{Server: s.getCacheController().name, Domain: fqdn, Result: ips, Status: log.DNSQueried, Elapsed: time.Since(start), Error: err})
++	log.RecordContext(ctx, &log.DNSLog{Server: s.getCacheController().name, Domain: fqdn, Result: ips, Status: log.DNSQueried, Elapsed: time.Since(start), Error: err})
+ 	return result{ips, rTTL, err}
+ }
+ 
+diff --git a/app/dns/nameserver_doh.go b/app/dns/nameserver_doh.go
+index ed7f184..0c1ac37 100644
+--- a/app/dns/nameserver_doh.go
++++ b/app/dns/nameserver_doh.go
+@@ -87,7 +87,7 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
+ 						cnc.ConnectionOnClose(cc),
+ 					)
+ 				} else {
+-					log.Record(&log.AccessMessage{
++					log.RecordContext(ctx, &log.AccessMessage{
+ 						From:   "DNS",
+ 						To:     s.dohURL,
+ 						Status: log.AccessAccepted,
+diff --git a/app/dns/nameserver_local.go b/app/dns/nameserver_local.go
+index 54ab031..95b601d 100644
+--- a/app/dns/nameserver_local.go
++++ b/app/dns/nameserver_local.go
+@@ -23,7 +23,7 @@ func (s *LocalNameServer) QueryIP(ctx context.Context, domain string, option dns
+ 
+ 	if len(ips) > 0 {
+ 		errors.LogInfo(ctx, "Localhost got answer: ", domain, " -> ", ips)
+-		log.Record(&log.DNSLog{Server: s.Name(), Domain: domain, Result: ips, Status: log.DNSQueried, Elapsed: time.Since(start), Error: err})
++		log.RecordContext(ctx, &log.DNSLog{Server: s.Name(), Domain: domain, Result: ips, Status: log.DNSQueried, Elapsed: time.Since(start), Error: err})
+ 	}
+ 
+ 	return
+diff --git a/app/proxyman/outbound/handler.go b/app/proxyman/outbound/handler.go
+index 414fb9c..b3b6a87 100644
+--- a/app/proxyman/outbound/handler.go
++++ b/app/proxyman/outbound/handler.go
+@@ -190,7 +190,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
+ 		if ob.Target.Network == net.Network_UDP && ob.OriginalTarget.Address != nil {
+ 			strategy = strategy.GetDynamicStrategy(ob.OriginalTarget.Address.Family())
+ 		}
+-		ips, err := internet.LookupForIP(ob.Target.Address.Domain(), strategy, nil)
++		ips, err := internet.LookupForIPContext(ctx, ob.Target.Address.Domain(), strategy, nil)
+ 		if err != nil {
+ 			errors.LogInfoInner(ctx, err, "failed to resolve ip for target ", ob.Target.Address.Domain())
+ 			if h.senderSettings.TargetStrategy.ForceIP() {
+diff --git a/common/errors/errors.go b/common/errors/errors.go
+index 674714e..39d8406 100644
+--- a/common/errors/errors.go
++++ b/common/errors/errors.go
+@@ -125,7 +125,13 @@ func LogErrorInner(ctx context.Context, inner error, msg ...interface{}) {
+ }
+ 
+ func doLog(ctx context.Context, inner error, severity log.Severity, msg ...interface{}) {
+-	if log.GetSeverity() < severity {
++	// Tribe (core 0011): a scoped context's messages go to its scope, at the scope's level.
++	scope := log.ScopeFromContext(ctx)
++	if scope != nil {
++		if !log.ScopeWants(scope, severity) {
++			return
++		}
++	} else if log.GetSeverity() < severity {
+ 		return
+ 	}
+ 	pc, _, _, _ := runtime.Caller(2)
+@@ -148,10 +154,15 @@ func doLog(ctx context.Context, inner error, severity log.Severity, msg ...inter
+ 			err.prefix = append(err.prefix, id)
+ 		}
+ 	}
+-	log.Record(&log.GeneralMessage{
++	m := &log.GeneralMessage{
+ 		Severity: severity,
+ 		Content:  err,
+-	})
++	}
++	if scope != nil {
++		scope.Handle(m)
++		return
++	}
++	log.Record(m)
+ }
+ 
+ // Cause returns the root cause of this error.
+diff --git a/common/log/log.go b/common/log/log.go
+index 9759df2..74e5a00 100644
+--- a/common/log/log.go
++++ b/common/log/log.go
+@@ -27,10 +27,10 @@ func (m *GeneralMessage) String() string {
+ 	return serial.Concat("[", m.Severity, "] ", m.Content)
+ }
+ 
+-// Record writes a message into log stream.
++// Record writes a message into log stream (Tribe: with the RedactTerms terms masked).
+ func Record(msg Message) {
+ 	if h := logHandler.Load(); h != nil {
+-		(*h).Handle(msg)
++		(*h).Handle(redactMessage(msg))
+ 	}
+ }
+ 
+diff --git a/common/log/tribe_scope.go b/common/log/tribe_scope.go
+new file mode 100644
+index 0000000..85dd4cc
+--- /dev/null
++++ b/common/log/tribe_scope.go
+@@ -0,0 +1,231 @@
++package log
++
++// Tribe (core 0011): log scopes and redaction, so a short-lived second core instance in the
++// process (the Scanner's probe instances) never writes what it dials into the process log - the
++// handler the tunnel's instance registered (its log file, the app's log callback) or, without
++// one, the default stdout handler.
++//
++// Scope: a context may carry a scope handler (ContextWithScope). A message recorded with that
++// context (RecordContext, errors.LogX) goes to the scope handler only, never to the process
++// handler. A core instance created with core.NewWithContext(scopedCtx, ...) hands the scope to its
++// features, so everything it logs with its own or a derived context stays in the scope.
++//
++// Redaction: messages recorded without a scope (context.Background() call sites, goroutines that
++// lost the context) still reach the process handler. RedactTerms registers strings that must not
++// appear there: such a message is passed on with every occurrence (case-insensitive) replaced by
++// "[redacted]", keeping its type and severity, so the process log loses no line. Without
++// registered terms Record costs one atomic load more than before.
++
++import (
++	"context"
++	"strings"
++	"sync"
++	"sync/atomic"
++
++	"github.com/xtls/xray-core/common/serial"
++)
++
++type scopeKey struct{}
++
++// ContextWithScope returns a context whose messages go to h instead of the process handler.
++func ContextWithScope(ctx context.Context, h Handler) context.Context {
++	return context.WithValue(ctx, scopeKey{}, h)
++}
++
++// ScopeFromContext returns the scope handler of ctx, or nil.
++func ScopeFromContext(ctx context.Context) Handler {
++	if ctx == nil {
++		return nil
++	}
++	h, _ := ctx.Value(scopeKey{}).(Handler)
++	return h
++}
++
++// ScopeWants reports whether scope h takes a message of this severity (a SeverityLogger scope
++// drops more verbose ones before they are built).
++func ScopeWants(h Handler, severity Severity) bool {
++	if sh, ok := h.(SeverityLogger); ok {
++		return sh.Severity() >= severity
++	}
++	return true
++}
++
++// RecordContext writes msg to the scope handler of ctx, or (redacted) to the process handler.
++func RecordContext(ctx context.Context, msg Message) {
++	if h := ScopeFromContext(ctx); h != nil {
++		h.Handle(msg)
++		return
++	}
++	Record(msg)
++}
++
++// RedactedMark replaces a registered term in a process log line.
++const RedactedMark = "[redacted]"
++
++// minRedactTerm: shorter terms would mask unrelated text.
++const minRedactTerm = 4
++
++type redactSet struct {
++	terms []string // lower case
++}
++
++var (
++	redactMu   sync.Mutex
++	redactRefs = map[string]int{}
++	redactCur  atomic.Pointer[redactSet]
++	redactHits atomic.Uint64
++)
++
++// RedactTerms registers terms for the process handler and returns the function that removes them
++// again (registrations are counted, a term stays while any registration holds it). Terms shorter
++// than 4 bytes are ignored.
++func RedactTerms(terms ...string) (release func()) {
++	var held []string
++	redactMu.Lock()
++	for _, t := range terms {
++		t = strings.ToLower(strings.TrimSpace(t))
++		if len(t) < minRedactTerm {
++			continue
++		}
++		redactRefs[t]++
++		held = append(held, t)
++	}
++	if len(held) > 0 {
++		publishRedactLocked()
++	}
++	redactMu.Unlock()
++	var once sync.Once
++	return func() {
++		once.Do(func() {
++			if len(held) == 0 {
++				return
++			}
++			redactMu.Lock()
++			for _, t := range held {
++				if redactRefs[t]--; redactRefs[t] <= 0 {
++					delete(redactRefs, t)
++				}
++			}
++			publishRedactLocked()
++			redactMu.Unlock()
++		})
++	}
++}
++
++func publishRedactLocked() {
++	if len(redactRefs) == 0 {
++		redactCur.Store(nil)
++		return
++	}
++	set := &redactSet{terms: make([]string, 0, len(redactRefs))}
++	for t := range redactRefs {
++		set.terms = append(set.terms, t)
++	}
++	redactCur.Store(set)
++}
++
++// RedactedLines is the number of process log lines that had a term masked.
++func RedactedLines() uint64 { return redactHits.Load() }
++
++// RedactString masks the registered terms in s; ok is false when s had none.
++func RedactString(s string) (out string, ok bool) {
++	set := redactCur.Load()
++	if set == nil {
++		return s, false
++	}
++	return set.mask(s)
++}
++
++func (set *redactSet) mask(s string) (string, bool) {
++	lower := strings.ToLower(s)
++	if len(lower) != len(s) {
++		// Case folding changed the byte length (non-ASCII text): mask the whole line if a term
++		// is in it rather than cut it at wrong offsets.
++		for _, t := range set.terms {
++			if strings.Contains(lower, t) {
++				return RedactedMark, true
++			}
++		}
++		return s, false
++	}
++	var hide []bool
++	for _, t := range set.terms {
++		for from := 0; ; {
++			i := strings.Index(lower[from:], t)
++			if i < 0 {
++				break
++			}
++			i += from
++			if hide == nil {
++				hide = make([]bool, len(s))
++			}
++			for k := i; k < i+len(t); k++ {
++				hide[k] = true
++			}
++			from = i + len(t)
++		}
++	}
++	if hide == nil {
++		return s, false
++	}
++	var out strings.Builder
++	out.Grow(len(s))
++	for i := 0; i < len(s); {
++		j := i
++		for j < len(s) && hide[j] == hide[i] {
++			j++
++		}
++		if hide[i] {
++			out.WriteString(RedactedMark)
++		} else {
++			out.WriteString(s[i:j])
++		}
++		i = j
++	}
++	return out.String(), true
++}
++
++// redactMessage returns msg as the process handler may see it.
++func redactMessage(msg Message) Message {
++	set := redactCur.Load()
++	if set == nil || msg == nil {
++		return msg
++	}
++	masked, hit := set.mask(msg.String())
++	if !hit {
++		return msg
++	}
++	redactHits.Add(1)
++	str := func(v interface{}) string {
++		s, _ := set.mask(serial.ToString(v))
++		return s
++	}
++	switch m := msg.(type) {
++	case *GeneralMessage:
++		return &GeneralMessage{Severity: m.Severity, Content: str(m.Content)}
++	case *AccessMessage:
++		c := *m
++		c.From, c.To, c.Reason = str(m.From), str(m.To), str(m.Reason)
++		c.Email, c.Detour = str(m.Email), str(m.Detour)
++		return &c
++	case *DNSLog:
++		c := *m
++		c.Server, c.Domain = str(m.Server), str(m.Domain)
++		if m.Error != nil {
++			c.Error = redactedError(str(m.Error))
++		}
++		c.Result = nil
++		for _, ip := range m.Result {
++			if _, hit := set.mask(ip.String()); !hit {
++				c.Result = append(c.Result, ip)
++			}
++		}
++		return &c
++	default:
++		return &GeneralMessage{Severity: Severity_Info, Content: masked}
++	}
++}
++
++type redactedError string
++
++func (e redactedError) Error() string { return string(e) }
+diff --git a/common/log/tribe_scope_test.go b/common/log/tribe_scope_test.go
+new file mode 100644
+index 0000000..68d4b30
+--- /dev/null
++++ b/common/log/tribe_scope_test.go
+@@ -0,0 +1,95 @@
++package log_test
++
++import (
++	"context"
++	"net"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/xtls/xray-core/common/log"
++)
++
++type tribeCapture struct {
++	mu   sync.Mutex
++	msgs []log.Message
++}
++
++func (c *tribeCapture) Handle(m log.Message) {
++	c.mu.Lock()
++	c.msgs = append(c.msgs, m)
++	c.mu.Unlock()
++}
++
++func (c *tribeCapture) take() []log.Message {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	m := c.msgs
++	c.msgs = nil
++	return m
++}
++
++// Tribe (core 0011): a scoped context's messages never reach the process handler; registered terms
++// are masked in process messages of every type, which keep their type and severity.
++func TestTribeLogScopeAndRedaction(t *testing.T) {
++	process := &tribeCapture{}
++	log.RegisterHandler(process)
++	scope := &tribeCapture{}
++	ctx := log.ContextWithScope(context.Background(), scope)
++
++	log.RecordContext(ctx, &log.GeneralMessage{Severity: log.Severity_Info, Content: "dial secret-host.test"})
++	if got := process.take(); len(got) != 0 {
++		t.Fatalf("scoped message reached the process handler: %v", got)
++	}
++	if got := scope.take(); len(got) != 1 {
++		t.Fatalf("scope got %d messages, want 1", len(got))
++	}
++
++	release := log.RedactTerms("Secret-Host.TEST", "abc", "203.0.113.7")
++	release2 := log.RedactTerms("secret-host.test")
++	before := log.RedactedLines()
++	log.Record(&log.GeneralMessage{Severity: log.Severity_Warning, Content: "a SECRET-HOST.test b secret-host.testsecret-host.test c abc"})
++	log.Record(&log.AccessMessage{From: "x", To: "tcp:secret-host.test:443", Status: log.AccessAccepted, Detour: "p"})
++	log.Record(&log.DNSLog{Server: "s", Domain: "secret-host.test.", Result: []net.IP{net.ParseIP("203.0.113.7"), net.ParseIP("198.51.100.1")}})
++	log.Record(&log.GeneralMessage{Severity: log.Severity_Info, Content: "unrelated line"})
++	got := process.take()
++	if len(got) != 4 {
++		t.Fatalf("process got %d messages, want 4 (redaction must not drop lines)", len(got))
++	}
++	if g, ok := got[0].(*log.GeneralMessage); !ok || g.Severity != log.Severity_Warning {
++		t.Fatalf("general message changed type or severity: %#v", got[0])
++	}
++	if s := got[0].String(); s != "[Warning] a [redacted] b [redacted] c abc" {
++		t.Fatalf("masked general line %q", s)
++	}
++	if _, ok := got[1].(*log.AccessMessage); !ok {
++		t.Fatalf("access message changed type: %T", got[1])
++	}
++	if d, ok := got[2].(*log.DNSLog); !ok || len(d.Result) != 1 || d.Result[0].String() != "198.51.100.1" {
++		t.Fatalf("dns log: %#v", got[2])
++	}
++	for _, m := range got[:3] {
++		s := strings.ToLower(m.String())
++		if strings.Contains(s, "secret-host") || strings.Contains(s, "203.0.113.7") {
++			t.Fatalf("term left in %q", m.String())
++		}
++		if !strings.Contains(s, log.RedactedMark) {
++			t.Fatalf("no mark in %q", m.String())
++		}
++	}
++	if got[3].String() != "[Info] unrelated line" {
++		t.Fatalf("unrelated line changed: %q", got[3].String())
++	}
++	if d := log.RedactedLines() - before; d != 3 {
++		t.Fatalf("redacted lines %d, want 3", d)
++	}
++	release()
++	release() // idempotent
++	if s, ok := log.RedactString("secret-host.test 203.0.113.7"); !ok || s != "[redacted] 203.0.113.7" {
++		t.Fatalf("second registration must hold its term: %q %v", s, ok)
++	}
++	release2()
++	if s, ok := log.RedactString("secret-host.test"); ok || s != "secret-host.test" {
++		t.Fatalf("released term still masked: %q", s)
++	}
++}
+diff --git a/core/context.go b/core/context.go
+index 5042796..d47798c 100644
+--- a/core/context.go
++++ b/core/context.go
+@@ -2,8 +2,32 @@ package core
+ 
+ import (
+ 	"context"
++
++	"github.com/xtls/xray-core/features/dns"
++	"github.com/xtls/xray-core/features/outbound"
++	"github.com/xtls/xray-core/transport/internet"
+ )
+ 
++// Tribe (0011): a dial uses the DNS client and outbound manager of the instance in its context.
++func init() {
++	internet.RegisterContextDialerState(func(ctx context.Context) (dns.Client, outbound.Manager) {
++		v := FromContext(ctx)
++		if v == nil {
++			return nil, nil
++		}
++		dc, _ := v.GetFeature(dns.ClientType()).(dns.Client)
++		om, _ := v.GetFeature(outbound.ManagerType()).(outbound.Manager)
++		return dc, om
++	})
++	// Transport pools are per instance and closed with it (Instance.Close).
++	internet.RegisterInstanceKey(func(ctx context.Context) any {
++		if v := FromContext(ctx); v != nil {
++			return v
++		}
++		return nil
++	})
++}
++
+ // XrayKey is the key type of Instance in Context, exported for test.
+ type XrayKey int
+ 
+diff --git a/core/xray.go b/core/xray.go
+index 794ce8f..aa54980 100644
+--- a/core/xray.go
++++ b/core/xray.go
+@@ -272,6 +272,8 @@ func (s *Instance) Close() error {
+ 			errs = append(errs, err)
+ 		}
+ 	}
++	// Tribe (0011): the transports' pooled connections of this instance go with it.
++	internet.CloseInstanceResources(s)
+ 	if len(errs) > 0 {
+ 		return errors.New("failed to close all features").Base(errors.New(serial.Concat(errs...)))
+ 	}
+diff --git a/proxy/freedom/freedom.go b/proxy/freedom/freedom.go
+index e83c66a..7cc7279 100644
+--- a/proxy/freedom/freedom.go
++++ b/proxy/freedom/freedom.go
+@@ -52,7 +52,7 @@ func reloadEnvSettings() error {
+ 
+ func init() {
+ 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+-		h := new(Handler)
++		h := &Handler{instanceCtx: ctx}
+ 		if streamSettings, ok := session.StreamSettingsFromContext(ctx).(*internet.MemoryStreamConfig); ok && streamSettings.SocketSettings != nil {
+ 			h.resolveStrategy = streamSettings.SocketSettings.DomainStrategy
+ 			h.usesDialerProxy = len(streamSettings.SocketSettings.DialerProxy) > 0
+@@ -98,6 +98,7 @@ type Handler struct {
+ 	finalRules      []*FinalRule
+ 	resolveStrategy internet.DomainStrategy
+ 	usesDialerProxy bool
++	instanceCtx     context.Context // Tribe (0011): resolve with this instance's DNS client
+ }
+ 
+ func buildFinalRule(config *FinalRuleConfig) (*FinalRule, error) {
+@@ -300,7 +301,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
+ 		if destination.Address.Family().IsDomain() {
+ 			if defaultRule != nil || len(h.finalRules) > 0 {
+ 				if strategy := h.resolveStrategy; strategy.HasStrategy() {
+-					ips, err := internet.LookupForIP(destination.Address.Domain(), strategy, outGateway)
++					ips, err := internet.LookupForIPContext(ctx, destination.Address.Domain(), strategy, outGateway)
+ 					if err != nil { // non-force may still dial with system DNS
+ 						errors.LogInfoInner(ctx, err, "failed to get IP address for domain ", destination.Address.Domain())
+ 						if strategy.ForceIP() {
+@@ -605,7 +606,7 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ 				} else {
+ 					shouldUseSystemResolver := true
+ 					if strategy := w.Handler.resolveStrategy; strategy.HasStrategy() {
+-						ips, err := internet.LookupForIP(b.UDP.Address.Domain(), strategy, w.OutGateway)
++						ips, err := internet.LookupForIPContext(w.Handler.instanceCtx, b.UDP.Address.Domain(), strategy, w.OutGateway)
+ 						if err != nil {
+ 							// drop packet if resolve failed when forceIP
+ 							if strategy.ForceIP() {
+diff --git a/proxy/wireguard/client.go b/proxy/wireguard/client.go
+index 9563f39..706e3fd 100644
+--- a/proxy/wireguard/client.go
++++ b/proxy/wireguard/client.go
+@@ -125,13 +125,13 @@ func NewClient(ctx context.Context, conf *DeviceConfig) (*Handler, error) {
+ 	bind := &bind{}
+ 	logger := &device.Logger{
+ 		Verbosef: func(format string, args ...any) {
+-			log.Record(&log.GeneralMessage{
++			log.RecordContext(ctx, &log.GeneralMessage{
+ 				Severity: log.Severity_Debug,
+ 				Content:  fmt.Sprintf(format, args...),
+ 			})
+ 		},
+ 		Errorf: func(format string, args ...any) {
+-			log.Record(&log.GeneralMessage{
++			log.RecordContext(ctx, &log.GeneralMessage{
+ 				Severity: log.Severity_Error,
+ 				Content:  fmt.Sprintf(format, args...),
+ 			})
+diff --git a/transport/internet/dialer.go b/transport/internet/dialer.go
+index 6d7b905..49bbb0a 100644
+--- a/transport/internet/dialer.go
++++ b/transport/internet/dialer.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"strings"
++	"sync/atomic"
+ 
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/dice"
+@@ -79,12 +80,53 @@ func DestIpAddress() net.IP {
+ 	return effectiveSystemDialer.DestIpAddress()
+ }
+ 
++// Tribe (0011): the DNS client (domainStrategy lookups) and the outbound manager (dialerProxy)
++// were process-wide, and every core.New replaced them with its own. A second instance in the
++// process (a scan probe next to the tunnel) therefore made the tunnel resolve with the probe's
++// DNS and look its dialerProxy hops up in the probe's outbounds (or in a closed instance's, after
++// the probe stopped). The instance that owns a dial is in its context: its own features are used;
++// the process-wide pair (atomic now) is only the fallback for a context without an instance.
++type dialerState struct {
++	dns dns.Client
++	obm outbound.Manager
++}
++
+ var (
+-	dnsClient dns.Client
+-	obm       outbound.Manager
++	globalDialerState atomic.Pointer[dialerState]
++	contextDialerFn   atomic.Pointer[func(context.Context) (dns.Client, outbound.Manager)]
+ )
+ 
++// RegisterContextDialerState installs the lookup of an instance's own DNS client and outbound
++// manager from a dial context (core does it in init).
++func RegisterContextDialerState(fn func(context.Context) (dns.Client, outbound.Manager)) {
++	contextDialerFn.Store(&fn)
++}
++
++func dialerStateFor(ctx context.Context) (dns.Client, outbound.Manager) {
++	var dc dns.Client
++	var om outbound.Manager
++	if g := globalDialerState.Load(); g != nil {
++		dc, om = g.dns, g.obm
++	}
++	if fn := contextDialerFn.Load(); fn != nil && ctx != nil {
++		c, m := (*fn)(ctx)
++		if c != nil {
++			dc = c
++		}
++		if m != nil {
++			om = m
++		}
++	}
++	return dc, om
++}
++
+ func LookupForIP(domain string, strategy DomainStrategy, localAddr net.Address) ([]net.IP, error) {
++	return LookupForIPContext(context.Background(), domain, strategy, localAddr)
++}
++
++// LookupForIPContext resolves with the DNS client of the instance that owns ctx.
++func LookupForIPContext(ctx context.Context, domain string, strategy DomainStrategy, localAddr net.Address) ([]net.IP, error) {
++	dnsClient, _ := dialerStateFor(ctx)
+ 	if dnsClient == nil {
+ 		return nil, errors.New("DNS client not initialized")
+ 	}
+@@ -253,7 +295,7 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
+ 		if outboundName == "freedom" && dest.Network == net.Network_UDP && origTargetAddr != nil && src == nil {
+ 			finalStrategy = finalStrategy.GetDynamicStrategy(origTargetAddr.Family())
+ 		}
+-		ips, err := LookupForIP(dest.Address.Domain(), finalStrategy, src)
++		ips, err := LookupForIPContext(ctx, dest.Address.Domain(), finalStrategy, src)
+ 		if err != nil {
+ 			errors.LogErrorInner(ctx, err, "failed to resolve ip")
+ 			if sockopt.DomainStrategy.ForceIP() {
+@@ -268,6 +310,7 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
+ 	}
+ 
+ 	if len(sockopt.DialerProxy) > 0 {
++		_, obm := dialerStateFor(ctx)
+ 		if obm == nil {
+ 			return nil, errors.New("there is no outbound manager for dialerProxy")
+ 		}
+@@ -282,6 +325,5 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
+ }
+ 
+ func InitSystemDialer(dc dns.Client, om outbound.Manager) {
+-	dnsClient = dc
+-	obm = om
++	globalDialerState.Store(&dialerState{dns: dc, obm: om})
+ }
+diff --git a/transport/internet/grpc/dial.go b/transport/internet/grpc/dial.go
+index bb65041..b392a0d 100644
+--- a/transport/internet/grpc/dial.go
++++ b/transport/internet/grpc/dial.go
+@@ -41,6 +41,26 @@ func init() {
+ type dialerConf struct {
+ 	net.Destination
+ 	*internet.MemoryStreamConfig
++	instance any // Tribe (0011): the core instance the ClientConn belongs to
++}
++
++// Tribe (0011): instances whose ClientConns are closed with them.
++var globalDialerInstances = map[any]bool{}
++
++func tribeCloseInstance(instance any) {
++	globalDialerAccess.Lock()
++	var conns []*grpc.ClientConn
++	for k, c := range globalDialerMap {
++		if k.instance == instance {
++			conns = append(conns, c)
++			delete(globalDialerMap, k)
++		}
++	}
++	delete(globalDialerInstances, instance)
++	globalDialerAccess.Unlock()
++	for _, c := range conns {
++		c.Close()
++	}
+ }
+ 
+ var (
+@@ -85,7 +105,12 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
+ 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
+ 	grpcSettings := streamSettings.ProtocolSettings.(*Config)
+ 
+-	if client, found := globalDialerMap[dialerConf{dest, streamSettings}]; found && client.GetState() != connectivity.Shutdown {
++	instance := internet.InstanceKeyFromContext(ctx)
++	if instance != nil && !globalDialerInstances[instance] {
++		globalDialerInstances[instance] = true
++		internet.OnInstanceClose(instance, func() { tribeCloseInstance(instance) })
++	}
++	if client, found := globalDialerMap[dialerConf{dest, streamSettings, instance}]; found && client.GetState() != connectivity.Shutdown {
+ 		return client, nil
+ 	}
+ 
+@@ -122,6 +147,9 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
+ 			gctx = c.ContextWithID(gctx, c.IDFromContext(ctx))
+ 			gctx = session.ContextWithOutbounds(gctx, session.OutboundsFromContext(ctx))
+ 			gctx = session.ContextWithTimeoutOnly(gctx, true)
++			// Tribe (0011): gRPC dials from its own context; keep the first dial's values (its socket
++			// protector, log scope and instance) so the connection is the instance's, not the process's.
++			gctx = internet.ContextWithValuesOf(gctx, ctx)
+ 
+ 			var c net.Conn
+ 			if streamSettings.FinalMask != nil {
+@@ -197,7 +225,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
+ 		setUserAgent(conn, userAgent)
+ 		conn.Connect()
+ 	}
+-	globalDialerMap[dialerConf{dest, streamSettings}] = conn
++	globalDialerMap[dialerConf{dest, streamSettings, instance}] = conn
+ 	return conn, err
+ }
+ 
+diff --git a/transport/internet/splithttp/client.go b/transport/internet/splithttp/client.go
+index a2b5f75..25fc27e 100644
+--- a/transport/internet/splithttp/client.go
++++ b/transport/internet/splithttp/client.go
+@@ -38,6 +38,54 @@ type DefaultDialerClient struct {
+ 	// pool of net.Conn, created using dialUploadConn
+ 	uploadRawPool  *sync.Pool
+ 	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
++	tribeConns     *tribeConnSet // Tribe (0011): every connection it dialled, for tribeCloseAll
++}
++
++// tribeConnSet tracks open connections (removed again when they close).
++type tribeConnSet struct {
++	mu sync.Mutex
++	m  map[*tribeTrackedConn]struct{}
++}
++
++type tribeTrackedConn struct {
++	net.Conn
++	set  *tribeConnSet
++	once sync.Once
++}
++
++func (c *tribeTrackedConn) Close() error {
++	c.once.Do(func() {
++		c.set.mu.Lock()
++		delete(c.set.m, c)
++		c.set.mu.Unlock()
++	})
++	return c.Conn.Close()
++}
++
++func (s *tribeConnSet) add(c net.Conn) net.Conn {
++	t := &tribeTrackedConn{Conn: c, set: s}
++	s.mu.Lock()
++	if s.m == nil {
++		s.m = map[*tribeTrackedConn]struct{}{}
++	}
++	s.m[t] = struct{}{}
++	s.mu.Unlock()
++	return t
++}
++
++func (s *tribeConnSet) closeAll() {
++	if s == nil {
++		return
++	}
++	s.mu.Lock()
++	conns := make([]*tribeTrackedConn, 0, len(s.m))
++	for c := range s.m {
++		conns = append(conns, c)
++	}
++	s.mu.Unlock()
++	for _, c := range conns {
++		c.Close()
++	}
+ }
+ 
+ func (c *DefaultDialerClient) IsClosed() bool {
+@@ -178,6 +226,24 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
+ 	return nil
+ }
+ 
++// tribeCloseAll closes the client's idle connections (HTTP/1.1, HTTP/2), its pooled raw upload
++// connections and its HTTP/3 transport (Tribe 0011: the instance that owns it closed).
++func (c *DefaultDialerClient) tribeCloseAll() {
++	c.closed.Store(true)
++	c.client.CloseIdleConnections()
++	c.tribeConns.closeAll()
++	for {
++		v := c.uploadRawPool.Get()
++		if v == nil {
++			break
++		}
++		if conn, ok := v.(net.Conn); ok {
++			conn.Close()
++		}
++	}
++	c.Close()
++}
++
+ // HTTP/1.1 and HTTP/2 will close itself, we only handle HTTP/3 here
+ func (c *DefaultDialerClient) Close() error {
+ 	transport := c.client.Transport
+diff --git a/transport/internet/splithttp/dialer.go b/transport/internet/splithttp/dialer.go
+index b52f5a7..7a70572 100644
+--- a/transport/internet/splithttp/dialer.go
++++ b/transport/internet/splithttp/dialer.go
+@@ -37,13 +37,33 @@ import (
+ type dialerConf struct {
+ 	net.Destination
+ 	*internet.MemoryStreamConfig
++	instance any // Tribe (0011): the core instance the pool belongs to
+ }
+ 
+ var (
+ 	globalDialerMap    map[dialerConf]*XmuxManager
+ 	globalDialerAccess sync.Mutex
++	// Tribe (0011): instances whose pools are closed with them.
++	globalDialerInstances = map[any]bool{}
+ )
+ 
++// tribeCloseInstance drops an instance's pools and closes their connections.
++func tribeCloseInstance(instance any) {
++	globalDialerAccess.Lock()
++	var managers []*XmuxManager
++	for k, m := range globalDialerMap {
++		if k.instance == instance {
++			managers = append(managers, m)
++			delete(globalDialerMap, k)
++		}
++	}
++	delete(globalDialerInstances, instance)
++	globalDialerAccess.Unlock()
++	for _, m := range managers {
++		m.tribeCloseAll()
++	}
++}
++
+ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
+ 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
+ 
+@@ -58,7 +78,12 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
+ 		globalDialerMap = make(map[dialerConf]*XmuxManager)
+ 	}
+ 
+-	key := dialerConf{dest, streamSettings}
++	instance := internet.InstanceKeyFromContext(ctx)
++	key := dialerConf{dest, streamSettings, instance}
++	if instance != nil && !globalDialerInstances[instance] {
++		globalDialerInstances[instance] = true
++		internet.OnInstanceClose(instance, func() { tribeCloseInstance(instance) })
++	}
+ 
+ 	xmuxManager, found := globalDialerMap[key]
+ 
+@@ -144,6 +169,17 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 
+ 		return conn, nil
+ 	}
++	// Tribe (0011): every connection of this client is tracked, so the instance's close ends the
++	// ones in use too (a download stream, an HTTP/2 connection kept alive by its pings).
++	tracked := &tribeConnSet{}
++	rawDial := dialContext
++	dialContext = func(ctxInner context.Context) (net.Conn, error) {
++		conn, err := rawDial(ctxInner)
++		if err != nil {
++			return nil, err
++		}
++		return tracked.add(conn), nil
++	}
+ 
+ 	var keepAlivePeriod time.Duration
+ 	if streamSettings.ProtocolSettings.(*Config).Xmux != nil {
+@@ -281,6 +317,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 		httpVersion:    httpVersion,
+ 		uploadRawPool:  &sync.Pool{},
+ 		dialUploadConn: dialContext,
++		tribeConns:     tracked,
+ 	}
+ 
+ 	return client
+diff --git a/transport/internet/splithttp/mux.go b/transport/internet/splithttp/mux.go
+index 1945224..57611e8 100644
+--- a/transport/internet/splithttp/mux.go
++++ b/transport/internet/splithttp/mux.go
+@@ -59,6 +59,18 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
+ 	}
+ }
+ 
++// tribeCloseAll closes every connection of the manager's clients (Tribe 0011: its instance closed).
++func (m *XmuxManager) tribeCloseAll() {
++	for _, c := range m.xmuxClients {
++		if dc, ok := c.XmuxConn.(*DefaultDialerClient); ok {
++			dc.tribeCloseAll()
++		} else {
++			common.Close(c.XmuxConn)
++		}
++	}
++	m.xmuxClients = nil
++}
++
+ func (m *XmuxManager) newXmuxClient() *XmuxClient {
+ 	xmuxClient := &XmuxClient{
+ 		XmuxConn:  m.newConnFunc(),
+diff --git a/transport/internet/system_dialer.go b/transport/internet/system_dialer.go
+index f881a20..ae49785 100644
+--- a/transport/internet/system_dialer.go
++++ b/transport/internet/system_dialer.go
+@@ -15,8 +15,10 @@ import (
+ )
+ 
+ var (
+-	Controllers           []func(network, address string, c syscall.RawConn) error
+-	ControllersLock       sync.Mutex
++	Controllers     []func(network, address string, c syscall.RawConn) error
++	ControllersLock sync.Mutex
++	// Tribe (0011): see ContextWithSocketProtector.
++	socketProtectorKey                 = &struct{ name string }{"tribe-socket-protector"}
+ 	effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
+ )
+ 
+@@ -70,10 +72,11 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
+ 			}
+ 		}
+ 		var lc net.ListenConfig
+-		if sockopt != nil || len(Controllers) > 0 {
++		controllers := controllersFor(ctx)
++		if sockopt != nil || len(controllers) > 0 {
+ 			lc.Control = func(network, _ string, c syscall.RawConn) error {
+ 				// ListenPacket supplies a local address; dialer controllers need the destination.
+-				for _, ctl := range Controllers {
++				for _, ctl := range controllers {
+ 					if err := ctl(network, destAddr.String(), c); err != nil {
+ 						return errors.New("failed to apply external controller").Base(err)
+ 					}
+@@ -142,12 +145,13 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
+ 		KeepAliveConfig: keepAliveConfig,
+ 	}
+ 
+-	if sockopt != nil || len(Controllers) > 0 {
++	controllers := controllersFor(ctx)
++	if sockopt != nil || len(controllers) > 0 {
+ 		if sockopt != nil && sockopt.TcpMptcp {
+ 			dialer.SetMultipathTCP(true)
+ 		}
+ 		dialer.Control = func(network, address string, c syscall.RawConn) error {
+-			for _, ctl := range Controllers {
++			for _, ctl := range controllers {
+ 				if err := ctl(network, address, c); err != nil {
+ 					return errors.New("failed to apply external controller").Base(err)
+ 				}
+@@ -247,3 +251,21 @@ func (c *FakePacketConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
+ func (c *FakePacketConn) LocalAddr() net.Addr {
+ 	return &net.UDPAddr{IP: []byte{0, 0, 0, 0}}
+ }
++
++// ContextWithSocketProtector (Tribe 0011): every socket a dial with this context creates runs
++// protect INSTEAD of the process-wide Controllers. A scan probe instance carries one in its
++// context (core.NewWithContext and every core.Dial), so its sockets never reach the tunnel's
++// protect callback - whose failure handler stops the tunnel - and a failed probe bind stays a
++// probe-local error.
++func ContextWithSocketProtector(ctx context.Context, protect func(network, address string, c syscall.RawConn) error) context.Context {
++	return context.WithValue(ctx, socketProtectorKey, protect)
++}
++
++func controllersFor(ctx context.Context) []func(network, address string, c syscall.RawConn) error {
++	if ctx != nil {
++		if p, ok := ctx.Value(socketProtectorKey).(func(network, address string, c syscall.RawConn) error); ok && p != nil {
++			return []func(network, address string, c syscall.RawConn) error{p}
++		}
++	}
++	return Controllers
++}
+diff --git a/transport/internet/tribe_dialer_state_test.go b/transport/internet/tribe_dialer_state_test.go
+new file mode 100644
+index 0000000..f92ae5b
+--- /dev/null
++++ b/transport/internet/tribe_dialer_state_test.go
+@@ -0,0 +1,222 @@
++package internet_test
++
++// Tribe (0011): a second core instance in the process must not change how the first one dials, and
++// its sockets need not pass the first one's process-wide protect callback.
++// Instance A resolves with its own DNS hosts table (freedom domainStrategy) and dials a
++// dialerProxy hop that only A has; instances B are created and closed around it (a scan probe
++// next to the tunnel). Before the patch every core.New replaced the process-wide DNS client and
++// outbound manager, so A resolved with B's table and looked its hop up in B's outbounds.
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/infra/conf/serial"
++	_ "github.com/xtls/xray-core/main/distro/all"
++	"github.com/xtls/xray-core/transport/internet"
++)
++
++func tribeStateInstance(t *testing.T, cfg map[string]any) *core.Instance {
++	t.Helper()
++	raw, _ := json.Marshal(cfg)
++	c, err := serial.LoadJSONConfig(bytes.NewReader(raw))
++	if err != nil {
++		t.Fatal(err)
++	}
++	inst, err := core.New(c)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := inst.Start(); err != nil {
++		t.Fatal(err)
++	}
++	return inst
++}
++
++func tribeStateConfig(hostIP string) map[string]any {
++	return map[string]any{
++		"log": map[string]any{"loglevel": "none"},
++		"dns": map[string]any{"hosts": map[string]any{"tribe-state.test": hostIP}},
++		"outbounds": []any{
++			map[string]any{"tag": "direct", "protocol": "freedom",
++				"settings": map[string]any{"domainStrategy": "UseIPv4", "finalRules": []any{map[string]any{"action": "allow"}}}},
++			map[string]any{"tag": "chain", "protocol": "freedom",
++				"settings":       map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}},
++				"streamSettings": map[string]any{"sockopt": map[string]any{"dialerProxy": "hop-" + hostIP}}},
++			map[string]any{"tag": "hop-" + hostIP, "protocol": "freedom",
++				"settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}},
++		},
++	}
++}
++
++func tribeStateFetch(inst *core.Instance, tag string, dest xnet.Destination) (string, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	conn, err := core.Dial(session.SetForcedOutboundTagToContext(ctx, tag), inst, dest)
++	if err != nil {
++		return "", err
++	}
++	defer conn.Close()
++	stop := context.AfterFunc(ctx, func() { conn.Close() })
++	defer stop()
++	conn.Write([]byte("?"))
++	b, err := io.ReadAll(io.LimitReader(conn, 16))
++	return string(b), err
++}
++
++func TestTribeDialerStatePerInstance(t *testing.T) {
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func() {
++				defer c.Close()
++				var b [1]byte
++				c.Read(b[:])
++				c.Write([]byte("instance-A"))
++			}()
++		}
++	}()
++	port := xnet.Port(ln.Addr().(*net.TCPAddr).Port)
++
++	a := tribeStateInstance(t, tribeStateConfig("127.0.0.1"))
++	defer a.Close()
++	byName := xnet.TCPDestination(xnet.DomainAddress("tribe-state.test"), port)
++	byIP := xnet.TCPDestination(xnet.LocalHostIP, port)
++	check := func(when string) {
++		t.Helper()
++		if got, err := tribeStateFetch(a, "direct", byName); got != "instance-A" {
++			t.Fatalf("%s: A's freedom did not resolve with A's DNS: %q %v", when, got, err)
++		}
++		if got, err := tribeStateFetch(a, "chain", byIP); got != "instance-A" {
++			t.Fatalf("%s: A's dialerProxy hop was not found in A: %q %v", when, got, err)
++		}
++	}
++	check("alone")
++	b := tribeStateInstance(t, tribeStateConfig("127.0.0.9")) // resolves elsewhere, other hop tag
++	check("next to B")
++	b.Close()
++	check("after B closed")
++
++	// Instances come and go while A dials (run with -race: the fallback pair is atomic now).
++	var wg sync.WaitGroup
++	stop := make(chan struct{})
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		for i := 0; ; i++ {
++			select {
++			case <-stop:
++				return
++			default:
++			}
++			raw, _ := json.Marshal(tribeStateConfig(fmt.Sprintf("127.0.0.%d", 10+i%200)))
++			c, err := serial.LoadJSONConfig(bytes.NewReader(raw))
++			if err != nil {
++				t.Error(err)
++				return
++			}
++			x, err := core.New(c)
++			if err != nil || x.Start() != nil {
++				t.Error("churn instance did not start")
++				return
++			}
++			x.Close()
++		}
++	}()
++	for i := 0; i < 20; i++ {
++		check(fmt.Sprintf("churn %d", i))
++	}
++	close(stop)
++	wg.Wait()
++}
++
++// Tribe (0011): a dial whose context carries a socket protector runs only that protector, never the
++// process-wide controllers (the tunnel's protect callback); a failing protector fails that dial only.
++func TestTribeSocketProtectorReplacesControllers(t *testing.T) {
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func() { defer c.Close(); var b [1]byte; c.Read(b[:]); c.Write([]byte("instance-A")) }()
++		}
++	}()
++	port := xnet.Port(ln.Addr().(*net.TCPAddr).Port)
++	target := ln.Addr().String()
++	var globalCalls, protectCalls atomic.Int32
++	internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
++		if address == target {
++			globalCalls.Add(1)
++		}
++		return nil
++	})
++	live := tribeStateInstance(t, tribeStateConfig("127.0.0.1"))
++	defer live.Close()
++	byIP := xnet.TCPDestination(xnet.LocalHostIP, port)
++	if got, _ := tribeStateFetch(live, "direct", byIP); got != "instance-A" || globalCalls.Load() != 1 {
++		t.Fatalf("live dial: %q, global controller calls %d", got, globalCalls.Load())
++	}
++	for _, fail := range []bool{false, true} {
++		protect := func(network, address string, c syscall.RawConn) error {
++			protectCalls.Add(1)
++			if fail {
++				return errors.New("probe bind failed (test)")
++			}
++			return nil
++		}
++		ctx := internet.ContextWithSocketProtector(context.Background(), protect)
++		raw, _ := json.Marshal(tribeStateConfig("127.0.0.1"))
++		cfg, _ := serial.LoadJSONConfig(bytes.NewReader(raw))
++		probe, err := core.NewWithContext(ctx, cfg)
++		if err != nil || probe.Start() != nil {
++			t.Fatal("probe instance")
++		}
++		before := protectCalls.Load()
++		dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
++		conn, err := core.Dial(session.SetForcedOutboundTagToContext(dctx, "direct"), probe, byIP)
++		var got []byte
++		if err == nil {
++			conn.Write([]byte("?"))
++			got, _ = io.ReadAll(io.LimitReader(conn, 16))
++			conn.Close()
++		}
++		cancel()
++		probe.Close()
++		if protectCalls.Load() == before || globalCalls.Load() != 1 {
++			t.Fatalf("fail=%v: protector calls %d, global controller calls %d (must stay 1)", fail, protectCalls.Load()-before, globalCalls.Load())
++		}
++		if fail == (string(got) == "instance-A") {
++			t.Fatalf("fail=%v: probe dial answered %q", fail, got)
++		}
++	}
++	if got, _ := tribeStateFetch(live, "direct", byIP); got != "instance-A" || globalCalls.Load() != 2 {
++		t.Fatalf("live dial after the probes: %q, global calls %d", got, globalCalls.Load())
++	}
++}
+diff --git a/transport/internet/tribe_instance.go b/transport/internet/tribe_instance.go
+new file mode 100644
+index 0000000..7871d12
+--- /dev/null
++++ b/transport/internet/tribe_instance.go
+@@ -0,0 +1,77 @@
++package internet
++
++// Tribe (core 0011): per-instance transport resources. Transports that pool connections across
++// dials (XHTTP's XmuxManager, gRPC's ClientConn) key their pools by the core instance in the dial's
++// context too, and register a closer here; core.Instance.Close runs them, so a short-lived second
++// instance (the Scanner's probe) never leaves pooled connections behind, never shares one with the
++// tunnel's instance, and the tunnel's pools are untouched by a probe's close.
++
++import (
++	"context"
++	"sync"
++	"sync/atomic"
++)
++
++var instanceKeyFn atomic.Pointer[func(context.Context) any]
++
++// RegisterInstanceKey is called by core: fn returns an opaque key of the instance in ctx, or nil.
++func RegisterInstanceKey(fn func(context.Context) any) { instanceKeyFn.Store(&fn) }
++
++// InstanceKeyFromContext returns the key of the core instance a dial belongs to (nil: none).
++func InstanceKeyFromContext(ctx context.Context) any {
++	if ctx == nil {
++		return nil
++	}
++	if p := instanceKeyFn.Load(); p != nil {
++		return (*p)(ctx)
++	}
++	return nil
++}
++
++var instanceClosers = struct {
++	sync.Mutex
++	m map[any][]func()
++}{m: map[any][]func(){}}
++
++// OnInstanceClose runs fn when the instance with this key closes (a nil key: never).
++func OnInstanceClose(key any, fn func()) {
++	if key == nil {
++		return
++	}
++	instanceClosers.Lock()
++	instanceClosers.m[key] = append(instanceClosers.m[key], fn)
++	instanceClosers.Unlock()
++}
++
++// CloseInstanceResources runs the closers of an instance; core.Instance.Close calls it.
++func CloseInstanceResources(key any) {
++	instanceClosers.Lock()
++	fns := instanceClosers.m[key]
++	delete(instanceClosers.m, key)
++	instanceClosers.Unlock()
++	for _, fn := range fns {
++		fn()
++	}
++}
++
++// ContextWithValuesOf returns ctx (its deadline and cancellation) whose values fall back to those of
++// values: a transport that dials from its own context (gRPC) keeps the dial's socket protector,
++// log scope and instance.
++func ContextWithValuesOf(ctx, values context.Context) context.Context {
++	if values == nil {
++		return ctx
++	}
++	return valuesOf{Context: ctx, values: values}
++}
++
++type valuesOf struct {
++	context.Context
++	values context.Context
++}
++
++func (v valuesOf) Value(key any) any {
++	if x := v.Context.Value(key); x != nil {
++		return x
++	}
++	return v.values.Value(key)
++}
+diff --git a/transport/internet/tribe_log_scope_test.go b/transport/internet/tribe_log_scope_test.go
+new file mode 100644
+index 0000000..b65c683
+--- /dev/null
++++ b/transport/internet/tribe_log_scope_test.go
+@@ -0,0 +1,203 @@
++package internet_test
++
++// Tribe (0011): a core instance created with a scoped context logs into its scope only. The
++// tunnel's instance (app/log at debug into files, DNS log on) keeps logging its own traffic while
++// a scoped instance in the same process dials a host the tunnel log must never see; a
++// context-free line naming that host reaches the tunnel log with the host masked.
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	applog "github.com/xtls/xray-core/app/log"
++	"github.com/xtls/xray-core/common/errors"
++	clog "github.com/xtls/xray-core/common/log"
++	xnet "github.com/xtls/xray-core/common/net"
++	cserial "github.com/xtls/xray-core/common/serial"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/infra/conf/serial"
++)
++
++type tribeScopeSink struct {
++	mu sync.Mutex
++	b  strings.Builder
++	n  int
++}
++
++func (s *tribeScopeSink) Handle(m clog.Message) {
++	s.mu.Lock()
++	s.b.WriteString(m.String())
++	s.b.WriteByte('\n')
++	s.n++
++	s.mu.Unlock()
++}
++
++func (s *tribeScopeSink) Severity() clog.Severity { return clog.Severity_Debug }
++
++func tribeEchoListener(t *testing.T) *net.TCPListener {
++	t.Helper()
++	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func() {
++				defer c.Close()
++				b := make([]byte, 1)
++				if _, err := c.Read(b); err == nil {
++					c.Write([]byte("ok"))
++				}
++			}()
++		}
++	}()
++	return ln
++}
++
++func TestTribeLogScopePerInstance(t *testing.T) {
++	const secret = "tribe-secret-provider.test"
++	const own = "tribe-own-node.test"
++	dir := t.TempDir()
++	errPath, accessPath := filepath.Join(dir, "error.log"), filepath.Join(dir, "access.log")
++	ln := tribeEchoListener(t)
++	defer ln.Close()
++	port := ln.Addr().(*net.TCPAddr).Port
++
++	tunnelCfg := tribeStateConfig("127.0.0.1")
++	tunnelCfg["log"] = map[string]any{"loglevel": "debug", "error": errPath, "access": accessPath, "dnsLog": true}
++	tunnelCfg["dns"] = map[string]any{"hosts": map[string]any{own: "127.0.0.1"}}
++	tunnel := tribeStateInstance(t, tunnelCfg)
++	tunnelOpen := true
++	defer func() {
++		if tunnelOpen {
++			tunnel.Close()
++		}
++	}()
++
++	scope := &tribeScopeSink{}
++	probeCfg := tribeStateConfig("127.0.0.1")
++	delete(probeCfg, "log")
++	probeCfg["dns"] = map[string]any{"hosts": map[string]any{secret: "127.0.0.1"}}
++	probe := tribeScopedInstance(t, clog.ContextWithScope(context.Background(), scope), probeCfg)
++
++	release := clog.RedactTerms(secret)
++	defer release()
++	for i := 0; i < 3; i++ {
++		if got, err := tribeStateFetch(tunnel, "direct", xnet.TCPDestination(xnet.ParseAddress(own), xnet.Port(port))); err != nil || got != "ok" {
++			t.Fatalf("tunnel fetch %q %v", got, err)
++		}
++		ctx, cancel := context.WithTimeout(clog.ContextWithScope(context.Background(), scope), 3*time.Second)
++		got, err := tribeScopedFetch(ctx, probe, xnet.TCPDestination(xnet.ParseAddress(secret), xnet.Port(port)))
++		cancel()
++		if err != nil || got != "ok" {
++			t.Fatalf("probe fetch %q %v", got, err)
++		}
++	}
++	errors.LogWarning(context.Background(), "a line without a context names ", secret)
++	probe.Close()
++
++	// The file loggers write from their own goroutine: read while the tunnel still runs, until its
++	// own lines and the masked line are there (or 3 s).
++	var logs strings.Builder
++	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
++		logs.Reset()
++		for _, p := range []string{errPath, accessPath} {
++			b, err := os.ReadFile(p)
++			if err != nil {
++				t.Fatal(err)
++			}
++			logs.Write(b)
++		}
++		low := strings.ToLower(logs.String())
++		if (strings.Contains(low, own) && strings.Contains(low, clog.RedactedMark)) || time.Now().After(deadline) {
++			break
++		}
++	}
++	tunnel.Close()
++	tunnelOpen = false
++	for _, p := range []string{errPath, accessPath} { // whatever the loggers still wrote
++		if b, err := os.ReadFile(p); err == nil {
++			logs.Write(b)
++		}
++	}
++
++	text := strings.ToLower(logs.String())
++	if strings.Contains(text, secret) {
++		t.Fatalf("the tunnel's log names the scoped instance's host:\n%s", logs.String())
++	}
++	if !strings.Contains(text, own) {
++		t.Fatalf("the tunnel's own lines are missing:\n%s", logs.String())
++	}
++	if !strings.Contains(text, "a line without a context names "+clog.RedactedMark) {
++		t.Fatalf("the context-free line was dropped instead of masked:\n%s", logs.String())
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if scope.n == 0 || !strings.Contains(scope.b.String(), secret) {
++		t.Fatalf("the scope got %d messages, none naming its host", scope.n)
++	}
++}
++
++func tribeScopedInstance(t *testing.T, ctx context.Context, cfg map[string]any) *core.Instance {
++	t.Helper()
++	c := tribeStateLoad(t, cfg)
++	// Like the Scanner's probe config: no log app of its own (one would replace the process
++	// handler - the tunnel's - for good).
++	logType := cserial.GetMessageType(&applog.Config{})
++	apps := c.App[:0]
++	for _, app := range c.App {
++		if app.Type != logType {
++			apps = append(apps, app)
++		}
++	}
++	c.App = apps
++	inst, err := core.NewWithContext(ctx, c)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := inst.Start(); err != nil {
++		t.Fatal(err)
++	}
++	return inst
++}
++
++func tribeStateLoad(t *testing.T, cfg map[string]any) *core.Config {
++	t.Helper()
++	raw, _ := json.Marshal(cfg)
++	c, err := serial.LoadJSONConfig(bytes.NewReader(raw))
++	if err != nil {
++		t.Fatal(err)
++	}
++	return c
++}
++
++func tribeScopedFetch(ctx context.Context, inst *core.Instance, dest xnet.Destination) (string, error) {
++	return tribeScopedFetchVia(ctx, inst, "direct", dest)
++}
++
++func tribeScopedFetchVia(ctx context.Context, inst *core.Instance, tag string, dest xnet.Destination) (string, error) {
++	conn, err := core.Dial(session.SetForcedOutboundTagToContext(ctx, tag), inst, dest)
++	if err != nil {
++		return "", err
++	}
++	defer conn.Close()
++	stop := context.AfterFunc(ctx, func() { conn.Close() })
++	defer stop()
++	conn.Write([]byte("?"))
++	b, err := io.ReadAll(io.LimitReader(conn, 16))
++	return string(b), err
++}
+diff --git a/transport/internet/tribe_pool_scope_test.go b/transport/internet/tribe_pool_scope_test.go
+new file mode 100644
+index 0000000..f02e1ff
+--- /dev/null
++++ b/transport/internet/tribe_pool_scope_test.go
+@@ -0,0 +1,203 @@
++package internet_test
++
++// Tribe (0011): connection pools of a transport (XHTTP's XmuxManager, gRPC's ClientConn) belong
++// to the core instance that dialled them. A probe instance next to the tunnel's: its pooled
++// connections dial with the probe's own socket protector (never the process-wide controllers), are
++// never reused by the tunnel (or the reverse), and are closed when the probe instance closes, while
++// the tunnel's stay up and keep working.
++
++import (
++	"context"
++	"io"
++	"net"
++	"strconv"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++
++	clog "github.com/xtls/xray-core/common/log"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/transport/internet"
++)
++
++const tribePoolUUID = "3b1f2e4d-5c6a-4b7e-8f90-a1b2c3d4e5f6"
++
++// tribeCountingProxy forwards to target and counts the connections it carries (open now, total).
++type tribeCountingProxy struct {
++	ln          *net.TCPListener
++	live, total atomic.Int64
++	mu          sync.Mutex
++	conns       []net.Conn
++}
++
++func newTribeCountingProxy(t *testing.T, target int) *tribeCountingProxy {
++	t.Helper()
++	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	p := &tribeCountingProxy{ln: ln}
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			s, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", itoa(target)))
++			if err != nil {
++				c.Close()
++				continue
++			}
++			p.live.Add(1)
++			p.total.Add(1)
++			p.mu.Lock()
++			p.conns = append(p.conns, c, s)
++			p.mu.Unlock()
++			var once sync.Once
++			end := func() { once.Do(func() { c.Close(); s.Close(); p.live.Add(-1) }) }
++			go func() { io.Copy(s, c); end() }()
++			go func() { io.Copy(c, s); end() }()
++		}
++	}()
++	t.Cleanup(func() {
++		ln.Close()
++		p.mu.Lock()
++		for _, c := range p.conns {
++			c.Close()
++		}
++		p.mu.Unlock()
++	})
++	return p
++}
++
++func (p *tribeCountingProxy) port() int { return p.ln.Addr().(*net.TCPAddr).Port }
++
++func itoa(n int) string { return strconv.Itoa(n) }
++
++func tribeFreePort(t *testing.T) int {
++	l, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer l.Close()
++	return l.Addr().(*net.TCPAddr).Port
++}
++
++func tribePoolClient(xPort, gPort int) map[string]any {
++	user := []any{map[string]any{"id": tribePoolUUID, "encryption": "none"}}
++	vnext := func(port int) map[string]any {
++		return map[string]any{"vnext": []any{map[string]any{"address": "127.0.0.1", "port": port, "users": user}}}
++	}
++	return map[string]any{
++		"outbounds": []any{
++			map[string]any{"tag": "x", "protocol": "vless", "settings": vnext(xPort),
++				"streamSettings": map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/tribe-x"}}},
++			map[string]any{"tag": "g", "protocol": "vless", "settings": vnext(gPort),
++				"streamSettings": map[string]any{"network": "grpc", "grpcSettings": map[string]any{"serviceName": "tribe-g"}}},
++		},
++	}
++}
++
++func TestTribePoolsPerInstance(t *testing.T) {
++	clog.RegisterHandler(tribeQuietLog{})
++	echo := tribeEchoListener(t)
++	defer echo.Close()
++	dest := xnet.TCPDestination(xnet.ParseAddress("127.0.0.1"), xnet.Port(echo.Addr().(*net.TCPAddr).Port))
++	sx, sg := tribeFreePort(t), tribeFreePort(t)
++	clients := []any{map[string]any{"id": tribePoolUUID}}
++	server := tribeScopedInstance(t, clog.ContextWithScope(context.Background(), tribeQuietLog{}), map[string]any{
++		"inbounds": []any{
++			map[string]any{"listen": "127.0.0.1", "port": sx, "protocol": "vless", "settings": map[string]any{"clients": clients, "decryption": "none"},
++				"streamSettings": map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/tribe-x"}}},
++			map[string]any{"listen": "127.0.0.1", "port": sg, "protocol": "vless", "settings": map[string]any{"clients": clients, "decryption": "none"},
++				"streamSettings": map[string]any{"network": "grpc", "grpcSettings": map[string]any{"serviceName": "tribe-g"}}},
++		},
++		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}}},
++	})
++	defer server.Close()
++	px, pg := newTribeCountingProxy(t, sx), newTribeCountingProxy(t, sg)
++	ports := map[string]bool{"127.0.0.1:" + itoa(px.port()): true, "127.0.0.1:" + itoa(pg.port()): true}
++
++	// The tunnel's process-wide controller (amnezia_xray_setsockcallback / LibXraySetSockCallback).
++	var processCalls atomic.Int64
++	internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
++		if ports[address] {
++			processCalls.Add(1)
++		}
++		return nil
++	})
++	fetch := func(inst *core.Instance, tag string) {
++		t.Helper()
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		got, err := tribeScopedFetchTag(ctx, inst, tag, dest)
++		if err != nil || got != "ok" {
++			t.Fatalf("%s: %q %v", tag, got, err)
++		}
++	}
++	tunnel := tribeScopedInstance(t, context.Background(), tribePoolClient(px.port(), pg.port()))
++	defer tunnel.Close()
++	for _, tag := range []string{"x", "g"} {
++		fetch(tunnel, tag)
++	}
++	time.Sleep(200 * time.Millisecond)
++	tunnelLive := px.live.Load() + pg.live.Load()
++	tunnelTotal := px.total.Load() + pg.total.Load()
++	tunnelProcess := processCalls.Load()
++	if tunnelLive == 0 || tunnelProcess == 0 {
++		t.Fatalf("the tunnel's pools: live %d, controller calls %d", tunnelLive, tunnelProcess)
++	}
++
++	var protectCalls atomic.Int64
++	protect := func(network, address string, c syscall.RawConn) error {
++		if ports[address] {
++			protectCalls.Add(1)
++		}
++		return nil
++	}
++	probeCtx := internet.ContextWithSocketProtector(clog.ContextWithScope(context.Background(), tribeQuietLog{}), protect)
++	probe := tribeScopedInstance(t, probeCtx, tribePoolClient(px.port(), pg.port()))
++	for _, tag := range []string{"x", "g"} {
++		ctx, cancel := context.WithTimeout(probeCtx, 5*time.Second)
++		got, err := tribeScopedFetchTag(ctx, probe, tag, dest)
++		cancel()
++		if err != nil || got != "ok" {
++			t.Fatalf("probe %s: %q %v", tag, got, err)
++		}
++	}
++	time.Sleep(200 * time.Millisecond)
++	if processCalls.Load() != tunnelProcess {
++		t.Errorf("probe sockets ran the process-wide controller (%d calls, %d before)", processCalls.Load(), tunnelProcess)
++	}
++	if protectCalls.Load() < 2 {
++		t.Errorf("probe sockets ran their own protector %d times, want one per transport", protectCalls.Load())
++	}
++	if px.total.Load()+pg.total.Load() < tunnelTotal+2 {
++		t.Errorf("the probe reused the tunnel's pooled connections (total %d, tunnel's %d)", px.total.Load()+pg.total.Load(), tunnelTotal)
++	}
++	probe.Close()
++	deadline := time.Now().Add(3 * time.Second)
++	for px.live.Load()+pg.live.Load() > tunnelLive && time.Now().Before(deadline) {
++		time.Sleep(20 * time.Millisecond)
++	}
++	if live := px.live.Load() + pg.live.Load(); live > tunnelLive {
++		t.Errorf("the probe's pooled connections outlived it: %d live, the tunnel holds %d", live, tunnelLive)
++	}
++	// The tunnel's pools are untouched by the probe's close.
++	for _, tag := range []string{"x", "g"} {
++		fetch(tunnel, tag)
++	}
++	t.Logf("tunnel: %d live / %d connections; after the probe closed: %d live; protector calls %d, controller calls %d",
++		tunnelLive, tunnelTotal, px.live.Load()+pg.live.Load(), protectCalls.Load(), processCalls.Load())
++}
++
++type tribeQuietLog struct{}
++
++func (tribeQuietLog) Handle(clog.Message) {}
++
++func tribeScopedFetchTag(ctx context.Context, inst *core.Instance, tag string, dest xnet.Destination) (string, error) {
++	return tribeScopedFetchVia(ctx, inst, tag, dest)
++}

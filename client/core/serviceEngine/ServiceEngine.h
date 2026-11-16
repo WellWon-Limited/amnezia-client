@@ -185,6 +185,74 @@ public:
     bool rebindAwaitingResult() const { return m_rebindAwaiting; }
     QString currentNodeId() const { return m_currentNodeId; }
 
+    // ---- Upstream nodes (plan provider-pool v2, lane L1; CONNECT-INVARIANTS proposal §31) ----
+    // excludeForAttempt: the start of an upstream node failed BEFORE its tunnel came up (no seat, refused,
+    // bad or no answer) - the tunnel adapter calls it right before it reports the tunnel Error, so the
+    // restart of this attempt (reconcile -> connect, or the engine's own switch) never picks the same
+    // node again: excluded from every pick of this attempt (also from the retry without session
+    // exclusions) and counted as a failure of its tier. Cleared by requestStop() (a new attempt), pruned
+    // by a pool refresh. code = a stable code for the switch log, never a credential.
+    void excludeForAttempt(const QString &nodeId, const QString &code);
+    QString attemptExclusionCode(const QString &nodeId) const { return m_attemptExcluded.value(nodeId); }
+    bool hasAttemptExclusions() const { return !m_attemptExcluded.isEmpty(); }
+    // The lease owner said the running upstream session must leave its node (terminal answer, no seat on
+    // a re-acquire, the seat of a provisional start never confirmed): step 3 of the §20 ladder through
+    // the reconcile owner's dead-session path (the facade calls it deferred). The node is excluded for
+    // the attempt. false = nothing to leave (not connected on an upstream node).
+    bool leaveUpstreamNode(const QString &code, const QString &detail = QString());
+    bool currentNodeIsUpstream() const;
+    // upstream_revision of the subscription in force (0 = none).
+    qint64 upstreamRevision() const { return m_pool.subscription().upstreamRevision; }
+    // The node by id (the tunnel adapter builds an upstream bring-up from it). nullptr = not in the pool.
+    const SubscriptionNode *nodeById(const QString &nodeId) const { return findNode(nodeId); }
+    // Standby-pack candidates (UpstreamEngine.h::standbyPackCandidates, computed by the facade): merged
+    // after the subscription's nodes into every pick, the pin and the debug rows. Empty = none.
+    void setStandbyCandidates(const QList<SubscriptionNode> &nodes);
+    const QList<SubscriptionNode> &subscriptionNodes() const { return m_pool.nodes(); }
+    const QList<SubscriptionNode> &candidateNodes() const { return m_merged; }
+    // A start of this attempt failed before its tunnel came up (native error, protocol error, start
+    // watchdog): with upstream candidates in the pool it counts as a failure of the node's tier (the
+    // tier rule must see own nodes fail in a whitelist window) and the node is not retried in the
+    // attempt. Switch off or no upstream candidate = no-op (the behaviour before: §29.7).
+    void noteStartFailedForTier(const QString &why);
+    // A user start / stop: a new attempt - its exclusions are forgotten. The engine's own stops inside
+    // one attempt (watchdog, restart) keep them.
+    void beginUserAttempt()
+    {
+        m_attemptExcluded.clear();
+        clearAttemptOrder(); // AVPN Scanner: a hint belongs to the attempt it was given for
+    }
+    // ---- AVPN Scanner (CONNECT-INVARIANTS §32 п. 2, plan scanner-client-plan.md §2.12) ----
+    // A row tap's one-attempt order hint: the visible order after the country filter, starting after the
+    // tapped row. The existing ladder consults it in this attempt only, before its own pick: step 3 of
+    // onDead (another node), and connect()/nextCandidate() when the pinned node itself cannot be raised.
+    // A hinted node is taken only when it is a candidate the ladder could take anyway (supported, alive,
+    // allowed by the transport mode, not failed in this session or excluded in this attempt). Gone after
+    // ttlMs, on beginUserAttempt() (a user start / stop / another tap), when data passed (verifySucceeded,
+    // a Connected without a verify phase) and on an adoption. requestStop() keeps it: the restart that
+    // moves a live tunnel onto the tapped row runs through requestStop. No timer, no I/O.
+    void setAttemptOrder(const QStringList &order, qint64 ttlMs);
+    QStringList attemptOrder() const; // the live hint ("" entries dropped, expired = empty)
+    void clearAttemptOrder()
+    {
+        m_attemptOrder.clear();
+        m_attemptOrderUntilMs = -1;
+    }
+    // The target of the engine's own two-phase switch while its down phase runs ("" = none).
+    QString pendingSwitchNodeId() const { return m_pendingSwitchNodeId; }
+    // Nodes whose data plane failed since the last stop (the ladder does not go round them).
+    QSet<QString> failedThisSession() const { return m_failedThisSession; }
+    // The subscription in force (account fields + the device's tunnel address; nodes via candidateNodes()).
+    const Subscription &subscription() const { return m_pool.subscription(); }
+    // "Own tier pre-exhausted by evidence" (UpstreamTier.h::decideFastTierOpen): the facade hands the
+    // reachability evidence it has before each start; connect() decides for THIS attempt (a pin / manual
+    // pick never), logs one line, and the tier gate then treats every own node as freshly failed on this
+    // network - Auto commits to the upstream tier without starting an own node. The next connect()
+    // decides again on fresh evidence.
+    void setFastTierEvidence(const FastTierEvidence &e) { m_fastEvidence = e; }
+    bool fastTierOpen() const { return m_fastTierOpen; }
+    QString fastTierWhy() const { return m_fastTierWhy; }
+
     // AVPN awg31-xray-v1: транспорт текущей ноды ("awg"/"xray"; пусто = нет текущей) и её локация.
     QString currentNodeProto() const;
     bool currentNodeIsXray() const { return isXrayProto(currentNodeProto()); }
@@ -501,9 +569,14 @@ private:
                                           const QString &exclA, bool withExclusions,
                                           bool useLastKnownRtt = false) const;
     QHash<QString, int> failoverRtt() const;
+    // Upstream nodes: the tier gate of the automatic pick (disabled while features.upstream_nodes is off).
+    UpstreamTierGate tierGate() const;
     const SubscriptionNode *findNode(const QString &nodeId) const;
     const SubscriptionNode *pinnedCandidate() const;
     const SubscriptionNode *networkMemoryCandidate() const; // plan v3 step 5
+    // AVPN Scanner: the first node of the live attempt-order hint the ladder may take (see setAttemptOrder);
+    // `exclude` = the node being left. nullptr = no hint or no usable hinted node.
+    const SubscriptionNode *hintedCandidate(const QString &exclude) const;
     bool anySupportedNode() const;
     // 5.1.109: can location `loc` be raised at all / under transport mode `mode` (the rule of
     // setPinnedNode and pinLacksTransport). anySupported - a connectable node of any proto.
@@ -597,6 +670,13 @@ private:
     TransportHistory m_transportHistory;
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
+    QHash<QString, QString> m_attemptExcluded; // upstream: start failed in this attempt (nodeId -> code)
+    FastTierEvidence m_fastEvidence;           // upstream: reachability evidence of the facade
+    bool          m_fastTierOpen = false;      // upstream: own tier pre-exhausted for this attempt
+    QString       m_fastTierWhy;
+    QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack
+    QList<SubscriptionNode> m_merged;          // subscription nodes + pack candidates (the pick pool)
+    void rebuildCandidates();
     bool          m_verifyEveryTransport = false; // plan v3 step 5: features.node_scan (see setter)
     QString       m_networkMemoryNodeId;           // plan v3 step 5: last node that carried data on this network
     QString       m_networkMemoryStartNodeId;      // owner test 06.11: started from memory, not up yet
@@ -609,6 +689,8 @@ private:
     bool          m_okRecorded = false;  // один успех / один провал на сессию подъёма
     bool          m_failRecorded = false;
     std::optional<Subscription> m_pendingReseed; // отложенное тело reseed (применить в терминале)
+    QStringList   m_attemptOrder;            // AVPN Scanner: a row tap's one-attempt order hint
+    qint64        m_attemptOrderUntilMs = -1; // its end (nowMs clock); -1 = none
 };
 
 } // namespace avpn

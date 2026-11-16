@@ -5,6 +5,8 @@
 #pragma once
 
 #include "TuningStore.h" // AVPN awg31-xray-v1: kill-switch'и xray_client / transport_auto_pick
+#include "UpstreamNode.h" // AVPN upstream nodes: kill switch upstream_nodes
+#include "XrayPlatformGate.h" // AVPN release C: per-platform Xray decision (Android/Windows switches)
 #include "dto/Subscription.h"
 
 #include <QHash>
@@ -91,13 +93,42 @@ inline std::atomic<bool> &xrayPlatformRuntimeReady()
     return ready;
 }
 
+// Upstream nodes, macOS root service (plan point 14, decision F): a provider profile routes by geo tags,
+// so it may run only when the cut geo pair sits next to Tribe-service and matches this build
+// (MacServiceInstaller::macUpstreamGeoPresent). A SEPARATE input from xrayPlatformRuntimeReady: a missing
+// pair withholds upstream candidates only, own Xray nodes are untouched. Set by the facade where it
+// checks tun2socks (AvpnEngineQml::refreshXrayRuntimeGate: start, foreground, idle - never per tick);
+// default true (iOS ships the pair inside the extension; tests).
+inline std::atomic<bool> &upstreamPlatformRuntimeReady()
+{
+    static std::atomic<bool> ready{true};
+    return ready;
+}
+
+// Release C (lane P1): Android and Windows join behind their OWN server switch (xray_client_android /
+// xray_client_windows, compiled default false) on top of xray_client and the platform runtime
+// (XrayPlatformGate.h::decideXrayClientSupported). iOS/macOS read exactly what they read before; with
+// the new switch absent Android/Windows stay without Xray, as before. Upstream nodes keep their own
+// switches on top (isSupportedProtoNode).
 inline bool xrayClientSupported()
 {
-#if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
-    return TuningStore::flag(QStringLiteral("xray_client"), false) && xrayPlatformRuntimeReady().load();
-#else
-    return false;
-#endif
+    constexpr XrayPlatform p = xrayBuildPlatform();
+    if (p == XrayPlatform::Apple)
+        return TuningStore::flag(QStringLiteral("xray_client"), false) && xrayPlatformRuntimeReady().load();
+    if (p == XrayPlatform::Other)
+        return false;
+    return decideXrayClientSupported(p, TuningStore::flag(QStringLiteral("xray_client"), false),
+                                     TuningStore::flag(xrayPlatformSwitchKey(p), false),
+                                     xrayPlatformRuntimeReady().load());
+}
+
+// The platform half of the gate (the former constant kXrayPlatform of ConfigService.cpp): Apple always;
+// Android/Windows when their own switch in the given features (the config the caller holds) is on and
+// the runtime is present; anything else never.
+inline bool xrayPlatformEnabledBy(const QMap<QString, bool> &features)
+{
+    constexpr XrayPlatform p = xrayBuildPlatform();
+    return decideXrayPlatform(p, xrayPlatformSwitchIn(features, p), xrayPlatformRuntimeReady().load());
 }
 
 // Форвард-совместимость по протоколу (Task 10, backend-first-3; расширено волной awg31-xray-v1):
@@ -123,8 +154,13 @@ inline bool isSupportedProtoNode(const SubscriptionNode &n)
 {
     if (!isSupportedProto(n.proto))
         return false;
+    // AVPN upstream nodes: a stub (no xray, an upstream block) runs on the same Xray engine, so it needs
+    // xray_client above AND its own kill switch upstream_nodes, read at every choice.
     if (isXrayProto(n.proto) && !n.xray.has_value())
-        return false;
+        return n.upstream.has_value() && upstreamNodesEnabled() && upstreamPlatformRuntimeReady().load()
+               // a profile routing by a geo tag the build does not ship is never offered (device-side
+               // check; a pack-sourced candidate has no list - the extension's own start check covers it)
+               && upstreamGeoSupported(*n.upstream, upstreamBuildGeoTags());
     return true;
 }
 
@@ -178,6 +214,11 @@ inline bool isManualOnlyNode(const SubscriptionNode &n)
 // транспорта и ротация «Сменить сервер» работают по локациям, не по узлам.
 inline QString locationKeyOf(const SubscriptionNode &n)
 {
+    // AVPN upstream nodes (release A, point 16): a provider profile is always a location of its own - a
+    // host_id the server might send must never merge it into one of OUR hosts (picker row, pin, display
+    // label and exit RTT of the location), nor ours into it.
+    if (n.upstream.has_value())
+        return QStringLiteral("u:") + n.nodeId;
     if (n.hostId > 0)
         return QStringLiteral("h:") + QString::number(n.hostId);
     if (!n.countryCode.isEmpty())
@@ -227,8 +268,10 @@ inline QString nextLiveNodeId(const QList<SubscriptionNode> &nodes, const QStrin
     for (const SubscriptionNode &n : nodes) {
         if (n.nodeId == currentNodeId)
             currentLoc = locationKeyOf(n);
+        // Upstream nodes are not in the ring: «Заменить сервер» is a round of OUR locations; a provider
+        // profile is reached by Auto through its tier or by the user's own tap (plan point 4).
         if (!isAutoEligibleNode(n) || !transportAllowed(n, mode) || isManualOnlyNode(n)
-            || healthAggregate(n) <= 0.0)
+            || healthAggregate(n) <= 0.0 || isUpstreamNode(n))
             continue;
         const QString key = locationKeyOf(n);
         if (!byLoc.contains(key))

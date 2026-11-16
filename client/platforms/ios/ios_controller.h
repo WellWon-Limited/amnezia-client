@@ -9,6 +9,8 @@
 #include <QList>
 #include <QElapsedTimer>
 #include <atomic>
+#include <mutex>    // AVPN (upstream nodes)
+#include <optional> // AVPN (upstream nodes)
 #include "IosStatusRequest.h"
 #include "IosNativePolicy.h"
 
@@ -76,6 +78,29 @@ public:
     // true = сообщение отправляется живому туннелю; итог (K4) — сигнал rebindFinished(bool).
     // false = отправлять некому (нет менеджера / туннель не Connected), сигнала не будет.
     bool rebindTunnel();
+
+    // AVPN (upstream nodes, contract client-envelope-contract.md; the engine lane calls these).
+    // setUpstreamStart: arms the NEXT connectVpn of an upstream node - right before the connect,
+    // from any thread. connectVpn takes it only when start.nodeId equals the configuration's
+    // tribeSessionMetadata.node_id and the protocol is Xray; any other connect drops it. The start
+    // envelope then carries tribeSessionMetadata {node_id, proto:"xray", upstream:1, profile_id,
+    // config_sha256} and, when start.hasLease, upstream_lease (section 1). An invalid struct is
+    // refused (logged by field name) and returns false.
+    bool setUpstreamStart(const avpn_ios::UpstreamStartEnvelope &start);
+    void clearUpstreamStart();
+    // Provisional start hand-over (section 2): app message upstream_lease_set to the live extension.
+    // true = sent; the reply arrives as upstreamLeaseEvent. false = invalid lease or no live tunnel.
+    bool sendUpstreamLeaseSet(const avpn_ios::UpstreamLeaseEnvelope &lease);
+
+    // AVPN (Scanner, plan scanner-client-plan.md §2.3, lane L4; caller: serviceEngine/IosScanHost.mm). One
+    // tribe-scan-v1 message to the live extension (PacketTunnelProvider+Scan.swift), the bytes as they are and the
+    // reply bytes as they come. `done` exactly once, on this controller's thread, never from inside the call:
+    // Reply + bytes | NeedsVpn - no running extension (no profile, not Connected/Reasserting) | NoReply - no
+    // answer (send error, nil reply) | Timeout - nothing within timeoutMs (200..10000). Never touches the tunnel.
+    enum class ScanSendResult { Reply, NeedsVpn, NoReply, Timeout };
+    void sendScanMessage(const QByteArray &message, int timeoutMs,
+                         std::function<void(ScanSendResult, const QByteArray &)> done);
+    bool scanHostRunning(); // the extension runs (Connected/Reasserting): the scan host can answer
 
     bool shareText(const QStringList &filesToSend);
     QString openFile();
@@ -163,6 +188,14 @@ signals:
     void permissionPromptPending(bool pending);
 
     void finished();
+
+    // AVPN (upstream nodes, contract section 5): the extension's `upstream` status object, normalized
+    // (IosNativePolicy.h::normalizeUpstreamStatus), keys exactly as the contract: state, code, seq,
+    // renewed_ms_ago, expires_in_ms, revision, config_changed, applied_bytes, shadow_bytes, meter_scope.
+    // Emitted when state/code/seq/revision/config_changed/meter_scope change (status polls) and on
+    // every upstream_lease_set reply. The engine lane connects it (terminal -> leave the node through
+    // the dead-session path; newer revision -> refresh /v1/subscription).
+    void upstreamLeaseEvent(const QVariantMap &upstream);
 
 protected slots:
 
@@ -286,6 +319,12 @@ private:
     // AVPN (ревью 2026-07-11): поколение сессии — стейл-ответ checkStatus СТАРОЙ сессии,
     // долетевший после реконнекта, не должен трогать счётчики/статусы новой (underflow-дельта).
     std::atomic<uint64_t> m_statusGeneration { 0 };
+    // AVPN (upstream nodes): armed by setUpstreamStart (any thread), taken by connectVpn.
+    std::mutex m_upstreamStartLock;
+    std::optional<avpn_ios::UpstreamStartEnvelope> m_upstreamStartArmed;
+    std::optional<avpn_ios::UpstreamStartEnvelope> m_upstreamStart; // the current connect's
+    avpn_ios::UpstreamStatusFields m_lastUpstreamStatus;
+    void emitUpstreamStatus(const avpn_ios::UpstreamStatusFields &fields, bool always);
 };
 
 #endif // IOS_CONTROLLER_H

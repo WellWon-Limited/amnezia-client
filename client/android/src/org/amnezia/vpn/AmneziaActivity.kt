@@ -135,6 +135,24 @@ class AmneziaActivity : QtActivity() {
                         // todo: add error reporting to Qt
                         QtAndroidController.onServiceError()
                     }
+
+                    ServiceEvent.SCAN_REPLY -> {
+                        // AVPN (Scanner, lane A3): the probe host's reply, bound to its request id; to C++ unchanged
+                        // (AndroidScanHost.cpp), never logged.
+                        msg.data?.let { d ->
+                            d.getString(MSG_SCAN_REPLY)?.let { QtAndroidController.onScanReply(d.getLong(MSG_SCAN_ID), it) }
+                        }
+                    }
+
+                    ServiceEvent.SCAN_HOST_STATE -> {
+                        msg.data?.getString(MSG_SCAN_STATE)?.let { QtAndroidController.onScanHostState(it) }
+                    }
+
+                    ServiceEvent.UPSTREAM_STATUS -> {
+                        // AVPN (upstream nodes, android-ipc-contract.md section 3): forwarded to C++ unchanged
+                        // (UpstreamStatusWire.h decodes it); never logged.
+                        msg.data?.getString(MSG_UPSTREAM_STATUS)?.let { QtAndroidController.onUpstreamStatus(it) }
+                    }
                 }
             }
         }
@@ -725,6 +743,38 @@ class AmneziaActivity : QtActivity() {
         mainScope.launch {
             disconnectFromVpn()
         }
+    }
+
+    // AVPN (upstream nodes, android-ipc-contract.md section 2): the late seat hand-over of a provisional
+    // session, called by C++ (JNI "(Ljava/lang/String;)Z") on its own thread. `message` is the iOS provider
+    // message verbatim; the service answers with ServiceEvent.UPSTREAM_STATUS. true = handed to a bound
+    // service messenger; false = no bound service (the seat lapses at its TTL). The message carries the
+    // renew token: never logged.
+    // AVPN (Scanner, lane A3): one tribe-scan-v1 message of the app's probe host (AndroidScanHost.cpp, JNI
+    // "(JLjava/lang/String;)Z", called on its own thread). The service answers ServiceEvent.SCAN_REPLY with the same
+    // id. true = handed to a bound service messenger; false = no bound service (the host answers no_vpn itself).
+    // The request carries the scan token and configs: never logged.
+    @Suppress("unused")
+    fun scanMessage(id: Long, request: String): Boolean {
+        if (!isServiceConnected) return false
+        return vpnServiceMessenger.send(
+            Action.SCAN_MESSAGE.packToMessage {
+                putLong(MSG_SCAN_ID, id)
+                putString(MSG_SCAN_REQUEST, request)
+            },
+            replyTo = activityMessenger
+        ) != null
+    }
+
+    @Suppress("unused")
+    fun upstreamLeaseSet(message: String): Boolean {
+        if (!isServiceConnected) return false
+        return vpnServiceMessenger.send(
+            Action.UPSTREAM_LEASE_SET.packToMessage {
+                putString(MSG_UPSTREAM_LEASE_SET, message)
+            },
+            replyTo = activityMessenger
+        ) != null
     }
 
     @Suppress("unused")

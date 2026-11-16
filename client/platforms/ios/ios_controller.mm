@@ -17,6 +17,8 @@
 #import <os/lock.h> // AVPN: os_unfair_lock — владение m_currentTunnel (ревью 2026-07-11)
 #import "core/utils/swiftBridge.h"
 #include "core/serviceEngine/TuningStore.h" // AVPN backend-first (Task 6): xray_* NE timeouts + network_change_debounce_ms
+#include "IosXrayTunables.h" // AVPN (upstream nodes): xray_tunables of the Xray envelope
+#include <time.h>            // AVPN (upstream nodes): clock_gettime_nsec_np (sleep-proof clock)
 
 const char* Action::start = "start";
 const char* Action::restart = "restart";
@@ -127,6 +129,72 @@ QString stringFromResponse(NSDictionary *response, NSString *key) {
         return QString::fromNSString((NSString *)value);
     }
     return QString();
+}
+
+// AVPN (upstream nodes, contract client-envelope-contract.md): the ObjC half of the envelope and the
+// status decode; the decisions are IosNativePolicy.h (pure, IosNativePolicyTests.cpp).
+long long upstreamClockMs() {
+    // Keeps running while the device sleeps (contract section 7), like the extension's clock.
+    return (long long)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL);
+}
+
+NSDictionary *upstreamLeaseDictionary(const avpn_ios::UpstreamLeaseEnvelope &l, long long expiresInMs) {
+    NSMutableArray *tags = [NSMutableArray arrayWithCapacity:l.meterTags.size()];
+    for (const std::string &t : l.meterTags) [tags addObject:[NSString stringWithUTF8String:t.c_str()]];
+    return @{
+        @"lease_id": [NSString stringWithUTF8String:l.leaseId.c_str()],
+        @"renew_token": [NSString stringWithUTF8String:l.renewToken.c_str()],
+        @"api_base": [NSString stringWithUTF8String:l.apiBase.c_str()],
+        @"renew_after_s": @(l.renewAfterS),
+        @"ttl_s": @(l.ttlS),
+        @"expires_in_ms": @(expiresInMs < 0 ? 0 : expiresInMs),
+        @"seq": @(l.seq),
+        @"epoch": @(l.epoch),
+        @"revision": @(l.revision),
+        @"meter_scope": [NSString stringWithUTF8String:avpn_ios::upstreamEnvelopeScope(l.meterScope, l.meterTags).c_str()],
+        @"meter_tags": tags,
+    };
+}
+
+avpn_ios::UpstreamStatusFields upstreamStatusFromObject(id obj) {
+    avpn_ios::UpstreamStatusFields f;
+    if (![obj isKindOfClass:[NSDictionary class]]) return f;
+    NSDictionary *d = (NSDictionary *)obj;
+    f.present = true;
+    auto text = [d](NSString *key) -> std::string {
+        id v = d[key];
+        return [v isKindOfClass:[NSString class]] ? std::string([(NSString *)v UTF8String] ?: "") : std::string();
+    };
+    auto number = [d](NSString *key, long long fallback) -> long long {
+        id v = d[key];
+        return [v isKindOfClass:[NSNumber class]] ? [(NSNumber *)v longLongValue] : fallback;
+    };
+    f.state = text(@"state");
+    f.code = text(@"code");
+    f.seq = number(@"seq", 0);
+    f.renewedMsAgo = number(@"renewed_ms_ago", -1);
+    f.expiresInMs = number(@"expires_in_ms", 0);
+    f.revision = number(@"revision", 0);
+    f.configChanged = [d[@"config_changed"] isKindOfClass:[NSNumber class]] && [d[@"config_changed"] boolValue];
+    f.appliedBytes = number(@"applied_bytes", 0);
+    f.shadowBytes = number(@"shadow_bytes", 0);
+    f.meterScope = text(@"meter_scope");
+    return f;
+}
+
+QVariantMap upstreamStatusMap(const avpn_ios::UpstreamStatusFields &f) {
+    return {
+        {QStringLiteral("state"), QString::fromStdString(f.state)},
+        {QStringLiteral("code"), QString::fromStdString(f.code)},
+        {QStringLiteral("seq"), qlonglong(f.seq)},
+        {QStringLiteral("renewed_ms_ago"), qlonglong(f.renewedMsAgo)},
+        {QStringLiteral("expires_in_ms"), qlonglong(f.expiresInMs)},
+        {QStringLiteral("revision"), qlonglong(f.revision)},
+        {QStringLiteral("config_changed"), f.configChanged},
+        {QStringLiteral("applied_bytes"), qlonglong(f.appliedBytes)},
+        {QStringLiteral("shadow_bytes"), qlonglong(f.shadowBytes)},
+        {QStringLiteral("meter_scope"), QString::fromStdString(f.meterScope)},
+    };
 }
 
 // AVPN backend-first (T20): handshake-пороги из rawConfig (numbers.handshake_timeout_ms /
@@ -335,6 +403,14 @@ NSDictionary *IosController::providerMetadata()
 {
     QJsonObject metadata = m_rawConfig.value(QStringLiteral("tribeSessionMetadata")).toObject();
     metadata.insert(QStringLiteral("generation"), QUuid::createUuid().toString(QUuid::WithoutBraces));
+    // AVPN (upstream nodes, contract section 1): an upstream start says so in its metadata.
+    if (m_upstreamStart) {
+        metadata.insert(QStringLiteral("node_id"), QString::fromStdString(m_upstreamStart->nodeId));
+        metadata.insert(QStringLiteral("proto"), QStringLiteral("xray"));
+        metadata.insert(QStringLiteral("upstream"), 1);
+        metadata.insert(QStringLiteral("profile_id"), QString::fromStdString(m_upstreamStart->profileId));
+        metadata.insert(QStringLiteral("config_sha256"), QString::fromStdString(m_upstreamStart->configSha256));
+    }
     const QByteArray encoded = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
     NSDictionary *value = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:encoded.constData() length:encoded.size()] options:0 error:nil];
     return value ?: @{};
@@ -454,6 +530,22 @@ bool IosController::connectVpn(amnezia::Proto proto, const QJsonObject& configur
 #endif
     m_proto = proto;
     m_rawConfig = configuration;
+    // AVPN (upstream nodes): the armed upstream start belongs to this connect only when it names this
+    // node and this is an Xray start; any other connect drops it (nothing of it leaks into AWG/own Xray).
+    {
+        std::lock_guard<std::mutex> lock(m_upstreamStartLock);
+        m_upstreamStart.reset();
+        if (m_upstreamStartArmed) {
+            const std::string nodeId = configuration.value(QStringLiteral("tribeSessionMetadata")).toObject()
+                                           .value(QStringLiteral("node_id")).toString().toStdString();
+            if (proto == amnezia::Proto::Xray && nodeId == m_upstreamStartArmed->nodeId)
+                m_upstreamStart = m_upstreamStartArmed;
+            else
+                qWarning() << "IosController::connectVpn : upstream start dropped (not this connect's node)";
+            m_upstreamStartArmed.reset();
+        }
+    }
+    m_lastUpstreamStatus = avpn_ios::UpstreamStatusFields();
     [m_serverAddress release];
     m_serverAddress = [configuration.value(configKey::hostName).toString().toNSString() copy];
     m_handshakeConfirmed = false;
@@ -1130,6 +1222,8 @@ void IosController::checkStatus()
         // Wi-Fi от нашего же utun).
         const QString ifaceName = stringFromResponse(response, @"active_interface_name");
         const QString coreLogTail = stringFromResponse(response, @"core_log_tail");
+        // AVPN (upstream nodes, contract section 5): absent for every non-upstream session.
+        const avpn_ios::UpstreamStatusFields upstreamStatus = upstreamStatusFromObject(response[@"upstream"]);
         // AVPN (diag 2026-09-03): счётчики привязки сокетов ядра — извлекаем ЗДЕСЬ (response
         // живёт только в этом хендлере), в GUI-лямбду уходят готовые числа.
         const long long xrayProtectBound = (long long)[response[@"protect_bound"] longLongValue];
@@ -1159,7 +1253,7 @@ void IosController::checkStatus()
 
         QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
-                                         xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
+                                         xrayProtectBound, xrayProtectUnbound, xrayProtectRejected, upstreamStatus]() { // AVPN (upstream nodes): + upstreamStatus
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
             // AVPN (C5/H7): владение заявкой (complete — exactly-once) и применение полезной нагрузки
             // (accept — request новее последнего применённого) разделены: ответ, опоздавший за
@@ -1176,6 +1270,7 @@ void IosController::checkStatus()
                 }
             }
             clearLocalStopIfNewSession(false); // AVPN (REV-3): runtime-поколение новой NE-сессии
+            if (upstreamStatus.present) emitUpstreamStatus(upstreamStatus, false); // AVPN (upstream nodes)
             if (!roamSummary.isEmpty() && roamSummary != m_lastRoamSummary) {
                 m_lastRoamSummary = roamSummary;
                 qInfo() << "[roam] NE counters:" << roamSummary;
@@ -1336,6 +1431,84 @@ void IosController::checkStatus()
     });
     [tunnel release]; // парный к retainedCurrentTunnel() в checkStatus
     });
+}
+
+// AVPN (upstream nodes, contract client-envelope-contract.md): the engine lane's entry points.
+bool IosController::setUpstreamStart(const avpn_ios::UpstreamStartEnvelope &start)
+{
+    std::string why;
+    if (!avpn_ios::upstreamStartEnvelopeValid(start, why)) {
+        qWarning() << "IosController::setUpstreamStart : refused, field" << QString::fromStdString(why);
+        clearUpstreamStart();
+        return false;
+    }
+    avpn_ios::UpstreamStartEnvelope armed = start;
+    // Kept as an absolute point of the sleep-proof clock until startXray writes the envelope.
+    if (armed.hasLease) armed.lease.expiresInMs = upstreamClockMs() + start.lease.expiresInMs;
+    std::lock_guard<std::mutex> lock(m_upstreamStartLock);
+    m_upstreamStartArmed = armed;
+    return true;
+}
+
+void IosController::clearUpstreamStart()
+{
+    std::lock_guard<std::mutex> lock(m_upstreamStartLock);
+    m_upstreamStartArmed.reset();
+}
+
+void IosController::emitUpstreamStatus(const avpn_ios::UpstreamStatusFields &fields, bool always)
+{
+    const avpn_ios::UpstreamStatusFields next = avpn_ios::normalizeUpstreamStatus(fields);
+    if (!always && !avpn_ios::upstreamStatusChanged(m_lastUpstreamStatus, next)) return;
+    if (next.state != m_lastUpstreamStatus.state || next.code != m_lastUpstreamStatus.code)
+        qInfo() << "IosController : upstream lease" << QString::fromStdString(next.state)
+                << QString::fromStdString(next.code) << "seq" << next.seq;
+    m_lastUpstreamStatus = next;
+    emit upstreamLeaseEvent(upstreamStatusMap(next));
+}
+
+bool IosController::sendUpstreamLeaseSet(const avpn_ios::UpstreamLeaseEnvelope &lease)
+{
+    std::string why;
+    if (!avpn_ios::upstreamLeaseEnvelopeValid(lease, why)) {
+        qWarning() << "IosController::sendUpstreamLeaseSet : refused, field" << QString::fromStdString(why);
+        return false;
+    }
+    const long long deadline = upstreamClockMs() + lease.expiresInMs;
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, lease, deadline] {
+            avpn_ios::UpstreamLeaseEnvelope rest = lease;
+            rest.expiresInMs = std::max(0LL, deadline - upstreamClockMs());
+            sendUpstreamLeaseSet(rest);
+        }, Qt::QueuedConnection);
+        return true;
+    }
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel) return false;
+    if (tunnel.connection.status != NEVPNStatusConnected && tunnel.connection.status != NEVPNStatusReasserting) {
+        [tunnel release];
+        return false;
+    }
+    NSString *actionKey = [NSString stringWithUTF8String:MessageKey::action];
+    NSDictionary *message = @{actionKey: @"upstream_lease_set",
+                              @"upstream_lease": upstreamLeaseDictionary(lease, deadline - upstreamClockMs())};
+    const uint64_t gen = m_statusGeneration.load();
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // tunnel: our retain is released at the end of the block (checkStatus pattern).
+        sendVpnExtensionMessage(tunnel, message, [this, gen](NSDictionary *response) {
+            const avpn_ios::UpstreamStatusFields fields = upstreamStatusFromObject(response[@"upstream"]);
+            QMetaObject::invokeMethod(this, [this, gen, fields] {
+                if (m_statusGeneration.load() != gen) return; // another session meanwhile
+                if (!fields.present) {
+                    qWarning() << "IosController::sendUpstreamLeaseSet : no reply from the extension";
+                    return;
+                }
+                emitUpstreamStatus(fields, true);
+            }, Qt::QueuedConnection);
+        });
+        [tunnel release];
+    });
+    return true;
 }
 
 // AVPN (BUG-4 auto-heal): ребайнд сокета живого NE-туннеля. Тот же канал, что checkStatus
@@ -1743,6 +1916,10 @@ bool IosController::setupXray()
     // AAAA-трафик уходит мимо VPN с настоящим адресом. Kill-switch с дефолтом TRUE.
     finalConfig.insert(configKey::xrayIpv6Capture,
                        avpn::TuningStore::flag(QStringLiteral("xray_ipv6_capture"), true) ? 1 : 0);
+    // AVPN (upstream nodes, contract section 3): Go memory limit + hev sizes, only the numbers the
+    // server publishes (none = the key is left out, the extension behaves as before).
+    if (const QJsonObject xrayTunables = avpn_ios::xrayTunablesForEnvelope(); !xrayTunables.isEmpty())
+        finalConfig.insert(QStringLiteral("xray_tunables"), xrayTunables);
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -1775,6 +1952,10 @@ bool IosController::setupSSXray()
     // AAAA-трафик уходит мимо VPN с настоящим адресом. Kill-switch с дефолтом TRUE.
     finalConfig.insert(configKey::xrayIpv6Capture,
                        avpn::TuningStore::flag(QStringLiteral("xray_ipv6_capture"), true) ? 1 : 0);
+    // AVPN (upstream nodes, contract section 3): Go memory limit + hev sizes, only the numbers the
+    // server publishes (none = the key is left out, the extension behaves as before).
+    if (const QJsonObject xrayTunables = avpn_ios::xrayTunablesForEnvelope(); !xrayTunables.isEmpty())
+        finalConfig.insert(QStringLiteral("xray_tunables"), xrayTunables);
 
     QJsonDocument finalConfigDoc(finalConfig);
     QString finalConfigStr(finalConfigDoc.toJson(QJsonDocument::Compact));
@@ -1968,6 +2149,12 @@ bool IosController::startXray(const QString &config)
     NSMutableDictionary *provider = [NSMutableDictionary dictionaryWithDictionary:tunnelProtocol.providerConfiguration ?: @{}];
     provider[@"tribeSessionMetadata"] = providerMetadata();
     provider[@"tribeManagerId"] = ((NETunnelProviderProtocol *)m_currentTunnel.protocolConfiguration).providerConfiguration[@"tribeManagerId"] ?: [[NSUUID UUID] UUIDString];
+    // AVPN (upstream nodes, contract section 1): the granted lease; absent = provisional start.
+    // setUpstreamStart stored the lease's expiry as a point of the sleep-proof clock: expires_in_ms
+    // counts from now, the time spent since (save, permission prompt) is not given to the lease.
+    if (m_upstreamStart && m_upstreamStart->hasLease)
+        provider[@"upstream_lease"] = upstreamLeaseDictionary(m_upstreamStart->lease,
+                                                              m_upstreamStart->lease.expiresInMs - upstreamClockMs());
     tunnelProtocol.providerConfiguration = provider;
     m_currentTunnel.protocolConfiguration = tunnelProtocol;
     [tunnelProtocol release]; // protocolConfiguration retains/copies; this file is MRC
@@ -2512,3 +2699,65 @@ bool IosController::isTestFlight() {
     return receiptURL && [[receiptURL lastPathComponent] isEqualToString:@"sandboxReceipt"];
 }
 
+
+// AVPN (Scanner, plan scanner-client-plan.md §2.3, lane L4): the app side of the probe host channel
+// ({"action":"scan_*"}, PacketTunnelProvider+Scan.swift). The same session as checkStatus (a retained manager,
+// sendProviderMessage), but the bytes travel as they are: the tribe-scan-v1 JSON is decoded only by the Scanner's
+// coordinator (ScanHostContract.h), never here, and never logged (it carries the scan token and the configs).
+bool IosController::scanHostRunning()
+{
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel)
+        return false;
+    const NEVPNStatus status = tunnel.connection.status;
+    [tunnel release];
+    return status == NEVPNStatusConnected || status == NEVPNStatusReasserting;
+}
+
+void IosController::sendScanMessage(const QByteArray &message, int timeoutMs,
+                                    std::function<void(ScanSendResult, const QByteArray &)> done)
+{
+    if (!done)
+        return;
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, message, timeoutMs, done] { sendScanMessage(message, timeoutMs, done); },
+                                  Qt::QueuedConnection);
+        return;
+    }
+    // Exactly once (reply, nil reply, send error and the deadline race for one flag), always queued onto this
+    // thread - never from inside this call.
+    const auto finished = std::make_shared<std::atomic_bool>(false);
+    const auto finish = [this, finished, done](ScanSendResult result, const QByteArray &bytes) {
+        QMetaObject::invokeMethod(this, [finished, done, result, bytes] {
+            if (!finished->exchange(true))
+                done(result, bytes);
+        }, Qt::QueuedConnection);
+    };
+    NETunnelProviderManager *tunnel = retainedCurrentTunnel();
+    if (!tunnel || (tunnel.connection.status != NEVPNStatusConnected
+                    && tunnel.connection.status != NEVPNStatusReasserting)) {
+        if (tunnel)
+            [tunnel release];
+        finish(ScanSendResult::NeedsVpn, QByteArray()); // the host lives in the extension: it is not running
+        return;
+    }
+    QTimer::singleShot(qBound(200, timeoutMs, 10000), this, [finished, done] {
+        if (!finished->exchange(true))
+            done(ScanSendResult::Timeout, QByteArray());
+    });
+    NSData *data = message.toNSData();
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // tunnel: our retain is released at the end of the block (checkStatus pattern); the block keeps data.
+        NETunnelProviderSession *session = (NETunnelProviderSession *)tunnel.connection;
+        NSError *sendError = nil;
+        const BOOL sent = [session sendProviderMessage:data returnError:&sendError responseHandler:^(NSData *response) {
+            finish(response ? ScanSendResult::Reply : ScanSendResult::NoReply,
+                   response ? QByteArray::fromNSData(response) : QByteArray());
+        }];
+        if (!sent || sendError) {
+            qWarning() << "IosController::sendScanMessage : send failed";
+            finish(ScanSendResult::NoReply, QByteArray());
+        }
+        [tunnel release];
+    });
+}

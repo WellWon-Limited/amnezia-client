@@ -6,6 +6,8 @@
 #include "TransportModeGate.h"  // ModeTunnel - what the transport-mode gate is told about the tunnel
 #include "WhoamiVerdict.h" // timerFiredLate - the one "late timer = frozen process" rule (§29 п.5)
 #include <QHash>
+#include <QPair>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QList>
@@ -780,6 +782,561 @@ inline void appendReliabilityEvent(ReliabilityRing &ring, const QString &stamp, 
 }
 
 
+// ── AVPN Scanner (CONNECT-INVARIANTS §32; plan ~/avpn-build/plans/provider-pool/scanner-client-plan.md
+// v2.2 §2.12, §3, §4.4) — the engine's half of the ONLY three ways the Scanner reaches the tunnel, the
+// client switches, the live status the coordinator reads. Pure; tests/facade_policy_check.cpp
+// (scanner*), tests/facade_engine_check.cpp (row connect against the real ServiceEngine).
+//
+// Before the picker's tap and the Scanner's row tap share it: what pinAndReconnectImpl does with the intent.
+// selectOnly — features.picker_instant_reconnect off and no explicit connect: the old switchToNode (target only).
+inline bool pinReconnectSelectOnly(bool forceConnect, bool instantReconnectOn)
+{
+    return !forceConnect && !instantReconnectOn;
+}
+// Up (or coming up): intent on, restart through reconcile (stop -> Disconnected -> start, §4 update 2026-07-10).
+// Down: only an explicit connect (forceConnect: the Doctor's restore, the Scanner's row) turns the intent on;
+// the picker's tap stores the target (cold connect by the orb). Review F4: the Scanner's row must connect.
+struct PinReconnectIntent {
+    bool wantConnected = false;
+    bool needsRestart = false;
+};
+inline PinReconnectIntent pinReconnectIntent(bool tunnelUp, bool forceConnect)
+{
+    if (tunnelUp || forceConnect)
+        return {true, tunnelUp};
+    return {false, false};
+}
+
+// Client switches (REMOTE-TUNING §1; the server publishes them only while its switch v1_scanner is on and
+// ABSENT otherwise). Absent `scanner` = the Scanner does not exist: no entry point acts, every other
+// switch reads off and the old Doctor sheet stays where it is today.
+inline constexpr char kScannerSwitchKey[] = "scanner";
+inline constexpr char kScannerReturnHomeKey[] = "scanner_return_home";
+inline constexpr char kScannerDoctorLegacyKey[] = "doctor_legacy";
+inline constexpr char kScannerConnectOnOpenKey[] = "scanner_connect_on_open";
+inline constexpr char kScannerAwgMiniKey[] = "scanner_awg_mini";
+struct ScannerSwitches {
+    bool scanner = false;
+    bool returnHome = false;     // after «Подключено» from a row: home (false = stay in the Scanner, owner 15.11)
+    bool doctorLegacy = false;   // the old Doctor sheet for one more release
+    bool connectOnOpen = false;  // REQ S3 (b): iPhone/Android open with the VPN off connects (compiled default on)
+    bool awgMini = false;        // own AmneziaWG mini-probe
+    bool doctorSheet = true;     // the old Doctor sheet is reachable (today: always)
+    bool operator==(const ScannerSwitches &o) const
+    {
+        return scanner == o.scanner && returnHome == o.returnHome && doctorLegacy == o.doctorLegacy
+            && connectOnOpen == o.connectOnOpen && awgMini == o.awgMini && doctorSheet == o.doctorSheet;
+    }
+    bool operator!=(const ScannerSwitches &o) const { return !(*this == o); }
+};
+// flag(key, compiledDefault) -> bool: TuningStore::flag in the app, a map in the tests.
+template <typename Flag>
+inline ScannerSwitches scannerSwitchesFrom(Flag flag)
+{
+    ScannerSwitches s;
+    s.scanner = flag(QLatin1String(kScannerSwitchKey), false);
+    if (!s.scanner)
+        return s;
+    s.returnHome = flag(QLatin1String(kScannerReturnHomeKey), false);
+    s.doctorLegacy = flag(QLatin1String(kScannerDoctorLegacyKey), false);
+    s.connectOnOpen = flag(QLatin1String(kScannerConnectOnOpenKey), true);
+    s.awgMini = flag(QLatin1String(kScannerAwgMiniKey), false);
+    s.doctorSheet = s.doctorLegacy;
+    return s;
+}
+
+// Path (a) ConnectRow: the ordinary user connect, forced (review F4) — when the tunnel is down, first the
+// user-start bookkeeping of start(); then pinAndReconnectImpl(force, StartOrigin::User). Up: the ordinary
+// move through reconcile (pinReconnectIntent -> needsRestart).
+struct ScannerRowConnect {
+    bool userStartBookkeeping = false;
+    bool forceConnect = true;
+    bool userOrigin = true;
+};
+inline ScannerRowConnect scannerRowConnect(bool tunnelUpOrComingUp)
+{
+    ScannerRowConnect r;
+    r.userStartBookkeeping = !tunnelUpOrComingUp;
+    return r;
+}
+// The engine part of a row tap that the facade and tests/facade_engine_check.cpp share: the one-attempt order
+// hint (head = the tapped row) for ServiceEngine::nextCandidate / connect() / onDead step 3.
+template <typename Engine>
+inline void facadeScanRowHint(Engine &engine, const QStringList &order, qint64 ttlMs)
+{
+    engine.setAttemptOrder(order, ttlMs);
+}
+enum class ScanRowGate { Connect, IgnoreSwitchOff, IgnoreNoNode };
+inline ScanRowGate decideScanRowConnect(bool scannerOn, const QString &nodeId)
+{
+    if (!scannerOn)
+        return ScanRowGate::IgnoreSwitchOff;
+    if (nodeId.trimmed().isEmpty())
+        return ScanRowGate::IgnoreNoNode;
+    return ScanRowGate::Connect;
+}
+
+// Path (b) UserConnectForScan: the ordinary start() (StartOrigin::User), only from VPN off. A start the
+// user already made (intent on, a tunnel up or coming up) is not doubled and is not the Scanner's to cancel.
+// hostNeedsVpn = the platform's probe host lives in the tunnel process (iPhone, Android); a host that probes
+// with the VPN off (macOS, Windows) never connects for a scan.
+enum class ScanOpenConnect { Start, IgnoreSwitchOff, IgnoreNoVpnNeeded, IgnoreAlreadyOn };
+inline const char *scanOpenConnectName(ScanOpenConnect d)
+{
+    switch (d) {
+    case ScanOpenConnect::Start: return "start";
+    case ScanOpenConnect::IgnoreSwitchOff: return "switch_off";
+    case ScanOpenConnect::IgnoreNoVpnNeeded: return "no_vpn_needed";
+    case ScanOpenConnect::IgnoreAlreadyOn: return "already_on";
+    }
+    return "unknown";
+}
+inline ScanOpenConnect decideScanOpenConnect(bool scannerOn, bool hostNeedsVpn, bool wantConnected, bool tunnelUpOrComingUp)
+{
+    if (!scannerOn)
+        return ScanOpenConnect::IgnoreSwitchOff;
+    if (!hostNeedsVpn)
+        return ScanOpenConnect::IgnoreNoVpnNeeded;
+    if (wantConnected || tunnelUpOrComingUp)
+        return ScanOpenConnect::IgnoreAlreadyOn;
+    return ScanOpenConnect::Start;
+}
+
+// The connect the Scanner itself started (path b), as the engine keeps it — in memory only, keyed by
+// the attempt: its id, the process that made it and the intent serial right after its start(). Any other
+// action on the intent (orb, stop, picker, row tap, Doctor) moves the serial: the attempt is no longer
+// the Scanner's.
+struct ScanOwnConnect {
+    quint64 id = 0;               // 0 = none
+    quint64 processEpoch = 0;     // random per process
+    quint64 intentSerial = 0;
+    bool reachedConnected = false; // «Подключено» (dataFlowing) seen once: latched, never undone
+    bool active() const { return id != 0; }
+};
+inline void noteScanOwnConnectProgress(ScanOwnConnect &a, bool dataFlowingNow)
+{
+    if (a.active() && dataFlowingNow)
+        a.reachedConnected = true;
+}
+// Path (c) CancelPendingConnect: the ordinary stop() ONLY for that connect and only before «Подключено».
+// After an app relaunch the record belongs to another process (or does not exist): nothing to cancel.
+enum class ScanCancel { Stop, IgnoreNoAttempt, IgnoreOtherProcess, IgnoreAfterConnected, IgnoreSuperseded, IgnoreNotPending };
+inline const char *scanCancelName(ScanCancel d)
+{
+    switch (d) {
+    case ScanCancel::Stop: return "stop";
+    case ScanCancel::IgnoreNoAttempt: return "no_attempt";
+    case ScanCancel::IgnoreOtherProcess: return "other_process";
+    case ScanCancel::IgnoreAfterConnected: return "after_connected";
+    case ScanCancel::IgnoreSuperseded: return "superseded";
+    case ScanCancel::IgnoreNotPending: return "not_pending";
+    }
+    return "unknown";
+}
+inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch, quint64 intentSerial,
+                                   bool wantConnected, bool dataFlowingNow)
+{
+    if (!a.active())
+        return ScanCancel::IgnoreNoAttempt;
+    if (a.processEpoch != processEpoch)
+        return ScanCancel::IgnoreOtherProcess;
+    if (a.reachedConnected || dataFlowingNow)
+        return ScanCancel::IgnoreAfterConnected;
+    if (a.intentSerial != intentSerial)
+        return ScanCancel::IgnoreSuperseded;
+    if (!wantConnected)
+        return ScanCancel::IgnoreNotPending;
+    return ScanCancel::Stop;
+}
+
+// A row tap's connect chain as the coordinator needs it: the node the ladder left (connectFailed), the end
+// of the chain without data (attemptEnded), «Подключено» (dataFlowing on a node). Observed from engine
+// state on every change; no timer.
+struct ScanRowAttempt {
+    bool active = false;
+    QString tapped;
+    QString lastNode;
+    quint64 intentSerial = 0;
+    QStringList reported;
+};
+struct ScanRowStep {
+    QStringList failed;
+    bool connected = false;
+    QString connectedNode;
+    bool ended = false;
+};
+inline void scanRowAttemptBegin(ScanRowAttempt &a, const QString &nodeId, quint64 intentSerial)
+{
+    a = ScanRowAttempt();
+    a.active = true;
+    a.tapped = nodeId;
+    a.lastNode = nodeId;
+    a.intentSerial = intentSerial;
+}
+// engineNode = the node the engine raises or carries now ("" = none); gaveUp = the chain cannot go on by
+// itself (intent off, the start backoff began, data-plane cap reached).
+inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial, const QString &engineNode,
+                                         bool dataFlowing, bool gaveUp)
+{
+    ScanRowStep st;
+    if (!a.active)
+        return st;
+    if (intentSerial != a.intentSerial) { // another action took the tunnel: not this chain any more
+        a.active = false;
+        return st;
+    }
+    auto fail = [&a, &st](const QString &n) {
+        if (!n.isEmpty() && !a.reported.contains(n)) {
+            a.reported << n;
+            st.failed << n;
+        }
+    };
+    if (dataFlowing && !engineNode.isEmpty()) {
+        if (engineNode != a.lastNode)
+            fail(a.lastNode);
+        a.active = false;
+        st.connected = true;
+        st.connectedNode = engineNode;
+        return st;
+    }
+    if (!engineNode.isEmpty() && engineNode != a.lastNode) {
+        fail(a.lastNode);
+        a.lastNode = engineNode;
+    }
+    if (gaveUp) {
+        fail(a.lastNode);
+        a.active = false;
+        st.ended = true;
+    }
+    return st;
+}
+
+// The live status the coordinator reads (ScanCurrent): which node the live tunnel is on and which node an
+// attempt in progress raises (never probed with its key, §32 п. 3). state = DebugSnapshot::state;
+// nativeUp = the platform reports the old runtime still up (Connected / Reconnecting / Disconnecting);
+// next = ServiceEngine::nextCandidate() (what the next connect() raises).
+struct ScanLiveView {
+    bool live = false;
+    bool connecting = false;
+    bool failed = false;
+    QString nodeId;
+    QString attemptNodeId;
+};
+inline ScanLiveView scanLiveView(const QString &state, bool nativeUp, const QString &current, const QString &pendingSwitch,
+                                 const QString &pinned, const QString &next, bool wantConnected, bool restartPending,
+                                 bool dataFlowing)
+{
+    ScanLiveView v;
+    const bool up = state == QLatin1String("connected") || state == QLatin1String("verifying");
+    const bool switching = state == QLatin1String("switching");
+    v.live = up || (switching && nativeUp && !pendingSwitch.isEmpty());
+    v.nodeId = v.live ? current : QString();
+    v.failed = state == QLatin1String("error");
+    v.connecting = wantConnected && !dataFlowing && !v.failed;
+    if (!wantConnected)
+        return v;
+    QString target;
+    if (switching)
+        target = pendingSwitch.isEmpty() ? current : pendingSwitch;
+    else if (state == QLatin1String("connecting") || state == QLatin1String("selecting"))
+        target = current.isEmpty() ? next : current;
+    else if (restartPending)
+        target = pinned.isEmpty() ? next : pinned;
+    else if (!up)
+        target = next;
+    v.attemptNodeId = target == v.nodeId ? QString() : target;
+    return v;
+}
+
+// ── AVPN Scanner, second pass (lane L6b) ───────────────────────────────────────────────────────────────────
+
+// An endpoint "a.b.c.d:port" or "[v6]:port" whose host is an IP literal (an awg_mini session dials it without DNS).
+inline bool endpointIsIpLiteral(const QString &endpoint)
+{
+    const QString e = endpoint.trimmed();
+    static const QRegularExpression v4(QStringLiteral("^([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3}):([0-9]{1,5})$"));
+    static const QRegularExpression v6(QStringLiteral("^\\[([0-9A-Fa-f:.]{2,45})\\]:([0-9]{1,5})$"));
+    QRegularExpressionMatch m = v4.match(e);
+    if (m.hasMatch()) {
+        for (int i = 1; i <= 4; ++i)
+            if (m.captured(i).toInt() > 255)
+                return false;
+        const int port = m.captured(5).toInt();
+        return port >= 1 && port <= 65535;
+    }
+    m = v6.match(e);
+    if (m.hasMatch()) {
+        const int port = m.captured(2).toInt();
+        return m.captured(1).contains(QLatin1Char(':')) && port >= 1 && port <= 65535;
+    }
+    return false;
+}
+
+// awg_mini (awg-probe-plan.md §3; TribeScanner.h ScanAwgNodeInput): the device's OWN AmneziaWG input for one own
+// node, exactly as the live tunnel gets it - AwgConfigBuilder (address = the subscription's, mtu = the node's or the
+// platform default, the node's peer key / PSK / endpoint) and the daemon's UAPI order of the obfuscation lines
+// (platforms/macos/daemon/wireguardutilsmacos.cpp: jc jmin jmax s1 s2 [s3] [s4] h1..h4, i1..i5, the AWG 3.0 keys,
+// header_protection_key as hex, random_trailers / disable_cookies as 1|0). false = no config for that node (not an
+// own AWG node, no private key, no tunnel address). An endpoint that is not an IP literal is left empty (the
+// coordinator then refuses awg_no_endpoint). SECRET in, SECRET out: never logged, never stored here.
+template <typename Out>
+inline bool awgProbeInputFrom(const Subscription &sub, const SubscriptionNode &node, const QString &privateKey,
+                              int defaultMtu, Out &out)
+{
+    if (node.upstream.has_value() || node.xray.has_value() || node.proto.compare(QLatin1String("awg"), Qt::CaseInsensitive) != 0)
+        return false;
+    if (privateKey.trimmed().isEmpty() || node.serverPubkey.trimmed().isEmpty())
+        return false;
+    QString address;
+    for (const QString &a : sub.address) // the probe needs one address: the IPv4 one first, else the first
+        if (!a.contains(QLatin1Char(':'))) {
+            address = a.trimmed();
+            break;
+        }
+    if (address.isEmpty() && !sub.address.isEmpty())
+        address = sub.address.first().trimmed();
+    if (address.isEmpty())
+        return false;
+    out.privateKey = privateKey.trimmed();
+    out.address = address;
+    out.mtu = node.mtu > 0 ? node.mtu : defaultMtu;
+    out.peerPublicKey = node.serverPubkey.trimmed();
+    out.presharedKey = node.presharedKey.trimmed();
+    out.endpoint = endpointIsIpLiteral(node.endpoint) ? node.endpoint.trimmed() : QString();
+    const AwgParams &a = node.awg;
+    QList<QPair<QString, QString>> ob;
+    auto num = [&ob](const char *k, int v) { ob.append({QLatin1String(k), QString::number(v)}); };
+    auto str = [&ob](const char *k, const QString &v) {
+        if (!v.trimmed().isEmpty())
+            ob.append({QLatin1String(k), v.trimmed()});
+    };
+    num("jc", a.Jc);
+    num("jmin", a.Jmin);
+    num("jmax", a.Jmax);
+    num("s1", a.S1);
+    num("s2", a.S2);
+    if (a.S3)
+        num("s3", *a.S3);
+    if (a.S4)
+        num("s4", *a.S4);
+    num("h1", a.H1);
+    num("h2", a.H2);
+    num("h3", a.H3);
+    num("h4", a.H4);
+    str("i1", a.I1);
+    str("i2", a.I2);
+    str("i3", a.I3);
+    str("i4", a.I4);
+    str("i5", a.I5);
+    if (!a.headerProtectionKey.trimmed().isEmpty())
+        ob.append({QStringLiteral("header_protection_key"),
+                   QString::fromLatin1(QByteArray::fromBase64(a.headerProtectionKey.trimmed().toLatin1()).toHex())});
+    str("content_padding_addition", a.contentPaddingAddition);
+    str("rekey_after_time", a.rekeyAfterTime);
+    str("rekey_timeout", a.rekeyTimeout);
+    str("reject_after_time", a.rejectAfterTime);
+    str("keepalive_timeout", a.keepaliveTimeout);
+    str("max_handshake_attempts", a.maxHandshakeAttempts);
+    if (a.randomTrailers.has_value())
+        ob.append({QStringLiteral("random_trailers"), *a.randomTrailers ? QStringLiteral("1") : QStringLiteral("0")});
+    if (a.disableCookies.has_value())
+        ob.append({QStringLiteral("disable_cookies"), *a.disableCookies ? QStringLiteral("1") : QStringLiteral("0")});
+    out.obfuscation = ob;
+    out.boundIf = -1;
+    return true;
+}
+
+// knownHostIps: the IP literals the engine resolved for EXACTLY this host (case-insensitive; a "host:port" or a
+// URL host as given), in resolution order, without duplicates. {} = none known.
+inline QStringList knownIpsForHost(const QHash<QString, QStringList> &byHost, const QString &host)
+{
+    QString h = host.trimmed().toLower();
+    if (h.startsWith(QLatin1Char('[')) && h.contains(QLatin1Char(']')))
+        h = h.mid(1, h.indexOf(QLatin1Char(']')) - 1);
+    else if (h.count(QLatin1Char(':')) == 1)
+        h = h.section(QLatin1Char(':'), 0, 0);
+    if (h.endsWith(QLatin1Char('.')))
+        h.chop(1);
+    return byHost.value(h);
+}
+
+// The PHYSICAL uplink under the tunnel (item 7): the device's own VPN holds the default route on utun, so the
+// platform's "transport medium" reads unknown (macOS) while the Wi-Fi / Ethernet interface still carries the
+// tunnel. type: 1 Wi-Fi, 2 Ethernet, 3 cellular, 0 anything else; only an interface that is up, not virtual by
+// name and has a routable IPv4 address counts. Wi-Fi and Ethernet both present -> "ethernet" (the order macOS
+// gives the wired service by default); nothing -> "".
+struct PhysicalIface {
+    QString name;
+    int type = 0;
+    bool up = false;
+    QStringList ipv4;
+};
+inline bool physicalIfaceNameVirtual(const QString &name)
+{
+    static const QStringList virt{QStringLiteral("utun"), QStringLiteral("ipsec"), QStringLiteral("ppp"), QStringLiteral("gif"),
+                                  QStringLiteral("stf"), QStringLiteral("bridge"), QStringLiteral("awdl"), QStringLiteral("llw"),
+                                  QStringLiteral("anpi"), QStringLiteral("ap"), QStringLiteral("lo"), QStringLiteral("vmenet"),
+                                  QStringLiteral("tun"), QStringLiteral("tap"), QStringLiteral("wg"), QStringLiteral("feth")};
+    for (const QString &v : virt)
+        if (name.startsWith(v))
+            return true;
+    return false;
+}
+inline QString physicalUplinkKind(const QList<PhysicalIface> &ifaces)
+{
+    bool wifi = false, wired = false, cell = false;
+    for (const PhysicalIface &i : ifaces) {
+        if (!i.up || physicalIfaceNameVirtual(i.name))
+            continue;
+        bool routable = false;
+        for (const QString &a : i.ipv4)
+            routable = routable || (!a.startsWith(QLatin1String("169.254.")) && !a.startsWith(QLatin1String("127.")) && !a.isEmpty());
+        if (!routable)
+            continue;
+        wifi = wifi || i.type == 1;
+        wired = wired || i.type == 2;
+        cell = cell || i.type == 3;
+    }
+    if (wired)
+        return QStringLiteral("ethernet");
+    if (wifi)
+        return QStringLiteral("wifi");
+    if (cell)
+        return QStringLiteral("cellular");
+    return QString();
+}
+// The network kind the Scanner uses, one order on every platform: the path monitor's physical kind first
+// (macOS UplinkMonitor::pathKind - the route table's physical default route under the VPN; iOS
+// IosScanHost::appPathKind), then the interface list (desktop only; iOS passes ""), then the platform's medium
+// (doctorNetType) - which under the device's own VPN is the tunnel's and so last. The monitor and the interface
+// list can differ (an Ethernet link with an address but no default route): the monitor wins and `disagree` asks
+// the caller to journal it once. The reporting key is built from `kind` (upstreamNetworkKey).
+struct ScanKindPick {
+    QString kind;
+    QString source; // "path" | "interfaces" | "platform" | "" (nothing known)
+    bool disagree = false;
+};
+inline ScanKindPick scanNetworkKindPick(const QString &pathKind, const QString &interfacesKind, const QString &platformMedium)
+{
+    ScanKindPick p;
+    if (!pathKind.isEmpty()) {
+        p.kind = pathKind;
+        p.source = QStringLiteral("path");
+        p.disagree = !interfacesKind.isEmpty() && interfacesKind != pathKind;
+        return p;
+    }
+    if (!interfacesKind.isEmpty()) {
+        p.kind = interfacesKind;
+        p.source = QStringLiteral("interfaces");
+        return p;
+    }
+    if (!platformMedium.isEmpty()) {
+        p.kind = platformMedium;
+        p.source = QStringLiteral("platform");
+    }
+    return p;
+}
+inline QString scanNetworkKindName(const QString &pathKind, const QString &interfacesKind, const QString &platformMedium)
+{
+    return scanNetworkKindPick(pathKind, interfacesKind, platformMedium).kind;
+}
+
+// Item 4 (TribeScanner::reportCheckRefused): why a full check could not start or submit, as the machine's shade
+// keys know it - "queue_full" (report_queue_full: the queue's 20 reports / 32 MiB wait for the network), "busy"
+// (report_check_busy: another diagnostic runs), "unavailable" (report_check_unavailable: no queue, the switch off,
+// the queue refused the report for another reason - support_diag off, too large twice, unsupported log type).
+// Review F1: every light fact goes back WITH the ask it answers - TribeScanner::lightFactFor(askId, fact), which
+// drops a fact of any ask but the latest - so a late fact of a previous scan never fills the next scan's card.
+// The engine also drops it itself once a newer ask started (its epoch moved). bound = asked through
+// startLightChecksFor; an old-style ask (startLightChecks) answers through lightFact.
+struct ScanLightAsk {
+    quint64 askId = 0;
+    bool bound = false;
+    quint64 epoch = 0; // the engine's light epoch when the ask came
+};
+template <typename Scanner, typename Fact>
+inline bool scanDeliverLightFact(Scanner &scanner, const ScanLightAsk &ask, quint64 epochNow, const Fact &f)
+{
+    if (ask.epoch != epochNow)
+        return false;
+    if (ask.bound)
+        scanner.lightFactFor(ask.askId, f);
+    else
+        scanner.lightFact(f);
+    return true;
+}
+
+// The server's kill switch, immediate: a 404 of the scan endpoints (TribeScanner::serverSwitchedOff) asks for a
+// fresh /v1/config at once through the existing refresh (ConfigService::refreshIfStale, the foreground path; no
+// new timer), at most once per kScannerOffRefreshMs - ten 404s in a minute are one request. The refreshed
+// switches then turn scannerEnabled off and the page leaves; the reverse waits for the periodic fetch.
+// The throttle is the ask's own (lastAskMs): the refresh itself runs whatever the config's age (maxAge 0). With
+// maxAge = kScannerOffRefreshMs a config fetched less than a minute before the 404 was "fresh", nothing was asked,
+// and scanner_off stops every later scan request - the entry points stayed until the periodic fetch (~15 min).
+inline constexpr qint64 kScannerOffRefreshMs = 60000;
+template <typename Config>
+inline bool facadeScannerOffRefresh(Config &config, qint64 &lastAskMs, qint64 nowMs)
+{
+    if (lastAskMs > 0 && nowMs - lastAskMs < kScannerOffRefreshMs)
+        return false;
+    lastAskMs = nowMs;
+    config.refreshIfStale(0);
+    return true;
+}
+
+// Queue lane F3/F4: "not_saved" (report_check_not_saved: not written to disk, not confirmed) and "rejected"
+// (report_check_rejected: the server refused it; kept and retried after an app update) pass through.
+inline QString scanCheckRefusalReason(const QString &why)
+{
+    if (why == QLatin1String("queue_full") || why == QLatin1String("full"))
+        return QStringLiteral("queue_full");
+    if (why == QLatin1String("busy") || why == QLatin1String("not_saved") || why == QLatin1String("rejected"))
+        return why;
+    return QStringLiteral("unavailable");
+}
+
+// Item 6: the existing service step of guardedStart (macOS desktop) as a decision, shared with the Scanner's
+// explicit «Запустить службу». installed / running / outdated = macServiceInstalled / macServiceRunning /
+// macServiceOutdated (MacServiceInstaller.h); upgradeDeclined = the user said no to the update in this session
+// (Connect only: the Scanner's explicit tap asks again).
+//  act          - anything to do at all (not running, or an install / update is due)
+//  needInstall  - run the bundled installer (confirm dialog, administrator password, tarball, bootstrap)
+//  outdatedOnly - installed and running, only older than this app (a refusal keeps the old service working)
+struct MacServicePlan {
+    bool act = false;
+    bool needInstall = false;
+    bool outdatedOnly = false;
+};
+inline MacServicePlan macServicePlan(bool installed, bool running, bool outdated, bool upgradeDeclined)
+{
+    MacServicePlan p;
+    p.outdatedOnly = installed && running && outdated;
+    p.needInstall = !installed || (outdated && !(p.outdatedOnly && upgradeDeclined));
+    p.act = !running || p.needInstall;
+    return p;
+}
+// The Scanner's tap must never cost the user the tunnel (§32): the installer replaces and restarts the root
+// service (tribe-svc-install.sh bootstraps it again), which ends a live tunnel - so an install / update runs from the
+// Scanner only while the VPN is off and not coming up; Connect does its own update with the tunnel down anyway.
+// Starting a stopped service is always allowed (no tunnel can run without it).
+inline bool macServiceTapAllowed(const MacServicePlan &p, bool vpnOnOrComing)
+{
+    return !(p.needInstall && vpnOnOrComing);
+}
+// What the Scanner's button would do now (QML text): "install" (no service), "update" (installed, other than
+// this app's: older or newer - the app installs its own bundled one), "start" (installed, current, not running:
+// launchd is given up to ~5 s), "none" (running and current).
+inline const char *macServiceActionName(bool installed, bool running, bool outdated)
+{
+    if (!installed)
+        return "install";
+    if (outdated)
+        return "update";
+    if (!running)
+        return "start";
+    return "none";
+}
+
 struct AppliedIntentState {
     bool paused;
     bool resumeAfterPause;
@@ -825,6 +1382,14 @@ struct NodeDebugRow {
     int         transportRank = 0;
     bool        transportSupported = true;
     QString     activeProto;
+    // Upstream nodes (plan provider-pool v2, point 16): a provider profile row (no endpoint, no ICMP target,
+    // neutral RTT) and its policy tier (own nodes 0). Model roles `upstream` / `upstreamTier` for the UI.
+    bool        upstream = false;
+    int         upstreamTier = 0;
+    bool        packSourced = false; // synthesized from the standby pack (no stub in the subscription)
+    // Display name parts (UpstreamNode.h::upstreamDisplayName); `name` carries the label only when custom.
+    int         upstreamOrdinal = 0;
+    bool        upstreamLabelCustom = false;
 };
 
 // AVPN (A5, жалоба владельца 2026-09-23 «Connected, VPN работает, а карточка пишет «Умный выбор

@@ -1,4 +1,40 @@
 patches:
+  "3.1.4-tribe.12":
+    # + 0015: WireGuardAdapter.tribeBackendWillRestart, an optional callback run synchronously right
+    # before the adapter stops, pauses, replaces or rebinds its backend (TribeBackendRestart in
+    # TribeRoaming.swift); nil = no call. The provider stops its probe sessions there.
+    # + 0014: the Scanner's AmneziaWG mini-session runner (package tribeawg + api-tribescan-awg.go,
+    # which hands it to 0013's engine host): a userspace device on an in-memory netstack with its own
+    # registry and logger; awg_mini in scan_caps (2 at once on iOS, 4 on the macOS NE). No new export.
+    # + 0013: the Scanner's probe engine exports LibXrayTribeScanMessage / LibXrayTribeScanStopAll
+    # (ABI libxray-tribe-scan-v1, api-tribescan.go + api-tribescan-log.go + tribescan_ios.go /
+    # tribescan_other.go + their host test, declarations in wireguard.h). The engine itself (package tribescan/) is the shared
+    # ../amnezia-libxray/patches/0012-tribe-scan-engine.patch and core 0011 makes the dialer state
+    # per instance; both are applied in build() and therefore not listed here. Slot 0012 is the
+    # data watch branch's; rebased onto it this version becomes 3.1.4-tribe.14.
+    # + 0011: LibXrayTribeOutboundStats (C export of libxray 0007; core 0008 counts the buffered
+    # first write of a stream outbound).
+    # tribe.11 (all unchanged) + 0010: LibXrayTribeHTTP, one HTTPS request through the running
+    # core's local SOCKS5 inbound (tribehttp.go + its host test, export in api-tribehttp.go,
+    # declaration in wireguard.h). The Xray core moves to amnezia-xray-core v1.261101.0 (Go
+    # 1.27.4) with ../amnezia-libxray/patches/0004-xray-core-261101-controller-errors.patch, and
+    # ../amnezia-libxray/patches/0005-libxray-forcefree-once.patch (FreeOSMemory loop once per
+    # process) + 0006-libxray-restore-runtime-on-stop.patch (StopXray restores GOGC and the memory
+    # limit, parks the loop) go to the vendored libxray; all are applied in build() after
+    # `go mod vendor` and are therefore not listed here.
+    - patch_file: "patches/0001-tribe-dnsfwd-warmup-rebind.patch"
+    - patch_file: "patches/0002-xray-socket-protection-result.patch"
+    - patch_file: "patches/0003-tribe-seamless-roaming.patch"
+    - patch_file: "patches/0005-tribe-bounded-recovery.patch"
+    - patch_file: "patches/0006-tribe-persistent-heal-soft-restart.patch"
+    - patch_file: "patches/0007-tribe-fresh-port-on-return.patch"
+    - patch_file: "patches/0008-tribe-logger-context-loss-gate.patch"
+    - patch_file: "patches/0009-tribe-userspace-direct-split.patch"
+    - patch_file: "patches/0010-tribe-upstream-http.patch"
+    - patch_file: "patches/0011-tribe-outbound-stats.patch"
+    - patch_file: "patches/0013-tribe-scan-probe.patch"
+    - patch_file: "patches/0014-tribe-scan-awg.patch"
+    - patch_file: "patches/0015-tribe-backend-restart-hook.patch"
   "3.1.4-tribe.11":
     # tribe.10 (all unchanged) + 0009: userspace direct split. The TUN wrapper hands TCP/UDP packets
     # whose destination is in the list (wgSetDirectSplit, a CIDR file) to a gVisor stack that

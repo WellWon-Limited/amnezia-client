@@ -94,6 +94,8 @@ deploy/data/macos/pf/amn.400.allowPIA.conf
 *.aar
 *.ap_
 *.aab
+# AVPN: the cut geo pair copied by client/cmake/android.cmake at configure time (recipes/tribe-xray-geo)
+client/android/assets/tribe-geo/
 
 # Files for the ART/Dalvik VM
 *.dex

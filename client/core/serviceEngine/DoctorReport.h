@@ -9,12 +9,19 @@
 // Спека: tribe-front docs/superpowers/specs/2026-07-17-doctor-v1-design.md.
 
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QMap>
+#include <QRegularExpression>
+#include <QSet>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include <algorithm>
+#include <cmath>
 
 namespace doctor {
 
@@ -558,6 +565,446 @@ inline QJsonObject buildReport(const QList<StageResult> &stages, const QJsonObje
     if (!extra.isEmpty())
         o.insert(QStringLiteral("extra"), extra);
     return o;
+}
+
+// ==== AVPN Scanner: the Doctor merged into «Ваше подключение» (plan scanner-client-plan.md v2.2 §3, §3.1;
+// REQ S8; openapi 1.5.0 DoctorCheckReport / DoctorScanSummary) ===============================================
+// The full check of «Проверить и отправить отчёт» runs the stages above with three differences, all
+// decided here: it never raises the VPN (with the VPN off the connect stage is skipped), it has no
+// alternatives stage, and its report is schema 5 with the Scanner's summary as `scan`. The report goes to
+// the support thread ALWAYS (the on-disk queue of TribeSupportChat); its bench copy only when it passes the
+// server's strict rules below (a malformed one is never sent: the server answers 400 and drops it).
+
+// Connect stage of a check with the VPN off: the Scanner never starts the VPN for a report (§32 п. 1).
+inline StageResult connectStageNoVpn()
+{
+    StageResult r; r.id = QStringLiteral("connect");
+    r.status = Skip;
+    r.data.insert(QStringLiteral("could_connect"), false);
+    r.data.insert(QStringLiteral("skipped"), QStringLiteral("vpn_off"));
+    r.note = QStringLiteral("VPN не подключён — подключение не проверялось");
+    return r;
+}
+
+// A stage that needs the live connection, in a check with the VPN off.
+inline StageResult stageSkippedNoVpn(const QString &id)
+{
+    StageResult r; r.id = id;
+    r.status = Skip;
+    r.data.insert(QStringLiteral("skipped"), QStringLiteral("vpn_off"));
+    r.note = QStringLiteral("Не проверялось — VPN не подключён");
+    return r;
+}
+
+// Speed of the check = ONE sized /v1/probe through the live tunnel (TribeScanner::sampleSpeed, scan_check_speed_bytes,
+// plan §3: the bench host is cut by provider profiles). A full body with the device-verified digest gives
+// down_mbit = bytes * 8 / ms / 1000 through speedStage (no loaded-RTT pair: no bufferbloat verdict); the sample's
+// errors become stages the schema allows (status -1..2, a note, a stable code in data):
+//  no_tunnel -> skipped (no working connection), busy / no_base / no_token -> skipped, budget -> skipped (the
+//  cellular hour cannot cover it), transport (no 200) -> Warn, a body that is short or fails its digest -> Warn.
+inline StageResult speedStageFromSample(bool ok, qint64 bytes, qint64 ms, bool digestOk, const QString &error)
+{
+    if (!ok) {
+        if (error == QLatin1String("no_tunnel"))
+            return speedStageSkippedNoConnection();
+        StageResult r = speedStage(-1, 0, 0);
+        r.data.insert(QStringLiteral("method"), QStringLiteral("probe"));
+        if (error == QLatin1String("transport")) {
+            r.status = Warn;
+            r.data.insert(QStringLiteral("error"), QStringLiteral("transport"));
+            r.note = QStringLiteral("Замер скорости не удался — сервер не ответил на загрузку");
+            return r;
+        }
+        const QString code = (error == QLatin1String("busy") || error == QLatin1String("no_base") || error == QLatin1String("no_token")
+                              || error == QLatin1String("budget"))
+                                 ? error : QStringLiteral("other");
+        r.data.insert(QStringLiteral("skipped"), code);
+        r.note = code == QLatin1String("budget") ? QStringLiteral("Скорость не проверялась — лимит трафика в мобильной сети")
+                                                 : QStringLiteral("Скорость не проверялась");
+        return r;
+    }
+    if (!digestOk || bytes <= 0 || ms <= 0) {
+        StageResult r = speedStage(-1, 0, 0);
+        r.status = Warn;
+        r.data.insert(QStringLiteral("method"), QStringLiteral("probe"));
+        r.data.insert(QStringLiteral("error"), QStringLiteral("digest"));
+        r.data.insert(QStringLiteral("bytes"), double(qMax<qint64>(0, bytes)));
+        r.note = QStringLiteral("Замер скорости прервался — данные пришли не полностью");
+        return r;
+    }
+    const double mbit = double(bytes) * 8.0 / double(ms) / 1000.0;
+    StageResult r = speedStage(mbit, 0, 0);
+    r.data.insert(QStringLiteral("method"), QStringLiteral("probe"));
+    r.data.insert(QStringLiteral("bytes"), double(bytes));
+    r.data.insert(QStringLiteral("ms"), double(ms));
+    return r;
+}
+
+// The card's «Скорость» (bars of LoadBars + one word) from the speed stage.
+struct SpeedCardFact {
+    bool known = false;
+    int bars = 0;
+    QString word; // "comfortable" | "slow"
+};
+inline SpeedCardFact speedCardFact(double downMbit, int status)
+{
+    SpeedCardFact f;
+    if (downMbit < 0 || status == Skip)
+        return f;
+    f.known = true;
+    f.bars = downMbit >= 20.0 ? 5 : downMbit >= 5.0 ? 3 : downMbit > 0.0 ? 2 : 0;
+    f.word = (status == Ok && downMbit >= 5.0) ? QStringLiteral("comfortable") : QStringLiteral("slow");
+    return f;
+}
+
+// The four home chips of the card (Telegram, YouTube, Instagram, WhatsApp) from AvpnEngineQml's
+// serviceStatus ({key, state, stale}): -1 = unknown. A chip measured on another connection (stale) is
+// unknown here; anyFresh = at least one chip ran on THIS connection (else the card says «проверим по кнопке»).
+inline QList<int> scanChipStates(const QVariantList &serviceStatus, bool *anyFresh = nullptr)
+{
+    static const QStringList order{QStringLiteral("telegram"), QStringLiteral("youtube"),
+                                   QStringLiteral("instagram"), QStringLiteral("whatsapp")};
+    QList<int> out(order.size(), -1);
+    bool fresh = false;
+    for (const QVariant &v : serviceStatus) {
+        const QVariantMap m = v.toMap();
+        const int i = int(order.indexOf(m.value(QStringLiteral("key")).toString()));
+        if (i < 0 || m.value(QStringLiteral("stale"), false).toBool())
+            continue;
+        const int st = m.value(QStringLiteral("state"), -1).toInt();
+        if (st < 0)
+            continue;
+        out[i] = st;
+        fresh = true;
+    }
+    if (anyFresh)
+        *anyFresh = fresh;
+    return out;
+}
+
+inline constexpr int kCheckReportMaxBytes = 256 * 1024; // BENCH_DOCTOR_REPORT_MAX_BYTES (413 above)
+inline constexpr int kCheckStageMax = 12;
+inline constexpr int kCheckNoteMax = 500;
+inline constexpr int kCheckSummaryMax = 4000;
+
+inline const QSet<QString> &checkStageIds()
+{
+    static const QSet<QString> ids{QStringLiteral("network"), QStringLiteral("connect"), QStringLiteral("servers"),
+                                   QStringLiteral("services"), QStringLiteral("rusplit"), QStringLiteral("speed")};
+    return ids;
+}
+
+// Schema 5 (DoctorCheckReport): {type:"doctor", schema:5, mode:"check", stages[<=12], summary, scan, extra}.
+// Only the six check stages go in (no `altnodes`); note <= 500, summary <= 4000; `scan` only when the
+// Scanner has a summary (the schema has no null for it).
+inline QJsonObject buildCheckReport(const QList<StageResult> &stages, const QJsonObject &extra, const QJsonObject &scan)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("type"), QStringLiteral("doctor"));
+    o.insert(QStringLiteral("schema"), 5);
+    o.insert(QStringLiteral("mode"), QStringLiteral("check"));
+    QJsonArray arr;
+    QList<StageResult> kept;
+    QSet<QString> seen;
+    for (const StageResult &s : stages) {
+        if (!checkStageIds().contains(s.id) || seen.contains(s.id) || arr.size() >= kCheckStageMax)
+            continue;
+        seen.insert(s.id);
+        kept << s;
+        QJsonObject so = s.data;
+        so.insert(QStringLiteral("id"), s.id);
+        so.insert(QStringLiteral("status"), qBound(int(Skip), s.status, int(Bad)));
+        so.insert(QStringLiteral("note"), s.note.left(kCheckNoteMax));
+        arr.append(so);
+    }
+    o.insert(QStringLiteral("stages"), arr);
+    o.insert(QStringLiteral("summary"), humanSummary(kept).left(kCheckSummaryMax));
+    if (!scan.isEmpty())
+        o.insert(QStringLiteral("scan"), scan);
+    if (!extra.isEmpty())
+        o.insert(QStringLiteral("extra"), extra);
+    return o;
+}
+
+inline int checkReportBytes(const QJsonObject &o)
+{
+    return int(QJsonDocument(o).toJson(QJsonDocument::Compact).size());
+}
+
+// Over the cap: the free-form `extra` gives way first (the full bench, then its biggest keys, then all of
+// it); stages, summary and scan are never cut here.
+inline QJsonObject fitCheckReport(QJsonObject o, int capBytes = kCheckReportMaxBytes)
+{
+    if (checkReportBytes(o) <= capBytes || !o.contains(QStringLiteral("extra")))
+        return o;
+    QJsonObject extra = o.value(QStringLiteral("extra")).toObject();
+    for (const QString &k : {QStringLiteral("bench"), QStringLiteral("reliability_ring"), QStringLiteral("switch_log"),
+                             QStringLiteral("services")}) {
+        extra.remove(k);
+        o.insert(QStringLiteral("extra"), extra);
+        if (checkReportBytes(o) <= capBytes)
+            return o;
+    }
+    while (!extra.isEmpty()) {
+        QString biggest;
+        int size = -1;
+        for (auto it = extra.constBegin(); it != extra.constEnd(); ++it) {
+            const int n = int(QJsonDocument(QJsonArray{it.value()}).toJson(QJsonDocument::Compact).size());
+            if (n > size) { size = n; biggest = it.key(); }
+        }
+        extra.remove(biggest);
+        o.insert(QStringLiteral("extra"), extra);
+        if (checkReportBytes(o) <= capBytes)
+            return o;
+    }
+    o.remove(QStringLiteral("extra"));
+    return o;
+}
+
+namespace detail {
+inline bool jsonIntIn(const QJsonValue &v, double lo, double hi)
+{
+    if (!v.isDouble())
+        return false;
+    const double d = v.toDouble();
+    return std::isfinite(d) && d == std::floor(d) && d >= lo && d <= hi;
+}
+inline bool matches(const QString &pattern, const QString &s)
+{
+    return QRegularExpression(QRegularExpression::anchoredPattern(pattern)).match(s).hasMatch();
+}
+inline bool fail(QString *why, const QString &w)
+{
+    if (why)
+        *why = w;
+    return false;
+}
+// As the server's scan.py _NETWORK_KEY_RE: an ASN never starts with 0.
+inline const char *kNetworkKeyPattern =
+    "cell:[0-9]{3}-[0-9]{2,3}:(2g|3g|4g|5g|unknown)|cell:asn:[1-9][0-9]{0,9}:(2g|3g|4g|5g|unknown)|wifi:asn:[1-9][0-9]{0,9}|wifi|unknown";
+inline const char *kCodePattern = "[a-z][a-z0-9_]{0,31}";
+} // namespace detail
+
+// openapi NetworkKey: the operator-level key in full (a bare class such as "cellular" or "cell" is refused).
+inline bool checkNetworkKeyValid(const QString &k)
+{
+    if (k.size() > 48 || !detail::matches(QLatin1String(detail::kNetworkKeyPattern), k))
+        return false;
+    // ASN 1..4294967295 (the pattern allows up to 10 digits).
+    const QRegularExpressionMatch m = QRegularExpression(QStringLiteral("asn:([0-9]{1,10})")).match(k);
+    if (m.hasMatch()) {
+        const qint64 asn = m.captured(1).toLongLong();
+        if (asn < 1 || asn > 4294967295LL)
+            return false;
+    }
+    return true;
+}
+
+// openapi DoctorScanSummary (additionalProperties false at every level): aggregates and candidate ids only.
+// Contract 1.7.0 added `seats_requested` (0..48) and the row's `evidence` (direct | exclusion); ScanMachine.h
+// buildSummary writes both, so the key lists here must follow the server's schema exactly - a key missing here
+// costs every report its `scan` block (scanCheckSubmit drops a summary this validator refuses). The contract
+// between the two files is tests/scan_summary_contract_check.cpp (the real machine's summaries through this).
+inline bool scanSummaryValid(const QJsonObject &s, QString *why = nullptr)
+{
+    using namespace detail;
+    static const QSet<QString> keys{QStringLiteral("schema"), QStringLiteral("network_key"), QStringLiteral("manifest_revision"),
+                                    QStringLiteral("candidates"), QStringLiteral("counts"), QStringLiteral("top"),
+                                    QStringLiteral("not_verified_reasons"), QStringLiteral("stop_reason"),
+                                    QStringLiteral("duration_ms"), QStringLiteral("bytes_spent"), QStringLiteral("caps"),
+                                    QStringLiteral("seats_requested")};
+    static const QSet<QString> classes{QStringLiteral("works"), QStringLiteral("slow"), QStringLiteral("no_data"),
+                                       QStringLiteral("unreachable"), QStringLiteral("leak"), QStringLiteral("not_verified")};
+    static const QSet<QString> rowKeys{QStringLiteral("kind"), QStringLiteral("id"), QStringLiteral("class"),
+                                       QStringLiteral("ms"), QStringLiteral("probe"), QStringLiteral("evidence")};
+    static const QSet<QString> probes{QStringLiteral("tunnel"), QStringLiteral("full"), QStringLiteral("leg"),
+                                      QStringLiteral("awg_mini")};
+    static const QSet<QString> evidences{QStringLiteral("direct"), QStringLiteral("exclusion")};
+    for (auto it = s.constBegin(); it != s.constEnd(); ++it)
+        if (!keys.contains(it.key()))
+            return fail(why, QStringLiteral("scan.unknown_key:") + it.key().left(32));
+    if (!jsonIntIn(s.value(QStringLiteral("schema")), 1, 1))
+        return fail(why, QStringLiteral("scan.schema"));
+    if (!s.value(QStringLiteral("network_key")).isString()
+        || !checkNetworkKeyValid(s.value(QStringLiteral("network_key")).toString()))
+        return fail(why, QStringLiteral("scan.network_key"));
+    if (s.contains(QStringLiteral("manifest_revision")) && !jsonIntIn(s.value(QStringLiteral("manifest_revision")), 0, 9007199254740991.0))
+        return fail(why, QStringLiteral("scan.manifest_revision"));
+    if (!jsonIntIn(s.value(QStringLiteral("candidates")), 0, 1024))
+        return fail(why, QStringLiteral("scan.candidates"));
+    if (!s.value(QStringLiteral("counts")).isObject())
+        return fail(why, QStringLiteral("scan.counts"));
+    const QJsonObject counts = s.value(QStringLiteral("counts")).toObject();
+    for (auto it = counts.constBegin(); it != counts.constEnd(); ++it)
+        if (!classes.contains(it.key()) || !jsonIntIn(it.value(), 0, 1024))
+            return fail(why, QStringLiteral("scan.counts.") + it.key().left(32));
+    if (s.contains(QStringLiteral("top"))) {
+        if (!s.value(QStringLiteral("top")).isArray() || s.value(QStringLiteral("top")).toArray().size() > 20)
+            return fail(why, QStringLiteral("scan.top"));
+        for (const QJsonValue &v : s.value(QStringLiteral("top")).toArray()) {
+            if (!v.isObject())
+                return fail(why, QStringLiteral("scan.top.row"));
+            const QJsonObject r = v.toObject();
+            for (auto it = r.constBegin(); it != r.constEnd(); ++it)
+                if (!rowKeys.contains(it.key()))
+                    return fail(why, QStringLiteral("scan.top.unknown_key:") + it.key().left(32));
+            const QString kind = r.value(QStringLiteral("kind")).toString();
+            const QString id = r.value(QStringLiteral("id")).toString();
+            if (kind != QLatin1String("node") && kind != QLatin1String("upstream"))
+                return fail(why, QStringLiteral("scan.top.kind"));
+            const bool idOk = id.size() <= 48
+                && (kind == QLatin1String("node") ? matches(QStringLiteral("[0-9]{1,10}(:[a-z0-9_]{1,16}){0,2}"), id)
+                                                  : matches(QStringLiteral("[0-9a-f]{16}"), id));
+            if (!r.value(QStringLiteral("id")).isString() || !idOk)
+                return fail(why, QStringLiteral("scan.top.id"));
+            if (!classes.contains(r.value(QStringLiteral("class")).toString()))
+                return fail(why, QStringLiteral("scan.top.class"));
+            if (r.contains(QStringLiteral("ms")) && !jsonIntIn(r.value(QStringLiteral("ms")), 0, 600000))
+                return fail(why, QStringLiteral("scan.top.ms"));
+            if (r.contains(QStringLiteral("probe"))
+                && (!r.value(QStringLiteral("probe")).isString() || !probes.contains(r.value(QStringLiteral("probe")).toString())))
+                return fail(why, QStringLiteral("scan.top.probe"));
+            if (r.contains(QStringLiteral("evidence"))
+                && (!r.value(QStringLiteral("evidence")).isString() || !evidences.contains(r.value(QStringLiteral("evidence")).toString())))
+                return fail(why, QStringLiteral("scan.top.evidence"));
+        }
+    }
+    if (s.contains(QStringLiteral("not_verified_reasons"))) {
+        if (!s.value(QStringLiteral("not_verified_reasons")).isObject())
+            return fail(why, QStringLiteral("scan.not_verified_reasons"));
+        const QJsonObject nv = s.value(QStringLiteral("not_verified_reasons")).toObject();
+        if (nv.size() > 16)
+            return fail(why, QStringLiteral("scan.not_verified_reasons.size"));
+        for (auto it = nv.constBegin(); it != nv.constEnd(); ++it)
+            if (!matches(QLatin1String(kCodePattern), it.key()) || !jsonIntIn(it.value(), 0, 1024))
+                return fail(why, QStringLiteral("scan.not_verified_reasons.") + it.key().left(32));
+    }
+    if (s.contains(QStringLiteral("stop_reason"))
+        && (!s.value(QStringLiteral("stop_reason")).isString()
+            || !matches(QLatin1String(kCodePattern), s.value(QStringLiteral("stop_reason")).toString())))
+        return fail(why, QStringLiteral("scan.stop_reason"));
+    if (s.contains(QStringLiteral("duration_ms")) && !jsonIntIn(s.value(QStringLiteral("duration_ms")), 0, 600000))
+        return fail(why, QStringLiteral("scan.duration_ms"));
+    if (s.contains(QStringLiteral("bytes_spent")) && !jsonIntIn(s.value(QStringLiteral("bytes_spent")), 0, 1073741824.0))
+        return fail(why, QStringLiteral("scan.bytes_spent"));
+    if (s.contains(QStringLiteral("seats_requested")) && !jsonIntIn(s.value(QStringLiteral("seats_requested")), 0, 48))
+        return fail(why, QStringLiteral("scan.seats_requested"));
+    if (s.contains(QStringLiteral("caps"))) {
+        if (!s.value(QStringLiteral("caps")).isObject())
+            return fail(why, QStringLiteral("scan.caps"));
+        const QJsonObject caps = s.value(QStringLiteral("caps")).toObject();
+        if (caps.size() > 8)
+            return fail(why, QStringLiteral("scan.caps.size"));
+        for (auto it = caps.constBegin(); it != caps.constEnd(); ++it)
+            if (!matches(QLatin1String(kCodePattern), it.key()) || !it.value().isBool())
+                return fail(why, QStringLiteral("scan.caps.") + it.key().left(32));
+    }
+    return true;
+}
+
+// The whole report as the server validates it (type doctor + schema 5): required type/schema/mode/stages,
+// stage ids of the check only and unique, status -1..2, note <= 500, summary <= 4000, `scan` strict,
+// `extra` an object, <= 256 KiB compact.
+inline bool checkReportValid(const QJsonObject &o, QString *why = nullptr)
+{
+    using namespace detail;
+    if (o.value(QStringLiteral("type")).toString() != QLatin1String("doctor"))
+        return fail(why, QStringLiteral("type"));
+    if (!jsonIntIn(o.value(QStringLiteral("schema")), 5, 5))
+        return fail(why, QStringLiteral("schema"));
+    if (!o.value(QStringLiteral("mode")).isString() || !matches(QLatin1String(kCodePattern), o.value(QStringLiteral("mode")).toString()))
+        return fail(why, QStringLiteral("mode"));
+    if (!o.value(QStringLiteral("stages")).isArray())
+        return fail(why, QStringLiteral("stages"));
+    const QJsonArray stages = o.value(QStringLiteral("stages")).toArray();
+    if (stages.size() > kCheckStageMax)
+        return fail(why, QStringLiteral("stages.size"));
+    QSet<QString> seen;
+    for (const QJsonValue &v : stages) {
+        if (!v.isObject())
+            return fail(why, QStringLiteral("stages.entry"));
+        const QJsonObject st = v.toObject();
+        const QString id = st.value(QStringLiteral("id")).toString();
+        if (!st.value(QStringLiteral("id")).isString() || !matches(QLatin1String(kCodePattern), id)
+            || !checkStageIds().contains(id) || seen.contains(id))
+            return fail(why, QStringLiteral("stages.id"));
+        seen.insert(id);
+        if (!jsonIntIn(st.value(QStringLiteral("status")), -1, 2))
+            return fail(why, QStringLiteral("stages.status"));
+        if (st.contains(QStringLiteral("note"))
+            && (!st.value(QStringLiteral("note")).isString() || st.value(QStringLiteral("note")).toString().size() > kCheckNoteMax))
+            return fail(why, QStringLiteral("stages.note"));
+    }
+    if (o.contains(QStringLiteral("summary"))
+        && (!o.value(QStringLiteral("summary")).isString() || o.value(QStringLiteral("summary")).toString().size() > kCheckSummaryMax))
+        return fail(why, QStringLiteral("summary"));
+    if (o.contains(QStringLiteral("scan"))) {
+        if (!o.value(QStringLiteral("scan")).isObject())
+            return fail(why, QStringLiteral("scan"));
+        if (!scanSummaryValid(o.value(QStringLiteral("scan")).toObject(), why))
+            return false;
+    }
+    if (o.contains(QStringLiteral("extra")) && !o.value(QStringLiteral("extra")).isObject())
+        return fail(why, QStringLiteral("extra"));
+    if (checkReportBytes(o) > kCheckReportMaxBytes)
+        return fail(why, QStringLiteral("size"));
+    return true;
+}
+
+// diag.log of the check for the support thread: the report JSON first (never cut), then the app's
+// diagnostics, the whole at most maxBytes of UTF-8 (the attachment cap; 413 above).
+inline QString checkDiagText(const QString &reportJson, const QString &diagReport, int maxBytes)
+{
+    QString head = QStringLiteral("=== SCANNER CHECK (doctor schema 5) ===\n") + reportJson + QStringLiteral("\n\n");
+    QByteArray out = head.toUtf8();
+    if (out.size() >= maxBytes)
+        return QString::fromUtf8(out.left(maxBytes));
+    const QByteArray rest = diagReport.toUtf8();
+    const QByteArray marker = QByteArrayLiteral("\n[truncated]\n");
+    if (out.size() + rest.size() <= maxBytes)
+        return QString::fromUtf8(out + rest);
+    int room = maxBytes - int(out.size()) - int(marker.size());
+    if (room <= 0)
+        return QString::fromUtf8(out);
+    // Cut on a UTF-8 boundary (never inside a multi-byte sequence).
+    while (room > 0 && (uchar(rest.at(room)) & 0xC0) == 0x80)
+        --room;
+    return QString::fromUtf8(out + rest.left(room) + marker);
+}
+
+// The shade of the check follows the SUPPORT-thread result of THIS report (plan §3.1; queue lane F3/F4):
+//  Sent     - both support parts (text, log) acknowledged («Отчёт отправлен в поддержку»), also for a report the
+//             queue could not write and sent once directly (sent_unsaved) and for one whose bench copy alone was
+//             refused; the bench part never decides the shade (a 429 there holds it for an hour);
+//  NotSaved - not written to disk and not confirmed: not_saved, or unsaved_sending once the Send bound passed,
+//             or an id the queue does not know - never «уйдёт», nothing survives the app (report_check_not_saved);
+//  Rejected - the server refused the text or the log terminally; the payload stays in the queue's rejected
+//             store and is retried after an app update (report_check_rejected);
+//  Queued   - on disk and not yet delivered when the bound passed («Отчёт уйдёт, когда появится связь»);
+//  Wait     - otherwise (the queue's next status decides).
+enum class CheckDelivery { Wait, Sent, Queued, NotSaved, Rejected };
+inline CheckDelivery checkDelivery(const QString &result, const QString &textPart, const QString &logPart,
+                                   bool boundPassed)
+{
+    const bool textDone = textPart.isEmpty() || textPart == QLatin1String("acked");
+    const bool logDone = logPart.isEmpty() || logPart == QLatin1String("acked");
+    const bool anySupport = !textPart.isEmpty() || !logPart.isEmpty();
+    if (anySupport && textDone && logDone)
+        return CheckDelivery::Sent;
+    if (result == QLatin1String("delivered") || result == QLatin1String("sent_unsaved"))
+        return CheckDelivery::Sent;
+    if (result == QLatin1String("not_saved") || result == QLatin1String("unknown"))
+        return CheckDelivery::NotSaved;
+    const bool supportRejected = textPart == QLatin1String("rejected") || logPart == QLatin1String("rejected");
+    if (result == QLatin1String("rejected"))
+        return CheckDelivery::Rejected; // a refused bench alone with text + log acked was Sent above
+    if (!boundPassed)
+        return CheckDelivery::Wait;
+    if (result == QLatin1String("unsaved_sending"))
+        return CheckDelivery::NotSaved;
+    if (supportRejected)
+        return CheckDelivery::Rejected;
+    return CheckDelivery::Queued;
 }
 
 } // namespace doctor

@@ -90,6 +90,8 @@
         <file>Tribe/Theme.qml</file>
         <file>Tribe/Dev.qml</file>
         <file>Tribe/Haptic.qml</file>
+        <file>Tribe/ScanTexts.qml</file>
+        <file>Tribe/ScanSwitches.qml</file>
         <file>Tribe/components/TribeButton.qml</file>
         <file>Tribe/components/TribeCard.qml</file>
         <file>Tribe/components/TribeToggle.qml</file>
@@ -120,6 +122,12 @@
         <file>Tribe/components/TribeTransportSelector.qml</file>
         <file>Tribe/components/TribeLabelBadge.qml</file>
         <file>Tribe/components/TribeTransportBadge.qml</file>
+        <file>Tribe/components/TribeScanRow.qml</file>
+        <file>Tribe/components/TribeConnectionCard.qml</file>
+        <file>Tribe/components/TribeCountryMenu.qml</file>
+        <file>Tribe/components/TribeScanBar.qml</file>
+        <file>Tribe/components/TribeShade.qml</file>
+        <file>Tribe/components/TribeShadeHost.qml</file>
         <file>Tribe/Pages/PageConnectTribe.qml</file>
         <file>Tribe/Pages/PageLocationsTribe.qml</file>
         <file>Tribe/Pages/PageAccountTribe.qml</file>
@@ -131,6 +139,7 @@
         <file>Tribe/Pages/PageAdminTribe.qml</file>
         <file>Tribe/Pages/PageLegalTribe.qml</file>
         <file>Tribe/Pages/PageServersTribe.qml</file>
+        <file>Tribe/Pages/PageScannerTribe.qml</file>
         <!-- AVPN in-app Legal: fallback-снапшоты юр-документов (генерятся в tribe-backend
              scripts/build_legal_md.py; свежий текст приложение качает с tribevpn.com/legal/*.md) -->
         <file>Tribe/legal/privacy.ru.md</file>

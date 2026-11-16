@@ -51,6 +51,11 @@ class Daemon : public QObject {
     return wgutils() ? wgutils()->rebindEndpointSocket() : false;
   }
 
+  // AVPN (Scanner): the live tunnel's peer for the probe host (service/server/tribe_scan.cpp), so an
+  // AmneziaWG mini-probe never targets the node of the live tunnel. false = no tunnel is up; true = one is,
+  // with its peer public key (base64) and endpoint ("ip:port", "[ip6]:port") as configured.
+  bool liveTunnelPeer(QString* publicKey, QString* endpoint) const;
+
  signals:
   void connected(const QString& pubkey);
   /**

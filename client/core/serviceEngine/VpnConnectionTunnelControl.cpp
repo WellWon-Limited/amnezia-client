@@ -7,6 +7,9 @@
 #include "BypassListService.h" // AVPN server-driven АнтиВПН (Task 10): split-DNS из BypassListStore
 #include "NodeRotation.h"      // AVPN awg31-xray-v1: protoOf/isXrayProto — диспетчер по proto ноды
 #include "XrayConfigBuilder.h" // AVPN awg31-xray-v1: конфиг xray (VLESS+Reality) для DockerContainer::Xray
+#include "UpstreamEngine.h"      // AVPN upstream nodes: envelope pieces, standby candidate, tunables
+#include "UpstreamLeaseClient.h" // AVPN upstream nodes: lease / standby / probe I/O (Qt only)
+#include "XrayProfileSanitizer.h"
 
 #include <QDebug>                       // AVPN awg31-xray-v1: qWarning при фильтрации wg-quick ключей
 #include <QJsonArray>                   // AVPN split-DNS: список RU-суффиксов в корень cfg
@@ -14,7 +17,7 @@
 #include "TuningStore.h"                // AVPN backend-first (T20): server-tunable пороги
 #include "ConnectTunables.h"            // AVPN: клампованные handshake-пороги (ревью 2026-07-11)
 #include "core/utils/constants/configKeys.h" // AVPN seamless roaming: ключи roam* в корень cfg
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER // macOS desktop; Windows since release C (UpstreamEngine.h)
     // AVPN awg31-xray-v1 (этап D2): статистика xray-пути демона через QtRO (xrayRuntimeStatus), async
     #include "core/utils/ipcClient.h"
     #include <QRemoteObjectPendingCall>
@@ -31,7 +34,26 @@
 #endif
 
 #include <QDateTime>                    // AVPN: посев handshake-epoch ≈ now на Connected (анти-ложный-DEAD)
+#include <QElapsedTimer>
 #include <QMetaObject>
+#include <QRandomGenerator>
+#include <QTimer>
+
+#include <utility>
+#if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
+    #include <time.h> // AVPN upstream nodes: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - runs during sleep
+#elif defined(Q_OS_ANDROID)
+    #include <time.h> // AVPN release C: clock_gettime(CLOCK_BOOTTIME) - counts in suspend
+    #include "UpstreamStatusWire.h" // AVPN release C: the hand-over message (android-ipc-contract.md §2)
+#elif defined(Q_OS_WIN)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h> // AVPN release C: GetTickCount64 - counts across sleep and hibernation
+#endif
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // AVPN (BUG-4 auto-heal): прямой fire-and-forget {"type":"rebind"} демону (паттерн BUG-6)
     #include <QFile>
@@ -45,6 +67,43 @@ namespace avpn {
 VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObject *parent)
     : QObject(parent), m_conn(conn)
 {
+    // AVPN upstream nodes: the lease I/O and the app-side owner. Decision B: the macOS GUI process owns
+    // renewals (the root daemon has no TLS backend and no token); on iOS / macOS NE the extension does.
+    m_leaseClient = new UpstreamLeaseClient(this);
+    m_upOwner.setIo(m_leaseClient);
+    {
+        UpstreamLeaseOwner::Options o;
+#if AVPN_UPSTREAM_GUI_OWNER
+        o.keepOwnership = true;
+#endif
+        o.scope = upstreamMeterScopeForBuild();
+        m_upOwner.setOptions(o);
+    }
+    m_leaseClient->onAcquire = [this](quint64 id, const AcquireReply &r) {
+        if (r.kind == LeaseReplyKind::Granted && r.grant.probe.present && r.grant.probe.accessAsn > 0
+            && m_upOwner.active() && !m_upOwner.provisionalPending())
+            emit upstreamAccessFacts(r.grant.probe.accessAsn);
+        applyUpstreamEvents(m_upOwner.onAcquireReply(id, r, upstreamClockMs()));
+    };
+    m_leaseClient->onRenew = [this](quint64 id, const RenewReply &r) {
+        // Lab 14.11 D2: a renewal our server rejects as malformed is a contract bug - journaled with its
+        // code (the machine leaves the node after kUpstreamRenewRejectedLimit of them in a row).
+        if (upstreamRenewRejected(r))
+            qWarning().noquote() << QStringLiteral("avpn upstream: renew rejected by the server code=%1")
+                                        .arg(QLatin1String(r.kind == LeaseReplyKind::Refused
+                                                               ? upstreamErrorCodeName(r.error.code) : "http_422"));
+        applyUpstreamEvents(m_upOwner.onRenewReply(id, r, upstreamClockMs(), QDateTime::currentMSecsSinceEpoch()));
+    };
+    m_leaseClient->onReleaseDone = [this](quint64 id) {
+        // Contract §6: the core stops only after the release answered (or its 1.5 s bound passed).
+        if (m_stopAfterRelease && id == m_stopReleaseId) {
+            m_stopAfterRelease = false;
+            if (m_conn)
+                QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
+            if (m_afterRelease)
+                std::exchange(m_afterRelease, {})();
+        }
+    };
     if (m_conn) {
         connect(m_conn, &VpnConnection::bytesChanged, this,
                 &VpnConnectionTunnelControl::onBytesChanged, Qt::QueuedConnection);
@@ -64,7 +123,7 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
                 },
                 Qt::QueuedConnection);
     }
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
     // AVPN awg31-xray-v1 (этап D2): демон отдаёт кумулятивы rx/tx utun tun2socks по IPC — поллим,
     // пока поднят xray (старт в up(), стоп в down()). Интервал ~2с: чаще health-тика (4с), чтобы
     // HealthLoop видел свежие соседние замеры.
@@ -122,7 +181,7 @@ bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QSt
         Q_ARG(QJsonObject, cfg));
 }
 
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
 // AVPN awg31-xray-v1 (этап D2): один async-замер статистики xray-пути демона. Реплика на живом
 // xray-туннеле уже инициализирована (XrayProtocol::start ходил через неё) — withInterface не ждёт;
 // ответ — QRemoteObjectPendingCallWatcher (никакого waitForFinished на GUI-потоке, §1). Демон
@@ -159,6 +218,10 @@ void VpnConnectionTunnelControl::pollXrayRuntimeStatus()
                     m_stats.rxBytes = rx;
                     m_stats.txBytes = tx;
                     m_stats.valid = true;
+                    // AVPN upstream nodes (contract §4, scope "tunnel"): the lease meter reads the same
+                    // cumulatives (utun22 since the session's start; re-based after an adoption).
+                    if (m_upOwner.active())
+                        m_upOwner.onBytes(rx, tx);
                 });
     });
 }
@@ -168,7 +231,7 @@ void VpnConnectionTunnelControl::pollXrayRuntimeStatus()
 // nested QEventLoop (§1); идемпотентно (повторный вызов при уже известном xray — no-op).
 void VpnConnectionTunnelControl::adoptXrayIfRunning()
 {
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
     if (isXrayProto(m_lastUpProto))
         return; // путь уже опознан как xray — поллинг идёт
     IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
@@ -192,6 +255,9 @@ void VpnConnectionTunnelControl::adoptXrayIfRunning()
                     if (m_xrayStatsTimer)
                         m_xrayStatsTimer->start();
                     qInfo() << "avpn: adopted live xray tunnel — runtime stats polling started";
+                    // AVPN upstream nodes (point 9, §19): the session may be an upstream one this GUI
+                    // started before its restart (its record names the node and the session start).
+                    adoptUpstreamFromRecord(qint64(o.value(QStringLiteral("started_at_ms")).toDouble()));
                 });
     });
 #endif
@@ -203,6 +269,12 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         return TunnelResult::fail(QStringLiteral("no VpnConnection"));
     if (m_keys.privateKey.isEmpty())
         return TunnelResult::fail(QStringLiteral("client keys not set"));
+    // AVPN upstream nodes (decision A): a stub's config comes from the signed lease, never from the
+    // subscription - the acquire runs here, asynchronously, inside Connecting.
+    if (isUpstreamNode(node))
+        return upUpstream(sub, node);
+    if (m_upOwner.active())
+        applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs())); // an up() without down(): release
     // AVPN awg31-xray-v1: диспетчер по proto ноды. xray без параметров непригодна (парсер такую
     // отбрасывает; страховка для стейл-LKG) — честный отказ до туннеля.
     const bool xrayNode = isXrayProto(protoOf(node));
@@ -295,6 +367,12 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         QJsonObject xcfg = XrayConfigBuilder::build(sub, primary, m_keys);
         if (xcfg.isEmpty())
             return TunnelResult::fail(QStringLiteral("xray config build failed"));
+        // Contract §3: own Xray sessions get only the tunables the server sent (none = today's envelope).
+        {
+            const QJsonObject tun = xrayTunablesFor(/*upstreamSession=*/false);
+            if (!tun.isEmpty())
+                xcfg.insert(QStringLiteral("xray_tunables"), tun);
+        }
         m_lastConfigReport = XrayConfigBuilder::reportSummary(sub, primary);
         m_lastConfigReport.insert(QStringLiteral("split_on"), splitOnFact);
         m_lastConfigReport.insert(QStringLiteral("ru_node"), ruNodeFact);
@@ -303,7 +381,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         m_lastUpProto = QStringLiteral("xray");
         // Свежая сессия: статистика xray-пути начинается с нуля (кумулятивы демона/NE — с подъёма).
         m_stats = TunnelStats{};
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
         if (m_xrayStatsTimer)
             m_xrayStatsTimer->start();
 #endif
@@ -312,7 +390,7 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
         return TunnelResult::success();
     }
     m_lastUpProto = QStringLiteral("awg");
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
     if (m_xrayStatsTimer)
         m_xrayStatsTimer->stop();
 #endif
@@ -478,13 +556,351 @@ bool VpnConnectionTunnelControl::rebindSocket()
 
 void VpnConnectionTunnelControl::down()
 {
-    if (m_conn)
+    // AVPN upstream nodes (contract §6): the release with the final meter goes through the tunnel BEFORE
+    // the core stops - on macOS (the GUI owns the lease) the stop is sent when the release answered, at
+    // most kUpstreamReleaseTimeoutMs later (its own transfer bound; the facade's stop watchdog stays the
+    // backstop). Elsewhere the extension releases on its own stop.
+    m_stopAfterRelease = false;
+#if defined(Q_OS_IOS)
+    IosController::Instance()->clearUpstreamStart(); // abort: an armed, not yet taken start is dropped
+#endif
+    if (m_afterRelease)
+        std::exchange(m_afterRelease, {})(); // a repeated stop: what waited for the release runs now
+    if (m_upOwner.active()) {
+        applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
+        if (m_upOwner.releaseSent() && m_upOwner.options().keepOwnership && m_leaseClient) {
+            m_stopReleaseId = m_leaseClient->lastReleaseRequestId();
+            m_stopAfterRelease = true;
+        }
+    }
+    if (m_conn && !m_stopAfterRelease)
         QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
     m_stats = TunnelStats{};
-#if defined(Q_OS_MACOS) && !defined(MACOS_NE)
+#if AVPN_UPSTREAM_GUI_OWNER
     if (m_xrayStatsTimer)
         m_xrayStatsTimer->stop(); // AVPN awg31-xray-v1: сессия xray закрыта — поллинг демона не нужен
 #endif
+}
+
+// ---- AVPN upstream nodes (plan provider-pool v2, lane L1) ---------------------------------------------
+
+qint64 VpnConnectionTunnelControl::upstreamClockMs()
+{
+#if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
+    // Contract §7: keeps running while the device sleeps (same counter as mach_continuous_time).
+    return qint64(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL);
+#elif defined(Q_OS_ANDROID)
+    // Release C: the boot-time clock counts in suspend (Doze) - the same clock as the Xray service's
+    // SystemClock.elapsedRealtime (android-ipc-contract.md §5). CLOCK_MONOTONIC would stop in suspend.
+    struct timespec ts {};
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return qint64(ts.tv_sec) * 1000 + qint64(ts.tv_nsec) / 1000000;
+#elif defined(Q_OS_WIN)
+    // Release C: milliseconds since boot, sleep and hibernation included (QueryUnbiasedInterruptTime
+    // would exclude them; QElapsedTimer's performance counter is not documented to count across sleep).
+    return qint64(GetTickCount64());
+#else
+    // Linux: no upstream nodes (no Xray client); a monotonic reference.
+    return QElapsedTimer::msecsSinceReference();
+#endif
+}
+
+void VpnConnectionTunnelControl::configureUpstream(QNetworkAccessManager *nam, std::function<QString()> directBase,
+                                                   const QString &pubKeyHex, std::function<QString()> token)
+{
+    if (m_leaseClient)
+        m_leaseClient->configure(nam, std::move(directBase), pubKeyHex, std::move(token));
+}
+
+TunnelResult VpnConnectionTunnelControl::upUpstream(const Subscription &sub, const SubscriptionNode &node)
+{
+    if (!upstreamNodesEnabled())
+        return TunnelResult::fail(QStringLiteral("upstream nodes are switched off"));
+    if (!m_leaseClient || !m_leaseClient->configured())
+        return TunnelResult::fail(QStringLiteral("upstream lease client not configured"));
+    // splitTunnelType 0 on every platform (contract §1): the profile routes RU/direct itself;
+    // appendSplitTunnelingConfig in connectToVpn reads this flag from the store (queued, after us).
+    if (m_appStore)
+        m_appStore->setSitesSplitTunnelingEnabled(false);
+    m_upStub = node;
+    m_lastUpProto = QStringLiteral("xray");
+    m_stats = TunnelStats{};
+#if AVPN_UPSTREAM_GUI_OWNER
+    if (m_xrayStatsTimer)
+        m_xrayStatsTimer->stop(); // started with the core (bringUpUpstream)
+#endif
+    std::optional<StandbyCandidate> standby;
+    if (m_standbyPack) {
+        StandbyCandidate c;
+        QString why;
+        if (standbyCandidateFor(*m_standbyPack, node, sub.upstreamRevision, QDateTime::currentMSecsSinceEpoch(),
+                                upstreamStandbyMaxAgeSTuned(), c, &why))
+            standby = c;
+    }
+    {
+        UpstreamLeaseOwner::Options o = m_upOwner.options();
+        // How long a provisional session may run before its seat is confirmed through the tunnel: the data
+        // check's budget, at least one acquire round trip after the tunnel is up.
+        o.provisionalConfirmBudgetMs = qMax<qint64>(xrayVerifyTimeoutMsTuned(), upstreamAcquireTimeoutMsTuned() + 2000);
+        m_upOwner.setOptions(o);
+    }
+    m_lastConfigReport = XrayConfigBuilder::reportSummaryUpstream(node, false, meterScopeName(m_upOwner.options().scope));
+    m_lastConfigReport.insert(QStringLiteral("stage"), QStringLiteral("acquiring"));
+    m_lastConfigReport.insert(QStringLiteral("standby_usable"), standby.has_value());
+    qInfo() << "avpn upstream: acquiring a seat for" << node.nodeId << "standby" << standby.has_value();
+    applyUpstreamEvents(m_upOwner.begin(node, sub.upstreamRevision, standby, upstreamClockMs(),
+                                        QDateTime::currentMSecsSinceEpoch()));
+    return TunnelResult::success();
+}
+
+#if defined(Q_OS_IOS)
+// The bridge's view of contract §1 upstream_lease (IosNativePolicy.h::UpstreamLeaseEnvelope).
+static avpn_ios::UpstreamLeaseEnvelope iosLeaseEnvelope(const QJsonObject &l)
+{
+    avpn_ios::UpstreamLeaseEnvelope e;
+    e.leaseId = l.value(QStringLiteral("lease_id")).toString().toStdString();
+    e.renewToken = l.value(QStringLiteral("renew_token")).toString().toStdString();
+    e.apiBase = l.value(QStringLiteral("api_base")).toString().toStdString();
+    e.renewAfterS = l.value(QStringLiteral("renew_after_s")).toInteger();
+    e.ttlS = l.value(QStringLiteral("ttl_s")).toInteger();
+    e.expiresInMs = l.value(QStringLiteral("expires_in_ms")).toInteger();
+    e.seq = l.value(QStringLiteral("seq")).toInteger();
+    e.epoch = l.value(QStringLiteral("epoch")).toInteger();
+    e.revision = l.value(QStringLiteral("revision")).toInteger();
+    e.meterScope = l.value(QStringLiteral("meter_scope")).toString().toStdString();
+    for (const QJsonValue &t : l.value(QStringLiteral("meter_tags")).toArray())
+        e.meterTags.push_back(t.toString().toStdString());
+    return e;
+}
+#endif
+
+void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwnerEvent> &events)
+{
+    for (const UpstreamOwnerEvent &e : events) {
+        switch (e.kind) {
+        case UpstreamOwnerEventKind::BringUp:
+            bringUpUpstream(e);
+            break;
+        case UpstreamOwnerEventKind::StartFailed:
+            failUpstreamStart(e.code, e.detail);
+            break;
+        case UpstreamOwnerEventKind::Leave:
+            qWarning() << "avpn upstream: leaving" << m_upOwner.nodeId() << "lease" << e.code << e.detail;
+            emit upstreamLeaveRequested(e.code, e.detail);
+            break;
+        case UpstreamOwnerEventKind::LeaseConfirmed:
+            qInfo() << "avpn upstream: seat confirmed through the tunnel on" << m_upOwner.nodeId();
+            m_lastConfigReport.insert(QStringLiteral("stage"), QStringLiteral("confirmed"));
+            break;
+        case UpstreamOwnerEventKind::HandOver:
+#if defined(Q_OS_IOS)
+            // Contract §2: the provisional session's seat goes to the extension (upstream_lease_set).
+            if (!IosController::Instance()->sendUpstreamLeaseSet(iosLeaseEnvelope(e.lease)))
+                qWarning() << "avpn upstream: lease hand-over not sent (no live tunnel) - the seat lapses at TTL";
+#elif defined(Q_OS_ANDROID)
+            // Release C (decision A-1): the same message to the Xray service process, which renews from now
+            // on (android-ipc-contract.md §2); its reply comes back as AndroidController::upstreamLeaseEvent.
+            if (!AndroidController::instance()->sendUpstreamLeaseSet(upstreamLeaseSetMessage(e.lease)))
+                qWarning() << "avpn upstream: lease hand-over not sent (no bound service) - the seat lapses at TTL";
+#endif
+            emit upstreamLeaseHandover(e.lease);
+            break;
+        case UpstreamOwnerEventKind::Persist:
+#if AVPN_UPSTREAM_GUI_OWNER
+            QSettings().setValue(QLatin1String(kUpstreamLeaseRecordKey), e.record.toJson());
+#endif
+            break;
+        case UpstreamOwnerEventKind::ClearRecord:
+#if AVPN_UPSTREAM_GUI_OWNER
+            QSettings().remove(QLatin1String(kUpstreamLeaseRecordKey));
+#endif
+            break;
+        case UpstreamOwnerEventKind::RevisionChanged:
+            emit upstreamRevisionSeen(e.revision);
+            break;
+        case UpstreamOwnerEventKind::ConfigChanged:
+            qInfo() << "avpn upstream: the profile of" << m_upOwner.nodeId()
+                    << "changed on the server - applies at the next connect";
+            break;
+        }
+    }
+}
+
+void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
+{
+    // The bind of the local inbound with random session credentials (XrayProfileSanitizer; the runners
+    // keep non-empty credentials and re-pick the port). Never logged.
+    const auto randomHex = []() {
+        QByteArray b(16, Qt::Uninitialized);
+        QRandomGenerator::system()->generate(reinterpret_cast<quint32 *>(b.data()),
+                                             reinterpret_cast<quint32 *>(b.data() + b.size()));
+        return QString::fromLatin1(b.toHex());
+    };
+    LocalInboundBind bind;
+    bind.port = 10808;
+    bind.user = randomHex();
+    bind.password = randomHex();
+    ProfileSanitizerOptions opt;
+    if (m_upStub.upstream) {
+        QStringList declared;
+        for (const QString &p : m_upStub.upstream->protocols)
+            if (p.startsWith(QLatin1String("proto:")))
+                declared << p.mid(6);
+        opt.allowedOutboundProtocols = upstreamOutboundAllowlist(declared);
+    }
+    const SanitizedProfile sp = XrayProfileSanitizer::sanitize(e.config, e.configSha256, bind, opt);
+    if (!sp.ok()) {
+        qWarning() << "avpn upstream: profile of" << m_upStub.nodeId << "refused:" << sp.code() << sp.detail;
+        const QString code = QStringLiteral("profile_") + sp.code();
+        applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs())); // a granted seat is given back
+        failUpstreamStart(code);
+        return;
+    }
+    XrayConfigBuilder::UpstreamEnvelopeInput in;
+    in.nodeId = m_upStub.nodeId;
+    in.profileId = m_upStub.upstream ? m_upStub.upstream->profileId : m_upOwner.profileId();
+    in.configSha256 = e.configSha256;
+    in.coreConfig = sp.coreConfig;
+    in.dns = m_upStub.dns;
+    in.lease = e.provisional ? QJsonObject() : e.lease;
+    in.tunables = xrayTunablesFor(/*upstreamSession=*/true);
+    const QJsonObject xcfg = XrayConfigBuilder::buildUpstream(in);
+    if (xcfg.isEmpty()) {
+        applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
+        failUpstreamStart(QStringLiteral("envelope"));
+        return;
+    }
+    m_lastConfigReport = XrayConfigBuilder::reportSummaryUpstream(m_upStub, e.provisional,
+                                                                  meterScopeName(m_upOwner.options().scope));
+    m_lastConfigReport.insert(QStringLiteral("stage"), e.provisional ? QStringLiteral("provisional")
+                                                                       : QStringLiteral("granted"));
+    m_lastConfigReport.insert(QStringLiteral("split_on"), false);
+    m_lastConfigReport.insert(QStringLiteral("split_dns"), false);
+    m_lastConfigReport.insert(QStringLiteral("dns_fwd"), false);
+    m_lastUpProto = QStringLiteral("xray");
+    m_stats = TunnelStats{};
+#if AVPN_UPSTREAM_GUI_OWNER
+    if (m_xrayStatsTimer)
+        m_xrayStatsTimer->start();
+#endif
+#if defined(Q_OS_IOS)
+    // The bridge arms the NEXT connectVpn for this node (it matches tribeSessionMetadata.node_id) and
+    // writes tribeSessionMetadata / upstream_lease into the extension's provider configuration.
+    {
+        avpn_ios::UpstreamStartEnvelope start;
+        start.nodeId = m_upStub.nodeId.toStdString();
+        start.profileId = in.profileId.toStdString();
+        start.configSha256 = in.configSha256.toStdString();
+        start.hasLease = !e.provisional && !e.lease.isEmpty();
+        if (start.hasLease)
+            start.lease = iosLeaseEnvelope(e.lease);
+        if (!IosController::Instance()->setUpstreamStart(start)) {
+            applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
+            failUpstreamStart(QStringLiteral("bridge_refused"));
+            return;
+        }
+    }
+#endif
+    qInfo() << "avpn upstream: starting the core for" << m_upStub.nodeId << (e.provisional ? "(provisional)" : "");
+    if (!invokeConnect(xcfg, m_upStub.nodeId, DockerContainer::Xray)) {
+        applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
+        failUpstreamStart(QStringLiteral("invoke"));
+    }
+}
+
+void VpnConnectionTunnelControl::failUpstreamStart(const QString &codeIn, const QString &detail)
+{
+    const QString code = detail.isEmpty() ? codeIn : codeIn + QLatin1Char('/') + detail;
+    const QString nodeId = m_upStub.nodeId;
+    qWarning() << "avpn upstream: start failed on" << nodeId << "code" << code;
+    m_lastConfigReport.insert(QStringLiteral("stage"), QStringLiteral("failed"));
+    m_lastConfigReport.insert(QStringLiteral("start_failure"), code);
+#if defined(Q_OS_IOS)
+    IosController::Instance()->clearUpstreamStart(); // an armed start never reaches another connect
+#endif
+    // The engine first (the restart must not pick this node again), then the real tunnel Error through
+    // the existing path (queued into VpnConnection's thread; it comes back as connectionStateChanged).
+    if (m_upStartFailureSink && !nodeId.isEmpty())
+        m_upStartFailureSink(nodeId, code);
+    if (m_conn)
+        QMetaObject::invokeMethod(m_conn, "setConnectionState", Qt::QueuedConnection,
+                                  Q_ARG(Vpn::ConnectionState, Vpn::ConnectionState::Error));
+}
+
+void VpnConnectionTunnelControl::adoptUpstreamFromRecord(qint64 daemonStartedAtWallMs)
+{
+#if AVPN_UPSTREAM_GUI_OWNER
+    if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active())
+        return;
+    QSettings st;
+    const UpstreamLeaseRecord rec =
+        UpstreamLeaseRecord::fromJson(st.value(QLatin1String(kUpstreamLeaseRecordKey)).toByteArray());
+    if (rec.nodeId.isEmpty())
+        return;
+    const qint64 nowWall = QDateTime::currentMSecsSinceEpoch();
+    if (!upstreamRecordAdoptable(rec, nowWall) || !upstreamRecordMatchesSession(rec, daemonStartedAtWallMs)) {
+        st.remove(QLatin1String(kUpstreamLeaseRecordKey)); // another session: the record is stale
+        return;
+    }
+    m_upStub = SubscriptionNode{};
+    m_upStub.nodeId = rec.nodeId;
+    m_lastUpProto = QStringLiteral("xray");
+    qInfo() << "avpn upstream: adopting the live session of" << rec.nodeId;
+    applyUpstreamEvents(m_upOwner.adopt(rec, upstreamClockMs(), nowWall));
+    emit upstreamSessionAdopted(rec.nodeId);
+#else
+    Q_UNUSED(daemonStartedAtWallMs)
+#endif
+}
+
+void VpnConnectionTunnelControl::runAfterUpstreamRelease(std::function<void()> fn)
+{
+    if (!fn)
+        return;
+    if (m_stopAfterRelease)
+        m_afterRelease = std::move(fn);
+    else
+        fn();
+}
+
+void VpnConnectionTunnelControl::retryUpstreamAdoption()
+{
+#if AVPN_UPSTREAM_GUI_OWNER
+    if (!isXrayProto(m_lastUpProto) || m_upOwner.active())
+        return;
+    IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
+        if (rep.isNull() || !rep->isReplicaValid())
+            return;
+        QRemoteObjectPendingReply<QJsonObject> reply = rep->xrayRuntimeStatus(QString());
+        auto *watcher = new QRemoteObjectPendingCallWatcher(reply, this);
+        connect(watcher, &QRemoteObjectPendingCallWatcher::finished, this,
+                [this, watcher](QRemoteObjectPendingCallWatcher *) {
+                    watcher->deleteLater();
+                    if (watcher->error() != QRemoteObjectPendingCall::NoError)
+                        return;
+                    const QJsonObject o = watcher->returnValue().toJsonObject();
+                    if (o.value(QStringLiteral("running")).toBool())
+                        adoptUpstreamFromRecord(qint64(o.value(QStringLiteral("started_at_ms")).toDouble()));
+                });
+    });
+#endif
+}
+
+void VpnConnectionTunnelControl::upstreamTunnelUp()
+{
+    if (m_upOwner.active())
+        applyUpstreamEvents(m_upOwner.tunnelUp(upstreamClockMs()));
+}
+
+void VpnConnectionTunnelControl::upstreamTick()
+{
+    if (!m_upOwner.active())
+        return;
+    const qint64 now = upstreamClockMs();
+    const qint64 wake = m_upOwner.wakeAtMs();
+    if (wake < 0 || now < wake)
+        return; // nothing due: no request, no allocation
+    applyUpstreamEvents(m_upOwner.tick(now));
 }
 
 } // namespace avpn

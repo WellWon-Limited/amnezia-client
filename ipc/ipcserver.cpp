@@ -26,6 +26,10 @@
 IpcServer::IpcServer(QObject *parent) : IpcInterfaceSource(parent)
 {
     connect(&m_pingHelper, &PingHelper::connectionLose, this, &IpcServer::connectionLose);
+    // AVPN (Scanner): the service's NetworkWatcher feeds the probe host's path generation too
+    // (localserver.cpp forwards it into these signals); a wake-up = the path was down meanwhile.
+    connect(this, &IpcServer::networkChanged, this, [this]() { m_scanHost.notePathEvent(false); });
+    connect(this, &IpcServer::wakeup, this, [this]() { m_scanHost.notePathEvent(true); });
 }
 
 int IpcServer::createPrivilegedProcess()
@@ -265,6 +269,7 @@ bool IpcServer::disableAllTraffic()
     qDebug() << "IpcServer::disableAllTraffic";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("kill_switch_block_all"); // AVPN (Scanner)
     return KillSwitch::instance()->disableAllTraffic();
 }
 
@@ -274,6 +279,7 @@ bool IpcServer::enableKillSwitch(const QJsonObject &configStr, int vpnAdapterInd
     qDebug() << "IpcServer::enableKillSwitch";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("kill_switch_on"); // AVPN (Scanner)
     return KillSwitch::instance()->enableKillSwitch(configStr, vpnAdapterIndex);
 }
 
@@ -283,6 +289,7 @@ bool IpcServer::disableKillSwitch()
     qDebug() << "IpcServer::disableKillSwitch";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("kill_switch_off"); // AVPN (Scanner)
     return KillSwitch::instance()->disableKillSwitch();
 }
 
@@ -301,6 +308,7 @@ bool IpcServer::refreshKillSwitch(bool enabled)
     qDebug() << "IpcServer::refreshKillSwitch";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("kill_switch_refresh"); // AVPN (Scanner)
     return KillSwitch::instance()->refresh(enabled);
 }
 
@@ -310,6 +318,7 @@ bool IpcServer::xrayStart(const QString& cfg)
     qDebug() << "IpcServer::xrayStart";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("xray_start"); // AVPN (Scanner)
     return Xray::getInstance().startXray(cfg);
 }
 
@@ -319,6 +328,7 @@ bool IpcServer::xrayStop()
     qDebug() << "IpcServer::xrayStop";
 #endif
 
+    m_scanHost.stopAllBeforeTunnelChange("xray_stop"); // AVPN (Scanner)
     return Xray::getInstance().stopXray();
 }
 

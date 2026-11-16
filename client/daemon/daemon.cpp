@@ -18,6 +18,14 @@
 #  include "../platforms/macos/daemon/splitdnsresolverfiles.h" // AVPN (Tribe split-DNS)
 #endif
 
+// AVPN (Scanner): ends every probe scan of the service before the WireGuard/AWG tunnel changes, and
+// tells the probe host the live peer (service/server/tribe_scan.h; this file is compiled into the
+// service only).
+namespace avpn {
+void tribeScanBeforeTunnelChange(const char* reason);
+int tribeScanDaemonLivePeer(QString* publicKey, QString* endpoint);
+}
+
 constexpr const char* JSON_ALLOWEDIPADDRESSRANGES = "allowedIPAddressRanges";
 constexpr int HANDSHAKE_POLL_MSEC = 250;
 
@@ -87,6 +95,7 @@ bool Daemon::activate(const InterfaceConfig& config) {
   // If the activation abort's for any reason `the `activationFailure` signal is
   // emitted.
   logger.debug() << "Activating interface";
+  avpn::tribeScanBeforeTunnelChange("awg_activate");  // AVPN (Scanner)
   auto emit_failure_guard = qScopeGuard([this] { emit activationFailure(); });
 
   if (m_connections.contains(config.m_hopType)) {
@@ -600,6 +609,7 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
 
 bool Daemon::deactivate(bool emitSignals) {
   Q_ASSERT(wgutils() != nullptr);
+  avpn::tribeScanBeforeTunnelChange("awg_deactivate");  // AVPN (Scanner)
   m_handshakeTimer.stop(); // AVPN (волна-3): опрос рукопожатия принадлежит уходящей сессии («Invalid name» ×5 после deactivate)
 
 #ifdef Q_OS_WIN
@@ -735,6 +745,34 @@ bool Daemon::switchServer(const InterfaceConfig& config) {
   startDeferredExclusions(deferredExclusions, config.m_serverPublicKey);
 #endif
   return true;
+}
+
+// AVPN (Scanner)
+bool Daemon::liveTunnelPeer(QString* publicKey, QString* endpoint) const {
+  if (m_connections.isEmpty()) {
+    return false;
+  }
+  const InterfaceConfig& config = m_connections.first().m_config;
+  if (publicKey) {
+    *publicKey = config.m_serverPublicKey;
+  }
+  if (endpoint) {
+    endpoint->clear();
+    if (config.m_serverPort > 0 && !config.m_serverIpv4AddrIn.isEmpty()) {
+      *endpoint = QStringLiteral("%1:%2").arg(config.m_serverIpv4AddrIn).arg(config.m_serverPort);
+    } else if (config.m_serverPort > 0 && !config.m_serverIpv6AddrIn.isEmpty()) {
+      *endpoint = QStringLiteral("[%1]:%2").arg(config.m_serverIpv6AddrIn).arg(config.m_serverPort);
+    }
+  }
+  return true;
+}
+
+// AVPN (Scanner): -1 = no daemon object (the state cannot be told), 0 = no tunnel, 1 = a tunnel is up.
+int avpn::tribeScanDaemonLivePeer(QString* publicKey, QString* endpoint) {
+  if (!s_daemon) {
+    return -1;
+  }
+  return s_daemon->liveTunnelPeer(publicKey, endpoint) ? 1 : 0;
 }
 
 QJsonObject Daemon::getStatus() {

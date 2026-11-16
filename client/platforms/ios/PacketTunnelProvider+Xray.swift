@@ -17,6 +17,11 @@ enum XrayErrors: Error {
     case xrayCoreStartFailed
     case socketProtectionFailed
     case tun2socksExited
+    // AVPN (upstream nodes): start refusals that name their reason (CONNECT-INVARIANTS §22.13).
+    case upstreamLeaseInvalid
+    case xrayGeoDataMissing
+    case xrayResourceDirMissing
+    case upstreamLeaseTerminal
 }
 
 extension Constants {
@@ -206,6 +211,17 @@ extension PacketTunnelProvider {
             return
         }
 
+        // AVPN (upstream nodes): what this start is (PacketTunnelProvider+Upstream.swift). A core restart
+        // inside the session keeps the renewer it has; a broken lease fails the start - provider traffic
+        // never runs unaccounted.
+        let upstreamPlan: UpstreamStartPlan = preservingCounters ? .none : upstreamStartPlan()
+        if case .invalid(let why) = upstreamPlan {
+            recordXrayStartFailure("upstream lease invalid: \(why)")
+            completionHandler(XrayErrors.upstreamLeaseInvalid)
+            return
+        }
+        if !preservingCounters { beginUpstreamMeter(upstreamPlan) }
+
         // AVPN (этап D3): новое поколение runtime-сессии — все висящие колбэки прежнего старта
         // (setTunnelNetworkSettings, tun2socks) становятся стейл и игнорируются.
         let sessionGeneration = xrayRuntimeSession.beginSession(protocolName: "xray",
@@ -269,6 +285,21 @@ extension PacketTunnelProvider {
             xrayAppliedUplinkSignature = currentUplinkSignature()
             xrayLog(.info, message: "Tribe roaming (xray): restartOnPathLoss=\(xrayRestartOnPathLoss) uplink=\(xrayAppliedUplinkSignature ?? "-")")
 
+            // AVPN (upstream nodes, contract section 3): geo files from the appex's own resource
+            // directory, always (never NULL/empty: libxray would make the core look in the current
+            // directory); a rule whose file is missing fails here with its name, not later in the core.
+            guard let datDir = Bundle.main.resourcePath, !datDir.isEmpty else {
+                recordXrayStartFailure("geo data dir unavailable")
+                fail(XrayErrors.xrayResourceDirMissing)
+                return
+            }
+            let missingGeo = XrayGeoAssets.missing(inConfig: xrayConfig.config, dir: datDir)
+            guard missingGeo.isEmpty else {
+                recordXrayStartFailure("geo data missing: \(missingGeo.joined(separator: ","))")
+                fail(XrayErrors.xrayGeoDataMissing)
+                return
+            }
+
             let xrayConfigData = xrayConfig.config.data(using: .utf8)
 
             guard let xrayConfigData else {
@@ -291,6 +322,10 @@ extension PacketTunnelProvider {
 
             // Extract existing SOCKS5 credentials or generate new ones per session.
             let socksCredentials = ensureInboundAuth(jsonDict: &jsonDict, port: port, address: address)
+            // AVPN (upstream nodes): the lease renewer's requests go through this inbound.
+            tribeUpstream.socks = (port: port, user: socksCredentials.username, pass: socksCredentials.password)
+            // AVPN (upstream nodes): per-outbound counters for meter_scope "proxy" (merged, never replacing).
+            mergeUpstreamStatsKeys(into: &jsonDict)
 
             // AVPN (девайс-разбор 2026-09-02): без файла ядро пишет в stderr NE — то есть в никуда,
             // и REALITY-ошибки/отказы дозвона не видит никто. Кладём лог рядом с конфигом и
@@ -318,6 +353,8 @@ extension PacketTunnelProvider {
 
                 // Launch xray (protect-колбэк взводится ДО старта ядра — внутри setupAndStartXray)
                 self.setupAndStartXray(configData: updatedData,
+                                       datDir: datDir, // AVPN (upstream nodes): geo dir + Go limit
+                                       maxMemory: XrayTunables.goMemoryLimitBytes(xrayConfig.tunables), // AVPN (upstream nodes)
                                        callbackIdentity: callbackIdentity) { xrayError in
                     if let xrayError {
                         fail(xrayError)
@@ -332,8 +369,13 @@ extension PacketTunnelProvider {
                                               password: socksCredentials.password,
                                               connectTimeoutMs: xrayConfig.connectTimeoutMs,
                                               readWriteTimeoutMs: xrayConfig.readWriteTimeoutMs,
-                                              callbackIdentity: callbackIdentity,
-                                              completionHandler: completionHandler)
+                                              tunables: xrayConfig.tunables, // AVPN (upstream nodes)
+                                              callbackIdentity: callbackIdentity) { error in // AVPN (upstream nodes)
+                        // AVPN (upstream nodes): core and hev run - the lease owner starts (a core
+                        // restart on an uplink change keeps the renewer it has).
+                        if error == nil && !preservingCounters { self.attachUpstreamRenewer(upstreamPlan) }
+                        completionHandler(error)
+                    }
                 }
             }
         } catch {
@@ -351,6 +393,7 @@ extension PacketTunnelProvider {
             let identity = XraySocketCallbackIdentity(generation: active.generation,
                                                       sessionId: active.sessionId)
             let stopGeneration = xrayRuntimeSession.beginStop()
+            tribeScanStopAllIfUsed(reason: "core_stop") // AVPN (Scanner §2.3): inside the gate, before the core stops
             Socks5Tunnel.quit()
             let done: Bool
             if let identity, xraySocketCallbackRegistry.value(for: identity) != nil {
@@ -405,11 +448,13 @@ extension PacketTunnelProvider {
         if let failure = lastXrayStartFailure {
             core["last_start_failure"] = failure
         }
-        let response = xrayRuntimeSession.payload(core: core)
+        var response = xrayRuntimeSession.payload(core: core) // AVPN (upstream nodes): var for the upstream status
+        appendUpstreamStatus(to: &response) // AVPN (upstream nodes): contract section 5
         completionHandler(try? JSONSerialization.data(withJSONObject: response, options: []))
     }
 
-    private func readHevTrafficSample() -> TunnelTrafficSample {
+    // AVPN (upstream nodes): internal - the lease meter reads the same counters.
+    func readHevTrafficSample() -> TunnelTrafficSample {
         var txPackets = 0
         var txBytes = 0
         var rxPackets = 0
@@ -504,8 +549,9 @@ extension PacketTunnelProvider {
 
     // Точный teardown колбэка: [stopCore] -> LibXraySetSockCallback(nil, nil) (синхронный
     // drain) -> снять контекст из реестра. false = слот остаётся взведённым (fail-closed).
+    // AVPN (upstream nodes): internal - a terminal lease answer stops the core the same way.
     @discardableResult
-    private func retireXrayCallback(identity: XraySocketCallbackIdentity, stopCore: Bool) -> Bool {
+    func retireXrayCallback(identity: XraySocketCallbackIdentity, stopCore: Bool) -> Bool {
         XraySocketCallbackTeardown.execute(
             stopCore: { stopCore ? XrayNativeCStringResult.consume(LibXrayStopXray()) : true },
             drain: { XrayNativeCStringResult.consume(LibXraySetSockCallback(nil, nil)) },
@@ -573,6 +619,8 @@ extension PacketTunnelProvider {
     }
 
     private func setupAndStartXray(configData: Data,
+                                   datDir: String, // AVPN (upstream nodes): geo data dir
+                                   maxMemory: Int64, // AVPN (upstream nodes): Go soft memory limit
                                    callbackIdentity: XraySocketCallbackIdentity,
                                    completionHandler: @escaping (Error?) -> Void) {
         let path = Constants.cachesDirectory.appendingPathComponent("config.json", isDirectory: false).path
@@ -591,6 +639,11 @@ extension PacketTunnelProvider {
         let startError: Error? = xrayNativeLifecycleGate.withExclusive {
             guard xrayRuntimeSession.isCurrent(generation: callbackIdentity.generation) else {
                 return XrayErrors.supersededSession
+            }
+            // AVPN (upstream nodes, decision E): a terminal lease answer stopped the core; a restart
+            // already under way must not bring it back.
+            guard !tribeUpstream.coreStoppedByLease else {
+                return XrayErrors.upstreamLeaseTerminal
             }
             guard xraySocketCallbackRegistry.install(context, identity: callbackIdentity) else {
                 xrayLog(.error, message: "Xray socket protection slot is still held by a previous session")
@@ -615,7 +668,9 @@ extension PacketTunnelProvider {
             // и поверх мёртвого socks, а tun2socksExited в этом случае не срабатывает.
             // Причину запоминаем ДО возврата: она уезжает в статус-ответ (last_start_failure) и
             // дальше в лог/диагностику приложения — «вечное подключение» больше не безымянно.
-            if let reason = XrayNativeCStringResult.message(LibXrayRunXray(nil, path, Int64.max)) {
+            // AVPN (upstream nodes): datDir = the appex resource dir (geo pair), maxMemory = the Go soft
+            // limit from xray_tunables.memory_limit_mib (Int64.max when the key is absent, as before).
+            if let reason = XrayNativeCStringResult.message(LibXrayRunXray(datDir, path, maxMemory)) {
                 xrayLog(.error, message: "Xray core start failed: \(reason)")
                 lastXrayStartFailure = reason
                 // Слот колбэка очищаем ТОЛЬКО через drain (колбэк уже взведён), ядро не гасим.
@@ -640,6 +695,7 @@ extension PacketTunnelProvider {
                                       password: String,
                                       connectTimeoutMs: Int?,
                                       readWriteTimeoutMs: Int?,
+                                      tunables: XrayTunables?, // AVPN (upstream nodes): hev misc sizes
                                       callbackIdentity: XraySocketCallbackIdentity,
                                       completionHandler: @escaping (Error?) -> Void) {
         let sessionGeneration = callbackIdentity.generation
@@ -648,6 +704,9 @@ extension PacketTunnelProvider {
         // the pre-Task-6 literals. task-stack-size/limit-nofile intentionally left untouched.
         let connectTimeout = connectTimeoutMs ?? 5000
         let readWriteTimeout = readWriteTimeoutMs ?? 60000
+        // AVPN (upstream nodes, contract section 3): task-stack-size (20480 when absent, as before),
+        // tcp-buffer-size and max-session-count only when xray_tunables carries them.
+        let miscTunables = XrayTunables.hevMiscLines(tunables).joined(separator: "\n  ")
         let config = """
         tunnel:
           mtu: 9000
@@ -658,7 +717,7 @@ extension PacketTunnelProvider {
           password: \(password)
           udp: 'udp'
         misc:
-          task-stack-size: 20480
+          \(miscTunables)
           connect-timeout: \(connectTimeout)
           read-write-timeout: \(readWriteTimeout)
           log-file: stderr

@@ -24,6 +24,9 @@ struct XrayConfig: Decodable {
     // v6-источника, чтобы v6 не утекал мимо VPN. nil трактуется как ЗАХВАТ — см.
     // applyXrayIPv6Policy() в PacketTunnelProvider+Xray.swift.
     let ipv6Capture: Int?
+    // AVPN (upstream nodes, contract section 3): Go memory limit + hev sizes; nil / absent keys =
+    // the behaviour before (XrayTunables.swift).
+    let tunables: XrayTunables?
 
     private enum CodingKeys: String, CodingKey {
         case dns1
@@ -36,5 +39,6 @@ struct XrayConfig: Decodable {
         case networkChangeDebounceMs = "network_change_debounce_ms"
         case restartOnPathLoss = "xray_restart_on_path_loss"
         case ipv6Capture = "xray_ipv6_capture"
+        case tunables = "xray_tunables" // AVPN (upstream nodes)
     }
 }

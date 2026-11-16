@@ -11,8 +11,12 @@ AbstractButton {
 
     property string variant: "primary"          // primary | glass | ghost | icon
     property string iconSource: ""
+    property string strokeIcon: ""              // a TribeStrokeIcon key drawn in the label colour (20 px)
     property bool loading: false
     readonly property bool isIcon: variant === "icon"
+    readonly property color labelColor: variant === "primary" ? "white"
+                                        : variant === "ghost" ? Theme.color.text2
+                                        : Theme.color.text1
 
     implicitHeight: isIcon ? 44 : 46
     implicitWidth: isIcon ? 44 : Math.max(120, contentRow.implicitWidth + 2 * Theme.space.xl)
@@ -53,6 +57,15 @@ AbstractButton {
                 sourceSize.width: 20; sourceSize.height: 20
                 Layout.alignment: Qt.AlignVCenter
             }
+            TribeStrokeIcon {
+                visible: control.strokeIcon !== "" && !control.loading
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: 20
+                Layout.preferredHeight: 20
+                icon: control.strokeIcon
+                tint: control.labelColor
+                weight: 1.8
+            }
             Text {
                 visible: control.text !== "" && !control.isIcon && !control.loading
                 text: control.text
@@ -61,9 +74,7 @@ AbstractButton {
                 font.family: Theme.font.body
                 font.pixelSize: 15
                 font.weight: Theme.font.wSemibold
-                color: control.variant === "primary" ? "white"
-                     : control.variant === "ghost" ? Theme.color.text2
-                     : Theme.color.text1
+                color: control.labelColor
             }
         }
     }

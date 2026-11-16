@@ -112,6 +112,7 @@ extension PacketTunnelProvider {
             }
             adapterBox.adapter = adapter
             wgAdapter = adapter
+            tribeScanAttachAdapter(adapter) // AVPN (Scanner, review F2): the adapter's own backend restarts end scans first
 
             // AVPN seamless roaming: политика ДО start() (адаптер читает её на своей очереди).
             let roaming = wgConfig.roamingPolicy
@@ -247,6 +248,7 @@ extension PacketTunnelProvider {
             completionHandler(try? JSONSerialization.data(withJSONObject: TribeSoftRestartResult.notStarted.responsePayload, options: []))
             return
         }
+        tribeScanStopAllIfUsed(reason: "core_restart") // AVPN (Scanner §2.3): probes end before the backend restarts
         wgAdapter.softRestartBackendResult { result in
             wg_log(.info, message: "AVPN soft-restart: backend \(result.logDescription)")
             completionHandler(try? JSONSerialization.data(withJSONObject: result.responsePayload, options: []))
@@ -274,6 +276,7 @@ extension PacketTunnelProvider {
 
             do {
                 let tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: configString)
+                tribeScanStopAllIfUsed(reason: "peer_change") // AVPN (Scanner §2.3): probes end before the peer changes
                 wgAdapter?.update(tunnelConfiguration: tunnelConfiguration) { [weak self] error in
                     if let error {
                         wg_log(.error, message: "Failed to switch tunnel configuration: \(error.localizedDescription)")

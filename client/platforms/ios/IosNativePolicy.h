@@ -4,9 +4,11 @@
 // (client/platforms/ios/tests/IosNativePolicyTests.cpp). ObjC-слой только собирает входы и
 // исполняет решение.
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <string>
+#include <vector>
 #include <sys/file.h>
 #include <unistd.h>
 
@@ -424,6 +426,189 @@ inline bool tryLockExclusive(int fd, int attempts = 20, useconds_t sleepMicros =
         if (i + 1 < attempts) usleep(sleepMicros);
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// AVPN upstream nodes (plan provider-pool, release A, lane L3; contract client-envelope-contract.md).
+// The plain structs the engine lane fills for the iOS bridge (IosController::setUpstreamStart /
+// sendUpstreamLeaseSet) and the decode of the extension's `upstream` status object (section 5).
+
+// Whether this iOS build measures the scope "proxy": per-outbound counters of the running core
+// (LibXrayTribeOutboundStats, awg-apple tribe.12 patch 0011), summed over the lease's meter_tags in the
+// extension (UpstreamProxyMeter.swift). The extension still falls back to "tunnel" when the lease has
+// no meter_tags or the running core reports stats_disabled (UpstreamMeterPlan.scope).
+inline constexpr bool kUpstreamProxyMeterSupported = true;
+
+// `upstream_lease` (section 1): the lease the app got from POST /v1/upstream/lease (signature, type,
+// sha and sanitizer already checked by the app). expiresInMs is relative to the moment the struct is
+// handed to the bridge (the extension anchors it to its own sleep-proof clock at receipt).
+struct UpstreamLeaseEnvelope {
+    std::string leaseId;      // [A-Za-z0-9_-]{32,64}
+    std::string renewToken;   // "tlr1.<...>", secret: never logged
+    std::string apiBase;      // tunnel_api_base, https, no trailing slash
+    long long renewAfterS = 0;
+    long long ttlS = 0;
+    long long expiresInMs = 0;
+    long long seq = 0;        // last value returned by the server
+    long long epoch = 0;      // traffic_accounting_epoch (>= 1)
+    long long revision = 0;   // upstream_revision at acquire
+    std::string meterScope = "tunnel"; // "proxy" | "tunnel"
+    // meter_tags of the lease answer: the only outbound tags summed for "proxy" (empty = "tunnel").
+    std::vector<std::string> meterTags;
+};
+
+// One upstream start: tribeSessionMetadata fields + the lease (hasLease = false: provisional start
+// from the standby pack; the lease follows by sendUpstreamLeaseSet).
+struct UpstreamStartEnvelope {
+    std::string nodeId;       // "up:<profile_id>" - must equal rawConfig.tribeSessionMetadata.node_id
+    std::string profileId;
+    std::string configSha256; // 64 hex
+    bool hasLease = false;
+    UpstreamLeaseEnvelope lease;
+};
+
+inline bool upstreamCharsAre(const std::string &s, bool (*ok)(unsigned char))
+{
+    for (unsigned char c : s)
+        if (!ok(c)) return false;
+    return true;
+}
+inline bool upstreamIdChar(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+inline bool upstreamHexChar(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+inline bool upstreamVisibleChar(unsigned char c) { return c >= 0x21 && c <= 0x7e; }
+
+// https://<host>[:port][/path], no user info, query or fragment, no trailing slash.
+inline bool upstreamApiBaseValid(const std::string &base)
+{
+    static const std::string scheme = "https://";
+    if (base.size() <= scheme.size() || base.compare(0, scheme.size(), scheme) != 0) return false;
+    if (base.back() == '/') return false;
+    if (base.find_first_of("?#@ \t\r\n") != std::string::npos) return false;
+    const std::string rest = base.substr(scheme.size());
+    const std::string host = rest.substr(0, rest.find_first_of(":/"));
+    return !host.empty();
+}
+
+// At most 64 tags of 1..128 bytes without control characters (the extension parses the same rule).
+inline bool upstreamMeterTagsValid(const std::vector<std::string> &tags)
+{
+    if (tags.size() > 64) return false;
+    for (const std::string &t : tags) {
+        if (t.empty() || t.size() > 128) return false;
+        for (unsigned char c : t)
+            if (c < 0x20 || c == 0x7f) return false;
+    }
+    return true;
+}
+
+// why = the field name only (never a value).
+inline bool upstreamLeaseEnvelopeValid(const UpstreamLeaseEnvelope &l, std::string &why)
+{
+    const long long maxInt = 9007199254740991LL;
+    if (l.leaseId.size() < 32 || l.leaseId.size() > 64 || !upstreamCharsAre(l.leaseId, upstreamIdChar)) why = "lease_id";
+    else if (l.renewToken.empty() || l.renewToken.size() > 1024 || !upstreamCharsAre(l.renewToken, upstreamVisibleChar)) why = "renew_token";
+    else if (!upstreamApiBaseValid(l.apiBase)) why = "api_base";
+    else if (l.renewAfterS < 0 || l.renewAfterS > 86400) why = "renew_after_s";
+    else if (l.ttlS < 1 || l.ttlS > 86400) why = "ttl_s";
+    else if (l.expiresInMs < 0 || l.expiresInMs > maxInt) why = "expires_in_ms";
+    else if (l.seq < 0 || l.seq > maxInt) why = "seq";
+    else if (l.epoch < 1 || l.epoch > maxInt) why = "epoch";
+    else if (l.revision < 0 || l.revision > maxInt) why = "revision";
+    else if (l.meterScope != "proxy" && l.meterScope != "tunnel") why = "meter_scope";
+    else if (!upstreamMeterTagsValid(l.meterTags)) why = "meter_tags";
+    else { why.clear(); return true; }
+    return false;
+}
+
+inline bool upstreamStartEnvelopeValid(const UpstreamStartEnvelope &s, std::string &why)
+{
+    if (s.profileId.empty() || s.profileId.size() > 64 || !upstreamCharsAre(s.profileId, upstreamIdChar)) why = "profile_id";
+    else if (s.nodeId != "up:" + s.profileId) why = "node_id";
+    else if (s.configSha256.size() != 64 || !upstreamCharsAre(s.configSha256, upstreamHexChar)) why = "config_sha256";
+    else if (s.hasLease) return upstreamLeaseEnvelopeValid(s.lease, why);
+    else { why.clear(); return true; }
+    return false;
+}
+
+// The envelope's meter scope: "proxy" only when this build can measure it and the lease names its tags
+// (contract section 1: empty or missing meter_tags -> "tunnel").
+inline std::string upstreamEnvelopeScope(const std::string &requested, const std::vector<std::string> &meterTags)
+{
+    return requested == "proxy" && kUpstreamProxyMeterSupported && !meterTags.empty() ? "proxy" : "tunnel";
+}
+
+// hev-socks5-tunnel sizes (xray_tunables, section 3; /v1/config numbers xray_hev_*): the same ranges
+// as XrayTunables.swift in the extension. A non-finite value = the key's default.
+inline int upstreamClampInt(double v, int def, int lo, int hi)
+{
+    if (!std::isfinite(v)) return def;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return int(v);
+}
+inline int hevTcpBufferSizeFrom(double v) { return upstreamClampInt(v, 4096, 4096, 65536); }
+inline int hevMaxSessionCountFrom(double v) { return upstreamClampInt(v, 1200, 128, 65535); }
+inline int hevTaskStackSizeFrom(double v) { return upstreamClampInt(v, 24576, 20480, 131072); }
+
+// The `upstream` object of a status reply / of the upstream_lease_set reply, as extracted by the
+// ObjC layer (present = the reply had it). normalizeUpstreamStatus keeps only contract values:
+// an unknown state reads as "none", a code outside the contract list (or on a non-terminal state)
+// as "", negative byte totals as 0.
+struct UpstreamStatusFields {
+    bool present = false;
+    std::string state = "none";
+    std::string code;
+    long long seq = 0;
+    long long renewedMsAgo = -1;
+    long long expiresInMs = 0;
+    long long revision = 0;
+    bool configChanged = false;
+    long long appliedBytes = 0;
+    long long shadowBytes = 0;
+    std::string meterScope = "tunnel";
+};
+
+// The terminal codes the tunnel owner may send (contract section 5) - the same list as
+// UpstreamStatusWire.h::upstreamStatusTerminalCodeKnown, incl. renew_rejected (the shared lease machine ends a
+// renewing session with it after kUpstreamRenewRejectedLimit 422 answers in a row). Without it the code read as
+// "" here: the app left the node with no notice and no journal code (parity test:
+// core/serviceEngine/tests/build_ios_terminal_codes.sh).
+inline bool upstreamTerminalCodeKnown(const std::string &c)
+{
+    return c == "disabled" || c == "lease_gone" || c == "not_entitled" || c == "over_quota"
+           || c == "no_seat_reacquire" || c == "standby_unconfirmed" || c == "renew_rejected";
+}
+
+inline UpstreamStatusFields normalizeUpstreamStatus(UpstreamStatusFields f)
+{
+    if (f.state != "none" && f.state != "pending" && f.state != "active" && f.state != "terminal") f.state = "none";
+    if (f.state != "terminal" || !upstreamTerminalCodeKnown(f.code)) f.code.clear();
+    if (f.seq < 0) f.seq = 0;
+    if (f.renewedMsAgo < -1) f.renewedMsAgo = -1;
+    if (f.expiresInMs < 0) f.expiresInMs = 0;
+    if (f.revision < 0) f.revision = 0;
+    if (f.appliedBytes < 0) f.appliedBytes = 0;
+    if (f.shadowBytes < 0) f.shadowBytes = 0;
+    if (f.meterScope != "proxy") f.meterScope = "tunnel";
+    return f;
+}
+
+// upstreamLeaseEvent is emitted when the reply says something the engine acts on: another state or
+// code, a newer seq (a renewal landed), a newer revision (refresh /v1/subscription), config_changed.
+// Status polls in between (only the ms counters moved) stay quiet.
+inline bool upstreamStatusChanged(const UpstreamStatusFields &prev, const UpstreamStatusFields &next)
+{
+    if (!next.present) return false;
+    if (!prev.present) return true;
+    return prev.state != next.state || prev.code != next.code || prev.seq != next.seq
+           || prev.revision != next.revision || prev.configChanged != next.configChanged
+           || prev.meterScope != next.meterScope;
 }
 
 } // namespace avpn_ios

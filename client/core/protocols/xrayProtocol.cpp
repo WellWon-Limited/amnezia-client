@@ -25,6 +25,25 @@ static const QString tunName = "utun22";
 static const QString tunName = "tun2";
 #endif
 
+#ifdef Q_OS_WIN
+// AVPN (upstream nodes, release C): the envelope of an upstream (provider) node says so in
+// tribeSessionMetadata.upstream (serviceEngine XrayConfigBuilder::buildUpstream).
+static bool avpnUpstreamSession(const QJsonObject &rawConfig)
+{
+    return rawConfig.value(QStringLiteral("tribeSessionMetadata")).toObject().value(QStringLiteral("upstream")).toInt() == 1;
+}
+
+// AVPN (upstream nodes, release C): the default-route interface (the service's own choice for the core's
+// sockets); no such interface -> the route lookup as for an own node. The peer rules keep vpnServer =
+// 192.0.2.1: the service appends it to its permits and needs a valid address; a TEST-NET-1 permit is inert,
+// and the core's sockets need none (the firewall permits Tribe-service.exe by app id).
+static int avpnUpstreamUplinkIndex(const QString &displayHost)
+{
+    const int idx = NetworkUtilities::getGatewayAndIface().second.index();
+    return idx > 0 ? idx : NetworkUtilities::AdapterIndexTo(QHostAddress(displayHost));
+}
+#endif
+
 XrayProtocol::XrayProtocol(const QJsonObject &configuration, QObject *parent) : VpnProtocol(configuration, parent)
 {
     m_vpnGateway = amnezia::protocols::xray::defaultLocalAddr;
@@ -253,7 +272,14 @@ ErrorCode XrayProtocol::setupRouting()
     return IpcClient::withInterface(
             [this](QSharedPointer<IpcInterfaceReplica> iface) -> ErrorCode {
 #ifdef Q_OS_WIN
-                const int inetAdapterIndex = NetworkUtilities::AdapterIndexTo(QHostAddress(m_remoteAddress));
+                // AVPN (upstream nodes, release C): a provider session has no single server - hostName is the
+                // display constant 192.0.2.1 and the real dial addresses live inside the Xray config. Its uplink
+                // is the default-route interface, the one Tribe-service pins every core socket to
+                // (service/server/xray.cpp Xray::startXray -> IP_UNICAST_IF), not a route lookup of a
+                // documentation address. Own nodes: unchanged.
+                const int inetAdapterIndex = avpnUpstreamSession(m_rawConfig)
+                    ? avpnUpstreamUplinkIndex(m_remoteAddress)
+                    : NetworkUtilities::AdapterIndexTo(QHostAddress(m_remoteAddress));
 #endif
                 auto createTun = iface->createTun(tunName, amnezia::protocols::xray::defaultLocalAddr);
                 if (!createTun.waitForFinished() || !createTun.returnValue()) {

@@ -31,6 +31,9 @@ public:
     bool isFresh() const { return m_fresh; }
     bool isPinned() const { return m_pinned; }
     QString activeBaseUrl() const { return m_activeBase; }
+    // AVPN upstream nodes: the config signing key (dev or prod, as chosen by the facade) - the lease
+    // answer is signed by the same key under its own context (SignedContext.h).
+    const QString &publicKeyHex() const { return m_pubKeyHex; }
     // 5.1.109: why features.xray_client of config() is what it is (ConfigCachePolicy.h::decideXrayClient).
     // On the cached copy the signed "true" is honoured for a bounded time since it was received; while
     // the process is still on that copy the trust is judged again before every config request, on the
@@ -95,6 +98,9 @@ private:
     // 5.1.109: what the cached signed copy says and when it was received - the inputs of
     // decideXrayClient while !m_fresh (m_config carries the judged value, never the raw one).
     bool         m_cachedXraySigned = false;
+    bool         m_cachedUpstreamSigned = false;   // upstream nodes: the cached signed value
+    qint64       m_cachedUpstreamMaxAgeMs = 0;     // its own bound (numbers.upstream_nodes_cache_max_age_h)
+    bool         m_upstreamTrustExpired = false;   // one-way within a run, as the Xray trust
     qint64       m_cachedAtMs = 0;
     qint64       m_cachedMaxAgeMs = 0;
     qint64       m_cachedAgeMs = -1;

@@ -21,6 +21,16 @@
     #include "core/serviceEngine/AvpnDeepLinkBridge.h" // AVPN (Task 13): мост диплинка активации → QML
     #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
     #include "core/serviceEngine/TribeHaptics.h" // AVPN (haptics): тактильный отклик → QML
+    #include "core/serviceEngine/TribeScanner.h" // AVPN Scanner (lane L6b): the coordinator «Сканер» → QML
+    #if defined(Q_OS_IOS)
+        #include "core/serviceEngine/IosScanHost.h" // AVPN Scanner (lane L4): the probe host in the tunnel extension
+    #endif
+    #if defined(Q_OS_ANDROID)
+        #include "core/serviceEngine/AndroidScanHost.h" // AVPN Scanner (lane A3): the probe host in the Xray service
+    #endif
+    #if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID) && !defined(MACOS_NE) // AVPN Scanner (lanes L5/W3)
+        #include "core/serviceEngine/DaemonScanHost.h" // the probe host in the root service (avpn.cmake: the same condition)
+    #endif
 #endif
 
 #if defined(Q_OS_ANDROID)
@@ -31,6 +41,33 @@
 #if defined(Q_OS_IOS)
     #include "platforms/ios/ios_controller.h"
     #include "core/utils/swiftBridge.h"
+#endif
+
+#ifdef AVPN_ENGINE_ENABLED // AVPN Scanner (lane L6b)
+namespace {
+// AVPN: the platform probe host of the Scanner, created by the engine only while features.scanner is on.
+// iOS: IosScanHost (lane L4, avpn.cmake if(IOS)). macOS desktop / Windows (and the Linux desktop build):
+// DaemonScanHost over the root service (lanes L5/W3, avpn.cmake NOT IOS AND NOT ANDROID AND NOT MACOS_NE).
+// Elsewhere (Android until lane A3, the macOS NE build) no host: the Scanner shows NoScan.
+// `caps` = what the coordinator's machine starts from before the host answers its first scan_caps.
+void installScanHost(avpn::AvpnEngineQml *engine) // AVPN
+{
+#if defined(Q_OS_IOS)
+    engine->setScanHostFactory(avpn::iosScanKnownCaps(), []() -> avpn::IScanHost * { return new avpn::IosScanHost(); });
+#elif defined(Q_OS_ANDROID)
+    // AVPN Scanner (lane A3): probes run in :amneziaXrayService (decision A-7); NeedsVpn otherwise.
+    engine->setScanHostFactory(avpn::androidScanKnownCaps(), []() -> avpn::IScanHost * { return new avpn::AndroidScanHost(); });
+#elif !defined(MACOS_NE)
+    avpn::ScanHostCaps desktop; // probes with the VPN off; the rest comes with the service's scan_caps
+    desktop.needsVpn = false;
+    engine->setScanHostFactory(desktop, []() -> avpn::IScanHost * {
+        return new avpn::DaemonScanHost(avpn::DaemonScanHost::serviceTransport());
+    });
+#else
+    engine->setScanHostFactory(avpn::ScanHostCaps(), nullptr);
+#endif
+}
+} // namespace
 #endif
 
 CoreController::CoreController(const QSharedPointer<VpnConnection> &vpnConnection, SecureQSettings* settings,
@@ -239,6 +276,20 @@ void CoreController::initControllers()
     tribeSupport->setBaseUrl(avpnEngine->apiBase());
     QObject::connect(avpnEngine, &avpn::AvpnEngineQml::apiBaseChanged,
                      tribeSupport, &avpn::TribeSupportChat::setBaseUrl);
+
+    // AVPN Scanner (lane L6b, CONNECT-INVARIANTS §32): the coordinator «Сканер» (context property TribeScanner,
+    // owned by the engine). It reaches the tunnel only through the engine's three guarded paths; its report
+    // check goes into TribeSupport's queue. Switch features.scanner absent = nothing of it runs.
+    avpnEngine->attachSupport(tribeSupport); // AVPN
+    installScanHost(avpnEngine);             // AVPN
+    {
+        avpn::TribeScanner::Deps scanDeps; // AVPN
+        scanDeps.engine = avpnEngine->scanEngine();
+        scanDeps.host = avpnEngine->scanHost();
+        auto *tribeScanner = new avpn::TribeScanner(scanDeps, avpnEngine);
+        avpnEngine->attachScanner(tribeScanner);
+        setQmlContextProperty("TribeScanner", tribeScanner);
+    }
 
     // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный
     // рефреш /v1/subscription — бейдж и золотая CTA оживают сразу, на любой открытой вкладке.

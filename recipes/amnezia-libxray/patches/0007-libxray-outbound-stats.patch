@@ -1,0 +1,484 @@
+diff --git a/xray/stats_tribe.go b/xray/stats_tribe.go
+new file mode 100644
+index 0000000..fe13b8d
+--- /dev/null
++++ b/xray/stats_tribe.go
+@@ -0,0 +1,93 @@
++package xray
++
++// Tribe (0007): per-outbound byte counters of the running core, read in process (no gRPC API
++// inbound, no listener, no config change). The caller enables them before start by MERGING into
++// the config: "stats": {} and policy.system.statsOutboundUplink / statsOutboundDownlink = true.
++// Counters are cumulative since this core instance started and are never reset here.
++
++import (
++	"encoding/json"
++	"strings"
++
++	"github.com/xtls/xray-core/features/stats"
++)
++
++// TrafficPair is one outbound's cumulative bytes: uplink = written towards the outbound's peer,
++// downlink = read from it (the outbound's own transport connection, protocol overhead included).
++type TrafficPair struct {
++	Uplink   int64 `json:"uplink"`
++	Downlink int64 `json:"downlink"`
++}
++
++type outboundStatsReply struct {
++	Running   bool                   `json:"running"`
++	Outbounds map[string]TrafficPair `json:"outbounds"`
++	Error     string                 `json:"error"`
++	ErrorCode string                 `json:"error_code"`
++}
++
++const (
++	outboundCounterPrefix = "outbound>>>"
++	uplinkCounterSuffix   = ">>>traffic>>>uplink"
++	downlinkCounterSuffix = ">>>traffic>>>downlink"
++)
++
++// OutboundStats reads the running instance's outbound counters. running=false (and no error)
++// when no core runs; errCode "stats_disabled" when the running config has no stats feature.
++func OutboundStats() (running bool, outbounds map[string]TrafficPair, errCode string) {
++	outbounds = map[string]TrafficPair{}
++	coreMu.RLock()
++	defer coreMu.RUnlock()
++	if coreServer == nil {
++		return false, outbounds, ""
++	}
++	feature := coreServer.GetFeature(stats.ManagerType())
++	manager, ok := feature.(stats.Manager)
++	if !ok || manager == nil {
++		return true, outbounds, "stats_disabled"
++	}
++	if _, noop := manager.(stats.NoopManager); noop {
++		return true, outbounds, "stats_disabled"
++	}
++	manager.VisitCounters(func(name string, counter stats.Counter) bool {
++		if !strings.HasPrefix(name, outboundCounterPrefix) {
++			return true
++		}
++		rest := name[len(outboundCounterPrefix):]
++		var tag string
++		var up bool
++		switch {
++		case strings.HasSuffix(rest, uplinkCounterSuffix):
++			tag, up = rest[:len(rest)-len(uplinkCounterSuffix)], true
++		case strings.HasSuffix(rest, downlinkCounterSuffix):
++			tag = rest[:len(rest)-len(downlinkCounterSuffix)]
++		default:
++			return true
++		}
++		pair := outbounds[tag]
++		if up {
++			pair.Uplink = counter.Value()
++		} else {
++			pair.Downlink = counter.Value()
++		}
++		outbounds[tag] = pair
++		return true
++	})
++	return true, outbounds, ""
++}
++
++// OutboundStatsJSON is the frozen reply of the C export LibXrayTribeOutboundStats
++// (ABI libxray-tribe-stats-v1):
++// {"running":bool,"outbounds":{"<tag>":{"uplink":n,"downlink":n}},"error":"","error_code":""}.
++func OutboundStatsJSON() string {
++	running, outbounds, code := OutboundStats()
++	reply := outboundStatsReply{Running: running, Outbounds: outbounds, ErrorCode: code}
++	if code == "stats_disabled" {
++		reply.Error = "the running config has no stats feature"
++	}
++	encoded, err := json.Marshal(reply)
++	if err != nil {
++		return `{"running":false,"outbounds":{},"error":"encode failed","error_code":"internal"}`
++	}
++	return string(encoded)
++}
+diff --git a/xray/stats_tribe_test.go b/xray/stats_tribe_test.go
+new file mode 100644
+index 0000000..f687aa4
+--- /dev/null
++++ b/xray/stats_tribe_test.go
+@@ -0,0 +1,339 @@
++package xray
++
++// Tribe (0007): per-outbound counters measured on a real core. A client core (the instance
++// RunXray keeps) has a SOCKS5 inbound and four outbounds: "direct" (freedom), "proxy" (VLESS to a
++// second, local core), "chainA" (VLESS to the same server, dialled through "hopB" via
++// sockopt.dialerProxy) and "hopB" (freedom). Local sinks read a known number of bytes and answer
++// with a known number, so every tag's counters are compared with the payload.
++
++import (
++	"encoding/binary"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++const tribeStatsUUID = "5b2c8e7a-7a4c-4f0e-9a51-3f1f6d9b2c11"
++
++type tribeStatsReply struct {
++	Running   bool                   `json:"running"`
++	Outbounds map[string]TrafficPair `json:"outbounds"`
++	Error     string                 `json:"error"`
++	ErrorCode string                 `json:"error_code"`
++}
++
++func tribeReadStats(t *testing.T) tribeStatsReply {
++	t.Helper()
++	var r tribeStatsReply
++	if err := json.Unmarshal([]byte(OutboundStatsJSON()), &r); err != nil {
++		t.Fatalf("stats JSON: %v", err)
++	}
++	if r.Outbounds == nil {
++		t.Fatal("outbounds must be an object, never null")
++	}
++	return r
++}
++
++func tribeFreePort(t *testing.T) int {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	return ln.Addr().(*net.TCPAddr).Port
++}
++
++// tribeSink: per connection reads an 8-byte header (up, down), then exactly up bytes, then writes
++// down bytes and closes.
++func tribeSink(t *testing.T) int {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { ln.Close() })
++	go func() {
++		for {
++			c, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			go func(c net.Conn) {
++				defer c.Close()
++				var hdr [8]byte
++				if _, err := io.ReadFull(c, hdr[:]); err != nil {
++					return
++				}
++				up, down := binary.BigEndian.Uint32(hdr[:4]), binary.BigEndian.Uint32(hdr[4:])
++				if _, err := io.CopyN(io.Discard, c, int64(up)); err != nil {
++					return
++				}
++				buf := make([]byte, 32<<10)
++				for left := int(down); left > 0; {
++					n := min(left, len(buf))
++					if _, err := c.Write(buf[:n]); err != nil {
++						return
++					}
++					left -= n
++				}
++			}(c)
++		}
++	}()
++	return ln.Addr().(*net.TCPAddr).Port
++}
++
++// tribeFlow opens a SOCKS5 (no auth) CONNECT through the client core to 127.0.0.1:port, sends
++// 8+up bytes and reads down bytes. Returns the application bytes each way.
++func tribeFlow(t *testing.T, socksPort, port int, up, down uint32) (int64, int64) {
++	t.Helper()
++	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), 5*time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	c.SetDeadline(time.Now().Add(20 * time.Second))
++	if _, err := c.Write([]byte{5, 1, 0}); err != nil {
++		t.Fatal(err)
++	}
++	var greet [2]byte
++	if _, err := io.ReadFull(c, greet[:]); err != nil || greet != [2]byte{5, 0} {
++		t.Fatalf("socks greeting: %v %v", greet, err)
++	}
++	req := []byte{5, 1, 0, 1, 127, 0, 0, 1, byte(port >> 8), byte(port)}
++	if _, err := c.Write(req); err != nil {
++		t.Fatal(err)
++	}
++	var rep [10]byte
++	if _, err := io.ReadFull(c, rep[:]); err != nil || rep[1] != 0 {
++		t.Fatalf("socks connect: %v %v", rep, err)
++	}
++	var hdr [8]byte
++	binary.BigEndian.PutUint32(hdr[:4], up)
++	binary.BigEndian.PutUint32(hdr[4:], down)
++	if _, err := c.Write(hdr[:]); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := c.Write(make([]byte, up)); err != nil {
++		t.Fatal(err)
++	}
++	got, err := io.CopyN(io.Discard, c, int64(down))
++	if err != nil || got != int64(down) {
++		t.Fatalf("download %d/%d: %v", got, down, err)
++	}
++	return int64(8 + up), int64(down)
++}
++
++func tribeWriteConfig(t *testing.T, dir, name string, cfg map[string]any) string {
++	t.Helper()
++	raw, err := json.Marshal(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(dir, name)
++	if err := os.WriteFile(path, raw, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func tribeFreedom(tag string) map[string]any {
++	return map[string]any{"tag": tag, "protocol": "freedom",
++		"settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}}
++}
++
++func tribeVless(tag string, port int) map[string]any {
++	return map[string]any{"tag": tag, "protocol": "vless", "settings": map[string]any{
++		"vnext": []any{map[string]any{"address": "127.0.0.1", "port": port,
++			"users": []any{map[string]any{"id": tribeStatsUUID, "encryption": "none"}}}}}}
++}
++
++func tribeClientConfig(socksPort, serverPort, directSink, proxySink, chainSink int, withStats bool) map[string]any {
++	chain := tribeVless("chainA", serverPort)
++	chain["streamSettings"] = map[string]any{"sockopt": map[string]any{"dialerProxy": "hopB"}}
++	cfg := map[string]any{
++		"log": map[string]any{"loglevel": "none"},
++		"inbounds": []any{map[string]any{"tag": "socks-in", "listen": "127.0.0.1", "port": socksPort,
++			"protocol": "socks", "settings": map[string]any{"auth": "noauth", "udp": false}}},
++		"outbounds": []any{tribeFreedom("direct"), tribeVless("proxy", serverPort), chain, tribeFreedom("hopB")},
++		"routing": map[string]any{"rules": []any{
++			map[string]any{"type": "field", "port": fmt.Sprint(proxySink), "outboundTag": "proxy"},
++			map[string]any{"type": "field", "port": fmt.Sprint(chainSink), "outboundTag": "chainA"},
++			map[string]any{"type": "field", "port": fmt.Sprint(directSink), "outboundTag": "direct"},
++		}},
++		// A policy the caller already had: enabling stats must MERGE into it.
++		"policy": map[string]any{"levels": map[string]any{"0": map[string]any{"handshake": 4}}},
++	}
++	if withStats {
++		cfg["stats"] = map[string]any{}
++		cfg["policy"].(map[string]any)["system"] = map[string]any{
++			"statsOutboundUplink": true, "statsOutboundDownlink": true}
++	}
++	return cfg
++}
++
++func tribeWithin(t *testing.T, what string, got, payload int64) {
++	t.Helper()
++	// Lower bound: every application byte crossed this outbound's transport. Upper bound: protocol
++	// headers (VLESS request/response, a few dozen bytes) plus 1 %.
++	if got < payload || got > payload+payload/100+1024 {
++		t.Errorf("%s=%d, payload %d", what, got, payload)
++	}
++}
++
++func TestTribeOutboundStats(t *testing.T) {
++	dir := t.TempDir()
++	if r := tribeReadStats(t); r.Running || len(r.Outbounds) != 0 || r.ErrorCode != "" {
++		t.Fatalf("no core: %+v", r)
++	}
++
++	serverPort := tribeFreePort(t)
++	server, err := StartXray(tribeWriteConfig(t, dir, "server.json", map[string]any{
++		"log": map[string]any{"loglevel": "none"},
++		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": serverPort, "protocol": "vless",
++			"settings": map[string]any{"clients": []any{map[string]any{"id": tribeStatsUUID}}, "decryption": "none"}}},
++		"outbounds": []any{tribeFreedom("out")},
++	}))
++	if err != nil {
++		t.Fatalf("server core: %v", err)
++	}
++	if err := server.Start(); err != nil {
++		t.Fatalf("server start: %v", err)
++	}
++	defer server.Close()
++
++	directSink, proxySink, chainSink := tribeSink(t), tribeSink(t), tribeSink(t)
++
++	// Stats feature absent -> stats_disabled while running.
++	socksPort := tribeFreePort(t)
++	if err := RunXray(dir, tribeWriteConfig(t, dir, "plain.json",
++		tribeClientConfig(socksPort, serverPort, directSink, proxySink, chainSink, false)), 0); err != nil {
++		t.Fatalf("RunXray plain: %v", err)
++	}
++	if r := tribeReadStats(t); !r.Running || r.ErrorCode != "stats_disabled" || len(r.Outbounds) != 0 {
++		t.Fatalf("plain config: %+v", r)
++	}
++	if err := StopXray(); err != nil {
++		t.Fatal(err)
++	}
++
++	socksPort = tribeFreePort(t)
++	if err := RunXray(dir, tribeWriteConfig(t, dir, "client.json",
++		tribeClientConfig(socksPort, serverPort, directSink, proxySink, chainSink, true)), 0); err != nil {
++		t.Fatalf("RunXray: %v", err)
++	}
++
++	// Readers hammer the export during all traffic (run with -race).
++	var stop atomic.Bool
++	var readers sync.WaitGroup
++	for i := 0; i < 4; i++ {
++		readers.Add(1)
++		go func() {
++			defer readers.Done()
++			for !stop.Load() {
++				var r tribeStatsReply
++				if err := json.Unmarshal([]byte(OutboundStatsJSON()), &r); err != nil {
++					t.Error(err)
++					return
++				}
++			}
++		}()
++	}
++
++	r := tribeReadStats(t)
++	if !r.Running || r.ErrorCode != "" {
++		t.Fatalf("stats config: %+v", r)
++	}
++	for tag, pair := range r.Outbounds {
++		if pair.Uplink != 0 || pair.Downlink != 0 {
++			t.Fatalf("%s counts before any traffic: %+v", tag, pair)
++		}
++	}
++
++	// 1. Direct only.
++	dUp, dDown := tribeFlow(t, socksPort, directSink, 200_000, 300_000)
++	r = tribeReadStats(t)
++	d := r.Outbounds["direct"]
++	t.Logf("direct flow: payload up=%d down=%d; counted direct=%+v proxy=%+v chainA=%+v hopB=%+v",
++		dUp, dDown, d, r.Outbounds["proxy"], r.Outbounds["chainA"], r.Outbounds["hopB"])
++	tribeWithin(t, "direct.uplink", d.Uplink, dUp)
++	tribeWithin(t, "direct.downlink", d.Downlink, dDown)
++	for _, tag := range []string{"proxy", "chainA", "hopB"} {
++		if p := r.Outbounds[tag]; p.Uplink != 0 || p.Downlink != 0 {
++			t.Errorf("direct bytes appeared under %s: %+v", tag, p)
++		}
++	}
++
++	// 2. Proxy only; direct must not move.
++	pUp, pDown := tribeFlow(t, socksPort, proxySink, 150_000, 250_000)
++	r = tribeReadStats(t)
++	p := r.Outbounds["proxy"]
++	t.Logf("proxy flow: payload up=%d down=%d; counted proxy=%+v direct=%+v chainA=%+v hopB=%+v",
++		pUp, pDown, p, r.Outbounds["direct"], r.Outbounds["chainA"], r.Outbounds["hopB"])
++	tribeWithin(t, "proxy.uplink", p.Uplink, pUp)
++	tribeWithin(t, "proxy.downlink", p.Downlink, pDown)
++	if r.Outbounds["direct"] != d {
++		t.Errorf("direct moved during the proxy flow: %+v -> %+v", d, r.Outbounds["direct"])
++	}
++
++	// 3. Chain: chainA dialled through hopB.
++	cUp, cDown := tribeFlow(t, socksPort, chainSink, 120_000, 220_000)
++	r = tribeReadStats(t)
++	a, b := r.Outbounds["chainA"], r.Outbounds["hopB"]
++	t.Logf("chain flow: payload up=%d down=%d; counted chainA=%+v hopB=%+v proxy=%+v direct=%+v",
++		cUp, cDown, a, b, r.Outbounds["proxy"], r.Outbounds["direct"])
++	tribeWithin(t, "chainA.uplink", a.Uplink, cUp)
++	tribeWithin(t, "chainA.downlink", a.Downlink, cDown)
++	if r.Outbounds["proxy"] != p || r.Outbounds["direct"] != d {
++		t.Errorf("chain flow moved proxy/direct")
++	}
++
++	// 4. Counters are cumulative and survive until stop.
++	tribeFlow(t, socksPort, proxySink, 10_000, 10_000)
++	if r2 := tribeReadStats(t); r2.Outbounds["proxy"].Uplink < p.Uplink+10_008 {
++		t.Errorf("proxy counter not cumulative: %+v -> %+v", p, r2.Outbounds["proxy"])
++	}
++
++	stop.Store(true)
++	readers.Wait()
++
++	// 5. Concurrent readers across stop/start cycles.
++	stop.Store(false)
++	for i := 0; i < 4; i++ {
++		readers.Add(1)
++		go func() {
++			defer readers.Done()
++			for !stop.Load() {
++				OutboundStatsJSON()
++			}
++		}()
++	}
++	cfgPath := filepath.Join(dir, "client.json")
++	for i := 0; i < 3; i++ {
++		if err := StopXray(); err != nil {
++			t.Fatal(err)
++		}
++		if err := RunXray(dir, cfgPath, 0); err != nil {
++			t.Fatalf("restart %d: %v", i, err)
++		}
++		if r := tribeReadStats(t); r.Outbounds["proxy"].Uplink != 0 {
++			t.Fatalf("a new instance must start from zero: %+v", r.Outbounds["proxy"])
++		}
++	}
++	if err := StopXray(); err != nil {
++		t.Fatal(err)
++	}
++	stop.Store(true)
++	readers.Wait()
++
++	if r := tribeReadStats(t); r.Running || len(r.Outbounds) != 0 || r.ErrorCode != "" {
++		t.Fatalf("after stop: %+v", r)
++	}
++}
+diff --git a/xray/xray.go b/xray/xray.go
+index ea536d3..a146c37 100644
+--- a/xray/xray.go
++++ b/xray/xray.go
+@@ -3,6 +3,7 @@ package xray
+ import (
+ 	"os"
+ 	"runtime/debug"
++	"sync"
+ 
+ 	"github.com/amnezia-vpn/amnezia-libxray/nodep"
+ 	"github.com/xtls/xray-core/common/cmdarg"
+@@ -12,6 +13,9 @@ import (
+ 
+ var (
+ 	coreServer *core.Instance
++	// Tribe (0007): guards coreServer, so OutboundStatsJSON may run from any thread while
++	// RunXray/StopXray replace the instance.
++	coreMu sync.RWMutex
+ )
+ 
+ func StartXray(configPath string) (*core.Instance, error) {
+@@ -42,6 +46,8 @@ func setMaxMemory(maxMemory int64) {
+ // configPath means the config.json file path.
+ // maxMemory means the soft memory limit of golang, see SetMemoryLimit to find more information.
+ func RunXray(datDir string, configPath string, maxMemory int64) (err error) {
++	coreMu.Lock()
++	defer coreMu.Unlock()
+ 	InitEnv(datDir)
+ 	if maxMemory > 0 {
+ 		setMaxMemory(maxMemory)
+@@ -68,6 +74,8 @@ func RunXray(datDir string, configPath string, maxMemory int64) (err error) {
+ func StopXray() error {
+ 	// Tribe (0006): GC percent and memory limit back to the pre-session values.
+ 	defer nodep.RestoreRuntime()
++	coreMu.Lock()
++	defer coreMu.Unlock()
+ 	if coreServer != nil {
+ 		err := coreServer.Close()
+ 		coreServer = nil

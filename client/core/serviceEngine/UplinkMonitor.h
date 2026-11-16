@@ -16,7 +16,9 @@
 // under a foreign NE VPN with a live en0). So iOS keeps the QNetworkInformation fallback, and the
 // question "physical path known to exist" (physicalUp) is answered strictly: unknown = no. up() keeps
 // its old lenient meaning (unknown = up: never block a start or pause health on an unknown state).
+#include <QList>
 #include <QObject>
+#include <QString>
 
 namespace avpn {
 
@@ -34,6 +36,39 @@ inline bool fallbackPhysicalUp(UplinkReach reach, UplinkMedium medium)
     return medium == UplinkMedium::Ethernet || medium == UplinkMedium::WiFi || medium == UplinkMedium::Cellular;
 }
 
+// AVPN Scanner (plan §2.11a): the physical uplink's kind when nw_path names no interface - under the Mac's
+// own VPN the virtual interfaces are prohibited and the default route is our utun, so the path's kind is
+// empty. The fallback is the route table's PHYSICAL default routes (UplinkMonitor.mm): each interface with its
+// medium from SystemConfiguration (802.11 -> Wifi, Ethernet -> Ethernet, anything else -> Unknown). Wired
+// wins over Wi-Fi (the medium macOS prefers when both carry a default route); none known -> "". Pure.
+enum class UplinkIfaceMedium { Unknown, Wifi, Ethernet };
+
+struct UplinkRouteIface {
+    QString name;                                   // BSD name ("en0")
+    UplinkIfaceMedium medium = UplinkIfaceMedium::Unknown;
+};
+
+// The interface the kind is taken from ("" = none with a known medium).
+inline QString uplinkPhysicalIfname(const QList<UplinkRouteIface> &ifaces)
+{
+    for (const UplinkRouteIface &i : ifaces)
+        if (i.medium == UplinkIfaceMedium::Ethernet)
+            return i.name;
+    for (const UplinkRouteIface &i : ifaces)
+        if (i.medium == UplinkIfaceMedium::Wifi)
+            return i.name;
+    return QString();
+}
+
+inline QString uplinkPhysicalKind(const QList<UplinkRouteIface> &ifaces)
+{
+    const QString name = uplinkPhysicalIfname(ifaces);
+    for (const UplinkRouteIface &i : ifaces)
+        if (i.name == name && !name.isEmpty())
+            return i.medium == UplinkIfaceMedium::Ethernet ? QStringLiteral("ethernet") : QStringLiteral("wifi");
+    return QString();
+}
+
 class UplinkMonitor : public QObject
 {
     Q_OBJECT
@@ -48,8 +83,20 @@ public:
     // fallback - fallbackPhysicalUp(). For decisions that must not act on an unknown state (§25 stop).
     bool physicalUp() const { return m_authoritative ? m_up : m_physicalUp; }
 
+    // AVPN Scanner (plan scanner-client-plan.md §2.11a): the app's element of the strict local network
+    // generation tuple ({"app", epoch, counter} of ScanNetworkGeneration.h). pathEpoch() = a random id chosen
+    // when this monitor started (0 = no source: the fallback .cpp has none); pathCounter() grows by one on
+    // every change of the physical path (status, interface set, gateway set - compared as a local hash).
+    // pathKind() "wifi" | "ethernet" | "cellular" | "" and pathGatewayHash() (16 hex, "" unknown) feed the
+    // weak fingerprint. Never sent anywhere.
+    quint64 pathEpoch() const { return m_pathEpoch; }
+    qint64 pathCounter() const { return m_pathCounter; }
+    QString pathKind() const { return m_pathKind; }
+    QString pathGatewayHash() const { return m_pathGatewayHash; }
+
 signals:
     void changed(bool up);
+    void pathChanged(); // AVPN Scanner: pathCounter() or the path facts moved
 
 private:
     explicit UplinkMonitor(QObject *parent = nullptr);
@@ -60,6 +107,13 @@ private:
     bool m_up = true;
     bool m_authoritative = false;
     bool m_physicalUp = false; // fallback only: fallbackPhysicalUp() of the last reading
+    // AVPN Scanner: the generation source (set only by the authoritative macOS monitor).
+    void setPath(const QByteArray &hash, const QString &kind, const QString &gatewayHash);
+    quint64 m_pathEpoch = 0;
+    qint64 m_pathCounter = 0;
+    QByteArray m_pathHash;
+    QString m_pathKind;
+    QString m_pathGatewayHash;
     void *m_impl = nullptr; // nw_path_monitor_t на macOS
 };
 

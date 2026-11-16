@@ -62,6 +62,13 @@ inline bool parseConfig(const QByteArray &body, RemoteConfig &out, QString &err)
         return false;
     }
     const QJsonObject o = doc.object();
+    // AVPN upstream nodes: second defence next to the signature context. No /v1/config or /v1/edges
+    // body has a root "type" key (ConfigOut/EdgesOut); the lease answer signed by the same key carries
+    // one ("type":"upstream_lease"). Such a body is never a config, whatever its signature.
+    if (o.contains(QLatin1String("type"))) {
+        err = QStringLiteral("typed body is not a config");
+        return false;
+    }
     out.minAppVersion = parseStrMap(o.value(QStringLiteral("min_app_version")).toObject());
     out.recommendedVersion = parseStrMap(o.value(QStringLiteral("recommended_version")).toObject());
     out.urls = parseStrMap(o.value(QStringLiteral("urls")).toObject());

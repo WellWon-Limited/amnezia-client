@@ -17,7 +17,9 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
-QT_BIN="${QT_BIN:-$HOME/Qt/6.10.2/macos/bin}"
+# Qt of the build (6.11.1, the same QT_ROOT the engine scripts take). A missing qmllint or platform plugin is a
+# FAIL, never a silent pass: with a wrong default the lint once "passed" without linting anything.
+QT_BIN="${QT_BIN:-${QT_ROOT:-$HOME/Qt/6.11.1/macos}/bin}"
 
 # Типы и модули, которые регистрирует C++ (qmlRegisterType/контекст), а не QML-файлы:
 # qmllint их не видит — это не ошибка. Новый C++-тип добавлять сюда осознанно.
@@ -26,12 +28,24 @@ ALLOW_MODULES='^(SortFilterProxyModel|PageEnum|ContainersModelFilters|ContainerP
 
 lint() {
   local ref="${1:-HEAD}" work
+  if [ ! -x "$QT_BIN/qmllint" ]; then
+    echo "qml_gate lint: FAIL — no qmllint at $QT_BIN (install that Qt or set QT_BIN / QT_ROOT)"
+    return 2
+  fi
   work="$(mktemp -d /tmp/tribe-qml-gate.XXXXXX)" || exit 2
   trap 'rm -rf -- "$work"' RETURN
   git -C "$REPO" archive "$ref" client/ui/qml | tar -x -C "$work" || { echo "qml_gate: git archive $ref failed"; return 2; }
-  local qml="$work/client/ui/qml" out="$work/lint.txt"
+  local qml="$work/client/ui/qml" out="$work/lint.txt" files lint_rc
+  files="$(git -C "$REPO" ls-tree -r --name-only "$ref" -- client/ui/qml | grep -c '\.qml$')"
+  [ "$files" -gt 0 ] || { echo "qml_gate lint: FAIL — no .qml files at $ref"; return 2; }
   (cd "$qml" && git -C "$REPO" ls-tree -r --name-only "$ref" -- client/ui/qml | grep '\.qml$' \
      | sed 's#^client/ui/qml/##' | xargs "$QT_BIN/qmllint" -I . -I Modules >"$out" 2>&1)
+  lint_rc=$?
+  # xargs: 125 = qmllint killed by a signal, 126 = not executable, 127 = not found. qmllint itself may exit
+  # non-zero on findings (123/124 via xargs): the verdict below reads its output.
+  case "$lint_rc" in
+    125|126|127) echo "qml_gate lint: FAIL — qmllint did not run (xargs exit $lint_rc)"; head -5 "$out"; return 2 ;;
+  esac
   local bad
   bad="$( { grep -oE '[A-Za-z0-9_]+ was not found' "$out" | awk '{print $1}' | grep -vE "$ALLOW_TYPES";
             grep -oE 'Failed to import [^ .]+' "$out" | awk '{print $4}' | grep -vE "$ALLOW_MODULES"; } | sort -u)"
@@ -41,7 +55,7 @@ lint() {
     grep -nE "$(echo "$bad" | paste -sd'|' -)" "$out" | head -20 | sed 's/^/    /'
     return 1
   fi
-  echo "qml_gate lint: OK ($ref)"
+  echo "qml_gate lint: OK ($ref, $files files, $QT_BIN/qmllint)"
 }
 
 run() {
@@ -55,6 +69,10 @@ run() {
   # единственного экземпляра) — установленная Tribe VPN и её состояние не участвуют.
   # В бандле только cocoa; offscreen берём из установленного Qt той же версии (окно не всплывает).
   local plugins="${QT_BIN%/bin}/plugins/platforms"
+  if [ -z "${QT_QPA_PLATFORM_PLUGIN_PATH:-}" ] && [ ! -d "$plugins" ]; then
+    echo "qml_gate run: FAIL — no Qt platform plugins at $plugins (install that Qt or set QT_BIN / QT_ROOT)"
+    rm -rf -- "${sandbox:?}"; return 2
+  fi
   HOME="$sandbox/home" TMPDIR="$sandbox/tmp/" QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" \
     QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-$plugins}" \
     "$bin" >"$log" 2>&1 &

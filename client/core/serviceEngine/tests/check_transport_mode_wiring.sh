@@ -123,7 +123,12 @@ gate_body="$(body_of 'bool AvpnEngineQml::refreshXrayRuntimeGate(')"
     && has "$gate_body" 'm_engine.nextXrayRuntimeGate(readyNow, avpn::macXrayRuntimePresent(), modeActivity())' \
     || bad "refreshXrayRuntimeGate() must decide by the gate with the facade's snapshot"
 has "$gate_body" 'syncTransportMode(why)' || bad "refreshXrayRuntimeGate() must tell the gate that availability changed"
-[ "$(count 'xrayPlatformRuntimeReady().store(')" = "2" ] && has "$gate_body" 'xrayPlatformRuntimeReady().store(next)' \
+# Release C (lane P1): the constructor writes it once per platform branch (macOS, Windows, Android - one
+# #if chain, so one write runs); every write is still in the constructor or in refreshXrayRuntimeGate().
+ctor_body="$(body_of 'AvpnEngineQml::AvpnEngineQml(')"
+ctor_stores="$(printf '%s\n' "$ctor_body" | grep -c -- 'xrayPlatformRuntimeReady().store(' || true)"
+[ "$ctor_stores" -ge 1 ] && [ "$(count 'xrayPlatformRuntimeReady().store(')" = "$((ctor_stores + 1))" ] \
+    && has "$gate_body" 'xrayPlatformRuntimeReady().store(next)' \
     || bad "the runtime gate must be written from the constructor and refreshXrayRuntimeGate() only"
 if code | grep -q 'xrayPlatformRuntimeReady().exchange('; then bad "the runtime gate must not be exchanged directly"; fi
 grep -q 'void noteStartupTunnelObserved() { applyModeChange(m_engine.noteStartupObserved(modeActivity())); }' "$HDR" \

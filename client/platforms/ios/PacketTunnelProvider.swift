@@ -124,6 +124,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // Последняя причина отказа старта Xray (текст ядра): уходит в статус-ответ приложению,
     // чтобы «вечное подключение» на устройстве имело внятную причину.
     var lastXrayStartFailure: String?
+    // AVPN (upstream nodes): lease renewer, SOCKS endpoint of the core, terminal stop (decision E) -
+    // PacketTunnelProvider+Upstream.swift.
+    let tribeUpstream = TribeUpstreamState()
 
     func openVPNPacketFlow() -> OpenVPNAdapterPacketFlow {
         openVPNPacketFlowAdapter
@@ -252,6 +255,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
           return
       }
 
+      if tribeHandleScanMessageIfScan(messageData, completionHandler: completionHandler) { return } // AVPN (Scanner §2.3): before the log line below - scan messages carry tokens and configs
+
       guard let message = String(data: messageData, encoding: .utf8) else {
           if let completionHandler {
               completionHandler(nil)
@@ -259,7 +264,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
           return
       }
 
-      neLog(.info, title: "App said: ", message: message)
+      // AVPN (upstream nodes): `upstream_lease_set` carries the renew token - never logged.
+      neLog(.info, title: "App said: ", message: message.contains("upstream_lease") ? "upstream_lease_set (redacted)" : message)
 
       guard let message = try? JSONSerialization.jsonObject(with: messageData, options: []) as? [String: Any] else {
           if protoType == .wireguard {
@@ -281,6 +287,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
           return
       }
 
+      guard tribeAppActionHasBranch(action) else { tribeAnswerUnknownAction(action, completionHandler: completionHandler); return } // AVPN (Scanner §2.3, R4): every action gets an answer
+
       if action == Constants.kActionStatus {
           handleStatusAppMessage(messageData,
                                  completionHandler: completionHandler)
@@ -298,10 +306,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       if action == Constants.kActionSoftRestart {
           handleSoftRestartAppMessage(completionHandler: completionHandler)
       }
+
+      // AVPN (upstream nodes, contract section 2): the lease of a provisional start, handed over by the app.
+      if action == UpstreamProviderKeys.actionLeaseSet {
+          handleUpstreamLeaseSetMessage(message, completionHandler: completionHandler)
+      }
   }
 
     override func startTunnel(options: [String : NSObject]? = nil,
                               completionHandler: @escaping ((any Error)?) -> Void) {
+        let completionHandler = tribeScanReopenOnSuccess(completionHandler) // AVPN (Scanner, review F1): a started tunnel reopens the scan host
         tribeRuntimeGeneration = UUID().uuidString
         let metadata = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["tribeSessionMetadata"] as? [String: Any] ?? [:]
         // Кто поднял туннель: приложение и наши команды передают tribeStartSource, iOS (Настройки,
@@ -384,6 +398,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             store.record(source: "ne", event: "stop", fields: stop)
         }
 
+        tribeScanStopAllIfUsed(reason: "tunnel_stop", close: true) // AVPN (Scanner §2.3): probes end before any core stops; host closed
         cancelPendingOpenVPNReconnect()
         cancelPendingNetworkChangeHandling()
 
@@ -400,7 +415,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             stopOpenVPN(with: reason,
                         completionHandler: completionHandler)
         case .xray:
-            stopXray(completionHandler: completionHandler)
+            // AVPN (upstream nodes, contract section 6): release the seat (<= 1.5 s) before the core stops.
+            stopXrayReleasingUpstream { [weak self] in
+                guard let self else { completionHandler(); return }
+                self.stopXray(completionHandler: completionHandler)
+            }
         }
     }
   
@@ -439,8 +458,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         updateActiveInterfaceIndex(for: changePath)
+        // AVPN (upstream nodes, decision E): a terminal lease answer stopped the core for good.
+        if upstreamBlocksCoreRestart {
+            xrayLog(.info, message: "Tribe upstream: lease ended, core not restarted on the network change")
+            completion(nil)
+            return
+        }
         reasserting = true
         xrayLog(.info, message: "Applying network change to xray tunnel")
+        noteUpstreamBytesBeforeCoreRestart() // AVPN (upstream nodes): hev zeroes its counters on restart
         stopXray { }
         // AVPN (этап D3): рестарт внутри той же NE-сессии — кумулятив rx/tx сохраняем.
         startXray(preservingCounters: true) { [weak self] error in

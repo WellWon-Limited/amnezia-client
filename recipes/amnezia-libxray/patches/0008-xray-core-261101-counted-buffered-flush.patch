@@ -1,0 +1,85 @@
+diff --git a/common/buf/tribe_counter_test.go b/common/buf/tribe_counter_test.go
+new file mode 100644
+index 0000000..d6d99e4
+--- /dev/null
++++ b/common/buf/tribe_counter_test.go
+@@ -0,0 +1,56 @@
++package buf_test
++
++import (
++	"bytes"
++	"errors"
++	"net"
++	"syscall"
++	"testing"
++
++	"github.com/xtls/xray-core/app/stats"
++	. "github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/transport/internet/stat"
++)
++
++type tribeSinkConn struct {
++	net.Conn
++	out bytes.Buffer
++}
++
++func (c *tribeSinkConn) Write(b []byte) (int, error) { return c.out.Write(b) }
++
++// SyscallConn makes NewWriter treat the sink as a stream socket (like *net.TCPConn).
++func (c *tribeSinkConn) SyscallConn() (syscall.RawConn, error) { return nil, errors.New("test sink") }
++
++// TestTribeBufferedFlushIsCounted: every byte written through NewWriter(CounterConnection) is
++// counted, including the buffered first write (BufferedWriter flushes through io.Writer).
++func TestTribeBufferedFlushIsCounted(t *testing.T) {
++	counter := new(stats.Counter)
++	sink := &tribeSinkConn{}
++	conn := &stat.CounterConnection{Connection: sink, WriteCounter: counter}
++	writer := NewBufferedWriter(NewWriter(conn))
++	header := []byte("request-header")
++	if _, err := writer.Write(header); err != nil {
++		t.Fatal(err)
++	}
++	first := New()
++	first.Extend(4000)
++	if err := writer.WriteMultiBuffer(MultiBuffer{first}); err != nil {
++		t.Fatal(err)
++	}
++	if err := writer.SetBuffered(false); err != nil {
++		t.Fatal(err)
++	}
++	rest := New()
++	rest.Extend(3000)
++	if err := writer.WriteMultiBuffer(MultiBuffer{rest}); err != nil {
++		t.Fatal(err)
++	}
++	want := int64(len(header) + 4000 + 3000)
++	if int64(sink.out.Len()) != want {
++		t.Fatalf("written %d, want %d", sink.out.Len(), want)
++	}
++	if got := counter.Value(); got != want {
++		t.Fatalf("counted %d of %d written bytes", got, want)
++	}
++}
+diff --git a/common/buf/writer.go b/common/buf/writer.go
+index f14d83c..30cbcfe 100644
+--- a/common/buf/writer.go
++++ b/common/buf/writer.go
+@@ -65,6 +65,18 @@ func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
+ 	return nil
+ }
+ 
++// Write implements io.Writer and counts like WriteMultiBuffer. Tribe: without it the embedded
++// writer's Write was promoted, so callers that use this writer as an io.Writer (BufferedWriter's
++// flush: a VLESS request header with the first payload) bypassed the stats counter of a
++// CounterConnection unwrapped by NewWriter.
++func (w *BufferToBytesWriter) Write(b []byte) (int, error) {
++	n, err := w.Writer.Write(b)
++	if w.counter != nil && n > 0 {
++		w.counter.Add(int64(n))
++	}
++	return n, err
++}
++
+ // ReadFrom implements io.ReaderFrom.
+ func (w *BufferToBytesWriter) ReadFrom(reader io.Reader) (int64, error) {
+ 	var sc SizeCounter

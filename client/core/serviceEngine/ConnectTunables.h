@@ -189,4 +189,22 @@ inline VerifyStep verifyStepFor(bool httpOk, bool statsValid, qint64 rxBytes)
     return VerifyStep::KeepTrying;
 }
 
+// Upstream nodes (plan provider-pool v2, point 6; CONNECT-INVARIANTS §1, §17.2): the lease acquire runs
+// INSIDE Connecting (VpnConnectionTunnelControl::up), so its timeout is bound below the reconcile
+// watchdog in code: the acquire, the core start and the platform's Connected must fit before the
+// watchdog (and the up-phase deadline of a switch, which is never shorter) fires. Floor 2 s (a direct
+// TLS round trip on a slow cellular link), ceiling watchdog - 4 s; numbers.upstream_acquire_timeout_ms,
+// default 6 s.
+inline int upstreamAcquireTimeoutMsTuned()
+{
+    const int hi = qMax(2000, reconcileWatchdogMsTuned() - 4000);
+    return qBound(2000, int(TuningStore::numberOr(QStringLiteral("upstream_acquire_timeout_ms"), 6000)), hi);
+}
+
+// The release on a user disconnect goes through the tunnel BEFORE the core stops (contract §6) and the
+// stop waits for it at most this long (the request's own transfer timeout; no timer of its own).
+inline constexpr int kUpstreamReleaseTimeoutMs = 1500;
+// A renewal through the tunnel: the API client's usual bound.
+inline constexpr int kUpstreamRenewTimeoutMs = 15000;
+
 } // namespace avpn
