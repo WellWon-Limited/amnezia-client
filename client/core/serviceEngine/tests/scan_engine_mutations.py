@@ -71,7 +71,7 @@ M = [
      "    v.live = up || (switching && nativeUp && !pendingSwitch.isEmpty());", "    v.live = up;",
      ["build_facade_policy.sh"]),
     ("M19 hint retries a row failed in this session", "ServiceEngine.cpp",
-     "        if (m_failedThisSession.contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId))\n            continue;\n        return n;",
+     "        if (sessionExclusions().contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId))\n            continue;\n        return n;",
      "        if (m_attemptExcluded.contains(n->nodeId))\n            continue;\n        return n;",
      ["build_facade_engine.sh"]),
     ("M20 hint survives a new user attempt", "ServiceEngine.h",
