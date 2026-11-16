@@ -2,6 +2,85 @@
 <!DOCTYPE TS>
 <TS version="2.1" language="en_US">
 <context>
+    <name>AvpnApkUpdate</name>
+    <message>
+        <location filename="../../core/serviceEngine/ApkUpdatePolicy.h" line="+106"/>
+        <source>Скачанный файл повреждён. Попробуйте ещё раз.</source>
+        <translation>The downloaded file is damaged. Please try again.</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Скачанный файл не прошёл проверку подписи — установка отменена.</source>
+        <translation>The downloaded file failed the signature check, so the installation was cancelled.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>У вас уже последняя версия.</source>
+        <translation>You already have the latest version.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>На сайте пока другая версия. Попробуйте обновиться позже.</source>
+        <translation>The website has a different version for now. Please try updating later.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <location line="+17"/>
+        <source>Не удалось обновить. Попробуйте скачать вручную.</source>
+        <translation>Could not update. Try downloading it manually.</translation>
+    </message>
+    <message>
+        <location line="-10"/>
+        <source>Обновление отменено.</source>
+        <translation>Update cancelled.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Android не разрешил установку. Проверьте, что Tribe VPN разрешено устанавливать приложения.</source>
+        <translation>Android did not allow the installation. Check that Tribe VPN is allowed to install apps.</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Не хватает места на телефоне для обновления.</source>
+        <translation>Not enough space on the phone for the update.</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Android отклонил обновление. Скачайте приложение с сайта заново.</source>
+        <translation>Android rejected the update. Download the app from the website again.</translation>
+    </message>
+    <message>
+        <location filename="../../platforms/android/avpn_selfupdate_android.cpp" line="+96"/>
+        <source>Обновление внутри приложения тут недоступно</source>
+        <translation>In-app updates are not available here</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Разрешите Tribe VPN устанавливать приложения — включите переключатель в открывшихся настройках, вернитесь и нажмите «Обновить» ещё раз.</source>
+        <translation>Allow Tribe VPN to install apps: turn on the switch in the settings that just opened, come back and tap “Update” again.</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Скачиваем обновление…</source>
+        <translation>Downloading the update…</translation>
+    </message>
+    <message>
+        <location line="+66"/>
+        <source>Не удалось скачать обновление. Проверьте интернет и попробуйте ещё раз.</source>
+        <translation>Could not download the update. Check your internet connection and try again.</translation>
+    </message>
+    <message>
+        <location line="+29"/>
+        <source>Проверяем подпись…</source>
+        <translation>Checking the signature…</translation>
+    </message>
+    <message>
+        <location line="+25"/>
+        <source>Устанавливаем…</source>
+        <translation>Installing…</translation>
+    </message>
+</context>
+<context>
     <name>ChatBubble</name>
     <message>
         <location filename="../../ui/qml/Tribe/components/ChatBubble.qml" line="+152"/>
@@ -2927,7 +3006,7 @@ You can attach a photo or video.</translation>
         <translation>Update</translation>
     </message>
     <message>
-        <location line="+38"/>
+        <location line="+39"/>
         <source>Обновлять автоматически</source>
         <translation>Update automatically</translation>
     </message>
@@ -2973,7 +3052,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+3559"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+3642"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3073,7 +3152,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2446"/>
+        <location line="-2516"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3093,7 +3172,7 @@ You can attach a photo or video.</translation>
         <translation>Done, restarting the app…</translation>
     </message>
     <message>
-        <location line="+14"/>
+        <location line="+20"/>
         <source>Обновление внутри приложения тут недоступно</source>
         <translation>In-app updates are not available here</translation>
     </message>
@@ -3103,14 +3182,29 @@ You can attach a photo or video.</translation>
         <translation>Downloading and checking the signature…</translation>
     </message>
     <message>
-        <location line="-1842"/>
-        <location line="+2248"/>
+        <location line="-1856"/>
+        <location line="+2326"/>
         <location line="+76"/>
         <source>Сервер</source>
         <translation>Server</translation>
     </message>
     <message>
-        <location line="-71"/>
+        <location line="-504"/>
+        <source>Подтвердите обновление в окне Android</source>
+        <translation>Confirm the update in the Android window</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Готово, откройте приложение заново</source>
+        <translation>Done. Open the app again</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Скачиваем обновление…</source>
+        <translation>Downloading the update…</translation>
+    </message>
+    <message>
+        <location line="+410"/>
         <source>Текущий сервер</source>
         <translation>Current server</translation>
     </message>
@@ -3283,7 +3377,7 @@ You can attach a photo or video.</translation>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+729"/>
+        <location line="+748"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
@@ -3545,18 +3639,48 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+1166"/>
+        <location line="+1184"/>
         <source>Нет авторизации</source>
         <translation>Not authorized</translation>
     </message>
     <message>
-        <location line="-1165"/>
-        <location line="+781"/>
+        <location line="-1183"/>
+        <location line="+799"/>
         <source>Не отправлено (ошибка %1)</source>
         <translation>Not sent (error %1)</translation>
     </message>
     <message>
-        <location line="-124"/>
+        <location line="-701"/>
+        <source>текст</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>лог</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>отчёт для разработчиков</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>%1 на %2</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Более ранний отчёт от %1 не доставлен: сервер ответил %2; доставлено: %3.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>ничего</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+564"/>
         <location line="+55"/>
         <location line="+498"/>
         <source>Файл недоступен</source>

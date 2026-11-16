@@ -465,10 +465,19 @@ public:
     Q_INVOKABLE QString configUrl(const QString &key, const QString &def) const;
     int     updateState() const { return m_updateState; }
     QString storeUrl() const;
+#if defined(Q_OS_ANDROID)
+    // AVPN (2026-11-16): the site APK (oss flavor) updates itself; Play builds go to the store.
+    bool canSelfUpdate() const;
+#else
     bool canSelfUpdate() const { return avpn::SelfUpdate::isSupported(); }
+#endif
     bool autoUpdate() const;
     Q_INVOKABLE void setAutoUpdate(bool on);
+#if defined(Q_OS_ANDROID)
+    bool selfUpdateBusy() const;
+#else
     bool selfUpdateBusy() const { return m_selfUpdate && m_selfUpdate->running(); }
+#endif
     bool selfUpdateBackground() const { return m_selfUpdateBackground; }
     QString selfUpdateStage() const { return m_selfUpdateStage; }
     int selfUpdatePercent() const { return m_selfUpdatePercent; }
@@ -1609,6 +1618,10 @@ private:
     QString m_rollbackNotice;                  // одноразовое «версию X вернули к Y»
     void    ensureSelfUpdate();
     void    startSelfUpdateInternal(bool background);
+#if defined(Q_OS_ANDROID)
+    void    startAndroidSelfUpdate();          // AVPN (2026-11-16): site APK, always on the person's tap
+    bool    m_androidUpdateWired = false;
+#endif
     void    maybeAutoUpdate();
     void    launchGuardFlushReport();
     // AVPN server-driven АнтиВПН (Task 10): оркестратор /v1/bypass-lists (подписанный fetch/LKG/

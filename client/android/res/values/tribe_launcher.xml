@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AVPN (2026-11-16): Tribe launcher icon and launch splash background (Theme bg, #0A111D). -->
+<resources>
+    <color name="tribe_launcher_background">#FF0A111D</color>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AVPN (2026-11-16): in-app update of the site APK (TribeSelfUpdate.kt). Separate file: upstream strings.xml untouched. -->
+<resources>
+    <string name="tribeUpdateChannel">App updates</string>
+    <string name="tribeUpdateDoneTitle">Tribe VPN updated</string>
+    <string name="tribeUpdateDoneText">Version %1$s is installed. Tap to open.</string>
+</resources>

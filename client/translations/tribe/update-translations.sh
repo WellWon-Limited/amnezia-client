@@ -17,6 +17,7 @@ SRC=(
   "$CLIENT/ui/qml/Tribe"
   "$CLIENT/ui/qml/Pages2/PageHomeTribe.qml"
   "$CLIENT/core/serviceEngine"
+  "$CLIENT/platforms/android/avpn_selfupdate_android.cpp" # AVPN (2026-11-16): site APK self-update texts
 )
 
 "$QT_BIN/lupdate" -locations relative -no-obsolete \

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AVPN (2026-11-16): in-app update of the site APK (TribeSelfUpdate.kt). -->
+<resources>
+    <string name="tribeUpdateChannel">Обновления приложения</string>
+    <string name="tribeUpdateDoneTitle">Tribe VPN обновлён</string>
+    <string name="tribeUpdateDoneText">Установлена версия %1$s. Нажмите, чтобы открыть.</string>
+</resources>

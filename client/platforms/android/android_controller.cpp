@@ -9,6 +9,7 @@
 #include "android_controller.h"
 #include "android_utils.h"
 #include "avpn_fcm_bridge.h" // AVPN (Task 9): FCM natives + запрос токена
+#include "avpn_selfupdate_android.h" // AVPN (2026-11-16): site APK self-update natives
 #include "ui/controllers/importUiController.h"
 
 namespace
@@ -147,6 +148,7 @@ bool AndroidController::initialize()
     // AVPN (Task 9, FCM): natives пуш-сервиса + старт Kotlin-половины (см. avpn_fcm_bridge.cpp).
     // Неуспех НЕ валит контроллер: без Play Services пуши деградируют до поллинга чата.
     avpn::registerFcmNatives();
+    avpn::registerSelfUpdateNatives(); // AVPN (2026-11-16): TribeSelfUpdate installer status
     qtAndroidControllerInitialized();
     return true;
 }

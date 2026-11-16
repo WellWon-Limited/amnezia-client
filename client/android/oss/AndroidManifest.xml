@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AVPN (2026-11-16): site APK (oss flavor) updates itself from tribevpn.com/dl/ (TribeSelfUpdate.kt).
+     Merged into the main manifest for the oss flavor only: the Play build never asks for
+     REQUEST_INSTALL_PACKAGES (Play policy) and updates through the store. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application>
+        <receiver
+            android:name=".TribeUpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
