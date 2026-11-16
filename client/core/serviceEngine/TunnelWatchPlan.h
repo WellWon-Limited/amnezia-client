@@ -252,6 +252,11 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
         numbers.insert(p.first, double(p.second));
     const long long ttlH = watchPlanNumber(in.numbers, "ios_tw_plan_ttl_h");
     const long long policyH = watchPlanNumber(in.numbers, "ios_tw_policy_max_age_h");
+    // Stage 2: the permission to switch is a lease, renewed by every plan the app writes. A phone
+    // whose app is not running stops switching when it lapses - that is how fast a server-side "off"
+    // reaches it; the verdict itself goes on working.
+    const long long leaseMin = watchPlanNumber(in.numbers, "ios_tw_switch_lease_min");
+    const bool switching = in.watch && in.watchSwitch;
 
     QJsonObject memory;
     for (const WatchPlanMemoryEntry &e : in.memory) {
@@ -283,6 +288,7 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
         {QStringLiteral("written_ms"), double(in.nowMs)},
         {QStringLiteral("config_fetched_ms"), double(in.configFetchedMs > 0 ? in.configFetchedMs : 0)},
         {QStringLiteral("expires_ms"), double(in.nowMs + ttlH * 3600LL * 1000LL)},
+        {QStringLiteral("switch_lease_until_ms"), double(switching ? in.nowMs + leaseMin * 60LL * 1000LL : 0)},
         {QStringLiteral("policy_max_age_ms"), double(policyH * 3600LL * 1000LL)},
         {QStringLiteral("pool_revision"), double(in.poolRevision)},
         {QStringLiteral("transport_mode"), watchPlanTransportMode(in.engineTransportMode)},

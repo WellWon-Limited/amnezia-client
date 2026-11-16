@@ -19,6 +19,8 @@
 
 #include "WhoamiVerdict.h" // timerFiredLate - one lateness rule for every timer
 
+#include <QList>
+#include <QSet>
 #include <QString>
 #include <QVariant>
 #include <QVariantMap>
@@ -105,6 +107,17 @@ inline QString str(const QVariantMap &m, const char *k)
 }
 } // namespace watch_detail
 
+// A label of the reply for the journal (the reason of a switch): letters, digits and "_", never free text.
+inline QString watchLabel(const QString &raw)
+{
+    if (raw.isEmpty() || raw.size() > 32)
+        return QStringLiteral("unknown");
+    for (const QChar c : raw)
+        if (!c.isLetterOrNumber() && c != QLatin1Char('_'))
+            return QStringLiteral("unknown");
+    return raw;
+}
+
 // `watch` as delivered by IosController::tunnelWatchSnapshot (JSON -> QVariantMap). Not a map - absent.
 // A map without a known verdict or without a bool `enabled` - present but not valid (garbled: ignored).
 inline TunnelWatchSnapshot parseTunnelWatch(const QVariant &watch)
@@ -146,11 +159,7 @@ inline TunnelWatchSnapshot parseTunnelWatch(const QVariant &watch)
     s.switches = int(switches.size());
     if (!switches.isEmpty()) {
         // The reason of the last switch, for the journal: a short label, never free text.
-        const QString why = switches.last().toMap().value(QStringLiteral("why")).toString();
-        bool label = !why.isEmpty() && why.size() <= 32;
-        for (const QChar c : why)
-            label = label && (c.isLetterOrNumber() || c == QLatin1Char('_'));
-        s.lastSwitchWhy = label ? why : QStringLiteral("unknown");
+        s.lastSwitchWhy = watchLabel(switches.last().toMap().value(QStringLiteral("why")).toString());
     }
     return s;
 }
@@ -273,6 +282,124 @@ inline QString watchAdoptJournalLine(const QString &from, const QString &to, int
         .arg(from.isEmpty() ? QStringLiteral("-") : from, to)
         .arg(seq)
         .arg(why.isEmpty() ? QStringLiteral("unknown") : why, taken ? QStringLiteral("adopted") : QStringLiteral("unknown_node"));
+}
+
+// ---- no reply yet: whose node is it? (second review, R3) ------------------------------------------
+// After a resume or a Reasserting -> Connected transition the app does not know on which node the
+// tunnel stands until a status reply asked AFTER that moment has been processed: the extension may have
+// moved it, and its reply may wait behind the switch itself on the adapter's queue (up to 5 s in
+// setTunnelNetworkSettings) - longer than the resume wait. Until then no data check may attribute its
+// result to a node. Bounded: with no reply at all for kIdentityWaitFactor resume waits the checks go on
+// as in build 139 (an extension that does not answer is a dead tunnel, and only the app's own check
+// and failover can restart it).
+constexpr int kIdentityWaitFactor = 4;
+inline bool identityReplyAwaited(qint64 askedMs, qint64 nowMs, qint64 timeoutMs)
+{
+    return askedMs >= 0 && nowMs >= askedMs && nowMs - askedMs < kIdentityWaitFactor * timeoutMs;
+}
+
+// ---- the extension's evidence against a node, per network (second review, R4) ----------------------
+// The node an adopted switch left is NOT marked failed for the whole app session: the extension's proof
+// is about one network and it ages. It is kept for kWatchEvidenceTtlMs (the same half hour the extension
+// itself remembers a dead node) and only for the network it was made on; while it is fresh the app's own
+// picks skip the node, afterwards the node is as eligible as any other.
+constexpr qint64 kWatchEvidenceTtlMs = 30 * 60 * 1000;
+constexpr int kWatchEvidenceMax = 16;
+
+class WatchEvidence {
+public:
+    void note(const QString &nodeId, const QString &netKey, qint64 nowMs)
+    {
+        if (nodeId.isEmpty())
+            return;
+        prune(nowMs);
+        for (int i = m_entries.size() - 1; i >= 0; --i)
+            if (m_entries.at(i).nodeId == nodeId && m_entries.at(i).netKey == netKey)
+                m_entries.removeAt(i);
+        m_entries.append({nodeId, netKey, nowMs});
+        while (m_entries.size() > kWatchEvidenceMax)
+            m_entries.removeFirst();
+    }
+    bool fresh(const QString &nodeId, const QString &netKey, qint64 nowMs) const
+    {
+        for (const Entry &e : m_entries)
+            if (e.nodeId == nodeId && e.netKey == netKey && alive(e, nowMs))
+                return true;
+        return false;
+    }
+    QSet<QString> freshNodes(const QString &netKey, qint64 nowMs) const
+    {
+        QSet<QString> out;
+        for (const Entry &e : m_entries)
+            if (e.netKey == netKey && alive(e, nowMs))
+                out.insert(e.nodeId);
+        return out;
+    }
+    void clear() { m_entries.clear(); }
+    int size() const { return int(m_entries.size()); }
+
+private:
+    struct Entry {
+        QString nodeId;
+        QString netKey;
+        qint64 atMs = 0;
+    };
+    static bool alive(const Entry &e, qint64 nowMs) { return nowMs >= e.atMs && nowMs - e.atMs < kWatchEvidenceTtlMs; }
+    void prune(qint64 nowMs)
+    {
+        for (int i = m_entries.size() - 1; i >= 0; --i)
+            if (!alive(m_entries.at(i), nowMs))
+                m_entries.removeAt(i);
+    }
+    QList<Entry> m_entries;
+};
+
+// When the extension has moved the session away from the user's pinned location and its evidence
+// against that location's node has expired (or was made on another network), the app's ORDINARY
+// restart through reconcile may bring the session back to the user's choice - with the app's own data
+// check after the start, and the app's own failover if that check fails. Never without a data check
+// of its own, never while anything else is in flight, never for the sake of speed (no pin - no return:
+// "auto" is satisfied by any node the ladder offers).
+struct WatchReturnInputs {
+    bool movedByExtension = false; // the session left the pinned location by an adopted switch and is still away
+    bool pinRaisable = false;      // an ordinary start would raise the pinned location now
+    bool evidenceFresh = false;    // the extension's evidence against the user's node on THIS network is fresh
+    bool nodeScanOn = false;       // features.node_scan: the app has a data check of its own
+    bool engineConnected = false;  // Connected - not Verifying, not Switching
+    bool wantConnected = false;
+    bool busy = false;             // an operation of the app's own is in flight or a restart is pending
+};
+inline bool decideExtensionReturn(const WatchReturnInputs &in)
+{
+    return in.movedByExtension && in.pinRaisable && !in.evidenceFresh && in.nodeScanOn
+        && in.engineConnected && in.wantConnected && !in.busy;
+}
+
+// ---- the tunnel has no engine (second review, R5) ---------------------------------------------------
+// The status reply said `engine_down`: an in-place switch failed and the extension could start neither
+// node's engine (it keeps retrying the previous one). The app restarts the tunnel itself by its ordinary
+// restart - once (a pending restart or an operation in flight already covers it), only on the screen
+// (a start from the background would be cut by iOS half-way), only for a session the user wants.
+struct EngineDownInputs {
+    bool wantConnected = false;
+    bool restartPending = false;
+    bool opInFlight = false;
+    bool paused = false;
+    bool foreground = false;
+    bool tunnelConnected = false; // the last observed native state is Connected
+};
+inline bool decideEngineDownRestart(const EngineDownInputs &in)
+{
+    return in.wantConnected && !in.restartPending && !in.opInFlight && !in.paused && in.foreground && in.tunnelConnected;
+}
+
+// NEVPNStatusReasserting reaches the app as Connecting. Connecting -> Connected while the engine holds a
+// session (it is Connected or Verifying, i.e. this is not a start or a switch of the app's own) means
+// the extension re-applied its network settings, as an in-place switch does.
+inline bool sessionReasserted(bool nowConnected, bool wasConnecting, const QString &engineStateBefore)
+{
+    return nowConnected && wasConnecting
+        && (engineStateBefore == QLatin1String("connected") || engineStateBefore == QLatin1String("verifying"));
 }
 
 // ---- what an adopted snapshot means ---------------------------------------------------------------

@@ -789,10 +789,22 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             &AvpnEngineQml::onTunnelWatchSnapshot, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::onDemandBackgroundEvent, this,
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
+    connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
+            &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     connect(IosController::Instance(), &IosController::sessionMetadataChanged, this,
-            [this](const QVariantMap &) { adoptNativeIdentity(); }, Qt::QueuedConnection);
+            [this](const QVariantMap &metadata) {
+#ifdef Q_OS_IOS
+        // AVPN (iOS data watch, 140, stage 2): a switch the extension made is told in every status
+        // reply; it is adopted from an ordinary poll too, whenever it arrives (TunnelWatchResume.h).
+        if (m_watchResume)
+            m_watchResume->onSessionMetadata(metadata);
+#else
+        Q_UNUSED(metadata);
+#endif
+        adoptNativeIdentity();
+    }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::disconnectReason, this,
             [this](const QString &reason, bool intentional) {
         reliabilityEvent(QStringLiteral("native_disconnect=%1 intentional=%2")
@@ -2711,6 +2723,8 @@ void AvpnEngineQml::writeTunnelWatchPlan(const char *why)
     // Stage 2: where the extension may switch to in place. Collected only with both flags on.
     if (in.watch && in.watchSwitch)
         in.candidates = m_engine.extensionSwitchCandidates();
+    // The engine's own picks skip a node the extension proved dead on THIS network (for half an hour).
+    m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
     in.sanityTargets = avpn::watchPlanSanityTargets(
         avpn::TuningStore::listOr(QStringLiteral("ios_tw_sanity_urls"), {}),
         avpn::TuningStore::listOr(QStringLiteral("whitelist_probe_domains"), {}),
@@ -2763,11 +2777,37 @@ void AvpnEngineQml::setupTunnelWatchResume()
     ops.adoptSwitch = [this](const QString &nodeId) {
         // Stage 2: the extension moved the tunnel while the app slept. The engine takes the node; the
         // app's own check of it runs only where the app has one (features.node_scan).
-        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false)))
+        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),
+                                           currentNetworkMemoryKey()))
             return false;
         writeTunnelWatchPlan("adopt"); // the candidates are counted from the node the tunnel stands on
         emit changed();
         return true;
+    };
+    // Stage 2: the way back to the user's pinned location when the extension's evidence has aged
+    // (TunnelWatchStatus.h::decideExtensionReturn) - by the ordinary restart through reconcile, with the
+    // app's own data check after the start and its own failover if that check fails.
+    ops.returnFacts = [this] {
+        m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
+        const avpn::ServiceEngine::ExtensionReturnFacts f = m_engine.extensionReturnFacts();
+        avpn::WatchReturnInputs in;
+        in.movedByExtension = f.movedByExtension;
+        in.pinRaisable = f.pinRaisable;
+        in.evidenceFresh = f.evidenceFresh;
+        in.nodeScanOn = featureEnabled(QStringLiteral("node_scan"), false);
+        in.engineConnected = m_engine.state() == avpn::EngineState::Connected;
+        in.wantConnected = m_wantConnected;
+        in.busy = m_opInFlight || m_needsRestart || m_paused || !uiForeground();
+        return in;
+    };
+    ops.restartToChoice = [this] {
+        m_startOrigin = StartOrigin::User;
+        m_needsRestart = true;
+        m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
+        m_restartOrigin = QStringLiteral("extension_return");
+        m_startAttempts = 0;
+        emit changed();
+        reconcile(); // the hand-over calls this last: nothing of it runs after the restart is asked
     };
     ops.forgetNode = [this](const QString &nodeId) {
         if (m_attemptNetKey.isEmpty())
@@ -2813,6 +2853,31 @@ void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
         m_watchResume->onTick(sinceMs, m_transitionTimer.interval());
 #else
     Q_UNUSED(sinceMs);
+#endif
+}
+
+// The status reply said the tunnel has no engine (a failed in-place switch; the extension keeps retrying
+// the previous node). The app does what it does for a dead tunnel of its own: the ordinary restart
+// through reconcile. Once: the flags below hold until that restart is under way; not in the background.
+void AvpnEngineQml::onTunnelEngineDown()
+{
+#ifdef Q_OS_IOS
+    avpn::EngineDownInputs in;
+    in.wantConnected = m_wantConnected;
+    in.restartPending = m_needsRestart;
+    in.opInFlight = m_opInFlight;
+    in.paused = m_paused;
+    in.foreground = uiForeground();
+    in.tunnelConnected = m_lastTunnelState == Vpn::Connected;
+    if (!avpn::decideEngineDownRestart(in))
+        return;
+    reliabilityEvent(QStringLiteral("extension_engine_down node=%1 -> restart").arg(m_engine.currentNodeId()));
+    m_needsRestart = true;
+    m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
+    m_restartOrigin = QStringLiteral("engine_down");
+    m_startAttempts = 0;
+    emit changed();
+    reconcile();
 #endif
 }
 
@@ -4581,6 +4646,13 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // AVPN (фикс-волна 2026-09-22, A1/A9): состояние движка ДО колбэка — Error/Disconnected посреди
     // СВОЕГО свитча/failover движка не является внешним обрывом (решение ниже).
     const QString engineStateBefore = m_engine.debugSnapshot().state;
+#ifdef Q_OS_IOS
+    // AVPN (iOS data watch, 140, stage 2): Reasserting (shown as Connecting) -> Connected of a session the
+    // engine holds: the extension re-applied its network settings, as an in-place switch does. One fresh
+    // status reply before the app attributes anything to a node (TunnelWatchResume::onReasserted).
+    if (m_watchResume && avpn::sessionReasserted(s == Vpn::Connected, m_lastTunnelState == Vpn::Connecting, engineStateBefore))
+        m_watchResume->onReasserted();
+#endif
     {
         const bool changedState = (s != m_lastTunnelState);
 #if defined(Q_OS_IOS) || defined(MACOS_NE)

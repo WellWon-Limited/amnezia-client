@@ -16,6 +16,7 @@
 #include "TransportModeGate.h"
 #include "TransportPick.h"
 #include "TunnelWatchPlan.h"
+#include "TunnelWatchStatus.h"
 #include "dto/Subscription.h"
 
 #include <QByteArray>
@@ -222,14 +223,27 @@ public:
     // taken out (TunnelWatchCandidates.h), only nodes whose DNS, MTU and routed ranges equal the current
     // node's, each with its own half of the tunnel configuration. Empty when the current node is unknown.
     QList<WatchPlanCandidate> extensionSwitchCandidates() const;
-    // The extension moved the tunnel to `nodeId` while the app slept. Only in Connected / Verifying, only
-    // to another node of the pool: that node becomes the current one, the node it left is marked failed
-    // in this session (the app's own ladder does not go back to it by itself), the health sample and the
-    // heal budget start over. Not a step of the app's ladder: no DEAD, no failure streak, no transport
-    // history; the pin, the intent and the mode are not touched. `verify`: back to Verifying - the facade
-    // then runs its own data check before "Connected" is shown. Compiled for every platform, called only
-    // from the facade's Q_OS_IOS block.
-    bool adoptExtensionSwitch(const QString &nodeId, bool verify);
+    // The extension moved the tunnel to `nodeId`. Only in Connected / Verifying, only to another node of
+    // the pool: that node becomes the current one, the health sample and the heal budget start over. The
+    // node it left is NOT marked failed for the session: the extension's proof is about one network and
+    // it ages - it is kept as evidence for `netKey` for half an hour (WatchEvidence), and while it is
+    // fresh on that network the engine's own picks skip the node. Not a step of the app's ladder: no DEAD,
+    // no failure streak, no transport history; the pin, the intent and the mode are not touched.
+    // `verify`: back to Verifying - the facade then runs its own data check before "Connected" is shown.
+    // Compiled for every platform, called only from the facade's Q_OS_IOS block.
+    bool adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey);
+    // The network the phone is on now (the facade's network-memory key): evidence made on another
+    // network excludes nothing here.
+    void setExtensionEvidenceNetwork(const QString &netKey) { m_extEvidenceNet = netKey; }
+    // What the way back to the user's choice needs to know (TunnelWatchStatus.h::decideExtensionReturn):
+    // the extension took the session out of the pinned location and it is still out; an ordinary start
+    // would raise that location; the evidence against the node the user was on is still fresh here.
+    struct ExtensionReturnFacts {
+        bool movedByExtension = false;
+        bool pinRaisable = false;
+        bool evidenceFresh = false;
+    };
+    ExtensionReturnFacts extensionReturnFacts() const;
     bool feedProbeResult(bool ok);
 
     // Plan v3 step 5 (features.node_scan, set by the facade before each user start): every
@@ -618,6 +632,15 @@ private:
     TransportHistory m_transportHistory;
     bool          m_historyDirty = false;
     QSet<QString> m_failedThisSession;   // узлы, провалившие data-plane с последнего стопа (failover не ходит по кругу)
+    // AVPN (iOS data watch, stage 2): what the packet tunnel extension proved against nodes it left, per
+    // network, for half an hour; the network the phone is on; the node the user was on when the extension
+    // first moved the session (empty = it did not, or the session is back there).
+    WatchEvidence m_extEvidence;
+    QString       m_extEvidenceNet;
+    QString       m_extOriginNodeId;
+    // Nodes the engine's own picks skip: failed in this session, or proved dead by the extension on
+    // this network within the last half hour. Without an adopted switch this is m_failedThisSession.
+    QSet<QString> sessionExclusions() const;
     bool          m_verifyEveryTransport = false; // plan v3 step 5: features.node_scan (see setter)
     QString       m_networkMemoryNodeId;           // plan v3 step 5: last node that carried data on this network
     QString       m_networkMemoryStartNodeId;      // owner test 06.11: started from memory, not up yet

@@ -970,6 +970,7 @@ private:
     // with features.ios_tunnel_watch / ios_on_demand_bg_arm false (default) each is a no-op for decisions.
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
     void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
+    void onTunnelEngineDown();                         // status reply with `engine_down` (stage 2)
     bool tunnelWatchFrozen(const char *site);          // resume freeze: hold this decision?
     bool deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume);
     void tickTunnelWatchFreeze(qint64 sinceLastTickMs); // on the existing 1 s transition tick

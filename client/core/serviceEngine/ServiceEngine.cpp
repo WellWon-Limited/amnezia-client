@@ -296,7 +296,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
     in.exclA = exclA;
     if (withExclusions)
-        in.excluded = m_failedThisSession;
+        in.excluded = sessionExclusions();
     in.preferLocation = preferLocation;
     in.preferNodeId = preferNodeId;
     // Случайный индекс в ярусе равного weight — авто реально чередует равноценные локации.
@@ -314,7 +314,7 @@ const SubscriptionNode *ServiceEngine::pinnedCandidate() const
     if (!pinned) return nullptr;
     const QString loc = locationKeyOf(*pinned);
     const SubscriptionNode *candidate = pickTransport(loc, m_pinnedNodeId, QString(), true);
-    if (!candidate && !m_failedThisSession.isEmpty())
+    if (!candidate && !sessionExclusions().isEmpty())
         candidate = pickTransport(loc, m_pinnedNodeId, QString(), false);
     return candidate;
 }
@@ -328,7 +328,7 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
     const SubscriptionNode *n = findNode(m_networkMemoryNodeId);
     if (!n || !isAutoEligibleNode(*n) || !transportAllowed(*n, transportMode()))
         return nullptr;
-    if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || m_failedThisSession.contains(n->nodeId))
+    if (healthAggregate(*n) <= 0.0 || isManualOnlyNode(*n) || sessionExclusions().contains(n->nodeId))
         return nullptr;
     // Owner test 06.11 (device 36, build 135): the remembered EE2 was unreachable from that Wi-Fi
     // (ICMP -1 on every round, absent from the selection pool) and every start still raised it - no
@@ -350,7 +350,7 @@ const SubscriptionNode *ServiceEngine::nextCandidate() const
         if (const SubscriptionNode *remembered = networkMemoryCandidate())
             return remembered;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true);
-        if (!c && !m_failedThisSession.isEmpty())
+        if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false);
         return c;
     }
@@ -697,6 +697,7 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_state = EngineState::Selecting;
+    m_extOriginNodeId.clear(); // AVPN (iOS data watch): a start of the app's own is a new choice
     m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session
     // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном
     // features.xray_client отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
@@ -726,7 +727,7 @@ bool ServiceEngine::connect(QString &error)
     if (interrupted.active && !interrupted.target.isEmpty()) {
         const SubscriptionNode *t = findNode(interrupted.target);
         if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_modeGate.inForce())
-            && healthAggregate(*t) > 0.0 && !m_failedThisSession.contains(t->nodeId))
+            && healthAggregate(*t) > 0.0 && !sessionExclusions().contains(t->nodeId))
             candidate = *t;
     }
     if (!candidate)
@@ -753,7 +754,7 @@ bool ServiceEngine::connect(QString &error)
         // последнего известного), а не монетой по весам.
         const bool lastKnown = interrupted.active;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, lastKnown);
-        if (!c && !m_failedThisSession.isEmpty())
+        if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, lastKnown);
         if (c)
             candidate = *c;
@@ -1125,7 +1126,7 @@ QList<WatchPlanCandidate> ServiceEngine::extensionSwitchCandidates() const // AV
     const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
     const QStringList order = watchSwitchCandidateOrder(m_pool.nodes(), rankingRtt(failoverRtt()), m_transportHistory,
                                                         transportMode(), m_currentNodeId,
-                                                        pinned ? pinned->countryCode : QString(), m_failedThisSession);
+                                                        pinned ? pinned->countryCode : QString(), sessionExclusions());
     for (const QString &id : order) {
         const SubscriptionNode *n = findNode(id);
         if (!n)
@@ -1140,17 +1141,33 @@ QList<WatchPlanCandidate> ServiceEngine::extensionSwitchCandidates() const // AV
     return out;
 }
 
-bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify) // AVPN (iOS data watch, stage 2)
+QSet<QString> ServiceEngine::sessionExclusions() const // AVPN (iOS data watch, stage 2)
+{
+    // Without an adopted switch there is no evidence: exactly the set of build 139.
+    QSet<QString> out = m_failedThisSession;
+    out.unite(m_extEvidence.freshNodes(m_extEvidenceNet, nowMs()));
+    return out;
+}
+
+bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify, const QString &netKey) // AVPN (iOS data watch, stage 2)
 {
     if (m_state != EngineState::Connected && m_state != EngineState::Verifying)
         return false;
     if (nodeId == m_currentNodeId || !findNode(nodeId))
         return false;
-    if (!m_currentNodeId.isEmpty())
-        m_failedThisSession.insert(m_currentNodeId);
+    m_extEvidenceNet = netKey;
+    if (!m_currentNodeId.isEmpty()) {
+        // The extension's proof against the node it left: this network, half an hour. Not a failure
+        // of the app session.
+        m_extEvidence.note(m_currentNodeId, netKey, nowMs());
+        if (m_extOriginNodeId.isEmpty())
+            m_extOriginNodeId = m_currentNodeId; // where the user was
+    }
     appendSwitchLog(QStringLiteral("extension switch adopted: %1 -> %2")
                         .arg(m_currentNodeId.isEmpty() ? QStringLiteral("?") : m_currentNodeId, nodeId));
     m_currentNodeId = nodeId;
+    if (nodeId == m_extOriginNodeId)
+        m_extOriginNodeId.clear(); // the extension itself came back
     m_sessionHintNodeId.clear();
     m_sessionHintProto.clear();
     m_sessionHintEndpoint.clear();
@@ -1161,6 +1178,21 @@ bool ServiceEngine::adoptExtensionSwitch(const QString &nodeId, bool verify) // 
         m_upFrozen = true; // not a time to traffic: the rise was the extension's
     }
     return true;
+}
+
+ServiceEngine::ExtensionReturnFacts ServiceEngine::extensionReturnFacts() const // AVPN (iOS data watch, stage 2)
+{
+    ExtensionReturnFacts f;
+    const SubscriptionNode *origin = findNode(m_extOriginNodeId);
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    const SubscriptionNode *current = findNode(m_currentNodeId);
+    if (!origin || !pinned || !current)
+        return f;
+    const QString pinLocation = locationKeyOf(*pinned);
+    f.movedByExtension = locationKeyOf(*origin) == pinLocation && locationKeyOf(*current) != pinLocation;
+    f.evidenceFresh = m_extEvidence.fresh(m_extOriginNodeId, m_extEvidenceNet, nowMs());
+    f.pinRaisable = pinnedCandidate() != nullptr;
+    return f;
 }
 
 bool ServiceEngine::verifyFailed(const QString &reason) // AVPN awg31-xray-v1
@@ -1297,6 +1329,7 @@ void ServiceEngine::requestStop() // AVPN
     m_rebindHealTries = 0; // AVPN BUG-4
     // AVPN awg31-xray-v1: новая сессия пользователя — сессионные провалы транспортов и стрик проб забыты.
     m_failedThisSession.clear();
+    m_extOriginNodeId.clear(); // AVPN (iOS data watch): the session the extension moved is over (the evidence ages by itself)
     m_networkMemoryStartNodeId.clear();
     m_probeFailStreak = 0;
     m_dataPlaneFailStreak = 0;  // AVPN (ревью волны, MAJOR-1): явный стоп = новая сессия наблюдения
@@ -1425,7 +1458,7 @@ bool ServiceEngine::onDead(bool tunnelStillUp, const QString &reasonIn)
             c = pickTransport(loc, QString(), m_currentNodeId, /*withExclusions=*/true, /*lastKnownRtt=*/true);
         if (!c)
             c = pickTransport(QString(), QString(), m_currentNodeId, /*withExclusions=*/true, /*lastKnownRtt=*/true);
-        if (!c && !m_failedThisSession.isEmpty())
+        if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), m_currentNodeId, /*withExclusions=*/false, /*lastKnownRtt=*/true);
         if (c)
             candidate = *c;
@@ -1514,7 +1547,7 @@ bool ServiceEngine::continuePendingSwitch() // AVPN
                     c = pickTransport(targetLocation, QString(), gone, /*withExclusions=*/true, /*lastKnownRtt=*/true);
                 if (!c)
                     c = pickTransport(QString(), QString(), gone, /*withExclusions=*/true, /*lastKnownRtt=*/true);
-                if (!c && !m_failedThisSession.isEmpty())
+                if (!c && !sessionExclusions().isEmpty())
                     c = pickTransport(QString(), QString(), gone, /*withExclusions=*/false, /*lastKnownRtt=*/true);
                 if (c) {
                     appendSwitchLog(QStringLiteral("switch target %1 gone after reseed → %2").arg(gone, c->nodeId));

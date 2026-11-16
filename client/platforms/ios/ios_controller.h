@@ -139,6 +139,10 @@ signals:
     // metadata was taken: {"session": <session_metadata of the reply>, "watch": <the extension's `watch`
     // object, only when the reply has one>}. A build 139 extension has no `watch` key.
     void tunnelWatchSnapshot(const QVariantMap &snapshot);
+    // AVPN (iOS data watch, build 140, stage 2): the status reply said `engine_down` - a failed in-place
+    // switch left the tunnel without an engine (the extension keeps retrying). Emitted for every such
+    // reply; the facade restarts the tunnel by its ordinary restart, once.
+    void tunnelEngineDown();
     // AVPN (iOS data watch, build 140): journal lines of the On-Demand arming in the background
     // (on_demand_state ..., on_demand_bg_arm result=...); the facade writes them to the tester journal.
     void onDemandBackgroundEvent(const QString &line);

@@ -1129,6 +1129,9 @@ void IosController::checkStatus()
         // AVPN (этап D3): runtime_state xray-пути (starting/running/stopping/stopped/failed) —
         // только для лога; у WG-ответа ключа нет (пусто).
         const QString runtimeState = stringFromResponse(response, @"runtime_state");
+        // AVPN (iOS data watch, build 140, stage 2): the tunnel has no engine after a failed in-place
+        // switch; the reply then carries the session metadata and nothing to judge.
+        const bool engineDown = [response[@"engine_down"] respondsToSelector:@selector(boolValue)] && [response[@"engine_down"] boolValue];
         // AVPN: причину отказа старта ядра снимаем ЗДЕСЬ — NSDictionary* response живёт только
         // в этом хендлере; во внутреннюю (GUI-поток) лямбду уезжает уже готовая строка.
         const QString startFailure = stringFromResponse(response, @"last_start_failure");
@@ -1164,7 +1167,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
+        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected]() {
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1183,6 +1186,10 @@ void IosController::checkStatus()
                 }
             }
             clearLocalStopIfNewSession(false); // AVPN (REV-3): runtime-поколение новой NE-сессии
+            if (engineDown) { // AVPN (iOS data watch, build 140, stage 2)
+                emit tunnelEngineDown();
+                return; // no counters in this reply: nothing below may judge a handshake by it
+            }
             if (!roamSummary.isEmpty() && roamSummary != m_lastRoamSummary) {
                 m_lastRoamSummary = roamSummary;
                 qInfo() << "[roam] NE counters:" << roamSummary;
@@ -1690,6 +1697,9 @@ static bool writeTunnelWatchPlan(const QByteArray &json)
         qWarning() << "avpn: watch plan not written:" << QString::fromNSString(error.localizedDescription);
         return false;
     }
+    // Stage 2: the plan may hold node keys. It never goes into a device backup (an atomic write makes
+    // a new file every time, so the mark is set after every write).
+    [url setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
     return true;
 }
 

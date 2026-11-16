@@ -146,6 +146,8 @@ inline constexpr TunnelWatchNumberSpec kIosTunnelWatchNumbers[] = {
     {"ios_tw_sanity_max_per_hour",           12,        1,          60, true},  // requests outside the tunnel
     {"ios_tw_switch_heal_steps",              2,        0,           2, true},  // stage 2: same-node heals the arbiter runs before a switch
     {"ios_tw_trial_probe_max_per_hour",      30,        1,          60, true},  // stage 2: trial probes (one per heal / switch) per hour
+    {"ios_tw_switch_max_per_hour",            6,        1,          30, true},  // stage 2: in-place switches per hour, a hard ceiling
+    {"ios_tw_switch_lease_min",             360,       10,        1440, true},  // stage 2: the switch permission lapses this long after the last plan write
     {"ios_tw_sanity_required",                1,        0,           1, true},  // physical-network check required
     {"ios_tw_probe",                          1,        0,           1, true},  // 0 = no probe through the tunnel
     {"ios_tw_plan_ttl_h",                    24,        1,         168, true},  // plan expires_ms = written + this
