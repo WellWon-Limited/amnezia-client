@@ -2,6 +2,7 @@
 
 #ifdef Q_OS_ANDROID
 #include "platforms/android/android_controller.h" // AVPN: адопт снапшота статуса (рассинхрон после фона)
+#include "platforms/android/avpn_selfupdate_android.h" // AVPN (2026-11-16): site APK self-update
 #endif
 
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -2114,6 +2115,12 @@ void AvpnEngineQml::ensureSelfUpdate()
 
 void AvpnEngineQml::startSelfUpdateInternal(bool background)
 {
+#if defined(Q_OS_ANDROID)
+    // Android always shows its own confirmation, so there is no silent background attempt.
+    if (!background)
+        startAndroidSelfUpdate();
+    return;
+#endif
     if (!avpn::SelfUpdate::isSupported()) {
         if (!background)
             emit selfUpdateFailed(tr("Обновление внутри приложения тут недоступно"));
@@ -2162,6 +2169,70 @@ void AvpnEngineQml::startSelfUpdateInternal(bool background)
         emit selfUpdateChanged();
 }
 
+
+#if defined(Q_OS_ANDROID)
+bool AvpnEngineQml::canSelfUpdate() const
+{
+    return avpn::AndroidSelfUpdate::isSupported();
+}
+
+bool AvpnEngineQml::selfUpdateBusy() const
+{
+    return avpn::AndroidSelfUpdate::instance()->running();
+}
+
+// AVPN (owner decision 2026-11-16): «Update» on Android downloads the site APK from /dl/
+// (urls.store_android), checks package, signer and version (ApkUpdatePolicy.h) and hands it to
+// Android's own installer dialog. Same UI as macOS: TribeUpdateGate/Sheet read selfUpdateStage,
+// selfUpdatePercent and selfUpdateFailed.
+void AvpnEngineQml::startAndroidSelfUpdate()
+{
+    auto *up = avpn::AndroidSelfUpdate::instance();
+    if (!m_androidUpdateWired) {
+        m_androidUpdateWired = true;
+        connect(up, &avpn::AndroidSelfUpdate::progress, this, [this](const QString &t) {
+            m_selfUpdateStage = t;
+            emit selfUpdateChanged();
+            emit selfUpdateProgress(t);
+        });
+        connect(up, &avpn::AndroidSelfUpdate::downloadProgress, this, [this](int pct) {
+            if (m_selfUpdatePercent == pct)
+                return;
+            m_selfUpdatePercent = pct;
+            emit selfUpdateChanged();
+        });
+        connect(up, &avpn::AndroidSelfUpdate::awaitingConfirmation, this, [this] {
+            m_selfUpdatePercent = -1;
+            m_selfUpdateStage = tr("Подтвердите обновление в окне Android");
+            emit selfUpdateChanged();
+            emit selfUpdateProgress(m_selfUpdateStage);
+        });
+        connect(up, &avpn::AndroidSelfUpdate::failed, this, [this](const QString &r) {
+            m_selfUpdateStage.clear();
+            m_selfUpdatePercent = -1;
+            m_selfUpdateTarget.clear();
+            emit selfUpdateChanged();
+            emit selfUpdateFailed(r);
+        });
+        connect(up, &avpn::AndroidSelfUpdate::installed, this, [this] {
+            m_selfUpdateStage = tr("Готово, откройте приложение заново");
+            m_selfUpdatePercent = 100;
+            emit selfUpdateChanged();
+            emit selfUpdateProgress(m_selfUpdateStage);
+        });
+    }
+    if (up->running())
+        return;
+    m_selfUpdateBackground = false;
+    m_selfUpdateTarget = availableVersion();
+    m_selfUpdatePercent = -1;
+    m_selfUpdateStage = tr("Скачиваем обновление…");
+    emit selfUpdateChanged();
+    up->start(configUrl(QStringLiteral("store_android"), QStringLiteral("https://tribevpn.com/dl/TribeVPN.apk")),
+              m_remoteCfg.recommendedVersion.value(QStringLiteral("android")));
+    emit selfUpdateChanged();
+}
+#endif
 
 QString AvpnEngineQml::storeUrl() const
 {

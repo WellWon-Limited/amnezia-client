@@ -102,6 +102,8 @@ android {
 
         getByName("oss") {
             java.setSrcDirs(listOf("oss"))
+            // AVPN (2026-11-16): site APK self-update (REQUEST_INSTALL_PACKAGES + package-replaced receiver)
+            manifest.srcFile("oss/AndroidManifest.xml")
         }
 
         getByName("play") {
