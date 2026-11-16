@@ -1017,12 +1017,10 @@ public struct TribeDataWatch: Equatable {
         var report: TribeDataWatchReport?
 
         // 7. An answer that came after its probe had been judged silent: the verdict was wrong.
-        var lateRefuted = false
         if let late = env.lateAnswerAt, late > lateAnswerSeenAt {
             lateAnswerSeenAt = late
             silences = 0
             if verdict == .noData && evidence == .probe {
-                lateRefuted = true
                 // A trial in flight was asked about a verdict that no longer stands: it is not
                 // waited for, not counted as disturbed, and its charge is given back (a path that
                 // answers later than one whole wait must not burn the trial budget).
@@ -1276,7 +1274,7 @@ public struct TribeDataWatch: Equatable {
             }
             if command != nil {
                 // the move to the new network's node goes first
-            } else if next == .recovered || lateRefuted || (arb.active && !arb.trialPending && next != .noData) {
+            } else if next == .recovered || (arb.active && !arb.trialPending && next != .noData) {
                 arb = Arbiter() // data came back, or the verdict was taken back: the round is over
             } else if next == .noData && !arb.trialPending && probeRequestedAt == nil && !quiet
                         && now >= arb.commandNotBefore && (arb.active || !env.candidates.isEmpty) {
