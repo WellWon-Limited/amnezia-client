@@ -11,7 +11,9 @@
 #pragma once
 
 #include "ScanNetworkGeneration.h"
+#include "dto/Subscription.h" // UpstreamKind (contract 1.10.0)
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -356,6 +358,7 @@ struct ScanManifestUpstream {
     QString label;
     int ordinal = 1;
     bool labelCustom = false;
+    UpstreamKind kind = UpstreamKind::Unspecified; // wire `kind` (1.10.0; the server omits `auto` from the manifest)
     QString countryCode;
     int tier = 1;
     int rank = 0;
@@ -532,6 +535,10 @@ inline bool scanManifestViewFromJson(const QJsonObject &o, ScanManifestView &out
         e.label = u.value(QLatin1String("label")).toString();
         e.ordinal = qMax(1, u.value(QLatin1String("ordinal")).toInt(1));
         e.labelCustom = u.value(QLatin1String("label_custom")).toBool(false);
+        {
+            const QJsonValue k = u.value(QLatin1String("kind"));
+            e.kind = upstreamKindFromWire(!(k.isUndefined() || k.isNull()), k.toString());
+        }
         e.countryCode = u.value(QLatin1String("country_code")).toString().toUpper();
         e.tier = qMax(1, u.value(QLatin1String("tier")).toInt(1));
         e.rank = qMax(0, u.value(QLatin1String("rank")).toInt(0));
@@ -782,6 +789,46 @@ inline ScanCachedResult scanCachedResultFromJson(const QJsonObject &o)
             c.failures << f;
     }
     return c;
+}
+
+// The persisted result's mark (TribeScanner::persistCache, since contract 1.10.0): its labels follow the «no
+// Сервер N» rule. A provider row without a country stored by an earlier build carries the rejected «Сервер N»
+// label (and may be the provider's balancer, which is no row now): dropped when the result is read back, so it is
+// never shown as cache - the next scan finds it again under its new name. Pure.
+inline constexpr char kScanCachedLabelRuleKey[] = "label_rule";
+inline constexpr char kScanCachedLabelRule[] = "1.10";
+
+inline void scanDropLegacyLabels(ScanCachedResult &c, const QJsonObject &stored)
+{
+    if (stored.value(QLatin1String(kScanCachedLabelRuleKey)).toString() == QLatin1String(kScanCachedLabelRule))
+        return;
+    for (int i = c.rows.size() - 1; i >= 0; --i)
+        if (c.rows.at(i).origin == ScanOrigin::Upstream && c.rows.at(i).countryCode.isEmpty())
+            c.rows.removeAt(i);
+}
+
+// The server list's figure of a node from the Scanner (owner 17.11: provider rows have no ICMP target). Source:
+// the persisted result of the network the device is on now - the same network key AND weak fingerprint - and
+// only while the Scanner itself would show that result when no scan can run (ScanMachine::cachedVisible outside
+// a scan: at most worksTtlS (scan_cache_works_ttl_s) old; a clock up to 60 s behind tolerated, as rowShownAt).
+// Only working rows (works / slow) are ever persisted, so a failed or «Не проверено» node gets nothing; a row
+// without a figure (ms -1) is left out. The figure is the row's ms: rtt_ms of the data probe through that node
+// (first byte of a second request on the same connection - one full-path round trip), ttfb1 when rtt is
+// missing (ScanClass.h). Engine node id -> ms. Pure.
+inline QHash<QString, int> scanListFigures(const ScanCachedResult &c, const QString &networkKey,
+                                           const QString &fingerprint, qint64 nowMs, int worksTtlS)
+{
+    QHash<QString, int> out;
+    if (!c.present() || networkKey.isEmpty() || fingerprint.isEmpty() || c.networkKey != networkKey
+        || c.fingerprint != fingerprint)
+        return out;
+    const qint64 age = nowMs - c.savedAtMs;
+    if (age < -60000 || age > qint64(worksTtlS) * 1000)
+        return out;
+    for (const ScanCachedRow &r : c.rows)
+        if (scanClassWorking(r.cls) && r.ms >= 0)
+            out.insert(r.id, r.ms);
+    return out;
 }
 
 // Ids with a failure on this network younger than ttlS (fresh failures order a candidate last in its tier).

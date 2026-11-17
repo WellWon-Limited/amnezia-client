@@ -240,19 +240,37 @@ inline void upstreamParseDisplayParts(const QJsonObject &o, int &ordinal, bool &
     labelCustom = c.isBool() && c.toBool();
 }
 
-// The name a provider profile is shown under (release A, owner decision 14.11; the artboard's
-// «Нидерланды 1»): the admin's own name when the server marks the label custom; otherwise OUR form -
-// the localized country name and our stable number, or «Сервер <n>» without a country. A label that is
-// not custom (a server fallback like "NL 1") is never shown. countryName = the localized name the list
-// uses for own nodes (doctor::countryDisplayName), serverWord = the localized «Сервер». Pure.
-inline QString upstreamDisplayName(const QString &label, bool labelCustom, int ordinal, const QString &countryName,
-                                   const QString &serverWord)
+// The wire `kind` of a stub's `upstream` object, a standby entry or a scan manifest entry (contract 1.10.0).
+// Optional and cosmetic like the display parts: absent or null = Unspecified (an older server), anything this
+// build does not know (another string, another JSON type) = Auto. Never a refusal.
+inline UpstreamKind upstreamParseKind(const QJsonObject &o)
+{
+    const QJsonValue k = o.value(QLatin1String("kind"));
+    return upstreamKindFromWire(!(k.isUndefined() || k.isNull()), k.toString());
+}
+
+// The name a provider profile is shown under (release A, owner decisions 14.11 and 17.11; the artboard's
+// «Нидерланды 1»): the admin's own name when the server marks the label custom; otherwise OUR form - the
+// localized country name (a country row), the localized function name (a white-list row: «Белые списки») or
+// the localized «Авто» (the provider's balancer: never a list row, the name only reaches the Connect card when
+// Auto connected through it), then our stable number. Never «Сервер <n>»; a label that is not custom (a server
+// fallback like "NL 1" or "Белые списки 2") is never shown - the words are the app's, in the app's language.
+// rowKind = upstreamRowKind(...); countryName = the localized name the list uses for own nodes
+// (doctor::countryDisplayName). Pure.
+inline QString upstreamDisplayName(const QString &label, bool labelCustom, int ordinal, UpstreamKind rowKind,
+                                   const QString &countryName, const QString &whitelistWord, const QString &autoWord)
 {
     const QString custom = label.trimmed();
     if (labelCustom && !custom.isEmpty())
         return custom;
     const QString country = countryName.trimmed();
-    const QString base = country.isEmpty() ? serverWord : country;
+    QString base;
+    if (rowKind == UpstreamKind::Whitelist)
+        base = whitelistWord;
+    else if (rowKind == UpstreamKind::Country && !country.isEmpty())
+        base = country;
+    else
+        base = autoWord;
     return ordinal > 0 ? base + QLatin1Char(' ') + QString::number(ordinal) : base;
 }
 
@@ -316,6 +334,7 @@ inline bool parseUpstreamStub(const QJsonValue &v, UpstreamStub &out, QString &w
     }
     s.priority = int(n);
     upstreamParseDisplayParts(o, s.ordinal, s.labelCustom);
+    s.kind = upstreamParseKind(o);
     out = s;
     why.clear();
     return true;

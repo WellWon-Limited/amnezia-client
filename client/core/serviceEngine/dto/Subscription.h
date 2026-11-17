@@ -85,6 +85,57 @@ constexpr int kTransportRankXray = 20;
 // profileId + configSha256 (a new sha = the provider rotated its servers; the row stays the same).
 enum class UpstreamProbeClass { Single, Composite };
 
+// What a provider profile is (contract 1.10.0, owner 17.11: no row is ever named «Сервер N»). The wire `kind`
+// of a stub, a scan manifest entry and a standby entry: country = one exit country («<страна> n», a flag);
+// whitelist = a profile for white-list networks («Белые списки n», a neutral icon, no country); auto = the
+// provider's own balancer across countries - an Auto candidate only, never a row of the manual list or the
+// Scanner. Unspecified = the field did not come (a server before 1.10.0).
+enum class UpstreamKind { Unspecified, Country, Whitelist, Auto };
+
+// The wire value: absent / null -> Unspecified; a value this build does not know -> Auto (contract: "An unknown
+// value: treat as auto"). Pure.
+inline UpstreamKind upstreamKindFromWire(bool present, const QString &value)
+{
+    if (!present)
+        return UpstreamKind::Unspecified;
+    if (value == QLatin1String("country"))
+        return UpstreamKind::Country;
+    if (value == QLatin1String("whitelist"))
+        return UpstreamKind::Whitelist;
+    return UpstreamKind::Auto;
+}
+
+// The kind a profile is SHOWN as. A whitelist profile stays one (no flag, even when a country came); a country
+// profile without a country code cannot be a country row; an older server's stub (no `kind`) is a country row
+// when it has a country and otherwise the provider's balancer - kept for Auto, hidden from the manual list
+// (before 1.10.0 such a stub was the «Сервер N» row the owner rejected). Never Unspecified. Pure.
+inline UpstreamKind upstreamRowKind(UpstreamKind wire, const QString &countryCode)
+{
+    const bool hasCountry = !countryCode.trimmed().isEmpty();
+    switch (wire) {
+    case UpstreamKind::Whitelist: return UpstreamKind::Whitelist;
+    case UpstreamKind::Auto: return UpstreamKind::Auto;
+    case UpstreamKind::Country: return hasCountry ? UpstreamKind::Country : UpstreamKind::Auto;
+    case UpstreamKind::Unspecified: break;
+    }
+    return hasCountry ? UpstreamKind::Country : UpstreamKind::Auto;
+}
+
+// A row of the manual server list and of the Scanner: every shown kind except the provider's balancer. Hiding
+// a row never removes the node from the subscription: Auto keeps it as a candidate.
+inline bool upstreamKindListed(UpstreamKind rowKind) { return rowKind != UpstreamKind::Auto; }
+
+inline const char *upstreamKindName(UpstreamKind k)
+{
+    switch (k) {
+    case UpstreamKind::Country: return "country";
+    case UpstreamKind::Whitelist: return "whitelist";
+    case UpstreamKind::Auto: return "auto";
+    case UpstreamKind::Unspecified: break;
+    }
+    return "";
+}
+
 struct UpstreamStub {
     QString profileId;                   // opaque id for the lease request; node_id == "up:" + profileId
     QString configSha256;                // lower-case hex of the normalized config the lease hands out
@@ -103,6 +154,7 @@ struct UpstreamStub {
     // = a server fallback such as "NL 1", never shown - UpstreamNode.h::upstreamDisplayName).
     int     ordinal = 0;
     bool    labelCustom = false;
+    UpstreamKind kind = UpstreamKind::Unspecified; // the wire `kind` (upstreamRowKind decides how it is shown)
 };
 
 struct SubscriptionNode {

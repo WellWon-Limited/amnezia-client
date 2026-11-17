@@ -450,6 +450,10 @@ public:
     // AVPN (i18n): текущий язык ("ru"/"en"/"es" — префикс локали) и смена из QML.
     QString appLang() const;
     Q_INVOKABLE void setAppLang(const QString &lang);
+    // A provider profile's name in the app's language (UpstreamNode.h::upstreamDisplayName; contract 1.10.0):
+    // the admin's own label, «<страна> n», «Белые списки n» or «Авто n» - never «Сервер n».
+    QString upstreamRowName(const QString &label, bool labelCustom, int ordinal, avpn::UpstreamKind rowKind,
+                            const QString &countryCode) const;
     QVariantMap referral() const { return m_referral; }   // AVPN (#37): кэш GET /v1/referral
     QVariantList announcements() const { return m_announcements; } // AVPN (P-ANN): кэш /v1/announcements
 

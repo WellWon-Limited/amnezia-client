@@ -3566,6 +3566,214 @@ static void properties()
     }
 }
 
+// --- provider rows (contract 1.10.0, owner 17.11) and the network change after a result ------------------------
+static void rowsAfter17Nov()
+{
+    // the manifest's `kind`: absent = Unspecified, unknown = auto
+    {
+        World w = baseWorld("kind", hostMac(), ScanNetKind::Wifi);
+        QJsonObject body = manifestBody(w);
+        QJsonArray ups = body.value(QStringLiteral("upstream")).toArray();
+        CHECK(ups.size() >= 1);
+        QJsonObject base = ups.at(0).toObject();
+        QJsonArray mine;
+        const auto entry = [&](const char *pid, const char *kind, const char *cc) {
+            QJsonObject e = base;
+            e.insert(QStringLiteral("profile_id"), QLatin1String(pid));
+            if (kind)
+                e.insert(QStringLiteral("kind"), QLatin1String(kind));
+            else
+                e.remove(QStringLiteral("kind"));
+            e.insert(QStringLiteral("country_code"), cc ? QJsonValue(QLatin1String(cc)) : QJsonValue());
+            mine << e;
+        };
+        entry("aaaaaaaaaaaaaa01", "country", "NL");
+        entry("aaaaaaaaaaaaaa02", "whitelist", nullptr);
+        entry("aaaaaaaaaaaaaa03", "auto", nullptr);
+        entry("aaaaaaaaaaaaaa04", nullptr, nullptr);      // an older server: no kind, no country
+        entry("aaaaaaaaaaaaaa05", nullptr, "PL");         // an older server: no kind, a country
+        entry("aaaaaaaaaaaaaa06", "balancer-v2", "DE");   // a kind this build does not know
+        entry("aaaaaaaaaaaaaa07", "country", nullptr);    // a country row without a country
+        body.insert(QStringLiteral("upstream"), mine);
+        ScanManifestView v;
+        CHECK(scanManifestViewFromJson(body, v));
+        CHECK(v.upstream.size() == 7);
+        if (v.upstream.size() == 7) {
+            CHECK(v.upstream.at(0).kind == UpstreamKind::Country && v.upstream.at(1).kind == UpstreamKind::Whitelist);
+            CHECK(v.upstream.at(2).kind == UpstreamKind::Auto && v.upstream.at(3).kind == UpstreamKind::Unspecified);
+            CHECK(v.upstream.at(5).kind == UpstreamKind::Auto);
+        }
+        // the planner never makes a row of the balancer (the server omits it; a safeguard for old servers)
+        ScanPlanInput in = planInput(hostMac());
+        in.manifest.upstream = v.upstream;
+        const ScanPlan p = buildScanPlan(in);
+        const auto planned = [&](const char *pid) {
+            const QString id = upstreamNodeIdFor(QLatin1String(pid));
+            return findC(p.probe, id) != nullptr || findC(p.orderOnly, id) != nullptr;
+        };
+        CHECK(planned("aaaaaaaaaaaaaa01") && planned("aaaaaaaaaaaaaa02") && planned("aaaaaaaaaaaaaa05"));
+        CHECK(!planned("aaaaaaaaaaaaaa03") && excluded(p, QStringLiteral("up:aaaaaaaaaaaaaa03"), "auto_kind"));
+        CHECK(!planned("aaaaaaaaaaaaaa04") && excluded(p, QStringLiteral("up:aaaaaaaaaaaaaa04"), "auto_kind"));
+        CHECK(!planned("aaaaaaaaaaaaaa06") && excluded(p, QStringLiteral("up:aaaaaaaaaaaaaa06"), "auto_kind"));
+        CHECK(!planned("aaaaaaaaaaaaaa07") && excluded(p, QStringLiteral("up:aaaaaaaaaaaaaa07"), "auto_kind"));
+    }
+
+    // the server list's figures: the persisted result of THIS network while the Scanner would show it
+    {
+        ScanCachedResult c;
+        c.networkKey = QStringLiteral("wifi:asn:64500");
+        c.fingerprint = QStringLiteral("fp-a");
+        c.savedAtMs = kT0;
+        ScanCachedRow a;
+        a.id = QStringLiteral("up:aaaaaaaaaaaaaa01");
+        a.origin = ScanOrigin::Upstream;
+        a.cls = ScanClass::Works;
+        a.ms = 44;
+        ScanCachedRow b = a;
+        b.id = QStringLiteral("up:aaaaaaaaaaaaaa02");
+        b.cls = ScanClass::Slow;
+        b.ms = 310;
+        ScanCachedRow nf = a;
+        nf.id = QStringLiteral("up:aaaaaaaaaaaaaa05");
+        nf.ms = -1; // no figure: nothing is invented
+        c.rows << a << b << nf;
+        const int ttl = ScanTunables().cacheWorksTtlS;
+        QHash<QString, int> f = scanListFigures(c, c.networkKey, c.fingerprint, kT0 + 5000, ttl);
+        CHECK(f.size() == 2 && f.value(a.id) == 44 && f.value(b.id) == 310 && !f.contains(nf.id));
+        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 + qint64(ttl) * 1000, ttl).size() == 2);
+        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 + qint64(ttl) * 1000 + 1, ttl).isEmpty()); // too old
+        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 - 60000, ttl).size() == 2);               // clock behind
+        CHECK(scanListFigures(c, c.networkKey, c.fingerprint, kT0 - 60001, ttl).isEmpty());
+        CHECK(scanListFigures(c, QStringLiteral("cell:250-02:4g"), c.fingerprint, kT0, ttl).isEmpty());   // other network
+        CHECK(scanListFigures(c, c.networkKey, QStringLiteral("fp-b"), kT0, ttl).isEmpty());              // other fingerprint
+        CHECK(scanListFigures(c, c.networkKey, QString(), kT0, ttl).isEmpty());
+        CHECK(scanListFigures(ScanCachedResult(), c.networkKey, c.fingerprint, kT0, ttl).isEmpty());
+        // a failure never gives a figure: it is not a row of the persisted result
+        ScanCachedRow bad = a;
+        bad.cls = ScanClass::NoData;
+        ScanCachedRow back;
+        CHECK(!scanCachedRowFromJson(scanCachedRowToJson(bad), back));
+    }
+
+    // an earlier build's countryless provider rows («Сервер N») are not read back; marked results keep theirs
+    {
+        ScanCachedResult c;
+        c.networkKey = QStringLiteral("wifi");
+        c.fingerprint = QStringLiteral("fp");
+        c.savedAtMs = kT0;
+        ScanCachedRow own;
+        own.id = QStringLiteral("4:xray");
+        own.cls = ScanClass::Works;
+        ScanCachedRow up = own;
+        up.id = QStringLiteral("up:aaaaaaaaaaaaaa02");
+        up.origin = ScanOrigin::Upstream;
+        up.label = QStringLiteral("Сервер 5");
+        ScanCachedRow upCc = up;
+        upCc.id = QStringLiteral("up:aaaaaaaaaaaaaa01");
+        upCc.countryCode = QStringLiteral("NL");
+        upCc.label = QStringLiteral("Нидерланды 1");
+        c.rows << own << up << upCc;
+        const QJsonObject legacy = scanCachedResultToJson(c);
+        ScanCachedResult r = scanCachedResultFromJson(legacy);
+        scanDropLegacyLabels(r, legacy);
+        CHECK(r.rows.size() == 2 && r.rows.at(0).id == own.id && r.rows.at(1).id == upCc.id);
+        QJsonObject marked = legacy;
+        marked.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));
+        ScanCachedResult m = scanCachedResultFromJson(marked);
+        scanDropLegacyLabels(m, marked);
+        CHECK(m.rows.size() == 3);
+    }
+
+    // the rescan rule after a network change
+    {
+        const QString none;
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::Done, none, false, false));
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::Empty, none, false, false));
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::NoScan, QStringLiteral("cooldown"), false, false));
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::NoScan, QStringLiteral("budget"), false, false));
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::NoScan, QStringLiteral("network_changed"), false, false));
+        CHECK(!scanRescanOnNetworkChange(false, ScanPhase::Done, none, false, false));                       // screen closed
+        CHECK(!scanRescanOnNetworkChange(true, ScanPhase::Done, none, true, false));                         // would start the VPN
+        CHECK(scanRescanOnNetworkChange(true, ScanPhase::Done, none, true, true));
+        for (const char *r : {"service_off", "scanner_off", "vpn_off", "host_memory", "manifest_unavailable"})
+            CHECK(!scanRescanOnNetworkChange(true, ScanPhase::NoScan, QLatin1String(r), false, false));
+        for (ScanPhase ph : {ScanPhase::Idle, ScanPhase::Preparing, ScanPhase::Connecting, ScanPhase::Reach, ScanPhase::Data,
+                             ScanPhase::Self})
+            CHECK(!scanRescanOnNetworkChange(true, ph, none, false, true));
+    }
+
+    // the machine: a finished result + another network = a new scan by itself (artboard), never a VPN start
+    {
+        World w = baseWorld("netchange", hostMac(), ScanNetKind::Wifi);
+        ScanMachine m(w.caps);
+        m.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        m.tick(kT0 + 60000);
+        m.tick(kT0 + 70000);
+        CHECK(m.phase() == ScanPhase::Done || m.phase() == ScanPhase::Empty);
+        const ScanStep s = m.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64501"), 2), ScanCachedResult(),
+                                            true, kT0 + 80000);
+        CHECK(scanPhaseScanning(m.phase()) && s.has(ScanActionKind::RequestManifest));
+        CHECK(!s.has(ScanActionKind::UserConnectForScan));
+        CHECK(m.cooldownUntil() <= kT0 + 80000 || m.view(kT0 + 80000).empty.reason.isEmpty());
+        // the same with the screen closed: nothing starts
+        ScanMachine c(w.caps);
+        c.opened(openOf(w, QStringLiteral("1"), true), kT0);
+        c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+        c.tick(kT0 + 60000);
+        c.tick(kT0 + 70000);
+        c.closed(kT0 + 71000);
+        const ScanStep cs = c.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64501"), 2), ScanCachedResult(),
+                                             true, kT0 + 80000);
+        CHECK(!scanPhaseScanning(c.phase()) && !cs.has(ScanActionKind::RequestManifest));
+    }
+    // the cellular hour used up: the new network shows frame 22 (NoScan budget), no manifest
+    {
+        World w = baseWorld("netchange_budget", hostMac(), ScanNetKind::Cellular);
+        ScanMachine m(w.caps);
+        QJsonArray ledger;
+        ledger << QJsonObject{{QStringLiteral("at_ms"), double(kT0 - 20 * 60000)}, {QStringLiteral("bytes"), 4.95 * 1024 * 1024},
+                              {QStringLiteral("cellular"), true}};
+        m.restoreBudget(ledger);
+        m.opened(openOf(w, QString(), false), kT0);
+        CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0).empty.reason == QLatin1String("budget"));
+        const ScanStep s = m.networkChanged(scanNet(ScanNetKind::Cellular, QStringLiteral("cell:250-01:4g"), 2), ScanCachedResult(),
+                                            true, kT0 + 1000);
+        CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0 + 1000).empty.reason == QLatin1String("budget"));
+        CHECK(!s.has(ScanActionKind::RequestManifest) && !s.has(ScanActionKind::UserConnectForScan));
+        // ... and on Wi-Fi the hour does not apply: it scans
+        const ScanStep sw = m.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64500"), 3), ScanCachedResult(),
+                                             true, kT0 + 2000);
+        CHECK(scanPhaseScanning(m.phase()) && sw.has(ScanActionKind::RequestManifest));
+    }
+    // iPhone: the tunnel is gone after the scan - the change keeps the old result and «Повторить», no VPN start;
+    // with the tunnel up the change rescans through it
+    {
+        World wi = baseWorld("netchange_ios", hostIosFull(), ScanNetKind::Wifi);
+        ScanMachine m(wi.caps);
+        m.opened(openOf(wi, QStringLiteral("1"), true), kT0);
+        m.manifestReady(manifestInputFrom(manifestArgs(wi)), kT0 + 50);
+        m.vpnState(ScanCurrent(), kT0 + 500); // the tunnel went away: the scan ends
+        CHECK(m.phase() == ScanPhase::Done || m.phase() == ScanPhase::Empty);
+        const ScanStep s = m.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64501"), 2), ScanCachedResult(),
+                                            true, kT0 + 2000);
+        CHECK(m.phase() == ScanPhase::NoScan && m.view(kT0 + 2000).empty.reason == QLatin1String("network_changed"));
+        for (const ScanAction &a : s.actions)
+            CHECK(!scanActionTouchesTunnel(a.kind));
+        ScanMachine u(wi.caps);
+        u.opened(openOf(wi, QStringLiteral("1"), true), kT0);
+        u.manifestReady(manifestInputFrom(manifestArgs(wi)), kT0 + 50);
+        u.tick(kT0 + 60000);
+        u.tick(kT0 + 70000);
+        CHECK(u.phase() == ScanPhase::Done || u.phase() == ScanPhase::Empty);
+        const ScanStep us = u.networkChanged(scanNet(ScanNetKind::Wifi, QStringLiteral("wifi:asn:64501"), 2), ScanCachedResult(),
+                                             true, kT0 + 80000);
+        CHECK(scanPhaseScanning(u.phase()) && us.has(ScanActionKind::RequestManifest));
+        for (const ScanAction &a : us.actions)
+            CHECK(!scanActionTouchesTunnel(a.kind));
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -3588,6 +3796,7 @@ int main(int argc, char **argv)
     contractV23();
     labSeams();
     cooldownRule();
+    rowsAfter17Nov();
     overruns();
     properties();
     if (g_fail) {

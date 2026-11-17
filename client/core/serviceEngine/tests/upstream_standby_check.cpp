@@ -132,6 +132,23 @@ static void parse()
         CHECK(q.ok() && q.pack.find("aaaaaaaaaaaaaaaa")->ordinal == 3 && q.pack.find("aaaaaaaaaaaaaaaa")->labelCustom);
         CHECK(q.pack.find("bbbbbbbbbbbbbbbb")->ordinal == 0 && !q.pack.find("bbbbbbbbbbbbbbbb")->labelCustom);
     }
+    // Contract 1.10.0 `kind` of an entry: absent = Unspecified, known values, anything else = auto; never refused.
+    CHECK(p.pack.find("aaaaaaaaaaaaaaaa")->kind == UpstreamKind::Unspecified);
+    {
+        QJsonObject o = pack();
+        QJsonArray es = o.value("entries").toArray();
+        QJsonObject e0 = es.at(0).toObject();
+        e0.insert("kind", "whitelist");
+        e0.insert("country_code", QJsonValue());
+        QJsonObject e1 = es.at(1).toObject();
+        e1.insert("kind", 7);
+        es.replace(0, e0);
+        es.replace(1, e1);
+        o.insert("entries", es);
+        const StandbyParse q = parsed(o);
+        CHECK(q.ok() && q.pack.find("aaaaaaaaaaaaaaaa")->kind == UpstreamKind::Whitelist);
+        CHECK(q.pack.find("bbbbbbbbbbbbbbbb")->kind == UpstreamKind::Auto);
+    }
     // Signature: the standby context only.
     const QByteArray b = ser(pack());
     CHECK(refused(parseStandbyPack(b, key().sign(b), key().pubHex()), StandbyRefusal::Signature));

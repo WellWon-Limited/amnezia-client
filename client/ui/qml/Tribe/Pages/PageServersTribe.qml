@@ -15,10 +15,14 @@ import "../../Controls2" // PageType
 // реконнект-семантика — в TribeEngine.pinAndReconnect (kill-switch features.picker_instant_reconnect).
 // AVPN awg31-xray-v1 (спека 2026-09-01 §2.3): у локации может быть несколько транспортов
 // (Amnezia/Xray) — бейджи в строке + селектор режима «Авто / Amnezia / Xray» над списком.
-// AVPN upstream nodes (release A, point 16): a provider profile (role `upstream`) is an ordinary row - our
-// label (the engine never passes the server's text), flag or a globe tile, the Xray badge, neutral RTT
-// ("—", bars off: no ICMP target). The engine keys it as a location of its own (never merged with ours);
-// such rows come after ours in the engine's order (tier, then pool order). Flag off: no such row exists.
+// AVPN upstream nodes (release A, point 16; contract 1.10.0, owner 17.11): a provider profile (role `upstream`) is
+// an ordinary row - our label (the engine never passes the server's text, never «Сервер N»), the Xray badge. A
+// country profile («<страна> n») has its flag; a white-list profile («Белые списки n», role upstreamKind
+// "whitelist") the kit's neutral globe tile; the provider's balancer ("auto") is never a row (the engine keeps it
+// for Auto). Figures: the Scanner's latest result on this network (nodePool, no ICMP target), else none. The
+// engine keys each as a location of its own (never merged with ours); provider country rows come after ours in
+// the engine's order (tier, then pool order), white-list rows after them. Flag off: no such row exists.
+// No measurement (owner's register, 11.11): «—» and the bars' idle track - never a health guess drawn as signal.
 PageType {
     id: root
 
@@ -111,6 +115,8 @@ PageType {
         for (let i = 0; i < pool.length; ++i) {
             const n = pool[i]
             if (!n || n.alive !== true) continue
+            // contract 1.10.0: the provider's balancer is an Auto candidate only (nodePool already leaves it out)
+            if (n.upstream === true && n.upstreamKind === "auto") continue
             const key = root.locationKeyOf(n)
             if (!byLoc[key]) { byLoc[key] = []; firstAt[key] = i }
             byLoc[key].push(n)
@@ -136,13 +142,15 @@ PageType {
             }
             const disabled = usable.length === 0
             const best = root.bestOf(disabled ? nodes : usable)
-            const cc = String(best.countryCode || "??").toUpperCase()
-            // AVPN upstream nodes: a provider profile row (its location holds only itself).
+            // AVPN upstream nodes: a provider profile row (its location holds only itself); a white-list profile
+            // has no country - no flag, the neutral tile (TribeFlag fallback).
             const isUp = best.upstream === true
+            const isWl = isUp && best.upstreamKind === "whitelist"
+            const cc = isWl ? "" : String(best.countryCode || "??").toUpperCase()
             // Имя локации: движок отдаёт подпись самой ноды, иначе подпись соседа по хосту (AWG),
             // иначе название страны (nodePool, pickerDisplay) — код региона («ee») не показываем.
-            // Upstream without a country: a neutral word, never a code.
-            const name = best.name || (isUp ? qsTr("Сервер") : cc)
+            // A provider row always has the engine's name (upstreamRowName).
+            const name = best.name || cc
             if (q && !(name.toLowerCase().includes(q) || cc.toLowerCase().includes(q)
                        || String(best.region || "").toLowerCase().includes(q)))
                 continue
@@ -172,11 +180,14 @@ PageType {
             }
             out.push({ key: key, cc: cc, name: name, nodeId: best.nodeId,
                        rtt: best.measuredRttMs,
-                       // upstream: no RTT is ever measured (no ICMP target) - bars stay off, not a
-                       // health guess that would read as a signal
-                       bars: best.measuredBars >= 0 ? best.measuredBars
-                                                    : (isUp ? 0 : Math.round((best.health || 0) * 5)),
+                       // -1 = no measurement (own: no ICMP answer yet; provider: no Scanner result on this
+                       // network): the idle track, never the server's health drawn as five green bars
+                       bars: best.measuredBars >= 0 ? best.measuredBars : -1,
+                       // order only (unmeasured own rows keep their old place): not shown
+                       healthRank: Math.round((best.health || 0) * 5),
                        upstream: isUp,
+                       // 0 own, 1 provider country, 2 white-list (no group in the artboard: placed last)
+                       group: isWl ? 2 : (isUp ? 1 : 0),
                        tier: isUp ? Number(best.upstreamTier || 0) : 0,
                        order: isUp ? firstAt[key] : 0,
                        badges: badges,
@@ -189,13 +200,14 @@ PageType {
         }
         out.sort(function(a, b) {
             if (a.disabled !== b.disabled) return a.disabled ? 1 : -1   // серые — вниз
-            // AVPN upstream nodes: provider rows after ours, in the engine's order (tier, then pool)
-            if (a.upstream !== b.upstream) return a.upstream ? 1 : -1
+            // AVPN upstream nodes: provider country rows after ours, white-list rows after them, each in the
+            // engine's order (tier, then pool)
+            if (a.group !== b.group) return a.group - b.group
             if (a.upstream) return (a.tier - b.tier) || (a.order - b.order)
             const am = a.rtt >= 0, bm = b.rtt >= 0
             if (am !== bm) return am ? -1 : 1
             if (am) return a.rtt - b.rtt
-            return b.bars - a.bars
+            return b.healthRank - a.healthRank
         })
         return out
     }
@@ -573,9 +585,10 @@ PageType {
                                 scale: 0.9
                                 transformOrigin: Item.Bottom
                                 // текущая страна при коннекте — живой замер через туннель
+                                // no measurement (bars -1): the idle track (UI-DESIGN §3, idle .4)
                                 level: (row.modelData.isCurrent && root.hasEngine
                                         && TribeEngine.state === "connected")
-                                       ? TribeEngine.liveBars : row.modelData.bars
+                                       ? TribeEngine.liveBars : Math.max(0, row.modelData.bars)
                             }
                             Text {
                                 Layout.alignment: Qt.AlignHCenter

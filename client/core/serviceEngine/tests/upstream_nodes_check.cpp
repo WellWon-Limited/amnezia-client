@@ -219,6 +219,26 @@ static void stubValidation()
         CHECK(parts(2.5, true) == std::make_tuple(true, 0, true));
         CHECK(keptWith([] { QJsonObject o = stubBlock(); o.insert("ordinal", "x"); return o; }()));
     }
+    // Contract 1.10.0 `kind`: optional and cosmetic too - absent / null = Unspecified, unknown = auto, never a refusal.
+    {
+        const auto kindOf = [](const QJsonValue &k) {
+            QJsonObject o = stubBlock();
+            if (!k.isUndefined())
+                o.insert("kind", k);
+            UpstreamStub s;
+            QString why;
+            const bool ok = parseUpstreamStub(o, s, why);
+            return ok ? s.kind : UpstreamKind::Unspecified;
+        };
+        CHECK(kindOf(QJsonValue(QJsonValue::Undefined)) == UpstreamKind::Unspecified);
+        CHECK(kindOf(QJsonValue()) == UpstreamKind::Unspecified);
+        CHECK(kindOf("country") == UpstreamKind::Country);
+        CHECK(kindOf("whitelist") == UpstreamKind::Whitelist);
+        CHECK(kindOf("auto") == UpstreamKind::Auto);
+        CHECK(kindOf("fourth-kind") == UpstreamKind::Auto);
+        CHECK(kindOf(3) == UpstreamKind::Auto);
+        CHECK(keptWith([] { QJsonObject o = stubBlock(); o.insert("kind", "fourth-kind"); return o; }()));
+    }
     const auto with = [](const char *key, const QJsonValue &v) {
         QJsonObject o = stubBlock();
         if (v.isUndefined())

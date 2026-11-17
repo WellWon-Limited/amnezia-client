@@ -265,6 +265,10 @@ public:
     QVariantMap view() const { return m_viewMap; }
     bool screenOpen() const { return m_m.screenOpen(); }
     QVariantMap shade() const { return m_shadeMap; }
+    // The server list's figures (owner 17.11, provider rows): engine node id -> ms of the latest Scanner result of
+    // the network the device is on now, while the Scanner itself would still show it (ScanTypes.h::scanListFigures,
+    // scan_cache_works_ttl_s). Reads the persisted result; never measures, never touches the tunnel.
+    QHash<QString, int> listFigures() const;
 
     Q_INVOKABLE void open(bool withCheck = false);
     Q_INVOKABLE void close();

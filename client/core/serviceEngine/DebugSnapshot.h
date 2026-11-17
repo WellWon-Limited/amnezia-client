@@ -1556,6 +1556,9 @@ struct NodeDebugRow {
     // Display name parts (UpstreamNode.h::upstreamDisplayName); `name` carries the label only when custom.
     int         upstreamOrdinal = 0;
     bool        upstreamLabelCustom = false;
+    // How the profile is shown (dto/Subscription.h::upstreamRowKind, contract 1.10.0): Country / Whitelist rows of
+    // the manual list, Auto - the provider's balancer, kept in the pool for Auto and the Connect card, never a row.
+    UpstreamKind upstreamKind = UpstreamKind::Unspecified;
 };
 
 // AVPN (A5, жалоба владельца 2026-09-23 «Connected, VPN работает, а карточка пишет «Умный выбор

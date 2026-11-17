@@ -268,6 +268,12 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
                 exclude(id, "current");
                 continue;
             }
+            // The provider's own balancer is an Auto candidate only, never a Scanner row (contract 1.10.0; the
+            // server omits it from the manifest - a safeguard, also for an older server's countryless entry).
+            if (!upstreamKindListed(upstreamRowKind(u.kind, u.countryCode))) {
+                exclude(id, "auto_kind");
+                continue;
+            }
             if (!countryOk(u.countryCode)) {
                 exclude(id, "country");
                 continue;
