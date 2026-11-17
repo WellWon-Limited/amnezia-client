@@ -203,6 +203,24 @@ int main()
     CHECK(countryDisplayName(QStringLiteral("zz"), QStringLiteral("es")) == QStringLiteral("ZZ"),
           "country display: unknown code -> the code in capitals");
     CHECK(countryDisplayName(QString(), QStringLiteral("ru")).isEmpty(), "country display: no code -> empty");
+    // U2 (device test 142): own nodes' English country labels follow the UI language, number kept.
+    {
+        const QString ru = QStringLiteral("ru");
+        CHECK(localizedNodeLabel("Finland 1", "FI", ru) == QStringLiteral("Финляндия 1"), "node label: Finland 1 -> Финляндия 1");
+        CHECK(localizedNodeLabel("Germany", "DE", ru) == QStringLiteral("Германия"), "node label: no number -> the country only");
+        CHECK(localizedNodeLabel("Estonia 3", "EE", ru) == QStringLiteral("Эстония 3"), "node label: Estonia 3");
+        CHECK(localizedNodeLabel("USA", "US", ru) == QStringLiteral("США"), "node label: the USA alias");
+        CHECK(localizedNodeLabel("United States 2", "us", ru) == QStringLiteral("США 2"), "node label: QLocale name, lower-case code");
+        CHECK(localizedNodeLabel("finland  #2", "FI", ru) == QStringLiteral("Финляндия 2"), "node label: case and '#'");
+        CHECK(localizedNodeLabel("FI 4", "FI", ru) == QStringLiteral("Финляндия 4"), "node label: the code form");
+        CHECK(localizedNodeLabel("Финляндия 1", "FI", "en") == QStringLiteral("Finland 1"), "node label: a Russian label in an English UI");
+        CHECK(localizedNodeLabel("Finland 1", "FI", "es") == QStringLiteral("Finlandia 1"), "node label: Spanish UI");
+        CHECK(localizedNodeLabel("Helsinki fast", "FI", ru) == QStringLiteral("Helsinki fast"), "node label: the admin's own name stays");
+        CHECK(localizedNodeLabel("Germany 1", "FI", ru) == QStringLiteral("Germany 1"), "node label: another country's name stays");
+        CHECK(localizedNodeLabel("Finland 1", "", ru) == QStringLiteral("Finland 1"), "node label: no code -> as is");
+        CHECK(localizedNodeLabel("", "FI", ru).isEmpty(), "node label: empty stays empty (pickerDisplay fallback)");
+        CHECK(localizedNodeLabel("12", "FI", ru) == QStringLiteral("12"), "node label: a bare number stays");
+    }
     // 5.1.108: Spanish UI gets Spanish names (QLocale only gives English ones).
     CHECK(countryDisplayName(QStringLiteral("fi"), QStringLiteral("es")) == QStringLiteral("Finlandia"),
           "country display: fi, es UI -> Finlandia");

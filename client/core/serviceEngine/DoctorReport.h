@@ -236,6 +236,52 @@ inline QString countryDisplayName(const QString &code, const QString &lang)
     return t != QLocale::AnyTerritory ? QLocale::territoryToString(t) : cc;
 }
 
+// An own node's label in the app's language (device test of 142, iPhone Air: own rows read "Finland 1",
+// "Germany", "USA" next to provider rows «Польша 3»). The server's Node.label is the admin's free text; when it
+// only names the node's own country - in English (QLocale), Russian, Spanish, as the code or a common short
+// form - optionally followed by a number, the row shows OUR form, as provider rows do
+// (UpstreamNode.h::upstreamDisplayName): the localized country name plus that number. Any other label (the
+// admin's own name) and a label without a country code stay as they are; an empty label stays empty (the
+// caller's fallback, NodeRanking.h::pickerDisplay). Pure.
+inline QString localizedNodeLabel(const QString &label, const QString &code, const QString &lang)
+{
+    const QString cc = code.trimmed().toUpper();
+    const QString text = label.simplified();
+    if (cc.isEmpty() || text.isEmpty())
+        return label;
+    static const QRegularExpression re(QStringLiteral("^(.*?)\\s*(?:#|№)?\\s*(\\d{1,4})?$"));
+    const QRegularExpressionMatch m = re.match(text);
+    if (!m.hasMatch())
+        return label;
+    const QString word = m.captured(1).trimmed().toCaseFolded();
+    const QString number = m.captured(2);
+    if (word.isEmpty())
+        return label;
+    QStringList names{cc, countryNameRu(cc), countryNameEs(cc)};
+    const QLocale::Territory t = QLocale::codeToTerritory(cc);
+    if (t != QLocale::AnyTerritory)
+        names << QLocale::territoryToString(t);
+    static const QHash<QString, QStringList> aliases{
+        {QStringLiteral("US"), {QStringLiteral("USA"), QStringLiteral("U.S."), QStringLiteral("U.S.A."),
+                                QStringLiteral("United States of America"), QStringLiteral("America")}},
+        {QStringLiteral("GB"), {QStringLiteral("UK"), QStringLiteral("U.K."), QStringLiteral("Great Britain"),
+                                QStringLiteral("Britain"), QStringLiteral("England")}},
+        {QStringLiteral("NL"), {QStringLiteral("Holland"), QStringLiteral("The Netherlands")}},
+        {QStringLiteral("CZ"), {QStringLiteral("Czech Republic")}},
+    };
+    names << aliases.value(cc);
+    bool known = false;
+    for (const QString &n : std::as_const(names))
+        if (n.toCaseFolded() == word) {
+            known = true;
+            break;
+        }
+    if (!known)
+        return label;
+    const QString country = countryDisplayName(cc, lang);
+    return number.isEmpty() ? country : country + QLatin1Char(' ') + QString::number(number.toInt());
+}
+
 // Result line of one alternative while the Doctor's alternatives stage runs (owner test of
 // 5.1.102): "ok" - both probes passed; "no_data" - the tunnel came up but data did not pass both
 // probes (verdict 1 = dropped after connecting, 0 = none); "unreachable" - the tunnel never came up.

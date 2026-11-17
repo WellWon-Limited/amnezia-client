@@ -309,14 +309,15 @@ public:
     // The display name the Connect card would show for a pool row (pickerDisplay / upstreamDisplayName).
     QString rowLabel(const DebugSnapshot &s, const NodeDebugRow &r) const
     {
-        const QString country = doctor::countryDisplayName(r.countryCode, m_e->appLang());
+        const QString lang = m_e->appLang();
+        const QString country = doctor::countryDisplayName(r.countryCode, lang);
         if (r.upstream)
             return m_e->upstreamRowName(r.name, r.upstreamLabelCustom, r.upstreamOrdinal, r.upstreamKind, r.countryCode);
-        QList<PickerRow> loc{{r.location, r.proto, r.name, country, -1}};
+        QList<PickerRow> loc{{r.location, r.proto, doctor::localizedNodeLabel(r.name, r.countryCode, lang), country, -1}};
         if (r.name.isEmpty() && !r.location.isEmpty())
             for (const NodeDebugRow &o : s.pool)
                 if (&o != &r && o.location == r.location)
-                    loc.append({o.location, o.proto, o.name, QString(), -1});
+                    loc.append({o.location, o.proto, doctor::localizedNodeLabel(o.name, o.countryCode, lang), QString(), -1});
         return pickerDisplay(loc).constFirst().name;
     }
 
@@ -2694,12 +2695,13 @@ QVariantMap AvpnEngineQml::currentNode() const
     // sibling), else the country name - never the region code (NodeRanking.h::pickerDisplay).
     QString pickName;
     if (pick) {
-        QList<PickerRow> loc{{pick->location, pick->proto, pick->name,
-                              doctor::countryDisplayName(pick->countryCode, appLang()), -1}};
+        const QString lang = appLang();
+        QList<PickerRow> loc{{pick->location, pick->proto, doctor::localizedNodeLabel(pick->name, pick->countryCode, lang),
+                              doctor::countryDisplayName(pick->countryCode, lang), -1}};
         if (pick->name.isEmpty() && !pick->location.isEmpty())
             for (const NodeDebugRow &r : s.pool)
                 if (&r != pick && r.location == pick->location)
-                    loc.append({r.location, r.proto, r.name, QString(), -1});
+                    loc.append({r.location, r.proto, doctor::localizedNodeLabel(r.name, r.countryCode, lang), QString(), -1});
         pickName = pickerDisplay(loc).constFirst().name;
         if (pick->upstream) // release A: the same name as its row in the server list
             pickName = upstreamRowName(pick->name, pick->upstreamLabelCustom, pick->upstreamOrdinal,
@@ -2759,9 +2761,10 @@ QVariantList AvpnEngineQml::nodePool() const
     display.reserve(pool.size());
     for (const QVariant &v : std::as_const(pool)) {
         const QVariantMap n = v.toMap();
+        const QString cc = n.value(QStringLiteral("countryCode")).toString();
         display.append({n.value(QStringLiteral("location")).toString(), n.value(QStringLiteral("proto")).toString(),
-                        n.value(QStringLiteral("name")).toString(),
-                        doctor::countryDisplayName(n.value(QStringLiteral("countryCode")).toString(), lang),
+                        doctor::localizedNodeLabel(n.value(QStringLiteral("name")).toString(), cc, lang),
+                        doctor::countryDisplayName(cc, lang),
                         measured.value(n.value(QStringLiteral("nodeId")).toString(), -1)});
     }
     display = pickerDisplay(display);
