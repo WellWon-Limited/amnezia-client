@@ -818,31 +818,74 @@ static void scannerConnectOnOpen()
 static void scannerCancelPendingConnect()
 {
     const quint64 proc = 0x1234;
+    const bool loop = true; // the app's event loop runs
     ScanOwnConnect a;
     // Nothing started by this machine: never a stop.
-    CHECK(decideScanCancel(a, proc, 1, true, false) == ScanCancel::IgnoreNoAttempt);
+    CHECK(decideScanCancel(a, proc, 1, true, false, loop) == ScanCancel::IgnoreNoAttempt);
     a.id = 7;
     a.processEpoch = proc;
     a.intentSerial = 5;
     // Before «Подключено», the same attempt, the intent still on: the ordinary stop.
-    CHECK(decideScanCancel(a, proc, 5, /*want=*/true, /*dataFlowing=*/false) == ScanCancel::Stop);
-    // A cancel arriving after connected: ignored (data passes now ...).
-    CHECK(decideScanCancel(a, proc, 5, true, /*dataFlowing=*/true) == ScanCancel::IgnoreAfterConnected);
-    // ... and still ignored when the data stopped later: «Подключено» once = the Scanner never turns it off.
+    CHECK(decideScanCancel(a, proc, 5, /*want=*/true, /*shownConnected=*/false, loop) == ScanCancel::Stop);
+    // A cancel arriving after «Подключено»: ignored ...
+    CHECK(decideScanCancel(a, proc, 5, true, /*shownConnected=*/true, loop) == ScanCancel::IgnoreAfterConnected);
+    // ... and still ignored when the tunnel went Reconnecting later: «Подключено» once = never turned off.
     ScanOwnConnect latched = a;
-    noteScanOwnConnectProgress(latched, /*dataFlowingNow=*/true);
+    noteScanOwnConnectProgress(latched, /*shownConnectedNow=*/true);
     CHECK(latched.reachedConnected);
-    CHECK(decideScanCancel(latched, proc, 5, true, /*dataFlowing=*/false) == ScanCancel::IgnoreAfterConnected);
+    CHECK(decideScanCancel(latched, proc, 5, true, /*shownConnected=*/false, loop) == ScanCancel::IgnoreAfterConnected);
     ScanOwnConnect notLatched = a;
     noteScanOwnConnectProgress(notLatched, false);
     CHECK(!notLatched.reachedConnected);
     // Relaunch: a record of another process (a stale flag) never cancels anything.
-    CHECK(decideScanCancel(a, /*processEpoch=*/0x9999, 5, true, false) == ScanCancel::IgnoreOtherProcess);
+    CHECK(decideScanCancel(a, /*processEpoch=*/0x9999, 5, true, false, loop) == ScanCancel::IgnoreOtherProcess);
     // The user (or any other path) touched the intent after the Scanner's start: not the Scanner's any more.
-    CHECK(decideScanCancel(a, proc, /*intentSerial=*/6, true, false) == ScanCancel::IgnoreSuperseded);
+    CHECK(decideScanCancel(a, proc, /*intentSerial=*/6, true, false, loop) == ScanCancel::IgnoreSuperseded);
     // Already stopped: nothing to cancel.
-    CHECK(decideScanCancel(a, proc, 5, /*want=*/false, false) == ScanCancel::IgnoreNotPending);
+    CHECK(decideScanCancel(a, proc, 5, /*want=*/false, false, loop) == ScanCancel::IgnoreNotPending);
     CHECK(QLatin1String(scanCancelName(ScanCancel::IgnoreAfterConnected)) == QLatin1String("after_connected"));
+}
+
+// S1 (owner's iPhone, build 140, 16.11 22:53): AmneziaWG on node 17 reached «Подключено» while the API was
+// unreachable - no /v1/ping, no whoami, so dataFlowing (ONLINE) stayed false - and a cancel 18 s later
+// stopped it. «Подключено» is what the orb shows: engine Connected on a Connected tunnel.
+static void scannerCancelAfterShownConnectedWithoutData()
+{
+    // The orb's «Подключено» without the data proof counts; paused, a tunnel not Connected or an engine
+    // still connecting / verifying does not; the data proof alone counts as before.
+    CHECK(scanShownConnected(/*paused=*/false, /*engineConnected=*/true, /*tunnelConnected=*/true, /*data=*/false));
+    CHECK(!scanShownConnected(false, /*engineConnected=*/false, true, false));  // Connecting / Verifying
+    CHECK(!scanShownConnected(false, true, /*tunnelConnected=*/false, false));  // native not Connected
+    CHECK(!scanShownConnected(/*paused=*/true, true, true, false));
+    CHECK(scanShownConnected(false, false, false, /*data=*/true));
+    // The 22:53 sequence: start 22:53:32, Connected without data 22:53:40, cancel 22:53:58.
+    ScanOwnConnect a;
+    a.id = 1;
+    a.processEpoch = 0x77;
+    a.intentSerial = 3;
+    noteScanOwnConnectProgress(a, scanShownConnected(false, false, false, false)); // connecting
+    CHECK(!a.reachedConnected);
+    noteScanOwnConnectProgress(a, scanShownConnected(false, true, true, /*data=*/false)); // «Подключено», no ONLINE
+    CHECK(a.reachedConnected);
+    CHECK(decideScanCancel(a, 0x77, 3, true, scanShownConnected(false, true, true, false), true)
+          == ScanCancel::IgnoreAfterConnected);
+    // Before the fix the rule saw only dataFlowing (false here) and answered Stop.
+}
+
+// S2 (same evening, 22:53:58): the person swiped the app away with the Scanner open. ~AmneziaApplication
+// joined the VPN thread, then deleted the QML engine; the page's Component.onDestruction -> close() ->
+// cancel -> stop(): the facade flipped to «disconnected», the queued disconnectFromVpn never ran and the
+// tunnel stayed up. With no event loop running the Scanner cancels nothing - whatever the phase.
+static void scannerCancelNeverDuringAppQuit()
+{
+    ScanOwnConnect a;
+    a.id = 2;
+    a.processEpoch = 0x88;
+    a.intentSerial = 9;
+    CHECK(decideScanCancel(a, 0x88, 9, /*want=*/true, /*shownConnected=*/false, /*eventLoopRunning=*/false)
+          == ScanCancel::IgnoreAppQuit); // «Подключаемся…» too: quitting the app is not the person's cancel
+    CHECK(decideScanCancel(a, 0x88, 9, true, false, true) == ScanCancel::Stop); // the same cancel in the app
+    CHECK(QLatin1String(scanCancelName(ScanCancel::IgnoreAppQuit)) == QLatin1String("app_quit"));
 }
 
 // A row tap's chain as the coordinator sees it: the node the ladder left, the end, «Подключено».
@@ -1107,6 +1150,8 @@ int main()
     scannerSwitchesAbsentIsToday();
     scannerConnectOnOpen();
     scannerCancelPendingConnect();
+    scannerCancelAfterShownConnectedWithoutData();
+    scannerCancelNeverDuringAppQuit();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();
