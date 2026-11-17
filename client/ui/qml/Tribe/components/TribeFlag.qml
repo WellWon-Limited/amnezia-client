@@ -21,7 +21,10 @@ Item {
     property Component fallback: null
 
     readonly property string cc: code ? code.trim().toUpperCase() : ""
-    readonly property bool valid: cc.length === 2
+    // Two LETTERS only: a placeholder ("??" - the servers page's key for a node without a country, e.g. a
+    // provider profile) is no country - the fallback is shown at once, no qrc request for "??.svg"
+    // (owner's iPhone 16.11: a decode error per provider row on every list rebuild).
+    readonly property bool valid: /^[A-Z]{2}$/.test(cc)
     readonly property bool ready: valid && flagImg.status === Image.Ready
 
     // SVG-флаг 21×15 → PreserveAspectCrop в квадрат → круглая маска. sourceSize ×2 — резкость на ретине.
