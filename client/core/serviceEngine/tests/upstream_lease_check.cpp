@@ -1120,6 +1120,17 @@ static void dispatch()
     CHECK(UpstreamLeaseTiming::fromTuning().defaultRenewS == 300);
 }
 
+// Owner's iPhone 16.11 (build 140): both seat releases ended "net_error 5" 40-80 ms after they were sent - aborted
+// by the API reset of the tunnel transition they preceded - and were never sent again. One resend, only for an
+// abort of our own (not the release's own 1.5 s timeout, not an answer).
+static void releaseResend()
+{
+    CHECK(upstreamReleaseResend(0, /*canceled=*/true, /*timedOut=*/false));
+    CHECK(!upstreamReleaseResend(1, true, false));  // once
+    CHECK(!upstreamReleaseResend(0, true, true));   // its own timeout: the server frees the seat at TTL
+    CHECK(!upstreamReleaseResend(0, false, false)); // an answer or another error
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1143,6 +1154,7 @@ int main(int argc, char **argv)
     dispatch();
     routeAndScope();
     provisional();
+    releaseResend();
     if (g_fail) {
         std::printf("upstream_lease_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

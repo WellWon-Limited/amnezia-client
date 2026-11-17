@@ -245,6 +245,15 @@ inline bool upstreamLeaseIdValid(const QString &id)
     return re.match(id).hasMatch();
 }
 
+// A seat release (DELETE) that ended aborted by the app itself - the API reset of a tunnel transition
+// (DebugSnapshot.h::transitionNetAction), not its own 1.5 s timeout - is sent ONCE more: by then the transition
+// is over and the new request takes the new path. The same rule every other API request follows
+// (DebugSnapshot.h::reissueAfterOwnAbort). A timeout or any answer ends it; the server frees the seat at TTL.
+inline bool upstreamReleaseResend(int attemptsDone, bool canceled, bool timedOut)
+{
+    return attemptsDone == 0 && canceled && !timedOut;
+}
+
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its
 // standby pack ("standby": true + the pack entry's config_sha256).
 inline QByteArray upstreamAcquireBody(const QString &profileId, LeaseKind kind,

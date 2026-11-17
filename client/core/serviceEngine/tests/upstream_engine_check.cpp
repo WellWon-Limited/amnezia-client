@@ -1851,6 +1851,70 @@ static void quitEndsUpstreamSession()
     }
 }
 
+// --- owner's iPhone 16.11 (build 140), D2 + D3: a refused bring-up -------------------------------------------
+// The profile of up:2ea0 was refused after its seat was granted. On iOS the owner had marked the lease handed over
+// at LeaseReady, so the adapter's disconnect() neither released the seat nor ended the machine's session: the seat
+// stayed paid until its expiry, and the next node's begin() found the machine busy - start() ignored, "acquiring a
+// seat" with no request, the 15 s start watchdog; its stop then "released" the old dead lease.
+static void ownerRefusedBringUp()
+{
+    const SubscriptionNode a = stubOf(QStringLiteral("aaaaaaaaaaaaaaa0"));
+    const SubscriptionNode b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+    const qint64 T = 7000000;
+    for (bool keep : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = keep;
+        o.setOptions(op);
+        o.begin(a, 1, std::nullopt, T, 1);
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::BringUp));
+        // The adapter refuses the profile (bringUpUpstream): disconnect - the seat goes back from this process.
+        o.disconnect(T + 310);
+        const FakeIo::Call *rel = io.last("release");
+        CHECK(rel && rel->profileOrLease == QLatin1String(kLease) && o.releaseSent());
+        CHECK(o.phase() == LeasePhase::Released);
+        // The next node's start sends its own acquire at once.
+        const int before = io.calls.size();
+        o.begin(b, 1, std::nullopt, T + 1000, 1);
+        CHECK(io.calls.size() == before + 1 && io.calls.last().what == QLatin1String("acquire")
+              && io.calls.last().profileOrLease == b.upstream->profileId);
+        CHECK(o.phase() == LeasePhase::Acquiring && o.active() && o.nodeId() == b.nodeId);
+        // ... and a stop now releases nothing of the old session (nothing granted for b yet).
+        const int calls = io.calls.size();
+        o.disconnect(T + 2000);
+        CHECK(io.calls.size() == calls);
+    }
+    // iOS / Android after the tunnel came up: the tunnel owner releases on its stop, not the app; the machine's
+    // session still ends, so a following start acquires.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        o.tunnelUp(T + 2000);
+        o.disconnect(T + 60000);
+        CHECK(!io.last("release") && !o.releaseSent());
+        o.begin(b, 1, std::nullopt, T + 61000, 1);
+        CHECK(io.calls.last().what == QLatin1String("acquire") && io.calls.last().profileOrLease == b.upstream->profileId);
+    }
+    // A start of the next node straight away (begin() without a disconnect) after a refused bring-up: the same.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.begin(a, 1, std::nullopt, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, a.upstream->configSha256), T + 300);
+        o.begin(b, 1, std::nullopt, T + 400, 1);
+        CHECK(io.last("release") && io.calls.last().what == QLatin1String("acquire"));
+    }
+    // The rule.
+    CHECK(upstreamAppReleasesSeat(true, true, true));    // macOS GUI owner: always
+    CHECK(upstreamAppReleasesSeat(false, false, false)); // not handed over (prepared, provisional)
+    CHECK(upstreamAppReleasesSeat(false, true, false));  // in the envelope, the tunnel never came up
+    CHECK(!upstreamAppReleasesSeat(false, true, true));  // the tunnel owner has it
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1863,6 +1927,7 @@ int main(int argc, char **argv)
     identityAndReseed();
     engineAttempt();
     ownerAcquireOutcomes();
+    ownerRefusedBringUp();
     ownerMacRenewals();
     ownerAdoption();
     dataCheck();

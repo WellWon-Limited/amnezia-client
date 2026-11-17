@@ -19,6 +19,8 @@
 //    needs nothing (the adapter's counters start at 0 with the tunnel); a rebaseline or an adoption
 //    re-bases on the current totals (counters that cannot restart), so the next report carries only the
 //    bytes after it.
+//  - Every session end (disconnect, a new begin) ends the machine's session too, so the next start() is never
+//    ignored; the release goes out from here per upstreamAppReleasesSeat (below).
 // Never logs: lease ids, tokens, configs, hosts - events carry codes only.
 //
 // Upstream Amnezia has no counterpart. Tests: tests/upstream_engine_check.cpp.
@@ -46,6 +48,17 @@ enum class UpstreamOwnerEventKind {
     RevisionChanged,  // revision: refetch the subscription once
     ConfigChanged,    // the profile changed on the server: applies at the next connect, never interrupts
 };
+
+// Who gives a session's seat back when the session ends (D3 of the owner's iPhone 16.11, build 140: refused seats
+// were never released and stayed paid until their 15-minute expiry). The GUI owner (macOS, keepOwnership) always
+// does. Elsewhere the lease travels in the tunnel's envelope and the tunnel owner (iOS extension, Android Xray
+// service) releases it on its own stop - but only a tunnel that came up has it: a session that ends before the
+// tunnel reported up (the profile refused, the bridge refused, the start watchdog, a stop while connecting) is
+// still this process's to release. A release sent twice is harmless: the server's DELETE is idempotent.
+inline bool upstreamAppReleasesSeat(bool keepOwnership, bool handedOver, bool tunnelReportedUp)
+{
+    return keepOwnership || !handedOver || !tunnelReportedUp;
+}
 
 struct UpstreamOwnerEvent {
     UpstreamOwnerEventKind kind = UpstreamOwnerEventKind::BringUp;
@@ -317,13 +330,18 @@ private:
         m_releaseSent = false;
         if (!m_active)
             return ev;
-        if (ownsRenewals()) {
-            const LeaseStep s = m_machine.disconnect(nowMs);
+        // The machine's session ends with the owner's, ALWAYS (owner's iPhone 16.11, build 140: after a refused
+        // profile the machine stayed Active, so the next start() was ignored - "acquiring a seat", no request,
+        // the 15 s start watchdog - and its dead lease was "released" only at the following stop). Who sends the
+        // release is upstreamAppReleasesSeat: a lease that never reached a running tunnel is still this process's.
+        const LeaseStep s = m_machine.disconnect(nowMs);
+        if (upstreamAppReleasesSeat(m_opt.keepOwnership, m_handedOver, m_tunnelIsUp)) {
             m_releaseSent = s.has(LeaseActionKind::SendRelease);
             if (m_io)
                 dispatchLeaseIo(s, *m_io);
         }
-        // A handed-over lease belongs to the extension: nothing is sent from here.
+        // A lease handed over to a tunnel that came up belongs to its owner (iOS extension, Android service): it
+        // releases on its own stop - nothing is sent from here.
         if (m_opt.keepOwnership) {
             UpstreamOwnerEvent c;
             c.kind = UpstreamOwnerEventKind::ClearRecord;

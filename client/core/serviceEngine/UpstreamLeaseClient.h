@@ -92,6 +92,8 @@ public:
 
 private:
     QString baseFor(const LeaseRoute &route) const;
+    void sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route,
+                     int attempt);
     QNetworkReply *post(const QString &url, const QByteArray &body, const QString &bearer, int timeoutMs);
 
     QPointer<QNetworkAccessManager> m_nam;
