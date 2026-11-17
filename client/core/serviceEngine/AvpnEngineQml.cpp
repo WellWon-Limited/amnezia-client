@@ -2741,7 +2741,21 @@ QVariantMap AvpnEngineQml::currentNode() const
     }
     node["nextProto"]        = nextProto;
     node["nextProtoVersion"] = nextProtoVersion;
+    // The figure its server list row shows (nodePool): a provider node - the Scanner's latest result on this
+    // network, own - the off-tunnel ICMP RTT; -1 = none. The card reads it through nodeFigure (one rule).
+    int listRtt = -1;
+    if (pick)
+        listRtt = pick->upstream ? ((m_scanner && m_scanSwitches.scanner) ? m_scanner->listFigures().value(pick->nodeId, -1) : -1)
+                                 : m_engine.measuredRtt().value(pick->nodeId, -1);
+    node["measuredRttMs"] = listRtt;
     return node;
+}
+
+QVariantMap AvpnEngineQml::nodeFigure(bool upstream, bool currentLive, bool liveReachable, bool liveDead, int liveRttMs,
+                                      int liveBars, int listRttMs) const
+{
+    const avpn::NodeFigure f = avpn::nodeFigure(upstream, currentLive, liveReachable, liveDead, liveRttMs, liveBars, listRttMs);
+    return {{QStringLiteral("ms"), f.ms}, {QStringLiteral("bars"), f.bars}, {QStringLiteral("failed"), f.failed}};
 }
 
 // AVPN: весь пул нод для страницы «Серверы» / шторки выбора.

@@ -40,6 +40,40 @@ inline QList<RankRow> rankFastestAtBottom(QList<RankRow> rows)
 // Уровень палочек 0..5 для измеренного RTT (единая шкала движка).
 inline int barsForNode(int rttMs) { return SignalQuality::barsForRtt(rttMs); }
 
+// What a node's signal shows - one rule for the Connect card and the server list row (device test of 142: the
+// card showed the live probe's 47 ms and green bars for a provider node whose list row showed the Scanner figure
+// or nothing). ms -1 = no figure ("—" / hidden), bars -1 = no measurement (the idle track), failed = red bars.
+//  - the node carrying the tunnel with the live probe confirmed dead: red bars, no figure;
+//  - a provider node: its list figure only (nodePool: the Scanner's latest result on this network), else none -
+//    never the probe through the tunnel (owner 17.11);
+//  - our own node carrying the tunnel: the live probe (at least one bar while it has not answered yet);
+//  - any other own node: its off-tunnel ICMP figure, else none.
+struct NodeFigure {
+    int ms = -1;
+    int bars = -1;
+    bool failed = false;
+};
+inline NodeFigure nodeFigure(bool upstream, bool currentLive, bool liveReachable, bool liveDead, int liveRttMs,
+                             int liveBars, int listRttMs)
+{
+    NodeFigure f;
+    if (currentLive && liveDead) {
+        f.bars = 0;
+        f.failed = true;
+        return f;
+    }
+    if (currentLive && !upstream) {
+        f.bars = liveReachable ? std::max(1, liveBars) : 1;
+        f.ms = liveReachable && liveRttMs >= 0 ? liveRttMs : -1;
+        return f;
+    }
+    if (listRttMs >= 0) {
+        f.ms = listRttMs;
+        f.bars = barsForNode(listRttMs);
+    }
+    return f;
+}
+
 // Для авто-выбора «Авто (быстрейший)»: nodeId с МИНИМАЛЬНЫМ измеренным rtt (>=0). Пусто (""),
 // если ни одна нода не измерена → движок откатывается на pickByWeight (backend-weight). Ничья rtt —
 // стабильно первый по исходному порядку (детерминированно).

@@ -4,6 +4,7 @@
 // падает на утверждении (canAdoptObservedTunnel «manual OFF»).
 #include "../DebugSnapshot.h"
 #include "../DoctorReport.h"
+#include "../NodeRanking.h" // nodeFigure (U7)
 #include "../ReportDelivery.h"
 #include "../UplinkMonitor.h"
 #include "../UpstreamEngine.h" // upstreamNetworkKey (Scanner item 7)
@@ -1381,6 +1382,33 @@ static void upstreamSeatFirstRule()
     CHECK(v.live && v.nodeId == QLatin1String("12:xray") && v.attemptNodeId == QLatin1String("up:aaaaaaaaaaaaaaa0"));
 }
 
+// U7 (device test of 142): the Connect card and the server list row show a node's signal by one rule.
+static void nodeFigureOneRule()
+{
+    // A connected provider node: the live probe answered 47 ms, the Scanner has no figure on this network ->
+    // nothing (the card showed 47 ms and green bars while its row showed "—").
+    NodeFigure f = nodeFigure(/*upstream=*/true, /*currentLive=*/true, true, false, 47, 5, -1);
+    CHECK(f.ms == -1 && f.bars == -1 && !f.failed);
+    // ...with a Scanner figure: that figure, on the card as in the row.
+    f = nodeFigure(true, true, true, false, 47, 5, 92);
+    CHECK(f.ms == 92 && f.bars == barsForNode(92));
+    const NodeFigure row = nodeFigure(true, false, true, false, 47, 5, 92);
+    CHECK(row.ms == f.ms && row.bars == f.bars);
+    // Our own node carrying the tunnel: the live probe; at least one bar before it answers, no figure then.
+    f = nodeFigure(false, true, true, false, 41, 4, 60);
+    CHECK(f.ms == 41 && f.bars == 4);
+    f = nodeFigure(false, true, false, false, -1, 0, 60);
+    CHECK(f.ms == -1 && f.bars == 1);
+    // A dead probe on the node carrying the tunnel: red, whatever the kind.
+    CHECK(nodeFigure(false, true, true, true, 41, 4, 60).failed);
+    CHECK(nodeFigure(true, true, true, true, 41, 4, 92).failed);
+    // Rows not carrying the tunnel: their figure, else the idle track.
+    f = nodeFigure(false, false, true, false, 41, 4, 60);
+    CHECK(f.ms == 60 && f.bars == barsForNode(60) && !f.failed);
+    f = nodeFigure(false, false, true, true, 41, 4, -1);
+    CHECK(f.ms == -1 && f.bars == -1 && !f.failed);
+}
+
 int main()
 {
     a1ErrorDoesNotLatchAdoption();
@@ -1425,6 +1453,7 @@ int main()
     scannerServicePlan();
     preNativeErrorNeedsNoStatus();
     upstreamSeatFirstRule();
+    nodeFigureOneRule();
     if (g_fail) {
         std::printf("facade_policy_check: %d FAILED\n", g_fail);
         return 1;

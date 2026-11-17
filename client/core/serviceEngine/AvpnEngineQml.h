@@ -414,6 +414,10 @@ public:
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
     QVariantList nodePool() const;
+    // The signal a node shows on the Connect card and in its server list row - one rule (NodeRanking.h::nodeFigure):
+    // {ms, bars, failed}; listRttMs = the row's figure (nodePool / currentNode measuredRttMs).
+    Q_INVOKABLE QVariantMap nodeFigure(bool upstream, bool currentLive, bool liveReachable, bool liveDead,
+                                       int liveRttMs, int liveBars, int listRttMs) const;
     // AVPN (live-node picker): Pro-гейт-заглушка — выбор сервера доступен (сейчас всегда true).
     bool proSelectionEnabled() const { return true; }
     // AVPN (store-flow): compile-time флаг store-сборки (см. Q_PROPERTY storeBuild выше).

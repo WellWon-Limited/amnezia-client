@@ -596,21 +596,30 @@ PageType {
                         // AVPN: справа — палочки сигнала, под ними скорость (RTT). Палочки чуть
                         // уменьшены (scale) и подняты; скорость выровнена по их центру.
                         ColumnLayout {
+                            id: sigCol
                             Layout.alignment: Qt.AlignVCenter
                             spacing: 3
+                            // one rule with the Connect card (TribeEngine.nodeFigure): the row carrying the tunnel -
+                            // own: the live probe, provider: its Scanner figure or none; other rows their figure
+                            readonly property bool currentLive: row.modelData.isCurrent && root.hasEngine
+                                                                && TribeEngine.state === "connected"
+                            readonly property var fig: root.hasEngine
+                                ? TribeEngine.nodeFigure(row.modelData.upstream === true, sigCol.currentLive,
+                                                         TribeEngine.liveReachable === true, TribeEngine.liveDead === true,
+                                                         Number(TribeEngine.liveRttMs), Number(TribeEngine.liveBars),
+                                                         Number(row.modelData.rtt))
+                                : ({ ms: Number(row.modelData.rtt), bars: Number(row.modelData.bars), failed: false })
                             LoadBars {
                                 Layout.alignment: Qt.AlignHCenter
                                 scale: 0.9
                                 transformOrigin: Item.Bottom
-                                // текущая страна при коннекте — живой замер через туннель
                                 // no measurement (bars -1): the idle track (UI-DESIGN §3, idle .4)
-                                level: (row.modelData.isCurrent && root.hasEngine
-                                        && TribeEngine.state === "connected")
-                                       ? TribeEngine.liveBars : Math.max(0, row.modelData.bars)
+                                failed: sigCol.fig.failed === true
+                                level: Math.max(0, Number(sigCol.fig.bars))
                             }
                             Text {
                                 Layout.alignment: Qt.AlignHCenter
-                                text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                text: Number(sigCol.fig.ms) >= 0 ? qsTr("~%1 мс").arg(sigCol.fig.ms) : "—"
                                 textFormat: Text.PlainText
                                 color: Theme.color.text3
                                 font.family: Theme.font.mono
