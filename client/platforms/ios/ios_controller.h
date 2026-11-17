@@ -291,6 +291,14 @@ private:
     bool isOurManager(NETunnelProviderManager *manager);
     void sendVpnExtensionMessage(NETunnelProviderManager *tunnel, NSDictionary *message,
                                  std::function<void(NSDictionary *)> callback = nullptr);
+#else
+    // AVPN (crash 5.1.110, SIGSEGV in setUplinkProbe): the same storage in C++ translation units.
+    // Without it every member below sat 16 bytes earlier in a .cpp than in ios_controller.mm, so an
+    // inline member access compiled in a .cpp (setUplinkProbe from AvpnEngineQml.cpp) wrote into
+    // other members and destroyed garbage as the "old" std::function. Order and size must match the
+    // two Objective-C pointers above (MRC: plain pointers); check: tests/run_ios_reliability_checks.sh.
+    void *m_currentTunnelStorage {};
+    void *m_serverAddressStorage {};
 #endif
 
     amnezia::Proto m_proto = amnezia::Proto::Awg;   // AVPN: дефолт до connectVpn (AWG-only продукт; иначе uninit enum)

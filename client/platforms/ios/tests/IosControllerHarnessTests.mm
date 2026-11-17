@@ -1881,6 +1881,27 @@ static void test_adopted_session_no_counters_kept()
 {
     expectAdoptedKept(adoptStalledSession(stalledReply(nil, nil), true), "session stopped without roam counters");
 }
+
+// Crash 5.1.110 (S4): AvpnEngineQml.cpp - a plain C++ unit - sets the uplink probe. The class must have
+// the same layout there as in ios_controller.mm, and the probe it sets must be the one the §25 rule
+// reads (before the fix: 16 bytes smaller, the setter wrote into other members, the rule always read
+// "no network" and the "old" std::function it destroyed was garbage - SIGSEGV at 0xd on launch).
+extern std::size_t avpnHarnessIosControllerSizeFromCxx();
+extern void avpnHarnessSetUplinkProbeFromCxx(bool up);
+static void test_uplink_probe_set_from_cxx_unit()
+{
+    CHECK(avpnHarnessIosControllerSizeFromCxx() == sizeof(IosController),
+          "IosController has another layout in a C++ unit than in ios_controller.mm");
+    WarningCapture capture;
+    // Set here "up", then from C++ "down": the rule must read the value the C++ unit set. (With the old
+    // layout what the rule read depended on stray bytes; the size check above is the deterministic guard.)
+    HarnessSession *s = adoptStalledSession(stalledReply(@0, @0), /*uplinkUp=*/true);
+    avpnHarnessSetUplinkProbeFromCxx(false); // the facade's call: plain C++, replaces the probe above
+    runStatusPolls(1500);
+    CHECK(warned("why=no_physical_uplink ") && warned(" physical_up=0"), "the rule does not read the probe a C++ unit set");
+    CHECK(s.stopCalls == 0, "session stopped although the probe set from C++ says no network");
+}
+
 #endif
 
 struct Test { const char *name; void (*fn)(); };
@@ -2175,6 +2196,7 @@ static const Test kTests[] = {
     {"adopted_session_uplink_down_kept", test_adopted_session_uplink_down_kept},
     {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
+    {"uplink_probe_set_from_cxx_unit", test_uplink_probe_set_from_cxx_unit},
 #endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
 #ifndef HARNESS_OLD

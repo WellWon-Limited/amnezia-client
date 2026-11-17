@@ -67,10 +67,12 @@ xcrun clang++ "${COMMON[@]}" "${OBJC[@]}" -c "$NATIVE/ios_controller_wrapper.mm"
 xcrun clang++ "${COMMON[@]}" "${OBJC[@]}" -c "$OUT/moc_ios_controller.cpp" -o "$OUT/moc_ios_controller.o"
 xcrun clang++ "${COMMON[@]}" "${OBJC[@]}" -c "$OUT/moc_vpnProtocol.cpp" -o "$OUT/moc_vpnProtocol.o"
 xcrun clang++ "${COMMON[@]}" "${OBJC[@]}" -c "$HERE/IosControllerHarnessTests.mm" -o "$OUT/harness.o"
+# AVPN (crash 5.1.110, S4): one unit as PLAIN C++, as AvpnEngineQml.cpp is in the app (not Objective-C++).
+xcrun clang++ "${COMMON[@]}" -x c++ -c "$HERE/IosControllerCxxAccess.cpp" -o "$OUT/cxx_access.o"
 LINK=(-F"$QT/lib" -framework QtCore -framework QtQml -framework Foundation -framework NetworkExtension
       -Wl,-rpath,"$QT/lib")
 xcrun clang++ "$OUT/ios_controller.o" "$OUT/ios_controller_wrapper.o" "$OUT/moc_ios_controller.o" \
-    "$OUT/moc_vpnProtocol.o" "$OUT/harness.o" "${LINK[@]}" -o "$OUT/ios_controller_harness"
+    "$OUT/moc_vpnProtocol.o" "$OUT/harness.o" "$OUT/cxx_access.o" "${LINK[@]}" -o "$OUT/ios_controller_harness"
 
 # AvpnIntentController: лок (C6) и схлопывание журнала (C8) на настоящем файловом App Group
 # (containerURL подменён на временный каталог).
