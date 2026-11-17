@@ -1125,10 +1125,16 @@ static void dispatch()
 // abort of our own (not the release's own 1.5 s timeout, not an answer).
 static void releaseResend()
 {
-    CHECK(upstreamReleaseResend(0, /*canceled=*/true, /*timedOut=*/false));
-    CHECK(!upstreamReleaseResend(1, true, false));  // once
+    // Owner's iPhone 16.11 (build 140): both seat releases ended "net_error 5" 40-80 ms after they were sent - cut
+    // by the API reset of the tunnel transition they preceded. Review F3 of 17.11: the Connected of the next node
+    // cuts the retry too - every try cut by OUR reset is sent again; only an answer or its own timeout ends it.
+    for (int done = 0; done < kUpstreamReleaseMaxResends; ++done)
+        CHECK(upstreamReleaseResend(done, /*canceled=*/true, /*timedOut=*/false));
+    CHECK(upstreamReleaseResend(1, true, false)); // the second local reset (Disconnected, then Connected)
+    CHECK(!upstreamReleaseResend(kUpstreamReleaseMaxResends, true, false)); // a reset storm: the server's TTL
     CHECK(!upstreamReleaseResend(0, true, true));   // its own timeout: the server frees the seat at TTL
     CHECK(!upstreamReleaseResend(0, false, false)); // an answer or another error
+    CHECK(kUpstreamReleaseMaxResends >= 4);
 }
 
 int main(int argc, char **argv)

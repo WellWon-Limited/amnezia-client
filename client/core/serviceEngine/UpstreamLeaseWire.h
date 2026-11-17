@@ -246,12 +246,16 @@ inline bool upstreamLeaseIdValid(const QString &id)
 }
 
 // A seat release (DELETE) that ended aborted by the app itself - the API reset of a tunnel transition
-// (DebugSnapshot.h::transitionNetAction), not its own 1.5 s timeout - is sent ONCE more: by then the transition
-// is over and the new request takes the new path. The same rule every other API request follows
-// (DebugSnapshot.h::reissueAfterOwnAbort). A timeout or any answer ends it; the server frees the seat at TTL.
+// (DebugSnapshot.h::transitionNetAction), not its own 1.5 s timeout - is sent again, as long as each try is cut by
+// such a reset: only a real answer or the release's own timeout ends it (review F3 of 17.11: Disconnected cut the
+// release, the Connected of the next node cut its one retry, and the seat stayed held). Every local abort needs a
+// tunnel transition, so the tries are few; kUpstreamReleaseMaxResends only guards against a reset storm (then the
+// server frees the seat at TTL). The same "re-issue after our own abort" every other API request follows
+// (DebugSnapshot.h::reissueAfterOwnAbort).
+inline constexpr int kUpstreamReleaseMaxResends = 8;
 inline bool upstreamReleaseResend(int attemptsDone, bool canceled, bool timedOut)
 {
-    return attemptsDone == 0 && canceled && !timedOut;
+    return attemptsDone < kUpstreamReleaseMaxResends && canceled && !timedOut;
 }
 
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its
