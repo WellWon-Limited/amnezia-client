@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+460"/>
+        <location line="+469"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-458"/>
+        <location line="-467"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1205,12 +1205,12 @@
         <translation>Conéctate: toca el botón de arriba</translation>
     </message>
     <message>
-        <location line="+109"/>
+        <location line="+117"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+56"/>
+        <location line="+57"/>
         <source>Сервер</source>
         <translation>Servidor</translation>
     </message>
@@ -1312,8 +1312,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="-453"/>
-        <location line="+454"/>
+        <location line="-462"/>
+        <location line="+463"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -1857,7 +1857,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+36"/>
+        <location line="+45"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -3058,7 +3058,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4006"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4020"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3158,7 +3158,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-2806"/>
+        <location line="-2820"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3208,7 +3208,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Servidor actual</translation>
     </message>
     <message>
-        <location line="+388"/>
+        <location line="+402"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No hay una suscripción activa. Consigue una para conectarte.</translation>
     </message>

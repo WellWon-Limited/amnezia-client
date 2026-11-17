@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+460"/>
+        <location line="+469"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-458"/>
+        <location line="-467"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>Traffic went around the VPN — trying another route</translation>
     </message>
@@ -1205,12 +1205,12 @@
         <translation>Connect — tap the button above</translation>
     </message>
     <message>
-        <location line="+109"/>
+        <location line="+117"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+56"/>
+        <location line="+57"/>
         <source>Сервер</source>
         <translation>Server</translation>
     </message>
@@ -1312,8 +1312,8 @@
         <translation>Installing…</translation>
     </message>
     <message>
-        <location line="-453"/>
-        <location line="+454"/>
+        <location line="-462"/>
+        <location line="+463"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -1857,7 +1857,7 @@ A gift for every friend!</translation>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+36"/>
+        <location line="+45"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -3058,7 +3058,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4006"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4020"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3158,7 +3158,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2806"/>
+        <location line="-2820"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3208,7 +3208,7 @@ You can attach a photo or video.</translation>
         <translation>Current server</translation>
     </message>
     <message>
-        <location line="+388"/>
+        <location line="+402"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No active subscription. Get one to connect.</translation>
     </message>
