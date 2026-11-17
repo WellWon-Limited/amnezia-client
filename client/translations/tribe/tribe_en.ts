@@ -1766,12 +1766,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+145"/>
-        <source>Сервер</source>
-        <translation>Server</translation>
-    </message>
-    <message>
-        <location line="+41"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+197"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1781,7 +1776,7 @@ A gift for every friend!</translation>
         <translation>unavailable in this version</translation>
     </message>
     <message>
-        <location line="+65"/>
+        <location line="+66"/>
         <source>Выбор сервера</source>
         <translation>Choose server</translation>
     </message>
@@ -1851,7 +1846,7 @@ A gift for every friend!</translation>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+36"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -3052,7 +3047,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+3642"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4001"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3152,7 +3147,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2516"/>
+        <location line="-2815"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3182,14 +3177,7 @@ You can attach a photo or video.</translation>
         <translation>Downloading and checking the signature…</translation>
     </message>
     <message>
-        <location line="-1856"/>
-        <location line="+2326"/>
-        <location line="+76"/>
-        <source>Сервер</source>
-        <translation>Server</translation>
-    </message>
-    <message>
-        <location line="-504"/>
+        <location line="+42"/>
         <source>Подтвердите обновление в окне Android</source>
         <translation>Confirm the update in the Android window</translation>
     </message>
@@ -3204,12 +3192,12 @@ You can attach a photo or video.</translation>
         <translation>Downloading the update…</translation>
     </message>
     <message>
-        <location line="+410"/>
+        <location line="+409"/>
         <source>Текущий сервер</source>
         <translation>Current server</translation>
     </message>
     <message>
-        <location line="+373"/>
+        <location line="+387"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No active subscription. Get one to connect.</translation>
     </message>
@@ -3219,7 +3207,7 @@ You can attach a photo or video.</translation>
         <translation>Could not refresh the server list. Try connecting again.</translation>
     </message>
     <message>
-        <location line="+255"/>
+        <location line="+531"/>
         <source>Отправляем…</source>
         <translation>Sending…</translation>
     </message>
@@ -3234,7 +3222,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+1124"/>
+        <location line="+1134"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3315,17 +3303,17 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+1097"/>
+        <location line="+1111"/>
         <source>Установка службы VPN отменена</source>
         <translation>VPN service installation cancelled</translation>
     </message>
     <message>
-        <location line="+147"/>
+        <location line="+150"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+551"/>
+        <location line="+553"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>Could not turn off the VPN. Try again or turn it off in iOS Settings.</translation>
     </message>
@@ -3372,23 +3360,23 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="+128"/>
+        <location line="+142"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+748"/>
+        <location line="+763"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+267"/>
-        <location line="+3554"/>
+        <location line="+293"/>
+        <location line="+3578"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>The server is not passing traffic — try another server</translation>
     </message>
     <message>
-        <location line="-3234"/>
+        <location line="-3244"/>
         <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
         <translation>Traffic gets through no server — check your network and try again</translation>
     </message>
@@ -3494,7 +3482,17 @@ You can attach a photo or video.</translation>
         <translation>Could not disconnect the device (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+686"/>
+        <location line="+104"/>
+        <source>Белые списки</source>
+        <translation>White lists</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Авто</source>
+        <translation>Auto</translation>
+    </message>
+    <message>
+        <location line="+590"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Sign in or connect first</translation>
     </message>

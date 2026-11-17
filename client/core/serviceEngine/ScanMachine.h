@@ -114,8 +114,9 @@
 //    a Wi-Fi network delivered while the app is in front (networkChanged with appInFront, or appForeground)
 //    opens the Scanner and scans once (A5).
 //  - Network change during a scan: the scan is cancelled (its finished results still reported under the old
-//    key) and restarted on the new network; while showing results: the new network's cached rows (NoScan,
-//    cooldown cleared).
+//    key) and restarted on the new network; while the open screen shows a finished result: a new scan by itself
+//    (artboard; scanRescanOnNetworkChange - cooldown cleared, the cellular hour still applies, never starting the
+//    VPN), otherwise the new network's cached rows (NoScan network_changed).
 //  - Outcomes (ScanOutcomes.h): one batch per scan (also for a cancelled one: what was measured is true),
 //    one per tap's connect chain. Budget actuals go to the ledger at every scan end (PersistBudget).
 //  - Doctor summary (lab seam S4, 16.11): every planned candidate ends in exactly one bucket - works, slow, a
@@ -180,6 +181,26 @@ inline bool scanPhaseScanning(ScanPhase p)
 {
     return p == ScanPhase::Preparing || p == ScanPhase::Connecting || p == ScanPhase::Reach || p == ScanPhase::Data
            || p == ScanPhase::Self;
+}
+
+// A network change while the open screen shows a finished result (artboard, «Сеть сменилась после скана»: the
+// shade «Сеть сменилась — проверяем заново» and a new scan by itself, instead of the old result and «Повторить»).
+// Only from a result the person is looking at - Done, Empty, or NoScan for the pause, the cellular hour or an
+// earlier network change (the new network clears the pause, §32 п. 9; the hour is checked again by beginScan,
+// which shows frame 22 when it is still used up). Never by starting the VPN: a host that needs the VPN (iPhone,
+// Android) with no tunnel working, up or coming keeps «Повторить» - only opening the Scanner or its button starts
+// the user's connect (§32 п. 2б). Every other NoScan (service, host, server switch, vpn_off, manifest) keeps
+// «Повторить» as before. No new timer and no new limit: the scan runs under the existing budget and cooldown. Pure.
+inline bool scanRescanOnNetworkChange(bool screenOpen, ScanPhase phase, const QString &noScanReason, bool hostNeedsVpn,
+                                      bool tunnelUpOrComing)
+{
+    if (!screenOpen || (hostNeedsVpn && !tunnelUpOrComing))
+        return false;
+    if (phase == ScanPhase::Done || phase == ScanPhase::Empty)
+        return true;
+    return phase == ScanPhase::NoScan
+           && (noScanReason == QLatin1String("cooldown") || noScanReason == QLatin1String("budget")
+               || noScanReason == QLatin1String("network_changed"));
 }
 
 // --- actions -------------------------------------------------------------------------------------------------
@@ -835,9 +856,13 @@ private:
             if (m_screenOpen)
                 beginScan(now, s);
         } else {
+            const bool rescan = scanRescanOnNetworkChange(m_screenOpen, m_phase, m_noScanReason, m_caps.needsVpn,
+                                                          m_current.working() || m_current.live || m_current.connecting);
             adoptNetwork(n, cached, now);
             materializeCurrent();
-            if (m_screenOpen && m_phase != ScanPhase::Idle)
+            if (rescan)
+                beginScan(now, s); // its own budget / VPN rules decide (NoScan "budget" = the artboard's frame 22)
+            else if (m_screenOpen && m_phase != ScanPhase::Idle)
                 toNoScan(QStringLiteral("network_changed"), now, s);
         }
     }

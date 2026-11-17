@@ -479,7 +479,16 @@ ScanCachedResult TribeScanner::cachedFor(const ScanNetwork &n) const
     const QByteArray raw = m_store->read(scanCacheStoreKey(n.key, n.fingerprint));
     if (raw.isEmpty())
         return ScanCachedResult();
-    return scanCachedResultFromJson(QJsonDocument::fromJson(raw).object());
+    const QJsonObject stored = QJsonDocument::fromJson(raw).object();
+    ScanCachedResult c = scanCachedResultFromJson(stored);
+    scanDropLegacyLabels(c, stored); // an earlier build's «Сервер N» rows are never shown
+    return c;
+}
+
+QHash<QString, int> TribeScanner::listFigures() const
+{
+    const ScanNetwork n = buildNetwork();
+    return scanListFigures(cachedFor(n), n.key, n.fingerprint, m_clock->nowMs(), m_m.tunables().cacheWorksTtlS);
 }
 
 void TribeScanner::persistCache(const ScanCachedResult &c)
@@ -487,7 +496,9 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
     if (c.networkKey.isEmpty())
         return;
     const QString key = scanCacheStoreKey(c.networkKey, c.fingerprint);
-    m_store->write(key, QJsonDocument(scanCachedResultToJson(c)).toJson(QJsonDocument::Compact));
+    QJsonObject stored = scanCachedResultToJson(c);
+    stored.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));
+    m_store->write(key, QJsonDocument(stored).toJson(QJsonDocument::Compact));
     QJsonArray idx = QJsonDocument::fromJson(m_store->read(QLatin1String(kScanCacheIndexKey))).array();
     for (int i = idx.size() - 1; i >= 0; --i)
         if (idx.at(i).toString() == key)
@@ -510,9 +521,11 @@ void TribeScanner::notifyNetwork()
     emitLog(QStringLiteral("network kind=%1 sources=%2").arg(QLatin1String(scanNetKindName(n.kind))).arg(n.sources.size()));
     const ScanPhase before = m_m.phase();
     dispatch(m_m.networkChanged(n, cachedFor(n), m_engine->appInFront(), now()));
-    // «Сеть сменилась — проверяем заново» (artboard): a scan the change restarted (the machine rescans by
-    // itself), or results that the change turned into the new network's cache (NoScan network_changed).
-    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data || before == ScanPhase::Self)
+    // «Сеть сменилась — проверяем заново» (artboard): a scan the change restarted or a finished result it rescans
+    // (the machine does both by itself, ScanMachine.h::scanRescanOnNetworkChange), or results that the change
+    // turned into the new network's cache (NoScan network_changed). A scan still preparing just retargets: silent.
+    const bool restarted = (before == ScanPhase::Reach || before == ScanPhase::Data || before == ScanPhase::Self
+                            || before == ScanPhase::Done || before == ScanPhase::Empty || before == ScanPhase::NoScan)
                            && scanPhaseScanning(m_m.phase());
     const bool resultsVoided = m_m.phase() == ScanPhase::NoScan && m_m.view(now()).empty.reason == QLatin1String("network_changed");
     if (m_m.screenOpen() && (restarted || resultsVoided)) {

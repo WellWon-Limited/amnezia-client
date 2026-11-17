@@ -74,6 +74,7 @@ struct StandbyEntry {
     QStringList meterTags; // as UpstreamLeaseGrant::meterTags (optional; malformed = entry_field)
     int ordinal = 0;          // display name parts (UpstreamNode.h::upstreamParseDisplayParts), optional
     bool labelCustom = false;
+    UpstreamKind kind = UpstreamKind::Unspecified; // wire `kind` (contract 1.10.0, UpstreamNode.h::upstreamParseKind)
 };
 
 struct StandbyPack {
@@ -201,6 +202,7 @@ inline StandbyParse parseStandbyPack(const QByteArray &body, const QByteArray &s
             return refuse(StandbyRefusal::EntryField, at + QStringLiteral(".tier"));
         e.tier = int(n);
         upstreamParseDisplayParts(eo, e.ordinal, e.labelCustom); // cosmetic: never a refusal
+        e.kind = upstreamParseKind(eo);                          // cosmetic: never a refusal
         const QString pc = eo.value(QLatin1String("probe_class")).toString();
         if (pc == QLatin1String("single"))
             e.probeClass = UpstreamProbeClass::Single;

@@ -605,6 +605,7 @@ inline QList<SubscriptionNode> standbyPackCandidates(const StandbyPack &pack, co
         s.packSourced = true;
         s.ordinal = e.ordinal;          // the same display name rule as a stub
         s.labelCustom = e.labelCustom;
+        s.kind = e.kind;                // and the same row kind (an auto profile stays out of the list)
         n.upstream = s;
         out << n;
     }

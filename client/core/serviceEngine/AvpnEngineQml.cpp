@@ -311,8 +311,7 @@ public:
     {
         const QString country = doctor::countryDisplayName(r.countryCode, m_e->appLang());
         if (r.upstream)
-            return avpn::upstreamDisplayName(r.name, r.upstreamLabelCustom, r.upstreamOrdinal, country,
-                                             AvpnEngineQml::tr("Сервер"));
+            return m_e->upstreamRowName(r.name, r.upstreamLabelCustom, r.upstreamOrdinal, r.upstreamKind, r.countryCode);
         QList<PickerRow> loc{{r.location, r.proto, r.name, country, -1}};
         if (r.name.isEmpty() && !r.location.isEmpty())
             for (const NodeDebugRow &o : s.pool)
@@ -2690,9 +2689,8 @@ QVariantMap AvpnEngineQml::currentNode() const
                     loc.append({r.location, r.proto, r.name, QString(), -1});
         pickName = pickerDisplay(loc).constFirst().name;
         if (pick->upstream) // release A: the same name as its row in the server list
-            pickName = avpn::upstreamDisplayName(pick->name, pick->upstreamLabelCustom, pick->upstreamOrdinal,
-                                                 doctor::countryDisplayName(pick->countryCode, appLang()),
-                                                 tr("Сервер"));
+            pickName = upstreamRowName(pick->name, pick->upstreamLabelCustom, pick->upstreamOrdinal,
+                                       pick->upstreamKind, pick->countryCode);
     }
     QVariantMap node;
     node["nodeId"]    = pick ? pick->nodeId : QString();
@@ -2755,25 +2753,39 @@ QVariantList AvpnEngineQml::nodePool() const
     }
     display = pickerDisplay(display);
 
+    // Provider rows (owner 17.11): no ICMP target, so their figure is the Scanner's latest result on THIS network,
+    // while the Scanner itself would show it (TribeScanner::listFigures); otherwise none - never invented.
+    const QHash<QString, int> scanMs =
+        (m_scanner && m_scanSwitches.scanner) ? m_scanner->listFigures() : QHash<QString, int>();
+
     QHash<QString, QVariantMap> byId;
     QList<RankRow> rows;
     rows.reserve(pool.size());
     for (int i = 0; i < pool.size(); ++i) {
         QVariantMap n = pool.at(i).toMap();
         const QString id = n.value(QStringLiteral("nodeId")).toString();
-        const int rtt = display.at(i).rttMs;
-        // Upstream nodes (release A): our form of the name - the admin's own label or «<country> <n>».
-        n[QStringLiteral("name")] = n.value(QStringLiteral("upstream")).toBool()
-            ? avpn::upstreamDisplayName(n.value(QStringLiteral("name")).toString(),
-                                        n.value(QStringLiteral("upstreamLabelCustom")).toBool(),
-                                        n.value(QStringLiteral("upstreamOrdinal")).toInt(),
-                                        doctor::countryDisplayName(n.value(QStringLiteral("countryCode")).toString(), lang),
-                                        tr("Сервер"))
+        const bool upstream = n.value(QStringLiteral("upstream")).toBool();
+        // Contract 1.10.0: the provider's balancer is an Auto candidate only - never a row of the manual list.
+        // The engine keeps it (pool, Auto, the Connect card); only this list leaves it out.
+        const avpn::UpstreamKind kind =
+            upstream ? avpn::upstreamKindFromWire(true, n.value(QStringLiteral("upstreamKind")).toString())
+                     : avpn::UpstreamKind::Unspecified;
+        if (upstream && !avpn::upstreamKindListed(kind))
+            continue;
+        const int rtt = upstream ? scanMs.value(id, -1) : display.at(i).rttMs;
+        // Upstream nodes (release A, 1.10.0): our form of the name - the admin's own label, «<country> <n>» or
+        // «Белые списки <n>»; never «Сервер <n>».
+        n[QStringLiteral("name")] = upstream
+            ? upstreamRowName(n.value(QStringLiteral("name")).toString(),
+                              n.value(QStringLiteral("upstreamLabelCustom")).toBool(),
+                              n.value(QStringLiteral("upstreamOrdinal")).toInt(), kind,
+                              n.value(QStringLiteral("countryCode")).toString())
             : display.at(i).name;
         n[QStringLiteral("measuredRttMs")] = rtt;
         n[QStringLiteral("measuredBars")] = (rtt >= 0) ? barsForNode(rtt) : -1;
         byId.insert(id, n);
-        rows.append({ id, rtt });
+        // A provider row keeps the engine's order (tier, then priority): its Scanner figure is shown, not ranked.
+        rows.append({ id, upstream ? -1 : rtt });
     }
 
     rows = rankFastestAtBottom(rows);
@@ -9505,6 +9517,14 @@ QString AvpnEngineQml::appLang() const
                    : QStringLiteral("ru");
 }
 
+QString AvpnEngineQml::upstreamRowName(const QString &label, bool labelCustom, int ordinal, avpn::UpstreamKind rowKind,
+                                       const QString &countryCode) const
+{
+    return avpn::upstreamDisplayName(label, labelCustom, ordinal, rowKind,
+                                     doctor::countryDisplayName(countryCode, appLang()),
+                                     tr("Белые списки"), tr("Авто"));
+}
+
 void AvpnEngineQml::setAppLang(const QString &lang)
 {
     if (!m_store || appLang() == lang)
@@ -10337,6 +10357,8 @@ QVariantMap AvpnEngineQml::debugSnapshot() const
         n["packSourced"] = r.packSourced;
         n["upstreamOrdinal"] = r.upstreamOrdinal;
         n["upstreamLabelCustom"] = r.upstreamLabelCustom;
+        // contract 1.10.0: "country" | "whitelist" | "auto" ("" for own rows); auto is never a list row
+        n["upstreamKind"] = QString::fromLatin1(avpn::upstreamKindName(r.upstreamKind));
         pool.append(n);
     }
     m["pool"] = pool;

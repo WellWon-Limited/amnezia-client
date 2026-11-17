@@ -2030,6 +2030,7 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
         if (row.upstream) {
             row.upstreamOrdinal = n.upstream->ordinal;
             row.upstreamLabelCustom = n.upstream->labelCustom;
+            row.upstreamKind = upstreamRowKind(n.upstream->kind, n.countryCode);
             if (!row.upstreamLabelCustom)
                 row.name.clear();
         }

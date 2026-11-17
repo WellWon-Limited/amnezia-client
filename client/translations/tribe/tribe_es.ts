@@ -1766,12 +1766,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+145"/>
-        <source>Сервер</source>
-        <translation>Servidor</translation>
-    </message>
-    <message>
-        <location line="+41"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+197"/>
         <source>недоступно для этого режима</source>
         <translation>no disponible para este modo</translation>
     </message>
@@ -1781,7 +1776,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>no disponible en esta versión</translation>
     </message>
     <message>
-        <location line="+65"/>
+        <location line="+66"/>
         <source>Выбор сервера</source>
         <translation>Elegir servidor</translation>
     </message>
@@ -1851,7 +1846,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+35"/>
+        <location line="+36"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -3052,7 +3047,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+3642"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4001"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3152,7 +3147,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-2516"/>
+        <location line="-2815"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3182,14 +3177,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando y verificando la firma…</translation>
     </message>
     <message>
-        <location line="-1856"/>
-        <location line="+2326"/>
-        <location line="+76"/>
-        <source>Сервер</source>
-        <translation>Servidor</translation>
-    </message>
-    <message>
-        <location line="-504"/>
+        <location line="+42"/>
         <source>Подтвердите обновление в окне Android</source>
         <translation>Confirma la actualización en la ventana de Android</translation>
     </message>
@@ -3204,12 +3192,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando la actualización…</translation>
     </message>
     <message>
-        <location line="+410"/>
+        <location line="+409"/>
         <source>Текущий сервер</source>
         <translation>Servidor actual</translation>
     </message>
     <message>
-        <location line="+373"/>
+        <location line="+387"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No hay una suscripción activa. Consigue una para conectarte.</translation>
     </message>
@@ -3219,7 +3207,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo actualizar la lista de servidores. Vuelve a conectarte.</translation>
     </message>
     <message>
-        <location line="+255"/>
+        <location line="+531"/>
         <source>Отправляем…</source>
         <translation>Enviando…</translation>
     </message>
@@ -3234,7 +3222,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1124"/>
+        <location line="+1134"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3315,17 +3303,17 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>baseline y amnezia ven el mismo egress (%1): parece que la VPN no estaba apagada durante la medición baseline</translation>
     </message>
     <message>
-        <location line="+1097"/>
+        <location line="+1111"/>
         <source>Установка службы VPN отменена</source>
         <translation>Instalación del servicio VPN cancelada</translation>
     </message>
     <message>
-        <location line="+147"/>
+        <location line="+150"/>
         <source>Не удалось установить службу VPN</source>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+551"/>
+        <location line="+553"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>No se pudo desactivar la VPN. Inténtalo de nuevo o desactívala en los Ajustes de iOS.</translation>
     </message>
@@ -3372,23 +3360,23 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Este servidor no está disponible ahora: conectando otro</translation>
     </message>
     <message>
-        <location line="+128"/>
+        <location line="+142"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>No hay suficientes servidores activos para cambiar</translation>
     </message>
     <message>
-        <location line="+748"/>
+        <location line="+763"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray no está disponible en esta versión de la app</translation>
     </message>
     <message>
-        <location line="+267"/>
-        <location line="+3554"/>
+        <location line="+293"/>
+        <location line="+3578"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>El servidor no deja pasar el tráfico: prueba con otro servidor</translation>
     </message>
     <message>
-        <location line="-3234"/>
+        <location line="-3244"/>
         <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
         <translation>El tráfico no pasa por ningún servidor: revisa tu red y vuelve a intentarlo</translation>
     </message>
@@ -3494,7 +3482,17 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo desconectar el dispositivo (HTTP %1)</translation>
     </message>
     <message>
-        <location line="+686"/>
+        <location line="+104"/>
+        <source>Белые списки</source>
+        <translation>Listas blancas</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Авто</source>
+        <translation>Auto</translation>
+    </message>
+    <message>
+        <location line="+590"/>
         <source>Сначала войдите или подключитесь</source>
         <translation>Primero inicia sesión o conéctate</translation>
     </message>

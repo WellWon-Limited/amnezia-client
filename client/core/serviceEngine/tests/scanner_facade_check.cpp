@@ -1967,7 +1967,10 @@ static void caseCapsGen()
     w.host.avail = ScanHostAvailability::Available;
     w.host.onAvailabilityChanged();
     w.run(50);
-    CHECK_EQ(w.s->view().value("empty").toMap().value("reason").toString(), QStringLiteral("network_changed"));
+    // a network change after a finished result: the screen rescans by itself (artboard, 17.11)
+    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
+    w.run(20000);
+    CHECK_EQ(w.host.count("scan_start"), 2);
 }
 
 // The machine is built from the host's own scan_caps answer, not the compiled guess.
@@ -2025,13 +2028,52 @@ static void caseScreenFields()
     w.s->refreshSwitches();
     CHECK(!w.s->returnHome());
 
-    // a change while results are shown: the shade «Сеть сменилась» over NoScan network_changed
+    // the server list's figures (owner 17.11): the working rows of this network's result, with their ms; the stored
+    // result carries the 1.10 label mark
+    {
+        g_case = QStringLiteral("list_figures");
+        const QHash<QString, int> f = w.s->listFigures();
+        int working = 0;
+        for (const QVariant &v : w.rows()) {
+            const QVariantMap r = v.toMap();
+            const QString id = r.value("id").toString();
+            const bool verified = !r.value("flags").toStringList().contains(QLatin1String("unverified"))
+                                  && r.value("state").toString() != QLatin1String("failed")
+                                  && !r.value("flags").toStringList().contains(QLatin1String("live_unverified"));
+            if (verified && r.value("ms").toInt() >= 0 && !r.value("flags").toStringList().contains(QLatin1String("current"))) {
+                ++working;
+                CHECK_EQ(f.value(id, -2), r.value("ms").toInt());
+            }
+        }
+        CHECK(working > 0 && !f.isEmpty());
+        bool marked = false;
+        for (auto it = w.store.m.constBegin(); it != w.store.m.constEnd(); ++it)
+            if (it.key().startsWith(QLatin1String(kScanCacheStorePrefix)))
+                marked = QJsonDocument::fromJson(it.value()).object().value(QLatin1String(kScanCachedLabelRuleKey)).toString()
+                         == QLatin1String(kScanCachedLabelRule);
+        CHECK(marked);
+        // another network: nothing from this one
+        const ScanNetFacts keep = w.engine.net;
+        w.engine.net.reportingKey = QStringLiteral("cell:250-02:4g");
+        w.engine.net.kind = ScanNetKind::Cellular;
+        CHECK(w.s->listFigures().isEmpty());
+        w.engine.net = keep;
+        CHECK(!w.s->listFigures().isEmpty()); // (the age rule: scan_core_check rowsAfter17Nov)
+        g_case = QStringLiteral("screen_fields");
+    }
+
+    // a change while results are shown: the shade «Сеть сменилась — проверяем заново» and a new scan by itself
+    // (artboard, «Сеть сменилась после скана»)
     g_case = QStringLiteral("network_changed_shade_results");
     w.run(5000);
+    const int startsBefore = w.host.count("scan_start");
     w.engine.net.appSources[0].counter = 5;
     w.s->networkChanged();
-    CHECK_EQ(w.s->view().value("empty").toMap().value("reason").toString(), QStringLiteral("network_changed"));
+    CHECK_EQ(w.phase(), QStringLiteral("preparing"));
     CHECK_EQ(w.s->shade().value("text_key").toString(), QStringLiteral("network_changed"));
+    w.run(20000);
+    CHECK_EQ(w.host.count("scan_start"), startsBefore + 1);
+    CHECK_EQ(w.engine.userConnects, 0);
 
     // a change mid-scan: the machine rescans by itself, the same shade says so
     g_case = QStringLiteral("network_changed_shade_scan");

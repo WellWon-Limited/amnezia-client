@@ -1381,6 +1381,23 @@ static void coldStartWhitelistWindow()
               && c[0].upstream->tier == 2 && c[0].countryCode == QLatin1String("NL") && c[0].endpoint.isEmpty());
         // Release A naming: a pack candidate carries the entry's display parts (label "L" is not custom).
         CHECK(c[0].upstream->ordinal == 2 && !c[0].upstream->labelCustom);
+        CHECK(c[0].upstream->kind == UpstreamKind::Unspecified); // the entry had no kind: shown by its country
+        {
+            QJsonObject po = QJsonDocument::fromJson(b).object();
+            QJsonArray es = po.value("entries").toArray();
+            QJsonObject e1 = es.at(1).toObject();
+            e1.insert("kind", "auto");
+            e1.insert("country_code", QJsonValue());
+            es.replace(1, e1);
+            po.insert("entries", es);
+            const QByteArray kb = QJsonDocument(po).toJson(QJsonDocument::Compact);
+            const StandbyParse kp = parseStandbyPack(kb, key.sign(QByteArrayLiteral("tribe-upstream-standby-v1\n") + kb), key.pubHex());
+            CHECK(kp.ok());
+            const QList<SubscriptionNode> kc = standbyPackCandidates(kp.pack, sub.nodes, sub.upstreamRevision, now, 259200);
+            // the pack's balancer stays a candidate (Auto) and is never a list row
+            CHECK(kc.size() == 1 && kc[0].upstream->kind == UpstreamKind::Auto
+                  && !upstreamKindListed(upstreamRowKind(kc[0].upstream->kind, kc[0].countryCode)));
+        }
         CHECK(standbyPackCandidates(p.pack, sub.nodes, 100, now, 259200).isEmpty());        // the subscription is not older
         CHECK(standbyPackCandidates(p.pack, {}, 0, now, 259200).size() == 2);               // no pool at all
         CHECK(standbyPackCandidates(p.pack, sub.nodes, 99, now + 80LL * 3600000, 259200).isEmpty()); // pack expired
@@ -1690,18 +1707,46 @@ static void picker16AndNotices()
         if (snap.pool.at(i).upstream)
             CHECK(display.at(i).rttMs == -1 && display.at(i).name != QLatin1String("Provider Name Ltd"));
 
-    // Release A naming (owner decision 14.11): the admin's own label, else «<localized country> <n>», else
-    // «Сервер <n>»; a server fallback such as "NL 1" is never shown.
-    const QString srv = QStringLiteral("Сервер");
-    CHECK(upstreamDisplayName("NL 1", false, 1, QStringLiteral("Нидерланды"), srv) == QStringLiteral("Нидерланды 1"));
-    CHECK(upstreamDisplayName("NL 1", false, 0, QStringLiteral("Нидерланды"), srv) == QStringLiteral("Нидерланды"));
-    CHECK(upstreamDisplayName("Быстрый Амстердам", true, 3, QStringLiteral("Нидерланды"), srv) == QStringLiteral("Быстрый Амстердам"));
-    CHECK(upstreamDisplayName("  Свой  ", true, 3, QString(), srv) == QStringLiteral("Свой"));
-    CHECK(upstreamDisplayName("   ", true, 3, QStringLiteral("Германия"), srv) == QStringLiteral("Германия 3")); // empty custom
-    CHECK(upstreamDisplayName(QString(), false, 7, QString(), srv) == QStringLiteral("Сервер 7"));
-    CHECK(upstreamDisplayName("Сервер 9", false, 0, QString(), srv) == QStringLiteral("Сервер"));
-    CHECK(upstreamDisplayName("NL 1", false, 2, QStringLiteral("Netherlands"), QStringLiteral("Server")) == QStringLiteral("Netherlands 2"));
-    // The engine row: the label only when custom, with the parts for the facade.
+    // Release A naming (owner decisions 14.11 and 17.11, contract 1.10.0): the admin's own label, else
+    // «<localized country> <n>» for a country row, «Белые списки <n>» for a white-list row, «Авто <n>» for the
+    // provider's balancer (Connect card only); never «Сервер <n>»; a server fallback such as "NL 1" is never shown.
+    const QString wl = QStringLiteral("Белые списки"), au = QStringLiteral("Авто");
+    const auto name = [&](const QString &label, bool custom, int ordinal, UpstreamKind k, const QString &country) {
+        return upstreamDisplayName(label, custom, ordinal, k, country, wl, au);
+    };
+    CHECK(name("NL 1", false, 1, UpstreamKind::Country, QStringLiteral("Нидерланды")) == QStringLiteral("Нидерланды 1"));
+    CHECK(name("NL 1", false, 0, UpstreamKind::Country, QStringLiteral("Нидерланды")) == QStringLiteral("Нидерланды"));
+    CHECK(name("Быстрый Амстердам", true, 3, UpstreamKind::Country, QStringLiteral("Нидерланды")) == QStringLiteral("Быстрый Амстердам"));
+    CHECK(name("  Свой  ", true, 3, UpstreamKind::Whitelist, QString()) == QStringLiteral("Свой"));
+    CHECK(name("   ", true, 3, UpstreamKind::Country, QStringLiteral("Германия")) == QStringLiteral("Германия 3")); // empty custom
+    CHECK(name("Белые списки 2", false, 2, UpstreamKind::Whitelist, QString()) == QStringLiteral("Белые списки 2"));
+    CHECK(name("LTE 1", false, 1, UpstreamKind::Whitelist, QStringLiteral("Польша")) == QStringLiteral("Белые списки 1")); // no flag, no country
+    CHECK(name("Авто 3", false, 3, UpstreamKind::Auto, QString()) == QStringLiteral("Авто 3"));
+    CHECK(name(QString(), false, 7, UpstreamKind::Country, QString()) == QStringLiteral("Авто 7")); // defensive: no country name
+    CHECK(upstreamDisplayName("NL 1", false, 2, UpstreamKind::Country, QStringLiteral("Netherlands"), QStringLiteral("White lists"),
+                              QStringLiteral("Auto")) == QStringLiteral("Netherlands 2"));
+    for (UpstreamKind k : {UpstreamKind::Unspecified, UpstreamKind::Country, UpstreamKind::Whitelist, UpstreamKind::Auto})
+        for (const QString &c : {QString(), QStringLiteral("Нидерланды")})
+            for (int o : {0, 1, 9})
+                CHECK(!name(QStringLiteral("Сервер 9"), false, o, k, c).contains(QStringLiteral("Сервер")));
+
+    // The wire kind and the row kind (contract 1.10.0; an older server's stub without kind: country when it has
+    // a country, else the provider's balancer - hidden from the list, kept for Auto).
+    CHECK(upstreamKindFromWire(false, QString()) == UpstreamKind::Unspecified);
+    CHECK(upstreamKindFromWire(true, QStringLiteral("country")) == UpstreamKind::Country);
+    CHECK(upstreamKindFromWire(true, QStringLiteral("whitelist")) == UpstreamKind::Whitelist);
+    CHECK(upstreamKindFromWire(true, QStringLiteral("auto")) == UpstreamKind::Auto);
+    CHECK(upstreamKindFromWire(true, QStringLiteral("balancer-v2")) == UpstreamKind::Auto);
+    CHECK(upstreamKindFromWire(true, QString()) == UpstreamKind::Auto); // present but not a string
+    CHECK(upstreamRowKind(UpstreamKind::Unspecified, QStringLiteral("NL")) == UpstreamKind::Country);
+    CHECK(upstreamRowKind(UpstreamKind::Unspecified, QString()) == UpstreamKind::Auto);
+    CHECK(upstreamRowKind(UpstreamKind::Country, QStringLiteral(" ")) == UpstreamKind::Auto);
+    CHECK(upstreamRowKind(UpstreamKind::Whitelist, QStringLiteral("PL")) == UpstreamKind::Whitelist);
+    CHECK(upstreamRowKind(UpstreamKind::Auto, QStringLiteral("NL")) == UpstreamKind::Auto);
+    CHECK(upstreamKindListed(UpstreamKind::Country) && upstreamKindListed(UpstreamKind::Whitelist));
+    CHECK(!upstreamKindListed(UpstreamKind::Auto));
+
+    // The engine row: the label only when custom, with the parts and the row kind for the facade.
     {
         QJsonObject named = stubNode("aaaaaaaaaaaaaaa3", 1, 2, sha64('a'), "NL");
         QJsonObject plain = stubNode("aaaaaaaaaaaaaaa4", 1, 3, sha64('a'), "NL");
@@ -1724,9 +1769,65 @@ static void picker16AndNotices()
         const NodeDebugRow rn = byId.value("up:aaaaaaaaaaaaaaa3"), rp = byId.value("up:aaaaaaaaaaaaaaa4");
         CHECK(rn.name == QStringLiteral("Быстрый Амстердам") && rn.upstreamLabelCustom && rn.upstreamOrdinal == 4);
         CHECK(rp.name.isEmpty() && !rp.upstreamLabelCustom && rp.upstreamOrdinal == 1);
-        CHECK(upstreamDisplayName(rp.name, rp.upstreamLabelCustom, rp.upstreamOrdinal, QStringLiteral("Нидерланды"), srv)
+        CHECK(rn.upstreamKind == UpstreamKind::Country && rp.upstreamKind == UpstreamKind::Country); // no kind + a country
+        CHECK(name(rp.name, rp.upstreamLabelCustom, rp.upstreamOrdinal, rp.upstreamKind, QStringLiteral("Нидерланды"))
               == QStringLiteral("Нидерланды 1"));
         CHECK(byId.value("9").name.isEmpty() || byId.value("9").name != QStringLiteral("NL 1")); // own rows untouched
+        CHECK(byId.value("9").upstreamKind == UpstreamKind::Unspecified);
+    }
+
+    // Hiding the balancer's row never removes the candidate (owner 17.11): the auto profile and an older server's
+    // countryless stub stay in the pool and Auto commits them in their tier; only the list leaves them out.
+    {
+        const auto withKind = [](QJsonObject n, const char *kind, int ordinal) {
+            QJsonObject u = n.value("upstream").toObject();
+            if (kind)
+                u.insert("kind", QLatin1String(kind));
+            u.insert("ordinal", ordinal);
+            n.insert("upstream", u);
+            return n;
+        };
+        const QJsonArray nodes{awgNode("9", 9, "EE"), awgNode("2", 2, "PL"), awgNode("5", 5, "US"),
+                               withKind(stubNode("cccccccccccccc01", 1, 0), "auto", 1),
+                               withKind(stubNode("cccccccccccccc02", 1, 1), "whitelist", 1),
+                               withKind(stubNode("cccccccccccccc03", 1, 2, sha64('a'), "NL"), "country", 1),
+                               withKind(stubNode("cccccccccccccc04", 1, 3), nullptr, 2)}; // older server: no kind, no country
+        const Subscription sub = parse(body(nodes));
+        CHECK(sub.nodes.size() == 7);
+        ServiceEngine en;
+        FakeTunnel tn;
+        en.setTunnel(&tn);
+        CHECK(en.loadSubscription(body(nodes), err));
+        QHash<QString, NodeDebugRow> byId;
+        for (const NodeDebugRow &r : en.debugSnapshot().pool)
+            byId.insert(r.nodeId, r);
+        CHECK(byId.contains("up:cccccccccccccc01") && byId.contains("up:cccccccccccccc04")); // kept in the pool
+        CHECK(byId.value("up:cccccccccccccc01").upstreamKind == UpstreamKind::Auto);
+        CHECK(byId.value("up:cccccccccccccc02").upstreamKind == UpstreamKind::Whitelist);
+        CHECK(byId.value("up:cccccccccccccc03").upstreamKind == UpstreamKind::Country);
+        CHECK(byId.value("up:cccccccccccccc04").upstreamKind == UpstreamKind::Auto);
+        CHECK(!upstreamKindListed(byId.value("up:cccccccccccccc01").upstreamKind)
+              && !upstreamKindListed(byId.value("up:cccccccccccccc04").upstreamKind));
+        CHECK(upstreamKindListed(byId.value("up:cccccccccccccc02").upstreamKind)
+              && upstreamKindListed(byId.value("up:cccccccccccccc03").upstreamKind));
+        // Auto: own nodes exhausted (K = 3 at cap 4) -> tier 1 commits the best priority: the balancer itself
+        TransportHistory hist;
+        TransportPickInput in;
+        in.tierGate.enabled = true;
+        in.tierGate.dataPlaneFailCap = 4;
+        in.tierGate.k = 6;
+        in.excluded = {"9", "2", "5"};
+        in.tierGate.failed = in.excluded;
+        const SubscriptionNode *n = pickTransportNode(sub.nodes, {}, hist, in, [](int) { return 0; });
+        CHECK(n && n->nodeId == QLatin1String("up:cccccccccccccc01"));
+        // ... and the older server's countryless stub too, once the listed ones failed
+        in.excluded += QSet<QString>{"up:cccccccccccccc01", "up:cccccccccccccc02", "up:cccccccccccccc03"};
+        in.tierGate.failed = in.excluded;
+        n = pickTransportNode(sub.nodes, {}, hist, in, [](int) { return 0; });
+        CHECK(n && n->nodeId == QLatin1String("up:cccccccccccccc04"));
+        // the parsed stub carries the wire kind (absent stays Unspecified; the row kind decides)
+        CHECK(sub.nodes.at(3).upstream.has_value() && sub.nodes.at(3).upstream->kind == UpstreamKind::Auto);
+        CHECK(sub.nodes.at(6).upstream.has_value() && sub.nodes.at(6).upstream->kind == UpstreamKind::Unspecified);
     }
 
     // Notices: one kind per outcome, a "code/detail" start failure by its code, nothing for the rest.
