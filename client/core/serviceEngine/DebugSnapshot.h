@@ -1025,21 +1025,27 @@ inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch
 // The native tells each handshake timeout of a session whose NE answered "no handshake, no data"
 // (IosController::handshakeNeverCompleted). At the FIRST one (~12 s after the tunnel came up) an own Auto
 // start on AmneziaWG leaves AmneziaWG for the rest of this attempt: the transport is recorded as failed
-// (location x proto history), every AmneziaWG node is excluded for the attempt, and the start goes on
-// with the next pick - the best Xray candidate. Only when the person chose nothing narrower (Auto mode,
-// no pinned node), only if such a pick exists, only once per attempt (no flapping back), only while the
+// (location x proto history), AmneziaWG is banned for the rest of the attempt (ServiceEngine::
+// banAwgForAttempt - one piece of attempt state that every pick reads), and the start goes on with the
+// next pick - the best Xray candidate. Only in Auto transport mode (a transport chosen by hand is never
+// overridden), never for a node the person chose exactly (a Scanner row tap: the head of the attempt's
+// order hint), only if such a pick exists, only once per attempt (no flapping back), only while the
 // person's own start is still in flight (their stop wins: it ends the attempt).
+// A pinned LOCATION does not block it (owner question, build 142): in Auto mode a pin is a location and the
+// engine already picks the transport inside it (rank + history); the Xray pick is then the pinned
+// location's own Xray (same country, other protocol), never another location. No Xray there - no move.
 struct AwgNoHandshakeInputs {
     int timeouts = 0;              // the native handshake timeout number (1 = the first, ~12 s)
     bool ownStartInFlight = false; // our start is in flight and the person still wants the VPN on
     bool nodeIsAwg = false;        // the node of this start is an own AmneziaWG node
     bool autoMode = false;         // the effective transport mode is Auto
-    bool pinned = false;           // the person pinned a node / location
-    bool alreadyLeft = false;      // AmneziaWG was already left in this attempt
-    bool xrayPick = false;         // a pick with every AmneziaWG node excluded gives an Xray node
+    bool explicitNode = false;     // the person chose exactly this node (a Scanner row tap)
+    bool alreadyLeft = false;      // AmneziaWG is already banned in this attempt
+    bool xrayPick = false;         // with every AmneziaWG node excluded the pick of this start (inside the
+                                   // pinned location, if any) gives an Xray node
 };
-enum class AwgNoHandshake { Leave, IgnoreLaterTimeout, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode, IgnorePinned,
-                            IgnoreAlreadyLeft, IgnoreNoXray };
+enum class AwgNoHandshake { Leave, IgnoreLaterTimeout, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode,
+                            IgnoreExplicitNode, IgnoreAlreadyLeft, IgnoreNoXray };
 inline AwgNoHandshake decideAwgNoHandshake(const AwgNoHandshakeInputs &in)
 {
     if (in.timeouts != 1)
@@ -1050,8 +1056,8 @@ inline AwgNoHandshake decideAwgNoHandshake(const AwgNoHandshakeInputs &in)
         return AwgNoHandshake::IgnoreNotAwg;
     if (!in.autoMode)
         return AwgNoHandshake::IgnoreMode;
-    if (in.pinned)
-        return AwgNoHandshake::IgnorePinned;
+    if (in.explicitNode)
+        return AwgNoHandshake::IgnoreExplicitNode;
     if (in.alreadyLeft)
         return AwgNoHandshake::IgnoreAlreadyLeft;
     if (!in.xrayPick)
@@ -1066,7 +1072,7 @@ inline const char *awgNoHandshakeName(AwgNoHandshake d)
     case AwgNoHandshake::IgnoreNotOwnStart: return "not_own_start";
     case AwgNoHandshake::IgnoreNotAwg: return "not_awg";
     case AwgNoHandshake::IgnoreMode: return "mode";
-    case AwgNoHandshake::IgnorePinned: return "pinned";
+    case AwgNoHandshake::IgnoreExplicitNode: return "explicit_node";
     case AwgNoHandshake::IgnoreAlreadyLeft: return "already_left";
     case AwgNoHandshake::IgnoreNoXray: return "no_xray";
     }

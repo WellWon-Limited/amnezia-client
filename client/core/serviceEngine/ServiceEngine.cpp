@@ -205,40 +205,44 @@ void ServiceEngine::excludeForAttempt(const QString &nodeId, const QString &code
     appendSwitchLog(QStringLiteral("upstream start failed on %1 code=%2 (excluded for this attempt)").arg(nodeId, code));
 }
 
+// Build 142 (S5): an own AmneziaWG node (provider nodes are Xray by nature).
+static bool isOwnAwgNode(const SubscriptionNode &n)
+{
+    return !isUpstreamNode(n) && !isXrayProto(protoOf(n));
+}
+
 QSet<QString> ServiceEngine::awgNodeIds() const // build 142 (S5)
 {
     QSet<QString> out;
     for (const SubscriptionNode &n : m_merged)
-        if (!isUpstreamNode(n) && !isXrayProto(protoOf(n)))
+        if (isOwnAwgNode(n))
             out.insert(n.nodeId);
     return out;
+}
+
+// The one reader of the transport ban: every pick asks it.
+bool ServiceEngine::bannedByAttempt(const SubscriptionNode &n) const // build 142 (S5)
+{
+    return m_awgBanned && isOwnAwgNode(n);
 }
 
 bool ServiceEngine::xrayPickWithoutAwg() const // build 142 (S5)
 {
     const QSet<QString> awg = awgNodeIds();
-    const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, false, awg);
+    const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
+    const QString loc = pinned ? locationKeyOf(*pinned) : QString();
+    const QString prefer = pinned ? m_pinnedNodeId : QString();
+    const SubscriptionNode *c = pickTransport(loc, prefer, QString(), /*withExclusions=*/true, false, awg);
     if (!c && !sessionExclusions().isEmpty())
-        c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, false, awg);
+        c = pickTransport(loc, prefer, QString(), /*withExclusions=*/false, false, awg);
     return c && isXrayProto(protoOf(*c));
 }
 
-void ServiceEngine::leaveAwgForAttempt() // build 142 (S5)
+void ServiceEngine::banAwgForAttempt() // build 142 (S5)
 {
     recordTransportOutcome(false); // the rise of this location x AmneziaWG failed (at most once per rise)
-    const QSet<QString> awg = awgNodeIds();
-    for (const QString &id : awg)
-        m_attemptExcluded.insert(id, QStringLiteral("awg_no_handshake"));
-    appendSwitchLog(QStringLiteral("no handshake on %1: AmneziaWG left for this attempt (%2 nodes), next pick Xray")
-                        .arg(m_currentNodeId).arg(awg.size()));
-}
-
-bool ServiceEngine::awgLeftForAttempt() const // build 142 (S5)
-{
-    for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
-        if (it.value() == QLatin1String("awg_no_handshake"))
-            return true;
-    return false;
+    m_awgBanned = true;
+    appendSwitchLog(QStringLiteral("no handshake on %1: AmneziaWG banned for this attempt, next pick Xray").arg(m_currentNodeId));
 }
 
 void ServiceEngine::rebuildCandidates()
@@ -364,7 +368,8 @@ const SubscriptionNode *ServiceEngine::pickByWeight(const QString &exclA, const 
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode()) // Task 10 + awg31; 5.1.109: effective mode
+            || bannedByAttempt(n)) // build 142 (S5): the attempt's transport ban
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -402,7 +407,8 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
             continue;
         if (!exclB.isEmpty() && n.nodeId == exclB)
             continue;
-        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode())) // Task 10 + awg31; 5.1.109: effective mode
+        if (!isAutoEligibleNode(n) || !transportAllowed(n, transportMode()) // Task 10 + awg31; 5.1.109: effective mode
+            || bannedByAttempt(n)) // build 142 (S5): the attempt's transport ban
             continue;
         if (healthAggregate(n) <= 0.0) // мёртв по backend-данным (пустой health = живой)
             continue;
@@ -434,6 +440,10 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
         in.hardExcluded.insert(it.key());
     in.hardExcluded.unite(extraHardExcluded);
+    if (m_awgBanned) // build 142 (S5): the attempt's transport ban, through its one reader
+        for (const SubscriptionNode &n : m_merged)
+            if (bannedByAttempt(n))
+                in.hardExcluded.insert(n.nodeId);
     in.tierGate = tierGate();
     // Случайный индекс в ярусе равного weight — авто реально чередует равноценные локации.
     const auto randomIndex = [](int size) {
@@ -469,7 +479,7 @@ const SubscriptionNode *ServiceEngine::networkMemoryCandidate() const
     // Upstream nodes (point 5): the memory never crosses a tier - it is used only inside the tier the
     // automatic pick commits to now (own nodes while tier 0 is open). An upstream node has no endpoint to
     // ping: inside its tier "not failed in this attempt" stands in for the reachability gate below.
-    if (m_attemptExcluded.contains(n->nodeId))
+    if (m_attemptExcluded.contains(n->nodeId) || bannedByAttempt(*n))
         return nullptr;
     const int commitTier = autoCommitTier(m_merged, transportMode(), tierGate());
     if (commitTier >= 0 && upstreamTierOf(*n) != commitTier)
@@ -529,7 +539,7 @@ const SubscriptionNode *ServiceEngine::hintedCandidate(const QString &exclude) c
         if (!n || !isSupportedProtoNode(*n) || !transportAllowed(*n, mode) || healthAggregate(*n) <= 0.0
             || isManualOnlyNode(*n))
             continue;
-        if (sessionExclusions().contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId))
+        if (sessionExclusions().contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId) || bannedByAttempt(*n))
             continue;
         return n;
     }
@@ -953,7 +963,7 @@ bool ServiceEngine::connect(QString &error)
         const SubscriptionNode *t = findNode(interrupted.target);
         if (t && isSupportedProtoNode(*t) && transportAllowed(*t, m_modeGate.inForce())
             && healthAggregate(*t) > 0.0 && !sessionExclusions().contains(t->nodeId)
-            && !m_attemptExcluded.contains(t->nodeId))
+            && !m_attemptExcluded.contains(t->nodeId) && !bannedByAttempt(*t))
             candidate = *t;
     }
     // AVPN Scanner (§32 п. 2): a row tap's order hint for this attempt - its head is the tapped row (the pin
@@ -1024,6 +1034,18 @@ bool ServiceEngine::connect(QString &error)
     if (!candidate && !m_attemptExcluded.isEmpty() && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
         appendSwitchLog(QStringLiteral("every candidate failed to start in this attempt: exclusions cleared"));
         m_attemptExcluded.clear();
+        const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, interrupted.active);
+        if (!c && !sessionExclusions().isEmpty())
+            c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, interrupted.active);
+        if (c)
+            candidate = *c;
+    }
+    // Build 142 (S5): the transport ban survives the reset above (failed Xray starts are retried, never
+    // AmneziaWG); it yields only when the pool has no Xray the pick could take at all (a refresh removed
+    // them) - then the attempt would have no node, and an AmneziaWG start is better than none.
+    if (!candidate && m_awgBanned && !xrayPickWithoutAwg() && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
+        appendSwitchLog(QStringLiteral("AmneziaWG ban lifted: no Xray node left in the pool"));
+        m_awgBanned = false;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, interrupted.active);
         if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, interrupted.active);

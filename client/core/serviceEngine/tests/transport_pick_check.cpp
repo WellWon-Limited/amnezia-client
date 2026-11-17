@@ -2130,54 +2130,118 @@ int main(int argc, char **argv)
     // --- Build 142 (S5): AmneziaWG got no handshake on this network - the attempt goes on with Xray ---
     {
         setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-        // The 16.11 pool as seen at 23:21:17 (rtt ms): 17 awg 34, 15 awg 34 + 15:xray 24, 12:xray 24, 11 awg 34 + 11:xray 27.
-        const QByteArray pool = subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0),
-                                          xrayNodeJson("15:xray", 15, "EE", 1.0), xrayNodeJson("12:xray", 12, "DE", 1.0),
-                                          awgNodeJson("11", 11, "FI", 1.0), xrayNodeJson("11:xray", 11, "FI", 1.0) });
+        // The 16.11 pool as seen at 23:21:17: 17 awg, 15 awg + 15:xray, 12:xray, 11 awg + 11:xray.
+        const QList<QByteArray> nodes{ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0),
+                                       xrayNodeJson("15:xray", 15, "EE", 1.0), xrayNodeJson("12:xray", 12, "DE", 1.0),
+                                       awgNodeJson("11", 11, "FI", 1.0), xrayNodeJson("11:xray", 11, "FI", 1.0) };
         const QHash<QString, int> rtt{{QStringLiteral("17"), 30}, {QStringLiteral("15"), 34}, {QStringLiteral("15:xray"), 34},
                                       {QStringLiteral("12:xray"), 40}, {QStringLiteral("11"), 34}, {QStringLiteral("11:xray"), 34}};
+        const auto isXray = [](ServiceEngine &e, const QString &id) {
+            const SubscriptionNode *n = e.nodeById(id);
+            return n && isXrayProto(protoOf(*n));
+        };
         QString err;
         ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
-        CHECK(eng.loadSubscription(pool, err));
+        CHECK(eng.loadSubscription(subJson(nodes), err));
         eng.setMeasuredRtt(rtt);
         eng.beginUserAttempt();                                   // the person's tap
         CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("17")); // Auto picks AmneziaWG first (rank 10)
         CHECK(eng.xrayPickWithoutAwg());
-        CHECK(!eng.awgLeftForAttempt());
-        eng.leaveAwgForAttempt();                                 // the first native timeout: no handshake, no data
-        CHECK(eng.awgLeftForAttempt());
+        CHECK(!eng.awgBanned());
+        eng.banAwgForAttempt();                                   // the first native timeout: no handshake, no data
+        CHECK(eng.awgBanned());
         CHECK(eng.transportHistory().entry(QStringLiteral("h:17"), QStringLiteral("awg")).samples == 1); // recorded failed
         CHECK(eng.transportHistory().entry(QStringLiteral("h:17"), QStringLiteral("awg")).successEwma == 0.0);
         eng.requestStop();                                        // the facade's guarded stop (not a new attempt)
-        CHECK(eng.awgLeftForAttempt());                           // kept across our own stop
-        CHECK(eng.connect(err));
-        const SubscriptionNode *next = eng.nodeById(tun.lastUpNodeId);
-        CHECK(next && isXrayProto(protoOf(*next)));               // the next pick of the attempt: Xray
-        CHECK(tun.lastUpNodeId == QLatin1String("15:xray") || tun.lastUpNodeId == QLatin1String("11:xray"));
+        CHECK(eng.awgBanned());                                   // kept across our own stop
+        CHECK(eng.connect(err) && isXray(eng, tun.lastUpNodeId)); // the next pick of the attempt: Xray
+        // Review F8: exhaust every Xray candidate by start failures of this attempt (as a provider seat
+        // refusal or a failed start counted for its tier does). connect() then clears the attempt exclusions
+        // - the ban is not one of them: the retry is Xray again, never AmneziaWG.
+        for (const char *x : {"15:xray", "12:xray", "11:xray"})
+            eng.excludeForAttempt(QString::fromLatin1(x), QStringLiteral("start_failed"));
         eng.requestStop();
-        CHECK(eng.connect(err) && isXrayProto(protoOf(*eng.nodeById(tun.lastUpNodeId)))); // no flapping back
+        CHECK(eng.connect(err) && isXray(eng, tun.lastUpNodeId));
+        // the session's data-plane failures too (the pick retries without them): still Xray
+        for (int i = 0; i < 3; ++i) {
+            eng.requestStop();
+            CHECK(eng.connect(err) && isXray(eng, tun.lastUpNodeId));
+        }
+        // a pool refresh keeps the ban (it is not a list of node ids a refresh could prune)
         eng.requestStop();
-        eng.beginUserAttempt();                                   // the person's next tap: a new attempt
-        CHECK(!eng.awgLeftForAttempt());
-        CHECK(eng.connect(err) && !isXrayProto(protoOf(*eng.nodeById(tun.lastUpNodeId)))); // AmneziaWG may try again
+        CHECK(eng.loadSubscription(subJson(nodes, 2), err));
+        CHECK(eng.awgBanned() && eng.connect(err) && isXray(eng, tun.lastUpNodeId));
+        // the network memory may not bring AmneziaWG back either
+        eng.requestStop();
+        eng.setNetworkMemoryNode(QStringLiteral("17"));
+        CHECK(eng.connect(err) && isXray(eng, tun.lastUpNodeId));
+        eng.setNetworkMemoryNode(QString());
+        // nor the row-tap hint's later rows (a hint set inside the attempt)
+        eng.requestStop();
+        eng.setAttemptOrder({QStringLiteral("11"), QStringLiteral("17")}, 60000);
+        CHECK(eng.connect(err) && isXray(eng, tun.lastUpNodeId));
+        eng.clearAttemptOrder();
+        // the person's next tap: a new attempt, AmneziaWG may try again
+        eng.requestStop();
+        eng.beginUserAttempt();
+        CHECK(!eng.awgBanned());
+        CHECK(eng.connect(err) && !isXray(eng, tun.lastUpNodeId));
+        eng.requestStop();
+        // the ban yields only to absence: a refresh that removed every Xray node lifts it in connect()
+        eng.banAwgForAttempt();
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0) }, 3), err));
+        CHECK(eng.connect(err) && !isXray(eng, tun.lastUpNodeId) && !eng.awgBanned());
         eng.requestStop();
     }
-    {   // no Xray for this device: nothing to leave for
-        setFlags(/*xrayClient=*/false, /*autoPick=*/true);
+    {   // a pinned LOCATION in Auto mode: its own Xray, never another location
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
         QString err;
         ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
-        CHECK(eng.loadSubscription(subJson({ awgNodeJson("17", 17, "FI", 1.0), xrayNodeJson("15:xray", 15, "EE", 1.0) }), err));
-        eng.setMeasuredRtt({{QStringLiteral("17"), 30}, {QStringLiteral("15:xray"), 30}});
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0),
+                                             xrayNodeJson("15:xray", 15, "EE", 1.0), xrayNodeJson("12:xray", 12, "DE", 1.0) }), err));
+        eng.setMeasuredRtt({{QStringLiteral("17"), 30}, {QStringLiteral("15"), 34}, {QStringLiteral("15:xray"), 34},
+                            {QStringLiteral("12:xray"), 20}});
+        CHECK(eng.setPinnedNode(QStringLiteral("15"), err));      // 23:21:19: the person chose 15's location
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("15"));
+        CHECK(eng.xrayPickWithoutAwg());
+        eng.banAwgForAttempt();
+        eng.requestStop();
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("15:xray")); // same location, not 12:xray (faster)
+        eng.requestStop();
+        eng.beginUserAttempt();
+        CHECK(eng.setPinnedNode(QStringLiteral("17"), err));      // 17's location has no Xray: nothing to move to
         CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("17"));
         CHECK(!eng.xrayPickWithoutAwg());
-        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
-        QString err2;
-        ServiceEngine only; FakeTunnel t2; only.setTunnel(&t2);
-        CHECK(only.loadSubscription(subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0) }), err2));
-        only.setMeasuredRtt({{QStringLiteral("17"), 30}, {QStringLiteral("15"), 30}});
-        CHECK(only.connect(err2) && !only.xrayPickWithoutAwg()); // an AmneziaWG-only pool
+        eng.requestStop();
     }
-
+    {   // no Xray for the automatic pick: nothing to leave for (xray_client off, transport_auto_pick off,
+        // an AmneziaWG-only pool). Review F8: with transport_auto_pick off the predicate refuses
+        // (NodeRotation.h::isAutoEligibleNode drops Xray from the Auto pick), so the ban is never set there.
+        for (int variant = 0; variant < 3; ++variant) {
+            setFlags(/*xrayClient=*/variant != 0, /*autoPick=*/variant != 1);
+            QString err;
+            ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+            const QByteArray pool = variant == 2 ? subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0) })
+                                                 : subJson({ awgNodeJson("17", 17, "FI", 1.0), xrayNodeJson("15:xray", 15, "EE", 1.0) });
+            CHECK(eng.loadSubscription(pool, err));
+            eng.setMeasuredRtt({{QStringLiteral("17"), 30}, {QStringLiteral("15:xray"), 30}, {QStringLiteral("15"), 30}});
+            CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("17"));
+            CHECK(!eng.xrayPickWithoutAwg());
+        }
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
+    {   // the legacy picker (transport_auto_pick off) reads the same ban: AmneziaWG nodes are skipped there too
+        setFlags(/*xrayClient=*/true, /*autoPick=*/false);
+        QString err;
+        ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("17", 17, "FI", 1.0), awgNodeJson("15", 15, "EE", 1.0) }), err));
+        eng.setMeasuredRtt({{QStringLiteral("17"), 30}, {QStringLiteral("15"), 34}});
+        CHECK(eng.connect(err));
+        eng.banAwgForAttempt();
+        CHECK(eng.bannedByAttempt(*eng.nodeById(QStringLiteral("17"))));
+        CHECK(eng.bannedByAttempt(*eng.nodeById(QStringLiteral("15"))));
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+    }
     if (g_failed) {
         fprintf(stderr, "transport_pick_check: FAILED %d/%d\n", g_failed, g_total);
         return 1;

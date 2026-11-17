@@ -1935,6 +1935,23 @@ static void test_adopted_unproven_told()
     CHECK(s.stopCalls == 0, "the fact stopped the session");
     CHECK(g_neverTimeouts.empty(), "no timeout yet: no timeout fact");
 }
+// Review F7: the NE stays silent past the first handshake timeout (no stats), then answers "no handshake".
+// The adoption is still told - on that late answer and on every one after it (the facade decides once).
+static void test_adopted_unproven_told_after_timeout()
+{
+    tapHandshakeFacts();
+    // Replies without handshake data (the engine not readable yet): the budget runs, nothing is proven.
+    NSDictionary *noHandshakeData = @{@"session_metadata": @{@"schema_version": @1, @"generation": @"run-1",
+                                                             @"configuration_generation": @"cfg-1", @"node_id": @"9"},
+                                      @"rx_bytes": @"0", @"tx_bytes": @"1000", @"last_handshake_time_sec": @(-1)};
+    HarnessSession *s = establishedSession(noHandshakeData, 150, [NSDate dateWithTimeIntervalSinceNow:-1560]);
+    runStatusPolls(400);                          // timeouts pass with no handshake data
+    CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "no timeout passed before the first answer");
+    CHECK(g_unproven == 0, "told without an answer");
+    s.statusReply = stalledReply(@7, @0);         // the first answer: soft-restarted, no handshake
+    runStatusPolls(300);
+    CHECK(g_unproven >= 1, "an answer after the first timeout was not told");
+}
 static void test_adopted_proven_not_told()
 {
     tapHandshakeFacts();
@@ -2258,6 +2275,7 @@ static const Test kTests[] = {
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
     {"uplink_probe_set_from_cxx_unit", test_uplink_probe_set_from_cxx_unit},
     {"adopted_unproven_told", test_adopted_unproven_told},
+    {"adopted_unproven_told_after_timeout", test_adopted_unproven_told_after_timeout},
     {"adopted_proven_not_told", test_adopted_proven_not_told},
     {"timeouts_told_when_never_handshook", test_timeouts_told_when_never_handshook},
     {"timeouts_not_told_without_answer", test_timeouts_not_told_without_answer},

@@ -1315,6 +1315,15 @@ void IosController::checkStatus()
                         ((last_handshake_time_sec > 0) ||
                          (rxBytes >= handshakeRxThreshold));
 
+                // AVPN (build 142, S3 + S5): the NE answered that its engine never handshook and got no data.
+                const bool answeredNoHandshake = hasHandshakeData && avpn_ios::answeredWithoutHandshake(
+                        (long long)last_handshake_time_sec, (unsigned long long)rxBytes,
+                        (unsigned long long)handshakeRxThreshold);
+                // S3: told on EVERY such reply of a session the cold-start rule showed Connected, whatever the
+                // handshake budget did meanwhile (review F7: the first answer may come after the first
+                // timeout); the facade's one re-check owner decides once per session.
+                if (m_shownConnectedBeforeHandshake && answeredNoHandshake)
+                    emit adoptedSessionUnproven();
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
@@ -1323,24 +1332,13 @@ void IosController::checkStatus()
                     qDebug() << "IosController::checkStatus : handshake confirmed";
                     emitConnectionStateIfChanged(Vpn::ConnectionState::Connected);
                     armOnDemandForConfirmedSession();
-                } else if (m_shownConnectedBeforeHandshake && m_handshakeTimeouts == 0 && hasHandshakeData
-                           && avpn_ios::answeredWithoutHandshake((long long)last_handshake_time_sec,
-                                                                 (unsigned long long)rxBytes,
-                                                                 (unsigned long long)handshakeRxThreshold)
-                           && !(m_handshakeTimer.isValid() && m_handshakeTimer.elapsed() > handshakeTimeoutMs)) {
-                    // AVPN (build 142, S3): the cold-start rule showed this session Connected before the NE
-                    // answered; the answer has no handshake and no data. The facade re-checks it (once per
-                    // session); the native state and the handshake budget below are unchanged.
-                    emit adoptedSessionUnproven();
                 } else if (m_handshakeTimer.isValid() &&
                            m_handshakeTimer.elapsed() > handshakeTimeoutMs) {
                     m_handshakeTimer.restart();
                     ++m_handshakeTimeouts;
                     // AVPN (build 142, S5): the fact of this timeout for the facade (an own Auto start on
                     // AmneziaWG leaves AmneziaWG at the first one); the native path below is unchanged.
-                    if (hasHandshakeData && avpn_ios::answeredWithoutHandshake(
-                            (long long)last_handshake_time_sec, (unsigned long long)rxBytes,
-                            (unsigned long long)handshakeRxThreshold))
+                    if (answeredNoHandshake)
                         emit handshakeNeverCompleted(m_handshakeTimeouts);
                     // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов
                     // честно отдаём Error и гасим туннель (типично: IP:порт ноды режется оператором).

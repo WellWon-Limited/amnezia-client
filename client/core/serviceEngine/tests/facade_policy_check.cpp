@@ -893,13 +893,15 @@ static void scannerCancelNeverDuringAppQuit()
 // the first native handshake timeout is due 12 s later (+ at most the 1 s status poll), the person's stop.
 static void awgNoHandshakeReplay()
 {
-    struct Attempt { const char *at; bool pinned; double neUpToStopS; };
+    // pinnedLocationXray: the pick of THIS start with AmneziaWG excluded gives an Xray node - inside the
+    // pinned location when one is pinned (17's host has no Xray listener, 15's has 15:xray), else anywhere.
+    struct Attempt { const char *at; bool pinnedLocation; bool xrayPick; double neUpToStopS; AwgNoHandshake expect; };
     const Attempt five[] = {
-        {"23:20:32 orb, node 17", /*pinned=*/true, 9.1},   // NE up 34.28, stop 43.39
-        {"23:20:44 scanner, node 17", true, 11.8},          // NE up 45.64, scanner cancel 57.46
-        {"23:21:01 orb after Auto, node 17", false, 12.0},  // NE up 04.27, stop 16.27
-        {"23:21:19 orb, node 15", true, 11.95},             // NE up 20.95, stop 32.90
-        {"23:21:36 orb, node 17", true, 7.3},               // NE up 38.01, app killed 45.33
+        {"23:20:32 orb, location of 17", true, false, 9.1, AwgNoHandshake::IgnoreNoXray},    // NE up 34.28, stop 43.39
+        {"23:20:44 scanner open, 17", true, false, 11.8, AwgNoHandshake::IgnoreNoXray},      // NE up 45.64, cancel 57.46
+        {"23:21:01 orb after Auto, 17", false, true, 12.0, AwgNoHandshake::Leave},          // NE up 04.27, stop 16.27
+        {"23:21:19 orb, location of 15", true, true, 11.95, AwgNoHandshake::Leave},         // NE up 20.95, stop 32.90 -> 15:xray
+        {"23:21:36 orb, location of 17", true, false, 7.3, AwgNoHandshake::IgnoreNoXray},   // NE up 38.01, app killed 45.33
     };
     int left = 0;
     int reachedTimeout = 0;
@@ -912,20 +914,17 @@ static void awgNoHandshakeReplay()
         in.ownStartInFlight = true;
         in.nodeIsAwg = true;
         in.autoMode = true;          // transport mode «Авто» all evening
-        in.pinned = a.pinned;
-        in.xrayPick = true;          // 11:xray, 12:xray, 15:xray measured (rtt 24-27 ms at 23:21:17)
+        in.explicitNode = false;     // no Scanner row tap among them (a pin is a location)
+        in.xrayPick = a.xrayPick;
         const AwgNoHandshake d = decideAwgNoHandshake(in);
         if (d == AwgNoHandshake::Leave)
             ++left;
-        CHECK(d == (a.pinned ? AwgNoHandshake::IgnorePinned : AwgNoHandshake::Leave));
+        CHECK(d == a.expect);
     }
-    // Only the start after the «Авто» tap is the rule's: the other four were on a chosen location.
-    CHECK(left == 1);
+    CHECK(left == 2); // the Auto start (to the best Xray) and 15's location (to 15:xray); 17 has no Xray
     // And that evening no start lived to its first timeout: the person gave up 7-12 s after the tunnel came
-    // up. With the rule, the Auto start leaves AmneziaWG ~1 s after the moment they stopped waiting.
+    // up. With the rule, such a start leaves AmneziaWG ~1 s after the moment they stopped waiting.
     CHECK(reachedTimeout == 0);
-    // That start: at the first timeout (NE up + 12 s) AmneziaWG is left; the person waited 12.0 s - the rule
-    // fires in the same second (poll) as their stop. The guard rails:
     AwgNoHandshakeInputs in;
     in.timeouts = 1;
     in.ownStartInFlight = true;
@@ -940,18 +939,22 @@ static void awgNoHandshakeReplay()
     stopped.ownStartInFlight = false; // the person's stop (or an adopted session, S3): theirs wins
     CHECK(decideAwgNoHandshake(stopped) == AwgNoHandshake::IgnoreNotOwnStart);
     AwgNoHandshakeInputs manual = in;
-    manual.autoMode = false;          // «AmneziaWG» chosen by hand
+    manual.autoMode = false;          // «AmneziaWG» chosen by hand: never overridden
     CHECK(decideAwgNoHandshake(manual) == AwgNoHandshake::IgnoreMode);
+    AwgNoHandshakeInputs tapped = in;
+    tapped.explicitNode = true;       // a Scanner row tap chose exactly this node: never overridden
+    CHECK(decideAwgNoHandshake(tapped) == AwgNoHandshake::IgnoreExplicitNode);
     AwgNoHandshakeInputs again = in;
     again.alreadyLeft = true;         // no flapping back inside the attempt
     CHECK(decideAwgNoHandshake(again) == AwgNoHandshake::IgnoreAlreadyLeft);
     AwgNoHandshakeInputs noXray = in;
-    noXray.xrayPick = false;          // nothing to go to (no Xray for this device / all excluded)
+    noXray.xrayPick = false;          // nothing to go to (no Xray for this device / in the pinned location)
     CHECK(decideAwgNoHandshake(noXray) == AwgNoHandshake::IgnoreNoXray);
     AwgNoHandshakeInputs onXray = in;
     onXray.nodeIsAwg = false;
     CHECK(decideAwgNoHandshake(onXray) == AwgNoHandshake::IgnoreNotAwg);
     CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::Leave)) == QLatin1String("leave_awg"));
+    CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::IgnoreExplicitNode)) == QLatin1String("explicit_node"));
 }
 
 // Build 142 (S3): on iOS a native Reconnecting during the app's own check is a handshake timeout: the check failed.

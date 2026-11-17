@@ -220,18 +220,25 @@ public:
     // A user start / stop: a new attempt - its exclusions are forgotten. The engine's own stops inside
     // one attempt (watchdog, restart) keep them.
     // Build 142 (S5, DebugSnapshot.h::decideAwgNoHandshake): an own Auto start on AmneziaWG got no handshake
-    // at the first native timeout. xrayPickWithoutAwg: the automatic pick with every AmneziaWG node excluded
-    // gives an Xray node (session exclusions as the real pick: with them, then without). leaveAwgForAttempt:
-    // the start of the current node is recorded as a failed rise of its location x AmneziaWG, and every
-    // AmneziaWG node is excluded for the rest of this attempt (code awg_no_handshake) - the next pick of the
-    // attempt is Xray, and "every candidate failed" can never bring AmneziaWG back while Xray candidates
-    // remain. awgLeftForAttempt: that was done in this attempt.
+    // at the first native timeout. The attempt's TRANSPORT BAN is one piece of attempt state (m_awgBanned)
+    // with one reader (bannedByAttempt) that every pick consults: pickTransport (connect, the pin, failover,
+    // reseed), the row-tap hint, network memory, the interrupted-switch replay and the legacy pickers. It
+    // is not an attempt exclusion: the "every candidate failed" reset of connect() and a pool refresh do not
+    // touch it. It ends with the attempt (beginUserAttempt: a user start / stop) and on any action of the
+    // person on the intent (clearAwgBan from the facade: a pick, a row tap, «Авто»); our own stops keep it.
+    // In connect() it yields only when the pool has no Xray the pick could take at all (removed by a
+    // refresh): absence, not failures - failed Xray starts are retried, never AmneziaWG.
+    // xrayPickWithoutAwg: with every own AmneziaWG node excluded the pick of THIS start - the pinned
+    // location when a location is pinned, else the automatic pick - gives an Xray node.
     bool xrayPickWithoutAwg() const;
-    void leaveAwgForAttempt();
-    bool awgLeftForAttempt() const;
+    void banAwgForAttempt();
+    void clearAwgBan() { m_awgBanned = false; }
+    bool awgBanned() const { return m_awgBanned; }
+    bool bannedByAttempt(const SubscriptionNode &n) const;
     void beginUserAttempt()
     {
         m_attemptExcluded.clear();
+        m_awgBanned = false; // build 142 (S5): the transport ban ends with the attempt
         clearAttemptOrder(); // AVPN Scanner: a hint belongs to the attempt it was given for
     }
     // ---- AVPN Scanner (CONNECT-INVARIANTS §32 п. 2, plan scanner-client-plan.md §2.12) ----
@@ -615,7 +622,7 @@ private:
                                           const QString &exclA, bool withExclusions,
                                           bool useLastKnownRtt = false,
                                           const QSet<QString> &extraHardExcluded = {}) const;
-    QSet<QString> awgNodeIds() const; // build 142 (S5): every AmneziaWG node of the candidates
+    QSet<QString> awgNodeIds() const; // build 142 (S5): every own AmneziaWG node of the candidates
     QHash<QString, int> failoverRtt() const;
     // Upstream nodes: the tier gate of the automatic pick (disabled while features.upstream_nodes is off).
     UpstreamTierGate tierGate() const;
@@ -728,6 +735,7 @@ private:
     // this network within the last half hour. Without an adopted switch this is m_failedThisSession.
     QSet<QString> sessionExclusions() const;
     QHash<QString, QString> m_attemptExcluded; // upstream: start failed in this attempt (nodeId -> code)
+    bool m_awgBanned = false; // build 142 (S5): AmneziaWG banned for the rest of this attempt (bannedByAttempt)
     FastTierEvidence m_fastEvidence;           // upstream: reachability evidence of the facade
     bool          m_fastTierOpen = false;      // upstream: own tier pre-exhausted for this attempt
     QString       m_fastTierWhy;
