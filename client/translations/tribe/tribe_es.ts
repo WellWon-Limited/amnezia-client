@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+456"/>
+        <location line="+460"/>
         <source>Проверяем трафик…</source>
         <translation>Comprobando el tráfico…</translation>
     </message>
     <message>
-        <location line="-454"/>
+        <location line="-458"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>El tráfico iba por fuera de la VPN: probando otra ruta</translation>
     </message>
@@ -1165,6 +1165,16 @@
         <translation>Red restringida por el operador: conéctese a Wi-Fi</translation>
     </message>
     <message>
+        <location line="+3"/>
+        <source>Отключаемся…</source>
+        <translation>Desconectando…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверяем…</source>
+        <translation>Verificando…</translation>
+    </message>
+    <message>
         <location line="+2"/>
         <source>Защита активна — ваше соединение безопасно</source>
         <translation>Protección activa: tu conexión es segura</translation>
@@ -1175,7 +1185,7 @@
         <translation>Conectado, pero el tráfico no pasa</translation>
     </message>
     <message>
-        <location line="-686"/>
+        <location line="-690"/>
         <source>Нет связи</source>
         <translation>Sin conexión</translation>
     </message>
@@ -1185,7 +1195,7 @@
         <translation>Cargando…</translation>
     </message>
     <message>
-        <location line="+688"/>
+        <location line="+692"/>
         <source>Доступ приостановлен — подписка истекла</source>
         <translation>Acceso pausado: la suscripción ha caducado</translation>
     </message>
@@ -1302,7 +1312,8 @@
         <translation>Instalando…</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-453"/>
+        <location line="+454"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -3047,7 +3058,7 @@ Puedes adjuntar una foto o un video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4001"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4006"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Etiqueta «%1»: medición SIN nuestro túnel. Primero apaga Tribe VPN.</translation>
     </message>
@@ -3147,7 +3158,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Reporte enviado al desarrollador ✓</translation>
     </message>
     <message>
-        <location line="-2815"/>
+        <location line="-2806"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>No hay una versión anterior a la que volver</translation>
     </message>
@@ -3192,12 +3203,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Descargando la actualización…</translation>
     </message>
     <message>
-        <location line="+409"/>
+        <location line="+410"/>
         <source>Текущий сервер</source>
         <translation>Servidor actual</translation>
     </message>
     <message>
-        <location line="+387"/>
+        <location line="+388"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No hay una suscripción activa. Consigue una para conectarte.</translation>
     </message>
@@ -3207,7 +3218,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo actualizar la lista de servidores. Vuelve a conectarte.</translation>
     </message>
     <message>
-        <location line="+531"/>
+        <location line="+533"/>
         <source>Отправляем…</source>
         <translation>Enviando…</translation>
     </message>
@@ -3222,7 +3233,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Grabando, enviado a las %1</translation>
     </message>
     <message>
-        <location line="+1134"/>
+        <location line="+1121"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>Este informe ya se ha entregado</translation>
     </message>
@@ -3371,12 +3382,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+293"/>
-        <location line="+3578"/>
+        <location line="+3607"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>El servidor no deja pasar el tráfico: prueba con otro servidor</translation>
     </message>
     <message>
-        <location line="-3244"/>
+        <location line="-3273"/>
         <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
         <translation>El tráfico no pasa por ningún servidor: revisa tu red y vuelve a intentarlo</translation>
     </message>

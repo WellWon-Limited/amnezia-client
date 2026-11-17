@@ -848,6 +848,10 @@ PageType {
                                     ? qsTr("Трафик шёл мимо VPN — пробуем другой путь")
                                     : qsTr("Сервер не пропускает данные — пробуем другой путь"))
               : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
+              // Device test of 142: while the orb said «Connecting…» the caption still asked to tap it. The
+              // caption follows the orb's phase: our own stop, taking over a live session, connecting.
+              : root.engineOwnStopping ? qsTr("Отключаемся…")
+              : root.showBusy ? (root.adopting ? qsTr("Проверяем…") : qsTr("Подключаемся…"))
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
                                               : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
