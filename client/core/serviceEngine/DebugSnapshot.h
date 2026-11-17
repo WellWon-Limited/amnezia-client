@@ -1407,6 +1407,27 @@ inline QString scanNetworkKindName(const QString &pathKind, const QString &inter
     return scanNetworkKindPick(pathKind, interfacesKind, platformMedium).kind;
 }
 
+// The platform medium as the last input of scanNetworkKindPick (AvpnEngineQml::networkKind - the one answer to
+// "what network is the device on" for the journal, the reports and the Doctor). qtMedium is QNetworkInformation's
+// transport medium ("wifi" | "cellular" | "ethernet" | "" for Unknown). iOS reports Unknown on cellular and under
+// any VPN; a known radio generation (CoreTelephony) then means "cellular" only while our own tunnel is down -
+// under it a phone on Wi-Fi with a SIM has a generation too, so the answer is "" (unknown), never a guess.
+inline QString platformNetworkKind(const QString &qtMedium, const QString &cellGen, bool ownTunnelUp)
+{
+    if (!qtMedium.isEmpty())
+        return qtMedium;
+    if (ownTunnelUp || cellGen.isEmpty())
+        return QString();
+    return QStringLiteral("cellular");
+}
+
+// The radio generation worth reporting for a network kind: CoreTelephony names the SIM's radio whatever carries
+// the data, so it belongs to a report only when the kind is cellular ("lte" on Wi-Fi read as "cellular LTE").
+inline QString cellularGenerationForKind(const QString &kind, const QString &cellGen)
+{
+    return kind == QLatin1String("cellular") ? cellGen : QString();
+}
+
 // Item 4 (TribeScanner::reportCheckRefused): why a full check could not start or submit, as the machine's shade
 // keys know it - "queue_full" (report_queue_full: the queue's 20 reports / 32 MiB wait for the network), "busy"
 // (report_check_busy: another diagnostic runs), "unavailable" (report_check_unavailable: no queue, the switch off,

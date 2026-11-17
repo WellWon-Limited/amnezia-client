@@ -1152,6 +1152,28 @@ static void scannerPhysicalNetworkKind()
     CHECK(upstreamNetworkKey(ios.kind, QStringLiteral("250-02"), QStringLiteral("lte"), 0).startsWith(QLatin1String("cell:250-02:")));
     ios = scanNetworkKindPick(QStringLiteral("cellular"), QString(), QStringLiteral("wifi"));
     CHECK(ios.kind == QLatin1String("cellular"));
+    // U1 (device test 142, iPhone Air on Wi-Fi with a SIM, VPN up): Qt's medium Unknown, CoreTelephony "lte".
+    // The platform input says "unknown" under our tunnel instead of guessing cellular...
+    CHECK(platformNetworkKind(QString(), QStringLiteral("lte"), /*ownTunnelUp=*/true).isEmpty());
+    // ...so a path monitor that has not answered yet leaves the kind unknown, never "cellular".
+    CHECK(scanNetworkKindPick(QString(), QString(), platformNetworkKind(QString(), QStringLiteral("lte"), true)).kind.isEmpty());
+    // The monitor's Wi-Fi wins and the report carries no radio generation for it.
+    ios = scanNetworkKindPick(QStringLiteral("wifi"), QString(), platformNetworkKind(QString(), QStringLiteral("lte"), true));
+    CHECK(ios.kind == QLatin1String("wifi"));
+    CHECK(cellularGenerationForKind(ios.kind, QStringLiteral("lte")).isEmpty());
+    // With the tunnel down Unknown + a radio is cellular (iOS reports Unknown on cellular), Qt's known medium wins.
+    CHECK(platformNetworkKind(QString(), QStringLiteral("lte"), false) == QLatin1String("cellular"));
+    CHECK(platformNetworkKind(QStringLiteral("wifi"), QStringLiteral("lte"), false) == QLatin1String("wifi"));
+    CHECK(platformNetworkKind(QStringLiteral("wifi"), QStringLiteral("lte"), true) == QLatin1String("wifi"));
+    CHECK(platformNetworkKind(QString(), QString(), false).isEmpty());
+    CHECK(cellularGenerationForKind(QStringLiteral("cellular"), QStringLiteral("lte")) == QLatin1String("lte"));
+    CHECK(cellularGenerationForKind(QString(), QStringLiteral("lte")).isEmpty());
+    // The Doctor's line in the support report: Wi-Fi with a SIM reads "Wi-Fi", not "сотовая LTE".
+    {
+        const auto st = doctor::networkStage(0, QStringLiteral("wifi"), cellularGenerationForKind(QStringLiteral("wifi"), QStringLiteral("lte")), -1, -1, -1);
+        CHECK(st.note == QStringLiteral("Сеть: Wi-Fi"));
+        CHECK(!st.data.contains(QStringLiteral("cellular_gen")));
+    }
     // The reporting key from the physical kind: never "unknown" for a Mac on Wi-Fi under its VPN.
     CHECK(upstreamNetworkKey(QStringLiteral("wifi"), QString(), QString(), 0) == QLatin1String("wifi"));
     CHECK(upstreamNetworkKey(QString(), QString(), QString(), 0) == QLatin1String("unknown"));

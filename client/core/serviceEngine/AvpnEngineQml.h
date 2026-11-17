@@ -628,7 +628,14 @@ public:
     // AVPN (волна UX Доктора 07-22): интро-шаги. Авто-тип сети ("wifi"/"cellular"/"ethernet"/"" =
     // неизвестно) — по нему интро решает, спрашивать ли «какой у вас интернет». Ручной выбор НЕ
     // персистится (сеть меняется между запусками) — benchExtra берёт его последним фолбэком.
+    // Only the network-memory keys still read it (currentNetworkMemoryKey, upstreamNetworkKeyNow): under the
+    // tunnel its CoreTelephony fallback says "cellular" on Wi-Fi. Every other reader uses networkKind().
     Q_INVOKABLE QString doctorNetType() const;
+    // The one answer to "what network is the device on" ("wifi" | "cellular" | "ethernet" | "" = unknown): the
+    // physical kind under any VPN, the order the Scanner uses (scanNetworkKindPick: the path monitor, the
+    // interface list, then platformNetworkKind). The journal, the reports and the Doctor read it.
+    Q_INVOKABLE QString networkKind() const;
+    QString platformNetKind() const; // the last input of networkKind (DebugSnapshot.h::platformNetworkKind)
     Q_INVOKABLE void setDiagNetType(const QString &t);
     // Операторы РФ для плашки интро (server-driven lists.doctor_operators "MCC-MNC|Имя").
     Q_INVOKABLE QVariantList diagOperators() const;
