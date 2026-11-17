@@ -401,6 +401,58 @@ static void codes()
     CHECK(seen.size() == int(ProfileRefusal::FakeDnsOverlap) + 1);
 }
 
+// Owner's iPhone 16.11 (build 140): every provider node was refused at connect with outbound_protocol "freedom"
+// while the Scanner probed the same profiles as working. The connect built its allowlist from the stub's proto:
+// tags (proxy outbounds only, upstream_normalize._protocols) through upstreamOutboundAllowlist, which keeps only
+// what it is given - the helper outbounds fell out. The one rule now: upstreamProfileOutboundAllowlist, applied
+// by the connect (upstreamProfileOptions) and by the Scanner's full-profile probe (upstreamProfileCheck).
+static void profileRule()
+{
+    // The tags a vless + hysteria profile's stub carries (synthetic, as the normalizer derives them).
+    const QStringList tags{"net:tcp", "proto:hysteria", "proto:vless", "sec:reality"};
+    // "Before": the stub's proto: names as the allowlist - a profile with a `direct` outbound is refused.
+    CHECK(refused(run(kProfile, [] {
+                      ProfileSanitizerOptions o;
+                      o.allowedOutboundProtocols = upstreamOutboundAllowlist({"hysteria", "vless"});
+                      return o;
+                  }()),
+                  ProfileRefusal::OutboundProtocol));
+    // Now: the same stub tags accept it (freedom / blackhole / dns / loopback are always allowed).
+    CHECK(run(kProfile, upstreamProfileOptions(tags)).ok());
+    CHECK(run(kProfile, upstreamProfileOptions({})).ok()); // no stub: the backend default (with the helpers)
+    for (const char *helper : {"freedom", "blackhole", "dns", "loopback"})
+        CHECK(upstreamProfileOutboundAllowlist(tags).contains(QLatin1String(helper))
+              && upstreamProfileOutboundAllowlist({}).contains(QLatin1String(helper)));
+    // A declared proxy protocol widens up to what the core has - never beyond; net:/sec: tags are not protocols.
+    const auto vmessProfile = [](QJsonObject &o) { setOutbound(o, 1, QJsonObject{{"protocol", "vmess"}, {"tag", "leg-b"}}); };
+    CHECK(refused(edited(vmessProfile, upstreamProfileOptions(tags)), ProfileRefusal::OutboundProtocol));
+    CHECK(edited(vmessProfile, upstreamProfileOptions({"proto:vless", "proto:vmess"})).ok());
+    CHECK(!upstreamProfileOutboundAllowlist({"proto:made-up", "net:tcp", "tcp"}).contains("made-up")
+          && !upstreamProfileOutboundAllowlist({"net:tcp"}).contains("tcp"));
+    // Still refused whatever the tags: only helpers (no proxy), a protocol the core lacks, forbidden sections.
+    CHECK(refused(edited([](QJsonObject &o) {
+                      o.insert("outbounds", QJsonArray{QJsonObject{{"protocol", "freedom"}, {"tag", "direct"}}});
+                  },
+                         upstreamProfileOptions(tags)),
+                  ProfileRefusal::NoProxyOutbound));
+    CHECK(refused(edited([](QJsonObject &o) { setOutbound(o, 1, QJsonObject{{"protocol", "tun"}, {"tag", "leg-b"}}); },
+                         upstreamProfileOptions({"proto:tun"})),
+                  ProfileRefusal::OutboundProtocol));
+    // The Scanner's check gives the connect's verdict for the same bytes, sha and stub (the bind changes nothing).
+    QJsonObject vm = root();
+    vmessProfile(vm);
+    QJsonObject api = root();
+    api.insert("api", QJsonObject{{"tag", "api"}});
+    for (const QByteArray &cfg : {kProfile, ser(vm), ser(api)})
+        for (const QStringList &t : {tags, QStringList{"proto:vmess"}, QStringList()}) {
+            const SanitizedProfile atConnect = XrayProfileSanitizer::sanitize(cfg, sha(cfg), bind(), upstreamProfileOptions(t));
+            const SanitizedProfile inScan = upstreamProfileCheck(cfg, sha(cfg), t);
+            CHECK(atConnect.refusal == inScan.refusal);
+        }
+    CHECK(upstreamProfileCheck(kProfile, sha(kProfile), tags).ok());
+    CHECK(refused(upstreamProfileCheck(kProfile, QString(), tags), ProfileRefusal::BadExpectedSha));
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -415,6 +467,7 @@ int main(int argc, char **argv)
     sockopt();
     fakedns();
     codes();
+    profileRule();
     if (g_fail) {
         std::printf("upstream_sanitizer_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

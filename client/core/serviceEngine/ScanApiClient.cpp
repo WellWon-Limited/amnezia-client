@@ -605,7 +605,7 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
             Batch r;
             r.failCode = QStringLiteral("transport");
             for (const QString &p : profileIds)
-                r.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport")};
+                r.items << BatchItem{p, false, QString(), QString(), QStringLiteral("transport"), QString()};
             if (done)
                 done(r);
         });
@@ -632,7 +632,7 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
             out.failCode = code;
             out.items.clear();
             for (const QString &p : profileIds)
-                out.items << BatchItem{p, false, QString(), QString(), code};
+                out.items << BatchItem{p, false, QString(), QString(), code, QString()};
         };
         if (!self) {
             failAll(QStringLiteral("transport"));
@@ -652,6 +652,7 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
                     bi.granted = it.value(QLatin1String("granted")).toBool(false);
                     bi.leaseId = it.value(QLatin1String("lease_id")).toString();
                     bi.config = it.value(QLatin1String("config")).toString();
+                    bi.configSha256 = it.value(QLatin1String("config_sha256")).toString();
                     bi.code = it.value(QLatin1String("code")).toString();
                     if (bi.granted && !leaseIdValid(bi.leaseId)) {
                         bi.granted = false;
@@ -664,7 +665,7 @@ void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig
                 }
                 out.ok = true;
                 for (const QString &p : profileIds)
-                    out.items << got.value(p, BatchItem{p, false, QString(), QString(), QStringLiteral("lease_failed")});
+                    out.items << got.value(p, BatchItem{p, false, QString(), QString(), QStringLiteral("lease_failed"), QString()});
             }
         } else if (r.status == 403) {
             failAll(QStringLiteral("not_entitled"));

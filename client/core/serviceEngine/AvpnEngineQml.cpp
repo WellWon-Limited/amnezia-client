@@ -286,6 +286,11 @@ public:
     {
         return knownIpsForHost(m_e->m_apiHostIpsByHost, host);
     }
+    QStringList upstreamProtocolTags(const QString &nodeId) const override
+    {
+        const avpn::SubscriptionNode *n = m_e->m_engine.nodeById(nodeId);
+        return (n && n->upstream) ? n->upstream->protocols : QStringList();
+    }
     void userConnectForScan() override { m_e->scanUserConnect(); }
     void cancelPendingConnect() override { m_e->scanCancelPendingConnect(); }
     void connectRow(const QString &nodeId, const QStringList &attemptOrder, qint64 hintTtlMs, bool userOrigin,

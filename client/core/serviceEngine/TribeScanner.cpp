@@ -4,6 +4,7 @@
 #include "ScanPlan.h"        // scanAwgMiniFlag
 #include "TuningStore.h"
 #include "UpstreamVerdict.h" // upstreamUnverifiableStrictTuned
+#include "XrayProfileSanitizer.h" // upstreamProfileCheck: the connect's profile rule
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -885,8 +886,21 @@ QString TribeScanner::configOf(const ScanCandidate &c) const
 {
     if (c.origin == ScanOrigin::Own)
         return m_engine->ownProbeConfig(c);
-    if (c.kind == ScanProbeKind::XrayFull)
-        return m_leases.value(c.id).config; // the probe lease's sanitized config (include_config)
+    if (c.kind == ScanProbeKind::XrayFull) {
+        // The probe lease's config (include_config), judged by the connect's own profile rule first
+        // (XrayProfileSanitizer.h::upstreamProfileCheck): a profile the connect would refuse is never probed, so it
+        // can never show as working (owner's iPhone 16.11, build 140). Refused = empty config = «Не проверено».
+        const Lease l = m_leases.value(c.id);
+        if (l.config.isEmpty())
+            return QString();
+        const SanitizedProfile chk = upstreamProfileCheck(l.config.toUtf8(), l.configSha256,
+                                                          m_engine->upstreamProtocolTags(c.id));
+        if (!chk.ok()) {
+            emitLog(QStringLiteral("probe_profile_refused code=profile_%1").arg(chk.code()));
+            return QString();
+        }
+        return l.config;
+    }
     return scanProviderLegConfig(m_active.body, c.profileId);
 }
 
@@ -1718,7 +1732,7 @@ void TribeScanner::doProbeBatch(const ScanAction &a)
         // Every lease is known before any grant reaches the machine (a late grant is released at once).
         for (const ScanApiClient::BatchItem &it : b.items)
             if (it.granted && candOf.contains(it.profileId))
-                self->m_leases.insert(candOf.value(it.profileId), Lease{it.leaseId, it.config});
+                self->m_leases.insert(candOf.value(it.profileId), Lease{it.leaseId, it.config, it.configSha256});
         for (const ScanApiClient::BatchItem &it : b.items) {
             const QString cand = candOf.value(it.profileId);
             if (cand.isEmpty())

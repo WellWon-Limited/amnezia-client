@@ -740,14 +740,10 @@ void VpnConnectionTunnelControl::bringUpUpstream(const UpstreamOwnerEvent &e)
     bind.port = 10808;
     bind.user = randomHex();
     bind.password = randomHex();
-    ProfileSanitizerOptions opt;
-    if (m_upStub.upstream) {
-        QStringList declared;
-        for (const QString &p : m_upStub.upstream->protocols)
-            if (p.startsWith(QLatin1String("proto:")))
-                declared << p.mid(6);
-        opt.allowedOutboundProtocols = upstreamOutboundAllowlist(declared);
-    }
+    // The one profile rule shared with the Scanner's probe (XrayProfileSanitizer.h::upstreamProfileOutboundAllowlist):
+    // the stub's proto: tags list only the proxy outbounds - the helper outbounds stay allowed.
+    const ProfileSanitizerOptions opt =
+        upstreamProfileOptions(m_upStub.upstream ? m_upStub.upstream->protocols : QStringList());
     const SanitizedProfile sp = XrayProfileSanitizer::sanitize(e.config, e.configSha256, bind, opt);
     if (!sp.ok()) {
         qWarning() << "avpn upstream: profile of" << m_upStub.nodeId << "refused:" << sp.code() << sp.detail;

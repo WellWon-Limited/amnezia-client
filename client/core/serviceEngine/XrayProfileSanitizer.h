@@ -145,6 +145,31 @@ inline QStringList upstreamOutboundAllowlist(const QStringList &requested)
     return out.isEmpty() ? upstreamDefaultOutboundProtocols() : out;
 }
 
+// THE outbound rule of a delivered provider profile - one rule for the connect (VpnConnectionTunnelControl::
+// bringUpUpstream) and the Scanner's full-profile probe (TribeScanner::configOf), so a profile the Scanner
+// shows as working is never refused at connect for its outbounds (owner's iPhone 16.11, build 140: every
+// provider node refused with outbound_protocol "freedom" while the Scanner marked it working).
+// stubProtocolTags = the stub's / lease's `upstream.protocols` (upstream_normalize._protocols): `proto:<name>`
+// of the PROXY outbounds only, plus net:/sec:/mask:/enc:/mux tags (ignored here). It describes the profile, it
+// is not an allowlist: the helper outbounds (freedom, blackhole, dns, loopback) never appear in it and are
+// always allowed - the normalizer keeps them (RU / private direct routes are the provider's split), and the leak
+// guard (D4) is the server's: a profile whose fallback chain still ends in `freedom` is normalized as
+// `leak_guard_state = unresolved` and withheld from every lease (upstream_pool.leak_guard_withholds), so it never
+// reaches this check. The backend's default proxies stay allowed; a declared proxy protocol widens the list only
+// up to what the core has.
+inline QStringList upstreamProfileOutboundAllowlist(const QStringList &stubProtocolTags)
+{
+    QStringList out = upstreamDefaultOutboundProtocols();
+    for (const QString &t : stubProtocolTags) {
+        if (!t.startsWith(QLatin1String("proto:")))
+            continue;
+        const QString p = t.mid(6);
+        if (xrayCoreOutboundProtocols().contains(p) && !out.contains(p))
+            out << p;
+    }
+    return out;
+}
+
 struct LocalInboundBind {
     int port = 0;      // the runners (iOS NE, desktop XrayProtocol) re-pick the port; any valid one here
     QString user;      // random per session, 1..255 bytes (SOCKS5 user/password limit)
@@ -155,6 +180,14 @@ struct ProfileSanitizerOptions {
     int maxBytes = kUpstreamConfigMaxBytes;
     QStringList allowedOutboundProtocols = upstreamDefaultOutboundProtocols();
 };
+
+// The options of a delivered provider profile (connect and Scanner alike): upstreamProfileOutboundAllowlist.
+inline ProfileSanitizerOptions upstreamProfileOptions(const QStringList &stubProtocolTags)
+{
+    ProfileSanitizerOptions o;
+    o.allowedOutboundProtocols = upstreamProfileOutboundAllowlist(stubProtocolTags);
+    return o;
+}
 
 struct SanitizedProfile {
     ProfileRefusal refusal = ProfileRefusal::None;
@@ -393,5 +426,19 @@ private:
         return a.mid(1, a.size() - 2); // ["..."] -> "..."
     }
 };
+
+// The connect's profile check without a session, for the Scanner's full-profile probe: the same sanitize() with
+// the same options (upstreamProfileOptions) and a fixed valid bind whose output is dropped - the bind changes no
+// verdict, so the Scanner refuses exactly the profiles the connect would refuse. (Its probe engine gets the profile
+// as delivered: it removes the inbound and listens on nothing.)
+inline SanitizedProfile upstreamProfileCheck(const QByteArray &config, const QString &expectedSha256Hex,
+                                             const QStringList &stubProtocolTags)
+{
+    LocalInboundBind b;
+    b.port = 10808;
+    b.user = QStringLiteral("check");
+    b.password = QStringLiteral("check");
+    return XrayProfileSanitizer::sanitize(config, expectedSha256Hex, b, upstreamProfileOptions(stubProtocolTags));
+}
 
 } // namespace avpn

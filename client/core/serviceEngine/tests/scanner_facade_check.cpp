@@ -216,6 +216,7 @@ struct Server {
     QJsonArray nodes;     // ScanManifestNode objects
     QJsonArray upstream;  // ScanManifestUpstream objects
     QHash<QString, QString> refuse; // profile id -> refusal code
+    QHash<QString, QByteArray> configs; // profile id -> the normalized config a probe grant carries (+ its sha256)
     QJsonObject numbers;  // manifest numbers
     int manifestStatus = 0; // non-zero: /v1/scan/manifest answers this status (no body)
     int tokenStatus = 0;    // non-zero: /v1/scan/token answers this status
@@ -313,8 +314,13 @@ struct Server {
                 QJsonObject it{{"profile_id", pid}, {"granted", true},
                                {"lease_id", QStringLiteral("LEASEIDLEASEIDLEASEIDLEASEID%1").arg(++leaseSerial, 4, 10, QLatin1Char('0'))},
                                {"expires_in_s", 60}};
-                if (cfg)
+                if (cfg && configs.contains(pid)) {
+                    it.insert("config", QString::fromUtf8(configs.value(pid)));
+                    it.insert("config_sha256", QString::fromLatin1(
+                        QCryptographicHash::hash(configs.value(pid), QCryptographicHash::Sha256).toHex()));
+                } else if (cfg) {
                     it.insert("config", QString::fromLatin1(kProviderConfig));
+                }
                 items << it;
             }
             QJsonObject body{{"type", "upstream_probe_batch"}, {"upstream_revision", double(revision)}, {"items", items}};
@@ -1167,6 +1173,66 @@ static void caseFullScan()
     const qint64 lightWorst = w.s->machine().tunables().costLightBytes;
     const qint64 live = kLiveSpent;
     CHECK_EQ(w.ledgerLast(), w.http.totalBytes + hostFinal + lightWorst + live);
+    CHECK(w.logsClean());
+}
+
+// Owner's iPhone 16.11 (build 140): the Scanner probed provider profiles the connect then refused. A full-profile
+// probe now passes the connect's own profile check first (XrayProfileSanitizer.h::upstreamProfileCheck): a profile
+// with helper outbounds (freedom / blackhole) is probed as delivered; a profile the connect would refuse never
+// reaches the host and its row is not «works». Synthetic normalized profiles (documentation addresses only).
+static QByteArray syntheticProfile(bool forbiddenSection)
+{
+    QByteArray p = R"({)";
+    if (forbiddenSection)
+        p += R"("api":{"tag":"api"},)";
+    p += R"("inbounds":[{"listen":"127.0.0.1","port":"__TRIBE_SOCKS_PORT__","protocol":"socks",)"
+         R"("settings":{"accounts":[{"pass":"__TRIBE_SOCKS_PASS__","user":"__TRIBE_SOCKS_USER__"}],"auth":"password","udp":true},)"
+         R"("tag":"tribe-in"}],"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"192.0.2.31","port":443,)"
+         R"("users":[{"encryption":"none","id":"11111111-2222-4333-8444-555555555555"}]}]},"tag":"proxy"},)"
+         R"({"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}],)"
+         R"("providerExtra":{"marker":"SECRET-PROVIDER-CONFIG"},)"
+         R"("routing":{"rules":[{"ip":["geoip:private"],"outboundTag":"direct"},{"network":"tcp,udp","outboundTag":"proxy"}]}})";
+    return p;
+}
+
+static void caseFullProbeProfileRule()
+{
+    g_case = QStringLiteral("full_probe_profile_rule");
+    World w;
+    // Two composite profiles: full probes on Wi-Fi with the config in the grant.
+    for (int i = 0; i < 2; ++i) {
+        QJsonObject u = w.server.upstream.at(i).toObject();
+        u.insert("probe_class", "composite");
+        w.server.upstream[i] = u;
+    }
+    w.server.configs.insert(kPids.at(0), syntheticProfile(false));
+    w.server.configs.insert(kPids.at(1), syntheticProfile(true));
+    w.liveOn(QStringLiteral("4:xray"));
+    w.start();
+    w.s->open();
+    w.run(20000);
+    QStringList sentConfigs;
+    for (const QJsonObject &rq : w.host.requests)
+        if (rq.value("action").toString() == QLatin1String("scan_start") || rq.value("action").toString() == QLatin1String("scan_add"))
+            for (const QJsonValue &v : rq.value("candidates").toArray())
+                if (v.toObject().value("profile_id").toString() == kPids.at(0)
+                    || v.toObject().value("profile_id").toString() == kPids.at(1))
+                    sentConfigs << v.toObject().value("profile_id").toString() + QLatin1Char('|')
+                                       + v.toObject().value("kind").toString() + QLatin1Char('|')
+                                       + v.toObject().value("config").toString();
+    bool fullA = false, anyB = false;
+    for (const QString &c : sentConfigs) {
+        fullA = fullA || (c.startsWith(kPids.at(0) + QLatin1String("|xray_full|"))
+                          && c.endsWith(QString::fromUtf8(syntheticProfile(false))));
+        anyB = anyB || (c.startsWith(kPids.at(1) + QLatin1String("|xray_full|")));
+    }
+    CHECK(fullA); // the profile with freedom / blackhole outbounds: probed as delivered
+    CHECK(!anyB); // the one the connect would refuse: never probed in full
+    CHECK(w.row(QStringLiteral("up:") + kPids.at(1)).value("state").toString() != QLatin1String("works"));
+    bool refusedLogged = false;
+    for (const QString &l : w.logs)
+        refusedLogged = refusedLogged || l.contains(QLatin1String("probe_profile_refused code=profile_forbidden_section"));
+    CHECK(refusedLogged);
     CHECK(w.logsClean());
 }
 
@@ -3601,6 +3667,7 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     caseFullScan();
+    caseFullProbeProfileRule();
     caseLiveDigest();
     caseManifest304();
     caseManifestSignature();

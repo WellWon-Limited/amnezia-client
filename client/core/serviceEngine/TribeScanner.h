@@ -151,6 +151,13 @@ public:
         Q_UNUSED(host);
         return {};
     }
+    // The `upstream.protocols` tags of a provider stub (engine node id "up:<profile>"): the input of the one profile
+    // rule the connect applies (XrayProfileSanitizer.h::upstreamProfileOptions). {} = unknown: the backend default.
+    virtual QStringList upstreamProtocolTags(const QString &nodeId) const
+    {
+        Q_UNUSED(nodeId);
+        return {};
+    }
     // The ONLY three ways to the tunnel (CONNECT-INVARIANTS §32).
     virtual void userConnectForScan() = 0;
     virtual void cancelPendingConnect() = 0;
@@ -351,6 +358,7 @@ private:
     struct Lease {
         QString leaseId; // SECRET
         QString config;  // SECRET
+        QString configSha256;
     };
     struct Active {         // what the last delivered manifest gave the current scan
         QString requestId;

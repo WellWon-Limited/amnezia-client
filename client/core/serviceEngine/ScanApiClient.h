@@ -175,6 +175,7 @@ public:
         QString leaseId;   // SECRET
         QString config;    // SECRET (include_config only)
         QString code;      // refused: no_seat | disabled | rate_limited | not_entitled | over_quota | upstream_unavailable | lease_failed
+        QString configSha256; // with config: its sha256 (the device-side profile check needs it, as at connect)
     };
     struct Batch {
         bool ok = false;          // a verified answer (items below), else failCode for every profile
