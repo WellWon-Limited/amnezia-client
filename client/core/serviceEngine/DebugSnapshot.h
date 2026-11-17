@@ -959,22 +959,39 @@ struct ScanOwnConnect {
     quint64 id = 0;               // 0 = none
     quint64 processEpoch = 0;     // random per process
     quint64 intentSerial = 0;
-    bool reachedConnected = false; // «Подключено» (dataFlowing) seen once: latched, never undone
+    bool reachedConnected = false; // «Подключено» (scanShownConnected) seen once: latched, never undone
     bool active() const { return id != 0; }
 };
-inline void noteScanOwnConnectProgress(ScanOwnConnect &a, bool dataFlowingNow)
+// «Подключено» for the Scanner's own connect is what the person sees on the orb: the engine reached
+// Connected on a Connected tunnel (the first input of dataFlowingNow), with or without the data proof.
+// Build 140 (owner's iPhone, 16.11 22:53): the latch was dataFlowing only; AmneziaWG came up on node 17
+// while the API was unreachable (no /v1/ping, no whoami), so the ONLINE proof never came, and a later
+// cancel stopped a tunnel that had shown «Подключено» for 18 s.
+inline bool scanShownConnected(bool paused, bool engineConnected, bool tunnelConnected, bool dataFlowingNow)
 {
-    if (a.active() && dataFlowingNow)
+    return (!paused && engineConnected && tunnelConnected) || dataFlowingNow;
+}
+inline void noteScanOwnConnectProgress(ScanOwnConnect &a, bool shownConnectedNow)
+{
+    if (a.active() && shownConnectedNow)
         a.reachedConnected = true;
 }
 // Path (c) CancelPendingConnect: the ordinary stop() ONLY for that connect and only before «Подключено».
 // After an app relaunch the record belongs to another process (or does not exist): nothing to cancel.
-enum class ScanCancel { Stop, IgnoreNoAttempt, IgnoreOtherProcess, IgnoreAfterConnected, IgnoreSuperseded, IgnoreNotPending };
+// eventLoopRunning = the app's event loop still runs (QThread::loopLevel() > 0 on the GUI thread). It does
+// not while the app is being terminated: ~AmneziaApplication joins the VPN thread, THEN deletes the QML
+// engine, whose Scanner page calls close() from Component.onDestruction. A stop() there reaches only the
+// facade (state and intent flip to off) - its disconnectFromVpn is queued to the joined thread and never
+// runs - so app and tunnel diverged (S2, 16.11 22:53:58), and quitting the app is not the person's cancel
+// anyway: the GUI's exit never acts on the tunnel (§19, BUG-6; upstream iOS does not stop on exit either).
+enum class ScanCancel { Stop, IgnoreNoAttempt, IgnoreAppQuit, IgnoreOtherProcess, IgnoreAfterConnected,
+                        IgnoreSuperseded, IgnoreNotPending };
 inline const char *scanCancelName(ScanCancel d)
 {
     switch (d) {
     case ScanCancel::Stop: return "stop";
     case ScanCancel::IgnoreNoAttempt: return "no_attempt";
+    case ScanCancel::IgnoreAppQuit: return "app_quit";
     case ScanCancel::IgnoreOtherProcess: return "other_process";
     case ScanCancel::IgnoreAfterConnected: return "after_connected";
     case ScanCancel::IgnoreSuperseded: return "superseded";
@@ -983,13 +1000,15 @@ inline const char *scanCancelName(ScanCancel d)
     return "unknown";
 }
 inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch, quint64 intentSerial,
-                                   bool wantConnected, bool dataFlowingNow)
+                                   bool wantConnected, bool shownConnectedNow, bool eventLoopRunning)
 {
     if (!a.active())
         return ScanCancel::IgnoreNoAttempt;
+    if (!eventLoopRunning)
+        return ScanCancel::IgnoreAppQuit;
     if (a.processEpoch != processEpoch)
         return ScanCancel::IgnoreOtherProcess;
-    if (a.reachedConnected || dataFlowingNow)
+    if (a.reachedConnected || shownConnectedNow)
         return ScanCancel::IgnoreAfterConnected;
     if (a.intentSerial != intentSerial)
         return ScanCancel::IgnoreSuperseded;

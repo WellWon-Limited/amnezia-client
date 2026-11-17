@@ -1776,6 +1776,7 @@ private:
     //  scanUserConnect()  - path (b): the ordinary start() from VPN off (StartOrigin::User), recorded as the
     //                       Scanner's own connect (m_scanOwnConnect);
     //  scanCancelPendingConnect() - path (c): the ordinary stop() of THAT connect, only before «Подключено»
+    //                       as the orb shows it and never while the app is being terminated
     //                       (DebugSnapshot.h::decideScanCancel), journalled either way;
     //  connectToNode()    - path (a): the user-start bookkeeping of start() when the tunnel is down, the order
     //                       hint (ServiceEngine::setAttemptOrder, head = the tapped row), then
@@ -1784,6 +1785,7 @@ private:
     friend class ScanEngineAdapter;
     void scanUserConnect();
     void scanCancelPendingConnect();
+    bool scanOwnConnectShownConnected() const; // «Подключено» as the orb shows it (S1, build 140)
     void connectToNode(const QString &nodeId, const QStringList &attemptOrder, qint64 hintTtlMs,
                        bool machineUserOrigin, bool machineForce);
     void noteUserStart();        // the user-start bookkeeping shared by start() and connectToNode()

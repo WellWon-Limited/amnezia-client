@@ -97,6 +97,7 @@
 #include <QSysInfo>      // AVPN (панель администратора): platform в extra{} бенча
 #include <QTimeZone>     // AVPN (панель администратора): tz в extra{} — физлокация vs egress
 #include "ui/controllers/systemController.h" // AVPN (панель администратора): saveReportFile → файл/шэр отчёта
+#include <QThread>   // AVPN Scanner (S2, build 140): loopLevel() - the app is past exec() (scanCancelPendingConnect)
 #include <QSettings> // AVPN (Task 7): чтение тумблера AvpnSettings/autoPauseRu (общий стор с QML Settings)
 #include <QVariantList>
 #include <QScopedValueRollback> // AVPN (краш-фикс): RAII-флаг m_inSyncNetCall вокруг вложенного QEventLoop
@@ -7453,7 +7454,7 @@ void AvpnEngineQml::scanNotifyNetwork()
 // chain (connectFailed for every node the ladder left, attemptEnded when it cannot go on, the return home).
 void AvpnEngineQml::scanSyncState()
 {
-    noteScanOwnConnectProgress(m_scanOwnConnect, m_dataFlowing);
+    noteScanOwnConnectProgress(m_scanOwnConnect, scanOwnConnectShownConnected());
     if (!m_scanner || !m_scanSwitches.scanner)
         return;
     // Seat first: the tapped provider row's chain has not touched the tunnel yet - the live node's data is not its.
@@ -7510,14 +7511,27 @@ void AvpnEngineQml::scanUserConnect()
     m_scanOwnConnect.id = id;
     m_scanOwnConnect.processEpoch = m_processEpoch;
     m_scanOwnConnect.intentSerial = m_intentSerial; // right after its own start(): anything later supersedes it
-    m_scanOwnConnect.reachedConnected = m_dataFlowing;
+    m_scanOwnConnect.reachedConnected = scanOwnConnectShownConnected();
+}
+
+// «Подключено» as the orb shows it (DebugSnapshot.h::scanShownConnected): the engine Connected on a Connected
+// tunnel, with or without the data proof - the same first input as refreshDataFlowing.
+bool AvpnEngineQml::scanOwnConnectShownConnected() const
+{
+    return avpn::scanShownConnected(m_paused, m_engine.state() == EngineState::Connected,
+                                    m_lastTunnelState == Vpn::Connected, m_dataFlowing);
 }
 
 // Path (c): the ordinary stop() of THAT connect, only before «Подключено» (DebugSnapshot.h::decideScanCancel).
 void AvpnEngineQml::scanCancelPendingConnect()
 {
-    noteScanOwnConnectProgress(m_scanOwnConnect, m_dataFlowing);
-    const ScanCancel d = decideScanCancel(m_scanOwnConnect, m_processEpoch, m_intentSerial, m_wantConnected, m_dataFlowing);
+    const bool shownConnected = scanOwnConnectShownConnected();
+    noteScanOwnConnectProgress(m_scanOwnConnect, shownConnected);
+    // No event loop = the app is being terminated (Component.onDestruction of the Scanner page after exec()
+    // returned): a stop could not reach the tunnel and is not the person's (decideScanCancel, app_quit).
+    const bool eventLoopRunning = QThread::currentThread()->loopLevel() > 0;
+    const ScanCancel d = decideScanCancel(m_scanOwnConnect, m_processEpoch, m_intentSerial, m_wantConnected,
+                                          shownConnected, eventLoopRunning);
     const QString why = QLatin1String(scanCancelName(d));
     if (d != ScanCancel::Stop) {
         scanJournal(QStringLiteral("scan_cancel_ignored reason=scan_cancel why=%1 attempt=%2").arg(why).arg(m_scanOwnConnect.id),
