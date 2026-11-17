@@ -787,8 +787,16 @@ PageType {
         // ошибка deep-link/kill-switch не теряется вне Connect/Настроек. Страницы в своих
         // onError держат ТОЛЬКО побочные эффекты (хаптика, redeem-флаги) и тост НЕ зовут —
         // добавишь showErrorMessage в странице → будет дубль.
+        // Device test of 142: the engine's errors («Трафик не проходит ни через один сервер…») came as Amnezia's
+        // modal popup - the screen dimmed and the orb, the very action the text asks for, was blocked until
+        // «Закрыть». The Tribe system has no blocking error dialog: an engine message is the top shade on every
+        // page (warning tone, as a failed connect in the Scanner artboard), with the switch off the top toast as
+        // before for notices. Neither blocks the screen.
         function onError(message) {
-            PageController.showErrorMessage(message)
+            if (ScanSwitches.scanner)
+                scanShade.enqueue("warning", message)
+            else
+                PageController.showNotificationMessage(message)
         }
         // AVPN (Scanner): with the `scanner` switch on the engine's short notices (release A: «подключаем
         // следующую») show as the warning shade on every Tribe page; off = the toast of PageConnectTribe
