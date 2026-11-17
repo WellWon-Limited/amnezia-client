@@ -169,6 +169,7 @@ bool VpnConnectionTunnelControl::invokeConnect(const QJsonObject &cfg, const QSt
 {
     if (!m_conn)
         return false;
+    ++m_statsSession; // a new tunnel session: statistics asked on the previous one are stale
     // VpnConnection живёт в своём QThread → только через очередь. // AVPN
     // DockerContainer::Awg/Xray (containerEnum.h) и порядок аргументов connectToVpn
     // (serverId, container, vpnConfiguration) сверены с форком — корректно. // AVPN
@@ -197,12 +198,15 @@ void VpnConnectionTunnelControl::pollXrayRuntimeStatus()
         // Пустой хинт = дефолт демона (utun22 — tunName из xrayProtocol.cpp на macOS).
         QRemoteObjectPendingReply<QJsonObject> reply = rep->xrayRuntimeStatus(QString());
         auto *watcher = new QRemoteObjectPendingCallWatcher(reply, this);
+        // Bound to the tunnel session it was asked on (review F6 of 17.11): a reply of the old tunnel that arrives
+        // after down() / the next connect never reaches the stats or the lease meter of the new session.
+        const quint64 statsSession = m_statsSession;
         connect(watcher, &QRemoteObjectPendingCallWatcher::finished, this,
-                [this, watcher](QRemoteObjectPendingCallWatcher *) {
+                [this, watcher, statsSession](QRemoteObjectPendingCallWatcher *) {
                     watcher->deleteLater();
                     if (watcher->error() != QRemoteObjectPendingCall::NoError)
                         return;
-                    if (!isXrayProto(m_lastUpProto))
+                    if (!isXrayProto(m_lastUpProto) || statsSession != m_statsSession)
                         return; // за время ответа туннель сменился — стейл
                     const QJsonObject o = watcher->returnValue().toJsonObject();
                     if (!o.value(QStringLiteral("running")).toBool()
@@ -561,6 +565,7 @@ void VpnConnectionTunnelControl::down()
     // most kUpstreamReleaseTimeoutMs later (its own transfer bound; the facade's stop watchdog stays the
     // backstop). Elsewhere the extension releases on its own stop.
     m_stopAfterRelease = false;
+    ++m_statsSession; // the tunnel session ends: statistics asked on it are stale
 #if defined(Q_OS_IOS)
     IosController::Instance()->clearUpstreamStart(); // abort: an armed, not yet taken start is dropped
 #endif
@@ -739,16 +744,17 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
                 qWarning() << "avpn upstream: profile of" << nodeId << "refused before the switch:" << chk.code()
                            << chk.detail;
                 applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs())); // the seat goes back
-                emit upstreamPrepared(nodeId, false, QStringLiteral("profile_") + chk.code());
+                emit upstreamPrepared(nodeId, e.prepareId, false, QStringLiteral("profile_") + chk.code());
                 break;
             }
             qInfo() << "avpn upstream: seat for" << nodeId << "held before the switch";
-            emit upstreamPrepared(nodeId, true, QString());
+            emit upstreamPrepared(nodeId, e.prepareId, true, QString());
             break;
         }
         case UpstreamOwnerEventKind::PrepareFailed:
             qWarning() << "avpn upstream: no seat for" << m_upStub.nodeId << "before the switch, code" << e.code;
-            emit upstreamPrepared(m_upStub.nodeId, false, e.detail.isEmpty() ? e.code : e.code + QLatin1Char('/') + e.detail);
+            emit upstreamPrepared(m_upStub.nodeId, e.prepareId, false,
+                                  e.detail.isEmpty() ? e.code : e.code + QLatin1Char('/') + e.detail);
             break;
         }
     }
@@ -910,16 +916,18 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
 #endif
 }
 
-bool VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
+quint64 VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
 {
     if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()
         || !isUpstreamNode(node) || !node.upstream)
-        return false;
+        return 0;
     m_upStub = node; // no provider session is live (checked above): the stub of the coming session
     qInfo() << "avpn upstream: taking a seat for" << node.nodeId << "before the switch";
-    applyUpstreamEvents(m_upOwner.prepare(node, sub.upstreamRevision, upstreamClockMs(),
-                                          QDateTime::currentMSecsSinceEpoch()));
-    return true;
+    const QVector<UpstreamOwnerEvent> ev = m_upOwner.prepare(node, sub.upstreamRevision, upstreamClockMs(),
+                                                             QDateTime::currentMSecsSinceEpoch());
+    const quint64 id = m_upOwner.prepareSerial(); // read before the events: their answer carries this id
+    applyUpstreamEvents(ev);
+    return id;
 }
 
 void VpnConnectionTunnelControl::cancelUpstreamPrepare()

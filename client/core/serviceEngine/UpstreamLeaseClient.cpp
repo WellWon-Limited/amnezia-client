@@ -173,7 +173,8 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (DebugSnapshot.h::transitionNetAction - owner's iPhone 16.11: both releases ended
         // "net_error 5" within 40-80 ms and never reached the server). Like every other API request, one aborted by
-        // us (not by its own timeout) is sent once more, over the new path (upstreamReleaseResend).
+        // us (not by its own timeout) is sent again over the new path, until a real answer or its own timeout
+        // (upstreamReleaseResend; onReleaseDone only then).
         if (upstreamReleaseResend(attempt, r->error() == QNetworkReply::OperationCanceledError,
                                   r->property("avpn_timed_out").toBool())) {
             sendRelease(requestId, leaseId, meter, route, attempt + 1);

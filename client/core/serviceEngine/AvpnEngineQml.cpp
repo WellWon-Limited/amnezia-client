@@ -625,8 +625,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 QTimer::singleShot(0, this, [this, code, detail]() { onUpstreamLeave(code, detail); });
             });
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamPrepared, this,
-            [this](const QString &nodeId, bool ok, const QString &code) {
-                QTimer::singleShot(0, this, [this, nodeId, ok, code]() { onUpstreamPrepared(nodeId, ok, code); });
+            [this](const QString &nodeId, quint64 prepareId, bool ok, const QString &code) {
+                QTimer::singleShot(0, this, [this, nodeId, prepareId, ok, code]() {
+                    onUpstreamPrepared(nodeId, prepareId, ok, code);
+                });
             });
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamRevisionSeen, this,
             [this](qint64 rev) { noteUpstreamRevision(rev); });
@@ -6004,6 +6006,10 @@ void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
     m_engine.clearAwgBan(); // build 142 (S5): any action of the person on the intent ends the transport ban
+    // Every action on the intent (stop, start, Auto, another pick, ...) ends a seat taken for a switch that has not
+    // brought it up yet - before any operation guard (review F1 of 17.11: Stop during the switch's own teardown
+    // skipped guardedStop, and the held seat was never given back).
+    cancelSeatFirst();
 }
 
 // Orb tap (connect audit 2026-11-04, revised P1-4): the single entry point of the orb. The tap does
@@ -7159,7 +7165,7 @@ void AvpnEngineQml::pinAndReconnect(const QString &nodeId)
 // AVPN (фикс-волна 2026-09-22, A6): Доктор зовёт с persist=false — его пересадки и возвраты
 // не становятся постоянным pin (иначе после перезапуска всегда та же нода без замера).
 void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect,
-                                        StartOrigin origin)
+                                        StartOrigin origin, const QString *pinBefore)
 {
     noteIntentChange(); // AVPN Scanner
     cancelSeatFirst();  // a new pick supersedes a seat still being taken for the previous one
@@ -7168,7 +7174,9 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         switchToNodeImpl(nodeId, persist);
         return;
     }
-    const QString prevPin = m_engine.pinnedNodeId();
+    // The pin to restore on a refused seat: the caller's, when it changed the pin itself before this call (the
+    // Scanner's row tap, review F9 of 17.11), else the pin as it is now.
+    const QString prevPin = pinBefore ? *pinBefore : m_engine.pinnedNodeId();
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
         emit error(humanPinError(err));
@@ -7188,11 +7196,12 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         // Seat first (D4 of 16.11): a provider node is not worth the working tunnel until its seat and a valid
         // profile are in hand - the seat is taken through the live tunnel now; onUpstreamPrepared restarts.
         const avpn::SubscriptionNode *target = m_engine.nodeById(nodeId);
-        if (avpn::upstreamSeatFirst(intent.needsRestart, target && avpn::isUpstreamNode(*target), m_tunnel.upstreamActive())
-            && m_tunnel.prepareUpstream(m_engine.subscription(), *target)) {
-            m_seatFirst = avpn::UpstreamSeatFirst{true, nodeId, prevPin, persist, m_intentSerial};
-            m_needsRestart = false; // the live tunnel stays until the seat is in hand
-            reliabilityEvent(QStringLiteral("upstream_seat_first node=%1").arg(nodeId));
+        if (avpn::upstreamSeatFirst(intent.needsRestart, target && avpn::isUpstreamNode(*target), m_tunnel.upstreamActive())) {
+            if (const quint64 prepareId = m_tunnel.prepareUpstream(m_engine.subscription(), *target)) {
+                m_seatFirst = avpn::UpstreamSeatFirst{true, nodeId, prevPin, persist, m_intentSerial, prepareId};
+                m_needsRestart = false; // the live tunnel stays until the seat is in hand
+                reliabilityEvent(QStringLiteral("upstream_seat_first node=%1").arg(nodeId));
+            }
         }
     } else {
         m_wantConnected = false; // офлайн: только цель, туннель не стартуем
@@ -7621,6 +7630,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
         return;
     }
     // The pin is checked before the intent changes: a row that cannot be pinned leaves everything as it was.
+    const QString pinBefore = m_engine.pinnedNodeId(); // before the pin changes: a refused seat restores it
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
         scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=pin node=%1").arg(nodeId),
@@ -7645,7 +7655,7 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     hint << attemptOrder;
     facadeScanRowHint(m_engine, hint, hintTtlMs);
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
-                        rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap);
+                        rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);
     scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
     m_scanRowBackoffRound = m_startBackoffRound;
 }
@@ -11897,9 +11907,9 @@ void AvpnEngineQml::cancelSeatFirst()
     m_tunnel.cancelUpstreamPrepare();
 }
 
-void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, bool ok, const QString &code)
+void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId, bool ok, const QString &code)
 {
-    switch (avpn::decideSeatFirstReply(m_seatFirst, nodeId, m_intentSerial, ok)) {
+    switch (avpn::decideSeatFirstReply(m_seatFirst, nodeId, prepareId, m_intentSerial, ok)) {
     case avpn::SeatFirstStep::Ignore:
         return;
     case avpn::SeatFirstStep::Drop:

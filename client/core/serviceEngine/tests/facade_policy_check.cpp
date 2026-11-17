@@ -1254,13 +1254,21 @@ static void upstreamSeatFirstRule()
     CHECK(!upstreamSeatFirst(false, true, false)); // the tunnel is down: the ordinary start (nothing to keep)
     CHECK(!upstreamSeatFirst(true, false, false)); // an own node: the ordinary pin restart
     CHECK(!upstreamSeatFirst(true, true, true));   // a provider session is live: one owner, one seat - old order
-    UpstreamSeatFirst p{true, QStringLiteral("up:aaaaaaaaaaaaaaa0"), QStringLiteral("12:xray"), true, 7};
-    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 7, true) == SeatFirstStep::Switch);
-    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 7, false) == SeatFirstStep::Stay);
-    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 8, true) == SeatFirstStep::Drop);
-    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 8, false) == SeatFirstStep::Drop);
-    CHECK(decideSeatFirstReply(p, QStringLiteral("up:bbbbbbbbbbbbbbb0"), 7, true) == SeatFirstStep::Ignore);
-    CHECK(decideSeatFirstReply(UpstreamSeatFirst(), QStringLiteral("up:aaaaaaaaaaaaaaa0"), 0, true) == SeatFirstStep::Ignore);
+    const QString a = QStringLiteral("up:aaaaaaaaaaaaaaa0");
+    UpstreamSeatFirst p{true, a, QStringLiteral("12:xray"), true, 7, /*prepareId=*/42};
+    CHECK(decideSeatFirstReply(p, a, 42, 7, true) == SeatFirstStep::Switch);
+    CHECK(decideSeatFirstReply(p, a, 42, 7, false) == SeatFirstStep::Stay);
+    CHECK(decideSeatFirstReply(p, a, 42, 8, true) == SeatFirstStep::Drop);
+    CHECK(decideSeatFirstReply(p, a, 42, 8, false) == SeatFirstStep::Drop);
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:bbbbbbbbbbbbbbb0"), 42, 7, true) == SeatFirstStep::Ignore);
+    CHECK(decideSeatFirstReply(UpstreamSeatFirst(), a, 0, 0, true) == SeatFirstStep::Ignore);
+    // Review F5 of 17.11: the queued success of an EARLIER prepare of the same node, matched after a second tap
+    // started a new prepare (same node, the intent serial of the new tap): never taken for the pending one.
+    CHECK(decideSeatFirstReply(p, a, 41, 7, true) == SeatFirstStep::Ignore);
+    CHECK(decideSeatFirstReply(p, a, 41, 7, false) == SeatFirstStep::Ignore);
+    UpstreamSeatFirst noId = p;
+    noId.prepareId = 0;
+    CHECK(decideSeatFirstReply(noId, a, 0, 7, true) == SeatFirstStep::Ignore);
     // While the seat is being taken the Scanner sees the provider node as the attempt (never probed with its key).
     const ScanLiveView v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("12:xray"), QString(),
                                         QStringLiteral("up:aaaaaaaaaaaaaaa0"), QString(), true, /*restartPending=*/true, true);

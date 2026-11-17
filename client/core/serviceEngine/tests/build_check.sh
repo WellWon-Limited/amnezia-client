@@ -26,3 +26,7 @@ cd "$HERE"
 # 5.1.111 (141, iOS data watch): the adapter, the provider, the facade and the controller call the
 # watch at the expected places and only there (source level; the rules are tested by behaviour).
 "$HERE/check_ios_data_watch_wiring.sh"
+
+# Review round 1 of 17.11 (provider seats): the facade, the adapter and the lease client hand the seat-first state
+# and the lease I/O through at the expected places (source level; the rules are tested by behaviour).
+"$HERE/check_upstream_seat_wiring.sh"

@@ -72,6 +72,7 @@ struct UpstreamOwnerEvent {
     QByteArray config;       // BringUp: the profile config (secret)
     QString configSha256;    // BringUp
     QJsonObject lease;       // BringUp (absent on provisional) / HandOver: upstream_lease
+    quint64 prepareId = 0;   // Prepared / PrepareFailed: the prepare() they answer (prepareSerial at its start)
     UpstreamLeaseRecord record;
     qint64 revision = 0;
 };
@@ -121,6 +122,10 @@ public:
         return preparing() && m_nodeId == nodeId && (!m_prepared || m_machine.deadlineMs() > nowMs);
     }
     bool preparing() const { return m_active && m_prepareOnly; }
+    // The identity of the session the last begin()/prepare() started: Prepared / PrepareFailed carry it, so an
+    // answer is only ever matched to the very prepare() it answers (review F5 of 17.11: a queued success of an
+    // earlier prepare of the same node switched the tunnel before the new prepare's grant existed).
+    quint64 prepareSerial() const { return m_sessionSerial; }
 
     // up() of the prepared node: the held grant becomes the session's BringUp now; an acquire still in flight
     // brings up on its grant like begin()'s would.
@@ -211,6 +216,10 @@ public:
     // rebaseline re-bases instead of counting.
     void onBytes(qint64 rxTotal, qint64 txTotal)
     {
+        // A seat held for a switch carries no traffic yet: what the running tunnel counts is another session's
+        // (review F6 of 17.11: the old Xray tunnel's whole cumulative would have been reported for the provider).
+        if (m_prepareOnly)
+            return;
         m_lastRx = rxTotal;
         m_lastTx = txTotal;
         m_haveBytes = true;
@@ -444,6 +453,7 @@ private:
                     m_prepared = true;
                     UpstreamOwnerEvent p;
                     p.kind = UpstreamOwnerEventKind::Prepared;
+                    p.prepareId = m_sessionSerial;
                     p.config = m_grant.config;
                     p.configSha256 = m_grant.configSha256;
                     ev << p;
@@ -563,6 +573,7 @@ private:
         if (!stub.upstream.has_value())
             return ev;
         resetSession();
+        ++m_sessionSerial;
         m_nodeId = stub.nodeId;
         m_profileId = stub.upstream->profileId;
         m_stubSha = stub.upstream->configSha256;
@@ -580,6 +591,7 @@ private:
     {
         UpstreamOwnerEvent f;
         f.kind = m_prepareOnly ? UpstreamOwnerEventKind::PrepareFailed : UpstreamOwnerEventKind::StartFailed;
+        f.prepareId = m_sessionSerial;
         f.detail = detail;
         f.code = code.isEmpty() ? QStringLiteral("unknown") : code;
         ev << f;
@@ -601,6 +613,7 @@ private:
     qint64 m_adoptedStartedWallMs = 0;
     bool m_active = false, m_bringUp = false, m_tunnelIsUp = false, m_handedOver = false, m_adopted = false;
     bool m_rebasePending = false, m_releaseSent = false, m_configChanged = false, m_haveBytes = false;
+    quint64 m_sessionSerial = 0; // never reset: one value per begin()/prepare()
     bool m_prepareOnly = false; // prepare(): a seat taken before the switch, not brought up yet
     bool m_prepared = false;    // ... and granted (Prepared was reported)
     qint64 m_lastRx = 0, m_lastTx = 0;

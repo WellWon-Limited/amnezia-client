@@ -1109,8 +1109,9 @@ private:
     // Plan v3 step 5 (review): who asked for the start - network memory is read/written only for
     // starts the user asked for (see StartOrigin).
     enum class StartOrigin { User, AutoTap, Rotate, Doctor };
+    // pinBefore: the pin as it was before the caller changed it itself (connectToNode), for the seat-first rollback.
     void pinAndReconnectImpl(const QString &nodeId, bool persist, bool forceConnect = false,
-                             StartOrigin origin = StartOrigin::User);
+                             StartOrigin origin = StartOrigin::User, const QString *pinBefore = nullptr);
     void selectAutoImpl(bool persist);
     void docRestoreSelection(); // Доктор: вернуть исходный выбор (pin или авто), не гася VPN
     // AVPN awg31-xray-v1 (спека §2.3):
@@ -1150,7 +1151,7 @@ private:
     // Seat first (D4 of 16.11): the answer of the seat taken before switching to a provider node
     // (DebugSnapshot.h::decideSeatFirstReply), deferred from the adapter's signal; cancelSeatFirst gives a pending
     // one back (a new pick, a stop with the intent off).
-    void onUpstreamPrepared(const QString &nodeId, bool ok, const QString &code);
+    void onUpstreamPrepared(const QString &nodeId, quint64 prepareId, bool ok, const QString &code);
     void cancelSeatFirst();
     // Release A: the notice (signal notice) for leaving an upstream node by its code; no text = nothing.
     void noticeUpstreamLeft(const QString &code);
