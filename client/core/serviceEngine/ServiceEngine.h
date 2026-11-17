@@ -219,6 +219,16 @@ public:
     void noteStartFailedForTier(const QString &why);
     // A user start / stop: a new attempt - its exclusions are forgotten. The engine's own stops inside
     // one attempt (watchdog, restart) keep them.
+    // Build 142 (S5, DebugSnapshot.h::decideAwgNoHandshake): an own Auto start on AmneziaWG got no handshake
+    // at the first native timeout. xrayPickWithoutAwg: the automatic pick with every AmneziaWG node excluded
+    // gives an Xray node (session exclusions as the real pick: with them, then without). leaveAwgForAttempt:
+    // the start of the current node is recorded as a failed rise of its location x AmneziaWG, and every
+    // AmneziaWG node is excluded for the rest of this attempt (code awg_no_handshake) - the next pick of the
+    // attempt is Xray, and "every candidate failed" can never bring AmneziaWG back while Xray candidates
+    // remain. awgLeftForAttempt: that was done in this attempt.
+    bool xrayPickWithoutAwg() const;
+    void leaveAwgForAttempt();
+    bool awgLeftForAttempt() const;
     void beginUserAttempt()
     {
         m_attemptExcluded.clear();
@@ -603,7 +613,9 @@ private:
     // useLastKnownRtt=true (failover) — RTT без TTL (свежий поверх последнего известного).
     const SubscriptionNode *pickTransport(const QString &preferLocation, const QString &preferNodeId,
                                           const QString &exclA, bool withExclusions,
-                                          bool useLastKnownRtt = false) const;
+                                          bool useLastKnownRtt = false,
+                                          const QSet<QString> &extraHardExcluded = {}) const;
+    QSet<QString> awgNodeIds() const; // build 142 (S5): every AmneziaWG node of the candidates
     QHash<QString, int> failoverRtt() const;
     // Upstream nodes: the tier gate of the automatic pick (disabled while features.upstream_nodes is off).
     UpstreamTierGate tierGate() const;

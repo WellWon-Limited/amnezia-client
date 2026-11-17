@@ -494,6 +494,54 @@ inline WatchConsume decideWatchConsume(const WatchConsumeInputs &in)
     return WatchConsume::Reverify;
 }
 
+// Build 142 (S3, owner's iPhone 16.11 23:20:26): the app was relaunched while the extension held a session
+// that had no handshake and no data on the Wi-Fi the phone had moved to (soft restarts every few minutes,
+// hs=never for 26 min). The cold-start rule showed it Connected, the engine adopted it Connected (§19) -
+// and «Подключено» stayed: the native handshake timeouts make it Reconnecting, which silences the health
+// tick, and §25 deliberately never stops a session that had a handshake before. The extension's answer
+// "no handshake, no data" (IosController::adoptedSessionUnproven) is a reason to re-check, exactly like
+// a no_data verdict: the same single re-check entry (TunnelWatchResume::recheck -> reenterVerifying),
+// whatever the watch flags. Once per session (its runtime generation); never for a session with a proof
+// (that adoption stays instant, §19); never without an identity (the engine cannot re-check it).
+enum class AdoptedProofCheck {
+    Nothing,        // not Connected (already moving: start / switch / stop / a check running)
+    AlreadyChecked, // this session was re-checked once already
+    NoIdentity,     // the engine does not know the node: reenterVerifying would refuse
+    Recheck,        // Connected on an unproven adopted session: back to Verifying, the app's own check
+    Defer,          // the app is awake only for the On-Demand arming: at the return to the screen
+};
+struct AdoptedProofInputs {
+    bool engineConnected = false;
+    bool backgroundArmOnly = false;
+    QString appNodeId;
+    QString generation;        // runtime generation of the session ("" = unknown: one check per process)
+    bool checkedOnce = false;  // a session was re-checked in this process
+    QString checkedGeneration;
+};
+inline AdoptedProofCheck decideAdoptedProofCheck(const AdoptedProofInputs &in)
+{
+    if (in.checkedOnce && in.generation == in.checkedGeneration)
+        return AdoptedProofCheck::AlreadyChecked;
+    if (!in.engineConnected)
+        return AdoptedProofCheck::Nothing;
+    if (in.appNodeId.isEmpty())
+        return AdoptedProofCheck::NoIdentity;
+    if (in.backgroundArmOnly)
+        return AdoptedProofCheck::Defer;
+    return AdoptedProofCheck::Recheck;
+}
+inline const char *adoptedProofCheckName(AdoptedProofCheck d)
+{
+    switch (d) {
+    case AdoptedProofCheck::Nothing: return "not_connected";
+    case AdoptedProofCheck::AlreadyChecked: return "already_checked";
+    case AdoptedProofCheck::NoIdentity: return "no_identity";
+    case AdoptedProofCheck::Recheck: return "recheck";
+    case AdoptedProofCheck::Defer: return "deferred";
+    }
+    return "unknown";
+}
+
 // What the re-check does with the engine's phase: a pending check is started again with its full budget;
 // a completed one (Connected) goes back to Verifying first; any other phase is already moving.
 enum class ReverifyAction { None, RestartPending, ReenterFromConnected };

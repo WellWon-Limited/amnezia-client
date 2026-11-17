@@ -1273,6 +1273,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
+    // Build 142 (S3): an adopted session shown Connected whose extension answers "no handshake, no data"
+    // goes to the app's own data check through the single re-check (TunnelWatchResume::onAdoptedUnproven).
+    connect(IosController::Instance(), &IosController::adoptedSessionUnproven, this, [this]() {
+        if (m_watchResume)
+            m_watchResume->onAdoptedUnproven();
+    }, Qt::QueuedConnection);
+    // Build 142 (S5): a handshake timeout of a session that never handshook (DebugSnapshot.h::decideAwgNoHandshake).
+    connect(IosController::Instance(), &IosController::handshakeNeverCompleted, this,
+            &AvpnEngineQml::onHandshakeNeverCompleted, Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     connect(IosController::Instance(), &IosController::sessionMetadataChanged, this,
@@ -3453,6 +3462,43 @@ void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
 #endif
 }
 
+#ifdef Q_OS_IOS
+// Build 142 (S5): AmneziaWG got no handshake on this network - at the first native timeout an own Auto start
+// leaves AmneziaWG for the rest of the attempt and goes on with the best Xray candidate, through the same
+// path as a failed start (a counted attempt, the network memory forgets the node, our guarded stop, then
+// reconcile starts the next pick of this attempt).
+void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts)
+{
+    avpn::AwgNoHandshakeInputs in;
+    in.timeouts = timeouts;
+    in.ownStartInFlight = m_op == Op::Starting && m_wantConnected;
+    const avpn::SubscriptionNode *node = m_engine.nodeById(m_engine.currentNodeId());
+    in.nodeIsAwg = node && !avpn::isUpstreamNode(*node) && !avpn::isXrayProto(avpn::protoOf(*node));
+    in.autoMode = m_engine.transportMode() == avpn::TransportMode::Auto;
+    in.pinned = !m_engine.pinnedNodeId().isEmpty();
+    in.alreadyLeft = m_engine.awgLeftForAttempt();
+    in.xrayPick = in.timeouts == 1 && in.ownStartInFlight && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
+    const avpn::AwgNoHandshake d = avpn::decideAwgNoHandshake(in);
+    if (d == avpn::AwgNoHandshake::IgnoreLaterTimeout)
+        return;
+    reliabilityEvent(QStringLiteral("awg_no_handshake node=%1 timeouts=%2 -> %3")
+                         .arg(m_engine.currentNodeId()).arg(timeouts).arg(QLatin1String(avpn::awgNoHandshakeName(d))));
+    if (d != avpn::AwgNoHandshake::Leave)
+        return;
+    m_op = Op::None;
+    m_opInFlight = false;
+    m_busy = false;
+    m_watchdog.stop();
+    ++m_startAttempts;
+    forgetNetworkMemoryAfterFailedStart("awg_no_handshake");
+    m_engine.leaveAwgForAttempt();
+    persistTransportHistory();
+    m_stopRetries = 0;
+    guardedStop("awg_no_handshake");
+    emit changed();
+}
+#endif
+
 // The status reply said the tunnel has no engine (a failed in-place switch; the extension keeps retrying
 // the previous node). The app does what it does for a dead tunnel of its own: the ordinary restart
 // through reconcile. Once: the flags below hold until that restart is under way; not in the background.
@@ -5377,6 +5423,21 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         break;
     case Vpn::Reconnecting:
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
+#ifdef Q_OS_IOS
+        // Build 142 (S3): on iOS Reconnecting is a handshake timeout of the awaited session. During the app's
+        // own data check that is the check's answer (DebugSnapshot.h::verifyFailsOnHandshakeTimeout) - its
+        // next attempt would only see "not Connected" and cancel itself, leaving the engine in Verifying.
+        // Deferred: never act from inside the tunnel callback (§3).
+        if (avpn::verifyFailsOnHandshakeTimeout(m_engine.isVerifying(), true)) {
+            const int epoch = m_verifyEpoch;
+            QTimer::singleShot(0, this, [this, epoch]() {
+                if (epoch != m_verifyEpoch || !m_engine.isVerifying())
+                    return; // the check already ended or moved on
+                reliabilityEvent(QStringLiteral("verify_failed why=handshake_timeout node=%1").arg(m_engine.currentNodeId()));
+                finishVerify(epoch, false, QStringLiteral("no handshake (native timeout, failover)"));
+            });
+        }
+#endif
         break;
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
         break;

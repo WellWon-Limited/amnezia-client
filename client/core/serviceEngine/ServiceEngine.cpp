@@ -205,6 +205,42 @@ void ServiceEngine::excludeForAttempt(const QString &nodeId, const QString &code
     appendSwitchLog(QStringLiteral("upstream start failed on %1 code=%2 (excluded for this attempt)").arg(nodeId, code));
 }
 
+QSet<QString> ServiceEngine::awgNodeIds() const // build 142 (S5)
+{
+    QSet<QString> out;
+    for (const SubscriptionNode &n : m_merged)
+        if (!isUpstreamNode(n) && !isXrayProto(protoOf(n)))
+            out.insert(n.nodeId);
+    return out;
+}
+
+bool ServiceEngine::xrayPickWithoutAwg() const // build 142 (S5)
+{
+    const QSet<QString> awg = awgNodeIds();
+    const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, false, awg);
+    if (!c && !sessionExclusions().isEmpty())
+        c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, false, awg);
+    return c && isXrayProto(protoOf(*c));
+}
+
+void ServiceEngine::leaveAwgForAttempt() // build 142 (S5)
+{
+    recordTransportOutcome(false); // the rise of this location x AmneziaWG failed (at most once per rise)
+    const QSet<QString> awg = awgNodeIds();
+    for (const QString &id : awg)
+        m_attemptExcluded.insert(id, QStringLiteral("awg_no_handshake"));
+    appendSwitchLog(QStringLiteral("no handshake on %1: AmneziaWG left for this attempt (%2 nodes), next pick Xray")
+                        .arg(m_currentNodeId).arg(awg.size()));
+}
+
+bool ServiceEngine::awgLeftForAttempt() const // build 142 (S5)
+{
+    for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
+        if (it.value() == QLatin1String("awg_no_handshake"))
+            return true;
+    return false;
+}
+
 void ServiceEngine::rebuildCandidates()
 {
     m_merged = m_pool.nodes();
@@ -384,7 +420,8 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
 // AVPN awg31-xray-v1: выбор транспорта по локациям (см. TransportPick.h и ServiceEngine.h).
 const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocation, const QString &preferNodeId,
                                                      const QString &exclA, bool withExclusions,
-                                                     bool useLastKnownRtt) const
+                                                     bool useLastKnownRtt,
+                                                     const QSet<QString> &extraHardExcluded) const
 {
     TransportPickInput in;
     in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
@@ -396,6 +433,7 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     // Upstream nodes: a start failure of this attempt is never retried in it; the automatic pick is tiered.
     for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
         in.hardExcluded.insert(it.key());
+    in.hardExcluded.unite(extraHardExcluded);
     in.tierGate = tierGate();
     // Случайный индекс в ярусе равного weight — авто реально чередует равноценные локации.
     const auto randomIndex = [](int size) {

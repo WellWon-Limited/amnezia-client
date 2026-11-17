@@ -1071,6 +1071,7 @@ private:
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
     void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
     void onTunnelEngineDown();                         // status reply with `engine_down` (stage 2)
+    void onHandshakeNeverCompleted(int timeouts);      // build 142 (S5): leave AmneziaWG for Xray (iOS)
     bool tunnelWatchFrozen(const char *site);          // resume freeze: hold this decision?
     bool deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume);
     void tickTunnelWatchFreeze(qint64 sinceLastTickMs); // on the existing 1 s transition tick

@@ -243,6 +243,36 @@ public:
         m_returnAskedMs = consume == WatchConsume::Reverify ? in.nowMs : -1;
     }
 
+    // Build 142 (S3): the extension answered that an adopted session the cold-start rule showed Connected
+    // has no handshake and no data (IosController::adoptedSessionUnproven). Re-checked once per session
+    // through the same single re-check as a verdict (recheck): Verifying, the app's own data check, and
+    // its failure takes the ordinary failover (§29, §20 step 3). Independent of the watch flags.
+    void onAdoptedUnproven()
+    {
+        AdoptedProofInputs in;
+        in.engineConnected = m_ops.engineConnected();
+        in.backgroundArmOnly = m_ops.backgroundArmOnly();
+        in.appNodeId = m_ops.appNodeId();
+        in.generation = m_ops.sessionGeneration();
+        in.checkedOnce = m_unprovenChecked;
+        in.checkedGeneration = m_unprovenGeneration;
+        const AdoptedProofCheck d = decideAdoptedProofCheck(in);
+        if (d == AdoptedProofCheck::AlreadyChecked || d == AdoptedProofCheck::Nothing)
+            return; // repeated every reply until the first timeout: silent
+        m_ops.journal(QStringLiteral("adopted_unproven node=%1 -> %2")
+                          .arg(in.appNodeId.isEmpty() ? QStringLiteral("-") : in.appNodeId,
+                               QLatin1String(adoptedProofCheckName(d))));
+        if (d == AdoptedProofCheck::NoIdentity)
+            return;
+        m_unprovenChecked = true;
+        m_unprovenGeneration = in.generation;
+        if (d == AdoptedProofCheck::Defer) {
+            m_deferred.push_back([this] { recheck(); }); // runs once at the return to the screen
+            return;
+        }
+        recheck();
+    }
+
     bool frozen() const { return m_freeze.active; }
     size_t deferredCount() const { return m_deferred.size(); }
 
@@ -346,6 +376,13 @@ private:
         m_ops.journal(watchConsumedJournalLine(w, nodeId, nowMs));
         if (watchVerdictForgetsNode(w.verdict))
             m_ops.forgetNode(nodeId);
+        recheck();
+    }
+
+    // The ONE place the app sends a session back to its own data check (§33 item 15: reenterVerifying has
+    // no second caller): a verdict of the extension (reverify) and an unproven adopted session (S3).
+    void recheck()
+    {
         switch (reverifyActionFor(m_ops.engineVerifying(), m_ops.engineConnected())) {
         case ReverifyAction::RestartPending:
             m_ops.startVerification(); // full budget, new epoch: the frozen check never completes as "limited"
@@ -385,6 +422,9 @@ private:
     QVariantMap m_pendingSession;
     // When the way back to the user's choice was asked last; -1 = ask at the next tick.
     qint64 m_returnAskedMs = -1;
+    // S3: the unproven adopted session that was re-checked (once per runtime generation).
+    bool m_unprovenChecked = false;
+    QString m_unprovenGeneration;
 };
 
 } // namespace avpn

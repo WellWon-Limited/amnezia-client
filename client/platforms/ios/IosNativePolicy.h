@@ -102,6 +102,20 @@ inline bool showEstablishedAsConnected(bool connectPending, bool previouslyLive,
     return !connectPending && !previouslyLive && connectedForMs >= kEstablishedSessionMs;
 }
 
+// The NE answered the status (handshake data present) and its engine never completed a handshake and
+// got no data back: last_handshake_time_sec == 0 and rx below the handshake threshold. Not a proof of
+// anything about the past (a soft restart resets both) - a fact about the engine as it is now.
+// Two uses, both facts for the facade, which decides (build 142, owner's iPhone 16.11):
+//  * an adopted session the cold-start rule showed Connected: told at once (adoptedSessionUnproven) -
+//    the facade re-checks it through its single re-check entry instead of keeping «Подключено» (S3);
+//  * any session at a handshake timeout: told with the timeout number (handshakeNeverCompleted) - an
+//    own Auto start on AmneziaWG leaves AmneziaWG for Xray at the first one (S5).
+inline bool answeredWithoutHandshake(long long lastHandshakeSec, unsigned long long rxBytes,
+                                     unsigned long long rxThreshold)
+{
+    return lastHandshakeSec == 0 && rxBytes < rxThreshold;
+}
+
 // Owner test 06.11 (device 36, build 135): the app was relaunched while the NE held a session that
 // had NEVER completed a handshake (node unreachable from that Wi-Fi: tx=1493 rx=0 for ~2 min). iOS
 // reported it Connected, the cold-start rule above showed it Connected, the app adopted it - and every

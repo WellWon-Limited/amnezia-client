@@ -1902,6 +1902,66 @@ static void test_uplink_probe_set_from_cxx_unit()
     CHECK(s.stopCalls == 0, "session stopped although the probe set from C++ says no network");
 }
 
+// Build 142 (S3): the 23:20:26 relaunch - an established session (26 min) whose NE answers "no handshake,
+// no data" (soft restarts reset the engine). The native tells the facade at once and changes nothing itself.
+static int g_unproven = 0;
+static std::vector<int> g_neverTimeouts;
+static void tapHandshakeFacts()
+{
+    QObject::connect(IosController::Instance(), &IosController::adoptedSessionUnproven, [] { ++g_unproven; });
+    QObject::connect(IosController::Instance(), &IosController::handshakeNeverCompleted,
+                     [](int t) { g_neverTimeouts.push_back(t); });
+}
+static HarnessSession *establishedSession(NSDictionary *reply, int timeoutMs, NSDate *connectedAt)
+{
+    IosController *c = IosController::Instance();
+    c->setRawConfigForTest(awgConfig(timeoutMs, 3));
+    HarnessSession *s = newSession(NEVPNStatusConnected);
+    s.runtimeGeneration = @"run-1";
+    s.hConnectedDate = connectedAt;
+    s.statusReply = reply;
+    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
+    g_loadMode = LoadMode::Deliver;
+    c->requestReconcileStatus();
+    return s;
+}
+static void test_adopted_unproven_told()
+{
+    tapHandshakeFacts();
+    HarnessSession *s = establishedSession(stalledReply(@7, @0), 60000, [NSDate dateWithTimeIntervalSinceNow:-1560]);
+    runStatusPolls(400);
+    CHECK(g_unproven >= 1, "adopted session without a handshake not told to the facade");
+    CHECK(!obs.states.empty() && obs.states.back() == Vpn::ConnectionState::Connected, "the native state changed");
+    CHECK(s.stopCalls == 0, "the fact stopped the session");
+    CHECK(g_neverTimeouts.empty(), "no timeout yet: no timeout fact");
+}
+static void test_adopted_proven_not_told()
+{
+    tapHandshakeFacts();
+    establishedSession(statusReply(@"run-1", @"cfg-1", 1794869620, 0), 60000, [NSDate dateWithTimeIntervalSinceNow:-1560]);
+    runStatusPolls(400);
+    CHECK(g_unproven == 0, "a session with a handshake was told unproven");
+}
+// Build 142 (S5): a session that is not adopted (shown Connecting: it came up a moment ago) and never
+// handshakes - every handshake timeout is told with its number; an unanswered status is not.
+static void test_timeouts_told_when_never_handshook()
+{
+    tapHandshakeFacts();
+    HarnessSession *s = establishedSession(statusReply(@"run-1", @"cfg-1", 0, 0), 150, [NSDate date]);
+    runStatusPolls(700);
+    CHECK(g_unproven == 0, "a session that is not adopted was told unproven");
+    CHECK(!g_neverTimeouts.empty() && g_neverTimeouts.front() == 1, "the first timeout not told as 1");
+    for (size_t i = 1; i < g_neverTimeouts.size(); ++i)
+        CHECK(g_neverTimeouts[i] == int(i + 1), "timeouts not told in order");
+    (void)s;
+}
+static void test_timeouts_not_told_without_answer()
+{
+    tapHandshakeFacts();
+    establishedSession(nil, 150, [NSDate date]);
+    runStatusPolls(700);
+    CHECK(g_neverTimeouts.empty(), "a timeout without an NE answer was told as no handshake");
+}
 #endif
 
 struct Test { const char *name; void (*fn)(); };
@@ -2197,6 +2257,10 @@ static const Test kTests[] = {
     {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
     {"uplink_probe_set_from_cxx_unit", test_uplink_probe_set_from_cxx_unit},
+    {"adopted_unproven_told", test_adopted_unproven_told},
+    {"adopted_proven_not_told", test_adopted_proven_not_told},
+    {"timeouts_told_when_never_handshook", test_timeouts_told_when_never_handshook},
+    {"timeouts_not_told_without_answer", test_timeouts_not_told_without_answer},
 #endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
 #ifndef HARNESS_OLD

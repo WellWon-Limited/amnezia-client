@@ -888,6 +888,80 @@ static void scannerCancelNeverDuringAppQuit()
     CHECK(QLatin1String(scanCancelName(ScanCancel::IgnoreAppQuit)) == QLatin1String("app_quit"));
 }
 
+// Build 142 (S5): the five starts of 16.11 23:20:32-23:21:51 on one Wi-Fi where AmneziaWG got no handshake
+// (rx=0, hs=never in every "Tribe stats"). Times from the journal: the extension came up (NE Connected),
+// the first native handshake timeout is due 12 s later (+ at most the 1 s status poll), the person's stop.
+static void awgNoHandshakeReplay()
+{
+    struct Attempt { const char *at; bool pinned; double neUpToStopS; };
+    const Attempt five[] = {
+        {"23:20:32 orb, node 17", /*pinned=*/true, 9.1},   // NE up 34.28, stop 43.39
+        {"23:20:44 scanner, node 17", true, 11.8},          // NE up 45.64, scanner cancel 57.46
+        {"23:21:01 orb after Auto, node 17", false, 12.0},  // NE up 04.27, stop 16.27
+        {"23:21:19 orb, node 15", true, 11.95},             // NE up 20.95, stop 32.90
+        {"23:21:36 orb, node 17", true, 7.3},               // NE up 38.01, app killed 45.33
+    };
+    int left = 0;
+    int reachedTimeout = 0;
+    for (const Attempt &a : five) {
+        // The first timeout is checked on the status reply after NE up + 12 s: strictly later than 12.0 s.
+        if (a.neUpToStopS > 12.0)
+            ++reachedTimeout;
+        AwgNoHandshakeInputs in;
+        in.timeouts = 1;
+        in.ownStartInFlight = true;
+        in.nodeIsAwg = true;
+        in.autoMode = true;          // transport mode «Авто» all evening
+        in.pinned = a.pinned;
+        in.xrayPick = true;          // 11:xray, 12:xray, 15:xray measured (rtt 24-27 ms at 23:21:17)
+        const AwgNoHandshake d = decideAwgNoHandshake(in);
+        if (d == AwgNoHandshake::Leave)
+            ++left;
+        CHECK(d == (a.pinned ? AwgNoHandshake::IgnorePinned : AwgNoHandshake::Leave));
+    }
+    // Only the start after the «Авто» tap is the rule's: the other four were on a chosen location.
+    CHECK(left == 1);
+    // And that evening no start lived to its first timeout: the person gave up 7-12 s after the tunnel came
+    // up. With the rule, the Auto start leaves AmneziaWG ~1 s after the moment they stopped waiting.
+    CHECK(reachedTimeout == 0);
+    // That start: at the first timeout (NE up + 12 s) AmneziaWG is left; the person waited 12.0 s - the rule
+    // fires in the same second (poll) as their stop. The guard rails:
+    AwgNoHandshakeInputs in;
+    in.timeouts = 1;
+    in.ownStartInFlight = true;
+    in.nodeIsAwg = true;
+    in.autoMode = true;
+    in.xrayPick = true;
+    CHECK(decideAwgNoHandshake(in) == AwgNoHandshake::Leave);
+    AwgNoHandshakeInputs later = in;
+    later.timeouts = 2;
+    CHECK(decideAwgNoHandshake(later) == AwgNoHandshake::IgnoreLaterTimeout); // decided once, at the first
+    AwgNoHandshakeInputs stopped = in;
+    stopped.ownStartInFlight = false; // the person's stop (or an adopted session, S3): theirs wins
+    CHECK(decideAwgNoHandshake(stopped) == AwgNoHandshake::IgnoreNotOwnStart);
+    AwgNoHandshakeInputs manual = in;
+    manual.autoMode = false;          // «AmneziaWG» chosen by hand
+    CHECK(decideAwgNoHandshake(manual) == AwgNoHandshake::IgnoreMode);
+    AwgNoHandshakeInputs again = in;
+    again.alreadyLeft = true;         // no flapping back inside the attempt
+    CHECK(decideAwgNoHandshake(again) == AwgNoHandshake::IgnoreAlreadyLeft);
+    AwgNoHandshakeInputs noXray = in;
+    noXray.xrayPick = false;          // nothing to go to (no Xray for this device / all excluded)
+    CHECK(decideAwgNoHandshake(noXray) == AwgNoHandshake::IgnoreNoXray);
+    AwgNoHandshakeInputs onXray = in;
+    onXray.nodeIsAwg = false;
+    CHECK(decideAwgNoHandshake(onXray) == AwgNoHandshake::IgnoreNotAwg);
+    CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::Leave)) == QLatin1String("leave_awg"));
+}
+
+// Build 142 (S3): on iOS a native Reconnecting during the app's own check is a handshake timeout: the check failed.
+static void verifyEndsOnHandshakeTimeout()
+{
+    CHECK(verifyFailsOnHandshakeTimeout(/*verifying=*/true, /*reconnecting=*/true));
+    CHECK(!verifyFailsOnHandshakeTimeout(false, true)); // Connected / Connecting: the ordinary Reconnecting
+    CHECK(!verifyFailsOnHandshakeTimeout(true, false));
+}
+
 // A row tap's chain as the coordinator sees it: the node the ladder left, the end, «Подключено».
 static void scannerRowChain()
 {
@@ -1219,6 +1293,8 @@ int main()
     scannerCancelPendingConnect();
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
+    awgNoHandshakeReplay();
+    verifyEndsOnHandshakeTimeout();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

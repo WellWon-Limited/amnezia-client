@@ -1017,6 +1017,71 @@ inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch
     return ScanCancel::Stop;
 }
 
+// Build 142 (S5, owner's iPhone 16.11 23:20-23:21, one Wi-Fi): AmneziaWG got no handshake there (nodes 17
+// and 15), build 139 had used an Xray node via network memory, the tap on «Авто» cleared it and five
+// starts in a row went to AmneziaWG again. An own start whose tunnel never handshook was not a failure of
+// anything: the native kept it Reconnecting, the start watchdog ended it after ~45 s without a transport
+// record, and AmneziaWG (rank 10) stayed ahead of Xray (rank 20) in every pick.
+// The native tells each handshake timeout of a session whose NE answered "no handshake, no data"
+// (IosController::handshakeNeverCompleted). At the FIRST one (~12 s after the tunnel came up) an own Auto
+// start on AmneziaWG leaves AmneziaWG for the rest of this attempt: the transport is recorded as failed
+// (location x proto history), every AmneziaWG node is excluded for the attempt, and the start goes on
+// with the next pick - the best Xray candidate. Only when the person chose nothing narrower (Auto mode,
+// no pinned node), only if such a pick exists, only once per attempt (no flapping back), only while the
+// person's own start is still in flight (their stop wins: it ends the attempt).
+struct AwgNoHandshakeInputs {
+    int timeouts = 0;              // the native handshake timeout number (1 = the first, ~12 s)
+    bool ownStartInFlight = false; // our start is in flight and the person still wants the VPN on
+    bool nodeIsAwg = false;        // the node of this start is an own AmneziaWG node
+    bool autoMode = false;         // the effective transport mode is Auto
+    bool pinned = false;           // the person pinned a node / location
+    bool alreadyLeft = false;      // AmneziaWG was already left in this attempt
+    bool xrayPick = false;         // a pick with every AmneziaWG node excluded gives an Xray node
+};
+enum class AwgNoHandshake { Leave, IgnoreLaterTimeout, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode, IgnorePinned,
+                            IgnoreAlreadyLeft, IgnoreNoXray };
+inline AwgNoHandshake decideAwgNoHandshake(const AwgNoHandshakeInputs &in)
+{
+    if (in.timeouts != 1)
+        return AwgNoHandshake::IgnoreLaterTimeout;
+    if (!in.ownStartInFlight)
+        return AwgNoHandshake::IgnoreNotOwnStart;
+    if (!in.nodeIsAwg)
+        return AwgNoHandshake::IgnoreNotAwg;
+    if (!in.autoMode)
+        return AwgNoHandshake::IgnoreMode;
+    if (in.pinned)
+        return AwgNoHandshake::IgnorePinned;
+    if (in.alreadyLeft)
+        return AwgNoHandshake::IgnoreAlreadyLeft;
+    if (!in.xrayPick)
+        return AwgNoHandshake::IgnoreNoXray;
+    return AwgNoHandshake::Leave;
+}
+inline const char *awgNoHandshakeName(AwgNoHandshake d)
+{
+    switch (d) {
+    case AwgNoHandshake::Leave: return "leave_awg";
+    case AwgNoHandshake::IgnoreLaterTimeout: return "later_timeout";
+    case AwgNoHandshake::IgnoreNotOwnStart: return "not_own_start";
+    case AwgNoHandshake::IgnoreNotAwg: return "not_awg";
+    case AwgNoHandshake::IgnoreMode: return "mode";
+    case AwgNoHandshake::IgnorePinned: return "pinned";
+    case AwgNoHandshake::IgnoreAlreadyLeft: return "already_left";
+    case AwgNoHandshake::IgnoreNoXray: return "no_xray";
+    }
+    return "unknown";
+}
+
+// Build 142 (S3): on iOS the native reports Reconnecting only at a handshake timeout of the session it
+// awaits (ios_controller.mm checkStatus). While the app's own data check runs (engine Verifying), that is
+// the check's answer - no handshake for the whole timeout, no data possible - not a pause: before, the
+// check's next attempt saw "tunnel not Connected", cancelled itself and the engine sat in Verifying.
+inline bool verifyFailsOnHandshakeTimeout(bool engineVerifying, bool nativeReconnecting)
+{
+    return engineVerifying && nativeReconnecting;
+}
+
 // A row tap's connect chain as the coordinator needs it: the node the ladder left (connectFailed), the end
 // of the chain without data (attemptEnded), «Подключено» (dataFlowing on a node). Observed from engine
 // state on every change; no timer.
