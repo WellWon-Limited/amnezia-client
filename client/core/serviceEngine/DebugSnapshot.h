@@ -126,6 +126,22 @@ inline void observeTunnelState(TeardownLatch &latch, ObservedTunnel s, bool erro
         break;
     }
 }
+// The same, with the state observed before this one. An Error that follows a terminal state (Disconnected, or an
+// Error) with nothing in between is a start that failed BEFORE the platform tunnel was asked for anything -
+// VpnConnection::connectToVpn always reports Connecting first: a provider node whose seat or profile was refused
+// (§31 п. 1), the bridge refusing an armed start. No session was started since the last terminal, so it changes
+// nothing the latch knows: after a Disconnected the teardown stays proven and a start may go at once. Before
+// (owner's iPhone 16.11, build 140) such an Error set needStatusBeforeStart on iOS; the status reply was the
+// unchanged Disconnected, which IosController never re-emits, so every orb tap (which renews the status budget)
+// waited again - four taps did nothing until the app was relaunched.
+inline void observeTunnelState(TeardownLatch &latch, ObservedTunnel previous, ObservedTunnel s, bool errorProvesTeardown)
+{
+    if (s == ObservedTunnel::Error && !errorProvesTeardown
+        && (previous == ObservedTunnel::Disconnected || previous == ObservedTunnel::Error))
+        return;
+    observeTunnelState(latch, s, errorProvesTeardown);
+}
+
 // Гейт onTick: глушит health только наш стоп в пути или пауза (Error — нет).
 inline bool healthTickAllowed(const TeardownLatch &latch, bool connected, bool paused)
 {

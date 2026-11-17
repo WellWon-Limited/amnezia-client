@@ -1080,6 +1080,53 @@ static void scannerServicePlan()
     CHECK(QLatin1String(macServiceActionName(true, true, false)) == QLatin1String("none"));
 }
 
+// Owner's iPhone 16.11 (build 140), D4: a provider start refused before the core ever started (lease transport
+// failure) was a synthetic Error right after the observed Disconnected of the old tunnel. On iOS it set
+// needStatusBeforeStart; the status reply was the unchanged Disconnected (IosController never re-emits it), and
+// every orb tap renewed the status budget - four taps, no start, until a relaunch.
+static void preNativeErrorNeedsNoStatus()
+{
+    // "Before": the old one-argument rule latches.
+    TeardownLatch before;
+    observeTunnelState(before, ObservedTunnel::Error, false);
+    CHECK(before.needStatusBeforeStart && !reconcileActionable(ObservedTunnel::Error, before));
+    // Disconnected -> Error with nothing in between: the teardown stays proven, the start goes at once.
+    TeardownLatch l;
+    observeTunnelState(l, ObservedTunnel::Connected, ObservedTunnel::Disconnected, false);
+    observeTunnelState(l, ObservedTunnel::Disconnected, ObservedTunnel::Error, false);
+    CHECK(!l.needStatusBeforeStart && !l.awaitingStopConfirm);
+    CHECK(reconcileGate(l, ObservedTunnel::Error, true, true) == ReconcileGate::Proceed);
+    CHECK(reconcileActionable(ObservedTunnel::Error, l));
+    // Error -> Error (the next refused provider): unchanged either way - proven stays proven ...
+    observeTunnelState(l, ObservedTunnel::Error, ObservedTunnel::Error, false);
+    CHECK(!l.needStatusBeforeStart);
+    // ... and a native Error that is unproven stays unproven (the latch is not cleared by a repeat).
+    TeardownLatch n;
+    observeTunnelState(n, ObservedTunnel::Transitional, ObservedTunnel::Error, false); // Connecting -> Error: native
+    CHECK(n.needStatusBeforeStart);
+    observeTunnelState(n, ObservedTunnel::Error, ObservedTunnel::Error, false);
+    CHECK(n.needStatusBeforeStart);
+    // A native attempt in between (connectToVpn always reports Connecting first) keeps today's rule.
+    TeardownLatch c;
+    observeTunnelState(c, ObservedTunnel::Disconnected, ObservedTunnel::Transitional, false);
+    observeTunnelState(c, ObservedTunnel::Transitional, ObservedTunnel::Error, false);
+    CHECK(c.needStatusBeforeStart);
+    // Connected -> Error (a live session failed): unchanged rule.
+    TeardownLatch d;
+    observeTunnelState(d, ObservedTunnel::Connected, ObservedTunnel::Error, false);
+    CHECK(d.needStatusBeforeStart);
+    // Our stop in flight is not confirmed by such an Error either (only Disconnected confirms it).
+    TeardownLatch s;
+    s.awaitingStopConfirm = true;
+    observeTunnelState(s, ObservedTunnel::Error, ObservedTunnel::Error, false);
+    CHECK(s.awaitingStopConfirm);
+    // Platforms where Error proves the teardown: unchanged (the latch clears).
+    TeardownLatch w;
+    w.needStatusBeforeStart = true;
+    observeTunnelState(w, ObservedTunnel::Disconnected, ObservedTunnel::Error, true);
+    CHECK(!w.needStatusBeforeStart);
+}
+
 int main()
 {
     a1ErrorDoesNotLatchAdoption();
@@ -1115,6 +1162,7 @@ int main()
     scannerLightFactsBoundToAsk();
     scannerKillSwitchImmediate();
     scannerServicePlan();
+    preNativeErrorNeedsNoStatus();
     if (g_fail) {
         std::printf("facade_policy_check: %d FAILED\n", g_fail);
         return 1;

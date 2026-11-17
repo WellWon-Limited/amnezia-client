@@ -5260,7 +5260,9 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         const bool errorProvesTeardown = true;  // база 3c8cc74e: Error — терминал
 #endif
         // One mapping for both uses (audit of 137); Unknown and Transitional are the same no-op here.
-        observeTunnelState(m_latch, observedTunnelOf(s), errorProvesTeardown);
+        // With the state before it: an Error with no native attempt since the last terminal (a provider seat or
+        // profile refused before the core started) proves nothing new and asks for no status (D4 of 16.11).
+        observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
             m_stopGeneration = SessionGeneration{};
             m_stopRetries = 0;
