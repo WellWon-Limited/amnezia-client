@@ -40,6 +40,9 @@ struct UpstreamTierGate {
     // Own nodes with a "fresh own failure on this network" by reachability evidence (decideFastTierOpen):
     // the rule's freshOwnFailure input. Non-empty = the attempt never falls back to own nodes.
     QSet<QString> ownPreFailed;
+    // Not candidates of this attempt at all (build 142: the AmneziaWG ban, ServiceEngine::bannedByAttempt):
+    // dropped from every tier before the tiers are judged - neither counted nor failed.
+    QSet<QString> ineligible;
 };
 
 // Sentinel commit tier: no candidate may be committed (fast open, and the upstream tier is used up too).
@@ -63,7 +66,7 @@ inline int upstreamCommitTier(const QList<const SubscriptionNode *> &pool, const
     bool anyUpstream = false;
     QList<TierCandidate> cands;
     for (const SubscriptionNode *n : pool) {
-        if (!n)
+        if (!n || gate.ineligible.contains(n->nodeId))
             continue;
         anyUpstream = anyUpstream || n->upstream.has_value();
         TierCandidate c;

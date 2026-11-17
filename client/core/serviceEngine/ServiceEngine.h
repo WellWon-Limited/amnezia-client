@@ -226,10 +226,12 @@ public:
     // is not an attempt exclusion: the "every candidate failed" reset of connect() and a pool refresh do not
     // touch it. It ends with the attempt (beginUserAttempt: a user start / stop) and on any action of the
     // person on the intent (clearAwgBan from the facade: a pick, a row tap, «Авто»); our own stops keep it.
-    // In connect() it yields only when the pool has no Xray the pick could take at all (removed by a
-    // refresh): absence, not failures - failed Xray starts are retried, never AmneziaWG.
-    // xrayPickWithoutAwg: with every own AmneziaWG node excluded the pick of THIS start - the pinned
-    // location when a location is pinned, else the automatic pick - gives an Xray node.
+    // At the top of connect() it yields when this start could take no Xray at all (a refresh removed them, the
+    // AmneziaWG mode chosen by hand, a pinned location without one) - before any pick, so the pin keeps
+    // priority; failed Xray starts are retried, never AmneziaWG. The provider tier rule reads the ban too
+    // (UpstreamTierGate::ineligible): banned nodes are not candidates of any tier.
+    // xrayPickWithoutAwg: a capability - with every own AmneziaWG node out, THIS start (its mode, its pinned
+    // location if any) could take an Xray node at all; failures of the attempt are not absence.
     bool xrayPickWithoutAwg() const;
     void banAwgForAttempt();
     void clearAwgBan() { m_awgBanned = false; }
@@ -620,8 +622,7 @@ private:
     // useLastKnownRtt=true (failover) — RTT без TTL (свежий поверх последнего известного).
     const SubscriptionNode *pickTransport(const QString &preferLocation, const QString &preferNodeId,
                                           const QString &exclA, bool withExclusions,
-                                          bool useLastKnownRtt = false,
-                                          const QSet<QString> &extraHardExcluded = {}) const;
+                                          bool useLastKnownRtt = false) const;
     QSet<QString> awgNodeIds() const; // build 142 (S5): every own AmneziaWG node of the candidates
     QHash<QString, int> failoverRtt() const;
     // Upstream nodes: the tier gate of the automatic pick (disabled while features.upstream_nodes is off).

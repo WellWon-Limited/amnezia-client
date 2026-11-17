@@ -1185,6 +1185,9 @@ void IosController::checkStatus()
     const auto ticket = m_statusRequests.begin(gen);
     if (!ticket) { [tunnel release]; return; }
     const uint64_t request = *ticket;
+    // AVPN (build 142, review N4): when this request left - a fact of its reply is evidence only if the request
+    // was sent after the app's last freeze (the facade compares; a reply queued across a suspension is old).
+    const qint64 sentMs = QDateTime::currentMSecsSinceEpoch();
     // AVPN (C5): дедлайн освобождает только СЛОТ заявки (можно начать следующую); поздний ответ
     // этой заявки всё равно применится, если он новее последнего применённого (accept ниже).
     QTimer::singleShot(avpn_ios::nativeTimings().statusDeadlineMs, this, [this, gen, request] {
@@ -1205,7 +1208,7 @@ void IosController::checkStatus()
     // tunnel: наш retain (retainedCurrentTunnel) отпускается в КОНЦЕ блока — синхронно после
     // sendProviderMessage (ответ-хендлер менеджер не трогает; release в колбэке был бы двойным
     // при callback(nil)-ветках). Сам блок дополнительно держит tunnel как object-capture.
-    sendVpnExtensionMessage(tunnel, message, [this, gen, request](NSDictionary* response){
+    sendVpnExtensionMessage(tunnel, message, [this, gen, request, sentMs](NSDictionary* response){
         if (!response) {
             QMetaObject::invokeMethod(this, [this, gen, request]() {
                 m_statusRequests.complete(gen, request);
@@ -1264,7 +1267,7 @@ void IosController::checkStatus()
             roamSummary = parts.join(QLatin1Char(' '));
         }
 
-        QMetaObject::invokeMethod(this, [this, gen, request, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
+        QMetaObject::invokeMethod(this, [this, gen, request, sentMs, metadata, txBytes, rxBytes, last_handshake_time_sec, runtimeState, engineDown, // AVPN: capture list - status generation/request (C5/H7), session metadata, xray runtime (D3), roam counters
                                          startFailure, ifaceName, coreLogTail, roamSummary, roamSoftRestarts, roamResumes,
                                          xrayProtectBound, xrayProtectUnbound, xrayProtectRejected, upstreamStatus]() { // AVPN (upstream nodes): + upstreamStatus
             // AVPN: ответ чужого (старого) поколения сессии — выбросить целиком.
@@ -1323,7 +1326,7 @@ void IosController::checkStatus()
                 // handshake budget did meanwhile (review F7: the first answer may come after the first
                 // timeout); the facade's one re-check owner decides once per session.
                 if (m_shownConnectedBeforeHandshake && answeredNoHandshake)
-                    emit adoptedSessionUnproven();
+                    emit adoptedSessionUnproven(sentMs);
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
@@ -1339,7 +1342,7 @@ void IosController::checkStatus()
                     // AVPN (build 142, S5): the fact of this timeout for the facade (an own Auto start on
                     // AmneziaWG leaves AmneziaWG at the first one); the native path below is unchanged.
                     if (answeredNoHandshake)
-                        emit handshakeNeverCompleted(m_handshakeTimeouts);
+                        emit handshakeNeverCompleted(m_handshakeTimeouts, sentMs);
                     // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов
                     // честно отдаём Error и гасим туннель (типично: IP:порт ноды режется оператором).
                     if (m_handshakeTimeouts >= handshakeMaxTimeouts && !m_connectPending) {

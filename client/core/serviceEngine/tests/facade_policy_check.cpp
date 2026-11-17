@@ -910,7 +910,7 @@ static void awgNoHandshakeReplay()
         if (a.neUpToStopS > 12.0)
             ++reachedTimeout;
         AwgNoHandshakeInputs in;
-        in.timeouts = 1;
+        in.fresh = true;
         in.ownStartInFlight = true;
         in.nodeIsAwg = true;
         in.autoMode = true;          // transport mode «Авто» all evening
@@ -926,15 +926,15 @@ static void awgNoHandshakeReplay()
     // up. With the rule, such a start leaves AmneziaWG ~1 s after the moment they stopped waiting.
     CHECK(reachedTimeout == 0);
     AwgNoHandshakeInputs in;
-    in.timeouts = 1;
+    in.fresh = true;
     in.ownStartInFlight = true;
     in.nodeIsAwg = true;
     in.autoMode = true;
     in.xrayPick = true;
     CHECK(decideAwgNoHandshake(in) == AwgNoHandshake::Leave);
-    AwgNoHandshakeInputs later = in;
-    later.timeouts = 2;
-    CHECK(decideAwgNoHandshake(later) == AwgNoHandshake::IgnoreLaterTimeout); // decided once, at the first
+    AwgNoHandshakeInputs stale = in;
+    stale.fresh = false;              // a reply queued across a freeze (N4): the next timeout tells again
+    CHECK(decideAwgNoHandshake(stale) == AwgNoHandshake::IgnoreStale);
     AwgNoHandshakeInputs stopped = in;
     stopped.ownStartInFlight = false; // the person's stop (or an adopted session, S3): theirs wins
     CHECK(decideAwgNoHandshake(stopped) == AwgNoHandshake::IgnoreNotOwnStart);
@@ -957,12 +957,37 @@ static void awgNoHandshakeReplay()
     CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::IgnoreExplicitNode)) == QLatin1String("explicit_node"));
 }
 
-// Build 142 (S3): on iOS a native Reconnecting during the app's own check is a handshake timeout: the check failed.
-static void verifyEndsOnHandshakeTimeout()
+// Review round 2, N4: the re-check of the adopted session runs while the native's stored state is Reconnecting
+// (its 12 s handshake timeout passed); the person leaves the app, iOS suspends it; the extension restores the
+// path during the sleep; the app returns and the check's pending attempt fires before any fresh status. Round 1
+// failed the check on that stored Reconnecting and moved a healthy tunnel away. Now a stored state is never the
+// verdict: the attempt goes on with a fresh budget and its request through the tunnel decides.
+static void verifyAfterThawReplay()
 {
-    CHECK(verifyFailsOnHandshakeTimeout(/*verifying=*/true, /*reconnecting=*/true));
-    CHECK(!verifyFailsOnHandshakeTimeout(false, true)); // Connected / Connecting: the ordinary Reconnecting
-    CHECK(!verifyFailsOnHandshakeTimeout(true, false));
+    const qint64 checkStarted = 1000;     // the re-check begins (23:20:27 in the S3 relaunch)
+    const qint64 hidden = 13000;          // the app leaves the screen, then is suspended
+    const qint64 resumed = 600000;        // back on the screen ten minutes later
+    // before the freeze: native Reconnecting (handshake timeout) - the series goes on, the requests decide
+    CHECK(verifyAttemptGate(true, true, /*connected=*/false, /*reconnecting=*/true, /*ios=*/true, checkStarted, 0)
+          == VerifyAttemptGate::GoOn);
+    // the first attempt after the thaw, the stored state still Reconnecting: a fresh budget, never a failure
+    CHECK(verifyAttemptGate(true, true, false, true, true, checkStarted, std::max(resumed, hidden))
+          == VerifyAttemptGate::FreshBudget);
+    // the next attempt (clock restarted after the boundary): on with the fresh budget
+    CHECK(verifyAttemptGate(true, true, false, true, true, resumed + 1, resumed) == VerifyAttemptGate::GoOn);
+    // the status that arrives meanwhile says Connected (the extension restored the path): still on
+    CHECK(verifyAttemptGate(true, true, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::GoOn);
+    // the state moved on for real: cancelled as before (stop, loss, our switch, a new check)
+    CHECK(verifyAttemptGate(true, true, false, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
+    CHECK(verifyAttemptGate(false, true, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
+    CHECK(verifyAttemptGate(true, false, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
+    // other platforms: unchanged - Reconnecting cancels, no budget rule
+    CHECK(verifyAttemptGate(true, true, false, true, /*ios=*/false, checkStarted, resumed) == VerifyAttemptGate::Cancel);
+    CHECK(verifyAttemptGate(true, true, true, false, false, checkStarted, resumed) == VerifyAttemptGate::GoOn);
+    // native facts: a reply to a request sent before the freeze is no evidence (S3 re-check, S5 ban)
+    CHECK(!nativeFactFresh(/*sent=*/hidden - 500, std::max(resumed, hidden)));
+    CHECK(nativeFactFresh(resumed + 200, std::max(resumed, hidden)));
+    CHECK(nativeFactFresh(5, /*never frozen=*/-1));
 }
 
 // A row tap's chain as the coordinator sees it: the node the ladder left, the end, «Подключено».
@@ -1305,7 +1330,7 @@ int main()
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
     awgNoHandshakeReplay();
-    verifyEndsOnHandshakeTimeout();
+    verifyAfterThawReplay();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

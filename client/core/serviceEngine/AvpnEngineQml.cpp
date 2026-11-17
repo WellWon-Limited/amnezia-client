@@ -1277,8 +1277,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
     // Build 142 (S3): an adopted session shown Connected whose extension answers "no handshake, no data"
     // goes to the app's own data check through the single re-check (TunnelWatchResume::onAdoptedUnproven).
-    connect(IosController::Instance(), &IosController::adoptedSessionUnproven, this, [this]() {
-        if (m_watchResume)
+    connect(IosController::Instance(), &IosController::adoptedSessionUnproven, this, [this](qint64 requestSentMs) {
+        // N4: an answer to a request older than the last freeze is no evidence - the next reply tells again.
+        if (m_watchResume && avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs()))
             m_watchResume->onAdoptedUnproven();
     }, Qt::QueuedConnection);
     // Build 142 (S5): a handshake timeout of a session that never handshook (DebugSnapshot.h::decideAwgNoHandshake).
@@ -3469,10 +3470,10 @@ void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
 // leaves AmneziaWG for the rest of the attempt and goes on with the best Xray candidate, through the same
 // path as a failed start (a counted attempt, the network memory forgets the node, our guarded stop, then
 // reconcile starts the next pick of this attempt).
-void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts)
+void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)
 {
     avpn::AwgNoHandshakeInputs in;
-    in.timeouts = timeouts;
+    in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());
     in.ownStartInFlight = m_op == Op::Starting && m_wantConnected;
     const avpn::SubscriptionNode *node = m_engine.nodeById(m_engine.currentNodeId());
     in.nodeIsAwg = node && !avpn::isUpstreamNode(*node) && !avpn::isXrayProto(avpn::protoOf(*node));
@@ -3480,10 +3481,10 @@ void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts)
     const QStringList hint = m_engine.attemptOrder();
     in.explicitNode = !hint.isEmpty() && hint.first() == m_engine.currentNodeId();
     in.alreadyLeft = m_engine.awgBanned();
-    in.xrayPick = in.timeouts == 1 && in.ownStartInFlight && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
+    in.xrayPick = in.ownStartInFlight && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
     const avpn::AwgNoHandshake d = avpn::decideAwgNoHandshake(in);
-    if (d == avpn::AwgNoHandshake::IgnoreLaterTimeout)
-        return;
+    if (!in.ownStartInFlight || d == avpn::AwgNoHandshake::IgnoreAlreadyLeft)
+        return; // not ours, or decided already: told every timeout - silent
     reliabilityEvent(QStringLiteral("awg_no_handshake node=%1 timeouts=%2 -> %3")
                          .arg(m_engine.currentNodeId()).arg(timeouts).arg(QLatin1String(avpn::awgNoHandshakeName(d))));
     if (d != avpn::AwgNoHandshake::Leave)
@@ -5426,16 +5427,6 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         break;
     case Vpn::Reconnecting:
         // Промежуточное iOS-Reconnecting: НЕ инициируем свитч/реконнект — дождёмся терминала.
-#ifdef Q_OS_IOS
-        // Build 142 (S3): on iOS Reconnecting is a handshake timeout of the awaited session. During the app's
-        // own data check that is the check's answer (DebugSnapshot.h::verifyFailsOnHandshakeTimeout) - its
-        // next attempt would only see "not Connected" and cancel itself, leaving the engine in Verifying.
-        // Deferred: never act from inside the tunnel callback (§3).
-        if (m_engine.isVerifying()) {
-            const int epoch = m_verifyEpoch;
-            QTimer::singleShot(0, this, [this, epoch]() { failVerifyOnHandshakeTimeout(epoch); });
-        }
-#endif
         break;
     default: // Unknown/Preparing/Connecting/Disconnecting — промежуточные, фазу движка не трогаем.
         break;
@@ -8157,32 +8148,43 @@ void AvpnEngineQml::startXrayVerification()
     QTimer::singleShot(800, this, [this, epoch]() { verifyAttempt(epoch); });
 }
 
-// Build 142 (S3, review F7): the app's own check meets a native Reconnecting - on iOS a handshake timeout of
-// the awaited session - at the transition, or at its next attempt when it started after it (a late
-// re-check of an adopted session). Either way the check failed (DebugSnapshot.h::
-// verifyFailsOnHandshakeTimeout); without this the attempt only saw "not Connected", cancelled itself and
-// the engine stayed in Verifying. true = the check was ended here.
-bool AvpnEngineQml::failVerifyOnHandshakeTimeout(int epoch)
+// Build 142 (review round 2, N4): when the app last froze - the later of the last hide and the last return to
+// the screen (the P2-2 boundary of classifyApiOutcome). States and facts from before it are not evidence.
+qint64 AvpnEngineQml::freezeBoundaryMs() const
+{
+    return std::max(m_lastResumeMs, m_lastHiddenMs);
+}
+
+// Build 142 (N4): the gate of every attempt of the app's own data check (DebugSnapshot.h::verifyAttemptGate).
+// false = the series is cancelled (the state moved on); a check that spanned a freeze gets a fresh budget.
+bool AvpnEngineQml::verifyAttemptGoesOn(int epoch, const char *site)
 {
 #ifdef Q_OS_IOS
-    if (epoch != m_verifyEpoch
-        || !avpn::verifyFailsOnHandshakeTimeout(m_engine.isVerifying(), m_lastTunnelState == Vpn::Reconnecting))
-        return false;
-    reliabilityEvent(QStringLiteral("verify_failed why=handshake_timeout node=%1").arg(m_engine.currentNodeId()));
-    finishVerify(epoch, false, QStringLiteral("no handshake (native timeout, failover)"));
-    return true;
+    const bool iosNative = true;
 #else
-    Q_UNUSED(epoch)
-    return false;
+    const bool iosNative = false;
 #endif
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    switch (avpn::verifyAttemptGate(epoch == m_verifyEpoch, m_engine.isVerifying(), m_lastTunnelState == Vpn::Connected,
+                                    m_lastTunnelState == Vpn::Reconnecting, iosNative, now - m_verifyClock.elapsed(),
+                                    freezeBoundaryMs())) {
+    case avpn::VerifyAttemptGate::Cancel:
+        return false;
+    case avpn::VerifyAttemptGate::FreshBudget:
+        reliabilityEvent(QStringLiteral("verify_budget_fresh why=freeze site=%1 node=%2")
+                             .arg(QLatin1String(site), m_engine.currentNodeId()));
+        m_verifyClock.restart();
+        return true;
+    case avpn::VerifyAttemptGate::GoOn:
+        return true;
+    }
+    return false;
 }
 
 void AvpnEngineQml::verifyAttempt(int epoch)
 {
-    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected) {
-        failVerifyOnHandshakeTimeout(epoch); // iOS: a handshake timeout ends the check, it is not a cancel
+    if (!verifyAttemptGoesOn(epoch, "verify"))
         return; // состояние уехало (стоп/обрыв/смена) — серия отменена
-    }
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141): an attempt due after a freeze waits for the extension's snapshot.
     if (deferWhileTunnelWatchFrozen("verify", [this, epoch]() { verifyAttempt(epoch); }))
@@ -8366,10 +8368,8 @@ void AvpnEngineQml::startWhoamiVerification()
 
 void AvpnEngineQml::whoamiAttempt(int epoch)
 {
-    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected) {
-        failVerifyOnHandshakeTimeout(epoch); // iOS: a handshake timeout ends the check, it is not a cancel
+    if (!verifyAttemptGoesOn(epoch, "whoami"))
         return; // the state moved on (stop / loss / switch) - this check is cancelled
-    }
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141): a late attempt after a freeze is judged only after the extension's
     // snapshot (field 13.11: "limited ... no_evidence left_ms=-402760" before anything was asked).

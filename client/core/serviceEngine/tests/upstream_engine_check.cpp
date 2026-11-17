@@ -2102,6 +2102,59 @@ static void ownerReviewRound1()
     }
 }
 
+// Build 142 (S5, review round 2 N2): an own Xray listener.
+static QJsonObject xrayOwnNode(const QString &id, int hostId, const char *cc)
+{
+    return QJsonObject{
+        {"node_id", id}, {"region", "eu"}, {"host_id", hostId}, {"transport_rank", 20},
+        {"endpoint", QStringLiteral("203.0.113.%1:443").arg(hostId)}, {"proto", "xray"}, {"weight", 1.0},
+        {"country_code", cc},
+        {"xray_params", QJsonObject{{"uuid", "8f14e45f-ceea-4a7c-9d6b-2a1b3c4d5e6f"},
+                                    {"public_key", "SbVjZ9Yl3dR3QpG1v8k2Wx0aU7Hq4Nn6Tt5Bc8Jd1mE"},
+                                    {"short_id", "a1b2c3d4"}, {"server_name", "vision.example.com"},
+                                    {"fingerprint", "chrome"}, {"flow", "xtls-rprx-vision"}, {"network", "tcp"},
+                                    {"security", "reality"}}}};
+}
+
+// Review round 2, N2: three own AmneziaWG, one own Xray, one working provider. AmneziaWG gets no handshake
+// (banned for the attempt), the own Xray is refused - the provider tier must open. The tier rule sees the
+// same pool as the picker: banned nodes are not candidates of tier 0 (neither untried nor failed).
+static void awgBanOpensProviderTier()
+{
+    setFlags(true, /*failCap=*/4);
+    QString err;
+    ServiceEngine e;
+    FakeTunnel t;
+    e.setTunnel(&t);
+    CHECK(e.loadSubscription(body(QJsonArray{awgNode("17", 17, "FI"), awgNode("16", 16, "DE"), awgNode("15", 15, "EE"),
+                                             xrayOwnNode("12:xray", 12, "DE"), stubNode("aaaaaaaaaaaaaaa0", 1, 0)}), err));
+    e.setMeasuredRtt({{QStringLiteral("17"), 20}, {QStringLiteral("16"), 30}, {QStringLiteral("15"), 40},
+                      {QStringLiteral("12:xray"), 50}});
+    e.beginUserAttempt();
+    CHECK(e.connect(err) && t.ups.last() == QLatin1String("17"));
+    CHECK(e.xrayPickWithoutAwg());
+    e.banAwgForAttempt();                                   // the first handshake timeout of 17
+    e.requestStop();
+    CHECK(e.connect(err) && t.ups.last() == QLatin1String("12:xray")); // own Xray before any provider
+    e.excludeForAttempt(QStringLiteral("12:xray"), QStringLiteral("start_failed")); // the Xray start is refused
+    e.onTunnelError();
+    e.requestStop();
+    CHECK(e.connect(err) && isStubId(t.ups.last()));        // the provider tier opens: own tier exhausted
+    CHECK(e.awgBanned());
+    // No own Xray at all: the ban still has a target (the provider, Xray by nature) and the predicate says so.
+    ServiceEngine p;
+    FakeTunnel pt;
+    p.setTunnel(&pt);
+    CHECK(p.loadSubscription(body(QJsonArray{awgNode("17", 17, "FI"), awgNode("16", 16, "DE"),
+                                             stubNode("aaaaaaaaaaaaaaa0", 1, 0)}), err));
+    p.setMeasuredRtt({{QStringLiteral("17"), 20}, {QStringLiteral("16"), 30}});
+    CHECK(p.connect(err) && pt.ups.last() == QLatin1String("17"));
+    CHECK(p.xrayPickWithoutAwg());
+    p.banAwgForAttempt();
+    p.requestStop();
+    CHECK(p.connect(err) && isStubId(pt.ups.last()));
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -2113,6 +2166,7 @@ int main(int argc, char **argv)
     flagOffIdentical();
     identityAndReseed();
     engineAttempt();
+    awgBanOpensProviderTier();
     ownerAcquireOutcomes();
     ownerRefusedBringUp();
     ownerSeatFirst();

@@ -2214,6 +2214,30 @@ int main(int argc, char **argv)
         CHECK(!eng.xrayPickWithoutAwg());
         eng.requestStop();
     }
+    {   // review round 2, N3: AmneziaWG -> Xray inside pinned location A, then the person chooses the AmneziaWG
+        // mode by hand: the ban cannot be kept (no Xray this start could take) and is lifted BEFORE the pick, so
+        // the pin keeps priority - A's AmneziaWG, not a faster location B.
+        setFlags(/*xrayClient=*/true, /*autoPick=*/true);
+        QString err;
+        ServiceEngine eng; FakeTunnel tun; eng.setTunnel(&tun);
+        CHECK(eng.loadSubscription(subJson({ awgNodeJson("15", 15, "EE", 1.0), xrayNodeJson("15:xray", 15, "EE", 1.0),
+                                             awgNodeJson("2", 2, "PL", 1.0) }), err));
+        eng.setMeasuredRtt({{QStringLiteral("15"), 60}, {QStringLiteral("15:xray"), 60}, {QStringLiteral("2"), 10}});
+        CHECK(eng.setPinnedNode(QStringLiteral("15"), err));
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("15"));
+        eng.banAwgForAttempt();
+        eng.requestStop();
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("15:xray"));
+        eng.requestStop();
+        ModeActivity idle;
+        idle.tunnel = ModeTunnel::Down;
+        eng.noteModeActivity(idle, QStringLiteral("idle"));
+        const TransportModeGate::Tap tap = eng.tapTransportMode(TransportMode::Awg);
+        CHECK(!tap.refused && eng.transportMode() == TransportMode::Awg);
+        CHECK(eng.connect(err) && tun.lastUpNodeId == QLatin1String("15")); // pinned A, AmneziaWG
+        CHECK(!eng.awgBanned());
+        eng.requestStop();
+    }
     {   // no Xray for the automatic pick: nothing to leave for (xray_client off, transport_auto_pick off,
         // an AmneziaWG-only pool). Review F8: with transport_auto_pick off the predicate refuses
         // (NodeRotation.h::isAutoEligibleNode drops Xray from the Auto pick), so the ban is never set there.

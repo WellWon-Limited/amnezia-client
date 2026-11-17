@@ -30,3 +30,8 @@ cd "$HERE"
 # Review round 1 of 17.11 (provider seats): the facade, the adapter and the lease client hand the seat-first state
 # and the lease I/O through at the expected places (source level; the rules are tested by behaviour).
 "$HERE/check_upstream_seat_wiring.sh"
+
+# Build 142 (owner's iPhone, build 140, 16.11): the Scanner cancel, the re-check of an unproven adopted session,
+# the AmneziaWG ban and its readers are called at the expected places (source level; the rules are tested by
+# behaviour in facade_policy_check, tunnel_watch_check, transport_pick_check, upstream_engine_check, harness).
+"$HERE/check_lifecycle_142_wiring.sh"

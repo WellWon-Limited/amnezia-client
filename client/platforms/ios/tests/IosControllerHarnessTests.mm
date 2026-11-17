@@ -1906,11 +1906,21 @@ static void test_uplink_probe_set_from_cxx_unit()
 // no data" (soft restarts reset the engine). The native tells the facade at once and changes nothing itself.
 static int g_unproven = 0;
 static std::vector<int> g_neverTimeouts;
+static qint64 g_factSentMs = -1; // review round 2, N4: every fact carries when its status request left
 static void tapHandshakeFacts()
 {
-    QObject::connect(IosController::Instance(), &IosController::adoptedSessionUnproven, [] { ++g_unproven; });
-    QObject::connect(IosController::Instance(), &IosController::handshakeNeverCompleted,
-                     [](int t) { g_neverTimeouts.push_back(t); });
+    QObject::connect(IosController::Instance(), &IosController::adoptedSessionUnproven, [](qint64 sent) {
+        ++g_unproven;
+        g_factSentMs = sent;
+    });
+    QObject::connect(IosController::Instance(), &IosController::handshakeNeverCompleted, [](int t, qint64 sent) {
+        g_neverTimeouts.push_back(t);
+        g_factSentMs = sent;
+    });
+}
+static bool factSentRecently(qint64 since)
+{
+    return g_factSentMs >= since && g_factSentMs <= QDateTime::currentMSecsSinceEpoch();
 }
 static HarnessSession *establishedSession(NSDictionary *reply, int timeoutMs, NSDate *connectedAt)
 {
@@ -1927,10 +1937,12 @@ static HarnessSession *establishedSession(NSDictionary *reply, int timeoutMs, NS
 }
 static void test_adopted_unproven_told()
 {
+    const qint64 since = QDateTime::currentMSecsSinceEpoch();
     tapHandshakeFacts();
     HarnessSession *s = establishedSession(stalledReply(@7, @0), 60000, [NSDate dateWithTimeIntervalSinceNow:-1560]);
     runStatusPolls(400);
     CHECK(g_unproven >= 1, "adopted session without a handshake not told to the facade");
+    CHECK(factSentRecently(since), "the fact does not carry when its status request was sent");
     CHECK(!obs.states.empty() && obs.states.back() == Vpn::ConnectionState::Connected, "the native state changed");
     CHECK(s.stopCalls == 0, "the fact stopped the session");
     CHECK(g_neverTimeouts.empty(), "no timeout yet: no timeout fact");

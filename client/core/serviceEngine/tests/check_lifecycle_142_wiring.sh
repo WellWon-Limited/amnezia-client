@@ -41,25 +41,34 @@ has "$(body "$FACADE" 'void AvpnEngineQml::scanSyncState()')" 'noteScanOwnConnec
 
 # ---- S3 ----------------------------------------------------------------------------------------------------
 status="$(code "$CONTROLLER" | awk '/const bool answeredNoHandshake = hasHandshakeData/ { on = 1 } on { print } on && /if \(hasFreshHandshake\) \{/ { exit }')"
-has "$status" 'if (m_shownConnectedBeforeHandshake && answeredNoHandshake)' && has "$status" 'emit adoptedSessionUnproven();' \
+has "$status" 'if (m_shownConnectedBeforeHandshake && answeredNoHandshake)' && has "$status" 'emit adoptedSessionUnproven(sentMs);' \
     || bad "S3: the native does not tell an unproven adoption before (independently of) the handshake budget"
-[ "$(count "$CONTROLLER" 'emit adoptedSessionUnproven();')" = "1" ] || bad "S3: adoptedSessionUnproven is emitted from more than one place"
+[ "$(count "$CONTROLLER" 'emit adoptedSessionUnproven(sentMs);')" = "1" ] || bad "S3: adoptedSessionUnproven is emitted from more than one place"
 has "$(code "$FACADE")" 'm_watchResume->onAdoptedUnproven();' || bad "S3: the facade does not hand the unproven adoption to TunnelWatchResume"
 [ "$(code "$RESUME" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "S3: reenterVerifying has more than one caller in TunnelWatchResume"
 [ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "S3: the facade calls reenterVerifying outside the hand-over's op"
 has "$(body "$RESUME" '    void onAdoptedUnproven()')" 'recheck();' || bad "S3: onAdoptedUnproven does not go through the one re-check"
-[ "$(count "$FACADE" 'failVerifyOnHandshakeTimeout(epoch)')" -ge 3 ] \
-    || bad "S3: a handshake timeout does not end the check at the transition and at both attempt guards"
-has "$(body "$FACADE" 'void AvpnEngineQml::verifyAttempt(int epoch)')" 'failVerifyOnHandshakeTimeout(epoch);' \
-    || bad "S3: verifyAttempt cancels on a handshake timeout instead of failing"
-has "$(body "$FACADE" 'void AvpnEngineQml::whoamiAttempt(int epoch)')" 'failVerifyOnHandshakeTimeout(epoch);' \
-    || bad "S3: whoamiAttempt cancels on a handshake timeout instead of failing"
+# N4 (review round 2): a stored native state is never the verdict of the data check; facts are fresh only.
+[ "$(count "$FACADE" 'failVerifyOnHandshakeTimeout')" = "0" ] || bad "N4: the check is still failed on a stored native state"
+for fn in 'void AvpnEngineQml::verifyAttempt(int epoch)' 'void AvpnEngineQml::whoamiAttempt(int epoch)'; do
+    b="$(body "$FACADE" "$fn")"
+    has "$b" 'if (!verifyAttemptGoesOn(epoch, ' || bad "N4: $fn does not pass the attempt gate"
+    has "$b" 'm_lastTunnelState != Vpn::Connected' && bad "N4: $fn judges the stored native state itself"
+done
+has "$(body "$FACADE" 'bool AvpnEngineQml::verifyAttemptGoesOn(int epoch, const char *site)')" 'avpn::verifyAttemptGate(' \
+    || bad "N4: the attempt gate is not DebugSnapshot.h::verifyAttemptGate"
+has "$(code "$FACADE")" 'if (m_watchResume && avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs()))' \
+    || bad "N4: an unproven adoption from before the last freeze is acted upon"
+has "$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)')" \
+    'in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());' || bad "N4: the S5 fact is not checked for freshness"
+[ "$(count "$CONTROLLER" 'sendVpnExtensionMessage(tunnel, message, [this, gen, request, sentMs]')" = "1" ] \
+    || bad "N4: the status request does not carry its send time into the reply"
 
 # ---- S5 ----------------------------------------------------------------------------------------------------
-[ "$(count "$CONTROLLER" 'emit handshakeNeverCompleted(m_handshakeTimeouts);')" = "1" ] \
+[ "$(count "$CONTROLLER" 'emit handshakeNeverCompleted(m_handshakeTimeouts, sentMs);')" = "1" ] \
     || bad "S5: the native does not tell the no-handshake timeout (once, with its number)"
 has "$(code "$FACADE")" '&IosController::handshakeNeverCompleted, this,' || bad "S5: the facade does not listen to the timeout fact"
-leave="$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts)')"
+leave="$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)')"
 has "$leave" 'avpn::decideAwgNoHandshake(in)' || bad "S5: the facade does not decide through decideAwgNoHandshake"
 has "$leave" 'in.xrayPick = ' && has "$leave" 'm_engine.xrayPickWithoutAwg()' || bad "S5: the Xray pick is not asked from the engine"
 has "$leave" 'in.alreadyLeft = m_engine.awgBanned();' || bad "S5: 'already left' is not the engine's ban"
@@ -85,6 +94,16 @@ has "$(body "$ENGINE_CPP" 'const SubscriptionNode *ServiceEngine::pickByWeight('
 has "$(code "$ENGINE_CPP")" '&& !m_attemptExcluded.contains(t->nodeId) && !bannedByAttempt(*t))' \
     || bad "S5: the interrupted-switch replay does not read the ban"
 [ "$(code "$ENGINE_CPP" | grep -cF 'm_awgBanned && isOwnAwgNode(n)')" = "1" ] || bad "S5: the ban has more than one reader"
+# N2 (review round 2): the provider tier rule sees the pool the picker sees - banned nodes are not candidates.
+has "$(body "$ENGINE_CPP" 'UpstreamTierGate ServiceEngine::tierGate() const')" 'if (bannedByAttempt(n))' \
+    && has "$(body "$ENGINE_CPP" 'UpstreamTierGate ServiceEngine::tierGate() const')" 'g.ineligible.insert(n.nodeId);' \
+    || bad "N2: the provider tier rule does not read the ban"
+has "$(code "$ENGINE/UpstreamTier.h")" 'if (!n || gate.ineligible.contains(n->nodeId))' || bad "N2: the tier rule does not drop ineligible nodes"
+# N3: the ban yields (no Xray this start could take) BEFORE any pick of connect(), so the pin keeps priority.
+conn="$(body "$ENGINE_CPP" 'bool ServiceEngine::connect(QString &error)')"
+lift="$(printf '%s\n' "$conn" | grep -nF 'if (m_awgBanned && !xrayPickWithoutAwg()) {' | cut -d: -f1)"
+pin="$(printf '%s\n' "$conn" | grep -nF 'pinnedCandidate()' | head -1 | cut -d: -f1)"
+[ -n "$lift" ] && [ -n "$pin" ] && [ "$lift" -lt "$pin" ] || bad "N3: the ban is lifted after the pinned pick (or not at all)"
 
 if [ "$fail" -ne 0 ]; then
     echo "check_lifecycle_142_wiring: FAILED"

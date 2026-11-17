@@ -1026,19 +1026,19 @@ inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch
 // anything: the native kept it Reconnecting, the start watchdog ended it after ~45 s without a transport
 // record, and AmneziaWG (rank 10) stayed ahead of Xray (rank 20) in every pick.
 // The native tells each handshake timeout of a session whose NE answered "no handshake, no data"
-// (IosController::handshakeNeverCompleted). At the FIRST one (~12 s after the tunnel came up) an own Auto
+// (IosController::handshakeNeverCompleted). At the first FRESH one (~12 s after the tunnel came up) an own Auto
 // start on AmneziaWG leaves AmneziaWG for the rest of this attempt: the transport is recorded as failed
 // (location x proto history), AmneziaWG is banned for the rest of the attempt (ServiceEngine::
 // banAwgForAttempt - one piece of attempt state that every pick reads), and the start goes on with the
 // next pick - the best Xray candidate. Only in Auto transport mode (a transport chosen by hand is never
 // overridden), never for a node the person chose exactly (a Scanner row tap: the head of the attempt's
-// order hint), only if such a pick exists, only once per attempt (no flapping back), only while the
+// order hint), only if such a pick exists, only once per attempt (the ban: no flapping back), only while the
 // person's own start is still in flight (their stop wins: it ends the attempt).
 // A pinned LOCATION does not block it (owner question, build 142): in Auto mode a pin is a location and the
 // engine already picks the transport inside it (rank + history); the Xray pick is then the pinned
 // location's own Xray (same country, other protocol), never another location. No Xray there - no move.
 struct AwgNoHandshakeInputs {
-    int timeouts = 0;              // the native handshake timeout number (1 = the first, ~12 s)
+    bool fresh = false;            // the fact's status request was sent after the app's last freeze (N4)
     bool ownStartInFlight = false; // our start is in flight and the person still wants the VPN on
     bool nodeIsAwg = false;        // the node of this start is an own AmneziaWG node
     bool autoMode = false;         // the effective transport mode is Auto
@@ -1047,12 +1047,12 @@ struct AwgNoHandshakeInputs {
     bool xrayPick = false;         // with every AmneziaWG node excluded the pick of this start (inside the
                                    // pinned location, if any) gives an Xray node
 };
-enum class AwgNoHandshake { Leave, IgnoreLaterTimeout, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode,
+enum class AwgNoHandshake { Leave, IgnoreStale, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode,
                             IgnoreExplicitNode, IgnoreAlreadyLeft, IgnoreNoXray };
 inline AwgNoHandshake decideAwgNoHandshake(const AwgNoHandshakeInputs &in)
 {
-    if (in.timeouts != 1)
-        return AwgNoHandshake::IgnoreLaterTimeout;
+    if (!in.fresh)
+        return AwgNoHandshake::IgnoreStale; // a reply queued across a freeze: the next timeout tells again
     if (!in.ownStartInFlight)
         return AwgNoHandshake::IgnoreNotOwnStart;
     if (!in.nodeIsAwg)
@@ -1071,7 +1071,7 @@ inline const char *awgNoHandshakeName(AwgNoHandshake d)
 {
     switch (d) {
     case AwgNoHandshake::Leave: return "leave_awg";
-    case AwgNoHandshake::IgnoreLaterTimeout: return "later_timeout";
+    case AwgNoHandshake::IgnoreStale: return "stale";
     case AwgNoHandshake::IgnoreNotOwnStart: return "not_own_start";
     case AwgNoHandshake::IgnoreNotAwg: return "not_awg";
     case AwgNoHandshake::IgnoreMode: return "mode";
@@ -1082,13 +1082,32 @@ inline const char *awgNoHandshakeName(AwgNoHandshake d)
     return "unknown";
 }
 
-// Build 142 (S3): on iOS the native reports Reconnecting only at a handshake timeout of the session it
-// awaits (ios_controller.mm checkStatus). While the app's own data check runs (engine Verifying), that is
-// the check's answer - no handshake for the whole timeout, no data possible - not a pause: before, the
-// check's next attempt saw "tunnel not Connected", cancelled itself and the engine sat in Verifying.
-inline bool verifyFailsOnHandshakeTimeout(bool engineVerifying, bool nativeReconnecting)
+// Build 142 (review round 2, N4): a state or a fact from before the app's last freeze is never evidence.
+// iOS suspends the app with requests and timers pending; the extension lives on and may restore the path
+// meanwhile. freezeBoundaryMs = the later of the last hide and the last return to the screen (the P2-2 rule of
+// classifyApiOutcome); <= 0 = never frozen.
+// A native fact (an answered status reply) counts only if its request was sent after the boundary.
+inline bool nativeFactFresh(qint64 requestSentMs, qint64 freezeBoundaryMs)
 {
-    return engineVerifying && nativeReconnecting;
+    return freezeBoundaryMs <= 0 || requestSentMs >= freezeBoundaryMs;
+}
+// The app's own data check, at each attempt. Only requests through the tunnel decide it - never the stored
+// native state: on iOS Reconnecting is a handshake timeout of the SAME live tunnel (the native keeps it up), so
+// the attempts go on and their requests answer (before: the attempt cancelled itself on "not Connected" and the
+// engine stayed in Verifying; round 1 then failed the check on the stored state - stale after a thaw). And a
+// budget spent across a freeze is no evidence either: the check gets a fresh budget once after the boundary.
+enum class VerifyAttemptGate { Cancel, GoOn, FreshBudget };
+inline VerifyAttemptGate verifyAttemptGate(bool epochCurrent, bool engineVerifying, bool nativeConnected,
+                                           bool nativeReconnecting, bool iosNative, qint64 checkStartedMs,
+                                           qint64 freezeBoundaryMs)
+{
+    if (!epochCurrent || !engineVerifying)
+        return VerifyAttemptGate::Cancel;
+    if (!nativeConnected && !(iosNative && nativeReconnecting))
+        return VerifyAttemptGate::Cancel; // the state moved on (stop / loss / switch)
+    if (iosNative && freezeBoundaryMs > 0 && checkStartedMs < freezeBoundaryMs)
+        return VerifyAttemptGate::FreshBudget;
+    return VerifyAttemptGate::GoOn;
 }
 
 // A row tap's connect chain as the coordinator needs it: the node the ladder left (connectFailed), the end

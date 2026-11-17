@@ -188,6 +188,11 @@ UpstreamTierGate ServiceEngine::tierGate() const
     g.failed = m_failedThisSession;
     for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
         g.failed.insert(it.key());
+    // Build 142 (S5, review N2): a node the attempt's transport ban takes out is not a candidate of any tier -
+    // the tier rule sees the same pool as the picker (not a failure: the own Xray still goes before providers).
+    for (const SubscriptionNode &n : m_merged)
+        if (bannedByAttempt(n))
+            g.ineligible.insert(n.nodeId);
     if (m_fastTierOpen)
         for (const SubscriptionNode &n : m_merged)
             if (!n.upstream.has_value())
@@ -226,15 +231,20 @@ bool ServiceEngine::bannedByAttempt(const SubscriptionNode &n) const // build 14
     return m_awgBanned && isOwnAwgNode(n);
 }
 
+// A capability, not an outcome: could THIS start take an Xray node at all - the transport mode, the pinned
+// location, the node's eligibility and health - with every own AmneziaWG node out. Failures of this attempt
+// are not absence (they are retried: connect() clears the attempt exclusions when all failed), and any tier
+// counts (a provider is Xray too). Read by the decision (DebugSnapshot.h::decideAwgNoHandshake) and by the
+// lift at the top of connect().
 bool ServiceEngine::xrayPickWithoutAwg() const // build 142 (S5)
 {
-    const QSet<QString> awg = awgNodeIds();
     const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
-    const QString loc = pinned ? locationKeyOf(*pinned) : QString();
-    const QString prefer = pinned ? m_pinnedNodeId : QString();
-    const SubscriptionNode *c = pickTransport(loc, prefer, QString(), /*withExclusions=*/true, false, awg);
-    if (!c && !sessionExclusions().isEmpty())
-        c = pickTransport(loc, prefer, QString(), /*withExclusions=*/false, false, awg);
+    TransportPickInput in;
+    in.mode = transportMode();
+    in.preferLocation = pinned ? locationKeyOf(*pinned) : QString();
+    in.preferNodeId = pinned ? m_pinnedNodeId : QString();
+    in.hardExcluded = awgNodeIds();
+    const SubscriptionNode *c = pickTransportNode(m_merged, rankingRtt(measuredRtt()), m_transportHistory, in);
     return c && isXrayProto(protoOf(*c));
 }
 
@@ -426,8 +436,7 @@ const SubscriptionNode *ServiceEngine::pickByMeasuredRtt(const QString &exclA, c
 // AVPN awg31-xray-v1: выбор транспорта по локациям (см. TransportPick.h и ServiceEngine.h).
 const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocation, const QString &preferNodeId,
                                                      const QString &exclA, bool withExclusions,
-                                                     bool useLastKnownRtt,
-                                                     const QSet<QString> &extraHardExcluded) const
+                                                     bool useLastKnownRtt) const
 {
     TransportPickInput in;
     in.mode = transportMode(); // 5.1.109: the effective mode, as connect() after normalizeTransportMode()
@@ -439,7 +448,6 @@ const SubscriptionNode *ServiceEngine::pickTransport(const QString &preferLocati
     // Upstream nodes: a start failure of this attempt is never retried in it; the automatic pick is tiered.
     for (auto it = m_attemptExcluded.constBegin(); it != m_attemptExcluded.constEnd(); ++it)
         in.hardExcluded.insert(it.key());
-    in.hardExcluded.unite(extraHardExcluded);
     if (m_awgBanned) // build 142 (S5): the attempt's transport ban, through its one reader
         for (const SubscriptionNode &n : m_merged)
             if (bannedByAttempt(n))
@@ -950,6 +958,15 @@ bool ServiceEngine::connect(QString &error)
     // AVPN awg31-xray-v1: kill-switch автоматики транспортов. Выключен → авто-пути = легаси-цепочка
     // «измеренный RTT → weight» ТОЛЬКО по awg (xray — ручной режим/pin).
     const bool autoPick = TuningStore::flag(QStringLiteral("transport_auto_pick"), true);
+    // Build 142 (S5, review N3): the AmneziaWG ban holds only while this start can still pick an Xray node -
+    // in the pinned location when one is pinned, else anywhere. When it cannot (a refresh removed them, the
+    // person chose the AmneziaWG mode, the pinned location has none), it is lifted HERE, before any pick, so
+    // the ordinary order below (hint, pin, memory, automatic pick) runs unchanged - the pin keeps priority.
+    // Failed Xray starts do not lift it: they are failures, not absence.
+    if (m_awgBanned && !xrayPickWithoutAwg()) {
+        appendSwitchLog(QStringLiteral("AmneziaWG ban lifted: no Xray node this start could take"));
+        m_awgBanned = false;
+    }
     std::optional<SubscriptionNode> candidate; // AVPN: optional — закрепление/weight-фолбэк ниже
     // AVPN (live-node picker): если пользователь закрепил ноду — стартуем с неё (она есть и жива).
     // Закрепление имеет приоритет над авто-скорингом: «движок не уходит ради скорости» (spec §23-25).
@@ -1034,18 +1051,6 @@ bool ServiceEngine::connect(QString &error)
     if (!candidate && !m_attemptExcluded.isEmpty() && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
         appendSwitchLog(QStringLiteral("every candidate failed to start in this attempt: exclusions cleared"));
         m_attemptExcluded.clear();
-        const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, interrupted.active);
-        if (!c && !sessionExclusions().isEmpty())
-            c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, interrupted.active);
-        if (c)
-            candidate = *c;
-    }
-    // Build 142 (S5): the transport ban survives the reset above (failed Xray starts are retried, never
-    // AmneziaWG); it yields only when the pool has no Xray the pick could take at all (a refresh removed
-    // them) - then the attempt would have no node, and an AmneziaWG start is better than none.
-    if (!candidate && m_awgBanned && !xrayPickWithoutAwg() && (autoPick || m_modeGate.inForce() != TransportMode::Auto)) {
-        appendSwitchLog(QStringLiteral("AmneziaWG ban lifted: no Xray node left in the pool"));
-        m_awgBanned = false;
         const SubscriptionNode *c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/true, interrupted.active);
         if (!c && !sessionExclusions().isEmpty())
             c = pickTransport(QString(), QString(), QString(), /*withExclusions=*/false, interrupted.active);
