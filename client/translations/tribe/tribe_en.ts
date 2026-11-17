@@ -1777,7 +1777,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+197"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+216"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1802,24 +1802,14 @@ A gift for every friend!</translation>
         <translation>Search country</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+67"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (fastest)</translation>
     </message>
     <message>
-        <location line="+0"/>
-        <source>Авто</source>
-        <translation>Auto</translation>
-    </message>
-    <message>
-        <location line="+11"/>
+        <location line="+10"/>
         <source>Сервис подберёт быстрейший узел</source>
         <translation>The service picks the fastest node</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сервис подберёт узел автоматически</source>
-        <translation>The service will pick a server automatically</translation>
     </message>
     <message>
         <location line="+52"/>

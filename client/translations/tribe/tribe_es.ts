@@ -1777,7 +1777,7 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+197"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+216"/>
         <source>недоступно для этого режима</source>
         <translation>no disponible para este modo</translation>
     </message>
@@ -1802,24 +1802,14 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
         <translation>Buscar país</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+67"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (más rápido)</translation>
     </message>
     <message>
-        <location line="+0"/>
-        <source>Авто</source>
-        <translation>Auto</translation>
-    </message>
-    <message>
-        <location line="+11"/>
+        <location line="+10"/>
         <source>Сервис подберёт быстрейший узел</source>
         <translation>El servicio elige el nodo más rápido</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сервис подберёт узел автоматически</source>
-        <translation>El servicio elegirá un servidor automáticamente</translation>
     </message>
     <message>
         <location line="+52"/>
