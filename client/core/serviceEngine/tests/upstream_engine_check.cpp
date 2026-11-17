@@ -2008,47 +2008,92 @@ static void ownerReviewRound1()
     const char *kC = "LeaseCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
     const char *kD = "LeaseDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
     const qint64 T = 11000000;
-    // F2: quick picks B -> C -> D, every acquire still unanswered; the answers come back in any order. Each
-    // cancelled acquire's grant is released by its own id; only D's grant is held (Prepared).
-    for (bool reversed : {false, true}) {
+    // F2 + N1 (review rounds 1-2 of 17.11): ONE acquisition in flight per owner. Quick picks B -> C -> D: only B's
+    // acquire is out; C replaces nothing on the wire, D replaces C in the queue. B's answer decides by the seat it
+    // names: a grant of B (nobody waits for B) is released, and D's acquire goes out at once (another profile).
+    for (bool grantB : {true, false}) {
         FakeIo io;
         UpstreamLeaseOwner o(&io);
         o.prepare(b, 1, T, 1);
         const quint64 idB = io.calls.last().id;
         o.prepare(c, 1, T + 100, 1);
-        const quint64 idC = io.calls.last().id;
         o.prepare(d, 1, T + 200, 1);
-        const quint64 idD = io.calls.last().id;
-        CHECK(idB != idC && idC != idD && o.machine().cancelledAcquiresPending() == 2);
-        QVector<UpstreamOwnerEvent> evB, evC;
-        if (reversed) {
-            evC = o.onAcquireReply(idC, grantedAs(c, kC), T + 300);
-            evB = o.onAcquireReply(idB, grantedAs(b, kB), T + 400);
-        } else {
-            evB = o.onAcquireReply(idB, grantedAs(b, kB), T + 300);
-            evC = o.onAcquireReply(idC, grantedAs(c, kC), T + 400);
-        }
-        QStringList released;
-        for (const FakeIo::Call &call : io.calls)
-            if (call.what == QLatin1String("release"))
-                released << call.profileOrLease;
-        CHECK(released.contains(QLatin1String(kB)) && released.contains(QLatin1String(kC)) && released.size() == 2);
-        CHECK(!findEv(evB, UpstreamOwnerEventKind::Prepared) && !findEv(evC, UpstreamOwnerEventKind::Prepared));
-        const QVector<UpstreamOwnerEvent> evD = o.onAcquireReply(idD, grantedAs(d, kD), T + 500);
+        CHECK(io.calls.size() == 1 && o.startQueued() && o.requestsOutstanding() == 1);
+        const QVector<UpstreamOwnerEvent> evB =
+            o.onAcquireReply(idB, grantB ? grantedAs(b, kB) : refused(UpstreamErrorCode::NoSeat), T + 300);
+        CHECK(!findEv(evB, UpstreamOwnerEventKind::Prepared) && !findEv(evB, UpstreamOwnerEventKind::PrepareFailed));
+        CHECK((io.last("release") != nullptr) == grantB);
+        if (grantB)
+            CHECK(io.last("release") && io.last("release")->profileOrLease == QLatin1String(kB));
+        const FakeIo::Call *acqD = io.last("acquire");
+        CHECK(acqD && acqD->id != idB && acqD->profileOrLease == d.upstream->profileId);
+        if (!acqD)
+            continue;
+        const QVector<UpstreamOwnerEvent> evD = o.onAcquireReply(acqD->id, grantedAs(d, kD), T + 500);
         const UpstreamOwnerEvent *p = findEv(evD, UpstreamOwnerEventKind::Prepared);
         CHECK(p && p->prepareId == o.prepareSerial() && o.preparedUsable(d.nodeId, T + 600));
-        CHECK(o.machine().cancelledAcquiresPending() == 0);
-        // A refused or failed answer to a cancelled acquire releases nothing and is forgotten.
+        int acquires = 0;
+        for (const FakeIo::Call &call : io.calls)
+            acquires += call.what == QLatin1String("acquire") ? 1 : 0;
+        CHECK(acquires == 2); // B and D - never C
+    }
+    // N1: B -> C -> B, the server answering with the SAME lease for B (an acquire of a profile already held is
+    // re-issued as the existing lease - api/openapi.yaml). Before: two acquires of B were out, and the cancelled
+    // one's late answer sent DELETE for the seat the new B had just been given. Now the first B's answer IS the
+    // waiting B's answer: no second acquire, no release, the seat held.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(b, 1, T, 1);
+        const quint64 idB1 = io.calls.last().id;
+        o.prepare(c, 1, T + 100, 1);
+        o.prepare(b, 1, T + 200, 1);
+        CHECK(io.calls.size() == 1);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(idB1, grantedAs(b, kB), T + 300);
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Prepared);
+        CHECK(p && p->prepareId == o.prepareSerial() && o.machine().leaseId() == QLatin1String(kB));
+        CHECK(!io.last("release") && io.calls.size() == 1);
+        // A later replay of the same lease (a duplicate answer) changes nothing.
+        CHECK(o.onAcquireReply(idB1, grantedAs(b, kB), T + 400).isEmpty() && !io.last("release"));
+        // brought up: still the same lease, still no release
+        const QVector<UpstreamOwnerEvent> up = o.bringUpPrepared(T + 500);
+        CHECK(findEv(up, UpstreamOwnerEventKind::BringUp) && !io.last("release"));
+    }
+    // A held seat given back, then the same profile picked again: the new acquire waits for that release (else the
+    // server could re-issue the lease the release then ends).
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(b, 1, T, 1);
+        o.onAcquireReply(io.calls.last().id, grantedAs(b, kB), T + 100);
+        o.disconnect(T + 200);
+        const FakeIo::Call *rel = io.last("release");
+        CHECK(rel && rel->profileOrLease == QLatin1String(kB));
+        const quint64 relId = rel ? rel->id : 0;
+        const int before = io.calls.size();
+        o.prepare(b, 1, T + 300, 1);
+        CHECK(io.calls.size() == before && o.startQueued());
+        o.onReleaseDone(relId, T + 400);
+        CHECK(io.calls.size() == before + 1 && io.calls.last().what == QLatin1String("acquire"));
+        // another profile does not wait for it
         FakeIo io2;
         UpstreamLeaseOwner o2(&io2);
         o2.prepare(b, 1, T, 1);
-        const quint64 id2 = io2.calls.last().id;
-        o2.disconnect(T + 10);
-        o2.onAcquireReply(id2, failed("transport"), T + 20);
-        CHECK(!io2.last("release") && o2.machine().cancelledAcquiresPending() == 0);
+        o2.onAcquireReply(io2.calls.last().id, grantedAs(b, kB), T + 100);
+        o2.disconnect(T + 200);
+        o2.prepare(c, 1, T + 300, 1);
+        CHECK(io2.calls.last().what == QLatin1String("acquire") && io2.calls.last().profileOrLease == c.upstream->profileId);
+        // A refused or failed answer of a cancelled acquire releases nothing; the waiting acquire then goes out.
+        FakeIo io3;
+        UpstreamLeaseOwner o3(&io3);
+        o3.prepare(b, 1, T, 1);
+        const quint64 id3 = io3.calls.last().id;
+        o3.disconnect(T + 10);
+        o3.onAcquireReply(id3, failed("transport"), T + 20);
+        CHECK(!io3.last("release") && o3.requestsOutstanding() == 0);
     }
-    // F5: every prepare() has its own identity, carried by its answer; a second prepare of the SAME node cancels
-    // the first one's acquire - its late grant is released and never reported as Prepared.
+    // F5: every prepare() has its own identity, carried by its answer; a second prepare of the same node takes the
+    // first one's still-unanswered acquire over - its answer is reported once, with the NEW prepare's id.
     {
         FakeIo io;
         UpstreamLeaseOwner o(&io);
@@ -2057,20 +2102,16 @@ static void ownerReviewRound1()
         const quint64 idFirst = io.calls.last().id;
         o.prepare(b, 1, T + 50, 1);
         const quint64 second = o.prepareSerial();
-        const quint64 idSecond = io.calls.last().id;
-        CHECK(first != 0 && second != first);
-        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(idFirst, grantedAs(b, kB), T + 100);
-        CHECK(!findEv(ev, UpstreamOwnerEventKind::Prepared) && io.last("release")
-              && io.last("release")->profileOrLease == QLatin1String(kB));
-        ev = o.onAcquireReply(idSecond, grantedAs(b, kC), T + 200);
+        CHECK(first != 0 && second != first && io.calls.size() == 1);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(idFirst, grantedAs(b, kB), T + 100);
         const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Prepared);
-        CHECK(p && p->prepareId == second);
+        CHECK(p && p->prepareId == second && !io.last("release"));
         // ... and a refusal answers with its prepare's id too.
         FakeIo io3;
         UpstreamLeaseOwner o3(&io3);
         o3.prepare(c, 1, T, 1);
-        ev = o3.onAcquireReply(io3.calls.last().id, refused(UpstreamErrorCode::NoSeat), T + 100);
-        const UpstreamOwnerEvent *f = findEv(ev, UpstreamOwnerEventKind::PrepareFailed);
+        const QVector<UpstreamOwnerEvent> ev3 = o3.onAcquireReply(io3.calls.last().id, refused(UpstreamErrorCode::NoSeat), T + 100);
+        const UpstreamOwnerEvent *f = findEv(ev3, UpstreamOwnerEventKind::PrepareFailed);
         CHECK(f && f->prepareId == o3.prepareSerial() && f->prepareId != 0);
     }
     // F6: what the running (other) tunnel counts while a seat is held for the switch is not this session's traffic.
@@ -2155,6 +2196,112 @@ static void awgBanOpensProviderTier()
     CHECK(p.connect(err) && isStubId(pt.ups.last()));
 }
 
+// --- review round 2 of 17.11: a model of the server's seat rules against random picks and answer orders ------
+// The server (upstream_pool.acquire_lease, api/openapi.yaml): one live session lease per device; an acquire of the
+// profile it holds is answered with THAT lease; a grant of another profile ends it (replaced); a refusal leaves
+// it; DELETE ends it. The owner picks B or C (prepare / begin), cancels, brings up; every request is answered in a
+// random order. Invariants after every step: at most one acquire out; a seat the owner holds is live on the server
+// (it never released, or let something replace, its own seat); at the end every seat is given back.
+static void ownerSeatModel()
+{
+    const SubscriptionNode nodes[2] = {stubOf(QStringLiteral("bbbbbbbbbbbbbbb0")), stubOf(QStringLiteral("ccccccccccccccc0"))};
+    int violations = 0, steps = 0, releases = 0, reuses = 0;
+    for (int seed = 1; seed <= 400; ++seed) {
+        quint32 rng = quint32(seed) * 2654435761u;
+        const auto rnd = [&rng](int n) { rng = rng * 1664525u + 1013904223u; return int((rng >> 8) % quint32(n)); };
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = seed % 2 == 0;
+        o.setOptions(op);
+        struct Live { QString lease; QString profile; } live;
+        int serial = 0, delivered = 0;
+        QList<int> pending; // indices into io.calls not answered yet
+        qint64 now = 20000000;
+        const auto sync = [&]() {
+            for (int i = delivered; i < io.calls.size(); ++i)
+                pending << i;
+            delivered = io.calls.size();
+        };
+        const auto check = [&](const char *where) {
+            int acquiresOut = 0;
+            for (int i : pending)
+                acquiresOut += io.calls[i].what == QLatin1String("acquire") ? 1 : 0;
+            bool bad = acquiresOut > 1;
+            const bool holds = o.active() && o.machine().phase() == LeasePhase::Active && !o.machine().leaseId().isEmpty();
+            bool releaseOut = false;
+            for (int i : pending)
+                releaseOut = releaseOut || (io.calls[i].what == QLatin1String("release") && io.calls[i].profileOrLease == o.machine().leaseId());
+            if (holds && (live.lease != o.machine().leaseId() || releaseOut))
+                bad = true;
+            if (bad) {
+                ++violations;
+                std::printf("seat model seed %d step %d (%s): acquires out %d, held %s, live %s, release of held out %d\n", seed,
+                            steps, where, acquiresOut, qPrintable(o.machine().leaseId()), qPrintable(live.lease), int(releaseOut));
+            }
+        };
+        const auto answer = [&](int k) {
+            const FakeIo::Call call = io.calls[pending.takeAt(k)];
+            now += 37;
+            if (call.what == QLatin1String("acquire")) {
+                const SubscriptionNode &n = call.profileOrLease == nodes[0].upstream->profileId ? nodes[0] : nodes[1];
+                AcquireReply r;
+                if (!live.lease.isEmpty() && live.profile == call.profileOrLease) {
+                    r = grantedAs(n, "");
+                    r.grant.leaseId = live.lease; // re-issued: the same lease
+                    ++reuses;
+                } else if (rnd(10) < 3) {
+                    r = refused(UpstreamErrorCode::NoSeat); // a refusal leaves the live lease alone
+                } else {
+                    live.lease = QStringLiteral("LeaseModel%1").arg(++serial, 30, 10, QLatin1Char('0'));
+                    live.profile = call.profileOrLease; // replaces any other
+                    r = grantedAs(n, "");
+                    r.grant.leaseId = live.lease;
+                }
+                o.onAcquireReply(call.id, r, now);
+            } else if (call.what == QLatin1String("release")) {
+                ++releases;
+                if (live.lease == call.profileOrLease)
+                    live = Live();
+                o.onReleaseDone(call.id, now);
+            }
+        };
+        for (int step = 0; step < 40; ++step, ++steps) {
+            now += 50;
+            const int what = rnd(8);
+            if (what == 0)
+                o.prepare(nodes[rnd(2)], 1, now, 1);
+            else if (what == 1)
+                o.begin(nodes[rnd(2)], 1, std::nullopt, now, 1);
+            else if (what == 2)
+                o.disconnect(now);
+            else if (what == 3)
+                o.bringUpPrepared(now);
+            else if (!pending.isEmpty())
+                answer(rnd(pending.size()));
+            sync();
+            check("step");
+        }
+        // the end: stop, then every request answered - no seat may stay held on the server
+        o.disconnect(now + 1);
+        sync();
+        while (!pending.isEmpty()) {
+            answer(0);
+            sync();
+        }
+        if (!live.lease.isEmpty()) {
+            ++violations;
+            std::printf("seat model seed %d: seat %s left held after the stop\n", seed, qPrintable(live.lease));
+        }
+    }
+    CHECK(violations == 0);
+    std::printf("seat model: %d steps, %d releases, %d same-lease re-issues\n", steps, releases, reuses);
+    // The model really exercised releases. Same-lease re-issues happen only when two acquires of one profile are out
+    // or an acquire overtakes a release of its profile - exactly what the owner no longer does (0 expected; with
+    // acquireBlocked() disabled the model finds both, see the mutation check in the report of round 2).
+    CHECK(releases > 100 && reuses == 0);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -2171,6 +2318,7 @@ int main(int argc, char **argv)
     ownerRefusedBringUp();
     ownerSeatFirst();
     ownerReviewRound1();
+    ownerSeatModel();
     ownerMacRenewals();
     ownerAdoption();
     dataCheck();

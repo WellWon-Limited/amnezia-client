@@ -68,7 +68,9 @@
 //    both equal CLOCK_UPTIME_RAW and stop during sleep (CACurrentMediaTime is mach_absolute_time too).
 //  - Android: SystemClock.elapsedRealtime(), not uptimeMillis().
 //  - A late answer to an older request (another request id) is ignored; a lease granted to an acquire
-//    that was cancelled by disconnect() is released at once.
+//    that was cancelled by disconnect() is released at once - unless a new session of the same profile took
+//    that request over (startTakingOver). Ordering of acquires and releases is the owner's
+//    (UpstreamLeaseOwner.h: one acquisition in flight).
 //  - Release on disconnect carries the final deltas: an unanswered report is resent under its own seq
 //    with the newer bytes added (if the server had applied it, the duplicate applies nothing and the
 //    newer bytes are lost - the only case of under-counting, never double counting).
@@ -236,6 +238,32 @@ public:
         return s;
     }
 
+    // A new session whose acquire is ALREADY out: the acquire cancelled by the last disconnect(), for the same profile
+    // and kind (review N1 of 17.11). Nothing is sent - the server answers an acquire of a profile with the one lease
+    // it holds for the device, so a second acquire could only be answered with the same seat, and the cancelled one's
+    // answer would then release it. The cancelled request becomes this session's own: its answer is the session's
+    // answer, and the lease clock runs from its send time. false = no such cancelled request (start() instead).
+    bool startTakingOver(quint64 cancelledRequestId, const QString &profileId, LeaseKind kind, MeterScope scope,
+                         qint64 knownRevision, qint64 nowMs)
+    {
+        const auto it = m_cancelledAcquires.constFind(cancelledRequestId);
+        if (busy() || it == m_cancelledAcquires.constEnd() || it.value().profileId != profileId || it.value().kind != kind)
+            return false;
+        const qint64 sentMs = it.value().sentMs;
+        reset();
+        m_cancelledAcquires.remove(cancelledRequestId);
+        clock(nowMs);
+        m_profileId = profileId;
+        m_kind = kind;
+        m_scope = scope;
+        m_knownRevision = knownRevision;
+        m_phase = LeasePhase::Acquiring;
+        m_inflight = Inflight::Acquire;
+        m_inflightId = cancelledRequestId;
+        m_requestSentMs = sentMs;
+        return true;
+    }
+
     // A session from a standby-pack entry (see the header). packConfigSha256 = the entry's sha;
     // tunnelApiBase = the pack's tunnel_api_base (requests through the tunnel); confirmBudgetMs = how long
     // after tunnelUp() the seat may stay unconfirmed (from the data-check budget). Always a session lease.
@@ -288,12 +316,13 @@ public:
             // B -> C -> D lose B's late grant - a paid seat held to its expiry).
             const auto it = m_cancelledAcquires.constFind(requestId);
             if (requestId != 0 && it != m_cancelledAcquires.constEnd()) {
-                const MeterScope scope = it.value();
+                const MeterScope scope = it.value().scope;
                 m_cancelledAcquires.remove(requestId);
                 if (r.kind == LeaseReplyKind::Granted) {
                     LeaseAction a;
                     a.kind = LeaseActionKind::SendRelease;
                     a.requestId = ++m_nextId;
+                    a.profileId = r.grant.profileId; // whose seat it is (the owner orders acquires by it)
                     a.leaseId = r.grant.leaseId;
                     a.meter = UpstreamMeter{r.grant.seq + 1, 0, 0, scope, r.grant.accountingEpoch};
                     a.route = LeaseRoute{r.grant.renewToken, r.grant.tunnelApiBase};
@@ -464,6 +493,7 @@ public:
             LeaseAction a;
             a.kind = LeaseActionKind::SendRelease;
             a.requestId = ++m_nextId;
+            a.profileId = m_profileId;
             a.leaseId = m_leaseId;
             a.meter = m_frozenValid ? UpstreamMeter{m_frozen.seq, m_frozen.rxDelta + m_unRx, m_frozen.txDelta + m_unTx, m_scope, m_epoch}
                                     : UpstreamMeter{m_lastSeq + 1, m_unRx, m_unTx, m_scope, m_epoch};
@@ -471,7 +501,7 @@ public:
             s.actions << a;
         } else if ((m_phase == LeasePhase::Acquiring || m_phase == LeasePhase::Provisional)
                    && m_inflight == Inflight::Acquire) {
-            rememberCancelled(m_inflightId, m_scope);
+            m_cancelledAcquires.insert(m_inflightId, CancelledAcquire{m_scope, m_profileId, m_kind, m_requestSentMs});
         }
         if (busy())
             m_phase = LeasePhase::Released;
@@ -496,21 +526,12 @@ public:
     qint64 unreportedTx() const { return m_unTx; }
     int renewRejectedInRow() const { return m_renewRejected; }
     int cancelledAcquiresPending() const { return int(m_cancelledAcquires.size()); }
+    // The acquire this session has out (0 = none) - what disconnect() would cancel.
+    quint64 acquireInFlight() const { return m_inflight == Inflight::Acquire ? m_inflightId : 0; }
+    qint64 requestSentMs() const { return m_requestSentMs; }
 
 private:
     enum class Inflight { None, Acquire, Renew };
-
-    static constexpr int kCancelledAcquiresMax = 32;
-    void rememberCancelled(quint64 id, MeterScope scope)
-    {
-        if (m_cancelledAcquires.size() >= kCancelledAcquiresMax) {
-            quint64 oldest = id;
-            for (auto it = m_cancelledAcquires.constBegin(); it != m_cancelledAcquires.constEnd(); ++it)
-                oldest = qMin(oldest, it.key());
-            m_cancelledAcquires.remove(oldest);
-        }
-        m_cancelledAcquires.insert(id, scope);
-    }
 
     bool busy() const
     {
@@ -522,7 +543,7 @@ private:
     void reset()
     {
         const quint64 nextId = m_nextId;
-        const QHash<quint64, MeterScope> cancelled = m_cancelledAcquires;
+        const QHash<quint64, CancelledAcquire> cancelled = m_cancelledAcquires;
         const qint64 lastNow = m_lastNow;
         *this = UpstreamLeaseMachine(m_t);
         m_nextId = nextId;
@@ -733,10 +754,16 @@ private:
     QString m_profileId;
     LeaseKind m_kind = LeaseKind::Session;
     MeterScope m_scope = MeterScope::Tunnel;
-    // Cancelled acquires (request id -> the session's meter scope) until their answer: a late grant is released.
-    // Every acquire is answered (the client classifies a timeout as transport), so entries do not pile up; the
-    // cap only guards against a broken I/O: the oldest id is dropped (its grant would then lapse at TTL).
-    QHash<quint64, MeterScope> m_cancelledAcquires;
+    // Cancelled acquires until their answer: a late grant is released, unless a new session of the same profile took
+    // the request over (startTakingOver). No cap: the owner keeps one acquisition in flight (UpstreamLeaseOwner.h,
+    // review round 2), so at most one entry exists - none is ever forgotten (review F2).
+    struct CancelledAcquire {
+        MeterScope scope = MeterScope::Tunnel;
+        QString profileId;
+        LeaseKind kind = LeaseKind::Session;
+        qint64 sentMs = 0;
+    };
+    QHash<quint64, CancelledAcquire> m_cancelledAcquires;
     LeaseRoute m_route;
     qint64 m_knownRevision = 0;
     QString m_leaseId;

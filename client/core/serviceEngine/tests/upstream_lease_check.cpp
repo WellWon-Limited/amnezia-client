@@ -944,6 +944,19 @@ static void routeAndScope()
     c.start(kProfileId, LeaseKind::Session, MeterScope::Tunnel, 100, T + 2);
     st = c.onAcquireReply(aid, granted(g1), T + 3);
     CHECK(must(st, LeaseActionKind::SendRelease).route == ra && must(st, LeaseActionKind::SendRelease).meter.scope == MeterScope::Proxy);
+    // Review N1 of 17.11: a new session of the same profile may take the cancelled request over instead - nothing is
+    // sent, and the late grant is that session's own answer (no release of the seat it is given).
+    UpstreamLeaseMachine same;
+    st = same.start(kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T);
+    const quint64 sid = sentId(st, LeaseActionKind::SendAcquire);
+    same.disconnect(T + 1);
+    CHECK(!same.startTakingOver(sid, QStringLiteral("0000000000000000"), LeaseKind::Session, MeterScope::Proxy, 100, T + 2));
+    CHECK(same.startTakingOver(sid, kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T + 2));
+    CHECK(same.acquireInFlight() == sid && same.requestSentMs() == T && same.cancelledAcquiresPending() == 0);
+    st = same.onAcquireReply(sid, granted(g1), T + 3);
+    CHECK(st.has(LeaseActionKind::LeaseReady) && !st.has(LeaseActionKind::SendRelease));
+    CHECK(same.phase() == LeasePhase::Active && same.leaseId() == kLeaseA);
+    CHECK(!same.startTakingOver(sid, kProfileId, LeaseKind::Session, MeterScope::Proxy, 100, T + 4)); // busy / used
 }
 
 
@@ -1126,14 +1139,17 @@ static void dispatch()
 static void releaseResend()
 {
     // Owner's iPhone 16.11 (build 140): both seat releases ended "net_error 5" 40-80 ms after they were sent - cut
-    // by the API reset of the tunnel transition they preceded. Review F3 of 17.11: the Connected of the next node
-    // cuts the retry too - every try cut by OUR reset is sent again; only an answer or its own timeout ends it.
+    // by the API reset of the tunnel transition they preceded. Review F3 of 17.11: the next node's Connected cuts
+    // the retry too - every try cut by OUR reset is sent again. Review round 2: only an HTTP answer is "released";
+    // a timeout, an error or a reset storm ends as NotConfirmed (left to the server's TTL, journaled), never done.
+    using T = UpstreamReleaseTry;
     for (int done = 0; done < kUpstreamReleaseMaxResends; ++done)
-        CHECK(upstreamReleaseResend(done, /*canceled=*/true, /*timedOut=*/false));
-    CHECK(upstreamReleaseResend(1, true, false)); // the second local reset (Disconnected, then Connected)
-    CHECK(!upstreamReleaseResend(kUpstreamReleaseMaxResends, true, false)); // a reset storm: the server's TTL
-    CHECK(!upstreamReleaseResend(0, true, true));   // its own timeout: the server frees the seat at TTL
-    CHECK(!upstreamReleaseResend(0, false, false)); // an answer or another error
+        CHECK(upstreamReleaseNext(done, /*canceled=*/true, /*timedOut=*/false, /*answered=*/false) == T::Resend);
+    CHECK(upstreamReleaseNext(kUpstreamReleaseMaxResends, true, false, false) == T::NotConfirmed); // reset storm
+    CHECK(upstreamReleaseNext(0, true, true, false) == T::NotConfirmed);   // its own timeout
+    CHECK(upstreamReleaseNext(0, false, false, false) == T::NotConfirmed); // a network error, no answer
+    CHECK(upstreamReleaseNext(0, false, false, true) == T::Answered);      // 204 (or any HTTP answer)
+    CHECK(upstreamReleaseNext(3, false, false, true) == T::Answered);
     CHECK(kUpstreamReleaseMaxResends >= 4);
 }
 

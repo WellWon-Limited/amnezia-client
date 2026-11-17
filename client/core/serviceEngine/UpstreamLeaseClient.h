@@ -45,7 +45,9 @@ public:
     // Answers (GUI thread). The classification is the pure one (classifyAcquireReply / classifyRenewReply).
     std::function<void(quint64, const AcquireReply &)> onAcquire;
     std::function<void(quint64, const RenewReply &)> onRenew;
-    std::function<void(quint64)> onReleaseDone; // the release answered, failed or timed out (or could not be sent)
+    // A release ended: confirmed = the server answered; false = it never did (its own timeout, a network error,
+    // local resets past the bound, not sendable) - the seat is then left to the server's TTL.
+    std::function<void(quint64, bool confirmed)> onReleaseDone;
 
     // IUpstreamLeaseIo
     void acquire(quint64 requestId, const QString &profileId, LeaseKind kind, const QString &standbyConfigSha256,

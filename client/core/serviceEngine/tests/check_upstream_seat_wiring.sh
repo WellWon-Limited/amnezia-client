@@ -2,8 +2,8 @@
 # Provider seats (review round 1 of 17.11, F1-F6, F9): the facade and the tunnel adapter hand the seat-first
 # state and the lease I/O through at exactly these places.
 #
-# The RULES - every cancelled acquire's grant released (F2), one identity per prepare (F5), no metering of a held
-# seat (F6), the release re-sent after each local abort (F3), who releases a seat at the end of a session - are
+# The RULES - one acquisition in flight per owner and the seat-identity release (F2, N1), one identity per prepare (F5), no metering of a held
+# seat (F6), the release re-sent after each local abort and never reported done without an answer (F3), who releases a seat at the end of a session - are
 # UpstreamLeaseMachine.h / UpstreamLeaseOwner.h / UpstreamLeaseWire.h / DebugSnapshot.h and are tested by
 # behaviour (upstream_engine_check ownerReviewRound1 / ownerSeatFirst / ownerRefusedBringUp, upstream_lease_check
 # releaseResend, facade_policy_check upstreamSeatFirstRule). AvpnEngineQml.cpp, VpnConnectionTunnelControl.cpp and
@@ -15,7 +15,8 @@
 #   F9  the Scanner's row tap reads the pin BEFORE it changes it and hands that value to pinAndReconnectImpl,
 #       which restores it on a refusal;
 #   F6  a statistics answer is bound to the tunnel session it was asked on (down() and every connect move it);
-#   F3  a release cut locally is sent again with the attempt count, and only the last try reports done;
+#   F3  a release cut locally is sent again; only an HTTP answer reports it confirmed;
+#   N1  a release that ended reaches the owner (an acquire of its profile waits for it);
 #   and the held seat survives only the old tunnel's down(): up() of the node consumes it, cancel releases it.
 # Run by build_check.sh.
 set -u
@@ -84,18 +85,23 @@ has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')" '++m_statsSess
 has "$(body_of "$ADP" 'bool VpnConnectionTunnelControl::invokeConnect(')" '++m_statsSession;' \
     || bad "F6: every connect must start a new statistics session"
 
-# F3
+# F3 (rounds 1-2): a release cut locally is sent again with the attempt count; only an HTTP answer reports it
+# confirmed, everything else reports "not confirmed" (left to the server's TTL) - never a silent "done".
 rel="$(body_of "$CLI" 'void UpstreamLeaseClient::sendRelease(')"
-has "$rel" 'if (upstreamReleaseResend(attempt, r->error() == QNetworkReply::OperationCanceledError,' \
+has "$rel" 'switch (upstreamReleaseNext(attempt, r->error() == QNetworkReply::OperationCanceledError,' \
     && has "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1);' \
-    || bad "F3: a release cut locally must be sent again with the attempt count (upstreamReleaseResend)"
-r1="$(first_line "$rel" 'sendRelease(requestId, leaseId, meter, route, attempt + 1);')"
-r2="$(first_line "$rel" 'return;')"
-r3="$(first_line "$rel" 'onReleaseDone(requestId);')"
-# the first return is the "not sendable" branch; the resend's own return must come right after the resend
-after="$(printf '%s\n' "$rel" | awk -v from="$r1" 'NR == from + 1')"
-printf '%s\n' "$after" | grep -qF 'return;' || bad "F3: after a resend the try must not report done"
-[ -n "$r2" ] && [ -n "$r3" ] || bad "F3: sendRelease must report done (onReleaseDone) when no resend follows"
+    || bad "F3: a release cut locally must be sent again with the attempt count (upstreamReleaseNext)"
+has "$rel" 'onReleaseDone(requestId, true);' && has "$rel" 'onReleaseDone(requestId, false);' \
+    || bad "F3: sendRelease must report whether the server answered (onReleaseDone confirmed / not confirmed)"
+[ "$(printf '%s\n' "$rel" | grep -cF 'onReleaseDone(requestId, true);')" = "1" ] \
+    || bad "F3: only the Answered outcome may report a confirmed release"
+
+# N1 (round 2): a release that ended reaches the owner, so an acquire of its profile that waited goes out
+ctor="$(body_of "$ADP" 'VpnConnectionTunnelControl::VpnConnectionTunnelControl(')"
+has "$ctor" 'applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs()));' \
+    || bad "N1: the lease client's onReleaseDone must reach the owner (m_upOwner.onReleaseDone)"
+has "$ctor" 'applyUpstreamEvents(m_upOwner.onAcquireReply(id, r, upstreamClockMs()));' \
+    || bad "N1: every acquire answer must reach the owner"
 
 # the held seat: survives down(), consumed by up() of the node, released by cancel
 dn="$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')"

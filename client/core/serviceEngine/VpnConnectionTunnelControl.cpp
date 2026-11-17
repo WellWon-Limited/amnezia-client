@@ -94,7 +94,11 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
                                                                ? upstreamErrorCodeName(r.error.code) : "http_422"));
         applyUpstreamEvents(m_upOwner.onRenewReply(id, r, upstreamClockMs(), QDateTime::currentMSecsSinceEpoch()));
     };
-    m_leaseClient->onReleaseDone = [this](quint64 id) {
+    m_leaseClient->onReleaseDone = [this](quint64 id, bool confirmed) {
+        if (!confirmed)
+            qWarning() << "avpn upstream: seat release not confirmed by the server - it frees the seat at the lease TTL";
+        // The machine first: an acquire of the same profile that waited for this release goes out now.
+        applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs()));
         // Contract §6: the core stops only after the release answered (or its 1.5 s bound passed).
         if (m_stopAfterRelease && id == m_stopReleaseId) {
             m_stopAfterRelease = false;

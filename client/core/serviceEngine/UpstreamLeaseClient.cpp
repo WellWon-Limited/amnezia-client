@@ -164,7 +164,7 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
     if (!r) {
         QTimer::singleShot(0, this, [this, requestId]() {
             if (onReleaseDone)
-                onReleaseDone(requestId);
+                onReleaseDone(requestId, false); // not sendable: never reached the server
         });
         return;
     }
@@ -172,16 +172,23 @@ void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId,
         r->deleteLater();
         // The release goes out just before the tunnel transition it belongs to, and that transition aborts every
         // API request in flight (DebugSnapshot.h::transitionNetAction - owner's iPhone 16.11: both releases ended
-        // "net_error 5" within 40-80 ms and never reached the server). Like every other API request, one aborted by
-        // us (not by its own timeout) is sent again over the new path, until a real answer or its own timeout
-        // (upstreamReleaseResend; onReleaseDone only then).
-        if (upstreamReleaseResend(attempt, r->error() == QNetworkReply::OperationCanceledError,
-                                  r->property("avpn_timed_out").toBool())) {
+        // "net_error 5" within 40-80 ms and never reached the server). upstreamReleaseNext: a try cut by us is sent
+        // again; only an HTTP answer counts as released.
+        const bool answered = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid();
+        switch (upstreamReleaseNext(attempt, r->error() == QNetworkReply::OperationCanceledError,
+                                    r->property("avpn_timed_out").toBool(), answered)) {
+        case UpstreamReleaseTry::Resend:
             sendRelease(requestId, leaseId, meter, route, attempt + 1);
             return;
+        case UpstreamReleaseTry::Answered:
+            if (onReleaseDone)
+                onReleaseDone(requestId, true);
+            return;
+        case UpstreamReleaseTry::NotConfirmed:
+            if (onReleaseDone)
+                onReleaseDone(requestId, false);
+            return;
         }
-        if (onReleaseDone)
-            onReleaseDone(requestId);
     });
 }
 

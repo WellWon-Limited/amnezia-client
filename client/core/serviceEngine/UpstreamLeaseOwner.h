@@ -31,6 +31,7 @@
 #include "UpstreamEngine.h"
 #include "UpstreamLeaseMachine.h"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QVector>
@@ -191,7 +192,12 @@ public:
                 m_grantSentMs = m_lastAcquireSentMs;
             }
         }
-        apply(m_machine.onAcquireReply(requestId, r, nowMs), nowMs, ev);
+        apply(m_machine.onAcquireReply(requestId, r, nowMs), nowMs, ev); // a grant nobody took over: released
+        if (requestId != 0 && requestId == m_orphanAcquire) {
+            m_orphanAcquire = 0;
+            m_orphanProfile.clear();
+            startQueuedIfFree(nowMs, ev);
+        }
         return ev;
     }
 
@@ -371,9 +377,16 @@ private:
         // profile the machine stayed Active, so the next start() was ignored - "acquiring a seat", no request,
         // the 15 s start watchdog - and its dead lease was "released" only at the following stop). Who sends the
         // release is upstreamAppReleasesSeat: a lease that never reached a running tunnel is still this process's.
+        const quint64 out = m_machine.acquireInFlight();
+        if (out != 0) {
+            m_orphanAcquire = out; // stays this owner's until its answer (startBlocked)
+            m_orphanProfile = m_machine.profileId();
+        }
+        m_startQueued = false;
         const LeaseStep s = m_machine.disconnect(nowMs);
         if (upstreamAppReleasesSeat(m_opt.keepOwnership, m_handedOver, m_tunnelIsUp)) {
             m_releaseSent = s.has(LeaseActionKind::SendRelease);
+            noteReleasesSent(s);
             if (m_io)
                 dispatchLeaseIo(s, *m_io);
         }
@@ -420,8 +433,10 @@ private:
                 m_lastAcquireRequest = a.requestId;
                 m_lastAcquireSentMs = nowMs;
             }
-            if (a.kind == LeaseActionKind::SendRelease)
+            if (a.kind == LeaseActionKind::SendRelease) {
                 m_releaseSent = true;
+                m_releasesOut.insert(a.requestId, a.profileId);
+            }
         }
         QVector<LeaseAction> rest;
         if (m_io)
@@ -583,8 +598,74 @@ private:
         m_active = true;
         m_bringUp = true;
         m_prepareOnly = prepareOnly;
-        apply(m_machine.start(m_profileId, LeaseKind::Session, machineScope(), knownRevision, nowMs), nowMs, ev);
+        // One acquisition in flight (review N1 of 17.11): the cancelled acquire of the SAME profile becomes this
+        // session's own (the server would answer a second one with the same seat, and the first one's answer would
+        // then release it); with any other request in the way the start waits (startQueuedIfFree).
+        if (m_orphanAcquire != 0 && m_orphanProfile == m_profileId
+            && m_machine.startTakingOver(m_orphanAcquire, m_profileId, LeaseKind::Session, machineScope(), knownRevision,
+                                         nowMs)) {
+            m_lastAcquireRequest = m_orphanAcquire;
+            m_lastAcquireSentMs = m_machine.requestSentMs();
+            m_orphanAcquire = 0;
+            m_orphanProfile.clear();
+        } else if (startBlocked()) {
+            m_startQueued = true;
+            m_queuedRevision = knownRevision;
+        } else {
+            apply(m_machine.start(m_profileId, LeaseKind::Session, machineScope(), knownRevision, nowMs), nowMs, ev);
+        }
         return ev;
+    }
+
+public:
+    // ONE acquisition in flight per owner, decided by seat identity (review round 2 of 17.11, N1 + F2):
+    //  - an acquire cancelled by a session's end stays out until its answer; meanwhile a new session's acquire
+    //    waits (a newer pick replaces the waiting one) - unless it is for the same profile: then it takes the
+    //    cancelled request over;
+    //  - a release this owner sent stays out until it ends (onReleaseDone); an acquire of THAT profile waits for
+    //    it - the server answers an acquire of a profile it holds for the device with the existing lease, which the
+    //    release in flight would then end.
+    // The cancelled acquire's answer is the machine's: a grant nobody took over is released. Cost: a pick that
+    // follows another within one acquire round trip waits for that answer (B -> C -> D: D goes out when B is
+    // answered, at most the acquire bound upstreamAcquireTimeoutMsTuned later); a pick of the profile whose seat
+    // was just given back waits for that release (at most its 1.5 s bound per try).
+    bool startBlocked() const
+    {
+        if (m_orphanAcquire != 0)
+            return true;
+        for (auto it = m_releasesOut.constBegin(); it != m_releasesOut.constEnd(); ++it)
+            if (it.value() == m_profileId)
+                return true;
+        return false;
+    }
+    bool startQueued() const { return m_active && m_startQueued; }
+    int requestsOutstanding() const { return (m_orphanAcquire ? 1 : 0) + int(m_releasesOut.size()); }
+
+    // A release this owner sent ended (UpstreamLeaseClient::onReleaseDone: answered, timed out or given up).
+    QVector<UpstreamOwnerEvent> onReleaseDone(quint64 requestId, qint64 nowMs)
+    {
+        QVector<UpstreamOwnerEvent> ev;
+        if (m_releasesOut.remove(requestId))
+            startQueuedIfFree(nowMs, ev);
+        return ev;
+    }
+
+private:
+
+    void noteReleasesSent(const LeaseStep &s)
+    {
+        for (const LeaseAction &a : s.actions)
+            if (a.kind == LeaseActionKind::SendRelease)
+                m_releasesOut.insert(a.requestId, a.profileId);
+    }
+
+    // The waiting session's acquire goes out once nothing is in its way.
+    void startQueuedIfFree(qint64 nowMs, QVector<UpstreamOwnerEvent> &ev)
+    {
+        if (!m_active || !m_startQueued || startBlocked())
+            return;
+        m_startQueued = false;
+        apply(m_machine.start(m_profileId, LeaseKind::Session, machineScope(), m_queuedRevision, nowMs), nowMs, ev);
     }
 
     void failStart(QVector<UpstreamOwnerEvent> &ev, const QString &code, const QString &detail = QString())
@@ -614,6 +695,12 @@ private:
     bool m_active = false, m_bringUp = false, m_tunnelIsUp = false, m_handedOver = false, m_adopted = false;
     bool m_rebasePending = false, m_releaseSent = false, m_configChanged = false, m_haveBytes = false;
     quint64 m_sessionSerial = 0; // never reset: one value per begin()/prepare()
+    // Requests that outlive their session (never reset with it - startBlocked):
+    quint64 m_orphanAcquire = 0;          // the acquire a session's end cancelled, until its answer
+    QString m_orphanProfile;
+    QHash<quint64, QString> m_releasesOut; // releases sent (request id -> profile), until onReleaseDone
+    bool m_startQueued = false;            // this session's acquire waits (startBlocked)
+    qint64 m_queuedRevision = 0;
     bool m_prepareOnly = false; // prepare(): a seat taken before the switch, not brought up yet
     bool m_prepared = false;    // ... and granted (Prepared was reported)
     qint64 m_lastRx = 0, m_lastTx = 0;

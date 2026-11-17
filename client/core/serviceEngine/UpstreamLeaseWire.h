@@ -245,17 +245,22 @@ inline bool upstreamLeaseIdValid(const QString &id)
     return re.match(id).hasMatch();
 }
 
-// A seat release (DELETE) that ended aborted by the app itself - the API reset of a tunnel transition
-// (DebugSnapshot.h::transitionNetAction), not its own 1.5 s timeout - is sent again, as long as each try is cut by
-// such a reset: only a real answer or the release's own timeout ends it (review F3 of 17.11: Disconnected cut the
-// release, the Connected of the next node cut its one retry, and the seat stayed held). Every local abort needs a
-// tunnel transition, so the tries are few; kUpstreamReleaseMaxResends only guards against a reset storm (then the
-// server frees the seat at TTL). The same "re-issue after our own abort" every other API request follows
-// (DebugSnapshot.h::reissueAfterOwnAbort).
+// What happens after one try of a seat release (DELETE). A try cut by the app's own API reset of a tunnel transition
+// (DebugSnapshot.h::transitionNetAction - canceled, not its own 1.5 s timeout) is sent again over the new path, like
+// every other API request (DebugSnapshot.h::reissueAfterOwnAbort): review F3 of 17.11 - Disconnected cut the release
+// and the next node's Connected cut the retry. Any HTTP answer ends it as Answered (the server's DELETE is
+// idempotent). Everything else - its own timeout, a network error, or kUpstreamReleaseMaxResends local resets in a
+// row (a reset storm) - ends it as NotConfirmed: never reported as released; the seat is left to the server's TTL
+// and the journal says so (review round 2). No new timer: nothing is kept owed.
 inline constexpr int kUpstreamReleaseMaxResends = 8;
-inline bool upstreamReleaseResend(int attemptsDone, bool canceled, bool timedOut)
+enum class UpstreamReleaseTry { Resend, Answered, NotConfirmed };
+inline UpstreamReleaseTry upstreamReleaseNext(int attemptsDone, bool canceled, bool timedOut, bool httpAnswered)
 {
-    return attemptsDone < kUpstreamReleaseMaxResends && canceled && !timedOut;
+    if (httpAnswered)
+        return UpstreamReleaseTry::Answered;
+    if (canceled && !timedOut && attemptsDone < kUpstreamReleaseMaxResends)
+        return UpstreamReleaseTry::Resend;
+    return UpstreamReleaseTry::NotConfirmed;
 }
 
 // standbyConfigSha256 non-empty = a standby acquire: the device already runs that profile from its
