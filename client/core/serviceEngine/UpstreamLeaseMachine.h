@@ -79,6 +79,7 @@
 #include "UpstreamLeaseWire.h"
 #include "UpstreamNode.h"
 
+#include <QHash>
 #include <QString>
 #include <QVector>
 
@@ -282,16 +283,22 @@ public:
         LeaseStep s;
         nowMs = clock(nowMs);
         if (m_inflight != Inflight::Acquire || requestId != m_inflightId) {
-            // A lease granted to an acquire cancelled by disconnect(): give the seat back at once.
-            if (requestId != 0 && requestId == m_cancelledAcquireId && r.kind == LeaseReplyKind::Granted) {
-                m_cancelledAcquireId = 0;
-                LeaseAction a;
-                a.kind = LeaseActionKind::SendRelease;
-                a.requestId = ++m_nextId;
-                a.leaseId = r.grant.leaseId;
-                a.meter = UpstreamMeter{r.grant.seq + 1, 0, 0, m_cancelledScope, r.grant.accountingEpoch};
-                a.route = LeaseRoute{r.grant.renewToken, r.grant.tunnelApiBase};
-                s.actions << a;
+            // A lease granted to an acquire cancelled by disconnect(): give the seat back at once. EVERY cancelled
+            // acquire is remembered until its own answer (review F2 of 17.11: one remembered id let a quick
+            // B -> C -> D lose B's late grant - a paid seat held to its expiry).
+            const auto it = m_cancelledAcquires.constFind(requestId);
+            if (requestId != 0 && it != m_cancelledAcquires.constEnd()) {
+                const MeterScope scope = it.value();
+                m_cancelledAcquires.remove(requestId);
+                if (r.kind == LeaseReplyKind::Granted) {
+                    LeaseAction a;
+                    a.kind = LeaseActionKind::SendRelease;
+                    a.requestId = ++m_nextId;
+                    a.leaseId = r.grant.leaseId;
+                    a.meter = UpstreamMeter{r.grant.seq + 1, 0, 0, scope, r.grant.accountingEpoch};
+                    a.route = LeaseRoute{r.grant.renewToken, r.grant.tunnelApiBase};
+                    s.actions << a;
+                }
             }
             return s;
         }
@@ -464,8 +471,7 @@ public:
             s.actions << a;
         } else if ((m_phase == LeasePhase::Acquiring || m_phase == LeasePhase::Provisional)
                    && m_inflight == Inflight::Acquire) {
-            m_cancelledAcquireId = m_inflightId;
-            m_cancelledScope = m_scope;
+            rememberCancelled(m_inflightId, m_scope);
         }
         if (busy())
             m_phase = LeasePhase::Released;
@@ -489,9 +495,22 @@ public:
     qint64 unreportedRx() const { return m_unRx; }
     qint64 unreportedTx() const { return m_unTx; }
     int renewRejectedInRow() const { return m_renewRejected; }
+    int cancelledAcquiresPending() const { return int(m_cancelledAcquires.size()); }
 
 private:
     enum class Inflight { None, Acquire, Renew };
+
+    static constexpr int kCancelledAcquiresMax = 32;
+    void rememberCancelled(quint64 id, MeterScope scope)
+    {
+        if (m_cancelledAcquires.size() >= kCancelledAcquiresMax) {
+            quint64 oldest = id;
+            for (auto it = m_cancelledAcquires.constBegin(); it != m_cancelledAcquires.constEnd(); ++it)
+                oldest = qMin(oldest, it.key());
+            m_cancelledAcquires.remove(oldest);
+        }
+        m_cancelledAcquires.insert(id, scope);
+    }
 
     bool busy() const
     {
@@ -502,13 +521,12 @@ private:
     // taken for the new one), and a cancelled acquire's late grant is still given back.
     void reset()
     {
-        const quint64 nextId = m_nextId, cancelled = m_cancelledAcquireId;
-        const MeterScope cancelledScope = m_cancelledScope;
+        const quint64 nextId = m_nextId;
+        const QHash<quint64, MeterScope> cancelled = m_cancelledAcquires;
         const qint64 lastNow = m_lastNow;
         *this = UpstreamLeaseMachine(m_t);
         m_nextId = nextId;
-        m_cancelledAcquireId = cancelled;
-        m_cancelledScope = cancelledScope;
+        m_cancelledAcquires = cancelled;
         m_lastNow = lastNow;
     }
 
@@ -715,7 +733,10 @@ private:
     QString m_profileId;
     LeaseKind m_kind = LeaseKind::Session;
     MeterScope m_scope = MeterScope::Tunnel;
-    MeterScope m_cancelledScope = MeterScope::Tunnel;
+    // Cancelled acquires (request id -> the session's meter scope) until their answer: a late grant is released.
+    // Every acquire is answered (the client classifies a timeout as transport), so entries do not pile up; the
+    // cap only guards against a broken I/O: the oldest id is dropped (its grant would then lapse at TTL).
+    QHash<quint64, MeterScope> m_cancelledAcquires;
     LeaseRoute m_route;
     qint64 m_knownRevision = 0;
     QString m_leaseId;
@@ -730,7 +751,7 @@ private:
     int m_failures = 0;
     int m_renewRejected = 0; // renewals in a row rejected as malformed (upstreamRenewRejected)
     Inflight m_inflight = Inflight::None;
-    quint64 m_inflightId = 0, m_nextId = 0, m_cancelledAcquireId = 0;
+    quint64 m_inflightId = 0, m_nextId = 0;
     qint64 m_requestSentMs = 0;
     bool m_ready = false;
     bool m_configChangedNoted = false;

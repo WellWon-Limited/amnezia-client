@@ -158,6 +158,7 @@ struct UpstreamSeatFirst {
     QString prevPin;       // the pin before the pick ("" = automatic choice): back on a refusal
     bool persistPin = false;
     quint64 intentSerial = 0;
+    quint64 prepareId = 0; // VpnConnectionTunnelControl::prepareUpstream: only its own answer counts (review F5)
 };
 enum class SeatFirstStep {
     Ignore, // not the pending pick (a cancelled one: its seat was already given back)
@@ -165,10 +166,12 @@ enum class SeatFirstStep {
     Switch, // seat and profile in hand: the pin restart runs now
     Stay,   // refused: the live tunnel stays, the node is excluded for the attempt, the old pin comes back
 };
-inline SeatFirstStep decideSeatFirstReply(const UpstreamSeatFirst &p, const QString &replyNode, quint64 intentSerialNow,
-                                          bool ok)
+// replyPrepareId = the prepare the answer belongs to: an answer of an earlier prepare - even of the same node, queued
+// before a second tap started a new one - is never taken for the pending one (review F5 of 17.11).
+inline SeatFirstStep decideSeatFirstReply(const UpstreamSeatFirst &p, const QString &replyNode, quint64 replyPrepareId,
+                                          quint64 intentSerialNow, bool ok)
 {
-    if (!p.pending || p.nodeId != replyNode)
+    if (!p.pending || p.nodeId != replyNode || p.prepareId == 0 || p.prepareId != replyPrepareId)
         return SeatFirstStep::Ignore;
     if (p.intentSerial != intentSerialNow)
         return SeatFirstStep::Drop;

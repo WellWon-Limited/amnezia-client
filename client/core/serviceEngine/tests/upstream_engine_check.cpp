@@ -1991,6 +1991,117 @@ static void ownerSeatFirst()
     }
 }
 
+// --- review round 1 of 17.11: who gives each seat back -----------------------------------------------------------
+static AcquireReply grantedAs(const SubscriptionNode &n, const char *leaseId)
+{
+    AcquireReply r = granted(n.upstream->profileId, n.upstream->configSha256);
+    r.grant.leaseId = QLatin1String(leaseId);
+    return r;
+}
+
+static void ownerReviewRound1()
+{
+    const SubscriptionNode b = stubOf(QStringLiteral("bbbbbbbbbbbbbbb0"));
+    const SubscriptionNode c = stubOf(QStringLiteral("ccccccccccccccc0"));
+    const SubscriptionNode d = stubOf(QStringLiteral("ddddddddddddddd0"));
+    const char *kB = "LeaseBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const char *kC = "LeaseCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+    const char *kD = "LeaseDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+    const qint64 T = 11000000;
+    // F2: quick picks B -> C -> D, every acquire still unanswered; the answers come back in any order. Each
+    // cancelled acquire's grant is released by its own id; only D's grant is held (Prepared).
+    for (bool reversed : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(b, 1, T, 1);
+        const quint64 idB = io.calls.last().id;
+        o.prepare(c, 1, T + 100, 1);
+        const quint64 idC = io.calls.last().id;
+        o.prepare(d, 1, T + 200, 1);
+        const quint64 idD = io.calls.last().id;
+        CHECK(idB != idC && idC != idD && o.machine().cancelledAcquiresPending() == 2);
+        QVector<UpstreamOwnerEvent> evB, evC;
+        if (reversed) {
+            evC = o.onAcquireReply(idC, grantedAs(c, kC), T + 300);
+            evB = o.onAcquireReply(idB, grantedAs(b, kB), T + 400);
+        } else {
+            evB = o.onAcquireReply(idB, grantedAs(b, kB), T + 300);
+            evC = o.onAcquireReply(idC, grantedAs(c, kC), T + 400);
+        }
+        QStringList released;
+        for (const FakeIo::Call &call : io.calls)
+            if (call.what == QLatin1String("release"))
+                released << call.profileOrLease;
+        CHECK(released.contains(QLatin1String(kB)) && released.contains(QLatin1String(kC)) && released.size() == 2);
+        CHECK(!findEv(evB, UpstreamOwnerEventKind::Prepared) && !findEv(evC, UpstreamOwnerEventKind::Prepared));
+        const QVector<UpstreamOwnerEvent> evD = o.onAcquireReply(idD, grantedAs(d, kD), T + 500);
+        const UpstreamOwnerEvent *p = findEv(evD, UpstreamOwnerEventKind::Prepared);
+        CHECK(p && p->prepareId == o.prepareSerial() && o.preparedUsable(d.nodeId, T + 600));
+        CHECK(o.machine().cancelledAcquiresPending() == 0);
+        // A refused or failed answer to a cancelled acquire releases nothing and is forgotten.
+        FakeIo io2;
+        UpstreamLeaseOwner o2(&io2);
+        o2.prepare(b, 1, T, 1);
+        const quint64 id2 = io2.calls.last().id;
+        o2.disconnect(T + 10);
+        o2.onAcquireReply(id2, failed("transport"), T + 20);
+        CHECK(!io2.last("release") && o2.machine().cancelledAcquiresPending() == 0);
+    }
+    // F5: every prepare() has its own identity, carried by its answer; a second prepare of the SAME node cancels
+    // the first one's acquire - its late grant is released and never reported as Prepared.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(b, 1, T, 1);
+        const quint64 first = o.prepareSerial();
+        const quint64 idFirst = io.calls.last().id;
+        o.prepare(b, 1, T + 50, 1);
+        const quint64 second = o.prepareSerial();
+        const quint64 idSecond = io.calls.last().id;
+        CHECK(first != 0 && second != first);
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(idFirst, grantedAs(b, kB), T + 100);
+        CHECK(!findEv(ev, UpstreamOwnerEventKind::Prepared) && io.last("release")
+              && io.last("release")->profileOrLease == QLatin1String(kB));
+        ev = o.onAcquireReply(idSecond, grantedAs(b, kC), T + 200);
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Prepared);
+        CHECK(p && p->prepareId == second);
+        // ... and a refusal answers with its prepare's id too.
+        FakeIo io3;
+        UpstreamLeaseOwner o3(&io3);
+        o3.prepare(c, 1, T, 1);
+        ev = o3.onAcquireReply(io3.calls.last().id, refused(UpstreamErrorCode::NoSeat), T + 100);
+        const UpstreamOwnerEvent *f = findEv(ev, UpstreamOwnerEventKind::PrepareFailed);
+        CHECK(f && f->prepareId == o3.prepareSerial() && f->prepareId != 0);
+    }
+    // F6: what the running (other) tunnel counts while a seat is held for the switch is not this session's traffic.
+    for (bool keep : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = keep;
+        o.setOptions(op);
+        o.prepare(b, 1, T, 1);
+        o.onAcquireReply(io.calls.last().id, grantedAs(b, kB), T + 100);
+        o.onBytes(5000000000LL, 4000000000LL); // the old Xray tunnel's cumulative (macOS / Windows statistics)
+        CHECK(o.machine().unreportedRx() == 0 && o.machine().unreportedTx() == 0);
+        o.bringUpPrepared(T + 1000);
+        o.onBytes(1000, 2000); // the new tunnel's own counters, from zero
+        CHECK(o.machine().unreportedRx() == 1000 && o.machine().unreportedTx() == 2000);
+    }
+    // Seat accounting of a held seat at every exit: refused profile / cancel / stop -> released from the app.
+    for (int exitKind = 0; exitKind < 2; ++exitKind) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(b, 1, T, 1);
+        o.onAcquireReply(io.calls.last().id, grantedAs(b, kB), T + 100);
+        if (exitKind == 0)
+            o.disconnect(T + 200); // cancelUpstreamPrepare (any intent change, a stop) / the profile refused
+        else
+            o.begin(c, 1, std::nullopt, T + 200, 1); // up() of another node
+        CHECK(io.last("release") && io.last("release")->profileOrLease == QLatin1String(kB));
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -2005,6 +2116,7 @@ int main(int argc, char **argv)
     ownerAcquireOutcomes();
     ownerRefusedBringUp();
     ownerSeatFirst();
+    ownerReviewRound1();
     ownerMacRenewals();
     ownerAdoption();
     dataCheck();
