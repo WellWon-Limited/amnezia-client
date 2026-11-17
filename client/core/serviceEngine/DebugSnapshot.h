@@ -142,6 +142,39 @@ inline void observeTunnelState(TeardownLatch &latch, ObservedTunnel previous, Ob
     observeTunnelState(latch, s, errorProvesTeardown);
 }
 
+// Seat first (owner's iPhone 16.11, D4): a pick of a provider node while a working tunnel of another node is up
+// does not tear it down first. The seat is acquired through the live tunnel and the profile checked
+// (VpnConnectionTunnelControl::prepareUpstream); only with both in hand does the usual pin restart run
+// (stop -> Disconnected -> start, which brings the held seat up). restartOfLiveTunnel = pinReconnectIntent's
+// needsRestart; providerSessionLive = the lease owner holds a session (a provider tunnel is live: one owner holds
+// one seat - that switch keeps the old order).
+inline bool upstreamSeatFirst(bool restartOfLiveTunnel, bool targetIsUpstream, bool providerSessionLive)
+{
+    return restartOfLiveTunnel && targetIsUpstream && !providerSessionLive;
+}
+struct UpstreamSeatFirst {
+    bool pending = false;
+    QString nodeId;
+    QString prevPin;       // the pin before the pick ("" = automatic choice): back on a refusal
+    bool persistPin = false;
+    quint64 intentSerial = 0;
+};
+enum class SeatFirstStep {
+    Ignore, // not the pending pick (a cancelled one: its seat was already given back)
+    Drop,   // the user did something else since: give the seat back, touch nothing
+    Switch, // seat and profile in hand: the pin restart runs now
+    Stay,   // refused: the live tunnel stays, the node is excluded for the attempt, the old pin comes back
+};
+inline SeatFirstStep decideSeatFirstReply(const UpstreamSeatFirst &p, const QString &replyNode, quint64 intentSerialNow,
+                                          bool ok)
+{
+    if (!p.pending || p.nodeId != replyNode)
+        return SeatFirstStep::Ignore;
+    if (p.intentSerial != intentSerialNow)
+        return SeatFirstStep::Drop;
+    return ok ? SeatFirstStep::Switch : SeatFirstStep::Stay;
+}
+
 // Гейт onTick: глушит health только наш стоп в пути или пауза (Error — нет).
 inline bool healthTickAllowed(const TeardownLatch &latch, bool connected, bool paused)
 {

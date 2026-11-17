@@ -334,7 +334,8 @@ ScanCurrent ScanEngineAdapter::current() const
     const SubscriptionNode *next = m_e->m_engine.nextCandidate();
     const ScanLiveView v = scanLiveView(s.state, nativeUp, s.currentNodeId, m_e->m_engine.pendingSwitchNodeId(),
                                         m_e->m_engine.pinnedNodeId(), next ? next->nodeId : QString(),
-                                        m_e->m_wantConnected, m_e->m_needsRestart, m_e->m_dataFlowing);
+                                        m_e->m_wantConnected, m_e->m_needsRestart || m_e->m_seatFirst.pending,
+                                        m_e->m_dataFlowing);
     c.nodeId = v.nodeId;
     c.live = v.live;
     c.connecting = v.connecting;
@@ -621,6 +622,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamLeaveRequested, this,
             [this](const QString &code, const QString &detail) {
                 QTimer::singleShot(0, this, [this, code, detail]() { onUpstreamLeave(code, detail); });
+            });
+    connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamPrepared, this,
+            [this](const QString &nodeId, bool ok, const QString &code) {
+                QTimer::singleShot(0, this, [this, nodeId, ok, code]() { onUpstreamPrepared(nodeId, ok, code); });
             });
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamRevisionSeen, this,
             [this](qint64 rev) { noteUpstreamRevision(rev); });
@@ -6640,6 +6645,8 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
                          .arg(m_engine.debugSnapshot().state).arg(keepEngineSwitch));
     cancelStartPreparation();
     if (m_probe) m_probe->cancel();
+    if (!m_wantConnected)
+        cancelSeatFirst(); // a stop that does not reconnect: a seat taken for a switch goes back
     // AVPN (фикс-волна 2026-09-22, A1a/A4): МЫ просим стоп — до Disconnected не адоптим эту сессию
     // и не стартуем; поколение гасимой сессии отличает «стоп в пути» от новой сессии ОС.
     m_latch.awaitingStopConfirm = true;
@@ -7096,11 +7103,13 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
                                         StartOrigin origin)
 {
     noteIntentChange(); // AVPN Scanner
+    cancelSeatFirst();  // a new pick supersedes a seat still being taken for the previous one
     m_startOrigin = origin; // plan v3 step 5: picker tap = user, Doctor alternatives/restore = Doctor
     if (pinReconnectSelectOnly(forceConnect, featureEnabled(QStringLiteral("picker_instant_reconnect"), true))) {
         switchToNodeImpl(nodeId, persist);
         return;
     }
+    const QString prevPin = m_engine.pinnedNodeId();
     QString err;
     if (!m_engine.setPinnedNode(nodeId, err)) {
         emit error(humanPinError(err));
@@ -7117,6 +7126,15 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("pin");
         m_startAttempts = 0;
+        // Seat first (D4 of 16.11): a provider node is not worth the working tunnel until its seat and a valid
+        // profile are in hand - the seat is taken through the live tunnel now; onUpstreamPrepared restarts.
+        const avpn::SubscriptionNode *target = m_engine.nodeById(nodeId);
+        if (avpn::upstreamSeatFirst(intent.needsRestart, target && avpn::isUpstreamNode(*target), m_tunnel.upstreamActive())
+            && m_tunnel.prepareUpstream(m_engine.subscription(), *target)) {
+            m_seatFirst = avpn::UpstreamSeatFirst{true, nodeId, prevPin, persist, m_intentSerial};
+            m_needsRestart = false; // the live tunnel stays until the seat is in hand
+            reliabilityEvent(QStringLiteral("upstream_seat_first node=%1").arg(nodeId));
+        }
     } else {
         m_wantConnected = false; // офлайн: только цель, туннель не стартуем
         m_needsRestart = false;
@@ -7438,7 +7456,8 @@ void AvpnEngineQml::scanSyncState()
     noteScanOwnConnectProgress(m_scanOwnConnect, m_dataFlowing);
     if (!m_scanner || !m_scanSwitches.scanner)
         return;
-    if (m_scanRow.active) {
+    // Seat first: the tapped provider row's chain has not touched the tunnel yet - the live node's data is not its.
+    if (m_scanRow.active && !m_seatFirst.pending) {
         const QString engineNode = m_engine.currentNodeId();
         const bool gaveUp = !m_wantConnected || m_startBackoffRound > m_scanRowBackoffRound
                             || m_engine.dataPlaneExhausted();
@@ -11772,6 +11791,52 @@ void AvpnEngineQml::onUpstreamLeave(const QString &code, const QString &detail)
     m_busy = m_engine.state() == avpn::EngineState::Switching || m_op != Op::None;
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
+}
+
+void AvpnEngineQml::cancelSeatFirst()
+{
+    if (m_seatFirst.pending)
+        reliabilityEvent(QStringLiteral("upstream_seat_first_dropped node=%1").arg(m_seatFirst.nodeId));
+    m_seatFirst = avpn::UpstreamSeatFirst();
+    m_tunnel.cancelUpstreamPrepare();
+}
+
+void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, bool ok, const QString &code)
+{
+    switch (avpn::decideSeatFirstReply(m_seatFirst, nodeId, m_intentSerial, ok)) {
+    case avpn::SeatFirstStep::Ignore:
+        return;
+    case avpn::SeatFirstStep::Drop:
+        cancelSeatFirst();
+        return;
+    case avpn::SeatFirstStep::Switch:
+        // The ordinary pin restart from here (stop -> Disconnected -> start); up() brings the held seat up.
+        m_seatFirst = avpn::UpstreamSeatFirst();
+        reliabilityEvent(QStringLiteral("upstream_seat_first_ready node=%1").arg(nodeId));
+        m_needsRestart = true;
+        m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
+        m_restartOrigin = QStringLiteral("pin");
+        m_startAttempts = 0;
+        emit changed();
+        reconcile();
+        return;
+    case avpn::SeatFirstStep::Stay: {
+        // The working tunnel was never touched: the node is out for this attempt, the pick is undone.
+        const avpn::UpstreamSeatFirst p = m_seatFirst;
+        m_seatFirst = avpn::UpstreamSeatFirst();
+        m_engine.excludeForAttempt(nodeId, code);
+        reliabilityEvent(QStringLiteral("upstream_start_failed node=%1 code=%2 live_kept=1").arg(nodeId, code));
+        QString err;
+        if (p.prevPin.isEmpty())
+            m_engine.clearPin();
+        else if (!m_engine.setPinnedNode(p.prevPin, err))
+            m_engine.clearPin();
+        if (p.persistPin)
+            persistPin();
+        emit changed(); // scanSyncState: the tapped row ends failed, the live connection stays
+        return;
+    }
+    }
 }
 
 void AvpnEngineQml::noteUpstreamRevision(qint64 revision)

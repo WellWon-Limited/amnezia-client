@@ -110,6 +110,16 @@ public:
     // for a stop that bypasses down()'s own deferred disconnect (macOS adopted-without-protocol path).
     void runAfterUpstreamRelease(std::function<void()> fn);
     void retryUpstreamAdoption();
+    // Seat first (owner's iPhone 16.11, D4): the user picked provider node `node` while another node's tunnel works.
+    // The seat is acquired now, through that live tunnel, and the profile checked by the connect's own rule; the
+    // answer comes back as upstreamPrepared(nodeId, ok, code) and the facade switches only on ok. The next up() of
+    // the node brings the held seat up; up() of anything else, cancelUpstreamPrepare() or the seat's first renewal
+    // falling due releases it. A down() keeps it (it is the stop of the old tunnel before that up()).
+    // false = not possible now (switched off, client not configured, a provider session is live): the caller
+    // switches the old way.
+    bool prepareUpstream(const Subscription &sub, const SubscriptionNode &node);
+    void cancelUpstreamPrepare();
+    bool upstreamPreparing() const { return m_upOwner.preparing(); }
     // macOS GUI owner (decision B): the facade's existing tick drives renewals at upstreamWakeAtMs().
     void upstreamTick();
     qint64 upstreamWakeAtMs() const { return m_upOwner.wakeAtMs(); }
@@ -146,6 +156,9 @@ signals:
     void upstreamSessionAdopted(const QString &nodeId);
     // A direct acquire answered with the device's own access network facts (network key of the pack).
     void upstreamAccessFacts(qint64 accessAsn);
+    // prepareUpstream's answer: ok = the seat is held and the profile passed the connect's check; else code =
+    // the refusal (the lease code, transport, profile_<sanitizer code>) - the seat is already given back.
+    void upstreamPrepared(const QString &nodeId, bool ok, const QString &code);
 
 private slots:
     void onBytesChanged(quint64 rx, quint64 tx);

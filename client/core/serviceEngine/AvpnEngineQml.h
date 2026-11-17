@@ -1145,6 +1145,11 @@ private:
     void finishUpstreamVerify(int epoch, const avpn::UpstreamVerdictResult &v, const QString &facts);
     // The lease owner asked to leave the running upstream node (deferred from the adapter's signal).
     void onUpstreamLeave(const QString &code, const QString &detail = QString());
+    // Seat first (D4 of 16.11): the answer of the seat taken before switching to a provider node
+    // (DebugSnapshot.h::decideSeatFirstReply), deferred from the adapter's signal; cancelSeatFirst gives a pending
+    // one back (a new pick, a stop with the intent off).
+    void onUpstreamPrepared(const QString &nodeId, bool ok, const QString &code);
+    void cancelSeatFirst();
     // Release A: the notice (signal notice) for leaving an upstream node by its code; no text = nothing.
     void noticeUpstreamLeft(const QString &code);
     // Point 15 (macOS desktop): on aboutToQuit, a real quit ends an upstream session (no-op elsewhere).
@@ -1813,6 +1818,7 @@ private:
     quint64                      m_scanConnectSerial = 0;
     avpn::ScanOwnConnect         m_scanOwnConnect;
     avpn::ScanRowAttempt         m_scanRow;
+    avpn::UpstreamSeatFirst      m_seatFirst;                 // a provider pick waiting for its seat (live tunnel kept)
     int                          m_scanRowBackoffRound = 0;   // m_startBackoffRound when the row tap began
     QString                      m_scanLastCurrent;           // the last ScanCurrent sent (dedupe, never secret)
     quint64                      m_scanLightEpoch = 0;

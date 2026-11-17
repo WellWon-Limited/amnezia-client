@@ -21,6 +21,8 @@
 //    bytes after it.
 //  - Every session end (disconnect, a new begin) ends the machine's session too, so the next start() is never
 //    ignored; the release goes out from here per upstreamAppReleasesSeat (below).
+//  - prepare(stub) (seat first): the acquire runs while another node's tunnel is up; the grant is held and
+//    reported (Prepared), brought up only by the next up() of that node (bringUpPrepared).
 // Never logs: lease ids, tokens, configs, hosts - events carry codes only.
 //
 // Upstream Amnezia has no counterpart. Tests: tests/upstream_engine_check.cpp.
@@ -47,6 +49,8 @@ enum class UpstreamOwnerEventKind {
     ClearRecord,      // the session ended: drop the record
     RevisionChanged,  // revision: refetch the subscription once
     ConfigChanged,    // the profile changed on the server: applies at the next connect, never interrupts
+    Prepared,         // config: a seat taken BEFORE the switch (prepare) is in hand - check the profile, then switch
+    PrepareFailed,    // code: the seat taken before the switch was not granted - the live tunnel stays
 };
 
 // Who gives a session's seat back when the session ends (D3 of the owner's iPhone 16.11, build 140: refused seats
@@ -95,20 +99,39 @@ public:
                                       const std::optional<StandbyCandidate> &standby, qint64 nowMs,
                                       qint64 nowWallMs = 0)
     {
+        return startSession(stub, knownRevision, standby, nowMs, nowWallMs, /*prepareOnly=*/false);
+    }
+
+    // Seat first (D4 of the owner's iPhone 16.11): a working tunnel of another node is up and the user picked this
+    // provider node. The acquire goes out now - on the app's usual API base, i.e. THROUGH the live tunnel - and a
+    // grant is not brought up but reported as Prepared{config}: the adapter checks the profile and the facade only
+    // then switches; a refusal (PrepareFailed{code}, or the profile check) leaves the live tunnel alone. The next
+    // up() of the same node brings the held seat up (bringUpPrepared); anything else ends it (disconnect() releases
+    // it: nothing was handed over). No standby start: the live tunnel is the path.
+    QVector<UpstreamOwnerEvent> prepare(const SubscriptionNode &stub, qint64 knownRevision, qint64 nowMs,
+                                        qint64 nowWallMs = 0)
+    {
+        return startSession(stub, knownRevision, std::nullopt, nowMs, nowWallMs, /*prepareOnly=*/true);
+    }
+
+    // A session taken by prepare() for nodeId that up() may bring up now: still held, and its lease (if granted
+    // already) not past the deadline. false = start afresh (begin() ends the stale one first).
+    bool preparedUsable(const QString &nodeId, qint64 nowMs) const
+    {
+        return preparing() && m_nodeId == nodeId && (!m_prepared || m_machine.deadlineMs() > nowMs);
+    }
+    bool preparing() const { return m_active && m_prepareOnly; }
+
+    // up() of the prepared node: the held grant becomes the session's BringUp now; an acquire still in flight
+    // brings up on its grant like begin()'s would.
+    QVector<UpstreamOwnerEvent> bringUpPrepared(qint64 nowMs)
+    {
         QVector<UpstreamOwnerEvent> ev;
-        ev << endSession(nowMs); // a previous session (should already be released by down())
-        if (!stub.upstream.has_value())
+        if (!preparing())
             return ev;
-        resetSession();
-        m_nodeId = stub.nodeId;
-        m_profileId = stub.upstream->profileId;
-        m_stubSha = stub.upstream->configSha256;
-        m_standby = standby;
-        m_wallAtStart = nowWallMs;
-        m_monoAtStart = nowMs;
-        m_active = true;
-        m_bringUp = true;
-        apply(m_machine.start(m_profileId, LeaseKind::Session, machineScope(), knownRevision, nowMs), nowMs, ev);
+        m_prepareOnly = false;
+        if (m_prepared)
+            readyEvents(nowMs, ev);
         return ev;
     }
 
@@ -204,6 +227,10 @@ public:
         QVector<UpstreamOwnerEvent> ev;
         if (!m_active || !ownsRenewals())
             return ev;
+        // A seat held for a switch is never renewed: its first renewal falling due means the switch did not
+        // come - give it back (the switch takes seconds; renew_after_s is at least kUpstreamRenewMinS).
+        if (m_prepareOnly && m_prepared && m_wakeAtMs >= 0 && nowMs >= m_wakeAtMs)
+            return endSession(nowMs);
         apply(m_machine.tick(nowMs), nowMs, ev);
         return ev;
     }
@@ -313,6 +340,7 @@ private:
         m_lastRenewal = UpstreamRenewal();
         m_hasRenewal = false;
         m_active = m_bringUp = m_tunnelIsUp = m_handedOver = m_adopted = m_rebasePending = false;
+        m_prepareOnly = m_prepared = false;
         m_releaseSent = false;
         m_configChanged = false;
         m_haveBytes = false;
@@ -400,22 +428,28 @@ private:
             case LeaseActionKind::LeaseReady: {
                 if (silentReady)
                     break;
-                UpstreamOwnerEvent b;
-                b.kind = UpstreamOwnerEventKind::BringUp;
-                b.provisional = a.provisional;
-                if (a.provisional && m_standby) {
-                    b.config = m_standby->config;
-                    b.configSha256 = m_standby->configSha256;
-                } else {
-                    b.config = m_grant.config;
-                    b.configSha256 = m_grant.configSha256;
-                    b.lease = leaseJson(nowMs);
-                    if (!m_opt.keepOwnership)
-                        m_handedOver = true; // the lease travels in the envelope: the extension owns it
+                if (a.provisional) {
+                    UpstreamOwnerEvent b;
+                    b.kind = UpstreamOwnerEventKind::BringUp;
+                    b.provisional = true;
+                    if (m_standby) {
+                        b.config = m_standby->config;
+                        b.configSha256 = m_standby->configSha256;
+                    }
+                    ev << b;
+                    break;
                 }
-                ev << b;
-                if (!a.provisional && m_opt.keepOwnership)
-                    ev << persistEvent(nowMs, 0);
+                if (m_prepareOnly) {
+                    // Seat first: held, not brought up - the adapter checks the profile, the facade switches.
+                    m_prepared = true;
+                    UpstreamOwnerEvent p;
+                    p.kind = UpstreamOwnerEventKind::Prepared;
+                    p.config = m_grant.config;
+                    p.configSha256 = m_grant.configSha256;
+                    ev << p;
+                    break;
+                }
+                readyEvents(nowMs, ev);
                 break;
             }
             case LeaseActionKind::LeaseConfirmed: {
@@ -505,10 +539,47 @@ private:
         return m_opt.keepOwnership ? MeterScope::Tunnel : m_opt.scope;
     }
 
+    // The BringUp of a granted (not provisional) session: the lease travels in the envelope.
+    void readyEvents(qint64 nowMs, QVector<UpstreamOwnerEvent> &ev)
+    {
+        UpstreamOwnerEvent b;
+        b.kind = UpstreamOwnerEventKind::BringUp;
+        b.config = m_grant.config;
+        b.configSha256 = m_grant.configSha256;
+        b.lease = leaseJson(nowMs);
+        if (!m_opt.keepOwnership)
+            m_handedOver = true; // renewals belong to the tunnel owner from now (its envelope carries the lease)
+        ev << b;
+        if (m_opt.keepOwnership)
+            ev << persistEvent(nowMs, 0);
+    }
+
+    QVector<UpstreamOwnerEvent> startSession(const SubscriptionNode &stub, qint64 knownRevision,
+                                             const std::optional<StandbyCandidate> &standby, qint64 nowMs,
+                                             qint64 nowWallMs, bool prepareOnly)
+    {
+        QVector<UpstreamOwnerEvent> ev;
+        ev << endSession(nowMs); // a previous session (should already be released by down())
+        if (!stub.upstream.has_value())
+            return ev;
+        resetSession();
+        m_nodeId = stub.nodeId;
+        m_profileId = stub.upstream->profileId;
+        m_stubSha = stub.upstream->configSha256;
+        m_standby = standby;
+        m_wallAtStart = nowWallMs;
+        m_monoAtStart = nowMs;
+        m_active = true;
+        m_bringUp = true;
+        m_prepareOnly = prepareOnly;
+        apply(m_machine.start(m_profileId, LeaseKind::Session, machineScope(), knownRevision, nowMs), nowMs, ev);
+        return ev;
+    }
+
     void failStart(QVector<UpstreamOwnerEvent> &ev, const QString &code, const QString &detail = QString())
     {
         UpstreamOwnerEvent f;
-        f.kind = UpstreamOwnerEventKind::StartFailed;
+        f.kind = m_prepareOnly ? UpstreamOwnerEventKind::PrepareFailed : UpstreamOwnerEventKind::StartFailed;
         f.detail = detail;
         f.code = code.isEmpty() ? QStringLiteral("unknown") : code;
         ev << f;
@@ -530,6 +601,8 @@ private:
     qint64 m_adoptedStartedWallMs = 0;
     bool m_active = false, m_bringUp = false, m_tunnelIsUp = false, m_handedOver = false, m_adopted = false;
     bool m_rebasePending = false, m_releaseSent = false, m_configChanged = false, m_haveBytes = false;
+    bool m_prepareOnly = false; // prepare(): a seat taken before the switch, not brought up yet
+    bool m_prepared = false;    // ... and granted (Prepared was reported)
     qint64 m_lastRx = 0, m_lastTx = 0;
     qint64 m_renewedAtMs = -1, m_wakeAtMs = -1;
     qint64 m_appliedTotal = 0, m_shadowTotal = 0;

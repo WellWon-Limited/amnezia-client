@@ -1127,6 +1127,26 @@ static void preNativeErrorNeedsNoStatus()
     CHECK(!w.needStatusBeforeStart);
 }
 
+// D4: seat first - the live tunnel stays until the provider's seat and profile are in hand.
+static void upstreamSeatFirstRule()
+{
+    CHECK(upstreamSeatFirst(true, true, false));
+    CHECK(!upstreamSeatFirst(false, true, false)); // the tunnel is down: the ordinary start (nothing to keep)
+    CHECK(!upstreamSeatFirst(true, false, false)); // an own node: the ordinary pin restart
+    CHECK(!upstreamSeatFirst(true, true, true));   // a provider session is live: one owner, one seat - old order
+    UpstreamSeatFirst p{true, QStringLiteral("up:aaaaaaaaaaaaaaa0"), QStringLiteral("12:xray"), true, 7};
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 7, true) == SeatFirstStep::Switch);
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 7, false) == SeatFirstStep::Stay);
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 8, true) == SeatFirstStep::Drop);
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:aaaaaaaaaaaaaaa0"), 8, false) == SeatFirstStep::Drop);
+    CHECK(decideSeatFirstReply(p, QStringLiteral("up:bbbbbbbbbbbbbbb0"), 7, true) == SeatFirstStep::Ignore);
+    CHECK(decideSeatFirstReply(UpstreamSeatFirst(), QStringLiteral("up:aaaaaaaaaaaaaaa0"), 0, true) == SeatFirstStep::Ignore);
+    // While the seat is being taken the Scanner sees the provider node as the attempt (never probed with its key).
+    const ScanLiveView v = scanLiveView(QStringLiteral("connected"), true, QStringLiteral("12:xray"), QString(),
+                                        QStringLiteral("up:aaaaaaaaaaaaaaa0"), QString(), true, /*restartPending=*/true, true);
+    CHECK(v.live && v.nodeId == QLatin1String("12:xray") && v.attemptNodeId == QLatin1String("up:aaaaaaaaaaaaaaa0"));
+}
+
 int main()
 {
     a1ErrorDoesNotLatchAdoption();
@@ -1163,6 +1183,7 @@ int main()
     scannerKillSwitchImmediate();
     scannerServicePlan();
     preNativeErrorNeedsNoStatus();
+    upstreamSeatFirstRule();
     if (g_fail) {
         std::printf("facade_policy_check: %d FAILED\n", g_fail);
         return 1;

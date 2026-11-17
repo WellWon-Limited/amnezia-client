@@ -566,7 +566,8 @@ void VpnConnectionTunnelControl::down()
 #endif
     if (m_afterRelease)
         std::exchange(m_afterRelease, {})(); // a repeated stop: what waited for the release runs now
-    if (m_upOwner.active()) {
+    // A seat taken for a switch (prepareUpstream) outlives the old tunnel's stop: the up() after it brings it up.
+    if (m_upOwner.active() && !m_upOwner.preparing()) {
         applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
         if (m_upOwner.releaseSent() && m_upOwner.options().keepOwnership && m_leaseClient) {
             m_stopReleaseId = m_leaseClient->lastReleaseRequestId();
@@ -645,6 +646,13 @@ TunnelResult VpnConnectionTunnelControl::upUpstream(const Subscription &sub, con
         m_upOwner.setOptions(o);
     }
     m_lastConfigReport = XrayConfigBuilder::reportSummaryUpstream(node, false, meterScopeName(m_upOwner.options().scope));
+    if (m_upOwner.preparedUsable(node.nodeId, upstreamClockMs())) {
+        // Seat first: the seat was acquired (and the profile checked) while the old tunnel still worked.
+        m_lastConfigReport.insert(QStringLiteral("stage"), QStringLiteral("prepared"));
+        qInfo() << "avpn upstream: bringing up the seat taken before the switch for" << node.nodeId;
+        applyUpstreamEvents(m_upOwner.bringUpPrepared(upstreamClockMs()));
+        return TunnelResult::success();
+    }
     m_lastConfigReport.insert(QStringLiteral("stage"), QStringLiteral("acquiring"));
     m_lastConfigReport.insert(QStringLiteral("standby_usable"), standby.has_value());
     qInfo() << "avpn upstream: acquiring a seat for" << node.nodeId << "standby" << standby.has_value();
@@ -721,6 +729,26 @@ void VpnConnectionTunnelControl::applyUpstreamEvents(const QVector<UpstreamOwner
         case UpstreamOwnerEventKind::ConfigChanged:
             qInfo() << "avpn upstream: the profile of" << m_upOwner.nodeId()
                     << "changed on the server - applies at the next connect";
+            break;
+        case UpstreamOwnerEventKind::Prepared: {
+            // The connect's own profile rule now, while the old tunnel works: a refused profile never costs it.
+            const QString nodeId = m_upOwner.nodeId();
+            const SanitizedProfile chk = upstreamProfileCheck(
+                e.config, e.configSha256, m_upStub.upstream ? m_upStub.upstream->protocols : QStringList());
+            if (!chk.ok()) {
+                qWarning() << "avpn upstream: profile of" << nodeId << "refused before the switch:" << chk.code()
+                           << chk.detail;
+                applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs())); // the seat goes back
+                emit upstreamPrepared(nodeId, false, QStringLiteral("profile_") + chk.code());
+                break;
+            }
+            qInfo() << "avpn upstream: seat for" << nodeId << "held before the switch";
+            emit upstreamPrepared(nodeId, true, QString());
+            break;
+        }
+        case UpstreamOwnerEventKind::PrepareFailed:
+            qWarning() << "avpn upstream: no seat for" << m_upStub.nodeId << "before the switch, code" << e.code;
+            emit upstreamPrepared(m_upStub.nodeId, false, e.detail.isEmpty() ? e.code : e.code + QLatin1Char('/') + e.detail);
             break;
         }
     }
@@ -880,6 +908,26 @@ void VpnConnectionTunnelControl::retryUpstreamAdoption()
                 });
     });
 #endif
+}
+
+bool VpnConnectionTunnelControl::prepareUpstream(const Subscription &sub, const SubscriptionNode &node)
+{
+    if (!upstreamNodesEnabled() || !m_leaseClient || !m_leaseClient->configured() || m_upOwner.active()
+        || !isUpstreamNode(node) || !node.upstream)
+        return false;
+    m_upStub = node; // no provider session is live (checked above): the stub of the coming session
+    qInfo() << "avpn upstream: taking a seat for" << node.nodeId << "before the switch";
+    applyUpstreamEvents(m_upOwner.prepare(node, sub.upstreamRevision, upstreamClockMs(),
+                                          QDateTime::currentMSecsSinceEpoch()));
+    return true;
+}
+
+void VpnConnectionTunnelControl::cancelUpstreamPrepare()
+{
+    if (!m_upOwner.preparing())
+        return;
+    qInfo() << "avpn upstream: the seat taken for" << m_upOwner.nodeId() << "is not needed any more";
+    applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
 }
 
 void VpnConnectionTunnelControl::upstreamTunnelUp()

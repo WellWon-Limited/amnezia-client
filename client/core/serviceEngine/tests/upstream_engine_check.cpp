@@ -1915,6 +1915,82 @@ static void ownerRefusedBringUp()
     CHECK(!upstreamAppReleasesSeat(false, true, true));  // the tunnel owner has it
 }
 
+// --- D4 of 16.11: seat first - a provider pick while another node's tunnel works -----------------------------
+static void ownerSeatFirst()
+{
+    const SubscriptionNode a = stubOf();
+    const QString sha = a.upstream->configSha256;
+    const qint64 T = 9000000;
+    for (bool keep : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = keep;
+        o.setOptions(op);
+        o.prepare(a, 1, T, 1);
+        CHECK(io.calls.size() == 1 && io.calls[0].what == QLatin1String("acquire") && io.calls[0].route.apiBase.isEmpty());
+        CHECK(o.preparing() && o.preparedUsable(a.nodeId, T));
+        QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, sha), T + 200);
+        const UpstreamOwnerEvent *p = findEv(ev, UpstreamOwnerEventKind::Prepared);
+        CHECK(p && p->config == QByteArrayLiteral("{\"cfg\":1}") && p->configSha256 == sha);
+        CHECK(!findEv(ev, UpstreamOwnerEventKind::BringUp) && !findEv(ev, UpstreamOwnerEventKind::Persist));
+        CHECK(o.preparedUsable(a.nodeId, T + 300) && !o.preparedUsable(QStringLiteral("up:other"), T + 300));
+        ev = o.bringUpPrepared(T + 1500);
+        const UpstreamOwnerEvent *b = findEv(ev, UpstreamOwnerEventKind::BringUp);
+        CHECK(b && !b->provisional && b->lease.value("lease_id").toString() == QLatin1String(kLease));
+        CHECK((findEv(ev, UpstreamOwnerEventKind::Persist) != nullptr) == keep);
+        CHECK(!o.preparing() && io.calls.size() == 1); // the held seat - no second acquire
+    }
+    // Refusals before the switch are PrepareFailed, never StartFailed: the live tunnel is not touched.
+    for (const AcquireReply &r : {refused(UpstreamErrorCode::NoSeat), failed("transport"), refused(UpstreamErrorCode::Disabled)}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(a, 1, T, 1);
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.calls[0].id, r, T + 100);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::PrepareFailed) && !findEv(ev, UpstreamOwnerEventKind::StartFailed)
+              && !findEv(ev, UpstreamOwnerEventKind::Leave) && !o.active());
+    }
+    // A held seat that is not used (cancel, a refused profile) goes back from the app on every platform.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(a, 1, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, sha), T + 200);
+        o.disconnect(T + 500);
+        CHECK(io.last("release") && io.last("release")->profileOrLease == QLatin1String(kLease) && !o.active());
+    }
+    // up() while the acquire is still in flight: the grant brings up like begin()'s.
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(a, 1, T, 1);
+        CHECK(o.bringUpPrepared(T + 50).isEmpty() && !o.preparing() && o.active());
+        const QVector<UpstreamOwnerEvent> ev = o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, sha), T + 200);
+        CHECK(findEv(ev, UpstreamOwnerEventKind::BringUp) && !findEv(ev, UpstreamOwnerEventKind::Prepared));
+    }
+    // A held seat is never renewed: its first renewal falling due gives it back (the switch did not come).
+    for (bool keep : {false, true}) {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        UpstreamLeaseOwner::Options op;
+        op.keepOwnership = keep;
+        o.setOptions(op);
+        o.prepare(a, 1, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, sha), T + 200);
+        CHECK(o.tick(T + 10000).isEmpty() && o.preparing());
+        o.tick(T + 200 + 300000);
+        CHECK(io.last("release") && !io.last("renew") && !o.active());
+    }
+    // A held lease past its deadline is not brought up (up() starts afresh).
+    {
+        FakeIo io;
+        UpstreamLeaseOwner o(&io);
+        o.prepare(a, 1, T, 1);
+        o.onAcquireReply(io.calls[0].id, granted(a.upstream->profileId, sha), T + 200);
+        CHECK(o.preparedUsable(a.nodeId, T + 899999) && !o.preparedUsable(a.nodeId, T + 900001));
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1928,6 +2004,7 @@ int main(int argc, char **argv)
     engineAttempt();
     ownerAcquireOutcomes();
     ownerRefusedBringUp();
+    ownerSeatFirst();
     ownerMacRenewals();
     ownerAdoption();
     dataCheck();
