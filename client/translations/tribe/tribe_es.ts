@@ -1691,7 +1691,17 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
 <context>
     <name>PageReferralTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+42"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+35"/>
+        <source>%1 дней + %2 ГБ</source>
+        <translation>%1 días + %2 GB</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 дней</source>
+        <translation>%1 días</translation>
+    </message>
+    <message>
+        <location line="+11"/>
         <source>Ссылка скопирована — отправь другу</source>
         <translation>Enlace copiado: envíaselo a un amigo</translation>
     </message>
@@ -1730,13 +1740,13 @@ bancos, cines, servicios estatales y marketplaces siguen funcionando ¡sin conmu
     </message>
     <message>
         <location line="+1"/>
-        <source>&lt;font color=&apos;%1&apos;&gt;%2 дней + %3 ГБ&lt;/font&gt; бесплатно</source>
-        <translation>&lt;font color=&apos;%1&apos;&gt;%2 días + %3 GB&lt;/font&gt; gratis</translation>
+        <source>&lt;font color=&apos;%1&apos;&gt;%2&lt;/font&gt; бесплатно</source>
+        <translation>&lt;font color=&apos;%1&apos;&gt;%2&lt;/font&gt; gratis</translation>
     </message>
     <message>
         <location line="+30"/>
-        <source>Поделитесь ссылкой — за каждого друга добавим %1 дней бесплатно!</source>
-        <translation>Comparte tu enlace: ¡añadiremos %1 días gratis por cada amigo!</translation>
+        <source>Поделитесь ссылкой — за каждого друга добавим %1 бесплатно!</source>
+        <translation>Comparte tu enlace: ¡añadiremos %1 gratis por cada amigo!</translation>
     </message>
     <message>
         <location line="+21"/>
