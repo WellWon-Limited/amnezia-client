@@ -1,6 +1,8 @@
 // AVPN serviceEngine — снимок состояния для диагностической панели (5 тапов по логотипу). [СКАФФОЛД]
 #pragma once
 
+#include <functional> // build 142: NoHandshakeOps
+
 #include "dto/Subscription.h"
 #include "ConfigCachePolicy.h" // kConfigRefreshThrottleMs - the one throttle of the config refresh
 #include "TransportModeGate.h"  // ModeTunnel - what the transport-mode gate is told about the tunnel
@@ -1020,66 +1022,87 @@ inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch
     return ScanCancel::Stop;
 }
 
-// Build 142 (S5, owner's iPhone 16.11 23:20-23:21, one Wi-Fi): AmneziaWG got no handshake there (nodes 17
-// and 15), build 139 had used an Xray node via network memory, the tap on «Авто» cleared it and five
-// starts in a row went to AmneziaWG again. An own start whose tunnel never handshook was not a failure of
-// anything: the native kept it Reconnecting, the start watchdog ended it after ~45 s without a transport
-// record, and AmneziaWG (rank 10) stayed ahead of Xray (rank 20) in every pick.
-// The native tells each handshake timeout of a session whose NE answered "no handshake, no data"
-// (IosController::handshakeNeverCompleted). At the first FRESH one (~12 s after the tunnel came up) an own Auto
-// start on AmneziaWG leaves AmneziaWG for the rest of this attempt: the transport is recorded as failed
-// (location x proto history), AmneziaWG is banned for the rest of the attempt (ServiceEngine::
-// banAwgForAttempt - one piece of attempt state that every pick reads), and the start goes on with the
-// next pick - the best Xray candidate. Only in Auto transport mode (a transport chosen by hand is never
-// overridden), never for a node the person chose exactly (a Scanner row tap: the head of the attempt's
-// order hint), only if such a pick exists, only once per attempt (the ban: no flapping back), only while the
-// person's own start is still in flight (their stop wins: it ends the attempt).
-// A pinned LOCATION does not block it (owner question, build 142): in Auto mode a pin is a location and the
-// engine already picks the transport inside it (rank + history); the Xray pick is then the pinned
-// location's own Xray (same country, other protocol), never another location. No Xray there - no move.
-struct AwgNoHandshakeInputs {
-    bool fresh = false;            // the fact's status request was sent after the app's last freeze (N4)
+// Build 142 - ONE rule for a session that never handshakes (owner's iPhone, build 140, 16.11; S3 and S5,
+// three review rounds). The native tells every handshake timeout of a session whose extension answered "no
+// handshake, no data" (IosController::handshakeNeverCompleted) with the send time of that status request.
+// Invariant: an AmneziaWG session without a handshake within its budget is never kept as «Подключено»; what
+// follows is the app's ORDINARY start path, whose end is proven (a handshake - and the data check where the app
+// has one - or the counted failed start, the next pick and the backoff; it never shows Connected without a
+// handshake). There is no special check of its own that could be left waiting (review rounds 1-3: the adopted
+// session's re-check through the data check leaked three times around freezes and native state changes).
+//  * stale: the request was sent before the app's last freeze (nativeFactFresh) - nothing; the next timeout
+//    tells again (every 12 s while the native awaits the handshake);
+//  * our own start in flight: its own budget goes on (start watchdog, failed start); only S5 acts - in Auto
+//    mode, not for an exactly chosen node (a Scanner row tap), when an Xray pick exists and AmneziaWG is not
+//    banned yet: AmneziaWG is banned for the attempt and the start ends as a failed start (next pick: Xray);
+//  * a session the app holds as up (adopted at a relaunch - S3 of 23:20:26 -, or its own after a reassert),
+//    no operation in flight: it is not kept - the same AmneziaWG ban when allowed, then the ordinary restart
+//    (our guarded stop, reconcile starts the next pick of this attempt). Whatever states the native went
+//    through meanwhile (Reconnecting -> Connecting -> Reconnecting around a thaw) and whatever was decided for
+//    an earlier fact: the next fresh fact decides again, nothing is "already checked".
+struct NoHandshakeInputs {
+    bool fresh = false;            // the fact's status request was sent after the app's last freeze
     bool ownStartInFlight = false; // our start is in flight and the person still wants the VPN on
-    bool nodeIsAwg = false;        // the node of this start is an own AmneziaWG node
+    bool tunnelHeldUp = false;     // the engine holds the session as up (Connected / Verifying), nothing in flight,
+                                   // the person wants the VPN on
+    bool nodeIsAwg = false;        // the session's node is an own AmneziaWG node
     bool autoMode = false;         // the effective transport mode is Auto
     bool explicitNode = false;     // the person chose exactly this node (a Scanner row tap)
     bool alreadyLeft = false;      // AmneziaWG is already banned in this attempt
-    bool xrayPick = false;         // with every AmneziaWG node excluded the pick of this start (inside the
-                                   // pinned location, if any) gives an Xray node
+    bool xrayPick = false;         // with every AmneziaWG node out this start could take an Xray node
 };
-enum class AwgNoHandshake { Leave, IgnoreStale, IgnoreNotOwnStart, IgnoreNotAwg, IgnoreMode,
-                            IgnoreExplicitNode, IgnoreAlreadyLeft, IgnoreNoXray };
-inline AwgNoHandshake decideAwgNoHandshake(const AwgNoHandshakeInputs &in)
+enum class NoHandshake { LeaveAwg, Restart, IgnoreStale, IgnoreNotOurs, IgnoreOwnStartGoesOn };
+inline NoHandshake decideNoHandshake(const NoHandshakeInputs &in)
 {
     if (!in.fresh)
-        return AwgNoHandshake::IgnoreStale; // a reply queued across a freeze: the next timeout tells again
-    if (!in.ownStartInFlight)
-        return AwgNoHandshake::IgnoreNotOwnStart;
-    if (!in.nodeIsAwg)
-        return AwgNoHandshake::IgnoreNotAwg;
-    if (!in.autoMode)
-        return AwgNoHandshake::IgnoreMode;
-    if (in.explicitNode)
-        return AwgNoHandshake::IgnoreExplicitNode;
-    if (in.alreadyLeft)
-        return AwgNoHandshake::IgnoreAlreadyLeft;
-    if (!in.xrayPick)
-        return AwgNoHandshake::IgnoreNoXray;
-    return AwgNoHandshake::Leave;
+        return NoHandshake::IgnoreStale;
+    if (!in.ownStartInFlight && !in.tunnelHeldUp)
+        return NoHandshake::IgnoreNotOurs;
+    const bool leave = in.nodeIsAwg && in.autoMode && !in.explicitNode && !in.alreadyLeft && in.xrayPick;
+    if (in.ownStartInFlight)
+        return leave ? NoHandshake::LeaveAwg : NoHandshake::IgnoreOwnStartGoesOn;
+    return leave ? NoHandshake::LeaveAwg : NoHandshake::Restart;
 }
-inline const char *awgNoHandshakeName(AwgNoHandshake d)
+inline const char *noHandshakeName(NoHandshake d)
 {
     switch (d) {
-    case AwgNoHandshake::Leave: return "leave_awg";
-    case AwgNoHandshake::IgnoreStale: return "stale";
-    case AwgNoHandshake::IgnoreNotOwnStart: return "not_own_start";
-    case AwgNoHandshake::IgnoreNotAwg: return "not_awg";
-    case AwgNoHandshake::IgnoreMode: return "mode";
-    case AwgNoHandshake::IgnoreExplicitNode: return "explicit_node";
-    case AwgNoHandshake::IgnoreAlreadyLeft: return "already_left";
-    case AwgNoHandshake::IgnoreNoXray: return "no_xray";
+    case NoHandshake::LeaveAwg: return "leave_awg";
+    case NoHandshake::Restart: return "restart";
+    case NoHandshake::IgnoreStale: return "stale";
+    case NoHandshake::IgnoreNotOurs: return "not_ours";
+    case NoHandshake::IgnoreOwnStartGoesOn: return "own_start_goes_on";
     }
     return "unknown";
+}
+// The facade's only path for the fact - its effects handed in, so the whole sequence runs in a test.
+//  facts()          - the inputs as the facade sees them now (fresh = the request's send time vs. the freeze);
+//  banAwg()         - ServiceEngine::banAwgForAttempt (records the failed rise, bans AmneziaWG for the attempt);
+//  endSession(own)  - our start in flight: the failed-start bookkeeping; a held session: the network memory
+//                     forgets its node; then our guarded stop with the intent kept - reconcile starts again.
+struct NoHandshakeOps {
+    std::function<NoHandshakeInputs()> facts;
+    std::function<void(const QString &)> journal;
+    std::function<void()> banAwg;
+    std::function<void(bool ownStart)> endSession;
+};
+inline NoHandshake handleNoHandshakeFact(int timeouts, const QString &nodeId, const NoHandshakeOps &ops)
+{
+    const NoHandshakeInputs in = ops.facts();
+    const NoHandshake d = decideNoHandshake(in);
+    // Told every 12 s: silent unless something is done or a start of ours is being judged for the first time.
+    if (d == NoHandshake::IgnoreNotOurs || (d == NoHandshake::IgnoreOwnStartGoesOn && (in.alreadyLeft || timeouts > 1)))
+        return d;
+    ops.journal(QStringLiteral("no_handshake node=%1 timeouts=%2 own_start=%3 held=%4 -> %5")
+                    .arg(nodeId.isEmpty() ? QStringLiteral("-") : nodeId)
+                    .arg(timeouts)
+                    .arg(int(in.ownStartInFlight))
+                    .arg(int(in.tunnelHeldUp))
+                    .arg(QLatin1String(noHandshakeName(d))));
+    if (d == NoHandshake::LeaveAwg)
+        ops.banAwg();
+    if (d == NoHandshake::LeaveAwg || d == NoHandshake::Restart)
+        ops.endSession(in.ownStartInFlight);
+    return d;
 }
 
 // Build 142 (review round 2, N4): a state or a fact from before the app's last freeze is never evidence.
@@ -1090,24 +1113,6 @@ inline const char *awgNoHandshakeName(AwgNoHandshake d)
 inline bool nativeFactFresh(qint64 requestSentMs, qint64 freezeBoundaryMs)
 {
     return freezeBoundaryMs <= 0 || requestSentMs >= freezeBoundaryMs;
-}
-// The app's own data check, at each attempt. Only requests through the tunnel decide it - never the stored
-// native state: on iOS Reconnecting is a handshake timeout of the SAME live tunnel (the native keeps it up), so
-// the attempts go on and their requests answer (before: the attempt cancelled itself on "not Connected" and the
-// engine stayed in Verifying; round 1 then failed the check on the stored state - stale after a thaw). And a
-// budget spent across a freeze is no evidence either: the check gets a fresh budget once after the boundary.
-enum class VerifyAttemptGate { Cancel, GoOn, FreshBudget };
-inline VerifyAttemptGate verifyAttemptGate(bool epochCurrent, bool engineVerifying, bool nativeConnected,
-                                           bool nativeReconnecting, bool iosNative, qint64 checkStartedMs,
-                                           qint64 freezeBoundaryMs)
-{
-    if (!epochCurrent || !engineVerifying)
-        return VerifyAttemptGate::Cancel;
-    if (!nativeConnected && !(iosNative && nativeReconnecting))
-        return VerifyAttemptGate::Cancel; // the state moved on (stop / loss / switch)
-    if (iosNative && freezeBoundaryMs > 0 && checkStartedMs < freezeBoundaryMs)
-        return VerifyAttemptGate::FreshBudget;
-    return VerifyAttemptGate::GoOn;
 }
 
 // A row tap's connect chain as the coordinator needs it: the node the ladder left (connectFailed), the end

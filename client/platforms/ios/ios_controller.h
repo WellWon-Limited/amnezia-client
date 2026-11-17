@@ -197,16 +197,11 @@ signals:
     // AVPN (owner test 06.11, review of 136): the native stopped an adopted session that never
     // completed a handshake (stopNeverConnectedAdoptedSession) - the facade logs the real reason.
     void adoptedDeadSessionStopped();
-    // AVPN (build 142, S3): a session the cold-start rule showed Connected before any handshake check;
-    // the NE answered and its engine has no handshake and no data (IosNativePolicy.h::
-    // answeredWithoutHandshake). Repeated on every such reply until the first handshake timeout; the
-    // facade decides once per session (TunnelWatchStatus.h::decideAdoptedProofCheck). requestSentMs: when the
-    // status request of that reply was sent (wall clock) - an answer to a request older than the app's last
-    // freeze is no evidence (DebugSnapshot.h::nativeFactFresh).
-    void adoptedSessionUnproven(qint64 requestSentMs);
-    // AVPN (build 142, S5): handshake timeout number `timeouts` (1, 2, ...) of the awaited session, and
-    // the NE answered that its engine never handshook and got no data. The facade decides
-    // (DebugSnapshot.h::decideAwgNoHandshake); nothing here changes the native behaviour. requestSentMs - as above.
+    // AVPN (build 142): handshake timeout number `timeouts` (1, 2, ...) of the awaited session, and the NE
+    // answered that its engine never handshook and got no data. Told at every timeout, whatever states the
+    // session went through meanwhile. requestSentMs: when that status request was sent (wall clock) - an answer
+    // to a request older than the app's last freeze is no evidence (DebugSnapshot.h::nativeFactFresh). The
+    // facade decides (DebugSnapshot.h::decideNoHandshake); nothing here changes the native behaviour.
     void handshakeNeverCompleted(int timeouts, qint64 requestSentMs);
     // AVPN (контракт K4): итог provider message {"action":"rebind"}. performed=true — NE ответил
     // {"rebind":"performed"}; false — {"rebind":"denied",...}, нет живого туннеля, ошибка отправки

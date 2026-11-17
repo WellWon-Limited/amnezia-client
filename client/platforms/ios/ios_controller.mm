@@ -1318,15 +1318,10 @@ void IosController::checkStatus()
                         ((last_handshake_time_sec > 0) ||
                          (rxBytes >= handshakeRxThreshold));
 
-                // AVPN (build 142, S3 + S5): the NE answered that its engine never handshook and got no data.
+                // AVPN (build 142): the NE answered that its engine never handshook and got no data.
                 const bool answeredNoHandshake = hasHandshakeData && avpn_ios::answeredWithoutHandshake(
                         (long long)last_handshake_time_sec, (unsigned long long)rxBytes,
                         (unsigned long long)handshakeRxThreshold);
-                // S3: told on EVERY such reply of a session the cold-start rule showed Connected, whatever the
-                // handshake budget did meanwhile (review F7: the first answer may come after the first
-                // timeout); the facade's one re-check owner decides once per session.
-                if (m_shownConnectedBeforeHandshake && answeredNoHandshake)
-                    emit adoptedSessionUnproven(sentMs);
                 if (hasFreshHandshake) {
                     m_handshakeConfirmed = true;
                     m_handshakeAwaiting = false;
@@ -1339,8 +1334,9 @@ void IosController::checkStatus()
                            m_handshakeTimer.elapsed() > handshakeTimeoutMs) {
                     m_handshakeTimer.restart();
                     ++m_handshakeTimeouts;
-                    // AVPN (build 142, S5): the fact of this timeout for the facade (an own Auto start on
-                    // AmneziaWG leaves AmneziaWG at the first one); the native path below is unchanged.
+                    // AVPN (build 142): the fact of this timeout for the facade - every timeout, whatever state
+                    // the session went through (DebugSnapshot.h::decideNoHandshake); the native path below is
+                    // unchanged.
                     if (answeredNoHandshake)
                         emit handshakeNeverCompleted(m_handshakeTimeouts, sentMs);
                     // AVPN: нода не отвечает (rx=0). Не висим в Reconnecting вечно — после N таймаутов

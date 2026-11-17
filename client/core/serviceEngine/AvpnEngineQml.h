@@ -1071,9 +1071,8 @@ private:
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
     void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
     void onTunnelEngineDown();                         // status reply with `engine_down` (stage 2)
-    void onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs); // build 142 (S5): leave AmneziaWG for Xray (iOS)
-    qint64 freezeBoundaryMs() const;                   // build 142 (N4): the app's last freeze (hide / return)
-    bool verifyAttemptGoesOn(int epoch, const char *site); // build 142 (N4): the data check's attempt gate
+    void onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs); // build 142: the one no-handshake rule (iOS)
+    qint64 freezeBoundaryMs() const;                   // build 142: the app's last freeze (hide / return)
     bool tunnelWatchFrozen(const char *site);          // resume freeze: hold this decision?
     bool deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume);
     void tickTunnelWatchFreeze(qint64 sinceLastTickMs); // on the existing 1 s transition tick

@@ -1504,84 +1504,6 @@ static void stageTwo()
     }
 }
 
-// Build 142 (S3): the relaunch of 16.11 23:20:26. The extension held a session on node 17 that had no
-// handshake on the Wi-Fi (soft restarts, hs=never for 26 min); the cold-start rule showed it Connected and
-// the engine adopted it (adopt_connected verdict=1). The extension's answer "no handshake, no data"
-// (IosController::adoptedSessionUnproven, repeated every status reply until the first timeout) sends it to
-// the app's own check once, through the same single re-check as a verdict - with every watch flag off.
-static void adoptedUnproven()
-{
-    {   // the pure rule
-        AdoptedProofInputs in;
-        in.engineConnected = true;
-        in.appNodeId = QStringLiteral("17");
-        in.generation = QStringLiteral("run-26");
-        CHECK(decideAdoptedProofCheck(in) == AdoptedProofCheck::Recheck, "unproven adopted session: re-check");
-        AdoptedProofInputs again = in;
-        again.checkedOnce = true;
-        again.checkedGeneration = QStringLiteral("run-26");
-        CHECK(decideAdoptedProofCheck(again) == AdoptedProofCheck::AlreadyChecked, "the same session: once");
-        again.generation = QStringLiteral("run-27");
-        CHECK(decideAdoptedProofCheck(again) == AdoptedProofCheck::Recheck, "another session of the process: again");
-        AdoptedProofInputs moving = in;
-        moving.engineConnected = false; // start / switch / stop / a check already running
-        CHECK(decideAdoptedProofCheck(moving) == AdoptedProofCheck::Nothing, "not Connected: nothing");
-        AdoptedProofInputs anon = in;
-        anon.appNodeId.clear();
-        CHECK(decideAdoptedProofCheck(anon) == AdoptedProofCheck::NoIdentity, "no identity: reenterVerifying would refuse");
-        AdoptedProofInputs bg = in;
-        bg.backgroundArmOnly = true;
-        CHECK(decideAdoptedProofCheck(bg) == AdoptedProofCheck::Defer, "awake only for the arming: at the return");
-    }
-    {   // 23:20:26 replay on the real object: flags off (as build 140), node_scan on (as that evening)
-        ResumeBench b;
-        b.watchFlag = false;
-        b.node = QStringLiteral("17");
-        b.generation = QStringLiteral("run-26");
-        for (int reply = 0; reply < 11; ++reply) { // one status reply a second until the first 12 s timeout
-            b.resume.onAdoptedUnproven();
-            if (reply == 0) {
-                CHECK(b.reenterCalls == 1 && b.verifications == 1, "first answer: Verifying and the app's own check");
-                b.verifying = true;
-                b.engineConnected = false; // the engine agreed: it is in Verifying now
-            }
-        }
-        CHECK(b.reenterCalls == 1 && b.verifications == 1, "every later answer of the same session: nothing more");
-        CHECK(b.journaled("adopted_unproven node=17 -> recheck") && b.journal.size() == 1, "one journal line");
-        CHECK(b.snapshotRequests == 0 && !b.resume.frozen(), "no freeze, no snapshot: the watch is not involved");
-    }
-    {   // node_scan off: the same re-check (the app's check is then the Xray-style one: fails over at once)
-        ResumeBench b;
-        b.watchFlag = false;
-        b.nodeScan = false;
-        b.resume.onAdoptedUnproven();
-        CHECK(b.reenterCalls == 1 && b.verifications == 1, "node_scan off: still re-checked");
-    }
-    {   // the engine refuses (no current node / not Connected inside the engine): no check is started
-        ResumeBench b;
-        b.engineAgrees = false;
-        b.resume.onAdoptedUnproven();
-        CHECK(b.reenterCalls == 1 && b.verifications == 0, "refused re-entry starts no check");
-    }
-    {   // no identity: journaled, nothing asked of the engine
-        ResumeBench b;
-        b.node.clear();
-        b.resume.onAdoptedUnproven();
-        CHECK(b.reenterCalls == 0 && b.journaled("adopted_unproven node=- -> no_identity"), "no identity: no re-check");
-    }
-    {   // awake only for the On-Demand arming: waits for the return to the screen, then runs once
-        ResumeBench b;
-        b.backgroundArmOnly = true;
-        b.resume.onAdoptedUnproven();
-        CHECK(b.reenterCalls == 0 && b.resume.deferredCount() == 1, "background: deferred");
-        b.backgroundArmOnly = false;
-        b.tick();
-        CHECK(b.reenterCalls == 1 && b.verifications == 1, "at the return: re-checked once");
-        b.resume.onAdoptedUnproven();
-        CHECK(b.reenterCalls == 1, "and not again");
-    }
-}
-
 int main()
 {
     tableAndClamps();
@@ -1591,7 +1513,6 @@ int main()
     resumeFreeze();
     handOver();
     stageTwo();
-    adoptedUnproven();
     std::printf("\n%d/%d ok\n", total - failures, total);
     if (failures) {
         std::printf("tunnel_watch_check: %d FAILED\n", failures);

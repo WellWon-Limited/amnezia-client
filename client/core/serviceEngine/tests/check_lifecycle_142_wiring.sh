@@ -7,12 +7,11 @@
 # if its call site is reverted (independent review, round 1: "the facade policy tests still pass if the
 # production wiring is reverted").
 #   S1/S2  the Scanner's cancel: latched on «Подключено» as the orb shows it; refused with no event loop;
-#   S3     the native tells an unproven adopted session on every answered reply (not gated by the handshake
-#          budget); the facade hands it to the one re-check owner; reenterVerifying has one caller; a native
-#          handshake timeout ends a running check at the transition and at the check's next attempt;
-#   S5     the native tells every no-handshake timeout; the facade decides through decideAwgNoHandshake and
-#          bans AmneziaWG for the attempt before its guarded stop; any action of the person on the intent
-#          lifts the ban; every pick of the engine reads the ban through its one reader.
+#   S3+S5  one rule: the native tells every no-handshake timeout with its request's send time; the facade hands
+#          a fresh one to handleNoHandshakeFact, which ends the session through our guarded stop (the ordinary
+#          restart / failed start) after banning AmneziaWG where allowed; no special check of an adopted session;
+#          the data check keeps its original guards; any action of the person lifts the ban; every pick and the
+#          provider tier rule read the ban through its one reader.
 # Run by the check sweep (every check_*.sh of this directory).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,43 +38,37 @@ has "$cancel" 'shownConnected, eventLoopRunning);' || bad "S2: decideScanCancel 
 has "$(body "$FACADE" 'void AvpnEngineQml::scanSyncState()')" 'noteScanOwnConnectProgress(m_scanOwnConnect, scanOwnConnectShownConnected());' \
     || bad "S1: scanSyncState does not latch «Подключено» as the orb shows it"
 
-# ---- S3 ----------------------------------------------------------------------------------------------------
-status="$(code "$CONTROLLER" | awk '/const bool answeredNoHandshake = hasHandshakeData/ { on = 1 } on { print } on && /if \(hasFreshHandshake\) \{/ { exit }')"
-has "$status" 'if (m_shownConnectedBeforeHandshake && answeredNoHandshake)' && has "$status" 'emit adoptedSessionUnproven(sentMs);' \
-    || bad "S3: the native does not tell an unproven adoption before (independently of) the handshake budget"
-[ "$(count "$CONTROLLER" 'emit adoptedSessionUnproven(sentMs);')" = "1" ] || bad "S3: adoptedSessionUnproven is emitted from more than one place"
-has "$(code "$FACADE")" 'm_watchResume->onAdoptedUnproven();' || bad "S3: the facade does not hand the unproven adoption to TunnelWatchResume"
-[ "$(code "$RESUME" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "S3: reenterVerifying has more than one caller in TunnelWatchResume"
-[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "S3: the facade calls reenterVerifying outside the hand-over's op"
-has "$(body "$RESUME" '    void onAdoptedUnproven()')" 'recheck();' || bad "S3: onAdoptedUnproven does not go through the one re-check"
-# N4 (review round 2): a stored native state is never the verdict of the data check; facts are fresh only.
-[ "$(count "$FACADE" 'failVerifyOnHandshakeTimeout')" = "0" ] || bad "N4: the check is still failed on a stored native state"
-for fn in 'void AvpnEngineQml::verifyAttempt(int epoch)' 'void AvpnEngineQml::whoamiAttempt(int epoch)'; do
-    b="$(body "$FACADE" "$fn")"
-    has "$b" 'if (!verifyAttemptGoesOn(epoch, ' || bad "N4: $fn does not pass the attempt gate"
-    has "$b" 'm_lastTunnelState != Vpn::Connected' && bad "N4: $fn judges the stored native state itself"
-done
-has "$(body "$FACADE" 'bool AvpnEngineQml::verifyAttemptGoesOn(int epoch, const char *site)')" 'avpn::verifyAttemptGate(' \
-    || bad "N4: the attempt gate is not DebugSnapshot.h::verifyAttemptGate"
-has "$(code "$FACADE")" 'if (m_watchResume && avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs()))' \
-    || bad "N4: an unproven adoption from before the last freeze is acted upon"
-has "$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)')" \
-    'in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());' || bad "N4: the S5 fact is not checked for freshness"
-[ "$(count "$CONTROLLER" 'sendVpnExtensionMessage(tunnel, message, [this, gen, request, sentMs]')" = "1" ] \
-    || bad "N4: the status request does not carry its send time into the reply"
-
-# ---- S5 ----------------------------------------------------------------------------------------------------
+# ---- S3 + S5: the one no-handshake rule (review round 3: no special check of an adopted session) ---------------
+# The native tells every no-handshake timeout with its request's send time; the facade hands it to the one
+# handler; the adopted session is never sent into the data check by this rule; the attempt guards of the data
+# check are the originals (a stored native state is never a verdict).
 [ "$(count "$CONTROLLER" 'emit handshakeNeverCompleted(m_handshakeTimeouts, sentMs);')" = "1" ] \
-    || bad "S5: the native does not tell the no-handshake timeout (once, with its number)"
-has "$(code "$FACADE")" '&IosController::handshakeNeverCompleted, this,' || bad "S5: the facade does not listen to the timeout fact"
-leave="$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)')"
-has "$leave" 'avpn::decideAwgNoHandshake(in)' || bad "S5: the facade does not decide through decideAwgNoHandshake"
-has "$leave" 'in.xrayPick = ' && has "$leave" 'm_engine.xrayPickWithoutAwg()' || bad "S5: the Xray pick is not asked from the engine"
-has "$leave" 'in.alreadyLeft = m_engine.awgBanned();' || bad "S5: 'already left' is not the engine's ban"
-ban_line="$(printf '%s\n' "$leave" | grep -n 'm_engine.banAwgForAttempt();' | cut -d: -f1)"
-stop_line="$(printf '%s\n' "$leave" | grep -n 'guardedStop("awg_no_handshake");' | cut -d: -f1)"
-[ -n "$ban_line" ] && [ -n "$stop_line" ] && [ "$ban_line" -lt "$stop_line" ] \
-    || bad "S5: AmneziaWG is not banned before the guarded stop of the failed start"
+    || bad "S3/S5: the native does not tell the no-handshake timeout (once, with its number and send time)"
+[ "$(count "$CONTROLLER" 'sendVpnExtensionMessage(tunnel, message, [this, gen, request, sentMs]')" = "1" ] \
+    || bad "S3/S5: the status request does not carry its send time into the reply"
+[ "$(count "$CONTROLLER" 'adoptedSessionUnproven')" = "0" ] && [ "$(count "$FACADE" 'adoptedSessionUnproven')" = "0" ] \
+    || bad "S3: the special re-check of an adopted session is back"
+has "$(code "$FACADE")" '&IosController::handshakeNeverCompleted, this,' || bad "S3/S5: the facade does not listen to the fact"
+rule="$(body "$FACADE" 'void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)')"
+has "$rule" 'avpn::handleNoHandshakeFact(timeouts, m_engine.currentNodeId(), ops);' || bad "S3/S5: the facade bypasses the one handler"
+has "$rule" 'in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());' || bad "S3/S5: the fact is not checked for freshness"
+has "$rule" 'in.alreadyLeft = m_engine.awgBanned();' || bad "S5: 'already left' is not the engine's ban"
+has "$rule" 'm_engine.banAwgForAttempt();' || bad "S5: the ban is not the engine's"
+has "$rule" 'guardedStop("no_handshake");' || bad "S3/S5: the session does not end through our guarded stop"
+has "$rule" 'reenterVerifying' && bad "S3: the rule sends the adopted session into the data check"
+handler="$(code "$ENGINE/DebugSnapshot.h" | awk '/^inline NoHandshake handleNoHandshakeFact\(/ { on = 1 } on { print } on && /^}$/ { exit }')"
+ban_line="$(printf '%s\n' "$handler" | grep -nF 'ops.banAwg();' | cut -d: -f1)"
+end_line="$(printf '%s\n' "$handler" | grep -nF 'ops.endSession(in.ownStartInFlight);' | cut -d: -f1)"
+[ -n "$ban_line" ] && [ -n "$end_line" ] && [ "$ban_line" -lt "$end_line" ] \
+    || bad "S5: AmneziaWG is not banned before the session ends"
+[ "$(count "$FACADE" 'failVerifyOnHandshakeTimeout')" = "0" ] && [ "$(count "$FACADE" 'verifyAttemptGoesOn')" = "0" ] \
+    || bad "N4/M1: the data check judges a stored native state again"
+for fn in 'void AvpnEngineQml::verifyAttempt(int epoch)' 'void AvpnEngineQml::whoamiAttempt(int epoch)'; do
+    has "$(body "$FACADE" "$fn")" 'if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)' \
+        || bad "N4/M1: $fn lost its original guard"
+done
+[ "$(code "$ENGINE/TunnelWatchResume.h" | grep -cF 'm_ops.reenterVerifying()')" = "1" ] || bad "§33: reenterVerifying has more than one caller in TunnelWatchResume"
+[ "$(code "$FACADE" | grep -cF 'm_engine.reenterVerifying()')" = "1" ] || bad "§33: the facade calls reenterVerifying outside the hand-over's op"
 has "$(body "$FACADE" 'void AvpnEngineQml::noteIntentChange()')" 'm_engine.clearAwgBan();' \
     || bad "S5: an action of the person on the intent does not lift the ban"
 # The ban: one piece of state, one reader, read by every pick.

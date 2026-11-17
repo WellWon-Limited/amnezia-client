@@ -1275,14 +1275,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
-    // Build 142 (S3): an adopted session shown Connected whose extension answers "no handshake, no data"
-    // goes to the app's own data check through the single re-check (TunnelWatchResume::onAdoptedUnproven).
-    connect(IosController::Instance(), &IosController::adoptedSessionUnproven, this, [this](qint64 requestSentMs) {
-        // N4: an answer to a request older than the last freeze is no evidence - the next reply tells again.
-        if (m_watchResume && avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs()))
-            m_watchResume->onAdoptedUnproven();
-    }, Qt::QueuedConnection);
-    // Build 142 (S5): a handshake timeout of a session that never handshook (DebugSnapshot.h::decideAwgNoHandshake).
+    // Build 142: a handshake timeout of a session that never handshook - the one rule (DebugSnapshot.h::decideNoHandshake).
     connect(IosController::Instance(), &IosController::handshakeNeverCompleted, this,
             &AvpnEngineQml::onHandshakeNeverCompleted, Qt::QueuedConnection);
 #endif
@@ -3466,40 +3459,48 @@ void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
 }
 
 #ifdef Q_OS_IOS
-// Build 142 (S5): AmneziaWG got no handshake on this network - at the first native timeout an own Auto start
-// leaves AmneziaWG for the rest of the attempt and goes on with the best Xray candidate, through the same
-// path as a failed start (a counted attempt, the network memory forgets the node, our guarded stop, then
-// reconcile starts the next pick of this attempt).
+// Build 142: the native told a handshake timeout of a session whose extension answered "no handshake, no data".
+// The one rule decides (DebugSnapshot.h::decideNoHandshake / handleNoHandshakeFact); here only its effects.
 void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)
 {
-    avpn::AwgNoHandshakeInputs in;
-    in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());
-    in.ownStartInFlight = m_op == Op::Starting && m_wantConnected;
-    const avpn::SubscriptionNode *node = m_engine.nodeById(m_engine.currentNodeId());
-    in.nodeIsAwg = node && !avpn::isUpstreamNode(*node) && !avpn::isXrayProto(avpn::protoOf(*node));
-    in.autoMode = m_engine.transportMode() == avpn::TransportMode::Auto;
-    const QStringList hint = m_engine.attemptOrder();
-    in.explicitNode = !hint.isEmpty() && hint.first() == m_engine.currentNodeId();
-    in.alreadyLeft = m_engine.awgBanned();
-    in.xrayPick = in.ownStartInFlight && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
-    const avpn::AwgNoHandshake d = avpn::decideAwgNoHandshake(in);
-    if (!in.ownStartInFlight || d == avpn::AwgNoHandshake::IgnoreAlreadyLeft)
-        return; // not ours, or decided already: told every timeout - silent
-    reliabilityEvent(QStringLiteral("awg_no_handshake node=%1 timeouts=%2 -> %3")
-                         .arg(m_engine.currentNodeId()).arg(timeouts).arg(QLatin1String(avpn::awgNoHandshakeName(d))));
-    if (d != avpn::AwgNoHandshake::Leave)
-        return;
-    m_op = Op::None;
-    m_opInFlight = false;
-    m_busy = false;
-    m_watchdog.stop();
-    ++m_startAttempts;
-    forgetNetworkMemoryAfterFailedStart("awg_no_handshake");
-    m_engine.banAwgForAttempt();
-    persistTransportHistory();
-    m_stopRetries = 0;
-    guardedStop("awg_no_handshake");
-    emit changed();
+    avpn::NoHandshakeOps ops;
+    ops.facts = [this, requestSentMs] {
+        avpn::NoHandshakeInputs in;
+        in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());
+        in.ownStartInFlight = m_op == Op::Starting && m_wantConnected;
+        in.tunnelHeldUp = m_op == Op::None && m_wantConnected
+            && (m_engine.state() == avpn::EngineState::Connected || m_engine.isVerifying());
+        const avpn::SubscriptionNode *node = m_engine.nodeById(m_engine.currentNodeId());
+        in.nodeIsAwg = node && !avpn::isUpstreamNode(*node) && !avpn::isXrayProto(avpn::protoOf(*node));
+        in.autoMode = m_engine.transportMode() == avpn::TransportMode::Auto;
+        const QStringList hint = m_engine.attemptOrder();
+        in.explicitNode = !hint.isEmpty() && hint.first() == m_engine.currentNodeId();
+        in.alreadyLeft = m_engine.awgBanned();
+        in.xrayPick = (in.ownStartInFlight || in.tunnelHeldUp) && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
+        return in;
+    };
+    ops.journal = [this](const QString &line) { reliabilityEvent(line); };
+    ops.banAwg = [this] {
+        m_engine.banAwgForAttempt();
+        persistTransportHistory();
+    };
+    ops.endSession = [this](bool ownStart) {
+        if (ownStart) {
+            // A failed start, as the start watchdog's: counted, the network memory forgets its node.
+            m_op = Op::None;
+            m_opInFlight = false;
+            m_busy = false;
+            m_watchdog.stop();
+            ++m_startAttempts;
+            forgetNetworkMemoryAfterFailedStart("no_handshake");
+        } else {
+            forgetNetworkPath(m_engine.currentNodeId()); // this network's memory: the node did not carry data
+        }
+        m_stopRetries = 0;
+        guardedStop("no_handshake"); // the intent stays on: reconcile starts the next pick after Disconnected
+        emit changed();
+    };
+    avpn::handleNoHandshakeFact(timeouts, m_engine.currentNodeId(), ops);
 }
 #endif
 
@@ -8155,35 +8156,9 @@ qint64 AvpnEngineQml::freezeBoundaryMs() const
     return std::max(m_lastResumeMs, m_lastHiddenMs);
 }
 
-// Build 142 (N4): the gate of every attempt of the app's own data check (DebugSnapshot.h::verifyAttemptGate).
-// false = the series is cancelled (the state moved on); a check that spanned a freeze gets a fresh budget.
-bool AvpnEngineQml::verifyAttemptGoesOn(int epoch, const char *site)
-{
-#ifdef Q_OS_IOS
-    const bool iosNative = true;
-#else
-    const bool iosNative = false;
-#endif
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    switch (avpn::verifyAttemptGate(epoch == m_verifyEpoch, m_engine.isVerifying(), m_lastTunnelState == Vpn::Connected,
-                                    m_lastTunnelState == Vpn::Reconnecting, iosNative, now - m_verifyClock.elapsed(),
-                                    freezeBoundaryMs())) {
-    case avpn::VerifyAttemptGate::Cancel:
-        return false;
-    case avpn::VerifyAttemptGate::FreshBudget:
-        reliabilityEvent(QStringLiteral("verify_budget_fresh why=freeze site=%1 node=%2")
-                             .arg(QLatin1String(site), m_engine.currentNodeId()));
-        m_verifyClock.restart();
-        return true;
-    case avpn::VerifyAttemptGate::GoOn:
-        return true;
-    }
-    return false;
-}
-
 void AvpnEngineQml::verifyAttempt(int epoch)
 {
-    if (!verifyAttemptGoesOn(epoch, "verify"))
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)
         return; // состояние уехало (стоп/обрыв/смена) — серия отменена
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141): an attempt due after a freeze waits for the extension's snapshot.
@@ -8368,7 +8343,7 @@ void AvpnEngineQml::startWhoamiVerification()
 
 void AvpnEngineQml::whoamiAttempt(int epoch)
 {
-    if (!verifyAttemptGoesOn(epoch, "whoami"))
+    if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)
         return; // the state moved on (stop / loss / switch) - this check is cancelled
 #ifdef Q_OS_IOS
     // AVPN (iOS data watch, 141): a late attempt after a freeze is judged only after the extension's

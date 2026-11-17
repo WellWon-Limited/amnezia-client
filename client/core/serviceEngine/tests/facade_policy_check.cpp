@@ -893,99 +893,158 @@ static void scannerCancelNeverDuringAppQuit()
 // the first native handshake timeout is due 12 s later (+ at most the 1 s status poll), the person's stop.
 static void awgNoHandshakeReplay()
 {
-    // pinnedLocationXray: the pick of THIS start with AmneziaWG excluded gives an Xray node - inside the
-    // pinned location when one is pinned (17's host has no Xray listener, 15's has 15:xray), else anywhere.
-    struct Attempt { const char *at; bool pinnedLocation; bool xrayPick; double neUpToStopS; AwgNoHandshake expect; };
+    // xrayPick: with AmneziaWG out THIS start could take an Xray node - inside the pinned location when one is
+    // pinned (17's host has no Xray listener, 15's has 15:xray), else anywhere.
+    struct Attempt { const char *at; bool xrayPick; double neUpToStopS; NoHandshake expect; };
     const Attempt five[] = {
-        {"23:20:32 orb, location of 17", true, false, 9.1, AwgNoHandshake::IgnoreNoXray},    // NE up 34.28, stop 43.39
-        {"23:20:44 scanner open, 17", true, false, 11.8, AwgNoHandshake::IgnoreNoXray},      // NE up 45.64, cancel 57.46
-        {"23:21:01 orb after Auto, 17", false, true, 12.0, AwgNoHandshake::Leave},          // NE up 04.27, stop 16.27
-        {"23:21:19 orb, location of 15", true, true, 11.95, AwgNoHandshake::Leave},         // NE up 20.95, stop 32.90 -> 15:xray
-        {"23:21:36 orb, location of 17", true, false, 7.3, AwgNoHandshake::IgnoreNoXray},   // NE up 38.01, app killed 45.33
+        {"23:20:32 orb, location of 17", false, 9.1, NoHandshake::IgnoreOwnStartGoesOn},   // NE up 34.28, stop 43.39
+        {"23:20:44 scanner open, 17", false, 11.8, NoHandshake::IgnoreOwnStartGoesOn},     // NE up 45.64, cancel 57.46
+        {"23:21:01 orb after Auto, 17", true, 12.0, NoHandshake::LeaveAwg},               // NE up 04.27, stop 16.27
+        {"23:21:19 orb, location of 15", true, 11.95, NoHandshake::LeaveAwg},             // NE up 20.95, stop 32.90
+        {"23:21:36 orb, location of 17", false, 7.3, NoHandshake::IgnoreOwnStartGoesOn},  // NE up 38.01, killed 45.33
     };
     int left = 0;
     int reachedTimeout = 0;
     for (const Attempt &a : five) {
-        // The first timeout is checked on the status reply after NE up + 12 s: strictly later than 12.0 s.
-        if (a.neUpToStopS > 12.0)
+        if (a.neUpToStopS > 12.0) // the first timeout is checked on the reply after NE up + 12 s
             ++reachedTimeout;
-        AwgNoHandshakeInputs in;
+        NoHandshakeInputs in;
         in.fresh = true;
         in.ownStartInFlight = true;
         in.nodeIsAwg = true;
         in.autoMode = true;          // transport mode «Авто» all evening
-        in.explicitNode = false;     // no Scanner row tap among them (a pin is a location)
         in.xrayPick = a.xrayPick;
-        const AwgNoHandshake d = decideAwgNoHandshake(in);
-        if (d == AwgNoHandshake::Leave)
-            ++left;
+        const NoHandshake d = decideNoHandshake(in);
+        left += d == NoHandshake::LeaveAwg ? 1 : 0;
         CHECK(d == a.expect);
     }
-    CHECK(left == 2); // the Auto start (to the best Xray) and 15's location (to 15:xray); 17 has no Xray
-    // And that evening no start lived to its first timeout: the person gave up 7-12 s after the tunnel came
-    // up. With the rule, such a start leaves AmneziaWG ~1 s after the moment they stopped waiting.
-    CHECK(reachedTimeout == 0);
-    AwgNoHandshakeInputs in;
+    CHECK(left == 2);           // the Auto start (best Xray) and 15's location (15:xray); 17 has no Xray
+    CHECK(reachedTimeout == 0); // and that evening nobody waited to the first timeout
+    NoHandshakeInputs in;
     in.fresh = true;
     in.ownStartInFlight = true;
     in.nodeIsAwg = true;
     in.autoMode = true;
     in.xrayPick = true;
-    CHECK(decideAwgNoHandshake(in) == AwgNoHandshake::Leave);
-    AwgNoHandshakeInputs stale = in;
-    stale.fresh = false;              // a reply queued across a freeze (N4): the next timeout tells again
-    CHECK(decideAwgNoHandshake(stale) == AwgNoHandshake::IgnoreStale);
-    AwgNoHandshakeInputs stopped = in;
-    stopped.ownStartInFlight = false; // the person's stop (or an adopted session, S3): theirs wins
-    CHECK(decideAwgNoHandshake(stopped) == AwgNoHandshake::IgnoreNotOwnStart);
-    AwgNoHandshakeInputs manual = in;
-    manual.autoMode = false;          // «AmneziaWG» chosen by hand: never overridden
-    CHECK(decideAwgNoHandshake(manual) == AwgNoHandshake::IgnoreMode);
-    AwgNoHandshakeInputs tapped = in;
-    tapped.explicitNode = true;       // a Scanner row tap chose exactly this node: never overridden
-    CHECK(decideAwgNoHandshake(tapped) == AwgNoHandshake::IgnoreExplicitNode);
-    AwgNoHandshakeInputs again = in;
-    again.alreadyLeft = true;         // no flapping back inside the attempt
-    CHECK(decideAwgNoHandshake(again) == AwgNoHandshake::IgnoreAlreadyLeft);
-    AwgNoHandshakeInputs noXray = in;
-    noXray.xrayPick = false;          // nothing to go to (no Xray for this device / in the pinned location)
-    CHECK(decideAwgNoHandshake(noXray) == AwgNoHandshake::IgnoreNoXray);
-    AwgNoHandshakeInputs onXray = in;
-    onXray.nodeIsAwg = false;
-    CHECK(decideAwgNoHandshake(onXray) == AwgNoHandshake::IgnoreNotAwg);
-    CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::Leave)) == QLatin1String("leave_awg"));
-    CHECK(QLatin1String(awgNoHandshakeName(AwgNoHandshake::IgnoreExplicitNode)) == QLatin1String("explicit_node"));
+    CHECK(decideNoHandshake(in) == NoHandshake::LeaveAwg);
+    NoHandshakeInputs x = in;
+    x.fresh = false;
+    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreStale);
+    x = in; x.autoMode = false;     // «AmneziaWG» chosen by hand: the own start's budget goes on
+    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
+    x = in; x.explicitNode = true;  // a Scanner row tap chose exactly this node
+    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
+    x = in; x.alreadyLeft = true;   // no flapping back inside the attempt
+    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreOwnStartGoesOn);
+    x = in; x.ownStartInFlight = false; // the person's stop: nothing of ours runs
+    CHECK(decideNoHandshake(x) == NoHandshake::IgnoreNotOurs);
+    x = in; x.ownStartInFlight = false; x.tunnelHeldUp = true; // a held session: banned AmneziaWG, then restarted
+    CHECK(decideNoHandshake(x) == NoHandshake::LeaveAwg);
+    x.autoMode = false;                                       // manual mode / pinned without Xray: restarted as is
+    CHECK(decideNoHandshake(x) == NoHandshake::Restart);
 }
 
-// Review round 2, N4: the re-check of the adopted session runs while the native's stored state is Reconnecting
-// (its 12 s handshake timeout passed); the person leaves the app, iOS suspends it; the extension restores the
-// path during the sleep; the app returns and the check's pending attempt fires before any fresh status. Round 1
-// failed the check on that stored Reconnecting and moved a healthy tunnel away. Now a stored state is never the
-// verdict: the attempt goes on with a fresh budget and its request through the tunnel decides.
-static void verifyAfterThawReplay()
+// The handler as the facade runs it (DebugSnapshot.h::handleNoHandshakeFact), effects recorded. Every replay
+// below must END: exactly one end of the session (the ordinary restart / failed start) or none for a healthy one.
+struct NoHandshakeBench {
+    NoHandshakeInputs now;
+    QStringList journal;
+    int bans = 0;
+    int ends = 0;
+    bool lastEndOwn = false;
+    NoHandshakeOps ops()
+    {
+        NoHandshakeOps o;
+        o.facts = [this] { return now; };
+        o.journal = [this](const QString &l) { journal << l; };
+        o.banAwg = [this] { ++bans; now.alreadyLeft = true; };
+        o.endSession = [this](bool own) {
+            ++ends;
+            lastEndOwn = own;
+            // our guarded stop: nothing of ours holds the session any more; reconcile starts the next pick
+            now.tunnelHeldUp = false;
+            now.ownStartInFlight = false;
+        };
+        return o;
+    }
+    NoHandshake fact(int timeouts, bool fresh)
+    {
+        now.fresh = fresh;
+        return handleNoHandshakeFact(timeouts, QStringLiteral("17"), ops());
+    }
+};
+
+// S3, 16.11 23:20:26: the relaunch adopted a session on 17 (pinned location without Xray) that had no handshake
+// on the Wi-Fi. Before: «Подключено» with nothing judging it. Now the first fresh timeout ends it, ordinary restart.
+static void noHandshakeAdoptedRelaunch()
 {
-    const qint64 checkStarted = 1000;     // the re-check begins (23:20:27 in the S3 relaunch)
-    const qint64 hidden = 13000;          // the app leaves the screen, then is suspended
-    const qint64 resumed = 600000;        // back on the screen ten minutes later
-    // before the freeze: native Reconnecting (handshake timeout) - the series goes on, the requests decide
-    CHECK(verifyAttemptGate(true, true, /*connected=*/false, /*reconnecting=*/true, /*ios=*/true, checkStarted, 0)
-          == VerifyAttemptGate::GoOn);
-    // the first attempt after the thaw, the stored state still Reconnecting: a fresh budget, never a failure
-    CHECK(verifyAttemptGate(true, true, false, true, true, checkStarted, std::max(resumed, hidden))
-          == VerifyAttemptGate::FreshBudget);
-    // the next attempt (clock restarted after the boundary): on with the fresh budget
-    CHECK(verifyAttemptGate(true, true, false, true, true, resumed + 1, resumed) == VerifyAttemptGate::GoOn);
-    // the status that arrives meanwhile says Connected (the extension restored the path): still on
-    CHECK(verifyAttemptGate(true, true, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::GoOn);
-    // the state moved on for real: cancelled as before (stop, loss, our switch, a new check)
-    CHECK(verifyAttemptGate(true, true, false, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
-    CHECK(verifyAttemptGate(false, true, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
-    CHECK(verifyAttemptGate(true, false, true, false, true, resumed + 1, resumed) == VerifyAttemptGate::Cancel);
-    // other platforms: unchanged - Reconnecting cancels, no budget rule
-    CHECK(verifyAttemptGate(true, true, false, true, /*ios=*/false, checkStarted, resumed) == VerifyAttemptGate::Cancel);
-    CHECK(verifyAttemptGate(true, true, true, false, false, checkStarted, resumed) == VerifyAttemptGate::GoOn);
-    // native facts: a reply to a request sent before the freeze is no evidence (S3 re-check, S5 ban)
-    CHECK(!nativeFactFresh(/*sent=*/hidden - 500, std::max(resumed, hidden)));
+    NoHandshakeBench b;
+    b.now.tunnelHeldUp = true;   // adopted: engine Connected, nothing in flight, intent on
+    b.now.nodeIsAwg = true;
+    b.now.autoMode = true;
+    b.now.xrayPick = false;      // 17's location has no Xray
+    CHECK(b.fact(1, true) == NoHandshake::Restart);
+    CHECK(b.ends == 1 && !b.lastEndOwn && b.bans == 0);
+    CHECK(b.journal.size() == 1 && b.journal.first().contains(QLatin1String("-> restart")));
+    for (int t = 2; t <= 6; ++t) // the native keeps telling while the stop runs: not ours any more, silent
+        CHECK(b.fact(t, true) == NoHandshake::IgnoreNotOurs);
+    CHECK(b.ends == 1 && b.journal.size() == 1);
+    // Auto with an Xray pick: the same end, AmneziaWG banned first (the next pick of the restart is Xray)
+    NoHandshakeBench c;
+    c.now.tunnelHeldUp = true;
+    c.now.nodeIsAwg = true;
+    c.now.autoMode = true;
+    c.now.xrayPick = true;
+    CHECK(c.fact(1, true) == NoHandshake::LeaveAwg && c.bans == 1 && c.ends == 1);
+}
+
+// Review round 3, M1: the native flaps Reconnecting -> Connecting -> Reconnecting around a thaw (a status refresh
+// at the return to the screen re-observes the session). Round 2 cancelled the check on the Connecting and had
+// marked the session done. Here nothing is marked: the flap tells nothing (no fact while Connecting), a fact
+// queued across the freeze is stale, and the first fresh fact after the thaw ends the session.
+static void noHandshakeFlapAroundThaw()
+{
+    NoHandshakeBench b;
+    b.now.tunnelHeldUp = true;
+    b.now.nodeIsAwg = true;
+    b.now.autoMode = false;           // the worst case: no Xray move, a plain restart
+    CHECK(b.fact(1, /*fresh=*/false) == NoHandshake::IgnoreStale); // sent before the hide, delivered after the thaw
+    CHECK(b.ends == 0);
+    // ... native Connecting (re-observed), then Reconnecting again at its next timeout - sent after the thaw:
+    CHECK(b.fact(2, /*fresh=*/true) == NoHandshake::Restart);
+    CHECK(b.ends == 1);                // terminated: the ordinary restart
+    CHECK(b.fact(3, true) == NoHandshake::IgnoreNotOurs && b.ends == 1);
+}
+
+// Review round 3, M2: round 2 ran whoami for the adopted session; a request that lived through a freeze ended as
+// CheckLimited -> «Подключено» without data. Here there is no check of the adopted session at all: a fact that
+// lived through the freeze is stale (no verdict of any kind), the next fresh one ends the session.
+static void noHandshakeFactAcrossFreeze()
+{
+    NoHandshakeBench b;
+    b.now.tunnelHeldUp = true;
+    b.now.nodeIsAwg = true;
+    for (int t = 1; t <= 3; ++t)      // three replies queued while the app slept
+        CHECK(b.fact(t, false) == NoHandshake::IgnoreStale);
+    CHECK(b.ends == 0 && b.bans == 0);
+    CHECK(b.fact(4, true) == NoHandshake::Restart && b.ends == 1);
+}
+
+// The healthy tunnel across a thaw: the extension restored the path while the app slept. The only fact is the
+// stale one from before the freeze; after the thaw the native confirms the handshake and tells nothing more.
+static void noHandshakeHealthyThaw()
+{
+    NoHandshakeBench b;
+    b.now.tunnelHeldUp = true;
+    b.now.nodeIsAwg = true;
+    b.now.autoMode = true;
+    b.now.xrayPick = true;
+    CHECK(b.fact(1, /*fresh=*/false) == NoHandshake::IgnoreStale);
+    CHECK(b.ends == 0 && b.bans == 0); // the healthy session is kept (the stale fact is only journaled)
+    CHECK(b.journal.size() == 1 && b.journal.first().contains(QLatin1String("-> stale")));
+    // freshness itself: the P2-2 boundary (the later of the last hide and the last return)
+    const qint64 hidden = 13000, resumed = 600000;
+    CHECK(!nativeFactFresh(hidden - 500, std::max(resumed, hidden)));
     CHECK(nativeFactFresh(resumed + 200, std::max(resumed, hidden)));
     CHECK(nativeFactFresh(5, /*never frozen=*/-1));
 }
@@ -1330,7 +1389,10 @@ int main()
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
     awgNoHandshakeReplay();
-    verifyAfterThawReplay();
+    noHandshakeAdoptedRelaunch();
+    noHandshakeFlapAroundThaw();
+    noHandshakeFactAcrossFreeze();
+    noHandshakeHealthyThaw();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();
