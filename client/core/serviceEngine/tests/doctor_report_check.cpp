@@ -198,8 +198,19 @@ int main()
           "country display: ee, ru UI -> Эстония");
     CHECK(countryDisplayName(QStringLiteral("ee"), QStringLiteral("en")) == QStringLiteral("Estonia"),
           "country display: ee, en UI -> Estonia");
-    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("ru")) == QStringLiteral("Brazil"),
-          "country display: no Russian name in the table -> English, not the code");
+    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("ru")) == QStringLiteral("Бразилия"),
+          "country display: every ISO code has a Russian name (CountryNames.h)");
+    CHECK(countryDisplayName(QStringLiteral("il"), QStringLiteral("ru")) == QStringLiteral("Израиль"), "country display: IL ru");
+    CHECK(countryDisplayName(QStringLiteral("IN"), QStringLiteral("ru")) == QStringLiteral("Индия"), "country display: IN ru");
+    CHECK(countryDisplayName(QStringLiteral("RS"), QStringLiteral("ru")) == QStringLiteral("Сербия"), "country display: RS ru");
+    CHECK(countryDisplayName(QStringLiteral("RS"), QStringLiteral("es")) == QStringLiteral("Serbia"), "country display: RS es");
+    CHECK(countryDisplayName(QStringLiteral("IL"), QStringLiteral("es")) == QStringLiteral("Israel"), "country display: IL es");
+    CHECK(countryDisplayName(QStringLiteral("in"), QStringLiteral("es")) == QStringLiteral("India"), "country display: IN es");
+    CHECK(countryDisplayName(QStringLiteral("US"), QStringLiteral("ru")) == QStringLiteral("США"), "country display: the short override wins");
+    CHECK(localizedNodeLabel("Serbia 1", "RS", "ru") == QStringLiteral("Сербия 1"), "node label: Serbia 1 -> Сербия 1");
+    CHECK(localizedNodeLabel("Israel 1", "IL", "ru") == QStringLiteral("Израиль 1"), "node label: Israel 1 -> Израиль 1");
+    CHECK(localizedNodeLabel("India 1", "IN", "ru") == QStringLiteral("Индия 1"), "node label: India 1 -> Индия 1");
+    CHECK(countryDisplayName(QStringLiteral("ZZ"), QStringLiteral("ru")) == QStringLiteral("ZZ"), "country display: unknown stays the code");
     CHECK(countryDisplayName(QStringLiteral("zz"), QStringLiteral("es")) == QStringLiteral("ZZ"),
           "country display: unknown code -> the code in capitals");
     CHECK(countryDisplayName(QString(), QStringLiteral("ru")).isEmpty(), "country display: no code -> empty");
@@ -226,8 +237,8 @@ int main()
           "country display: fi, es UI -> Finlandia");
     CHECK(countryDisplayName(QStringLiteral("DE"), QStringLiteral("es_ES")) == QStringLiteral("Alemania"),
           "country display: DE, es_ES UI -> Alemania");
-    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("es")) == QStringLiteral("Brazil"),
-          "country display: no Spanish name in the table -> English, not the code");
+    CHECK(countryDisplayName(QStringLiteral("br"), QStringLiteral("es")) == QStringLiteral("Brasil"),
+          "country display: every ISO code has a Spanish name (CountryNames.h)");
     // Owner test of 5.1.102: one line per checked alternative while the stage runs.
     CHECK(altNodeResult(2, true) == QStringLiteral("ok"), "alt result: both probes -> ok");
     CHECK(altNodeResult(1, true) == QStringLiteral("no_data"), "alt result: up, data dropped -> no_data");

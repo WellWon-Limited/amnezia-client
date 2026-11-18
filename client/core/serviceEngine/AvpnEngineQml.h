@@ -1056,6 +1056,7 @@ private:
     void settleOperation(const char *why); // review E1 of 18.11: the one release of the operation latches
     void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
+    bool m_scanNetCompareArmed = false;       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
     // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик

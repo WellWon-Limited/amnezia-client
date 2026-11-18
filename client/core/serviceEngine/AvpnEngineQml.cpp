@@ -6826,8 +6826,7 @@ void AvpnEngineQml::onWatchdog()
     if (!m_opInFlight)
         return;
     const Op finished = m_op;
-    m_op = Op::None;
-    m_opInFlight = false;
+    settleOperation("watchdog");
     m_busy = false;
     if (finished == Op::Stopping) {
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
@@ -7341,7 +7340,8 @@ void AvpnEngineQml::scanApplySwitches(const char *why)
     }
     if (next.scanner && !wasOn) {
         m_scanLastCurrent.clear();
-        scanNotifyNetwork();
+        if (m_scanner)
+            m_scanner->networkChanged(); // switched on: it starts from the network as it is now
         scanSyncState();
     }
     if (changedSwitches) {
@@ -7431,10 +7431,31 @@ void AvpnEngineQml::finishScannerSvc(bool ok, const QString &err)
 }
 #endif
 
+// Coordinator 18.11 (c): the Scanner and the attempt owner see the same network - the generation of the path
+// engine's NetworkTracker (the physical medium, gateway and subnet; our own utun is not a network). The app's
+// network monitor fires on every up/down of our own tunnel; such a notice is compared once the tunnel settled and
+// reaches the Scanner only when the network key really changed (no «Сеть сменилась» on a row tap).
 void AvpnEngineQml::scanNotifyNetwork()
 {
-    if (m_scanner && m_scanSwitches.scanner)
+    if (!m_scanner || !m_scanSwitches.scanner)
+        return;
+    if (networkChangeIsOwnTunnel(m_op != Op::None || m_engine.attemptRunning(), m_lastOwnOpMs,
+                                 QDateTime::currentMSecsSinceEpoch())) {
+        if (!m_scanNetCompareArmed) {
+            m_scanNetCompareArmed = true;
+            QTimer::singleShot(2000, this, [this]() {
+                m_scanNetCompareArmed = false;
+                scanNotifyNetwork();
+            });
+        }
+        return;
+    }
+    const quint64 before = m_engine.network().generation;
+    m_engine.observeNetwork(currentNetworkObservation());
+    if (m_engine.network().generation != before)
         m_scanner->networkChanged();
+    else
+        reliabilityEvent(QStringLiteral("scan_network_unchanged net_gen=%1").arg(before));
 }
 
 // The live status for the coordinator (deduplicated), the own connect's «Подключено» latch and a row tap's

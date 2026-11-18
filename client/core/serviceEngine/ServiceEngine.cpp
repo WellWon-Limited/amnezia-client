@@ -1476,7 +1476,10 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
             if (!row.upstreamLabelCustom)
                 row.name.clear();
         }
-        row.activeProto = (!curLoc.isEmpty() && loc == curLoc) ? s.activeProto : QString();
+        // A provider profile runs only on the Xray engine: its card always carries the Xray badge (coordinator 18.11
+        // (d): a whitelist row's card had none - a profile without a country is never "the current location").
+        row.activeProto = row.upstream ? QStringLiteral("xray")
+                                       : (!curLoc.isEmpty() && loc == curLoc) ? s.activeProto : QString();
         s.pool << row;
     }
     s.switchLog = m_switchLog;

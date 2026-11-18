@@ -217,6 +217,7 @@ static void identityAndReseed()
     for (const NodeDebugRow &r : e.debugSnapshot().pool) {
         if (isStubId(r.nodeId)) {
             CHECK(r.upstream && r.upstreamTier == 1 && r.name.isEmpty() && r.endpoint.isEmpty());
+            CHECK(r.activeProto == QLatin1String("xray")); // coordinator 18.11 (d): every provider card has its badge
         } else {
             CHECK(!r.upstream && r.upstreamTier == 0);
         }
