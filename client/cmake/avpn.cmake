@@ -258,6 +258,21 @@ if(IOS)
     list(APPEND HEADERS ${AVPN_SE}/IosScanHost.h)
     list(APPEND SOURCES ${AVPN_SE}/IosScanHost.mm)
     list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/IosScanHost.mm)
+    # AVPN (path engine stage 0, design 2026-11-17 §5 variant A): the Scanner's probe engine in the APP process
+    # (IosAppScanHost.h). OFF = the app references no Go symbol and libwg-go.a stays out of the app binary.
+    # Environment override for the dev scripts (run-on-iphone.sh passes no -D): AVPN_IOS_APP_SCAN_HOST=ON before the
+    # first configure of a build dir (the value stays in that dir's cache).
+    if(DEFINED ENV{AVPN_IOS_APP_SCAN_HOST})
+        set(AVPN_IOS_APP_SCAN_HOST "$ENV{AVPN_IOS_APP_SCAN_HOST}" CACHE BOOL "In-app Scanner probe host (env override)")
+    endif()
+    option(AVPN_IOS_APP_SCAN_HOST "iOS: run the Scanner's probe engine in the app process (stage-0 spike)" OFF)
+    if(AVPN_IOS_APP_SCAN_HOST)
+        add_compile_definitions(AVPN_IOS_APP_SCAN_HOST=1)
+        list(APPEND HEADERS ${AVPN_SE}/IosAppScanHost.h)
+        list(APPEND SOURCES ${AVPN_SE}/IosAppScanHost.mm)
+        list(APPEND AVPN_ENGINE_SRC ${AVPN_SE}/IosAppScanHost.mm)
+        message(STATUS "AVPN overlay: AVPN_IOS_APP_SCAN_HOST=ON (in-app Scanner probe host)")
+    endif()
 endif()
 
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это

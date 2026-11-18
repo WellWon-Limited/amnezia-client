@@ -111,6 +111,15 @@ public:
         return m_kind;
     }
 
+    // The most preferred physical interface of the last path (0 = none) and whether that path is usable.
+    unsigned bindIndex(bool *satisfied)
+    {
+        std::lock_guard<std::mutex> g(m_lock);
+        if (satisfied)
+            *satisfied = m_satisfied;
+        return m_bindIndex;
+    }
+
 private:
     AppPathMonitor() : m_gen(randomEpoch())
     {
@@ -135,6 +144,7 @@ private:
         const bool satisfied = nw_path_get_status(path) == nw_path_status_satisfied;
         __block QStringList interfaces;
         __block QStringList names;
+        __block unsigned firstIndex = 0; // enumeration order = preference order: the first one is the path's own
         nw_path_enumerate_interfaces(path, ^bool(nw_interface_t iface) {
             const nw_interface_type_t type = nw_interface_get_type(iface);
             const QString name = QString::fromUtf8(nw_interface_get_name(iface));
@@ -144,6 +154,8 @@ private:
             interfaces << QStringLiteral("%1:%2:%3").arg(QLatin1String(iosInterfaceTypeName(type)), name)
                               .arg(nw_interface_get_index(iface));
             names << name;
+            if (firstIndex == 0)
+                firstIndex = unsigned(nw_interface_get_index(iface));
             return true;
         });
         const QByteArray signature = iosAppPathSignature(satisfied, interfaces, iosInterfaceAddresses(names));
@@ -152,6 +164,8 @@ private:
             std::lock_guard<std::mutex> g(m_lock);
             const bool first = !m_gen.seen();
             m_kind = iosAppPathKind(interfaces); // the same interfaces the signature names
+            m_bindIndex = firstIndex;
+            m_satisfied = satisfied;
             if (m_gen.observe(signature) || first)
                 changed = m_changed;
         }
@@ -164,6 +178,8 @@ private:
     std::mutex m_lock;
     IosAppNetGeneration m_gen;
     QString m_kind; // iosAppPathKind of the last path
+    unsigned m_bindIndex = 0; // the last path's most preferred physical interface (0 = none)
+    bool m_satisfied = false;
     std::function<void()> m_changed;
     dispatch_queue_t m_queue = nullptr;
     nw_path_monitor_t m_monitor = nullptr;
@@ -174,6 +190,8 @@ private:
 bool IosScanHost::appGeneration(ScanNetSource &out) { return AppPathMonitor::instance().element(out); }
 
 QString IosScanHost::appPathKind() { return AppPathMonitor::instance().kind(); }
+
+unsigned IosScanHost::appBindInterfaceIndex(bool *satisfied) { return AppPathMonitor::instance().bindIndex(satisfied); }
 
 void IosScanHost::setAppGenerationChanged(std::function<void()> onChanged)
 {
