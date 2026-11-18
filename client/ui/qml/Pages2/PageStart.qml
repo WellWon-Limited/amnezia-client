@@ -128,6 +128,14 @@ PageType {
         // AVPN: «назад» с уведомлений/админ-пула. Эти страницы открыты через replace (depth=1), поэтому
         // PageController.closePage() уходил в ветку depth<=1 → hideWindow() (прятал окно). Возвращаем на Connect.
         function onBack() { root.goAvpnTab(0) }
+        // A page's short notice (the server list's mode switch, device round 3): the top shade on every page with
+        // the scanner switch on - it does not cover the page (the RU-sites card) the way the toast did; else the toast.
+        function onPageNotice(text) {
+            if (ScanSwitches.scanner)
+                scanShade.enqueue("info", text)
+            else
+                PageController.showNotificationMessage(text)
+        }
         // AVPN: админ-вход (Dev.adminMode) → просмотр пула нод (#5)
         function onRequestAdminServers() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLocationsTribe.qml") }
         // AVPN (server picker): страница выбора сервера (замена шторки TribeNodeSheet)

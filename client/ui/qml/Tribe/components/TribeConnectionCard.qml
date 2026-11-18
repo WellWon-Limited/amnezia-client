@@ -180,16 +180,11 @@ Rectangle {
                 font.pixelSize: Theme.font.bodyS + 1
                 font.weight: Theme.font.wBold
             }
-            // the live state: the same two badges the list's connected row wears (transport + filled «Подключено»)
-            TribeTransportBadge {
-                visible: root.liveOn && root.liveProto !== ""
-                transport: root.liveProto
-                version: root.liveProtoVersion
-                active: true
-            }
+            // the live state: the filled «Подключено» the list's connected row wears
             TribeLabelBadge {
-                // off: the card's own «VPN не подключён» row says it (the badge only on the compact card)
-                visible: root.liveState !== "off" || root.compactOnly
+                // one state at a time (device round 3: «Подключение…» next to «VPN не подключён»): with the card's
+                // own off row the row says it, the badge is for the other modes and the compact card
+                visible: root.compactOnly || !root.off
                 small: true
                 label: root.liveOn ? ScanTexts.rowConnected
                        : root.liveState === "connecting" ? ScanTexts.rowConnecting : ScanTexts.cardOff
@@ -213,10 +208,11 @@ Rectangle {
             Layout.fillWidth: true
             Layout.minimumHeight: Theme.scan.cardRow
             spacing: Theme.space.sm
-            StageIcon { kind: "skip" }
+            StageIcon { kind: root.liveState === "connecting" ? "current" : "skip" }
             Text {
                 Layout.fillWidth: true
-                text: ScanTexts.cardOff
+                // the coordinator's off card while the VPN is coming up says so, not «VPN не подключён»
+                text: root.liveState === "connecting" ? ScanTexts.stageConnecting : ScanTexts.cardOff
                 textFormat: Text.PlainText
                 color: Theme.color.text2
                 font.family: Theme.font.body
@@ -241,12 +237,22 @@ Rectangle {
             Word {
                 visible: !root.waiting(root.server)
                 Layout.fillWidth: true
+                Layout.maximumWidth: Math.ceil(implicitWidth)
                 text: root.serverLabel
                 color: Theme.color.text1
                 font.pixelSize: Theme.font.bodyS
             }
+            // through which protocol (owner: "connected through <server> · <protocol>"); its ms is on the list row
+            TribeTransportBadge {
+                visible: !root.waiting(root.server) && root.liveOn && root.liveProto !== ""
+                transport: root.liveProto
+                version: root.liveProtoVersion
+                active: true
+            }
+            Item { visible: !root.waiting(root.server); Layout.fillWidth: true }
             Text {
-                visible: !root.waiting(root.server) && Number(root.card.server_ms ?? -1) >= 0
+                visible: !root.waiting(root.server) && !(root.liveOn && root.liveProto !== "")
+                         && Number(root.card.server_ms ?? -1) >= 0
                 text: ScanTexts.ms.arg(Number(root.card.server_ms))
                 textFormat: Text.PlainText
                 color: Theme.color.text3
@@ -267,9 +273,11 @@ Rectangle {
             StageIcon { kind: root.iconOf(root.services, "services") }
             Caption { text: ScanTexts.cardServices }
             Dots { visible: root.waiting(root.services) }
+            // not checked yet: one plain sentence instead of four «?» chips (device round 3: «? ? ? ? по кнопке»
+            // read as cryptic)
             TribeServiceChips {
-                visible: !root.waiting(root.services)
-                Layout.fillWidth: !parent.ask
+                visible: !root.waiting(root.services) && !parent.ask
+                Layout.fillWidth: true
                 Layout.preferredHeight: chipH
                 dense: true
                 askMarks: parent.ask
@@ -277,10 +285,11 @@ Rectangle {
             }
             Word {
                 visible: parent.ask
+                Layout.fillWidth: true
                 text: ScanTexts.cardByButton
                 color: Theme.color.text3
             }
-            Item { visible: root.waiting(root.services) || parent.ask; Layout.fillWidth: true }
+            Item { visible: root.waiting(root.services); Layout.fillWidth: true }
         }
 
         // ── Сайты РФ: RU + «работают» / «не открываются» / «выключено» ──

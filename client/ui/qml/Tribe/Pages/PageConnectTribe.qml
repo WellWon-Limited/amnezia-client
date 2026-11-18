@@ -1335,6 +1335,8 @@ PageType {
                     // AVPN awg31-xray-v1: verifying — отдельная фаза («трафик ещё не подтверждён»),
                     // она приходит УЖЕ после подъёма туннеля, поэтому проверяется первой.
                     text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
+                          // our own stop is no server pick (device round 3: «Подбираем сервер…» while disconnecting)
+                          : root.engineStopping ? qsTr("Отключаемся…")
                           : (root.verifyingNow ? qsTr("Проверяем трафик…")
                           : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем…")
                           : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))))
