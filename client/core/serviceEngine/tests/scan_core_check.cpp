@@ -506,7 +506,14 @@ static void plan()
     in.restrictCountry.clear();
     p = buildScanPlan(in);
     CHECK(findC(p.probe, up(1))->kind == ScanProbeKind::XrayFull && findC(p.probe, up(3))->kind == ScanProbeKind::XrayFull);
-    CHECK(excluded(p, QStringLiteral("3"), "manual_only") && excluded(p, QStringLiteral("4:xray"), "ru") && excluded(p, QStringLiteral("5:xray"), "no_config")
+    CHECK(!excluded(p, QStringLiteral("3"), "manual_only")); // manual_only is probed (18.11); "3" is AmneziaWG: its own gates
+    {
+        ScanPlanInput m = planInput(hostMac());
+        m.ownNodes[4].manualOnly = true; // "4:xray", an own Xray node
+        const ScanPlan pm = buildScanPlan(m);
+        CHECK(findC(pm.probe, m.ownNodes[4].nodeId) && findC(pm.probe, m.ownNodes[4].nodeId)->kind != ScanProbeKind::None);
+    }
+    CHECK(excluded(p, QStringLiteral("4:xray"), "ru") && excluded(p, QStringLiteral("5:xray"), "no_config")
           && excluded(p, QStringLiteral("99:xray"), "not_in_pool"));
     in = planInput(hostMac());
     in.restrictCountry = QStringLiteral("de");

@@ -8,8 +8,8 @@
 // order, the order-only candidates («Не проверено»), the concurrency of each probe pool, the projection of
 // bytes. Rules (each one a test in tests/scan_core_check.cpp):
 //  - Never the current node (it is judged by the live tunnel). Never a node the manifest does not list for
-//    this network, a manual_only or RU node, a node without an exact tunnel config, a node outside a
-//    restricting country.
+//    this network, an RU node, a node without an exact tunnel config, a node outside a restricting country.
+//    manual_only nodes ARE probed (18.11): the connect engine decides on its own when it may use one.
 //  - Probe kind per candidate, by host capability (ScanTypes.h ScanHostCaps):
 //      own Xray path        -> xray_leg when the host has legs (one outbound by construction: the leg IS the
 //                              path), else xray_full (XrayConfigBuilder::coreConfig), else order only;
@@ -202,8 +202,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             continue;
         }
         const ScanOwnNode &n = it.value();
-        if (n.manualOnly || n.ru) {
-            exclude(n.nodeId, n.ru ? "ru" : "manual_only");
+        // A manual_only node IS probed (owner, 18.11: the server marks it for the AWG mini-probe and probing is cheap);
+        // whether the connect may use it is the connect engine's own rule. RU nodes are never a VPN exit.
+        if (n.ru) {
+            exclude(n.nodeId, "ru");
             continue;
         }
         if (!n.configAvailable) {
