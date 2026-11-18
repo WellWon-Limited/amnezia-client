@@ -2019,6 +2019,29 @@ bool TribeScanner::admitOutsideScan(qint64 cost, bool *cellularOut)
     return true;
 }
 
+qint64 TribeScanner::raceBytesLeft()
+{
+    const qint64 t = now();
+    const ScanBudgetLedger &l = m_m.ledger();
+    qint64 left = -1;
+    if (m_lastNet.kind == ScanNetKind::Cellular)
+        left = qMax<qint64>(0, l.leftInHour(t, m_m.tunables().budgetCellularBytesPerHour, true));
+    const qint64 device = qint64(m_active.body.value(QLatin1String("device_budget")).toObject().value(QLatin1String("bytes_per_hour")).toDouble(0));
+    if (device > 0) {
+        const qint64 d = qMax<qint64>(0, l.leftInHour(t, device, false));
+        left = left < 0 ? d : qMin(left, d);
+    }
+    return left;
+}
+
+void TribeScanner::raceCharge(qint64 bytes)
+{
+    if (bytes > 0)
+        chargeOutsideScan(bytes, m_lastNet.kind == ScanNetKind::Cellular);
+}
+
+bool TribeScanner::hostScanRunning() const { return scanPhaseScanning(m_m.phase()) || !m_hostScans.isEmpty(); }
+
 void TribeScanner::chargeOutsideScan(qint64 bytes, bool cellular)
 {
     // The machine owns the ledger; its only entry point for an outside charge is the ledger itself: the same

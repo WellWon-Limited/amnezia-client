@@ -36,6 +36,13 @@ public:
     static bool flag(const QString &key, bool def = true)
     {
         QMutexLocker l(&mutex());
+#ifdef AVPN_DEV_TOOLS
+        // Development builds only: a flag forced by the developer's control file (coreController.cpp,
+        // Documents/tribe-dev-flags.json) wins over the server's value.
+        const auto dev = devFlagsRef().constFind(key);
+        if (dev != devFlagsRef().constEnd())
+            return dev.value();
+#endif
         const auto &f = featuresRef();
         const auto it = f.constFind(key);
         return it != f.constEnd() ? it.value() : def;
@@ -89,6 +96,13 @@ public:
         return def;
     }
     static void reset() { set({}, {}, {}, {}); }
+#ifdef AVPN_DEV_TOOLS
+    static void setDevFlags(const QMap<QString, bool> &flags)
+    {
+        QMutexLocker l(&mutex());
+        devFlagsRef() = flags;
+    }
+#endif
 
 private:
     static QMutex &mutex() { static QMutex m; return m; }
@@ -96,6 +110,9 @@ private:
     static QMap<QString, bool> &featuresRef() { static QMap<QString, bool> f; return f; }
     static QMap<QString, QStringList> &listsRef() { static QMap<QString, QStringList> l; return l; }
     static QMap<QString, QString> &stringsRef() { static QMap<QString, QString> s; return s; }
+#ifdef AVPN_DEV_TOOLS
+    static QMap<QString, bool> &devFlagsRef() { static QMap<QString, bool> d; return d; }
+#endif
 };
 
 } // namespace avpn

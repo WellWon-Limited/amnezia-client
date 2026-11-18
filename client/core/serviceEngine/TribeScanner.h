@@ -329,6 +329,14 @@ public:
     int pollsActive() const;
     // Settlement records still kept (invariant 2): 0 once every host scan is settled and every message for it answered.
     int hostRecords() const { return int(m_records.size()); }
+
+    // The path race's share of the Scanner (ScanPathProber.h): one byte ledger and one host scan at a time.
+    // raceBytesLeft: what may still be spent now (-1 = no cap: no cellular cap applies and no device budget);
+    // raceCharge: real bytes of the race's probes and server calls into the same ledger; hostScanRunning: the
+    // Scanner's own scan holds the probe host (a race waits).
+    qint64 raceBytesLeft();
+    void raceCharge(qint64 bytes);
+    bool hostScanRunning() const;
     // Journal sink: one line per event / action kind (never secrets or hosts). Default qInfo "[scanner]".
     std::function<void(const QString &)> log;
     // Taps (tests): every machine event a host reply or a held host message caused, with the scan it acts on (its
