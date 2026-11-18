@@ -448,6 +448,14 @@ void TribeScanner::refreshView()
         countries[i] = c;
     }
     bar.insert(QStringLiteral("countries"), countries);
+    QJsonArray scope = bar.value(QLatin1String("scope_countries")).toArray();
+    for (int i = 0; i < scope.size(); ++i) {
+        QJsonObject c = scope.at(i).toObject();
+        c.insert(QStringLiteral("name"), doctor::countryDisplayName(c.value(QLatin1String("cc")).toString(), lang));
+        scope[i] = c;
+    }
+    if (!scope.isEmpty())
+        bar.insert(QStringLiteral("scope_countries"), scope);
     j.insert(QStringLiteral("bar"), bar);
     j.insert(QStringLiteral("cooldown_ends_at_ms"), double(t < m_m.cooldownUntil() ? m_m.cooldownUntil() : 0));
     j.insert(QStringLiteral("next_change_at_ms"), double(v.nextChangeAtMs));
@@ -474,6 +482,7 @@ ScanNetwork TribeScanner::buildNetwork() const
     if (m_hostGenFolded)
         n.sources << m_hostGen;
     n.fingerprint = scanNetFingerprint(QLatin1String(scanNetKindName(f.kind)), n.key, f.gatewayHash);
+    n.radio = f.kind == ScanNetKind::Cellular ? f.radio : QString();
     return n;
 }
 

@@ -3496,26 +3496,28 @@ static void findMore()
     CHECK(scanViewToJson(v).value(QStringLiteral("more_available")).toBool() && scanViewToJson(v).value(QStringLiteral("batch")).toInt() == 1);
 
     // batch 2: the proven row stays fresh, its candidate is not probed again; the stop counts the new rows only
-    CHECK(m.moreTapped(QString(), kT0 + 9000).has(ScanActionKind::RequestManifest)); // no manual cooldown for a continuation
-    const QList<ScanCandidate> second = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050));
+    CHECK(m.moreTapped(QString(), kT0 + 9000).actions.isEmpty() && m.view(kT0 + 9000).moreState == QLatin1String("available")); // the cooldown holds
+    CHECK(m.moreTapped(QString(), kT0 + 31000).has(ScanActionKind::RequestManifest));
+    const QList<ScanCandidate> second = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050));
     bool skipped = !second.isEmpty();
     for (const ScanCandidate &c : second)
         skipped = skipped && c.id != first.at(0).id;
     CHECK(skipped && second.size() == first.size() - 1);
-    v = m.view(kT0 + 9060);
-    CHECK(v.scanning && v.verifiedCount == 1 && v.batch == 2);
+    v = m.view(kT0 + 31060);
+    CHECK(v.scanning && v.verifiedCount == 1 && v.batch == 2 && v.moreState == QLatin1String("running"));
     QList<ScanProbeFacts> all;
     for (const ScanCandidate &c : second)
         all << works(c.id);
-    m.hostProgress(progressOf(m, all), kT0 + 9900);
-    m.tick(kT0 + 9050 + 8000);
-    v = m.view(kT0 + 17200);
-    CHECK(!v.scanning && v.verifiedCount == 1 + second.size() && !v.moreAvailable); // everything judged: nothing more
+    m.hostProgress(progressOf(m, all), kT0 + 31900);
+    m.tick(kT0 + 31050 + 8000);
+    v = m.view(kT0 + 39200);
+    CHECK(!v.scanning && v.verifiedCount == 1 + second.size() && !v.moreAvailable && v.moreState == QLatin1String("exhausted"));
+    CHECK(scanViewToJson(v).value(QStringLiteral("more")).toObject().value(QStringLiteral("state")).toString() == QLatin1String("exhausted")); // everything judged: nothing more
 
     // batch 3: nothing left - ends at once, still nothing more
-    m.moreTapped(QString(), kT0 + 18000);
-    const QList<ScanCandidate> third = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 18050));
-    v = m.view(kT0 + 18100);
+    m.moreTapped(QString(), kT0 + 70000);
+    const QList<ScanCandidate> third = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 70050));
+    v = m.view(kT0 + 70100);
     CHECK(third.isEmpty() && !v.scanning && !v.moreAvailable && v.batch == 3 && v.verifiedCount == 1 + second.size());
 
     // a country batch over the whole pool: only that country's candidates, the filter set to it
@@ -3528,24 +3530,65 @@ static void findMore()
         if (!x.countryCode.isEmpty())
             cc = x.countryCode;
     CHECK(!cc.isEmpty());
-    c.moreTapped(cc.toLower(), kT0 + 9000);
-    const QList<ScanCandidate> only = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050));
+    c.moreTapped(cc.toLower(), kT0 + 31000);
+    const QList<ScanCandidate> only = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050));
     bool sameCountry = !only.isEmpty();
     for (const ScanCandidate &x : only)
         sameCountry = sameCountry && x.countryCode == cc;
-    CHECK(sameCountry && c.view(kT0 + 9060).moreCountry == cc);
+    CHECK(sameCountry && c.view(kT0 + 31060).moreCountry == cc);
 
     // an ordinary open after a series starts a new one
     ScanMachine o(w.caps);
     o.opened(openOf(w, QString(), false), kT0);
     o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
     o.tick(kT0 + 50 + 8000);
-    o.moreTapped(QString(), kT0 + 9000);
-    o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 9050);
-    o.tick(kT0 + 9050 + 8000);
-    CHECK(o.view(kT0 + 17100).batch == 2);
-    o.retryTapped(kT0 + 60000);
-    CHECK(o.view(kT0 + 60010).batch == 1);
+    o.moreTapped(QString(), kT0 + 31000);
+    o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050);
+    o.tick(kT0 + 31050 + 8000);
+    CHECK(o.view(kT0 + 39100).batch == 2);
+    o.retryTapped(kT0 + 90000);
+    CHECK(o.view(kT0 + 90010).batch == 1);
+    // the country menu is the scope of the next scan over the whole pool (UI spec 18.11)
+    ScanMachine sc(w.caps);
+    sc.opened(openOf(w, QString(), false), kT0);
+    sc.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+    sc.tick(kT0 + 50 + 8000);
+    ScanView sv = sc.view(kT0 + 8100);
+    CHECK(!sv.bar.scopeCountries.isEmpty() && sv.bar.scannedScope.isEmpty());
+    const QJsonObject bar = scanViewToJson(sv).value(QStringLiteral("bar")).toObject();
+    CHECK(bar.value(QStringLiteral("scope_countries")).toArray().size() == sv.bar.scopeCountries.size()
+          && bar.contains(QStringLiteral("scanned_scope")));
+    const QString scopeCc = sv.bar.scopeCountries.first().countryCode;
+    sc.filterChosen(scopeCc, kT0 + 8200);
+    CHECK(sc.view(kT0 + 8200).bar.scope == scopeCc);
+    sc.retryTapped(kT0 + 40000);
+    const QList<ScanCandidate> scoped = candidatesOf(sc.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050));
+    bool inScope = !scoped.isEmpty();
+    for (const ScanCandidate &x : scoped)
+        inScope = inScope && x.countryCode == scopeCc;
+    CHECK(inScope && sc.view(kT0 + 40060).bar.scannedScope == scopeCc);
+    sc.filterChosen(QStringLiteral("ZZ"), kT0 + 50000); // not in the pool: nothing changes
+    CHECK(sc.view(kT0 + 50000).bar.scope == scopeCc || sc.view(kT0 + 50000).scanning);
+
+    // a batch probes at most 10 candidates; the rest makes «more available»
+    ScanPlanInput big = planInput(hostMac());
+    big.maxProbe = 2;
+    const ScanPlan bp = buildScanPlan(big);
+    const ScanPlan fp = buildScanPlan(planInput(hostMac()));
+    CHECK(bp.probe.size() == 2 && bp.remaining == fp.probe.size() - 2 && kScanMoreBatch == 10);
+
+    // the radio generation is shown, never part of the network's identity
+    ScanMachine rd(w.caps);
+    ScanOpen ro = openOf(w, QString(), false);
+    ro.network.kind = ScanNetKind::Cellular;
+    ro.network.radio = QStringLiteral("lte");
+    rd.opened(ro, kT0);
+    CHECK(rd.view(kT0).netRadio == QLatin1String("lte") && scanViewToJson(rd.view(kT0)).value(QStringLiteral("net_radio")).toString() == QLatin1String("lte"));
+    ScanNetwork nr = ro.network;
+    nr.radio = QStringLiteral("5g");
+    CHECK(nr == ro.network);
+    rd.networkChanged(nr, ScanCachedResult(), true, kT0 + 10);
+    CHECK(rd.view(kT0 + 10).netRadio == QLatin1String("5g"));
 }
 
 static void rowsAfter17Nov()

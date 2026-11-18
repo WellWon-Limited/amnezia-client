@@ -261,6 +261,8 @@ inline bool scanActionTouchesTunnel(ScanActionKind k)
 }
 
 struct ScanAction {
+    QString scopeCountry;      // RequestManifest: the scan's country scope ("" = all; the server contract to come)
+    int batch = 0;             // RequestManifest: 1 = first scan of a series, 2.. = «Найти ещё» batches
     ScanActionKind kind = ScanActionKind::RequestManifest;
     QString scanId;
     QString networkKey;
@@ -539,6 +541,9 @@ struct ScanBarView {
     int buttonValue = 0;             // seconds / minutes of the countdown
     ScanHint hint = ScanHint::None;
     qint64 hintBytes = 0;            // CellularCost: «Скан потратит до N МБ»
+    QList<ScanCountryView> scopeCountries; // the pool's countries (own nodes + provider profiles), most paths first
+    QString scannedScope;            // the country the shown result covers ("" = all)
+    QString scope;                   // the scope of the next scan ("" = all)
 };
 
 struct ScanEmptyView {
@@ -550,6 +555,7 @@ struct ScanEmptyView {
     bool reportSending = false;      // «Отправляем отчёт…»
     bool reportLink = false;         // «Отправить отчёт в поддержку» is offered (reportLinkTapped acts): Empty, NoScan,
                                      // and Done with no live connection - no card button then (lab seam S7)
+    QString scopeCc;                 // an Empty result of a country scope: that country
 };
 
 struct ScanView {
@@ -576,6 +582,8 @@ struct ScanView {
     bool moreAvailable = false;
     int batch = 0;
     QString moreCountry;             // the country of the running / last continuation ("" = whole pool)
+    QString moreState;               // view.more.state: available | running | exhausted ("" = none yet)
+    QString netRadio;                // view.net_radio: the cellular radio generation ("" = unknown / not cellular)
 };
 
 // PathOutcomeItem.probe / DoctorScanRow.probe of a probe kind.
@@ -673,6 +681,9 @@ private:
     QHash<QString, qint64> m_open;
 };
 
+// «Найти ещё»: candidates one batch probes (the next untried ones, mixed across tiers; UI spec 18.11).
+inline constexpr int kScanMoreBatch = 10;
+
 // --- the machine -----------------------------------------------------------------------------------------------
 
 class ScanMachine
@@ -690,6 +701,7 @@ public:
         ScanStep s;
         m_screenOpen = true;
         m_connectOnOpen = o.connectOnOpen;
+        m_net.radio = o.network.radio; // display only, never part of the identity
         if (o.network != m_net || m_rowsKey != o.network.key) {
             if (scanPhaseScanning(m_phase))
                 applyNetworkChange(o.network, o.cached, now, s); // reopened on another network mid-scan
@@ -801,10 +813,15 @@ public:
             finishStep(s, now);
             return s;
         }
+        // The normal rules apply (UI spec 18.11): the manual cooldown and the budget (beginScan) hold a batch too.
+        if (now < m_cooldownUntil) {
+            finishStep(s, now);
+            return s;
+        }
         const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
         m_continuation = true;
         m_moreKeepRows = sameNet;
-        m_moreCountry = country.trimmed().toUpper();
+        m_moreCountry = country.trimmed().isEmpty() ? m_scope : country.trimmed().toUpper();
         m_worksBase = sameNet ? freshWorkingCount() : 0;
         if (!sameNet)
             m_shownNet.clear();
@@ -823,6 +840,13 @@ public:
                 present = present || r.countryCode == cc;
             if (present)
                 m_filter = cc;
+            // The country is also the SCOPE of the next scan over the whole pool (UI spec 18.11): «Сканировать» /
+            // retry() and «Найти ещё» then probe only that country's paths. "" = every country.
+            bool inPool = cc.isEmpty();
+            for (const ScanCountryView &c : m_scopeCountries)
+                inPool = inPool || c.countryCode == cc;
+            if (inPool || present)
+                m_scope = cc;
         }
         finishStep(s, now);
         return s;
@@ -835,6 +859,7 @@ public:
         ScanStep s;
         if (n != m_net)
             applyNetworkChange(n, cached, now, s);
+        m_net.radio = n.radio;
         if (appInFront)
             maybeFireWifiIntent(now, s);
         finishStep(s, now);
@@ -1561,6 +1586,16 @@ public:
         v.moreAvailable = !v.scanning && m_completed && m_moreAvailable;
         v.batch = m_batch;
         v.moreCountry = m_moreCountry;
+        v.moreState = v.scanning ? (m_continuation && m_batch > 1 ? QStringLiteral("running") : QString())
+                      : !m_completed  ? QString()
+                      : m_moreAvailable ? QStringLiteral("available")
+                                        : QStringLiteral("exhausted");
+        v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
+        v.bar.scopeCountries = m_scopeCountries;
+        v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : QString();
+        v.bar.scope = m_scope;
+        if (m_phase == ScanPhase::Empty)
+            v.empty.scopeCc = m_scannedScope;
         const QList<ScanRowView> all = displayRows(now);
         for (const ScanRowView &r : all) {
             if (r.verified && !r.fromCache)
@@ -2335,7 +2370,9 @@ private:
         m_cands.clear();
         m_unverified.clear();
         m_tapFailed.clear();
-        m_filter = m_continuation ? m_moreCountry : QString();
+        m_scannedScope = m_continuation ? m_moreCountry : m_scope;
+        m_filter = m_scannedScope;
+        m_planRemaining = 0;
         m_lastSeq = 0;
         m_spent = 0;
         m_cap = -1;
@@ -2391,6 +2428,11 @@ private:
         // Manifest + scan token: reserved at their worst case (a full manifest and one small request); the real
         // bytes come back with manifestReady, before the host's grant is cut (plan §2.2b step 2a).
         ScanAction mr = act(ScanActionKind::RequestManifest, m_net.key);
+        // The server's side of the scope and the continuation (being designed: manifest?country=XX beyond the 24/12
+        // caps, a continuation batch with an exhausted flag): carried with the request so the manifest client can
+        // pass them once the contract lands; today the batch runs over what the device already has.
+        mr.scopeCountry = m_scannedScope;
+        mr.batch = m_batch;
         if (!sendApp(QStringLiteral("manifest"), qint64(m_t.costManifestBytes) + m_t.costApiBytes, now, s, mr)) {
             m_startedVpn = false;
             toNoScan(QStringLiteral("budget"), now, s);
@@ -2428,15 +2470,42 @@ private:
         in.net = m_scanNet.kind;
         in.tunables = m_t;
         in.freshFailures = m_manifest.freshFailures + scanFreshFailures(m_cachedFailures, now, m_t.cacheFailTtlS);
-        in.restrictCountry = m_continuation && !m_moreCountry.isEmpty() ? m_moreCountry : m_manifest.restrictCountry;
+        // the pool's countries (the scope menu): every country a scan here could probe, before any restriction
+        {
+            ScanPlanInput all = in;
+            all.restrictCountry.clear();
+            m_scopeCountries.clear();
+            const ScanPlan whole = buildScanPlan(all);
+            for (const QList<ScanCandidate> *list : {&whole.probe, &whole.orderOnly})
+                for (const ScanCandidate &c : *list) {
+                    if (c.countryCode.isEmpty())
+                        continue;
+                    bool hit = false;
+                    for (ScanCountryView &x : m_scopeCountries)
+                        if (x.countryCode == c.countryCode) {
+                            ++x.count;
+                            hit = true;
+                        }
+                    if (!hit)
+                        m_scopeCountries << ScanCountryView{c.countryCode, 1};
+                }
+            std::stable_sort(m_scopeCountries.begin(), m_scopeCountries.end(),
+                             [](const ScanCountryView &a, const ScanCountryView &b) { return a.count > b.count; });
+        }
+        in.restrictCountry = !m_scannedScope.isEmpty() ? m_scannedScope : m_manifest.restrictCountry;
         if (m_continuation && m_moreKeepRows)
             in.skip = m_shownNet;
+        if (m_continuation) {
+            in.maxProbe = kScanMoreBatch; // the next 10 untried, mixed across tiers (UI spec 18.11)
+            in.interleave = true;
+        }
         in.upstreamNames = m_manifest.upstreamNames;
         in.lastKnownGood = m_manifest.lastKnownGood;
         in.awgMiniEnabled = m_manifest.awgMiniEnabled;
         in.awgProbeIpKnown = m_manifest.awgProbeIpKnown;
         in.awgAddressKnown = m_manifest.awgAddressKnown;
         const ScanPlan plan = buildScanPlan(in);
+        m_planRemaining = plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
         m_lastProjection = plan.projectedBytes;
@@ -3267,7 +3336,7 @@ private:
                 m_shownNet.insert(r.id);
         for (const ScanCachedFailure &f : m_failuresThisScan)
             m_shownNet.insert(f.id);
-        m_moreAvailable = false;
+        m_moreAvailable = m_planRemaining > 0;
         for (const Cand &c : m_cands)
             m_moreAvailable = m_moreAvailable || !m_shownNet.contains(c.c.id);
         m_continuation = false;
@@ -3996,6 +4065,10 @@ private:
     int m_worksBase = 0;             // fresh working rows before the continuation (its stop counts the new ones)
     int m_batch = 0;
     bool m_moreAvailable = false;
+    int m_planRemaining = 0;         // probed candidates the batch cap left for the next one
+    QString m_scope;                 // the chosen country: the scope of the next scan ("" = all)
+    QString m_scannedScope;          // the scope of the running / last scan
+    QList<ScanCountryView> m_scopeCountries; // the pool's countries of the last manifest
     bool m_completed = false;
     bool m_screenOpen = false;
     bool m_startedVpn = false;
@@ -4236,6 +4309,11 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     o.insert(QStringLiteral("more_available"), v.moreAvailable);
     o.insert(QStringLiteral("batch"), v.batch);
     o.insert(QStringLiteral("more_country"), v.moreCountry);
+    if (!v.moreState.isEmpty())
+        o.insert(QStringLiteral("more"), QJsonObject{{QStringLiteral("state"), v.moreState}, {QStringLiteral("batch"), v.batch},
+                                                     {QStringLiteral("country"), v.moreCountry}});
+    if (!v.netRadio.isEmpty())
+        o.insert(QStringLiteral("net_radio"), v.netRadio);
     QJsonObject card;
     card.insert(QStringLiteral("mode"), QLatin1String(scanCardModeName(v.card.mode)));
     card.insert(QStringLiteral("button"), QLatin1String(scanCardButtonName(v.card.button)));
@@ -4260,6 +4338,13 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     for (const ScanCountryView &c : v.bar.countries)
         countries << QJsonObject{{QStringLiteral("cc"), c.countryCode}, {QStringLiteral("count"), c.count}};
     bar.insert(QStringLiteral("countries"), countries);
+    if (!v.bar.scopeCountries.isEmpty()) {
+        QJsonArray scope;
+        for (const ScanCountryView &c : v.bar.scopeCountries)
+            scope << QJsonObject{{QStringLiteral("cc"), c.countryCode}, {QStringLiteral("count"), c.count}};
+        bar.insert(QStringLiteral("scope_countries"), scope);
+        bar.insert(QStringLiteral("scanned_scope"), v.bar.scannedScope);
+    }
     bar.insert(QStringLiteral("total"), v.bar.total);
     bar.insert(QStringLiteral("button"), QLatin1String(scanBarButtonName(v.bar.button)));
     bar.insert(QStringLiteral("button_enabled"), v.bar.buttonEnabled);
@@ -4272,6 +4357,8 @@ inline QJsonObject scanViewToJson(const ScanView &v)
     empty.insert(QStringLiteral("variant"), QLatin1String(scanEmptyVariantName(v.empty.variant)));
     if (!v.empty.reason.isEmpty())
         empty.insert(QStringLiteral("reason"), v.empty.reason);
+    if (!v.empty.scopeCc.isEmpty())
+        empty.insert(QStringLiteral("scope_cc"), v.empty.scopeCc);
     if (v.empty.reportSending)
         empty.insert(QStringLiteral("report_sending"), true);
     if (v.empty.reportLink)

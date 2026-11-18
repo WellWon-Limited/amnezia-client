@@ -74,6 +74,9 @@ struct ScanPlanInput {
     QString lastKnownGood;                  // engine node id proven on this network (the path engine's ledger)
     QString restrictCountry;                // empty = every country
     QSet<QString> skip;                     // «Найти ещё»: ids already judged on this network (excluded "shown")
+    int maxProbe = 0;                       // «Найти ещё»: at most this many probed candidates (0 = all); the rest
+                                            // is counted in ScanPlan::remaining
+    bool interleave = false;                // own and provider candidates alternate (also for hosts other than the app)
     QMap<QString, QString> upstreamNames;   // profile_id -> display name (UpstreamNode.h::upstreamDisplayName)
     bool awgMiniEnabled = false;            // features.scanner_awg_mini (scanAwgMiniFlag), compiled default off
     bool awgProbeIpKnown = false;           // the app resolved the API's IP (the RU-split carve-out set)
@@ -104,6 +107,7 @@ struct ScanPlan {
     int legConcurrency = 0;
     int awgConcurrency = 0;
     qint64 projectedBytes = 0;
+    int remaining = 0;               // probed candidates cut by maxProbe (the next batch's)
 
     int concurrencyFor(ScanProbeKind k) const
     {
@@ -352,8 +356,12 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
 
     std::stable_sort(p.probe.begin(), p.probe.end(), scanCandidateLess);
     std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), scanCandidateLess);
-    if (scanPlanInterleaves(caps))
+    if (in.interleave || scanPlanInterleaves(caps))
         p.probe = scanInterleaveOrigins(p.probe);
+    if (in.maxProbe > 0 && p.probe.size() > in.maxProbe) {
+        p.remaining = int(p.probe.size()) - in.maxProbe;
+        p.probe = p.probe.mid(0, in.maxProbe);
+    }
 
     // Reach offsets with the per-entry-IP spacing (R8). Provider full probes and AWG sessions have none
     // (a whole profile is dialled by its own routing; AmneziaWG is UDP: its handshake is its reach).

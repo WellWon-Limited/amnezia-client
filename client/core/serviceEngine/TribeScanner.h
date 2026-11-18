@@ -97,6 +97,8 @@ struct ScanNetFacts {
     QString reportingKey = QStringLiteral("unknown"); // upstreamNetworkKey(...): the only key that leaves the device
     QString gatewayHash;                               // optional local hash of gateway / subnet ("" = none)
     QList<ScanNetSource> appSources;                   // the app process's path monitor element(s)
+    QString radio;                                     // cellular radio generation: "5g" | "lte" | "3g" | "2g" | ""
+                                                       // (the engine's own network observation; display only)
 };
 
 // The AmneziaWG mini-session input of ONE own AWG node, from the engine (plan awg-probe-plan.md §3): the

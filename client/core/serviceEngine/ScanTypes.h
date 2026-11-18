@@ -278,6 +278,8 @@ struct ScanNetwork {
     QString key = QStringLiteral("unknown"); // openapi NetworkKey (UpstreamEngine.h::upstreamNetworkKey)
     QList<ScanNetSource> sources;
     QString fingerprint;
+    QString radio;                // cellular radio generation "5g" | "lte" | "3g" | "2g" ("" = unknown / not cellular);
+                                  // shown only (view.net_radio), never part of the network's identity
 
     QString generation() const { return scanNetGeneration(sources); }
     bool operator==(const ScanNetwork &o) const
