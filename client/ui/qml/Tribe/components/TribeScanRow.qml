@@ -41,8 +41,9 @@ Rectangle {
         : rowState === "connecting" ? ScanTexts.rowConnecting
         : rowState === "connected" ? ScanTexts.rowConnected
         : ScanTexts.rowFailed
-    // Owner, device test of 142: «Доступно» in the accent blue (outline), the one connected row a FILLED accent
-    // «Подключено» on the only highlighted row - "available" and "connected now" cannot be confused.
+    // Owner, device test of 142: «Доступно» in the accent blue (outline), the one connected row a FILLED
+    // «Подключено» on the only highlighted row - "available" and "connected now" cannot be confused. Owner 18.11:
+    // the filled «Подключено» is green (Theme.color.connected, the connection-status tone), «Доступно» stays blue.
     readonly property bool connectedNow: rowState === "connected"
     readonly property color badgeFg: rowState === "works" ? Theme.color.accent
         : connectedNow ? Theme.color.bg800
@@ -50,7 +51,7 @@ Rectangle {
         : rowState === "failed" ? Theme.color.danger
         : Theme.color.text3
     readonly property color badgeFill: rowState === "works" ? Theme.color.badgeAccent
-        : connectedNow ? Theme.color.accent
+        : connectedNow ? Theme.color.connected
         : (rowState === "slow" || rowState === "connecting") ? Theme.color.badgeWarn
         : rowState === "failed" ? Theme.color.badgeOff
         : Theme.color.glass

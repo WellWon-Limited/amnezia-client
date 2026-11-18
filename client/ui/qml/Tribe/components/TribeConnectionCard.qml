@@ -24,6 +24,10 @@ Rectangle {
     property string liveState: "off"
     property string liveProto: ""          // "awg" | "xray" - the transport the tunnel runs on
     property string liveProtoVersion: ""
+    // Owner 18.11, item 7 PROPOSAL (artboard «Правки 18.11», «Ваше подключение»): the Scanner keeps ONE line - the
+    // live state badge, the flag, the server and the protocol - and the check with the report moves to Support.
+    // Off until the owner chooses; the page passes PageScannerTribe.connectionLine.
+    property bool line: false
     signal checkTapped()
 
     readonly property string mode: card.mode || "hidden"
@@ -63,7 +67,7 @@ Rectangle {
     // hidden by the coordinator (idle, before a scan): still the live state, title line only
     readonly property bool compactOnly: mode === "hidden"
     readonly property bool liveOn: liveState === "connected"
-    implicitHeight: col.implicitHeight + 2 * 14
+    implicitHeight: line ? lineRow.implicitHeight + 2 * 12 : col.implicitHeight + 2 * 14
     radius: Theme.radius.lg
     color: Theme.color.surface1
     border.width: 1
@@ -157,8 +161,63 @@ Rectangle {
         }
     }
 
+    // ── the one-line variant: «Подключено» · flag · server · protocol ──
+    RowLayout {
+        id: lineRow
+        visible: root.line
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Theme.space.lg
+        anchors.rightMargin: Theme.space.lg
+        spacing: Theme.space.sm
+        readonly property bool named: root.liveState !== "off" && root.serverLabel !== ""
+        // off: the card's own off row (dash + «VPN не подключён»), not a grey badge alone
+        StageIcon { visible: root.liveState === "off"; kind: "skip" }
+        Text {
+            visible: root.liveState === "off"
+            Layout.fillWidth: true
+            text: ScanTexts.cardOff
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            color: Theme.color.text2
+            font.family: Theme.font.body
+            font.pixelSize: Theme.font.bodyS
+        }
+        TribeLabelBadge {
+            visible: root.liveState !== "off"
+            small: true
+            label: root.liveOn ? ScanTexts.rowConnected
+                   : root.liveState === "connecting" ? ScanTexts.rowConnecting : ScanTexts.cardOff
+            fg: root.liveOn ? Theme.color.bg800 : root.liveState === "connecting" ? Theme.color.warning : Theme.color.text3
+            fill: root.liveOn ? Theme.color.connected : root.liveState === "connecting" ? Theme.color.badgeWarn : Theme.color.glass
+            filled: root.liveOn
+        }
+        TribeFlag {
+            visible: lineRow.named && root.serverCc !== ""
+            Layout.preferredWidth: 18; Layout.preferredHeight: 18
+            code: root.serverCc
+        }
+        Word {
+            visible: lineRow.named
+            Layout.fillWidth: true
+            Layout.maximumWidth: Math.ceil(implicitWidth)
+            text: root.serverLabel
+            color: Theme.color.text1
+            font.pixelSize: Theme.font.bodyS
+        }
+        TribeTransportBadge {
+            visible: root.liveOn && root.liveProto !== ""
+            transport: root.liveProto
+            version: root.liveProtoVersion
+            active: true
+        }
+        Item { Layout.fillWidth: true }
+    }
+
     ColumnLayout {
         id: col
+        visible: !root.line
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
@@ -180,7 +239,7 @@ Rectangle {
                 font.pixelSize: Theme.font.bodyS + 1
                 font.weight: Theme.font.wBold
             }
-            // the live state: the filled «Подключено» the list's connected row wears
+            // the live state: the filled green «Подключено» the list's connected row wears (owner 18.11)
             TribeLabelBadge {
                 // one state at a time (device round 3: «Подключение…» next to «VPN не подключён»): with the card's
                 // own off row the row says it, the badge is for the other modes and the compact card
@@ -189,7 +248,7 @@ Rectangle {
                 label: root.liveOn ? ScanTexts.rowConnected
                        : root.liveState === "connecting" ? ScanTexts.rowConnecting : ScanTexts.cardOff
                 fg: root.liveOn ? Theme.color.bg800 : root.liveState === "connecting" ? Theme.color.warning : Theme.color.text3
-                fill: root.liveOn ? Theme.color.accent : root.liveState === "connecting" ? Theme.color.badgeWarn : Theme.color.glass
+                fill: root.liveOn ? Theme.color.connected : root.liveState === "connecting" ? Theme.color.badgeWarn : Theme.color.glass
                 filled: root.liveOn
             }
         }

@@ -14,8 +14,18 @@ QtObject {
     readonly property string title: qsTr("Сканер")
     readonly property string netWifi: qsTr("Wi‑Fi")
     readonly property string netCellular: qsTr("Сотовая")
-    readonly property string checkedNow: qsTr("Проверено только что")
-    readonly property string checkedAgo: qsTr("Проверено %1 мин назад")
+    // the last-check chip in the radar block's top-left corner (owner 18.11, replaces «Проверено …» under the title)
+    readonly property string agoNow: qsTr("только что")
+    readonly property string agoMin: qsTr("%1 мин назад")
+    readonly property string agoHours: qsTr("%1 ч назад")
+    readonly property string agoYesterday: qsTr("вчера")
+    readonly property string agoDays: qsTr("%1 дн. назад")
+    readonly property string agoName: qsTr("Проверено: %1")      // screen reader name of the chip
+    // the network chip in the top-right corner: the radio of a mobile network when the engine reports it
+    readonly property string netLte: qsTr("LTE")
+    readonly property string net5g: qsTr("5G")
+    readonly property string net3g: qsTr("3G")
+    readonly property string netName: qsTr("Сеть: %1")           // screen reader name of the chip
     readonly property string sectionNow: qsTr("ДОСТУПНЫ СЕЙЧАС")
     readonly property string stageConnecting: qsTr("Подключаемся…")
     readonly property string stageReach: qsTr("Проверяем доступность · %1 из %2")
@@ -60,7 +70,6 @@ QtObject {
     readonly property string retry: qsTr("Повторить")
     readonly property string retryInS: qsTr("Повторить через %1 с")
     readonly property string retryInMin: qsTr("Повторить через %1 мин")
-    readonly property string hintCost: qsTr("Скан потратит до %1 МБ")
     readonly property string hourLimit: qsTr("Лимит сканов в мобильной сети на этот час")
 
     // ── empty result ──
@@ -132,6 +141,15 @@ QtObject {
     readonly property string scannerOffTitle: qsTr("Сканер временно недоступен")               // title, NoScan scanner_off (the server's switch, 404), no button (NO FRAME)
     readonly property string scannerOffText: qsTr("Мы выключили его на время работ. Подключение к VPN работает как обычно.") // text, the same state (NO FRAME)
     readonly property string rejectedWaiting: qsTr("Есть неотправленные отчёты: %1 — отправятся вместе с логами") // chat, the logs confirm sheet: a quiet line while the server-refused reports wait (NO FRAME)
+    // owner 18.11 (artboard «Правки 18.11»): «Найти ещё» continues the scan with the next batch (waits for the
+    // engine's view.more + TribeScanner.findMore()); the country menu as the scan's scope over the whole pool
+    // (waits for bar.scope_countries + empty.scope_cc)
+    readonly property string more: qsTr("Найти ещё")                                       // button under the list, a finished scan
+    readonly property string moreRunning: qsTr("Ищем ещё…")                                // the same button while the next batch runs
+    readonly property string moreExhausted: qsTr("Больше доступных нод в этой сети нет")   // replaces the button: nothing left to check
+    readonly property string scanScope: qsTr("Сканировать")                               // bar button: a country chosen that the shown result does not cover
+    readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
+    readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar
@@ -139,7 +157,7 @@ QtObject {
     //    texts (engineTitle + engineText + «Повторить»)
     //  - NoScan network_changed: the last result + the bar's «Повторить» + the shade networkChanged
     //  - shade scan_budget: hourLimit; shade wifi_intent: none (dismissed at once)
-    //  - network caption for ethernet / unknown: empty
+    //  - network chip for ethernet / unknown: no chip
     // NEWTEXTS-END
 
     // States 24 / 25 by what the button really does (TribeEngine.scannerServiceAction(), read when the state is
@@ -227,15 +245,27 @@ QtObject {
     function found(n) {
         return n === 1 ? t.foundOne : t.plural(n, t.foundFormOne, t.foundFormFew, t.foundFormMany).arg(n)
     }
-    function netCaption(net) {
-        return net === "wifi" ? t.netWifi : (net === "cellular" ? t.netCellular : "")
+    // radio: the engine's view.net_radio ("5g" | "lte" | "3g" | "2g"; not sent yet) - without it «Сотовая»
+    function netCaption(net, radio) {
+        if (net === "wifi") return t.netWifi
+        if (net !== "cellular") return ""
+        return radio === "5g" ? t.net5g : radio === "lte" ? t.netLte : (radio === "3g" || radio === "2g") ? t.net3g
+             : t.netCellular
     }
-    function checked(min) {
-        return min < 0 ? "" : (min === 0 ? t.checkedNow : t.checkedAgo.arg(min))
-    }
-    function megabytes(bytes) {
-        const mb = bytes / 1048576
-        return Number(mb).toLocaleString(Qt.locale(), "f", Math.round(mb) === mb ? 0 : 1)
+    function netIcon(net) { return net === "wifi" ? "wifi" : (net === "cellular" ? "cellular" : "") }
+    // view.checked_ago_min -> «только что» / «5 мин назад» / «3 ч назад» / «вчера» / «4 дн. назад»; "" = unknown.
+    // «вчера» is the calendar day before today (nowMs = the caller's clock), not "24-48 h ago".
+    function ago(min, nowMs) {
+        if (min < 0) return ""
+        if (min === 0) return t.agoNow
+        if (min < 60) return t.agoMin.arg(min)
+        const now = new Date(nowMs)
+        const then = new Date(nowMs - min * 60000)
+        const day = 86400000
+        const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+        if (then.getTime() >= startToday) return t.agoHours.arg(Math.floor(min / 60))
+        if (then.getTime() >= startToday - day) return t.agoYesterday
+        return t.agoDays.arg(Math.max(2, Math.round((startToday - then.getTime()) / day) + 1))
     }
     // ScanMachine shade keys + the app's own; "" = no text (the host shows nothing)
     function shadeText(key, args, reportsPending) {
