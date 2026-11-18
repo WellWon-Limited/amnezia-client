@@ -132,6 +132,12 @@ if(NOT IS_DIRECTORY "${AWG_APPLE_SOURCE_DIR}")
 endif()
 set(WG_APPLE_SOURCE_DIR "${AWG_APPLE_SOURCE_DIR}")
 target_link_libraries(${PROJECT} PRIVATE amnezia::awg-apple)
+# AVPN (path engine stage 0, option AVPN_IOS_APP_SCAN_HOST): the app references the Go engine, so go.o of
+# libwg-go.a is linked into the app; Go's net package on darwin needs libresolv (res_9_*), like the extension.
+if(AVPN_IOS_APP_SCAN_HOST)
+    find_library(FW_LIBRESOLV_APP libresolv.9.tbd)
+    target_link_libraries(${PROJECT} PRIVATE ${FW_LIBRESOLV_APP})
+endif()
 
 target_sources(${PROJECT} PRIVATE
 #    ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios/iosvpnprotocol.swift
