@@ -202,7 +202,10 @@ private:
                 break;
             }
             case EffectType::RunDataCheck: {
-                const Behaviour b = m_legBehaviour.value(e.stamp.leg);
+                // an adopted leg was never started here: the network's behaviour for that path decides
+                const Behaviour b = m_legBehaviour.contains(e.stamp.leg)
+                    ? m_legBehaviour.value(e.stamp.leg)
+                    : m_world.at(tracker.current().local, e.path.id.id, now);
                 if (b.kind == Behaviour::Kind::Works)
                     schedule(now + b.checkMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::DataOk, b.ttfbMs));
                 break; // no data: nothing comes, the owner's check deadline judges it
@@ -216,6 +219,7 @@ private:
                 break;
             case EffectType::Finish: results.append(e.result); break;
             case EffectType::Show: break;
+            case EffectType::StopUnconfirmed: break;
             }
         }
     }

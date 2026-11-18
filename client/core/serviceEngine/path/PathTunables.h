@@ -13,21 +13,28 @@
 
 namespace avpn::path {
 
-// One connect attempt (AttemptOwner.h).
+// One connect attempt (AttemptOwner.h). Server-tunable through TuningStore (ConnectTunables.h::
+// attemptTimingsTuned); these are the compiled defaults.
 struct AttemptTimings {
     // Start deadline per path kind: from "start path" to "tunnel up" (AmneziaWG: handshake confirmed; Xray and
-    // provider: the native side reports connected). AmneziaWG repeats its handshake every 5 s, so 7 s covers
-    // two handshake tries (design §10: one lost packet must not make a path dead - one failure is "suspect").
-    int awgStartMs = 7000;      // to be calibrated on device
-    int xrayStartMs = 6000;     // to be calibrated on device
-    int providerStartMs = 8000; // to be calibrated on device (includes the seat lease, 0.2-0.6 s observed)
+    // provider: the native side reports connected). Measured on iPhone Air 17-18.11: a working AmneziaWG start
+    // reaches data in 4.0-5.7 s in total, own Xray in 2.6-4.6 s, a provider profile in 2.4-3.4 s.
+    int awgStartMs = 4500;      // to be calibrated on device
+    int xrayStartMs = 5000;     // to be calibrated on device
+    int providerStartMs = 6000; // to be calibrated on device (includes the seat lease, 0.2-0.6 s observed)
     // The one in-tunnel data check: from "tunnel up" to "data proven".
     int dataCheckMs = 4000; // to be calibrated on device
-    // Overall budget of the attempt on one network: nothing proven within it -> honest failure.
-    int budgetMs = 20000; // to be calibrated on device
+    // Overall budget of the attempt on one network: nothing proven within it -> honest failure. Stage 1 walks
+    // the candidates one at a time, so one tap must be able to walk a hostile network (coordinator 18.11);
+    // the 20 s target of the design applies once the probe race exists (stage 2).
+    int budgetMs = 45000; // to be calibrated on device
     // At most this many paths are brought up per attempt and network (design §4 "limit of candidates"; it also
     // bounds the provider seats one tap can take).
-    int maxPaths = 8;
+    int maxPaths = 12;
+    // A stop that is never confirmed must not block the attempt: after this long the platform is taken as
+    // stopped (an outcome of the platform, never of the path - nothing is recorded). The native stop deadline
+    // (IosNativePolicy.h NativeTimings: 10 s).
+    int stopConfirmMs = 10000;
     // A gap between two events longer than this is a clock jump (the app was suspended, the main thread was
     // stopped): only this much of it counts against deadlines. Must exceed the platform tick period (1 s).
     int clockJumpMs = 2500;
