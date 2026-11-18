@@ -2801,7 +2801,12 @@ private:
             anyLeg = anyLeg || c.c.kind == ScanProbeKind::XrayLeg;
             anyFull = anyFull || c.c.kind == ScanProbeKind::XrayFull;
         }
-        const int seats = qMin(kScanProbeBatchMax, (anyLeg ? m_legConc : 0) + (anyFull ? m_fullConc : 0));
+        // A server batch (1.14.0) was sized by the server: every row gets its seat (device 18.11: 10 offered, 6 seated,
+        // 4 left «Не проверено»); otherwise the seats follow what can run at once.
+        int wanted = 0;
+        for (const Cand &c : m_cands)
+            wanted += (c.c.needsLease && !c.finalDone) ? 1 : 0;
+        const int seats = qMin(kScanProbeBatchMax, m_fromServer ? wanted : (anyLeg ? m_legConc : 0) + (anyFull ? m_fullConc : 0));
         for (Cand &c : m_cands) {
             if (!c.c.needsLease || c.finalDone)
                 continue;
