@@ -140,6 +140,12 @@ struct Events {
 // --- the fake engine ------------------------------------------------------------------------------------------
 struct FakeEngine : IScanEngine {
     Events *ev = nullptr;
+    QJsonArray offered; // offerScanNodes: the stub nodes the batch's provider rows carried
+    void offerScanNodes(const QJsonArray &nodes) override
+    {
+        for (const QJsonValue &v : nodes)
+            offered << v;
+    }
     ScanCurrent cur;
     ScanNetFacts net;
     QList<ScanOwnNode> own;
@@ -218,6 +224,8 @@ struct Server {
     QHash<QString, QString> refuse; // profile id -> refusal code
     QHash<QString, QByteArray> configs; // profile id -> the normalized config a probe grant carries (+ its sha256)
     QJsonObject numbers;  // manifest numbers
+    bool scopeApi = false;  // contract 1.14.0: /v1/scan/pool and /v1/scan/candidates answer (else 404: an older server)
+    QList<QJsonObject> candidateRequests;
     int manifestStatus = 0; // non-zero: /v1/scan/manifest answers this status (no body)
     int tokenStatus = 0;    // non-zero: /v1/scan/token answers this status
     int batchPad = 0;     // extra bytes in the probe-batch answer (to pass its reservation)
@@ -336,6 +344,66 @@ struct Server {
             for (const QJsonValue &v : QJsonDocument::fromJson(r.body).object().value("lease_ids").toArray())
                 releasedLeases << v.toString();
             out.status = 204;
+            return out;
+        }
+        if (scopeApi && path == QLatin1String("/v1/scan/pool")) {
+            QHash<QString, QPair<int, int>> per;
+            for (const QJsonValue &v : nodes)
+                per[v.toObject().value("country_code").toString(QStringLiteral("DE"))].first += 1;
+            for (const QJsonValue &v : upstream)
+                per[v.toObject().value("country_code").toString()].second += 1;
+            QJsonArray cs;
+            for (auto it = per.constBegin(); it != per.constEnd(); ++it)
+                cs << QJsonObject{{"country_code", it.key()}, {"own", it.value().first}, {"provider", it.value().second}};
+            out.status = 200;
+            out.body = QJsonDocument(QJsonObject{{"type", "scan_pool"}, {"version", 1}, {"upstream_revision", double(revision)},
+                                                 {"upstream_eligible", true}, {"countries", cs},
+                                                 {"functions", QJsonArray{QJsonObject{{"kind", "whitelist"}, {"provider", 2}}}}})
+                           .toJson(QJsonDocument::Compact);
+            return out;
+        }
+        if (scopeApi && path == QLatin1String("/v1/scan/candidates")) {
+            const QJsonObject rq = QJsonDocument::fromJson(r.body).object();
+            candidateRequests << rq;
+            QSet<QString> seen;
+            for (const QJsonValue &v : rq.value("seen").toArray())
+                seen.insert(v.toString());
+            const QString cc = rq.value("country").toString();
+            const int limit = rq.value("limit").toInt(12);
+            QJsonArray ns, us;
+            int left = 0;
+            for (const QJsonValue &v : nodes) {
+                const QJsonObject n = v.toObject();
+                if (seen.contains(n.value("node_id").toString()))
+                    continue;
+                if (ns.size() + us.size() < limit)
+                    ns << n;
+                else
+                    ++left;
+            }
+            for (const QJsonValue &v : upstream) {
+                QJsonObject u = v.toObject();
+                const QString id = QStringLiteral("up:") + u.value("profile_id").toString();
+                if (seen.contains(id) || (!cc.isEmpty() && u.value("country_code").toString() != cc))
+                    continue;
+                if (ns.size() + us.size() < limit) {
+                    u.insert("node", QJsonObject{{"node_id", id}, {"proto", "xray"}, {"upstream", QJsonObject{{"profile_id", u.value("profile_id")}}}});
+                    us << u;
+                } else {
+                    ++left;
+                }
+            }
+            if (!cc.isEmpty())
+                ns = QJsonArray(); // the fixture's own nodes carry no country on the wire: a country page is providers only
+            out.status = 200;
+            out.body = QJsonDocument(QJsonObject{{"type", "scan_candidates"}, {"version", 1}, {"issued_at", "2026-11-18T10:00:00Z"},
+                                                 {"network_key", rq.value("network_key")}, {"scope", rq.value("scope")},
+                                                 {"country", cc.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(cc)},
+                                                 {"upstream_revision", double(revision)}, {"exhausted", left == 0},
+                                                 {"nodes", ns}, {"upstream", us},
+                                                 {"probe_seats", QJsonArray{QJsonObject{{"tier", 1}, {"free", 8}}}}})
+                           .toJson(QJsonDocument::Compact);
+            out.headers.insert("x-tribe-sig", key.sign(QByteArray("tribe-scan-candidates-v1\n") + out.body));
             return out;
         }
         if (path == QLatin1String("/v1/telemetry/path-outcomes")) {
@@ -871,6 +939,7 @@ struct World {
     int lightDelayMs = 300;
     QList<QPair<QString, qint64>> charges; // the coordinator's own host charges (onHostCharge): host scan id, bytes
     int crossEvents = 0;                // machine events a host answer caused for ANOTHER scan than its own (must stay 0)
+    bool poolOnOpen = false;
     QStringList hostEvents;             // "event scan" of every machine event caused by a host answer / held message
 
     explicit World(const ScanHostCaps &caps = capsMac(), ScanNetKind kind = ScanNetKind::Wifi, int ownNodes = 8)
@@ -953,6 +1022,7 @@ struct World {
         d.store = &store;
         d.clock = &clock;
         d.timer = &timer;
+        d.fetchPoolOnOpen = poolOnOpen; // byte-exact cases count every request of the scan; the 1.14.0 case asks the pool
         s = std::make_unique<TribeScanner>(d);
         s->log = [this](const QString &l) { logs << l; };
         s->onHostCharge = [this](const QString &id, qint64 bytes) { charges << qMakePair(id, bytes); };
@@ -3717,12 +3787,72 @@ static void caseScanCanceledRetryRule()
     CHECK(!scanRetryCanceledRequest(503, true, 0));             // an answer decides
 }
 
+
+// Contract 1.14.0 end to end: the pool feeds the scope menu when the screen opens; «Найти ещё» asks the server's
+// batch with `seen`, the provider rows' stub nodes go to the engine before the rows; an older server (404) falls back.
+static void caseServerScope()
+{
+    g_case = QStringLiteral("server_scope");
+    {
+        World w;
+        w.server.scopeApi = true;
+        w.poolOnOpen = true;
+        w.server.numbers.insert(QStringLiteral("scan_stop_works"), 2); // the first screen stops early: rows are left
+        w.start();
+        w.s->open();
+        w.run(20000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        const QJsonObject bar = w.s->view().value(QStringLiteral("bar")).toMap().isEmpty()
+                                    ? QJsonObject() : QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("bar")).toMap());
+        CHECK(bar.value("scope_countries").toArray().size() >= 1 && bar.value("scope_whitelist").toInt() == 2);
+        bool named = true;
+        for (const QJsonValue &c : bar.value("scope_countries").toArray())
+            named = named && !c.toObject().value("name").toString().isEmpty();
+        CHECK(named);
+        w.clock.t += 31000;
+        w.s->findMore();
+        w.run(20000);
+        CHECK(w.server.candidateRequests.size() == 1);
+        if (!w.server.candidateRequests.isEmpty()) {
+            const QJsonObject rq = w.server.candidateRequests.first();
+            CHECK(rq.value("scope").toString() == "default" && rq.value("limit").toInt() == kScanMoreBatch && !rq.value("seen").toArray().isEmpty());
+        }
+        if (w.engine.offered.isEmpty())
+            for (const QString &l : w.logs)
+                if (l.contains(QLatin1String("candidates")) || l.contains(QLatin1String("find_more")))
+                    std::fprintf(stderr, "  log: %s\n", qPrintable(l));
+        CHECK(!w.engine.offered.isEmpty()); // the batch's provider rows: their nodes are in the engine's pool
+        const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();
+        CHECK(state == "exhausted" || state == "available");
+        w.s->close();
+    }
+    {
+        World w; // an older server: no pool, the batch request 404 -> the device's own continuation
+        w.poolOnOpen = true;
+        w.start();
+        w.s->open();
+        w.run(20000);
+        CHECK_EQ(w.http.count("/v1/scan/pool"), 1);
+        w.clock.t += 31000;
+        w.s->findMore();
+        w.run(20000);
+        CHECK_EQ(w.http.count("/v1/scan/candidates"), 1);
+        CHECK(w.engine.offered.isEmpty() && w.s->view().value(QStringLiteral("batch")).toInt() == 2);
+        w.clock.t += 31000;
+        w.s->findMore();
+        w.run(20000);
+        CHECK_EQ(w.http.count("/v1/scan/candidates"), 1); // the session does not ask again
+        w.s->close();
+    }
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     caseScanCanceledRetryRule();
     caseFullScan();
     caseFullProbeProfileRule();
+    caseServerScope();
     caseLiveDigest();
     caseManifest304();
     caseManifestSignature();

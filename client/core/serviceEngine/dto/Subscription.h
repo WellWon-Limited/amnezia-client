@@ -149,6 +149,10 @@ struct UpstreamStub {
     // that profile (cold start without the API; UpstreamEngine.h::standbyPackCandidates). Such a candidate
     // runs only through the provisional path (direct acquire first; transport failure -> the pack).
     bool    packSourced = false;
+    // Contract 1.14.0: offered by a Scanner batch (/v1/scan/candidates) beyond the device's delivered stubs. Such a
+    // profile can be pinned and connected as an exact or preferred choice; Auto never starts it on its own (the 24
+    // delivered stubs bound Auto's candidates on purpose).
+    bool    scanOffered = false;
     // Display name parts (release A, owner decision 14.11): our stable number of the profile inside its
     // country (>= 1; 0 = not given) and whether the stub's `label` is the admin's own display name (false
     // = a server fallback such as "NL 1", never shown - UpstreamNode.h::upstreamDisplayName).

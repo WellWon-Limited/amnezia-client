@@ -1,4 +1,5 @@
 #include "AvpnEngineQml.h"
+#include "ScanBudget.h" // attachPathProber: the Scanner's price of a probe
 #include "TransportPick.h" // the Doctor's alternatives: exit RTT order (display/measurement only)
 
 #ifdef Q_OS_ANDROID
@@ -310,6 +311,15 @@ public:
     }
 
     // The display name the Connect card would show for a pool row (pickerDisplay / upstreamDisplayName).
+    // Contract 1.14.0: provider rows of a /v1/scan/candidates batch beyond the delivered stubs - into the pool before
+    // any row of the batch can be tapped.
+    void offerScanNodes(const QJsonArray &subscriptionNodes) override
+    {
+        const int kept = m_e->m_engine.offerScanNodes(subscriptionNodes);
+        m_e->syncStandbyCandidates();
+        m_e->reliabilityEvent(QStringLiteral("scan_nodes_offered rows=%1 kept=%2").arg(subscriptionNodes.size()).arg(kept));
+    }
+
     QString rowDisplayName(const QString &rowId) const override
     {
         // one snapshot per view refresh (the rows of one refresh ask within the same event-loop turn)
@@ -841,6 +851,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             return st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
         },
         this);
+    connect(m_ruSentinel, &RuSplitSentinel::sitesStateChanged, this, &AvpnEngineQml::changed);
     connect(this, &AvpnEngineQml::changed, this, [this] {
         const QString st = state();
         if (m_ruSentinel)
@@ -1114,9 +1125,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
     // AVPN upstream nodes: lease / standby / probe I/O with the same client, key and token as /v1 calls.
     // The direct base is read at each call (edge walk moves m_baseUrl).
-    // R1a: a lease acquire for a new leg and a release after a stop are DIRECT requests - the direct edge, never the
-    // session edge of a tunnel that is (still) up.
-    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->directBaseUrl() : m_baseUrl; },
+    // S1 (device round 5): by the route the request takes NOW - through a tunnel that carries requests (seat-first
+    // while the live session stays up) the edge reachable from its exit, otherwise the direct edge (a new leg, a
+    // release after a stop: the session edge is cleared outside the carrying phase - syncControlPlaneEdge).
+    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },
                                kConfigPubKeyHex,
                                [this]() { return authToken(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
@@ -3206,6 +3218,47 @@ void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
     m_configSvc->setSessionEdge(edge);
 }
 
+void AvpnEngineQml::attachPathProber(path::IPathProber *prober, std::function<qint64()> bytesLeft,
+                                     std::function<void(qint64)> charge)
+{
+    // the race charges a probe as the Scanner does (ScanBudget.h::scanProbeCostBytes) - one ledger, one price list
+    const ScanTunables t;
+    path::PathRace::Costs c;
+    c.awg = scanProbeCostBytes(ScanProbeKind::AwgMini, false, t);
+    c.xray = scanProbeCostBytes(ScanProbeKind::XrayLeg, false, t);
+    c.provider = scanProbeCostBytes(ScanProbeKind::XrayFull, false, t) + t.costBatchBytes + t.costConfigBytes;
+    m_engine.setProbeCosts(c);
+    m_engine.setProbeBudget(std::move(bytesLeft), std::move(charge));
+    m_engine.setProber(prober);
+    reliabilityEvent(QStringLiteral("race_prober attached=%1").arg(int(prober != nullptr)));
+}
+
+void AvpnEngineQml::pathProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
+{
+    m_engine.onProbeResult(stamp, outcome, bytesSpent);
+    // a winner starts the owner's first leg: its journal, the ledger and the progress reach the screen now
+    if (syncAttempt())
+        QTimer::singleShot(0, this, [this]() { reconcile(); });
+}
+
+// S1 (device round 5): the ONE way a Scanner row's request ends without a connect - the row is told it failed and
+// the chain is over (a row stayed «Подключение…» for minutes after seat-first failed with the live tunnel kept).
+void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
+{
+    if (!m_scanRow.active)
+        return;
+    m_scanRow.active = false;
+    const QString n = node.isEmpty() ? m_scanRow.tapped : node;
+    scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1 why=%2").arg(n, QLatin1String(why)),
+                {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                 {QStringLiteral("node"), n}, {QStringLiteral("why"), QLatin1String(why)}});
+    if (m_scanner) {
+        if (!n.isEmpty() && !m_scanRow.reported.contains(n))
+            m_scanner->connectFailed(n);
+        m_scanner->attemptEnded();
+    }
+}
+
 // R3 (device round 4): the end of a Scanner row's one request.
 void AvpnEngineQml::endExactRowRequest(bool connected)
 {
@@ -3279,6 +3332,8 @@ bool AvpnEngineQml::syncAttempt()
         changedAny = true;
         if (m_exactRestoreArmed && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
+        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
+            endScanRowRequest(QString(), "attempt_failed"); // S1: the owner's terminal result ends the row's request
         const QString lang = appLang();
         if (r->connected) {
             if (r->fallbackNotice) {
@@ -3346,6 +3401,18 @@ static QString physicalSubnet(const QString &kind)
         }
     }
     return QString();
+}
+
+QString AvpnEngineQml::ruSitesState() const
+{
+    return m_ruSentinel ? m_ruSentinel->sitesState() : QStringLiteral("unknown");
+}
+
+// The network chip (Scanner variant B): the radio generation of a cellular network, from the same inputs as
+// networkKind() and the path engine's network key ("" when the kind is not cellular or the generation is unknown).
+QString AvpnEngineQml::netRadio() const
+{
+    return avpn::cellularGenerationForKind(networkKind(), avpn::cellularGeneration());
 }
 
 avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const
@@ -11858,7 +11925,14 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
             m_engine.clearPin();
         if (p.persistPin)
             persistPin();
-        emit changed(); // scanSyncState: the tapped row ends failed, the live connection stays
+        // S1 (device round 5): the tapped row's request ends here - it never reached the owner, the live tunnel stays
+        if (m_exactRestoreArmed) {
+            m_exactRestoreArmed = false;
+            m_exactRow.clear();
+            syncChoice();
+        }
+        endScanRowRequest(nodeId, "seat_first_failed");
+        emit changed();
         return;
     }
     }
@@ -11934,6 +12008,15 @@ void AvpnEngineQml::syncStandbyCandidates()
     if (pack && avpn::upstreamNodesEnabled())
         c = avpn::standbyPackCandidates(*pack, m_engine.subscriptionNodes(), m_engine.upstreamRevision(),
                                         QDateTime::currentMSecsSinceEpoch(), avpn::upstreamStandbyMaxAgeSTuned());
+    // contract 1.14.0: the Scanner's offered profiles join the pool (pin / connect); Auto does not start them itself
+    if (avpn::upstreamNodesEnabled())
+        for (const avpn::SubscriptionNode &n : m_engine.scanOfferedNodes()) {
+            bool dup = false;
+            for (const avpn::SubscriptionNode &o : std::as_const(c))
+                dup = dup || o.nodeId == n.nodeId;
+            if (!dup)
+                c << n;
+        }
     m_engine.setStandbyCandidates(c);
 }
 

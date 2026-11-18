@@ -161,6 +161,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
     : QObject(parent), m_engine(d.engine), m_host(d.host), m_m(d.host ? d.host->knownCaps() : ScanHostCaps())
 {
     Q_ASSERT(m_engine);
+    m_fetchPoolOnOpen = d.fetchPoolOnOpen;
     if (d.store) {
         m_store = d.store;
     } else {
@@ -345,6 +346,9 @@ void TribeScanner::execute(const ScanAction &a)
     case ScanActionKind::ProbeLiveTunnel:
         doLiveProbe(a);
         break;
+    case ScanActionKind::RequestCandidates:
+        doCandidates(a);
+        break;
     // The only three that reach the tunnel (CONNECT-INVARIANTS §32): handed to the engine lane unchanged.
     case ScanActionKind::UserConnectForScan:
         emitLog(QStringLiteral("action user_connect_for_scan"));
@@ -448,6 +452,14 @@ void TribeScanner::refreshView()
         countries[i] = c;
     }
     bar.insert(QStringLiteral("countries"), countries);
+    QJsonArray scope = bar.value(QLatin1String("scope_countries")).toArray();
+    for (int i = 0; i < scope.size(); ++i) {
+        QJsonObject c = scope.at(i).toObject();
+        c.insert(QStringLiteral("name"), doctor::countryDisplayName(c.value(QLatin1String("cc")).toString(), lang));
+        scope[i] = c;
+    }
+    if (!scope.isEmpty())
+        bar.insert(QStringLiteral("scope_countries"), scope);
     j.insert(QStringLiteral("bar"), bar);
     j.insert(QStringLiteral("cooldown_ends_at_ms"), double(t < m_m.cooldownUntil() ? m_m.cooldownUntil() : 0));
     j.insert(QStringLiteral("next_change_at_ms"), double(v.nextChangeAtMs));
@@ -478,6 +490,7 @@ ScanNetwork TribeScanner::buildNetwork() const
     if (m_hostGenFolded)
         n.sources << m_hostGen;
     n.fingerprint = scanNetFingerprint(QLatin1String(scanNetKindName(f.kind)), n.key, f.gatewayHash);
+    n.radio = f.kind != ScanNetKind::Cellular ? QString() : !f.radio.isEmpty() ? f.radio : m_radio ? m_radio() : QString();
     return n;
 }
 
@@ -1799,6 +1812,60 @@ void TribeScanner::doOutcomes(const ScanAction &a)
     });
 }
 
+// POST /v1/scan/candidates (1.14.0): the scope's next batch; the provider rows' stub nodes go into the engine's pool
+// before the machine sees the rows (a tap pins them like any node).
+void TribeScanner::doCandidates(const ScanAction &a)
+{
+    const QString scope = a.scopeCountry.isEmpty() ? QStringLiteral("default")
+                          : a.scopeCountry == QLatin1String(kScanScopeWhitelist) ? QStringLiteral("whitelist")
+                                                                                 : QStringLiteral("country");
+    const QString country = scope == QLatin1String("country") ? a.scopeCountry : QString();
+    emitLog(QStringLiteral("action request_candidates scope=%1 country=%2 seen=%3 limit=%4")
+                .arg(scope, country.isEmpty() ? QStringLiteral("-") : country).arg(a.ids.size()).arg(a.batch));
+    const QString id = a.requestId;
+    QPointer<TribeScanner> self(this);
+    m_api->fetchCandidates(a.networkKey, scope, country, a.ids, a.batch, a.costBytes, [self, id](const ScanApiClient::Candidates &r) {
+        if (!self)
+            return;
+        if (r.ok) {
+            if (!r.view.providerNodes.isEmpty())
+                self->m_engine->offerScanNodes(r.view.providerNodes);
+            self->dispatch(self->m_m.candidatesReady(id, r.view, r.bytes, self->now()));
+        } else {
+            const QString reason = r.status == 404 ? QStringLiteral("unsupported") : r.reason; // the manifest answered: 404 = no endpoint
+            self->dispatch(self->m_m.candidatesUnavailable(id, reason, r.bytes, self->now()));
+        }
+    });
+}
+
+// GET /v1/scan/pool when the screen opens, at most every 10 minutes (the server allows 60 per hour): the scope menu
+// over the whole pool. Its few bytes go into the Scanner's ledger like any request outside a scan.
+void TribeScanner::fetchPoolIfStale()
+{
+    if (!m_fetchPoolOnOpen || m_poolUnsupported || m_serverOff || !m_api || !m_api->configured())
+        return;
+    const qint64 t = now();
+    if (m_poolAt >= 0 && t - m_poolAt < 10 * 60 * 1000)
+        return;
+    bool cellular = false;
+    const qint64 cost = m_m.tunables().costApiBytes;
+    if (!admitOutsideScan(cost, &cellular))
+        return;
+    m_poolAt = t;
+    QPointer<TribeScanner> self(this);
+    m_api->fetchPool(cost, [self, cellular](const ScanApiClient::Pool &p) {
+        if (!self)
+            return;
+        self->chargeOutsideScan(p.bytes, cellular);
+        if (p.ok)
+            self->dispatch(self->m_m.poolReady(p.view, self->now()));
+        else if (p.status == 404)
+            self->m_poolUnsupported = true;
+        else
+            self->m_poolAt = -1; // ask again at the next open
+    });
+}
+
 void TribeScanner::doLiveProbe(const ScanAction &a)
 {
     const ScanCurrent c = m_engine->current();
@@ -1891,6 +1958,7 @@ void TribeScanner::open(bool withCheck)
     o.connectOnOpen = m_connectOnOpen;
     m_lastNet = o.network;
     emitLog(QStringLiteral("open with_check=%1").arg(withCheck));
+    fetchPoolIfStale();
     dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now()));
     dispatch(m_m.opened(o, now()));
 }
@@ -1912,6 +1980,13 @@ void TribeScanner::connectAndScan()
 }
 void TribeScanner::gotIt() { dispatch(m_m.gotItTapped(now())); }
 void TribeScanner::chooseCountry(const QString &cc) { dispatch(m_m.filterChosen(cc, now())); }
+void TribeScanner::findMore(const QString &country)
+{
+    if (!m_enabled || m_serverOff)
+        return;
+    emitLog(QStringLiteral("find_more country=%1").arg(country.isEmpty() ? QStringLiteral("-") : country));
+    dispatch(m_m.moreTapped(country, now()));
+}
 void TribeScanner::tapRow(const QString &id) { dispatch(m_m.rowTapped(id, now())); }
 void TribeScanner::tapCheck() { dispatch(m_m.checkTapped(now())); }
 void TribeScanner::checkFromSupport()
@@ -2030,6 +2105,29 @@ bool TribeScanner::admitOutsideScan(qint64 cost, bool *cellularOut)
         return false;
     return true;
 }
+
+qint64 TribeScanner::raceBytesLeft()
+{
+    const qint64 t = now();
+    const ScanBudgetLedger &l = m_m.ledger();
+    qint64 left = -1;
+    if (m_lastNet.kind == ScanNetKind::Cellular)
+        left = qMax<qint64>(0, l.leftInHour(t, m_m.tunables().budgetCellularBytesPerHour, true));
+    const qint64 device = qint64(m_active.body.value(QLatin1String("device_budget")).toObject().value(QLatin1String("bytes_per_hour")).toDouble(0));
+    if (device > 0) {
+        const qint64 d = qMax<qint64>(0, l.leftInHour(t, device, false));
+        left = left < 0 ? d : qMin(left, d);
+    }
+    return left;
+}
+
+void TribeScanner::raceCharge(qint64 bytes)
+{
+    if (bytes > 0)
+        chargeOutsideScan(bytes, m_lastNet.kind == ScanNetKind::Cellular);
+}
+
+bool TribeScanner::hostScanRunning() const { return scanPhaseScanning(m_m.phase()) || !m_hostScans.isEmpty(); }
 
 void TribeScanner::chargeOutsideScan(qint64 bytes, bool cellular)
 {

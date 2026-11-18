@@ -278,6 +278,8 @@ struct ScanNetwork {
     QString key = QStringLiteral("unknown"); // openapi NetworkKey (UpstreamEngine.h::upstreamNetworkKey)
     QList<ScanNetSource> sources;
     QString fingerprint;
+    QString radio;                // cellular radio generation "5g" | "lte" | "3g" | "2g" ("" = unknown / not cellular);
+                                  // shown only (view.net_radio), never part of the network's identity
 
     QString generation() const { return scanNetGeneration(sources); }
     bool operator==(const ScanNetwork &o) const
@@ -343,6 +345,7 @@ struct ScanManifestNode {
     bool crowdWorks = false; // crowd_works (G4): «работает у других в вашей сети» - a mark only
     bool awgProbe = false;   // awg_probe (awg-probe-plan.md): the device's own peer is on this AWG node
     QString awgEchoTarget;   // awg_echo_target of this node ("" = the manifest-level value, if any)
+    double score = -1;       // /v1/scan/candidates (1.14.0): the crowd score on this network 0..1, -1 = none
 };
 
 // The host node id a probe's X-Tribe-Egress-Node must name for an own candidate: the part before ':'
@@ -375,6 +378,7 @@ struct ScanManifestUpstream {
     int legEntryPort = 0;
     bool dnsThroughLeg = false;
     int dnsResolvers = 0;     // resolvers the host must exercise through the leg
+    double score = -1;        // /v1/scan/candidates (1.14.0): the crowd score on this network 0..1, -1 = none
 };
 
 // The DNS plan of a single profile's projection (upstream_normalize.py `_projection`): legs [{tag, protocol,
@@ -519,6 +523,8 @@ inline bool scanManifestViewFromJson(const QJsonObject &o, ScanManifestView &out
         node.awgEchoTarget = n.value(QLatin1String("awg_echo_target")).toString();
         if (!scanIsIpLiteralLoose(node.awgEchoTarget))
             node.awgEchoTarget.clear();
+        if (n.value(QLatin1String("score")).isDouble())
+            node.score = qBound(0.0, n.value(QLatin1String("score")).toDouble(), 1.0);
         v.nodes << node;
     }
     for (const QJsonValue &uv : o.value(QLatin1String("upstream")).toArray()) {
@@ -548,6 +554,8 @@ inline bool scanManifestViewFromJson(const QJsonObject &o, ScanManifestView &out
         e.legsTotal = qMax(0, u.value(QLatin1String("legs_total")).toInt(0));
         e.hasProjection = u.value(QLatin1String("projection")).isObject();
         e.crowdWorks = u.value(QLatin1String("crowd_works")).toBool(false);
+        if (u.value(QLatin1String("score")).isDouble())
+            e.score = qBound(0.0, u.value(QLatin1String("score")).toDouble(), 1.0);
         if (e.hasProjection) {
             const ScanDnsPlan plan = scanDnsPlanOf(u.value(QLatin1String("projection")).toObject());
             e.legTag = plan.legTag;
@@ -561,6 +569,116 @@ inline bool scanManifestViewFromJson(const QJsonObject &o, ScanManifestView &out
     out = v;
     if (error)
         error->clear();
+    return true;
+}
+
+// --- /v1/scan/candidates and /v1/scan/pool (contract 1.14.0) ------------------------------------------------
+
+// One batch of a scope's rows the device has not seen in this scan (POST /v1/scan/candidates, signed with the
+// context "tribe-scan-candidates-v1"). Its node / upstream rows use the manifest's row shapes (+ score); each
+// provider row carries `node`, the exact stub SubscriptionNode the subscription would hold for it (the engine adds it
+// to its pool before a pin: IScanEngine::offerScanNodes).
+struct ScanCandidatesView {
+    QString networkKey;
+    QString scope;                 // default | country | whitelist
+    QString country;
+    qint64 upstreamRevision = 0;
+    bool exhausted = false;        // nothing of the scope is left beyond this batch and `seen`
+    QList<ScanManifestNode> nodes;
+    QList<ScanManifestUpstream> upstream;
+    QJsonArray providerNodes;      // the provider rows' `node` objects (SECRET-free stub nodes: no config)
+    QHash<int, int> freeSeats;     // provider tier -> probe seats free now
+};
+
+inline bool scanCandidatesFromJson(const QJsonObject &o, ScanCandidatesView &out, QString *error = nullptr)
+{
+    const auto fail = [error](const char *why) {
+        if (error)
+            *error = QLatin1String(why);
+        return false;
+    };
+    if (o.value(QLatin1String("type")).toString() != QLatin1String("scan_candidates"))
+        return fail("type");
+    if (o.value(QLatin1String("version")).toInt(-1) != 1)
+        return fail("version");
+    if (!o.value(QLatin1String("exhausted")).isBool() || !o.value(QLatin1String("nodes")).isArray()
+        || !o.value(QLatin1String("upstream")).isArray() || !o.value(QLatin1String("probe_seats")).isArray())
+        return fail("fields");
+    // The rows are the manifest's shapes: the manifest's parser reads them (one rule for both lists).
+    QJsonObject shim{{QStringLiteral("type"), QStringLiteral("scan_manifest")}, {QStringLiteral("version"), 1},
+                     {QStringLiteral("network_key"), o.value(QLatin1String("network_key")).toString()},
+                     {QStringLiteral("upstream_revision"), o.value(QLatin1String("upstream_revision")).toDouble(0)},
+                     {QStringLiteral("upstream_eligible"), true},
+                     {QStringLiteral("probe"), QJsonObject{{QStringLiteral("scheme"), QStringLiteral("tribe-probe-v1")}}},
+                     {QStringLiteral("scan_token"), QJsonObject{{QStringLiteral("token"), QString()}}},
+                     {QStringLiteral("nodes"), o.value(QLatin1String("nodes"))},
+                     {QStringLiteral("upstream"), o.value(QLatin1String("upstream"))}};
+    ScanManifestView v;
+    QString why;
+    if (!scanManifestViewFromJson(shim, v, &why))
+        return fail("rows");
+    ScanCandidatesView c;
+    c.networkKey = o.value(QLatin1String("network_key")).toString();
+    c.scope = o.value(QLatin1String("scope")).toString(QStringLiteral("default"));
+    c.country = o.value(QLatin1String("country")).toString().toUpper();
+    c.upstreamRevision = qint64(o.value(QLatin1String("upstream_revision")).toDouble(0));
+    c.exhausted = o.value(QLatin1String("exhausted")).toBool();
+    c.nodes = v.nodes;
+    c.upstream = v.upstream;
+    QSet<QString> kept;
+    for (const ScanManifestUpstream &u : c.upstream)
+        kept.insert(u.profileId);
+    for (const QJsonValue &uv : o.value(QLatin1String("upstream")).toArray()) {
+        const QJsonObject u = uv.toObject();
+        const QJsonObject node = u.value(QLatin1String("node")).toObject();
+        if (kept.contains(u.value(QLatin1String("profile_id")).toString()) && !node.isEmpty())
+            c.providerNodes << node;
+    }
+    for (const QJsonValue &sv : o.value(QLatin1String("probe_seats")).toArray()) {
+        const QJsonObject x = sv.toObject();
+        if (x.value(QLatin1String("tier")).isDouble())
+            c.freeSeats.insert(x.value(QLatin1String("tier")).toInt(), qMax(0, x.value(QLatin1String("free")).toInt(0)));
+    }
+    out = c;
+    if (error)
+        error->clear();
+    return true;
+}
+
+// GET /v1/scan/pool: per country how many own listeners and provider profiles this device can use (the whole pool,
+// not only the 24 stubs) and the white-list function's count. Counts only.
+struct ScanPoolView {
+    struct Country {
+        QString countryCode;
+        int own = 0;
+        int provider = 0;
+    };
+    QList<Country> countries;
+    int whitelist = 0;
+    qint64 upstreamRevision = 0;
+};
+
+inline bool scanPoolFromJson(const QJsonObject &o, ScanPoolView &out)
+{
+    if (o.value(QLatin1String("type")).toString() != QLatin1String("scan_pool") || o.value(QLatin1String("version")).toInt(-1) != 1
+        || !o.value(QLatin1String("countries")).isArray())
+        return false;
+    ScanPoolView p;
+    p.upstreamRevision = qint64(o.value(QLatin1String("upstream_revision")).toDouble(0));
+    for (const QJsonValue &cv : o.value(QLatin1String("countries")).toArray()) {
+        const QJsonObject c = cv.toObject();
+        const QString cc = c.value(QLatin1String("country_code")).toString().toUpper();
+        if (cc.size() != 2)
+            continue;
+        p.countries << ScanPoolView::Country{cc, qMax(0, c.value(QLatin1String("own")).toInt(0)),
+                                             qMax(0, c.value(QLatin1String("provider")).toInt(0))};
+    }
+    for (const QJsonValue &fv : o.value(QLatin1String("functions")).toArray()) {
+        const QJsonObject f = fv.toObject();
+        if (f.value(QLatin1String("kind")).toString() == QLatin1String("whitelist"))
+            p.whitelist += qMax(0, f.value(QLatin1String("provider")).toInt(0));
+    }
+    out = p;
     return true;
 }
 
@@ -622,6 +740,7 @@ struct ScanCandidate {
     bool freshFailure = false;
     bool lastKnownGood = false; // network memory: first inside its tier (never across tiers)
     bool crowdWorks = false;  // a mark for the row only: never order, never verdict
+    double score = -1;        // the server's crowd score of a /v1/scan/candidates row (0..1, -1 = none): its order only
     bool dnsThroughLeg = false; // provider single: the DNS plan routes every resolver through the leg
     int dnsResolvers = 0;
     bool followUp = false;    // a full probe scheduled to confirm a provider leg whose DNS plan was not proven

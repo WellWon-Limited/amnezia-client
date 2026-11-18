@@ -6,6 +6,9 @@
 
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
+// The facade offers the race's probe-host hooks (attachPathProber / pathProbeResult): coreController.cpp wires
+// ScanPathProber only when this is defined.
+#define AVPN_PATH_PROBER_FACADE 1
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
@@ -144,6 +147,10 @@ class AvpnEngineQml : public QObject {
     // Path engine (design 2026-11-17): "checked N of M" of the attempt in progress (0/0 = no walk) - the caption
     // under the orb.
     Q_PROPERTY(int attemptChecked READ attemptChecked NOTIFY changed)
+    // Scanner variant B: the background RU-sites check for the home banner - "ok" | "bad" | "unknown".
+    Q_PROPERTY(QString ruSitesState READ ruSitesState NOTIFY changed)
+    // The radio generation of a cellular network ("5g" | "lte" | "3g" | "2g"; "" otherwise), from networkKind()'s inputs.
+    Q_PROPERTY(QString netRadio READ netRadio NOTIFY changed)
     Q_PROPERTY(int attemptTotal READ attemptTotal NOTIFY changed)
     Q_PROPERTY(QVariantList nodePool READ nodePool NOTIFY changed)
     // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
@@ -418,6 +425,8 @@ public:
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
     int attemptChecked() const { return m_engine.attemptChecked(); }
+    QString ruSitesState() const;
+    QString netRadio() const;
     int attemptTotal() const { return m_engine.attemptTotal(); }
     QVariantList nodePool() const;
     // The signal a node shows on the Connect card and in its server list row - one rule (NodeRanking.h::nodeFigure):
@@ -926,6 +935,12 @@ public:
     // the support report queue, then the coordinator itself (owned by this engine from here on).
     IScanEngine *scanEngine();
     IScanHost *scanHost();
+    // Path engine stage 2: the platform's race probe host (coreController.cpp makes ScanPathProber over the Scanner's
+    // pipeline; none = stage-1 behaviour) with the Scanner's one byte ledger (bytes left / charge), and its results.
+    // GUI thread. A result carries the race's stamp (race, network generation, probe): one of an older race, an older
+    // network or a cancelled probe is dropped by the race itself.
+    void attachPathProber(path::IPathProber *prober, std::function<qint64()> bytesLeft, std::function<void(qint64)> charge);
+    void pathProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent);
     void setScanHostFactory(const ScanHostCaps &caps, std::function<IScanHost *()> make);
     void attachSupport(TribeSupportChat *support);
     void attachScanner(TribeScanner *scanner);
@@ -1060,6 +1075,7 @@ private:
     bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
     QString m_exactRestorePin;         // R3: the choice before it
     void endExactRowRequest(bool connected);
+    void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож

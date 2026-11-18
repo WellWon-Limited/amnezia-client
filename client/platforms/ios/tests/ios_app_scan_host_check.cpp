@@ -56,9 +56,9 @@ static void testCaps()
     const ScanHostCaps c = iosAppScanKnownCaps();
     const ScanHostCaps e = iosScanKnownCaps();
     check(!c.needsVpn && e.needsVpn, "in-app needs no tunnel; the extension does");
-    check(c.maxFullConcurrent == e.maxFullConcurrent && c.maxLegConcurrent == e.maxLegConcurrent
-              && c.maxAwgConcurrent == e.maxAwgConcurrent && c.platform == e.platform,
-          "same engine pools as the extension");
+    check(c.maxFullConcurrent == kIosAppMaxFull && e.maxFullConcurrent == 1 && c.canVerifyComposite && !e.canVerifyComposite
+              && c.maxLegConcurrent == e.maxLegConcurrent && c.platform == QLatin1String("ios-app"),
+          "the app's own pools: several full probes, composites; the extension keeps one");
 
     const QByteArray goCaps = R"({"type":"scan_caps","version":"tribe-scan-v1","kinds":["xray_full","xray_leg","awg_mini"],"max_full_concurrent":1,"max_leg_concurrent":6,"max_awg_concurrent":2,"can_verify_composite":false,"dns_plan":true,"reach_stage":true,"needs_vpn":true,"platform":"ios","mem_mb":40})";
     const QByteArray d = iosAppScanDecorateCaps(goCaps);
@@ -197,6 +197,11 @@ static void testHostOptions()
     check(!poll.contains(QLatin1String("bind_interface_index")) && !poll.contains(QLatin1String("gen"))
               && poll.value(QLatin1String("host_epoch")).toInt() == 5,
           "other options: epoch only when no gen is known");
+    const QJsonObject lim = start.value(QLatin1String("platform_limits")).toObject();
+    check(lim.value(QLatin1String("max_full")).toInt() == kIosAppMaxFull && lim.value(QLatin1String("max_instances")).toInt() == kIosAppMaxInstances
+              && lim.value(QLatin1String("can_verify_composite")).toBool() && !lim.value(QLatin1String("needs_vpn")).toBool(true)
+              && poll.contains(QLatin1String("platform_limits")),
+          "every message carries the app's pools (engine patch 0014)");
     check(scanDecodeReply(iosAppScanLivePeerUnknownReply()).detail == QLatin1String("awg_live_peer_unknown"),
           "live-peer refusal is the extension's code (the coordinator's retry without AWG)");
     check(scanDecodeReply(iosAppScanNoPathReply()).error == ScanHostError::BadRequest, "no-path refusal = bad_request");

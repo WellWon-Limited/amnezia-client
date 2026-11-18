@@ -8,6 +8,7 @@
 #include "../GoodputProbe.h"
 #include "../HealthLoop.h"
 #include "../MtprotoProbe.h"
+#include "../Prober.h" // came in through Selector.h before it was removed
 #include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
 #include "../SubscriptionRequest.h"

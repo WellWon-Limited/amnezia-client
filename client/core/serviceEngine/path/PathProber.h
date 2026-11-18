@@ -24,6 +24,10 @@ class IPathProber {
 public:
     virtual ~IPathProber() = default;
     virtual ProberCaps caps() const = 0;
+    // Optional warm-up (no result): the engine calls it when the prober is attached, when the network generation
+    // changes and at every tap before a race - the host's caps and the probe session of this network can be fetched
+    // ahead, so the adapter needs no timer of its own. Idempotent; never touches the tunnel.
+    virtual void prepare(const NetworkKey &net) { Q_UNUSED(net) }
     virtual void start(const ProbeStamp &stamp, const PathCandidate &path, int timeoutMs) = 0;
     virtual void cancel(const ProbeStamp &stamp) = 0;
 };

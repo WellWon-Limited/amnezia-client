@@ -3,6 +3,12 @@
 #include <QDirIterator>
 #include <QTranslator>
 #include <QTimer>
+#ifdef AVPN_DEV_TOOLS // AVPN: development-build flag overrides (Documents/tribe-dev-flags.json)
+    #include <QFile>
+    #include <QJsonDocument>
+    #include <QJsonObject>
+    #include <QStandardPaths>
+#endif
 
 #include "core/utils/selfhosted/sshSession.h"
 #include "core/controllers/selfhosted/installController.h"
@@ -22,6 +28,9 @@
     #include "core/serviceEngine/AvpnIntentBridge.h" // AVPN (Task E): консьюмер «намерений» App Intent авто-паузы
     #include "core/serviceEngine/TribeHaptics.h" // AVPN (haptics): тактильный отклик → QML
     #include "core/serviceEngine/TribeScanner.h" // AVPN Scanner (lane L6b): the coordinator «Сканер» → QML
+    #include "core/serviceEngine/ScanPathProberApi.h" // AVPN path engine stage 2: the race's probe host
+    #include "core/serviceEngine/TribeNetInfo.h"      // AVPN: avpn::cellularGeneration (the Scanner's net_radio)
+    #include "core/serviceEngine/TuningStore.h"       // AVPN: development-build flag overrides
     #if defined(Q_OS_IOS)
         #include "core/serviceEngine/IosScanHost.h" // AVPN Scanner (lane L4): the probe host in the tunnel extension
         #if defined(AVPN_IOS_APP_SCAN_HOST)
@@ -290,6 +299,22 @@ void CoreController::initControllers()
     // owned by the engine). It reaches the tunnel only through the engine's three guarded paths; its report
     // check goes into TribeSupport's queue. Switch features.scanner absent = nothing of it runs.
     avpnEngine->attachSupport(tribeSupport); // AVPN
+#ifdef AVPN_DEV_TOOLS
+    // AVPN (development builds only): Documents/tribe-dev-flags.json {"path_race": true, ...} forces client flags over
+    // the server's (TuningStore.h), e.g. the probe race whose server switch is off.
+    {
+        QFile f(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QStringLiteral("/tribe-dev-flags.json"));
+        if (f.open(QIODevice::ReadOnly)) {
+            QMap<QString, bool> flags;
+            const QJsonObject o = QJsonDocument::fromJson(f.read(16384)).object();
+            for (auto it = o.constBegin(); it != o.constEnd(); ++it)
+                if (it.value().isBool())
+                    flags.insert(it.key(), it.value().toBool());
+            avpn::TuningStore::setDevFlags(flags);
+            qWarning() << "[avpn dev] client flags forced by the control file:" << flags.keys();
+        }
+    }
+#endif
     installScanHost(avpnEngine);             // AVPN
     {
         avpn::TribeScanner::Deps scanDeps; // AVPN
@@ -297,9 +322,28 @@ void CoreController::initControllers()
         scanDeps.host = avpnEngine->scanHost();
         auto *tribeScanner = new avpn::TribeScanner(scanDeps, avpnEngine);
         avpnEngine->attachScanner(tribeScanner);
+        tribeScanner->setRadioSource([]() { return avpn::cellularGeneration(); }); // view.net_radio (the engine's source)
         setQmlContextProperty("TribeScanner", tribeScanner);
 #if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)
         avpn::IosHybridScanHost::installAutorun(tribeScanner); // AVPN: debug run without UI taps (control file)
+#endif
+#if defined(AVPN_PATH_PROBER_FACADE) && ((defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)) \
+    || (!defined(Q_OS_IOS) && !defined(Q_OS_ANDROID) && !defined(MACOS_NE)))
+        // AVPN path engine stage 2: the race's probe host over the Scanner's pipeline (ScanPathProber.h) - iOS only with
+        // the in-app host (a race before a tunnel needs it), macOS / Windows over the service's host; elsewhere none
+        // (the engine keeps stage-1 behaviour). The facade's hooks come with AVPN_PATH_PROBER_FACADE (AvpnEngineQml.h).
+        {
+            auto *prober = new avpn::ScanPathProber(avpnEngine->scanHost(), avpnEngine->scanEngine(), nullptr, avpnEngine);
+            prober->adoptApi(std::make_unique<avpn::ScanApiRaceApi>(tribeScanner->api(), avpnEngine->scanEngine()));
+            prober->hostBusy = [tribeScanner]() { return tribeScanner->hostScanRunning(); };
+            prober->chargeApiBytes = [tribeScanner](qint64 bytes) { tribeScanner->raceCharge(bytes); };
+            prober->log = [](const QString &line) { qInfo().noquote() << "[avpn race]" << line; };
+            prober->onResult = [avpnEngine](const avpn::path::ProbeStamp &stamp, avpn::path::PathOutcome outcome, qint64 bytes) {
+                avpnEngine->pathProbeResult(stamp, outcome, bytes);
+            };
+            avpnEngine->attachPathProber(prober, [tribeScanner]() { return tribeScanner->raceBytesLeft(); },
+                                         [tribeScanner](qint64 bytes) { tribeScanner->raceCharge(bytes); });
+        }
 #endif
     }
 

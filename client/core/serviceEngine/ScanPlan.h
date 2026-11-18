@@ -8,8 +8,8 @@
 // order, the order-only candidates («Не проверено»), the concurrency of each probe pool, the projection of
 // bytes. Rules (each one a test in tests/scan_core_check.cpp):
 //  - Never the current node (it is judged by the live tunnel). Never a node the manifest does not list for
-//    this network, a manual_only or RU node, a node without an exact tunnel config, a node outside a
-//    restricting country.
+//    this network, an RU node, a node without an exact tunnel config, a node outside a restricting country.
+//    manual_only nodes ARE probed (18.11): the connect engine decides on its own when it may use one.
 //  - Probe kind per candidate, by host capability (ScanTypes.h ScanHostCaps):
 //      own Xray path        -> xray_leg when the host has legs (one outbound by construction: the leg IS the
 //                              path), else xray_full (XrayConfigBuilder::coreConfig), else order only;
@@ -73,6 +73,13 @@ struct ScanPlanInput {
     QSet<QString> freshFailures;            // engine node ids
     QString lastKnownGood;                  // engine node id proven on this network (the path engine's ledger)
     QString restrictCountry;                // empty = every country
+    QSet<QString> skip;                     // «Найти ещё»: ids already judged on this network (excluded "shown")
+    int maxProbe = 0;                       // «Найти ещё»: at most this many probed candidates (0 = all); the rest
+                                            // is counted in ScanPlan::remaining
+    bool interleave = false;                // own and provider candidates alternate (also for hosts other than the app)
+    bool onlyWhitelist = false;             // the white-list scope: only provider rows of kind whitelist
+    bool scoreOrder = false;                // a /v1/scan/candidates batch: the server's order - crowd score first across
+                                            // tiers (own and provider mixed), then tier and rank (contract 1.14.0)
     QMap<QString, QString> upstreamNames;   // profile_id -> display name (UpstreamNode.h::upstreamDisplayName)
     bool awgMiniEnabled = false;            // features.scanner_awg_mini (scanAwgMiniFlag), compiled default off
     bool awgProbeIpKnown = false;           // the app resolved the API's IP (the RU-split carve-out set)
@@ -103,6 +110,7 @@ struct ScanPlan {
     int legConcurrency = 0;
     int awgConcurrency = 0;
     qint64 projectedBytes = 0;
+    int remaining = 0;               // probed candidates cut by maxProbe (the next batch's)
 
     int concurrencyFor(ScanProbeKind k) const
     {
@@ -146,6 +154,18 @@ inline bool scanCandidateLess(const ScanCandidate &a, const ScanCandidate &b)
     return a.id < b.id;
 }
 
+// The order of a /v1/scan/candidates batch (contract 1.14.0): rows with a crowd score first, higher first, across
+// tiers; then the D9 order (tier, last-known-good, fresh failure, rank, id).
+inline bool scanCandidateScoreLess(const ScanCandidate &a, const ScanCandidate &b)
+{
+    const bool as = a.score >= 0, bs = b.score >= 0;
+    if (as != bs)
+        return as;
+    if (as && a.score != b.score)
+        return a.score > b.score;
+    return scanCandidateLess(a, b);
+}
+
 // The candidate a full-profile follow-up probes (D8): same identity, kind xray_full, no reach stage, its
 // own probe id so its host item never mixes with the leg's.
 inline ScanCandidate scanFollowUpOf(const ScanCandidate &leg, const ScanTunables &t)
@@ -161,6 +181,32 @@ inline ScanCandidate scanFollowUpOf(const ScanCandidate &leg, const ScanTunables
 inline QString scanProbeIdOf(const ScanCandidate &c)
 {
     return c.followUp ? c.id + QStringLiteral("#full") : c.id;
+}
+
+// The app host's order (owner's review 18.11: «большая часть нод наша, а не all vpn»): own and provider candidates
+// alternate, each side in its own D9 order, the last-known-good candidate first whatever its side - so a short scan
+// and the 8 s stop see both kinds. Only for the in-app iOS host (several full-profile probes at once); every other
+// host keeps the tier order.
+inline bool scanPlanInterleaves(const ScanHostCaps &caps) { return caps.platform == QLatin1String("ios-app"); }
+
+inline QList<ScanCandidate> scanInterleaveOrigins(const QList<ScanCandidate> &sorted)
+{
+    QList<ScanCandidate> own, up, out;
+    for (const ScanCandidate &c : sorted) {
+        if (c.lastKnownGood)
+            out << c;
+        else if (c.origin == ScanOrigin::Upstream)
+            up << c;
+        else
+            own << c;
+    }
+    for (int i = 0; i < qMax(own.size(), up.size()); ++i) {
+        if (i < own.size())
+            out << own.at(i);
+        if (i < up.size())
+            out << up.at(i);
+    }
+    return out;
 }
 
 inline ScanPlan buildScanPlan(const ScanPlanInput &in)
@@ -196,14 +242,24 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             exclude(mn.nodeId, "current");
             continue;
         }
+        if (in.skip.contains(mn.nodeId)) {
+            exclude(mn.nodeId, "shown");
+            continue;
+        }
+        if (in.onlyWhitelist) {
+            exclude(mn.nodeId, "scope");
+            continue;
+        }
         const auto it = pool.constFind(mn.nodeId);
         if (it == pool.constEnd()) {
             exclude(mn.nodeId, "not_in_pool");
             continue;
         }
         const ScanOwnNode &n = it.value();
-        if (n.manualOnly || n.ru) {
-            exclude(n.nodeId, n.ru ? "ru" : "manual_only");
+        // A manual_only node IS probed (owner, 18.11: the server marks it for the AWG mini-probe and probing is cheap);
+        // whether the connect may use it is the connect engine's own rule. RU nodes are never a VPN exit.
+        if (n.ru) {
+            exclude(n.nodeId, "ru");
             continue;
         }
         if (!n.configAvailable) {
@@ -224,6 +280,7 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
         c.tier = 0;
         c.rank = mn.rank;
         c.crowdWorks = mn.crowdWorks;
+        c.score = mn.score;
         c.entryIp = n.entryIp;
         c.entryPort = n.entryPort;
         c.freshFailure = in.freshFailures.contains(c.id);
@@ -268,6 +325,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
                 exclude(id, "current");
                 continue;
             }
+            if (in.skip.contains(id)) {
+                exclude(id, "shown");
+                continue;
+            }
             // The provider's own balancer is an Auto candidate only, never a Scanner row (contract 1.10.0; the
             // server omits it from the manifest - a safeguard, also for an older server's countryless entry).
             if (!upstreamKindListed(upstreamRowKind(u.kind, u.countryCode))) {
@@ -276,6 +337,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             }
             if (!countryOk(u.countryCode)) {
                 exclude(id, "country");
+                continue;
+            }
+            if (in.onlyWhitelist && u.kind != UpstreamKind::Whitelist) {
+                exclude(id, "scope");
                 continue;
             }
             ScanCandidate c;
@@ -291,6 +356,7 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             c.composite = u.composite;
             c.trimmed = u.trimmed;
             c.crowdWorks = u.crowdWorks;
+            c.score = u.score;
             c.freshFailure = in.freshFailures.contains(c.id);
             c.lastKnownGood = !in.lastKnownGood.isEmpty() && c.id == in.lastKnownGood;
             c.needsLease = true;
@@ -313,8 +379,14 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
         }
     }
 
-    std::stable_sort(p.probe.begin(), p.probe.end(), scanCandidateLess);
-    std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), scanCandidateLess);
+    std::stable_sort(p.probe.begin(), p.probe.end(), in.scoreOrder ? scanCandidateScoreLess : scanCandidateLess);
+    std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), in.scoreOrder ? scanCandidateScoreLess : scanCandidateLess);
+    if (!in.scoreOrder && (in.interleave || scanPlanInterleaves(caps)))
+        p.probe = scanInterleaveOrigins(p.probe);
+    if (in.maxProbe > 0 && p.probe.size() > in.maxProbe) {
+        p.remaining = int(p.probe.size()) - in.maxProbe;
+        p.probe = p.probe.mid(0, in.maxProbe);
+    }
 
     // Reach offsets with the per-entry-IP spacing (R8). Provider full probes and AWG sessions have none
     // (a whole profile is dialled by its own routing; AmneziaWG is UDP: its handshake is its reach).

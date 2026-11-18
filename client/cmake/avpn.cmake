@@ -123,6 +123,8 @@ list(APPEND HEADERS
     ${AVPN_SE}/IScanHost.h
     ${AVPN_SE}/ScanApiClient.h
     ${AVPN_SE}/TribeScanner.h
+    ${AVPN_SE}/ScanPathProber.h
+    ${AVPN_SE}/ScanPathProberApi.h
 )
 
 set(AVPN_ENGINE_SRC
@@ -160,6 +162,8 @@ set(AVPN_ENGINE_SRC
     ${AVPN_SE}/UpstreamLeaseClient.cpp
     ${AVPN_SE}/ScanApiClient.cpp
     ${AVPN_SE}/TribeScanner.cpp
+    ${AVPN_SE}/ScanPathProber.cpp
+    ${AVPN_SE}/ScanPathProberApi.cpp
 )
 list(APPEND SOURCES ${AVPN_ENGINE_SRC})
 

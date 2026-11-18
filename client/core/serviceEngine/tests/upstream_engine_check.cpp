@@ -1679,11 +1679,56 @@ static void ownerSeatModel()
     CHECK(releases > 100 && reuses == 0);
 }
 
+// Contract 1.14.0: a provider row of a Scanner batch beyond the 24 delivered stubs - offered, pinned (an exact Scanner
+// row), connected through the attempt owner, stopped; Auto never starts it on its own; a revision change drops it.
+static void scanOfferedRows()
+{
+    TuningStore::set({}, {{QStringLiteral("upstream_nodes"), true}, {QStringLiteral("xray_client"), true}}, {}, {});
+    ServiceEngine e;
+    FakeTunnel tun;
+    e.setTunnel(&tun);
+    QString err;
+    CHECK(e.loadSubscription(body(realisticPool()), err));
+    path::NetworkObservation home;
+    home.medium = path::NetMedium::Wifi;
+    home.gateway = QStringLiteral("192.168.3.1");
+    e.observeNetwork(home);
+    const QString offered = QStringLiteral("up:ccccccccccccccc9");
+    CHECK(e.offerScanNodes(QJsonArray{ stubNode("ccccccccccccccc9", 1, 0, sha64('c'), "CH"),
+                                       stubNode("aaaaaaaaaaaaaaa0", 1, 0) /* delivered already: not offered */ }) == 1);
+    e.setStandbyCandidates(e.scanOfferedNodes());
+    CHECK(e.nodeById(offered) && e.nodeById(offered)->upstream->scanOffered);
+    // Auto does not start it on its own: the delivered candidates bound Auto
+    for (const path::PathCandidate &c : e.pathPoolForTest())
+        CHECK(c.id.id != offered);
+    // an exact Scanner row: the one path, through the owner
+    e.setUserChoice(path::UserChoice::exactPath(offered));
+    CHECK(e.connect(err) && tun.ups == QStringList{ offered });
+    const path::PathId id = path::derivePathId(*e.nodeById(offered));
+    CHECK(id.id == offered && !id.revision.isEmpty()); // a provider path like any other
+    e.requestStop();
+    e.onTunnelDisconnected(); // the facade's stop confirmed
+    CHECK(!e.attemptRunning());
+    // capped, deduplicated, newest win
+    QJsonArray many;
+    for (int i = 0; i < 60; ++i)
+        many << stubNode(QStringLiteral("d%1").arg(i, 15, 10, QLatin1Char('0')), 1, i, sha64('d'), "NL");
+    CHECK(e.offerScanNodes(many) == ServiceEngine::kMaxScanOffered);
+    // a new upstream revision drops every offered row
+    QJsonArray next = realisticPool();
+    next << awgNode("4", 4, "LV"); // a new pool body with a new upstream revision
+    CHECK(e.reseedPool(parse(body(next, 2, 1763117000999.0))) == ReseedResult::Applied);
+    CHECK(e.upstreamRevision() == qint64(1763117000999.0));
+    CHECK(e.scanOfferedNodes().isEmpty());
+    TuningStore::set({}, {}, {}, {});
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     earlyRefusals();
+    scanOfferedRows();
     quitEndsUpstreamSession();
     picker16AndNotices();
     flagOffIdentical();

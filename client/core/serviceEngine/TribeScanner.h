@@ -84,6 +84,7 @@
 #include <QVariantMap>
 
 #include <functional>
+#include <QJsonArray>
 #include <memory>
 
 class QNetworkAccessManager;
@@ -97,6 +98,8 @@ struct ScanNetFacts {
     QString reportingKey = QStringLiteral("unknown"); // upstreamNetworkKey(...): the only key that leaves the device
     QString gatewayHash;                               // optional local hash of gateway / subnet ("" = none)
     QList<ScanNetSource> appSources;                   // the app process's path monitor element(s)
+    QString radio;                                     // cellular radio generation: "5g" | "lte" | "3g" | "2g" | ""
+                                                       // (the engine's own network observation; display only)
 };
 
 // The AmneziaWG mini-session input of ONE own AWG node, from the engine (plan awg-probe-plan.md §3): the
@@ -165,6 +168,15 @@ public:
     {
         Q_UNUSED(nodeId);
         return {};
+    }
+    // Contract 1.14.0: the stub nodes of a /v1/scan/candidates batch's provider rows (each the exact SubscriptionNode
+    // the subscription would carry: no config, a lease grants its seat). The engine adds them to its pool the way it
+    // adds standby-pack entries, BEFORE any row of the batch can be tapped, so a tap pins and connects a profile that is
+    // not one of the device's 24 stubs. Called on the GUI thread when the batch arrives; the default (an engine
+    // without the hook) adds nothing - such a row then fails its connect as an unknown node.
+    virtual void offerScanNodes(const QJsonArray &subscriptionNodes)
+    {
+        Q_UNUSED(subscriptionNodes);
     }
     // The ONLY three ways to the tunnel (CONNECT-INVARIANTS §32).
     virtual void userConnectForScan() = 0;
@@ -256,6 +268,7 @@ public:
         IScanClock *clock = nullptr;  // null = the system clock pair
         IScanTimer *timer = nullptr;  // null = one QTimer
         IScanResolver *resolver = nullptr; // null = QHostInfo
+        bool fetchPoolOnOpen = true;  // GET /v1/scan/pool when the screen opens (contract 1.14.0; off in byte-exact tests)
     };
     explicit TribeScanner(const Deps &deps, QObject *parent = nullptr);
     ~TribeScanner() override;
@@ -285,6 +298,10 @@ public:
     Q_INVOKABLE void connectAndScan();
     Q_INVOKABLE void gotIt();
     Q_INVOKABLE void chooseCountry(const QString &cc);
+    // «Найти ещё»: the next batch of this network's candidates not judged yet (country "" = the whole pool, else a
+    // scan of that country over the whole pool). The view says more_available / batch / more_country
+    // (ScanMachine::moreTapped).
+    Q_INVOKABLE void findMore(const QString &country = QString());
     Q_INVOKABLE void tapRow(const QString &id);
     Q_INVOKABLE void tapCheck();
     // Support's «Проверить подключение и отправить отчёт» (variant B, 18.11): the same check without the Scanner
@@ -332,6 +349,18 @@ public:
     int pollsActive() const;
     // Settlement records still kept (invariant 2): 0 once every host scan is settled and every message for it answered.
     int hostRecords() const { return int(m_records.size()); }
+
+    // The path race's share of the Scanner (ScanPathProber.h): one byte ledger and one host scan at a time.
+    // raceBytesLeft: what may still be spent now (-1 = no cap: no cellular cap applies and no device budget);
+    // raceCharge: real bytes of the race's probes and server calls into the same ledger; hostScanRunning: the
+    // Scanner's own scan holds the probe host (a race waits).
+    // The cellular radio generation for view.net_radio ("5g" | "lte" | "3g" | "2g" | ""): the same platform source the
+    // engine reports (TribeNetInfo.h avpn::cellularGeneration), set by the app wiring; unset = none. Used only when
+    // the engine's own ScanNetFacts.radio is empty and the network is cellular.
+    void setRadioSource(std::function<QString()> radio) { m_radio = std::move(radio); }
+    qint64 raceBytesLeft();
+    void raceCharge(qint64 bytes);
+    bool hostScanRunning() const;
     // Journal sink: one line per event / action kind (never secrets or hosts). Default qInfo "[scanner]".
     std::function<void(const QString &)> log;
     // Taps (tests): every machine event a host reply or a held host message caused, with the scan it acts on (its
@@ -522,6 +551,8 @@ private:
     void doRelease(const ScanAction &a);
     void doOutcomes(const ScanAction &a);
     void doLiveProbe(const ScanAction &a);
+    void doCandidates(const ScanAction &a);
+    void fetchPoolIfStale();
     void doLight(const ScanAction &a);
     void doShade(const ShadeRequest &r);
     void applyShadeStep(const ShadeStep &s);
@@ -562,6 +593,9 @@ private:
     bool m_serverOff = false;   // a scan endpoint answered 404 (the server's switch): nothing requested until the switches change
 
     ScanNetwork m_lastNet;
+    qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
+    bool m_poolUnsupported = false;  // an older server: no pool endpoint
+    bool m_fetchPoolOnOpen = true;
     bool m_hostGenFolded = false;
     ScanNetSource m_hostGen;
     QList<ScanNetSource> m_hostGenLeft; // monitor starts (source + epoch) the host element moved away from (<= 8)
@@ -589,6 +623,7 @@ private:
     bool m_speedBusy = false;
     QString m_speedToken;                    // SECRET: a token fetched for the speed sample alone
     qint64 m_speedTokenExpiresAtMs = 0;
+    std::function<QString()> m_radio;
     QHash<QString, HostScan> m_hostScans;    // host scan id -> its state
     QHash<QString, Lease> m_leases;          // candidate id -> its probe lease
     QString m_lightReqId;

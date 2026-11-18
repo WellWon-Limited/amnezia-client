@@ -7,6 +7,9 @@
 #include "path/PathId.h"
 
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDebug>
 #include <QTimeZone>
 #include <algorithm>
@@ -173,6 +176,50 @@ void ServiceEngine::rebuildCandidates()
     }
 }
 
+int ServiceEngine::offerScanNodes(const QJsonArray &nodes)
+{
+    const qint64 rev = upstreamRevision();
+    if (rev != m_scanOfferedRevision) {
+        m_scanOffered.clear();
+        m_scanOfferedRevision = rev;
+    }
+    if (rev <= 0 || nodes.isEmpty())
+        return int(m_scanOffered.size());
+    // The subscription's own parser, with the revision in force: the same validation as a delivered stub.
+    const QJsonObject body{ { QStringLiteral("version"), 1 }, { QStringLiteral("upstream_revision"), double(rev) },
+                            { QStringLiteral("nodes"), nodes } };
+    Subscription parsed;
+    QString err;
+    if (!SubscriptionParser::parse(QJsonDocument(body).toJson(QJsonDocument::Compact), parsed, err))
+        return int(m_scanOffered.size());
+    for (SubscriptionNode n : parsed.nodes) {
+        if (!isUpstreamNode(n))
+            continue; // only provider stubs: our own nodes come with the subscription
+        bool delivered = false;
+        for (const SubscriptionNode &p : m_pool.nodes())
+            delivered = delivered || p.nodeId == n.nodeId;
+        if (delivered)
+            continue;
+        n.upstream->scanOffered = true;
+        for (int i = int(m_scanOffered.size()) - 1; i >= 0; --i)
+            if (m_scanOffered.at(i).nodeId == n.nodeId)
+                m_scanOffered.removeAt(i);
+        m_scanOffered << n;
+    }
+    while (m_scanOffered.size() > kMaxScanOffered)
+        m_scanOffered.removeFirst();
+    return int(m_scanOffered.size());
+}
+
+QList<SubscriptionNode> ServiceEngine::scanOfferedNodes()
+{
+    if (upstreamRevision() != m_scanOfferedRevision) {
+        m_scanOffered.clear();
+        m_scanOfferedRevision = upstreamRevision();
+    }
+    return m_scanOffered;
+}
+
 void ServiceEngine::setStandbyCandidates(const QList<SubscriptionNode> &nodes)
 {
     // The node the session runs on keeps its record while it runs (identity for health and leave).
@@ -261,6 +308,10 @@ QList<path::PathCandidate> ServiceEngine::pathPool() const
         if (!isSupportedProtoNode(n) || healthAggregate(n) <= 0.0)
             continue;
         if (!autoXray && isXrayProto(protoOf(n)))
+            continue;
+        // Contract 1.14.0: a scan-offered profile is a path only when the person chose it (exact row or preferred
+        // server); Auto keeps to the delivered stubs.
+        if (n.upstream.has_value() && n.upstream->scanOffered && !m_choice.pathIds.contains(n.nodeId))
             continue;
         out << path::pathCandidateFromNode(n);
     }
@@ -415,6 +466,8 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
                        .arg(m_net.current().generation));
     if (m_race.running())
         applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
+    if (m_prober && m_net.current().usable())
+        m_prober->prepare(m_net.current()); // the host warms up for the new network (caps, probe session)
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -436,6 +489,7 @@ bool ServiceEngine::raceAllowed() const
 
 void ServiceEngine::beginRaceForTap()
 {
+    m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
     path::SelectInput in;

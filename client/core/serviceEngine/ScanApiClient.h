@@ -122,6 +122,7 @@ public:
 };
 
 inline constexpr char kScanManifestSigContext[] = "tribe-scan-manifest-v1";
+inline constexpr char kScanCandidatesSigContext[] = "tribe-scan-candidates-v1"; // POST /v1/scan/candidates (1.14.0)
 inline constexpr char kScanManifestStorePrefix[] = "scan-manifests/";
 
 // The store key of a network's manifest (16 hex of sha256 of the network key: no network key in a file name).
@@ -177,6 +178,31 @@ public:
     QString storedTunnelBase(const QString &networkKey) const;
     // Stored copies older than a newer upstream_revision of a subscription / renewal answer are dropped.
     void dropManifestsBelowRevision(qint64 revision);
+
+    // --- the whole pool (contract 1.14.0) ----------------------------------------------------------------------
+    // GET /v1/scan/pool: counts per country / function. ok false: reason scanner_off (404) | not_entitled |
+    // over_quota | rate_limited | unsupported (an older server: 404 is read as the switch, so the caller keeps its
+    // local menu) | transport | invalid.
+    struct Pool {
+        bool ok = false;
+        QString reason;
+        ScanPoolView view;
+        qint64 bytes = 0;
+        int status = 0;
+    };
+    void fetchPool(qint64 costBytes, std::function<void(const Pool &)> done);
+    // POST /v1/scan/candidates: one signed batch of a scope's rows not in `seen` (scope "default" | "country" |
+    // "whitelist"; country with "country" only; limit 1..24). ok false: the same reasons (+ invalid for a bad answer
+    // or a signature that fails: nothing of it is used).
+    struct Candidates {
+        bool ok = false;
+        QString reason;
+        ScanCandidatesView view;
+        qint64 bytes = 0;
+        int status = 0;
+    };
+    void fetchCandidates(const QString &networkKey, const QString &scope, const QString &country, const QStringList &seen,
+                         int limit, qint64 costBytes, std::function<void(const Candidates &)> done);
 
     // --- probe-batch -----------------------------------------------------------------------------------------
     struct BatchItem {
