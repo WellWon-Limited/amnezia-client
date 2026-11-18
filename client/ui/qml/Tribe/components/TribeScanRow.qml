@@ -41,26 +41,31 @@ Rectangle {
         : rowState === "connecting" ? ScanTexts.rowConnecting
         : rowState === "connected" ? ScanTexts.rowConnected
         : ScanTexts.rowFailed
-    readonly property color badgeFg: (rowState === "works" || rowState === "connected") ? Theme.color.connected
+    // Owner, device test of 142: «Доступно» in the accent blue (outline), the one connected row a FILLED accent
+    // «Подключено» on the only highlighted row - "available" and "connected now" cannot be confused.
+    readonly property bool connectedNow: rowState === "connected"
+    readonly property color badgeFg: rowState === "works" ? Theme.color.accent
+        : connectedNow ? Theme.color.bg800
         : (rowState === "slow" || rowState === "connecting") ? Theme.color.warning
         : rowState === "failed" ? Theme.color.danger
         : Theme.color.text3
-    readonly property color badgeFill: (rowState === "works" || rowState === "connected") ? Theme.color.badgeOn
+    readonly property color badgeFill: rowState === "works" ? Theme.color.badgeAccent
+        : connectedNow ? Theme.color.accent
         : (rowState === "slow" || rowState === "connecting") ? Theme.color.badgeWarn
         : rowState === "failed" ? Theme.color.badgeOff
         : Theme.color.glass
+    // the speed word is gone (the bars and ms say it); only a reason follows the badges on the bottom line
     readonly property string subText: notVerified ? ScanTexts.rowCheckOnConnect
         : (liveUnverified && rowState === "connected") ? ScanTexts.liveChecking
-        : speed === "fast" ? ScanTexts.speedFast
-        : speed === "medium" ? ScanTexts.speedMedium
         : ""
-    readonly property bool subIsReason: notVerified || (liveUnverified && rowState === "connected")
+    readonly property bool subIsReason: subText !== ""
 
     implicitHeight: Theme.scan.rowHeight
     radius: Theme.radius.lg
-    color: live ? Theme.color.chipSelected : Theme.color.surface1
+    // exactly one highlighted row: the one connected now (a connecting row keeps the plain surface)
+    color: connectedNow ? Theme.color.chipSelected : Theme.color.surface1
     border.width: 1
-    border.color: live ? Theme.color.accent : Theme.color.border
+    border.color: connectedNow ? Theme.color.accent : Theme.color.border
     opacity: (failed || dimmed) ? 0.5 : (cached ? 0.55 : 1.0)
     Behavior on color { ColorAnimation { duration: Theme.motion.fast } }
     Behavior on border.color { ColorAnimation { duration: Theme.motion.fast } }
@@ -103,13 +108,6 @@ Rectangle {
                     font.pixelSize: Theme.font.bodyS + 1
                     font.weight: Theme.font.wBold
                 }
-                TribeLabelBadge {
-                    id: stateBadge
-                    small: true
-                    label: row.badgeText
-                    fg: row.badgeFg
-                    fill: row.badgeFill
-                }
                 Item { Layout.fillWidth: true }
             }
 
@@ -123,6 +121,15 @@ Rectangle {
                     version: row.version
                     active: row.live
                     verifying: row.rowState === "connecting" || (row.live && row.verifying)
+                }
+                // the state badge on the bottom line, next to the transport (one badge line for every state)
+                TribeLabelBadge {
+                    id: stateBadge
+                    small: true
+                    label: row.badgeText
+                    fg: row.badgeFg
+                    fill: row.badgeFill
+                    filled: row.connectedNow
                 }
                 Text {
                     visible: row.subText !== ""

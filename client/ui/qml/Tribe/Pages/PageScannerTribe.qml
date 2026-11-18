@@ -89,6 +89,11 @@ PageType {
                 TribeScanner.showShade("warning", d.indexOf("vpn_on") === 0 ? "service_vpn_on" : "service_failed", [])
         }
     }
+    // The live VPN state from the engine (the card's badge): connected = data path up, connecting = an attempt runs
+    readonly property string liveVpn: typeof TribeEngine === "undefined" ? "off"
+        : TribeEngine.state === "connected" ? "connected"
+        : (TribeEngine.busy === true && TribeEngine.stopping !== true) || TribeEngine.state === "verifying" ? "connecting"
+        : "off"
     readonly property bool emptyResult: phase === "empty"
     readonly property bool showBar: phase !== "idle" && !blocked && !emptyResult
     readonly property bool showMark: phase === "done" || phase === "empty"
@@ -430,9 +435,14 @@ PageType {
                 }
 
                 TribeConnectionCard {
-                    visible: !root.blocked && (root.card.mode || "hidden") !== "hidden"
+                    // always on the list (owner, device test of 142): with the coordinator's card hidden it still
+                    // shows the live VPN state, as the compact card
                     width: parent.width
                     card: root.card
+                    liveState: root.liveVpn
+                    liveProto: (typeof TribeEngine !== "undefined") ? String(TribeEngine.activeProto || "") : ""
+                    liveProtoVersion: (typeof TribeEngine !== "undefined" && TribeEngine.currentNode)
+                                      ? String(TribeEngine.currentNode.protoVersion || "") : ""
                     serverLabel: root.card.server_label || root.liveLabel
                                  || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.name || "") : "")
                     serverCc: root.card.server_cc || root.liveCc
@@ -445,7 +455,7 @@ PageType {
                     id: sectionLabel
                     visible: rowsModel.count > 0
                     // .sec-label.in-list margin-top 4, none as the list's first child
-                    topPadding: (root.blocked || (root.card.mode || "hidden") !== "hidden") ? Theme.space.xs : 0
+                    topPadding: Theme.space.xs   // the card is always above it now
                     text: root.lastResult ? ScanTexts.sectionLast : ScanTexts.sectionNow
                     textFormat: Text.PlainText
                     color: Theme.color.text3

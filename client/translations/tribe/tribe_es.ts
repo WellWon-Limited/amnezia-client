@@ -1982,12 +1982,12 @@ Puedes adjuntar una foto o un video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+77"/>
+        <location line="+75"/>
         <source>Сканер</source>
         <translation>Escáner</translation>
     </message>
     <message>
-        <location line="-76"/>
+        <location line="-74"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2062,12 +2062,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Escaneo terminado</translation>
     </message>
     <message>
-        <location line="+3"/>
-        <source>Работает</source>
-        <translation>Funciona</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+4"/>
         <source>Медленно</source>
         <translation>Lento</translation>
     </message>
@@ -2090,16 +2085,6 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+1"/>
         <source>Не удалось</source>
         <translation>Falló</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>быстро</source>
-        <translation>rápido</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>средне</source>
-        <translation>medio</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2422,7 +2407,12 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-12"/>
+        <location line="-88"/>
+        <source>Доступно</source>
+        <translation>Disponible</translation>
+    </message>
+    <message>
+        <location line="+76"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>Hay que actualizar el servicio de Tribe VPN</translation>
     </message>
