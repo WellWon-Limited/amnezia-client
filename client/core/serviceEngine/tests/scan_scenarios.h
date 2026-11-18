@@ -969,6 +969,7 @@ inline QList<Scenario> scenarios()
                    QStringLiteral("egress node must be the probed node"), QStringLiteral("an attempt's target leaves the scan")},
                   [] {
                       World w = baseWorld("awg_mini", hostMac(), ScanNetKind::Wifi);
+                      w.numbers.insert(QStringLiteral("scan_stop_works"), 48); // every verdict before the stop (rows are admitted across tiers)
                       w.current = QStringLiteral("2:xray");
                       w.awgMini = true;
                       w.numbers.insert(QStringLiteral("scan_awg_concurrency"), 2);
@@ -1033,7 +1034,7 @@ inline QList<Scenario> scenarios()
 
     // 18. Tier warm-up: provider probes start while own ones run, the list fills tier 0 first.
     l << Scenario{QStringLiteral("tier_warmup"),
-                  {QStringLiteral("lower tiers warm up in parallel"), QStringLiteral("list filled in tier order")},
+                  {QStringLiteral("lower tiers warm up in parallel"), QStringLiteral("rows admitted across tiers (1.14.0)")},
                   [] {
                       World w = baseWorld("tier_warmup", hostMac(), ScanNetKind::Wifi);
                       w.current = QStringLiteral("1");
@@ -1060,11 +1061,12 @@ inline QList<Scenario> scenarios()
                       }
                       f.check(firstLeaseStep >= 0 && (firstOwnResult < 0 || firstLeaseStep < firstOwnResult), QStringLiteral("warm-up in parallel"));
                       const QJsonObject v = lastView(d);
-                      // 10 own (tier 0) work: no provider row may be in the list
-                      int own = 0;
+                      // the providers proved faster than the own nodes: they make the list, whatever their tier (owner 18.11,
+                      // contract 1.14.0: tiers order Auto only)
+                      int up = 0;
                       for (const QString &id : rowIds(v))
-                          own += id.startsWith(QLatin1String("up:")) ? 0 : 1;
-                      f.check(own == v.value(QLatin1String("verified")).toInt(), QStringLiteral("tier 0 fills the list first"));
+                          up += id.startsWith(QLatin1String("up:")) ? 1 : 0;
+                      f.check(up > 0, QStringLiteral("faster provider rows admitted across tiers"));
                   }};
 
     // 19. Cellular budget used up: no scan, «Повторить через N мин».
