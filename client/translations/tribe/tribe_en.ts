@@ -2003,12 +2003,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+74"/>
+        <location line="+83"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-73"/>
+        <location line="-82"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2018,17 +2018,7 @@ You can attach a photo or video.</translation>
         <translation>Cellular</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Проверено только что</source>
-        <translation>Checked just now</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Проверено %1&#xa0;мин назад</source>
-        <translation>Checked %1&#xa0;min ago</translation>
-    </message>
-    <message>
-        <location line="+2"/>
+        <location line="+14"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -2196,11 +2186,6 @@ You can attach a photo or video.</translation>
         <location line="+1"/>
         <source>Повторить через %1&#xa0;мин</source>
         <translation>Retry in %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Скан потратит до %1&#xa0;МБ</source>
-        <translation>The scan uses up to %1&#xa0;MB</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2383,12 +2368,92 @@ You can attach a photo or video.</translation>
         <translation>Unsent reports: %1 — they will go with the logs</translation>
     </message>
     <message>
-        <location line="-15"/>
+        <location line="+4"/>
+        <source>Найти ещё</source>
+        <translation>Find more</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ищем ещё…</source>
+        <translation>Searching for more…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Больше доступных нод в этой сети нет</source>
+        <translation>No more available nodes on this network</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать</source>
+        <translation>Scan</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1: доступных нод сейчас нет</source>
+        <translation>%1: no available nodes right now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Попробуйте другую страну или проверьте все страны.</source>
+        <translation>Try another country or scan all countries.</translation>
+    </message>
+    <message>
+        <location line="-24"/>
         <source>Запустить службу</source>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-100"/>
+        <location line="-110"/>
+        <source>только что</source>
+        <translation>just now</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;мин назад</source>
+        <translation>%1&#xa0;min ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;ч назад</source>
+        <translation>%1&#xa0;h ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>вчера</source>
+        <translation>yesterday</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;дн. назад</source>
+        <translation>%1&#xa0;days ago</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверено: %1</source>
+        <translation>Checked: %1</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>LTE</source>
+        <translation>LTE</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>5G</source>
+        <translation>5G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>3G</source>
+        <translation>3G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сеть: %1</source>
+        <translation>Network: %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>ДОСТУПНЫ СЕЙЧАС</source>
         <translation>AVAILABLE NOW</translation>
     </message>
@@ -2408,7 +2473,7 @@ You can attach a photo or video.</translation>
         <translation>check with the button below</translation>
     </message>
     <message>
-        <location line="+29"/>
+        <location line="+28"/>
         <source>Найдена 1 доступная нода</source>
         <translation>1 available server found</translation>
     </message>
@@ -3250,12 +3315,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3797"/>
+        <location line="+3796"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>There is no server in the selected mode — switch to “Auto”</translation>
     </message>
     <message>
-        <location line="-3794"/>
+        <location line="-3793"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>No network — connect when it is back</translation>
     </message>
@@ -3371,7 +3436,7 @@ You can attach a photo or video.</translation>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+482"/>
+        <location line="+481"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>Could not turn off the VPN. Try again or turn it off in iOS Settings.</translation>
     </message>

@@ -2003,12 +2003,12 @@ Puedes adjuntar una foto o un video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+74"/>
+        <location line="+83"/>
         <source>Сканер</source>
         <translation>Escáner</translation>
     </message>
     <message>
-        <location line="-73"/>
+        <location line="-82"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2018,17 +2018,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Móvil</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Проверено только что</source>
-        <translation>Comprobado ahora mismo</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Проверено %1&#xa0;мин назад</source>
-        <translation>Comprobado hace %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+2"/>
+        <location line="+14"/>
         <source>Подключаемся…</source>
         <translation>Conectando…</translation>
     </message>
@@ -2196,11 +2186,6 @@ Puedes adjuntar una foto o un video.</translation>
         <location line="+1"/>
         <source>Повторить через %1&#xa0;мин</source>
         <translation>Reintentar en %1&#xa0;min</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Скан потратит до %1&#xa0;МБ</source>
-        <translation>El escaneo usa hasta %1&#xa0;MB</translation>
     </message>
     <message>
         <location line="+1"/>
@@ -2383,12 +2368,92 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>Informes sin enviar: %1; se enviarán junto con los registros</translation>
     </message>
     <message>
-        <location line="-15"/>
+        <location line="+4"/>
+        <source>Найти ещё</source>
+        <translation>Buscar más</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Ищем ещё…</source>
+        <translation>Buscando más…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Больше доступных нод в этой сети нет</source>
+        <translation>No hay más nodos disponibles en esta red</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сканировать</source>
+        <translation>Escanear</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1: доступных нод сейчас нет</source>
+        <translation>%1: no hay nodos disponibles ahora</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Попробуйте другую страну или проверьте все страны.</source>
+        <translation>Prueba otro país o escanea todos los países.</translation>
+    </message>
+    <message>
+        <location line="-24"/>
         <source>Запустить службу</source>
         <translation>Iniciar el servicio</translation>
     </message>
     <message>
-        <location line="-100"/>
+        <location line="-110"/>
+        <source>только что</source>
+        <translation>ahora mismo</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;мин назад</source>
+        <translation>hace %1&#xa0;min</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;ч назад</source>
+        <translation>hace %1&#xa0;h</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>вчера</source>
+        <translation>ayer</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1&#xa0;дн. назад</source>
+        <translation>hace %1&#xa0;días</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверено: %1</source>
+        <translation>Comprobado: %1</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>LTE</source>
+        <translation>LTE</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>5G</source>
+        <translation>5G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>3G</source>
+        <translation>3G</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Сеть: %1</source>
+        <translation>Red: %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
         <source>ДОСТУПНЫ СЕЙЧАС</source>
         <translation>DISPONIBLES AHORA</translation>
     </message>
@@ -2408,7 +2473,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>compruébalo con el botón de abajo</translation>
     </message>
     <message>
-        <location line="+29"/>
+        <location line="+28"/>
         <source>Найдена 1 доступная нода</source>
         <translation>Encontrado 1 servidor disponible</translation>
     </message>
@@ -3250,12 +3315,12 @@ Puedes adjuntar una foto o un video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <location line="+3797"/>
+        <location line="+3796"/>
         <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
         <translation>No hay ningún servidor en el modo elegido: active el modo «Auto»</translation>
     </message>
     <message>
-        <location line="-3794"/>
+        <location line="-3793"/>
         <source>Нет сети — подключитесь, когда она появится</source>
         <translation>Sin red: conéctese cuando vuelva</translation>
     </message>
@@ -3371,7 +3436,7 @@ Puedes adjuntar una foto o un video.</translation>
         <translation>No se pudo instalar el servicio VPN</translation>
     </message>
     <message>
-        <location line="+482"/>
+        <location line="+481"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>No se pudo desactivar la VPN. Inténtalo de nuevo o desactívala en los Ajustes de iOS.</translation>
     </message>
