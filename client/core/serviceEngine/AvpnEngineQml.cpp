@@ -6935,6 +6935,18 @@ void AvpnEngineQml::guardedStop(const char *why)
     if (m_probe) m_probe->cancel();
     if (!m_wantConnected)
         cancelSeatFirst(); // a stop that does not reconnect: a seat taken for a switch goes back
+    // B1 (race measurement 18.11): a stop while nothing native runs - the race prelude, an attempt that ended before
+    // any leg - has no Disconnected to wait for: the stop is confirmed at once and the operation settles through the
+    // one function (the orb stayed dead until a relaunch).
+    if (avpn::stopFindsNothingNative(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg())) {
+        m_engine.requestStop();
+        m_latch.awaitingStopConfirm = false;
+        settleOperation("stop_nothing_native");
+        m_busy = false;
+        reliabilityEvent(QStringLiteral("stop_confirmed_nothing_native why=%1").arg(QLatin1String(why)));
+        emit changed();
+        return;
+    }
     // AVPN (фикс-волна 2026-09-22, A1a/A4): МЫ просим стоп — до Disconnected не адоптим эту сессию
     // и не стартуем; поколение гасимой сессии отличает «стоп в пути» от новой сессии ОС.
     m_latch.awaitingStopConfirm = true;

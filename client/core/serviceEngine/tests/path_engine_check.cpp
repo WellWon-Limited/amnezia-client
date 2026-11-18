@@ -1020,7 +1020,7 @@ static void scenarioRace()
         w.setProbe(k, QStringLiteral("15:xray"), ProbeBehaviour::ok(400));
         w.set(k, QStringLiteral("16"), Behaviour::works(800, 400, 120));
         w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::ok(1200));
-        Sim s({ xray("15:xray", "EE", false, 3.0), awg("16", "NL") }, w, home);
+        Sim s({ xray("15:xray", "EE", false, 3.0), awg("16", "NL", /*manual=*/true) }, w, home); // 15 is the first choice
         s.caps = hostCaps();
         const AttemptResult r = s.raceTap(UserChoice::automatic());
         row("race 2: Xray-15 blind spot, tap 1", s, r, 0);
@@ -1099,6 +1099,32 @@ static void scenarioRace()
         CHECK(s.providerProbes <= s.race.timings().providerPerRace && s.lostSeatAnswers <= s.race.timings().providerPerRace);
     }
 
+    // B3a: the first candidate works - the race (hedge at once) is never slower than no race
+    {
+        World w;
+        w.set(k, QStringLiteral("a1"), Behaviour::works(900, 400, 120));
+        Sim plain({ awg("a1", "EE"), awg("a2", "NL") }, w, home);
+        plain.tap(UserChoice::automatic());
+        Sim s({ awg("a1", "EE"), awg("a2", "NL") }, w, home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race B3a: first candidate works", s, r, 0);
+        CHECK(r.connected && s.lastTapWallMs() <= plain.lastTapWallMs());
+    }
+    // B3b: the race stops at its winner plus one spare proof
+    {
+        World w;
+        QList<PathCandidate> pool;
+        for (int i = 0; i < 8; ++i) {
+            const QByteArray id = "x" + QByteArray::number(i);
+            pool << xray(id.constData(), "DE");
+            w.set(k, QString::fromLatin1(id), Behaviour::works(600, 300, 100));
+        }
+        Sim s(pool, w, home);
+        s.caps = hostCaps();
+        s.raceTap(UserChoice::automatic());
+        CHECK(s.race.proven() <= 2 + 1 && s.probesStarted < 8);
+    }
     // 7. No host on the platform: exactly stage 1 (same legs, same time).
     {
         Sim a(pool1711(false), world1711(k), home);

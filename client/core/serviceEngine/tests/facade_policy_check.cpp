@@ -843,6 +843,15 @@ static void scannerCancelAfterShownConnectedWithoutData()
 // tunnel stayed up. With no event loop running the Scanner cancels nothing - whatever the phase.
 // The white-list detector's trigger from the attempt owner (it lived in the deleted start watchdog).
 // R1 (device round 4): a failed data check is the path's only on the path's own evidence.
+// B1 (race measurement 18.11): a stop during the race prelude has no native Disconnected to wait for.
+static void stopNothingNative()
+{
+    CHECK(avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, /*ownerHoldsNativeLeg=*/false));
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, true));  // a leg is starting
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Unknown, false));      // not observed yet: maybe up
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Connected, false));    // an adopted session
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -1281,6 +1290,7 @@ int main()
     scannerCancelNeverDuringAppQuit();
     whitelistTriggerFromOwner();
     checkBlameRule();
+    stopNothingNative();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

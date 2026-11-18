@@ -473,6 +473,9 @@ int main(int argc, char **argv)
         FakeProber prober;
         qint64 charged = 0;
         r.eng.setProber(&prober);
+        path::RaceTimings slowHedge;
+        slowHedge.hedgeMs = 5000; // this block proves the winner path; the hedge has its own block below
+        r.eng.setRaceTimingsForTest(slowHedge);
         r.eng.setProbeBudget([] { return qint64(-1); }, [&charged](qint64 b) { charged += b; });
         QString err;
         CHECK(r.eng.connect(err) && r.eng.attemptRunning() && r.tun.ups.isEmpty() && r.eng.raceRunning());
@@ -487,6 +490,19 @@ int main(int argc, char **argv)
         // a stale result of that race changes nothing
         r.eng.onProbeResult(prober.stampOf("17"), path::PathOutcome::ProbeOk, 1000);
         CHECK(r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        // B3a hedge: nothing proven by hedgeMs - the owner starts its first choice, the race runs on beside it
+        Rig h(pool);
+        FakeProber hp;
+        h.eng.setProber(&hp);
+        CHECK(h.eng.connect(err) && h.last() == QLatin1String("17") && h.eng.raceRunning()); // hedge 0: at once
+        // B1: a stop during the race prelude ends the attempt at once (nothing native runs)
+        Rig b(pool);
+        FakeProber bp;
+        b.eng.setProber(&bp);
+        b.eng.setRaceTimingsForTest(slowHedge); // a prelude: the owner waits for a proof
+        CHECK(b.eng.connect(err) && b.eng.attemptRunning() && b.tun.ups.isEmpty());
+        b.eng.requestStop();
+        CHECK(!b.eng.attemptRunning() && !b.eng.raceRunning() && !b.eng.ownerHoldsNativeLeg() && b.tun.ups.isEmpty());
         // no host: stage 1
         Rig q(pool);
         FakeProber off;

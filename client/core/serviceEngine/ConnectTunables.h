@@ -311,6 +311,10 @@ inline path::RaceTimings raceTimingsTuned()
     t.raceBudgetMs = num("race_budget_ms", d.raceBudgetMs, 2000, 30000);
     t.probeTimeoutMs = num("race_probe_timeout_ms", d.probeTimeoutMs, 1000, 15000);
     t.providerPerRace = num("race_provider_per_race", d.providerPerRace, 0, 8);
+    t.hedgeMs = num("race_hedge_ms", d.hedgeMs, 0, 10000);
+    t.spareProofs = num("race_spare_proofs", d.spareProofs, 0, 8);
+    t.knownFreshMin = num("race_known_fresh_min", d.knownFreshMin, 0, 1440);
+    t.cellularMaxBytes = num("race_cellular_max_bytes", d.cellularMaxBytes, 0, 4 * 1024 * 1024);
     return t;
 }
 

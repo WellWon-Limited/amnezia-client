@@ -500,12 +500,22 @@ void ServiceEngine::beginRaceForTap()
     const QList<path::RankedPath> order = path::selectPaths(in);
     if (order.isEmpty())
         return; // the owner reports "no candidate" itself
-    // (a) a path proven on this network leads: it starts at once, the race runs over the rest beside it
+    // (a) a path proven on this network leads: it starts at once, the race runs over the rest beside it - and when it
+    // carried data here recently there is no race at all (B3c: the race only where nothing works or it just failed)
     const bool known = order.first().view.state == path::PathState::Working;
+    const path::RaceTimings rt = m_race.timings();
+    if (known && order.first().view.strength == path::EvidenceStrength::Data
+        && nowMs() - order.first().view.lastSuccessMs <= qint64(rt.knownFreshMin) * 60000) {
+        attemptJournal(QStringLiteral("race_skipped known=%1 fresh").arg(order.first().path.id.id));
+        return;
+    }
     QList<path::PathCandidate> race;
     for (int i = known ? 1 : 0; i < order.size(); ++i)
         race << order.at(i).path;
-    const qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
+    qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
+    // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
+    if (m_net.current().coarse.startsWith(QLatin1String("cell")))
+        bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3")
                        .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft));
     m_raceFirst = !known;
@@ -590,6 +600,9 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
                 attemptJournal(QStringLiteral("race_winner node=%1").arg(e.path.id.id));
                 startOwnerAfterRace("winner");
             }
+            break;
+        case path::RaceEffectType::Hedge:
+            startOwnerAfterRace("hedge"); // B3a: nothing proven yet - the first choice starts, the race runs beside it
             break;
         case path::RaceEffectType::Done:
             attemptJournal(QStringLiteral("race_done reason=%1 proven=%2")

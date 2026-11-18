@@ -512,6 +512,14 @@ inline CheckBlame checkFailureBlame(bool uplinkUp, qint64 wallElapsedMs, qint64 
     return CheckBlame::Path;
 }
 
+// B1: a stop that finds nothing native to stop - the platform reported the tunnel down and the attempt owner holds no
+// leg (the race prelude, an attempt that ended before its first start). An unobserved tunnel (Unknown: right after a
+// launch, a session of an earlier process may be up) is never taken as down.
+inline bool stopFindsNothingNative(ObservedTunnel observed, bool ownerHoldsNativeLeg)
+{
+    return !ownerHoldsNativeLeg && observed == ObservedTunnel::Disconnected;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;

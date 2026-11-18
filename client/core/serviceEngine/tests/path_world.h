@@ -404,6 +404,9 @@ private:
                     startOwnerAfterRace("winner");
                 }
                 break;
+            case RaceEffectType::Hedge:
+                startOwnerAfterRace("hedge");
+                break;
             case RaceEffectType::Done:
                 raceLog << QStringLiteral("done:%1").arg(QLatin1String(raceDoneReasonName(e.reason)));
                 if (e.reason != RaceDoneReason::Stopped)
