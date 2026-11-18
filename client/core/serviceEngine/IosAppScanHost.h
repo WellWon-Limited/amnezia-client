@@ -73,6 +73,9 @@ inline const char *iosAppScanModeName(IosAppScanMode m)
 // after start, once the Scanner is enabled and the app is in front), "close_after_s": n (default 45)}.
 struct IosAppScanControl {
     IosAppScanMode mode = IosAppScanMode::Always;
+    // "awg_beside_tunnel": "extension" (default: a scan with awg_mini beside a tunnel goes to the extension, which
+    // knows the live peer) | "refuse" (refused awg_live_peer_unknown: the coordinator retries without AWG, in-app).
+    bool awgBesideTunnelRefuse = false;
     int autorunS = 0;
     int closeAfterS = 45;
 };
@@ -82,6 +85,7 @@ inline IosAppScanControl iosAppScanControlFrom(const QByteArray &json)
     IosAppScanControl c;
     const QJsonObject o = QJsonDocument::fromJson(json).object();
     c.mode = iosAppScanModeFrom(o.value(QLatin1String("mode")).toString(), IosAppScanMode::Always);
+    c.awgBesideTunnelRefuse = o.value(QLatin1String("awg_beside_tunnel")).toString() == QLatin1String("refuse");
     c.autorunS = qBound(0, o.value(QLatin1String("autorun_s")).toInt(0), 600);
     c.closeAfterS = qBound(10, o.value(QLatin1String("close_after_s")).toInt(45), 600);
     return c;
@@ -148,6 +152,7 @@ struct IosAppScanState {
     bool foreground = true;        // the app is in front (an in-app probe needs a running process)
     unsigned bindIndex = 0;        // the app path's physical interface (0 = none)
     bool pathSatisfied = false;
+    bool awgBesideTunnelRefuse = false; // IosAppScanControl::awgBesideTunnelRefuse
 };
 
 // Where a scan_start goes. A start of the app engine needs a physical interface to bind to (the engine refuses one
@@ -166,7 +171,7 @@ inline IosAppScanRoute iosAppScanRouteStart(const IosAppScanState &s, bool hasAw
     if (s.mode == IosAppScanMode::BeforeTunnel)
         return IosAppScanRoute::Extension;
     if (hasAwgMini) // only the extension knows the live AmneziaWG peer (§32 p. 3a): never in-app beside a tunnel
-        return s.extensionRunning ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseLivePeerUnknown;
+        return s.extensionRunning && !s.awgBesideTunnelRefuse ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseLivePeerUnknown;
     if (!s.foreground)
         return s.extensionRunning ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseNoPath;
     return appPath ? IosAppScanRoute::App : (s.extensionRunning ? IosAppScanRoute::Extension : IosAppScanRoute::RefuseNoPath);

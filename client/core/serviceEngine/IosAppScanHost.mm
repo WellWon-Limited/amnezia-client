@@ -149,6 +149,7 @@ struct IosHybridScanHost::State
     IosHybridScanHost *host = nullptr;
     QObject context;
     IosAppScanMode mode = IosAppScanMode::Always;
+    bool awgBesideTunnelRefuse = false;
     std::unique_ptr<IosScanHost> ext;
     IosAppScanRoutes routes;
     quint64 epoch = 1;          // host_epoch of the app engine: moves on every stop-all (stale starts are refused)
@@ -171,6 +172,7 @@ struct IosHybridScanHost::State
         bool sat = false;
         s.bindIndex = IosScanHost::appBindInterfaceIndex(&sat);
         s.pathSatisfied = sat;
+        s.awgBesideTunnelRefuse = awgBesideTunnelRefuse;
         return s;
     }
 
@@ -204,7 +206,9 @@ IosHybridScanHost::IosHybridScanHost() : m_state(std::make_shared<State>())
 {
     State &s = *m_state;
     s.host = this;
-    s.mode = readControl().mode;
+    const IosAppScanControl control = readControl();
+    s.mode = control.mode;
+    s.awgBesideTunnelRefuse = control.awgBesideTunnelRefuse;
     s.ext = std::make_unique<IosScanHost>(); // also starts the app path monitor
     s.tunnelDown = !IosController::Instance()->scanHostRunning();
     const std::weak_ptr<State> weak = m_state;

@@ -125,6 +125,13 @@ static void testRouting()
     check(iosAppScanRouteStart(s, false) == IosAppScanRoute::App, "always beside a tunnel, in front: in the app");
     check(iosAppScanRouteStart(s, true) == IosAppScanRoute::Extension,
           "always beside a tunnel with awg_mini: the extension (it knows the live peer)");
+    s.awgBesideTunnelRefuse = true;
+    check(iosAppScanRouteStart(s, true) == IosAppScanRoute::RefuseLivePeerUnknown,
+          "awg_beside_tunnel refuse: awg_mini beside a tunnel is refused (the retry without AWG runs in the app)");
+    check(iosAppScanControlFrom(R"({"awg_beside_tunnel":"refuse"})").awgBesideTunnelRefuse
+              && !iosAppScanControlFrom(R"({"awg_beside_tunnel":"extension"})").awgBesideTunnelRefuse,
+          "awg_beside_tunnel read");
+    s.awgBesideTunnelRefuse = false;
     s.extensionRunning = false; // connecting / stopping
     check(iosAppScanRouteStart(s, true) == IosAppScanRoute::RefuseLivePeerUnknown,
           "awg_mini while the tunnel comes up and the extension does not answer: live peer unknown");
