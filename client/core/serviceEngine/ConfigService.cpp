@@ -23,10 +23,10 @@ ConfigService::ConfigService(QNetworkAccessManager *nam, const QString &baseUrl,
 {
     // 5.1.108: a pinned control plane (AVPN_API_URL) is used as is. Before, the stored active edge of
     // an earlier run won over the env var, and the edge walk moved a dev session to the prod edges.
-    m_activeBase = m_pinned ? baseUrl
-                            : ConfigStore::activeEdge(baseUrl.isEmpty() && !bakedEdges.isEmpty()
-                                                          ? bakedEdges.first()
-                                                          : baseUrl);
+    // R1a (device round 4): every run starts at the Russian entry for direct requests; the walk of an earlier run
+    // (and a session edge of a run that was force-quit) is never restored - a sticky foreign edge froze every seat
+    // answer above ~15 KB from Russia.
+    m_activeBase = m_pinned || !baseUrl.isEmpty() ? baseUrl : (bakedEdges.isEmpty() ? QString() : bakedEdges.first());
 #if defined(Q_OS_MACOS) && !defined(MACOS_NE)
     // macOS часто работает неделями без выхода: обновления должны обнаруживаться
     // и в уже открытом приложении. После сна Qt доставит просроченный timeout.
@@ -377,8 +377,7 @@ bool ConfigService::switchToNextEdge()
     if (next == m_activeBase)
         return false;
     m_failStreak = 0;
-    m_activeBase = next;
-    ConfigStore::setActiveEdge(next);
+    m_activeBase = next; // this run only (R1a): never stored
     emit activeEdgeChanged(next);
     // 5.1.109 (reviews of d5d739403 and 3dbe0361f): a config request still in flight went to the OLD
     // edge. Before, the in-flight guard swallowed the immediate request below, the new edge was not

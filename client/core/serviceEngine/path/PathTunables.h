@@ -25,7 +25,7 @@ struct AttemptTimings {
     // acquisition is bounded by this, ConnectTunables.h::upstreamAcquireTimeoutMsTuned reads the same number;
     // 0.2-0.6 s observed) and then the native start (providerStartMs). With the direct API blocked the cached
     // profile starts only after the lease timed out - the leg's deadline still covers its whole native start.
-    int providerLeaseMs = 4000; // to be calibrated on device
+    int providerLeaseMs = 6000; // device round 4: the server granted in 3.8-4.2 s - sized against that, tunable
     // The one in-tunnel data check: from "tunnel up" to "data proven".
     int dataCheckMs = 4000; // to be calibrated on device
     // The check itself answers by dataCheckMs (complete payload = works, possibly slow; nothing = no data). The

@@ -36,7 +36,6 @@ public:
     static constexpr QLatin1String kLkgConfigKey{"avpn/lkgConfig"};
     static constexpr QLatin1String kLkgConfigAtKey{"avpn/lkgConfigAtMs"};
     static constexpr QLatin1String kLkgEdgesKey{"avpn/lkgEdges"};
-    static constexpr QLatin1String kActiveEdgeKey{"avpn/activeEdge"};
 
     // receivedAtMs (5.1.109) - when this signed body was received and verified: the cached
     // xray_client=true is honoured only for a bounded time after it (ConfigCachePolicy.h).
@@ -59,12 +58,7 @@ public:
         return s.isEmpty() ? QStringList() : s.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     }
 
-    static void setActiveEdge(const QString &base) { settings().setValue(kActiveEdgeKey, base); }
-    static QString activeEdge(const QString &def)
-    {
-        const QString s = settings().value(kActiveEdgeKey).toString();
-        return s.isEmpty() ? def : s;
-    }
+    // R1a (device round 4): no stored active edge any more - every run starts at the Russian entry.
 
 private:
     static SecureQSettings &settings()

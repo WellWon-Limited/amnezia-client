@@ -7,21 +7,27 @@
 
 namespace avpn {
 
-// E10 (device rounds 2-3 of 18.11): which edge the control plane uses while a session runs. An app request enters
-// the tunnel on every platform (iOS / MACOS_NE carve the API out of the RU split on purpose - incident 2026-07-05:
-// a direct API path was cut by the operator; the macOS service runs Xray as a full tunnel). Through our own tunnels
-// the active edge (api.tribevpn.com, the RU entry) is reachable - our exits and our Xray entry carry it. Through a
-// PROVIDER tunnel the request leaves at the provider's foreign exit, whose profile may block or not route Russian
-// destinations: api.tribevpn.com timed out there (14-15 s on subscription, scan manifest, seat requests) until the
-// edge walk moved to the backup edge. So while a provider session is up the control plane uses the edge that is
-// reachable from foreign exits (the one whoami already uses on Xray) at once - same requests, same tunnel, nothing
-// more leaves the device directly; the stored active edge is not touched and comes back when the session ends.
-// A pinned dev backend keeps its own base. Empty result = the active edge.
-inline QString controlPlaneSessionEdge(bool providerSessionUp, bool pinned, const QString &providerEdge)
+// R1a (device round 4, server-side finding): the API edge is a function of the route a request actually takes,
+// evaluated for every request - never a sticky flag. From Russia any connection to the foreign edge (vpn.wellwon.hk)
+// freezes after ~15 KB (a 29-52 KB seat answer stalled for 4 s; the server granted it in 20 ms), while through a
+// tunnel whose exit is abroad the Russian entry (api.tribevpn.com) may be unreachable (a provider's exit times out on
+// it). So:
+//  - Direct: no tunnel carries the request now - the tunnel is down, a leg is being brought up (its seat request),
+//    a release after a stop: the walk's direct edge, which starts every run at the Russian entry (the walk moves it
+//    within the run only, as the fallback when that edge does not answer);
+//  - Tunnel: a tunnel is up and in its carrying phase (being checked or connected) - its exit is abroad for every
+//    tunnel we raise (our exits and the providers alike): the edge reachable from foreign exits.
+// A pinned dev backend keeps its base for both. Empty result = the walk's direct edge.
+enum class ApiRoute { Direct, Tunnel };
+inline ApiRoute apiRouteNow(bool tunnelReportsConnected, bool engineCarrying)
 {
-    if (!providerSessionUp || pinned)
+    return tunnelReportsConnected && engineCarrying ? ApiRoute::Tunnel : ApiRoute::Direct;
+}
+inline QString apiSessionEdgeFor(ApiRoute route, bool pinned, const QString &abroadEdge)
+{
+    if (route == ApiRoute::Direct || pinned)
         return QString();
-    return providerEdge;
+    return abroadEdge;
 }
 
 inline QString nextEdge(const QStringList &edges, const QString &current)

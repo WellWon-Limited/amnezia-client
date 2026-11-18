@@ -56,13 +56,20 @@ int main(int argc, char **argv)
     }
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
-    // E10 (device rounds 2-3 of 18.11): a provider session's control plane uses the edge reachable from foreign
-    // exits at once; our own sessions and no session keep the stored edge; a pinned dev backend keeps its base.
+    // R1a (device round 4): the edge is a function of the route a request takes, evaluated per request.
     {
+        using avpn::ApiRoute;
         const QString hk = QStringLiteral("https://vpn.wellwon.hk");
-        CHECK(avpn::controlPlaneSessionEdge(true, false, hk) == hk, "provider session -> the reachable edge at once");
-        CHECK(avpn::controlPlaneSessionEdge(false, false, hk).isEmpty(), "own tunnel / no session -> the stored edge");
-        CHECK(avpn::controlPlaneSessionEdge(true, true, hk).isEmpty(), "pinned dev backend -> its own base");
+        // a provider session just ended (the tunnel reports down): direct -> the walk's direct edge (Russian entry)
+        CHECK(avpn::apiRouteNow(false, true) == ApiRoute::Direct, "session ended -> direct");
+        CHECK(avpn::apiSessionEdgeFor(ApiRoute::Direct, false, hk).isEmpty(), "direct -> the Russian entry");
+        // during a session (connected or being checked): through the tunnel -> the edge reachable from abroad
+        CHECK(avpn::apiRouteNow(true, true) == ApiRoute::Tunnel, "carrying tunnel -> tunnel");
+        CHECK(avpn::apiSessionEdgeFor(ApiRoute::Tunnel, false, hk) == hk, "through the tunnel -> the foreign edge");
+        // a leg being brought up while the old tunnel still reports up: its seat request is direct
+        CHECK(avpn::apiRouteNow(true, false) == ApiRoute::Direct, "leg being brought up -> direct");
+        // a pinned dev backend keeps its base
+        CHECK(avpn::apiSessionEdgeFor(ApiRoute::Tunnel, true, hk).isEmpty(), "pinned dev backend -> its own base");
     }
     return g_fail ? 1 : 0;
 }

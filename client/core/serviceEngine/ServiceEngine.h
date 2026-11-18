@@ -14,6 +14,8 @@
 #include "TransportModeGate.h"
 #include "TunnelWatchPlan.h"
 #include "path/AttemptOwner.h"
+#include "path/PathProber.h"
+#include "path/PathRace.h"
 #include "dto/Subscription.h"
 
 #include <QByteArray>
@@ -218,7 +220,29 @@ public:
     void observeNetwork(const path::NetworkObservation &o);
     const path::NetworkKey &network() const { return m_net.current(); }
     void attemptTick();
-    bool attemptRunning() const { return m_owner.running(); }
+    // Stage 2: a race that runs before the owner's first leg is part of the attempt (the orb is busy, reconcile waits).
+    bool attemptRunning() const { return m_owner.running() || m_raceFirst; }
+
+    // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
+    // The platform's probe host (nullptr = none: stage-1 behaviour exactly). Server switch features.path_race
+    // (compiled default off) gates it on top of the host's own availability.
+    void setProber(path::IPathProber *prober) { m_prober = prober; }
+    // The one byte ledger the Scanner uses: bytes the race may still spend now (-1 = no cap) and the charge of what
+    // a probe spent. Unset = no cap, nothing charged.
+    void setProbeBudget(std::function<qint64()> bytesLeft, std::function<void(qint64)> charge)
+    {
+        m_probeBytesLeft = std::move(bytesLeft);
+        m_chargeProbeBytes = std::move(charge);
+    }
+    void setProbeCosts(const path::PathRace::Costs &c) { m_probeCosts = c; }
+    void onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent);
+    // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
+    // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
+    bool recordProbeProof(const QString &nodeId, const QString &source);
+    // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
+    static path::PathOutcome startFailureOutcome(const QString &code);
+    bool raceRunning() const { return m_race.running(); }
+    void setRaceTimingsForTest(const path::RaceTimings &t) { m_raceTimingsForTest = t; }
     // "checked N of M" of the running attempt (0/0 = no walk).
     int attemptChecked() const { return m_owner.running() ? m_owner.progressDone() : 0; }
     int attemptTotal() const { return m_owner.running() ? m_owner.progressTotal() : 0; }
@@ -548,6 +572,20 @@ private:
     TransportModeGate m_modeGate; // 5.1.109: the stored choice and the mode in force (TransportModeGate.h)
     // Path engine (design 2026-11-17): the one owner of attempts, the evidence, the network, the user's choice.
     path::AttemptOwner m_owner;
+    // stage 2
+    path::PathRace m_race;
+    path::IPathProber *m_prober = nullptr;
+    std::function<qint64()> m_probeBytesLeft;
+    std::function<void(qint64)> m_chargeProbeBytes;
+    path::PathRace::Costs m_probeCosts;
+    std::optional<path::RaceTimings> m_raceTimingsForTest;
+    bool m_ownerQueueRaceStop = false; // the owner finished inside an effect batch: stop the race after it
+    bool m_raceStartedOwner = false; // this tap's owner was started by the race (never a second UserStart)
+    bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
+    bool raceAllowed() const;
+    void beginRaceForTap();
+    void applyRaceEffects(const QList<path::RaceEffect> &effects);
+    void startOwnerAfterRace(const char *why);
     path::PathLedger m_ledger;
     bool m_ledgerDirty = false;
     path::NetworkTracker m_net;

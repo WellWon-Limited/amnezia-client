@@ -146,9 +146,17 @@ private slots:
         LoopbackOnlyNam network;
         const QString base = QString("http://127.0.0.1:%1").arg(server.serverPort());
         {
-            // Unpinned (prod): the stored edge of the earlier run is taken - unchanged behaviour.
+            // Unpinned (prod), R1a of device round 4: the walk of an earlier run is NOT restored - every run starts at
+            // the Russian entry (a sticky foreign edge froze every large answer from Russia).
             avpn::ConfigService prod(&network, base, "fixture-key", {base, other});
+            QCOMPARE(prod.activeBaseUrl(), base);
+            QCOMPARE(prod.directBaseUrl(), base);
+            // a session edge (a tunnel carries requests) never becomes the direct edge, and it ends with the session
+            prod.setSessionEdge(other);
             QCOMPARE(prod.activeBaseUrl(), other);
+            QCOMPARE(prod.directBaseUrl(), base);
+            prod.setSessionEdge(QString());
+            QCOMPARE(prod.activeBaseUrl(), base);
         }
         avpn::ConfigService service(&network, base, "fixture-key", {"https://api.tribevpn.com", other},
                                     nullptr, /*pinned=*/true);

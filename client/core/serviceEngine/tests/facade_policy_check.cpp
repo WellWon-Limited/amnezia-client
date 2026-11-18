@@ -842,6 +842,18 @@ static void scannerCancelAfterShownConnectedWithoutData()
 // cancel -> stop(): the facade flipped to «disconnected», the queued disconnectFromVpn never ran and the
 // tunnel stayed up. With no event loop running the Scanner cancels nothing - whatever the phase.
 // The white-list detector's trigger from the attempt owner (it lived in the deleted start watchdog).
+// R1 (device round 4): a failed data check is the path's only on the path's own evidence.
+static void checkBlameRule()
+{
+    using avpn::CheckBlame;
+    CHECK(avpn::checkFailureBlame(true, 4500, 4000, true, 100) == CheckBlame::Path);       // no data through the tunnel
+    CHECK(avpn::checkFailureBlame(true, 4500, 4000, false, -1) == CheckBlame::Path);       // no counter: as before
+    CHECK(avpn::checkFailureBlame(false, 4500, 4000, true, 0) == CheckBlame::NoNetwork);   // the network went away
+    CHECK(avpn::checkFailureBlame(true, 13800, 4000, true, 0) == CheckBlame::Suspended);   // 13.8 s after the background
+    CHECK(avpn::checkFailureBlame(true, 6400, 4000, true, 90000) == CheckBlame::ControlPlane); // the tunnel carries data
+    CHECK(avpn::checkFailureBlame(true, 7000, 4000, true, 0) == CheckBlame::Path);         // within the stretch grace
+}
+
 static void whitelistTriggerFromOwner()
 {
     CHECK(whitelistTriggerFromAttempt(/*legStartFailures=*/1, false));   // a leg never came up
@@ -884,10 +896,19 @@ static void scannerRowChain()
     scanRowAttemptBegin(a, QStringLiteral("9"), 5);
     st = scanRowAttemptObserve(a, /*intentSerial=*/6, QStringLiteral("10"), false, true);
     CHECK(st.failed.isEmpty() && !st.ended && !st.connected && !a.active);
-    // Data on another node than the tapped one in one step: the tapped one is reported failed first.
+    // R4 (device round 4): the session before the tap (data on another node, the sibling «Эстония 3») is not a row
+    // of this chain: nothing is reported for it, before or after the tapped row fails.
     scanRowAttemptBegin(a, QStringLiteral("9"), 7);
     st = scanRowAttemptObserve(a, 7, QStringLiteral("10"), true, false);
-    CHECK(st.connected && st.failed == QStringList{QStringLiteral("9")});
+    CHECK(!st.connected && st.failed.isEmpty() && a.active);
+    st = scanRowAttemptObserve(a, 7, QStringLiteral("9"), false, false);
+    CHECK(st.failed.isEmpty());
+    st = scanRowAttemptObserve(a, 7, QString(), false, /*gaveUp=*/true);
+    CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
+    // the tapped row never came up and the chain gave up: only the tapped row
+    scanRowAttemptBegin(a, QStringLiteral("9"), 8);
+    st = scanRowAttemptObserve(a, 8, QStringLiteral("10"), false, /*gaveUp=*/true);
+    CHECK(st.ended && st.failed == QStringList{QStringLiteral("9")});
 }
 
 // The live status: the live node and the target of an attempt in progress (never probed with its key).
@@ -1253,6 +1274,7 @@ int main()
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
     whitelistTriggerFromOwner();
+    checkBlameRule();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

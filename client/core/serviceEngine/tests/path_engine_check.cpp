@@ -107,7 +107,9 @@ static void row(const char *name, const Sim &s, const AttemptResult &r, int legF
                                   : QStringLiteral("failed ") + QLatin1String(failReasonName(r.reason));
     if (r.fallbackNotice)
         outcome += QStringLiteral(" (fallback notice)");
-    g_rows.append({ QString::fromLatin1(name), outcome, r.elapsedMs, r.paths, legPaths(s, legFrom).join(QLatin1Char(' ')) });
+    // the time from the tap (the race in front of the owner included), not only the owner's own awake time
+    const qint64 ms = std::max<qint64>(r.elapsedMs, s.lastTapWallMs() < 600000 ? s.lastTapWallMs() : r.elapsedMs);
+    g_rows.append({ QString::fromLatin1(name), outcome, ms, r.paths, legPaths(s, legFrom).join(QLatin1Char(' ')) });
 }
 
 // --- PathId ----------------------------------------------------------------------------------------------
@@ -228,10 +230,17 @@ static void testLedger()
     l.record(net, p, PathOutcome::NoData, t0 + 500000);
     CHECK(l.view(net, p, t0 + 500000).quarantineUntilMs == t0 + 500000 + lt.quarantineMs[3]); // ladder tops at 6 h
 
+    // stage 2: a probe ok does not clear a tunnel "no data" (the Xray-15 case) - only a data ok does
     CHECK(l.record(net, p, PathOutcome::ProbeOk, t0 + 600000));
     v = l.view(net, p, t0 + 600000);
+    CHECK(v.state == PathState::Dead && v.failStreak > 0);
+    // after a handshake failure a probe ok does lift the path (the mini-probe completed a handshake and data)
+    const PathId hs{ QStringLiteral("hs"), QStringLiteral("r") };
+    l.record(net, hs, PathOutcome::NoHandshake, t0 + 600000);
+    CHECK(l.record(net, hs, PathOutcome::ProbeOk, t0 + 600001));
+    v = l.view(net, hs, t0 + 600001);
     CHECK(v.state == PathState::Working && v.strength == EvidenceStrength::Probe && v.failStreak == 0);
-    CHECK(l.view(net, p, t0 + 600000 + lt.probeOkTtlMs + 1).state == PathState::Unknown); // a probe proof is short
+    CHECK(l.view(net, hs, t0 + 600001 + lt.probeOkTtlMs + 1).state == PathState::Unknown); // a probe proof is short
     l.record(net, p, PathOutcome::DataOk, t0 + 700000, 2000, 300);
     v = l.view(net, p, t0 + 700000);
     CHECK(v.strength == EvidenceStrength::Data && v.connectMs == 2000 && v.ttfbMs == 300);
@@ -764,6 +773,7 @@ static void scenarioPreference()
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
     row("preferred DE failed here, tap 3", s, r, from);
     CHECK(r.connected && r.fallbackNotice && r.path.id.id == QLatin1String("nl1") && r.paths == 1);
+    CHECK(!r.preferredTried); // R2: the notice says "recently did not work", not "does not work"
     stopLive(s);
     // a server of the list (preferServer: the transports of one host) falls back like a country, with the notice
     from = int(s.legs.size());
@@ -777,7 +787,9 @@ static void scenarioPreference()
     s.idle(s.ledger.tunables().quarantineMs[0] + 1000);
     from = int(s.legs.size());
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
-    CHECK(legPaths(s, from).mid(0, 3) == QStringList({ "nl1", "fi1", "de1" })); // working, untried, then the preferred failures
+    // R2 (device round 4): DE failed here longer ago than the first quarantine step - it gets one real try first
+    CHECK(legPaths(s, from).mid(0, 2) == QStringList({ "de1", "de1:xray" }));
+    CHECK(legPaths(s, from).count(QStringLiteral("de1")) == 1); // once per attempt
     stopLive(s);
 
     // the exact node never falls back
@@ -965,6 +977,219 @@ static void scenarioReview1811()
     }
 }
 
+// --- Stage 2: the probe race in front of the owner (path/PathRace.h) --------------------------------------------
+
+static ProberCaps hostCaps()
+{
+    ProberCaps c;
+    c.available = true; // the iPhone Air spike: 6 legs, 1 provider profile at a time, 2 AmneziaWG
+    return c;
+}
+
+static void scenarioRace()
+{
+    const NetworkObservation home = wifi("192.168.9.1");
+    const QString k = key(home);
+
+    // 1. Hostile home Wi-Fi, first connect (the 17.11 world, the working provider ordered late): stage 1 against the
+    //    race. Target: data in under 7 s with the race.
+    {
+        Sim plain(pool1711(false), world1711(k), home);
+        const AttemptResult r1 = plain.tap(UserChoice::automatic());
+        row("race 1: hostile Wi-Fi, stage 1 (no host)", plain, r1, 0);
+        Sim s(pool1711(false), world1711(k), home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 1: hostile Wi-Fi, first connect with the race", s, r, 0);
+        CHECK(r.connected && s.lastTapWallMs() < 7000);
+        CHECK(!r1.connected || plain.lastTapWallMs() > s.lastTapWallMs()); // stage 1 walks the blocked paths first
+        CHECK(r.paths <= 2); // the owner starts with a probe-proven path
+        // the second tap: the proven path is known - it starts at once, the race runs over the rest beside it
+        stopLive(s);
+        const int from = int(s.legs.size());
+        const AttemptResult r2 = s.raceTap(UserChoice::automatic());
+        row("race 1: second tap (known path at once)", s, r2, from);
+        CHECK(r2.connected && r2.path.id.id == r.path.id.id && r2.paths == 1 && s.ownerStartedMs == s.legs[from].startedMs);
+    }
+
+    // 2. The Xray-15 blind spot: the probe passes, the real tunnel carries nothing. The tunnel's no-data outranks the
+    //    probe: the path is not picked again by the race (a later probe ok does not lift it).
+    {
+        World w;
+        w.set(k, QStringLiteral("15:xray"), Behaviour::noData(500));
+        w.setProbe(k, QStringLiteral("15:xray"), ProbeBehaviour::ok(400));
+        w.set(k, QStringLiteral("16"), Behaviour::works(800, 400, 120));
+        w.setProbe(k, QStringLiteral("16"), ProbeBehaviour::ok(1200));
+        Sim s({ xray("15:xray", "EE", false, 3.0), awg("16", "NL") }, w, home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 2: Xray-15 blind spot, tap 1", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("16") && legPaths(s) == QStringList({ "15:xray", "16" }));
+        CHECK(stateOf(s, xray("15:xray", "EE")) == PathState::Suspect);
+        stopLive(s);
+        for (int tap = 2; tap <= 4; ++tap) {
+            const int from = int(s.legs.size());
+            const AttemptResult rn = s.raceTap(UserChoice::automatic());
+            CHECK(rn.connected && legPaths(s, from) == QStringList({ "16" })); // 15 is probed (ok) but never raised
+            CHECK(stateOf(s, xray("15:xray", "EE")) == PathState::Suspect);
+            stopLive(s);
+        }
+        row("race 2: Xray-15 blind spot, taps 2-4 (15 probed, never raised)", s, s.results.last(), int(s.legs.size()) - 1);
+    }
+
+    // 3. The probe says alive but the leg does not come up (no handshake in the tunnel): the owner walks on to the next
+    //    proven path; the handshake failure is recorded, a later probe ok may lift it (it is not a no-data).
+    {
+        World w;
+        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(500));
+        w.set(k, QStringLiteral("12"), Behaviour::works(900, 400, 150));
+        Sim s({ awg("17", "EE", false, 2.0), awg("12", "DE") }, w, home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 3: probe alive, leg fails", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("12") && legPaths(s) == QStringList({ "17", "12" }));
+    }
+
+    // 4. Race results arriving after the network changed are dropped; the owner starts on the new network.
+    {
+        World w;
+        const NetworkObservation lte = cell("25001", "lte");
+        w.setProbe(k, QStringLiteral("17"), ProbeBehaviour::ok(2500));
+        w.set(key(lte), QStringLiteral("17"), Behaviour::works(700, 400, 120));
+        Sim s({ awg("17", "EE") }, w, home);
+        s.caps = hostCaps();
+        s.changeNetworkAt(1000, lte);
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 4: results after a network change", s, r, 0);
+        CHECK(r.connected && s.raceLog.contains(QStringLiteral("done:network_changed")));
+        CHECK(s.ledger.view(k, awg("17", "EE").id, s.wall()).state == PathState::Unknown); // the late probe ok: dropped
+    }
+
+    // 5. Cellular budget exhausted: no probe can be paid - one path at a time, exactly as stage 1.
+    {
+        const NetworkObservation lte = cell("25002", "lte");
+        Sim s(pool1711(false), world1711(key(lte)), lte);
+        s.caps = hostCaps();
+        s.bytesLeft = 20 * 1024;
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        Sim plain(pool1711(false), world1711(key(lte)), lte);
+        const AttemptResult r1 = plain.tap(UserChoice::automatic());
+        row("race 5: cellular budget exhausted", s, r, 0);
+        CHECK(s.probesStarted == 0 && s.raceLog.contains(QStringLiteral("done:bytes")));
+        CHECK(r.connected == r1.connected && legPaths(s) == legPaths(plain));
+    }
+
+    // 6. Provider probe seats whose batch answer is lost: at most providerPerRace such seats per race (each lives until
+    //    the server's 60 s probe TTL); the race and the attempt go on.
+    {
+        World w;
+        QList<PathCandidate> pool;
+        for (int i = 0; i < 6; ++i) {
+            const QByteArray id = "up:p" + QByteArray::number(i);
+            pool << prov(id.constData(), UpstreamKind::Country, "NL", i);
+            w.setProbe(k, QString::fromLatin1(id), ProbeBehaviour::lostAnswer());
+        }
+        pool << awg("11", "FI", true);
+        w.set(k, QStringLiteral("11"), Behaviour::works(1500, 600, 200));
+        Sim s(pool, w, home);
+        s.caps = hostCaps();
+        const AttemptResult r = s.raceTap(UserChoice::automatic());
+        row("race 6: provider probe seat answers lost", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("11"));
+        CHECK(s.providerProbes <= s.race.timings().providerPerRace && s.lostSeatAnswers <= s.race.timings().providerPerRace);
+    }
+
+    // 7. No host on the platform: exactly stage 1 (same legs, same time).
+    {
+        Sim a(pool1711(false), world1711(k), home);
+        Sim b(pool1711(false), world1711(k), home);
+        const AttemptResult ra = a.tap(UserChoice::automatic());
+        const AttemptResult rb = b.raceTap(UserChoice::automatic()); // caps.available == false
+        row("race 7: no host on the platform", b, rb, 0);
+        CHECK(ra.connected == rb.connected && legPaths(a) == legPaths(b) && a.lastTapWallMs() == b.lastTapWallMs()
+              && b.probesStarted == 0);
+    }
+
+    // The race machine itself: stale results, the stagger, the host's caps.
+    {
+        PathRace race;
+        NetworkTracker tr;
+        tr.observe(home);
+        const QList<PathCandidate> list = { awg("a", "EE"), awg("b", "NL"), awg("c", "DE"), xray("d", "FI"),
+                                            prov("up:e", UpstreamKind::Country, "NL", 0), prov("up:f", UpstreamKind::Country, "DE", 1) };
+        QList<RaceEffect> fx = race.begin(0, list, tr.current(), hostCaps(), -1, PathRace::Costs{});
+        int starts = 0;
+        for (const RaceEffect &e : fx)
+            starts += e.type == RaceEffectType::StartProbe;
+        CHECK(starts == 1); // one per stagger
+        fx = race.tick(250);
+        fx << race.tick(500);
+        fx << race.tick(750);
+        int awg = 0, prv = 0;
+        for (const RaceEffect &e : fx)
+            if (e.type == RaceEffectType::StartProbe) {
+                awg += e.path.kind == PathKind::OwnAwg;
+                prv += e.path.kind == PathKind::Provider;
+            }
+        CHECK(race.inFlight() <= 4 && awg <= 1); // two AmneziaWG at once (a + b), the third waits
+        const ProbeStamp old{ race.raceNumber() + 7, tr.current().generation, 1 };
+        CHECK(race.probeDone(800, old, PathOutcome::ProbeOk, 1000).isEmpty()); // another race: dropped
+    }
+}
+
+// --- Device round 4, R1: what is not the path's fault never enters the ledger ------------------------------------
+
+static void scenarioAttribution()
+{
+    const NetworkObservation home = wifi("192.168.4.1");
+    const QString k = key(home);
+    // Control plane down right after a launch: the remembered path's checks cannot reach our endpoints (the tunnel
+    // carries data) - the path stays "working", nothing is recorded, the attempt ends without blaming it.
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), Behaviour::works(600, 300, 100));
+        Sim s({ awg("17", "EE"), awg("16", "NL") }, w, home);
+        CHECK(s.tap(UserChoice::automatic()).connected);
+        stopLive(s);
+        s.world().set(k, QStringLiteral("17"), Behaviour::controlPlaneDown(600));
+        s.world().set(k, QStringLiteral("16"), Behaviour::controlPlaneDown(600));
+        const int reports = int(s.reports.size());
+        const int from = int(s.legs.size());
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("R1: control plane down after launch", s, r, from);
+        CHECK(!r.connected && s.reports.size() == reports);
+        CHECK(stateOf(s, awg("17", "EE")) == PathState::Working); // still the remembered path
+        CHECK(legPaths(s, from).first() == QLatin1String("17") && s.rechecks >= 1);
+    }
+    // Slow control plane: the provider's lease answer comes after the lease share (a transport failure of OUR
+    // request): the leg ends, the path is not refused; the next tap tries it again.
+    {
+        World w;
+        w.set(k, QStringLiteral("up:sw"), Behaviour::startError(/*attributable=*/false));
+        w.set(k, QStringLiteral("16"), Behaviour::works(800, 300, 100));
+        Sim s({ prov("up:sw", UpstreamKind::Country, "CH", 0), awg("16", "NL") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::preferCountry(QStringLiteral("CH")));
+        row("R1: slow lease answer (control plane)", s, r, 0);
+        CHECK(r.connected && stateOf(s, prov("up:sw", UpstreamKind::Country, "CH", 0)) == PathState::Unknown);
+        stopLive(s);
+        const int from = int(s.legs.size());
+        s.tap(UserChoice::preferCountry(QStringLiteral("CH")));
+        CHECK(legPaths(s, from).first() == QLatin1String("up:sw")); // not skipped for an error that was ours
+    }
+    // A request stretched by a suspension: the check is run again, nothing is recorded.
+    {
+        World w;
+        w.set(k, QStringLiteral("wl"), PathScript::always(Behaviour::silent(400)).then(10000, Behaviour::works(400, 300, 100)));
+        Sim s({ prov("wl", UpstreamKind::Whitelist, "", 0) }, w, home);
+        s.suspend(1000, 13800);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("R1: check stretched by a suspension", s, r, 0);
+        CHECK(r.connected && s.rechecks == 1);
+        for (const OutcomeReport &rep : s.reports)
+            CHECK(rep.outcome == PathOutcome::DataOk);
+    }
+}
+
 int main()
 {
     testPathId();
@@ -983,6 +1208,8 @@ int main()
     scenarioModeBeatsPreference();
     scenarioRevision();
     scenarioReview1811();
+    scenarioRace();
+    scenarioAttribution();
 
     std::printf("\n%-55s | %-40s | %8s | %5s | %s\n", "scenario", "outcome", "ms", "paths", "order");
     for (const Row &r : g_rows)

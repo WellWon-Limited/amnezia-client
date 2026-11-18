@@ -427,6 +427,9 @@ void TribeScanner::refreshView()
     for (int i = 0; i < rows.size() && i < v.rows.size(); ++i) {
         QJsonObject r = rows.at(i).toObject();
         r.insert(QStringLiteral("version"), v.rows.at(i).transportVersion);
+        const QString name = m_engine->rowDisplayName(v.rows.at(i).id);
+        if (!name.isEmpty())
+            r.insert(QStringLiteral("label"), name);
         rows[i] = r;
     }
     j.insert(QStringLiteral("rows"), rows);
@@ -495,6 +498,8 @@ void TribeScanner::persistCache(const ScanCachedResult &c)
 {
     if (c.networkKey.isEmpty())
         return;
+    if (onResultsSaved)
+        onResultsSaved(c);
     const QString key = scanCacheStoreKey(c.networkKey, c.fingerprint);
     QJsonObject stored = scanCachedResultToJson(c);
     stored.insert(QLatin1String(kScanCachedLabelRuleKey), QLatin1String(kScanCachedLabelRule));

@@ -16,6 +16,7 @@
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="$HERE/.."
+CLIENT="$HERE/../../.."
 IOS="$(cd "$HERE/../../../platforms/ios" && pwd)"
 fail=0
 bad() { echo "FAIL: $1"; fail=1; }
@@ -70,6 +71,26 @@ for slot in 'void AvpnEngineQml::onConnectionStateChanged(' 'void AvpnEngineQml:
     has "$first" 'm_engine.nativeEventStale(m_tunnel.nativeLegSeen())' || bad "E2: $slot must drop an obsolete native event first"
 done
 [ "$(code "$FACADE" | grep -cF 'm_opInFlight = false;')" = "1" ] || bad "E1: the operation latches are released only in settleOperation"
+
+# Stage 2: the Scanner's proven rows are probe proofs in the one ledger; a whoami we cancelled is no evidence.
+has "$(code "$FACADE")" 'scanner->onResultsSaved = [this](const avpn::ScanCachedResult &c) {' \
+    && has "$(code "$FACADE")" 'm_engine.recordProbeProof(node, QStringLiteral("scanner"))' \
+    || bad "stage 2: the Scanner's results must reach the path engine's ledger"
+has "$(code "$ENGINE/TribeScanner.cpp")" 'onResultsSaved(c);' || bad "stage 2: the Scanner must hand its saved results over"
+has "$(code "$FACADE")" 'if (r->error() == QNetworkReply::OperationCanceledError && !o.timedOut) {' \
+    || bad "stage 2: a whoami cancelled by our own reset must be no evidence (devicectl relaunch, net_error 5)"
+
+# Device round 4: R1 the attribution gate before a check failure reaches the ledger; R3 a Scanner row is one request;
+# R5 the button below the orb follows the orb's own stop state; R6 the empty-ledger control file is dev-only.
+has "$(code "$FACADE")" 'const avpn::CheckBlame blame = avpn::checkFailureBlame(' || bad "R1: finishVerify must ask checkFailureBlame"
+has "$(code "$ENGINE/ServiceEngine.cpp")" 'feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), o));' \
+    || bad "R1: a provider start failure must go through startFailureOutcome"
+has "$(code "$FACADE")" 'endExactRowRequest(r->connected);' || bad "R3: the end of a Scanner row's request must restore or demote the choice"
+has "$(code "$CLIENT/ui/qml/Tribe/Pages/PageConnectTribe.qml")" ': root.engineOwnStopping ? qsTr("Отключаемся…")' \
+    && [ "$(grep -c 'root.engineOwnStopping ? qsTr("Отключаемся…")' "$CLIENT/ui/qml/Tribe/Pages/PageConnectTribe.qml")" = "2" ] \
+    || bad "R5: the caption and the button say «Отключаемся…» from the orb's own state only"
+awk '/#ifdef AVPN_DEV_TOOLS/{f=1} f&&/tribe-reset-ledger/{print "ok"; exit} f&&/#endif/{exit}' "$FACADE" | grep -q ok \
+    || bad "R6: the empty-ledger control file must exist only in AVPN_DEV_TOOLS builds"
 
 [ "$fail" = 0 ] && echo "check_lifecycle_142_wiring: OK" || echo "check_lifecycle_142_wiring: FAILED"
 exit $fail

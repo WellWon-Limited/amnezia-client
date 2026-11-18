@@ -269,6 +269,19 @@ if(IOS)
     endif()
 endif()
 
+# R6 (device round 4): developer tools in development builds only (default OFF; never in a store build). Today: a
+# control file Documents/tribe-reset-ledger makes the next launch start from an empty path ledger, so a true first
+# walk can be measured (the ledger survives reinstalls for users, as it should). Environment override like
+# AVPN_IOS_APP_SCAN_HOST for the dev scripts.
+if(DEFINED ENV{AVPN_DEV_TOOLS})
+    set(AVPN_DEV_TOOLS "$ENV{AVPN_DEV_TOOLS}" CACHE BOOL "Developer tools (env override)")
+endif()
+option(AVPN_DEV_TOOLS "Developer tools in development builds (empty-ledger control file)" OFF)
+if(AVPN_DEV_TOOLS)
+    add_compile_definitions(AVPN_DEV_TOOLS=1)
+    message(STATUS "AVPN overlay: AVPN_DEV_TOOLS=ON (development build tools)")
+endif()
+
 # AVPN (аудит N3, 2026-07-02): «нет return в non-void функции» = UB — в НАШИХ исходниках это
 # ошибка компиляции, не warning. Апстрим-TU не трогаем. MSVC не покрываем (наши платформы — clang).
 if(NOT MSVC)
