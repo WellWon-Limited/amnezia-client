@@ -479,6 +479,14 @@ inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 // (2) исчерпание попыток при живой сети = пауза с ростом 30/60/120 с, не OFF (пользователь
 // всегда может выключить сам); (3) обрыв классифицируется, намерение снимает ТОЛЬКО внешний
 // (§13: пользователь/другой VPN/ОС), а «нет сети» и «упал компонент» его держат.
+// The white-list detector's trigger "the connect did not come up" (its spec §3.1; it lived in the start watchdog
+// before the path engine): a leg of the attempt owner whose tunnel never came up, or an attempt that ended with
+// nothing proven. The detector itself gates the round (cellular, tunnel fully down, its own debounce); no timer here.
+inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
+{
+    return legStartFailures > 0 || attemptEndedNothingProven;
+}
+
 enum class LossClass { Own, External, NoNetwork, Component };
 inline LossClass classifyLoss(bool weAreOperating, const QString &engineStateBeforeCallback,
                               bool engineInterruptedSwitch, bool componentLost, bool uplinkUp)

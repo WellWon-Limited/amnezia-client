@@ -19,7 +19,7 @@
 #include "../NodeRotation.h"
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
-#include "../TransportPick.h"
+#include "../path/PathSelect.h"
 #include "../TuningStore.h"
 #include "../UpstreamEngine.h"
 #include "../UpstreamLeaseOwner.h"
@@ -1125,21 +1125,18 @@ static void picker16AndNotices()
               && !upstreamKindListed(byId.value("up:cccccccccccccc04").upstreamKind));
         CHECK(upstreamKindListed(byId.value("up:cccccccccccccc02").upstreamKind)
               && upstreamKindListed(byId.value("up:cccccccccccccc03").upstreamKind));
-        // Auto: own nodes exhausted (K = 3 at cap 4) -> tier 1 commits the best priority: the balancer itself
-        TransportHistory hist;
-        TransportPickInput in;
-        in.tierGate.enabled = true;
-        in.tierGate.dataPlaneFailCap = 4;
-        in.tierGate.k = 6;
-        in.excluded = {"9", "2", "5"};
-        in.tierGate.failed = in.excluded;
-        const SubscriptionNode *n = pickTransportNode(sub.nodes, {}, hist, in, [](int) { return 0; });
-        CHECK(n && n->nodeId == QLatin1String("up:cccccccccccccc01"));
-        // ... and the older server's countryless stub too, once the listed ones failed
-        in.excluded += QSet<QString>{"up:cccccccccccccc01", "up:cccccccccccccc02", "up:cccccccccccccc03"};
-        in.tierGate.failed = in.excluded;
-        n = pickTransportNode(sub.nodes, {}, hist, in, [](int) { return 0; });
-        CHECK(n && n->nodeId == QLatin1String("up:cccccccccccccc04"));
+        // Auto (path engine): the provider's balancer - also an older server's countryless stub - is a candidate of an
+        // automatic choice, never of the list (above): after our own nodes, in the provider's priority order.
+        QList<path::PathCandidate> pool;
+        for (const SubscriptionNode &node : sub.nodes)
+            pool << path::pathCandidateFromNode(node);
+        path::SelectInput in;
+        in.pool = pool;
+        in.tried = {"9", "2", "5"};
+        QStringList order;
+        for (const path::RankedPath &r : path::selectPaths(in))
+            order << r.path.id.id;
+        CHECK(order.contains("up:cccccccccccccc01") && order.contains("up:cccccccccccccc04"));
         // the parsed stub carries the wire kind (absent stays Unspecified; the row kind decides)
         CHECK(sub.nodes.at(3).upstream.has_value() && sub.nodes.at(3).upstream->kind == UpstreamKind::Auto);
         CHECK(sub.nodes.at(6).upstream.has_value() && sub.nodes.at(6).upstream->kind == UpstreamKind::Unspecified);

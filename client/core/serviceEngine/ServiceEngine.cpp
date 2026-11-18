@@ -323,6 +323,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                 m_tunnel->down();
             break;
         case path::EffectType::Report:
+            if (e.report.outcome == path::PathOutcome::NoHandshake)
+                ++m_legStartFailures;
             if (findNode(e.report.path.id) && m_net.isCurrent(e.report.networkGeneration)
                 && m_ledger.record(e.report.network, e.report.path, e.report.outcome, nowMs(), e.report.connectMs,
                                    e.report.ttfbMs))
@@ -1479,13 +1481,13 @@ bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
         return false;
     }
     m_pinnedNodeId = nodeId;
-    // The person picked this server: the attempt owner's choice is that server - the transports of its host
-    // (the facade narrows it to one path for a Scanner row and widens a pin saved by an earlier run to a country).
+    // The person picked this server of the list: a preferred server - the transports of its host first, then the
+    // best available path with a notice (owner decision of 17.11); the facade narrows a Scanner row to its exact path.
     QStringList paths;
     for (const SubscriptionNode &n : m_merged)
         if (locationKeyOf(n) == loc)
             paths << n.nodeId;
-    m_choice = path::UserChoice::exactPaths(paths);
+    m_choice = path::UserChoice::preferServer(found->countryCode, paths);
     return true;
 }
 
@@ -1590,7 +1592,7 @@ bool ServiceEngine::rotateNext(QString &error) // AVPN
         for (const SubscriptionNode &n : m_merged)
             if (locationKeyOf(n) == locationKeyOf(*t))
                 paths << n.nodeId;
-    m_choice = path::UserChoice::exactPaths(paths);
+    m_choice = path::UserChoice::preferServer(findNode(targetId) ? findNode(targetId)->countryCode : QString(), paths);
     if (m_state == EngineState::Connected || m_state == EngineState::Verifying || m_state == EngineState::Switching)
         return true; // the facade restarts the live session on the new choice
     return connect(error);

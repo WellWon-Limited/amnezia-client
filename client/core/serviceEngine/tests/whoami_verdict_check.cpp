@@ -1,11 +1,9 @@
-// AVPN (plan v3 step 5): checks of the whoami verdict (WhoamiVerdict.h) and of the network memory
-// helpers (NetworkMemory.h). Build/run: tests/build_whoami_verdict.sh.
+// AVPN (plan v3 step 5): checks of the whoami verdict (WhoamiVerdict.h). Build/run: tests/build_whoami_verdict.sh.
 //
 // The verdict decides whether a freshly raised tunnel gets "Connected" with the "data flows" mark,
 // moves to the next path of the same attempt, stays as it is, or hands the decision to the existing
 // generate_204 check (tiebreak). A false NoData/BypassVpn sends a healthy user through the failover
 // chain, a false Works shows a green mark on a dead path - both directions are pinned below.
-#include "../NetworkMemory.h"
 #include <QDir>
 #include <QFile>
 #include <QSettings>
@@ -366,91 +364,6 @@ int main()
         CHECK(avpn::liveProbePingUrl(dev, true, true) == avpn::whoamiBaseUrl(dev, true, true) + ping
                   && avpn::liveProbePingUrl(dev, true, true) == dev + ping,
               "xray on a dev backend (AVPN_API_URL) -> the dev base, as whoami");
-    }
-
-    // --- network memory: the stored copy (owner test 06.11, review of 136) ---
-    // AvpnEngineQml::forgetNetworkMemoryAfterFailedStart -> forgetNetworkPath -> networkMemoryForgetStored;
-    // guardedStart -> networkMemoryReadStored. Same functions, an isolated settings file.
-    {
-        const QString path = QDir::tempPath() + QStringLiteral("/tribe-netmemory-check.ini");
-        QFile::remove(path);
-        QSettings st(path, QSettings::IniFormat);
-        const qint64 now = 1'800'000'000;
-        st.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey),
-                    avpn::networkMemoryRemember(QByteArray(), QStringLiteral("wifi"), QStringLiteral("15"), now - 60));
-        CHECK(avpn::networkMemoryReadStored(st, QStringLiteral("wifi"), now) == QLatin1String("15"),
-              "stored: the next start reads the remembered node");
-        CHECK(!avpn::networkMemoryForgetStored(st, QStringLiteral("wifi"), QStringLiteral("11")),
-              "stored: forgetting another node changes nothing");
-        CHECK(avpn::networkMemoryForgetStored(st, QStringLiteral("wifi"), QStringLiteral("15")),
-              "stored: the failed start's node is forgotten");
-        st.sync();
-        QSettings reread(path, QSettings::IniFormat); // a new process / the next guardedStart
-        CHECK(avpn::networkMemoryReadStored(reread, QStringLiteral("wifi"), now).isEmpty(),
-              "stored: after a failed start the next start reads nothing");
-        QFile::remove(path);
-    }
-
-    // --- network memory ---
-    CHECK(avpn::networkMemoryKey(QStringLiteral("wifi"), QStringLiteral("250-02")) == QLatin1String("wifi"),
-          "wifi key has no operator and no SSID");
-    CHECK(avpn::networkMemoryKey(QStringLiteral("ethernet"), QString()) == QLatin1String("wifi"),
-          "wired counts as the fixed-network key");
-    CHECK(avpn::networkMemoryKey(QStringLiteral("cellular"), QStringLiteral("250-02"))
-              == QLatin1String("cellular:250-02"),
-          "cellular key carries MCC-MNC");
-    CHECK(avpn::networkMemoryKey(QStringLiteral("cellular"), QString()) == QLatin1String("cellular"),
-          "cellular without operator code");
-    CHECK(avpn::networkMemoryKey(QString(), QStringLiteral("250-02")).isEmpty(), "unknown medium -> no key");
-    {
-        const qint64 now = 1'800'000'000;
-        QByteArray m;
-        CHECK(avpn::networkMemoryLookup(m, QStringLiteral("wifi"), now).isEmpty(), "empty memory");
-        m = avpn::networkMemoryRemember(m, QStringLiteral("wifi"), QStringLiteral("9:awg"), now - 100);
-        m = avpn::networkMemoryRemember(m, QStringLiteral("cellular:250-02"), QStringLiteral("9:xray"), now - 50);
-        CHECK(avpn::networkMemoryLookup(m, QStringLiteral("wifi"), now) == QLatin1String("9:awg"), "wifi remembered");
-        CHECK(avpn::networkMemoryLookup(m, QStringLiteral("cellular:250-02"), now) == QLatin1String("9:xray"),
-              "operator remembered separately");
-        CHECK(avpn::networkMemoryLookup(m, QStringLiteral("cellular:250-01"), now).isEmpty(),
-              "another operator has no memory");
-        m = avpn::networkMemoryRemember(m, QStringLiteral("wifi"), QStringLiteral("2:awg"), now - 10);
-        CHECK(avpn::networkMemoryLookup(m, QStringLiteral("wifi"), now) == QLatin1String("2:awg"),
-              "newer success replaces the entry");
-        // review item 5: entries older than 7 days are ignored
-        const QByteArray old = avpn::networkMemoryRemember(QByteArray(), QStringLiteral("wifi"), QStringLiteral("9:awg"),
-                                                           now - avpn::kNetworkMemoryMaxAgeSec - 1);
-        CHECK(avpn::networkMemoryLookup(old, QStringLiteral("wifi"), now).isEmpty(), "older than 7 days -> ignored");
-        const QByteArray fresh = avpn::networkMemoryRemember(QByteArray(), QStringLiteral("wifi"), QStringLiteral("9:awg"),
-                                                             now - avpn::kNetworkMemoryMaxAgeSec + 60);
-        CHECK(avpn::networkMemoryLookup(fresh, QStringLiteral("wifi"), now) == QLatin1String("9:awg"),
-              "just under 7 days -> used");
-        CHECK(avpn::networkMemoryLookup(R"([{"k":"wifi","n":"9:awg"}])", QStringLiteral("wifi"), now).isEmpty(),
-              "entry without a timestamp -> ignored");
-        // forget only if it still points at the failed node
-        QByteArray f = avpn::networkMemoryForget(m, QStringLiteral("wifi"), QStringLiteral("9:awg"));
-        CHECK(avpn::networkMemoryLookup(f, QStringLiteral("wifi"), now) == QLatin1String("2:awg"),
-              "failure of an older node keeps the newer entry");
-        f = avpn::networkMemoryForget(m, QStringLiteral("wifi"), QStringLiteral("2:awg"));
-        CHECK(avpn::networkMemoryLookup(f, QStringLiteral("wifi"), now).isEmpty(), "failed remembered node is forgotten");
-        CHECK(avpn::networkMemoryLookup(f, QStringLiteral("cellular:250-02"), now) == QLatin1String("9:xray"),
-              "other networks untouched");
-        CHECK(avpn::networkMemoryRemember(m, QString(), QStringLiteral("x"), now) == m, "no key -> no write");
-        // #6: explicit «Авто» tap clears the entry of the current network, whatever node it holds
-        QByteArray c = avpn::networkMemoryClear(m, QStringLiteral("wifi"));
-        CHECK(avpn::networkMemoryLookup(c, QStringLiteral("wifi"), now).isEmpty(), "«Авто» clears the wifi entry");
-        CHECK(avpn::networkMemoryLookup(c, QStringLiteral("cellular:250-02"), now) == QLatin1String("9:xray"),
-              "«Авто» on Wi-Fi keeps the operator entries");
-        CHECK(avpn::networkMemoryClear(m, QStringLiteral("cellular:250-01")) == m, "nothing to clear -> blob unchanged");
-        CHECK(avpn::networkMemoryClear(m, QString()) == m, "no key -> no write");
-        CHECK(avpn::networkMemoryLookup("not json", QStringLiteral("wifi"), now).isEmpty(), "corrupt blob -> empty");
-        QByteArray big;
-        for (int i = 0; i < avpn::kNetworkMemoryMax + 5; ++i)
-            big = avpn::networkMemoryRemember(big, QStringLiteral("cellular:%1").arg(i), QStringLiteral("n"), now - 100 + i);
-        CHECK(QJsonDocument::fromJson(big).array().size() == avpn::kNetworkMemoryMax, "memory is capped");
-        CHECK(avpn::networkMemoryLookup(big, QStringLiteral("cellular:%1").arg(avpn::kNetworkMemoryMax + 4), now)
-                  == QLatin1String("n"),
-              "cap drops the oldest, keeps the newest");
-        CHECK(avpn::networkMemoryLookup(big, QStringLiteral("cellular:0"), now).isEmpty(), "oldest dropped");
     }
 
     std::printf("%s: %d/%d checks\n", failures ? "whoami_verdict_check: FAILED" : "whoami_verdict_check: OK",

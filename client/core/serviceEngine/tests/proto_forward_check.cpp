@@ -9,7 +9,6 @@
 // клиентах без релиза) — ровно «как до волны» — и для любого неизвестного proto (vless, ...).
 // Сборка/запуск: core/serviceEngine/tests/build_proto_forward.sh
 #include "../NodeRotation.h"
-#include "../Selector.h"
 #include "../ServiceEngine.h"
 #include "../SubscriptionParser.h"
 #include "../TuningStore.h"
@@ -143,29 +142,6 @@ int main(int argc, char **argv)
         noProto.replace(QByteArray("\"proto\": \"awg\","), QByteArray());
         CHECK(SubscriptionParser::parse(subJson({ noProto }), legacy, err));
         CHECK(legacy.nodes.size() == 1 && legacy.nodes.first().proto == QLatin1String("awg"));
-    }
-
-    // --- 3) Selector::choose: xray с лучшим score никогда не выбирается; все xray → nullopt ---
-    {
-        auto mk = [](const QString &id, const QString &proto, int rtt) {
-            ScoredNodeS s;
-            s.node = mkNode(id, proto);
-            s.node.weight = 1.0;
-            s.rttMs = rtt;
-            s.score = Selector::score(rtt, 1.0);
-            return s;
-        };
-        // xray быстрее всех — приманка: выбрать НЕЛЬЗЯ.
-        auto pick = Selector::choose({ mk("x-1", QStringLiteral("xray"), 5),
-                                       mk("a-1", QStringLiteral("awg"), 100),
-                                       mk("a-2", QString(), 80) },
-                                     QString(), 0, 0);
-        CHECK(pick && pick->nodeId == QLatin1String("a-2"));
-        // ТОЛЬКО xray → честно пусто (НЕ manual_only-фолбэк «оставить как есть»).
-        auto none = Selector::choose({ mk("x-1", QStringLiteral("xray"), 5),
-                                       mk("x-2", QStringLiteral("xray"), 7) },
-                                     QString(), 0, 0);
-        CHECK(!none.has_value());
     }
 
     // --- 4) nextLiveNodeId (ротация «Сменить сервер»): xray в кольцо не входит ---

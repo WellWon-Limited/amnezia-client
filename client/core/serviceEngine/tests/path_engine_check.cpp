@@ -764,6 +764,12 @@ static void scenarioPreference()
     CHECK(legPaths(s, from).first() == QLatin1String("de1") && r.fallbackNotice);
     stopLive(s);
 
+    // a server of the list (preferServer: the transports of one host) falls back like a country, with the notice
+    from = int(s.legs.size());
+    r = s.tap(UserChoice::preferServer(QStringLiteral("DE"), { QStringLiteral("de1"), QStringLiteral("de1:xray") }));
+    CHECK(r.connected && r.fallbackNotice && r.path.id.id == QLatin1String("nl1"));
+    stopLive(s);
+
     // the exact node never falls back
     from = int(s.legs.size());
     r = s.tap(UserChoice::exactPath(QStringLiteral("de1")));

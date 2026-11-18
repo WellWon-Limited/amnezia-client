@@ -8,7 +8,7 @@ Groups:
             ServiceEngine.cpp or in the extension's host-testable Swift (TribeWatchPlan.swift,
             TribeDataWatchRuntime.swift); killed when the BEHAVIOURAL test named with the mutant fails:
               watch   - tunnel_watch_check              plan - TribeWatchPlanTests.swift
-              pick    - transport_pick_check            rt   - TribeDataWatchRuntimeTests.swift
+              integ   - path_integration_check          rt   - TribeDataWatchRuntimeTests.swift
               ios     - IosDataWatchTests.cpp           harness - the controller harness (the real
                                                                   ios_controller.mm)
               cfg     - config_cache_policy_check
@@ -63,8 +63,6 @@ PURE = [
     ("plan-02", ENG + "TunnelWatchPlan.h", "double(in.nowMs + ttlH * 3600LL * 1000LL)", "double(in.nowMs)", "watch", "the plan expires at once"),
     ("plan-03", ENG + "TunnelWatchPlan.h", "double(policyH * 3600LL * 1000LL)", "double(policyH)", "watch", "policy max age in the wrong unit"),
     ("plan-04", ENG + "TunnelWatchPlan.h", '{QStringLiteral("ios_tunnel_watch"), in.watch}', '{QStringLiteral("ios_tunnel_watch"), true}', "watch", "the plan switches the watch on by itself"),
-    ("plan-06", ENG + "TunnelWatchPlan.h", '        if (e.key != QLatin1String("wifi") && e.key != in.cellularKey)\n            continue; // only the two keys of net_keys\n', "", "watch", "another network's memory entry is handed over"),
-    ("plan-07", ENG + "TunnelWatchPlan.h", "if (!t.isDouble() || nowSec - qint64(t.toDouble()) > maxAgeSec)\n            return e;", "if (!t.isDouble())\n            return e;", "watch", "a memory entry older than 7 days is handed over"),
     ("plan-08", ENG + "TunnelWatchPlan.h", "return body.size() > kWatchPlanMaxBytes ? QByteArray() : body;", "return body.size() >= kWatchPlanMaxBytes ? QByteArray() : body;", "watch", "64 KB boundary"),
     ("plan-09", ENG + "TunnelWatchPlan.h", "return body.size() > kWatchPlanMaxBytes ? QByteArray() : body;", "return body;", "watch", "a plan over 64 KB is written"),
     ("plan-10", ENG + "TunnelWatchPlan.h", "const bool everOn = everOnBefore || flagNow;", "const bool everOn = flagNow;", "watch", "the kill switch never reaches the extension (file not rewritten with the flag off)"),
@@ -75,7 +73,6 @@ PURE = [
     ("plan-15", ENG + "TunnelWatchPlan.h", "    if (!in.sanityTargets.isEmpty())\n        plan.insert(", "    plan.insert(", "watch", "an empty target list is written (the built-in targets are lost)"),
     ("plan-16", ENG + "TunnelWatchPlan.h", "        if (!s.toPlan)\n            continue;\n        out.append(", "        out.append(", "watch", "app-only numbers go into the plan"),
     ("plan-17", ENG + "TunnelWatchPlan.h", "in.pinNodeId.isEmpty() ? QString() : in.pinCountry", "in.pinCountry", "watch", "a pin country without a pinned node"),
-    ("plan-18", ENG + "TunnelWatchPlan.h", "e.savedMs = e.nodeId ? qint64(t.toDouble()) * 1000 : 0;", "e.savedMs = e.nodeId ? qint64(t.toDouble()) : 0;", "watch", "memory time in the wrong unit"),
     ("plan-19", ENG + "TunnelWatchPlan.h", '{QStringLiteral("pool_revision"), double(in.poolRevision)}', '{QStringLiteral("pool_revision"), double(0)}', "watch", "rev-P1: pool revision not written"),
     ("plan-20", ENG + "TunnelWatchPlan.h", '{QStringLiteral("written_ms"), double(in.nowMs)}', '{QStringLiteral("written_ms"), double(in.nowMs / 1000)}', "watch", "rev-P2: written time in seconds"),
     ("plan-21", ENG + "TunnelWatchPlan.h", "    if (!w.write)\n        return out;\n    out.attempted = true;", "    out.attempted = true;", "watch", "rev-W2: the write goes ahead on an install whose flag was never on"),
@@ -176,10 +173,7 @@ PURE = [
     ("arm-12", IOS + "IosBackgroundArm.h", "    if (in.nowMs < in.heldSinceMs) return BgArmTick::ReleaseTimeout;\n", "", "ios", "rev-A8: a clock set back stretches the hold"),
     ("arm-13", IOS + "IosBackgroundArm.h", "    if (in.appActive) return BgArmTick::ReleaseNotNeeded;\n", "", "ios", "rev-W16: the hold is not given back on the screen"),
     # ---- the engine ----
-    ("eng-01", ENG + "ServiceEngine.cpp", "    if (m_state != EngineState::Connected || m_currentNodeId.isEmpty())\n        return false;\n    m_state = EngineState::Verifying;", "    if (m_currentNodeId.isEmpty())\n        return false;\n    m_state = EngineState::Verifying;", "pick", "rev-E1: any phase can be thrown back to Verifying"),
-    ("eng-02", ENG + "ServiceEngine.cpp", "    m_upFrozen = true;\n    return true;\n}", "    return true;\n}", "pick", "rev-E2: a re-check records a bogus time to traffic"),
-    ("eng-03", ENG + "ServiceEngine.cpp", "    m_state = EngineState::Verifying;\n    // A success of this re-check", "    // A success of this re-check", "pick", "the engine does not go back to Verifying"),
-    ("eng-04", ENG + "ServiceEngine.cpp", "    m_upFrozen = true;\n    return true;\n}", "    m_upFrozen = true;\n    m_dataPlaneFailStreak = 0;\n    return true;\n}", "pick", "rev-E3: a re-check returns the give-up streak"),
+    ("eng-01", ENG + "ServiceEngine.cpp", "    if (m_state != EngineState::Connected || m_currentNodeId.isEmpty())\n        return false;\n    m_state = EngineState::Verifying;", "    if (m_currentNodeId.isEmpty())\n        return false;\n    m_state = EngineState::Verifying;", "integ", "rev-E1: any phase can be thrown back to Verifying"),
     # ---- the extension: the plan file ----
     ("xp-01", IOS + "TribeWatchPlan.swift", "other.seq >= seq || other.writtenMs > writtenMs", "other.seq >= seq", "plan", "after the app's counter starts over every plan is refused"),
     ("xp-02", IOS + "TribeWatchPlan.swift", "other.seq >= seq || other.writtenMs > writtenMs", "true", "plan", "an older plan is accepted"),
@@ -223,10 +217,6 @@ PURE = [
     ("plan-28", ENG + "TunnelWatchPlan.h", "            if (candidates.size() >= kWatchPlanMaxCandidates)\n                break;\n", "", "watch", "more than five candidates are written"),
     ("plan-29", ENG + "TunnelWatchPlan.h", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')) || c.peer.isEmpty())", "if (node <= 0 || c.peer.isEmpty())", "watch", "an Xray listener is written as a candidate"),
     ("plan-30", ENG + "TunnelWatchPlan.h", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')) || c.peer.isEmpty())", "if (node <= 0 || c.nodeId.contains(QLatin1Char(':')))", "watch", "a candidate without a configuration is written"),
-    ("plan-31", ENG + "TunnelWatchPlan.h", "        if (!text.isEmpty())\n            peer.insert(key, text);", "        peer.insert(key, text);", "watch", "empty values and absent keys are written"),
-    ("plan-32", ENG + "TunnelWatchPlan.h", "if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))", "if (current.isEmpty())", "watch", "a node with another DNS or MTU is offered for a switch in place"),
-    ("plan-33", ENG + "TunnelWatchPlan.h", "for (const char *key : {\"mtu\", \"allowed_ips\", \"client_ip\"})", "for (const char *key : {\"mtu\"})", "watch", "other routed ranges or another tunnel address count as in place"),
-    ("plan-34", ENG + "TunnelWatchPlan.h", "if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))", "if (current != watchPlanSessionLines(candidateInner))", "watch", "two nodes with nothing to compare count as in place"),
     ("adopt-01", ENG + "TunnelWatchStatus.h", "if (in.switchSeq <= 0 || in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())", "if (in.snapshotNodeId.isEmpty() || in.snapshotGeneration.isEmpty())", "watch", "a node is adopted although the extension made no switch"),
     ("adopt-02", ENG + "TunnelWatchStatus.h", "    if (in.snapshotNodeId == in.appNodeId)\n        return false; // the app is already there\n", "", "watch", "the node the app is on is adopted again"),
     ("adopt-03", ENG + "TunnelWatchStatus.h", "if (in.snapshotGeneration == in.adoptedGeneration && in.switchSeq <= in.adoptedSeq)", "if (in.switchSeq <= in.adoptedSeq)", "watch", "a switch of another run of the extension is taken for an adopted one"),
@@ -242,33 +232,6 @@ PURE = [
     ("res-26b", ENG + "TunnelWatchResume.h", "ai.switchSeq = qMax(watchSeq, session.value(QStringLiteral(\"switch_seq\")).toInt());", "ai.switchSeq = session.value(QStringLiteral(\"switch_seq\")).toInt();", "watch", "the switch number of the watch block is not read"),
     ("res-27", ENG + "TunnelWatchResume.h", "        } else if (adopted && m_ops.engineVerifying()) {", "        } else if (false) {", "watch", "the node the extension moved to is not checked by the app"),
     ("res-28", ENG + "TunnelWatchResume.h", "ci.appGeneration = ci.snapshotGeneration == m_adoptedGeneration ? ci.snapshotGeneration : m_generation;", "ci.appGeneration = m_generation;", "watch", "after a start by the system the verdict of the adopted session is another session's"),
-    ("cand-01", ENG + "TunnelWatchCandidates.h", "    if (mode == TransportMode::Xray)\n        return out;\n", "", "pick", "Xray-only mode offers AmneziaWG candidates"),
-    ("cand-02", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isXrayProto(n.proto) || isUpstreamNode(n))", "pick", "a manual-only node is offered"),
-    ("cand-03", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto) || isUpstreamNode(*current))", "if (!current || isUpstreamNode(*current))", "pick", "an Xray session gets candidates"),
-    ("cand-04", ENG + "TunnelWatchCandidates.h", "        in.excluded = failedThisSession;\n", "", "pick", "a node that failed in this session is offered again"),
-    ("cand-05", ENG + "TunnelWatchCandidates.h", "    take(pinned);\n", "", "pick", "the pinned country does not come first"),
-    ("cand-06", ENG + "TunnelWatchCandidates.h", "        in.exclA = currentNodeId;\n", "", "pick", "the current node is offered as a candidate"),
-    ("cand-07", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isManualOnlyNode(n) || isUpstreamNode(n))", "pick", "(the Awg mode filters them too) Xray listeners enter the pool"),
-    ("cand-08", ENG + "TunnelWatchCandidates.h", "if (isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n))", "if (isXrayProto(n.proto) || isManualOnlyNode(n))", "pick", "merge with provider nodes, I5: a node that runs on a seat lease is offered to the extension"),
-    ("cand-09", ENG + "TunnelWatchCandidates.h", "if (!current || isXrayProto(current->proto) || isUpstreamNode(*current))", "if (!current || isXrayProto(current->proto))", "pick", "a session that stands on a provider node gets switch candidates"),
-    ("eng-05", ENG + "ServiceEngine.cpp", "        if (!watchPlanInPlace(currentInner, inner))\n            continue; // another DNS, MTU or routed range: that switch is the app's own\n", "", "pick", "a node with another DNS is put into the plan"),
-    ("eng-06", ENG + "ServiceEngine.cpp", "    if (m_state != EngineState::Connected && m_state != EngineState::Verifying)\n        return false;\n    if (nodeId == m_currentNodeId || !findNode(nodeId))", "    if (nodeId == m_currentNodeId || !findNode(nodeId))", "pick", "a switch is adopted while the app's own start is in flight"),
-    ("eng-07", ENG + "ServiceEngine.cpp", "    if (nodeId == m_currentNodeId || !findNode(nodeId))\n        return false;", "    if (nodeId == m_currentNodeId)\n        return false;", "pick", "a node the pool does not know is adopted"),
-    ("eng-08", ENG + "ServiceEngine.cpp", "        m_extEvidence.note(m_currentNodeId, netKey, atMs > 0 && atMs <= now ? atMs : now, now);\n", "", "pick", "the node the extension left is offered and picked again at once"),
-    ("t7-13", ENG + "ServiceEngine.cpp", "atMs > 0 && atMs <= now ? atMs : now, now);", "now, now);", "pick", "third review T7: the evidence is stamped with the moment of the adoption, not of the switch (the state of cdc7861ba)"),
-    ("t7-14", ENG + "ServiceEngine.cpp", "atMs > 0 && atMs <= now ? atMs : now, now);", "atMs, now);", "pick", "a time from the future or no time at all is taken as the moment of the switch"),
-    ("eng-08b", ENG + "ServiceEngine.cpp", "    out.unite(m_extEvidence.freshNodes(m_extEvidenceNet, nowMs()));\n", "", "pick", "the extension's evidence excludes nothing"),
-    ("eng-08d", ENG + "ServiceEngine.cpp", "        if (m_extOriginNodeId.isEmpty())\n            m_extOriginNodeId = m_currentNodeId; // where the user was", "        m_extOriginNodeId = m_currentNodeId; // where the user was", "pick", "the place to return to moves with every switch of the extension"),
-    ("eng-08e", ENG + "ServiceEngine.cpp", "    if (nodeId == m_extOriginNodeId)\n        m_extOriginNodeId.clear(); // the extension itself came back\n", "", "pick", "after the extension itself came back, the app's own failover is undone as if it were the extension's"),
-    ("eng-12", ENG + "ServiceEngine.cpp", "f.movedByExtension = locationKeyOf(*origin) == pinLocation && locationKeyOf(*current) != pinLocation;", "f.movedByExtension = locationKeyOf(*current) != pinLocation;", "pick", "a session that was outside the pinned location by the app's own doing is 'returned'"),
-    ("eng-12b", ENG + "ServiceEngine.cpp", "f.movedByExtension = locationKeyOf(*origin) == pinLocation && locationKeyOf(*current) != pinLocation;", "f.movedByExtension = locationKeyOf(*origin) == pinLocation;", "pick", "a session that is in the pinned location again is restarted for nothing"),
-    ("eng-13", ENG + "ServiceEngine.cpp", "f.evidenceFresh = m_extEvidence.fresh(m_extOriginNodeId, m_extEvidenceNet, nowMs());", "f.evidenceFresh = false;", "pick", "the way back is open while the extension's evidence is fresh"),
-    ("eng-14", ENG + "ServiceEngine.cpp", "f.pinRaisable = pinnedCandidate() != nullptr;", "f.pinRaisable = true;", "pick", "a way back to a location that cannot be raised"),
-    ("eng-15", ENG + "ServiceEngine.cpp", "    m_extOriginNodeId.clear(); // AVPN (iOS data watch): a start of the app's own is a new choice\n", "", "pick", "(a stop clears it as well; a start without a stop comes only after a lost tunnel) a start of the app's own keeps the old session's place to return to"),
-    ("eng-16", ENG + "ServiceEngine.cpp", "    m_extOriginNodeId.clear(); // AVPN (iOS data watch): the session the extension moved is over (the evidence ages by itself)\n", "", "pick", "a tunnel found alive after a stop inherits the old session's place to return to"),
-    ("eng-09", ENG + "ServiceEngine.cpp", "    if (verify) {\n        m_state = EngineState::Verifying;\n        m_upFrozen = true; // not a time to traffic: the rise was the extension's", "    if (true) {\n        m_state = EngineState::Verifying;\n        m_upFrozen = true; // not a time to traffic: the rise was the extension's", "pick", "without a check of its own the engine is left in Verifying"),
-    ("eng-10", ENG + "ServiceEngine.cpp", "    m_currentNodeId = nodeId;\n    if (nodeId == m_extOriginNodeId)", "    if (nodeId == m_extOriginNodeId)", "pick", "the adopted node does not become the current one"),
-    ("eng-11", ENG + "ServiceEngine.cpp", "        if (out.size() >= kWatchPlanMaxCandidates)\n            break;\n    }\n    return out;\n}\n\nQSet<QString> ServiceEngine::sessionExclusions", "    }\n    return out;\n}\n\nQSet<QString> ServiceEngine::sessionExclusions", "pick", "(the plan writer cuts to five as well) the engine's list is unbounded"),
     ("cfg-01", ENG + "ConfigCachePolicy.h", "    if (ios)\n        features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "    Q_UNUSED(ios);", "cfg", "the switch key is trusted from a cached config"),
     ("cfg-02", ENG + "ConfigCachePolicy.h", "    if (ios)\n        features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "    features.insert(QStringLiteral(\"ios_tunnel_watch_switch\"), false);", "cfg", "the freeze touches another platform's flag"),
     ("cfg-03", ENG + "ConfigCachePolicy.h", "    features.insert(QStringLiteral(\"node_scan\"), false);\n    if (ios)", "    if (ios)", "cfg", "node_scan is trusted from a cached config"),
@@ -524,20 +487,13 @@ WIRING = [
     ("w-t4c", IOS + "PacketTunnelProvider+WireGuard.swift", "        tribeDataWatch.noteStop(userInitiated: reason == .userInitiated) // AVPN (build 141): the spare nodes' keys leave the plan file\n", "", "a stop does not reach the runtime: the keys stay in the file with the tunnel off"),
     ("w-t4d", IOS + "PacketTunnelProvider+WireGuard.swift", "tribeDataWatch.noteStop(userInitiated: reason == .userInitiated)", "tribeDataWatch.noteStop(userInitiated: true)", "every stop, also one by the system, takes the candidates away"),
     ("w-t7a", IOS + "PacketTunnelProvider+DataWatch.swift", "        metadata[\"switch_ms\"] = made.atMs\n", "", "the status reply does not say when the switch was made"),
-    ("w-t7b", ENG + "AvpnEngineQml.cpp", "                                           stamp.atMs))", "                                           0))", "the facade drops the time of the switch"),
-    ("w-t7c", ENG + "AvpnEngineQml.cpp", "avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral(\"cellular\"), diagCarrier()),\n                                                                     currentNetworkMemoryKey()),", "currentNetworkMemoryKey(),", "the facade files the evidence under the network of the adoption"),
     ("w-s7f", IOS + "PacketTunnelProvider+WireGuard.swift", "                completionHandler(self.tribeEngineDownReply())\n", "                completionHandler(nil)\n", "second review R5: a tunnel without an engine answers the status request with nothing"),
     ("w-s8", IOS + "PacketTunnelProvider+WireGuard.swift", "adapter.start(tunnelConfiguration: startConfiguration)", "adapter.start(tunnelConfiguration: tunnelConfiguration)", "the node chosen for a start by the system is not the one raised"),
     ("w-s9", IOS + "PacketTunnelProvider+WireGuard.swift", "                self.tribeApplySessionOverride(&metadata) // AVPN (build 141, data watch stage 2)\n", "", "the status reply names the profile's node after a switch"),
     ("w-s10", IOS + "PacketTunnelProvider+WireGuard.swift", "startSource: tribeStartSource)", "startSource: nil)", "every start is treated as a start by the system"),
-    ("w-s11", ENG + "AvpnEngineQml.cpp", "    if (in.watch && in.watchSwitch)\n        in.candidates = m_engine.extensionSwitchCandidates();", "    in.candidates = m_engine.extensionSwitchCandidates();", "candidates are collected with the switch key off"),
-    ("w-s12", ENG + "AvpnEngineQml.cpp", "        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral(\"node_scan\"), false),\n", "        if (!m_engine.adoptExtensionSwitch(nodeId, true,\n", "an adopted node is sent to a check the app does not have"),
     ("w-s12b", ENG + "AvpnEngineQml.cpp", "            m_watchResume->onSessionMetadata(metadata);\n", "", "second review R3: a switch told in an ordinary status reply never reaches the hand-over"),
     ("w-s12c", ENG + "AvpnEngineQml.cpp", "        m_watchResume->onReasserted();\n", "", "second review R3: a Reasserting asks for no fresh reply"),
-    ("w-s12d", ENG + "AvpnEngineQml.cpp", "        m_startOrigin = StartOrigin::User;\n        m_needsRestart = true;\n        m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();\n        m_restartOrigin = QStringLiteral(\"extension_return\");", "        m_startOrigin = StartOrigin::User;\n        clearPin();\n        m_needsRestart = true;\n        m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();\n        m_restartOrigin = QStringLiteral(\"extension_return\");", "the way back touches the pin"),
     ("w-s12e", ENG + "AvpnEngineQml.cpp", "    if (!avpn::decideEngineDownRestart(in))\n        return;\n", "", "second review R5: an engine-down reply restarts the tunnel whatever the app is doing"),
-    ("w-s12f", ENG + "AvpnEngineQml.cpp", "        in.busy = m_opInFlight || m_needsRestart || m_paused || !uiForeground();", "        in.busy = m_opInFlight || m_needsRestart || m_paused;", "the way back is taken from the background"),
-    ("w-s12g", ENG + "ServiceEngine.cpp", "        m_extEvidence.note(m_currentNodeId, netKey, atMs > 0 && atMs <= now ? atMs : now, now);", "        m_failedThisSession.insert(m_currentNodeId);", "second review R4: the node the extension left is failed for the whole app session again"),
     ("w-s13", ENG + "ConfigService.cpp", "            freezeCachedFeatures(c.features, /*ios=*/true);", "            freezeCachedFeatures(c.features, /*ios=*/false);", "on iOS the switch key is trusted from the cache"),
     ("w-s14", "recipes/awg-apple/tribe/TribeDataWatch.swift", "        if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive {", "        if !policy.switchEnabled || policy.maxSwitches == 0 || appAlive || env.candidates.isEmpty {", "the arbiter's gate is rewritten (its conditions are pinned by the rule's own mutants)"),
     ("w-e2a", PATCH, "+        guard self.dataWatchPolicy.enabled else { return }\n+        self.dataWatch.notePathEvent(", "+        self.dataWatch.notePathEvent(", "a path event reaches a switched-off watch"),
@@ -578,7 +534,6 @@ WIRING = [
     ("w-a7b", IOS + "ios_controller.mm", "    return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;", "    return false;", "on the phone the controller never learns that the app is on the screen (the harness has no UIKit)"),
     ("w-a8a", ENG + "AvpnEngineQml.cpp", "    ops.startVerification = [this] {\n        refreshDataFlowing();\n        startDataPathVerification();", "    ops.startVerification = [this] {\n        refreshDataFlowing();\n        m_engine.verifyFailed(QStringLiteral(\"extension\"));", "the extension's verdict is taken as a failure of the node"),
     ("w-a8b", ENG + "AvpnEngineQml.cpp", "    ops.reenterVerifying = [this] { return m_engine.reenterVerifying(); };", "    ops.reenterVerifying = [this] { m_engine.reenterVerifying(); return true; };", "rev-W7 at the call site: the engine's answer is not passed on"),
-    ("w-a8c", ENG + "AvpnEngineQml.cpp", "    ops.forgetNode = [this](const QString &nodeId) {\n        if (m_attemptNetKey.isEmpty())\n            return;", "    ops.forgetNode = [this](const QString &nodeId) {\n        m_savedPin.clear();\n        if (m_attemptNetKey.isEmpty())\n            return;", "the extension's verdict clears the pin"),
     ("w-x1a", "recipes/awg-apple/tribe/TribeDataWatch.swift", 'numbers["ios_tw_cycle_s"], fallback: policy.cycleSeconds, min: 10, max: 120)', 'numbers["ios_tw_cycle_s"], fallback: policy.cycleSeconds, min: 5, max: 120)', "the extension clamps a number to other bounds than the app"),
     ("w-x1b", ENG + "ConnectTunables.h", '{"ios_tw_probe_max_per_hour",            12,        1,          60, true}', '{"ios_tw_probe_max_per_hour",            12,        1,         600, true}', "the app lets through a value the extension cuts"),
     ("w-x1c", "recipes/awg-apple/tribe/TribeDataWatch.swift", '        policy.probeMaxPerHour = Int(number(numbers["ios_tw_probe_max_per_hour"], fallback: Double(policy.probeMaxPerHour), min: 1, max: 60))\n', "", "a number of the plan is not read by the extension"),
@@ -587,8 +542,6 @@ WIRING = [
 
 # Survivors that are accepted, with the reason no test of this group can or should kill them.
 ACCEPTED = {
-    "cand-07": "equivalent: with Xray listeners in the pool the Awg mode of the pick still refuses them (transportAllowed)",
-    "eng-11": "equivalent: buildWatchPlan cuts the list to five as well (plan-28); the engine's cut only saves work",
     "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
     "rs-01": "equivalent: a second lock - the parse keeps candidates only with the switch key on and a live lease (xl-01, xl-02, xp-06), so a plan with candidates always has the key on",
     "sb-02": "equivalent: the same second lock at the start choice (the pure function's own lock is pinned by xc-12)",
@@ -629,10 +582,10 @@ def test_command(kind, tree, work):
     rule = os.path.join(tree, "recipes/awg-apple/tribe/TribeDataWatch.swift")
     if kind == "watch":
         return ["bash", "-c", 'OUT="%s/tw" QT_ROOT="%s" bash "%s/build_tunnel_watch.sh"' % (work, QT, eng_tests)]
-    if kind == "pick":
-        # Headers outside the two copied directories come from the working tree (never mutated here).
-        return ["bash", "-c", 'OUT="%s/tp" QT_ROOT="%s" AVPN_MAIN_CLIENT="%s" bash "%s/build_transport_pick.sh"'
-                % (work, QT, os.path.join(ROOT, "client"), eng_tests)]
+    if kind == "integ":
+        # The real engine with the attempt owner (path engine). Third-party headers (qtkeychain) come from the main
+        # checkout as in every engine build script - a worktree may not have the submodules.
+        return ["bash", "-c", 'OUT="%s/pi" QT_ROOT="%s" bash "%s/build_path_integration.sh"' % (work, QT, eng_tests)]
     if kind == "ios":
         return ["bash", "-c", 'xcrun clang++ -std=c++17 -pthread "%s/IosDataWatchTests.cpp" -o "%s/idw" && "%s/idw"' % (ios_tests, work, work)]
     if kind == "plan":

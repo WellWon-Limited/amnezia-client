@@ -506,13 +506,10 @@ int main(int argc, char **argv)
         }
         CHECK(countContaining(eng.switchLog(), "heal budget restored") == 0);
         CHECK(feedDead(eng, tun, 1200, tx));                       // кап эпизода исчерпан → другая нода
-        const int upsBefore = tun.ups.size();
         CHECK(eng.onTunnelDisconnected());
-        // path engine: the pinned server is an exact choice - it never falls back to another server (owner
-        // decision of 17.11, "во всех обработчиках"): the failover attempt ends with an honest failure
-        CHECK(tun.ups.size() == upsBefore);
-        const std::optional<path::AttemptResult> exactEnd = eng.takeAttemptResult();
-        CHECK(exactEnd && exactEnd->reason == path::FailReason::ExactNodeFailed);
+        // path engine: the pinned server of the list is a preference - its own paths are spent, the failover attempt
+        // goes on to the best available server (the facade tells the person, the preference is kept)
+        CHECK(tun.lastUpNodeId == QLatin1String("10"));
         // простой (ни rx, ни handshake) бюджет не возвращает
         ServiceEngine idle;
         FakeTunnel itun;

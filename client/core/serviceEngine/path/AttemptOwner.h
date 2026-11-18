@@ -401,7 +401,7 @@ private:
         AttemptResult res;
         res.connected = true;
         res.path = m_leg.path;
-        res.fallbackNotice = m_choice.kind == UserChoice::Kind::PreferCountry && m_leg.path.country != m_choice.country;
+        res.fallbackNotice = m_choice.kind == UserChoice::Kind::PreferCountry && !isPreferred(m_choice, m_leg.path);
         finish(res, out);
     }
 

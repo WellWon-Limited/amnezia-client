@@ -27,8 +27,8 @@
 // Bounded: entries untouched for evidenceTtlMs are dropped, then the oldest beyond maxEntries.
 // Persistence: toJson()/fromJson(), versioned ({"v":1,...}); another version or garbage reads as empty.
 //
-// Replaces (integration step): network memory (NetworkMemory.h, avpn/netMemory), transport history
-// (TransportPick.h TransportHistory, avpn/transportHistory), the engine's failed-this-session and attempt
+// Replaced (and removed with it): network memory (avpn/netMemory), transport history (avpn/transportHistory), the
+// engine's failed-this-session and attempt
 // exclusions, the AmneziaWG ban, the extension's watch evidence and the Scanner's failure caches
 // (SELECTION-MAP M12, M15-M21).
 #pragma once

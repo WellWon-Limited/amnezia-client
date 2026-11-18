@@ -15,7 +15,7 @@
 #include "UpstreamLeaseWire.h"
 #include "UpstreamNode.h"
 #include "UpstreamStandbyPack.h"
-#include "UpstreamTier.h"
+#include "UpstreamNode.h"
 #include "UpstreamVerdict.h"
 #include "dto/Subscription.h"
 #if defined(Q_OS_IOS)

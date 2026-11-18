@@ -841,6 +841,14 @@ static void scannerCancelAfterShownConnectedWithoutData()
 // joined the VPN thread, then deleted the QML engine; the page's Component.onDestruction -> close() ->
 // cancel -> stop(): the facade flipped to «disconnected», the queued disconnectFromVpn never ran and the
 // tunnel stayed up. With no event loop running the Scanner cancels nothing - whatever the phase.
+// The white-list detector's trigger from the attempt owner (it lived in the deleted start watchdog).
+static void whitelistTriggerFromOwner()
+{
+    CHECK(whitelistTriggerFromAttempt(/*legStartFailures=*/1, false));   // a leg never came up
+    CHECK(whitelistTriggerFromAttempt(0, /*nothingProven=*/true));       // the attempt ended with nothing proven
+    CHECK(!whitelistTriggerFromAttempt(0, false));                       // a leg up without data, a connect: no
+}
+
 static void scannerCancelNeverDuringAppQuit()
 {
     ScanOwnConnect a;
@@ -1244,6 +1252,7 @@ int main()
     scannerCancelPendingConnect();
     scannerCancelAfterShownConnectedWithoutData();
     scannerCancelNeverDuringAppQuit();
+    whitelistTriggerFromOwner();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

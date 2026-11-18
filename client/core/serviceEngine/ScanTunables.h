@@ -17,8 +17,8 @@
 // Every default and clamp equals the server's (checked against config.py of 1.7.0; scan_stage2_stall_after_bytes
 // 16384 -> 4096 on 16.11 on both sides, lab seam S2); the compiled values are the fallback for a manifest that
 // lacks a key.
-// scan_shade_ms also has a compiled fallback outside a manifest (ShadeQueue.h::shadeTimingFrom). The limit of a
-// racing probe (ScanAutoRace.h) is a compiled constant there: racing is not part of this release.
+// scan_shade_ms also has a compiled fallback outside a manifest (ShadeQueue.h::shadeTimingFrom). Racing probes are
+// the path engine's stage 2 (design 2026-11-17), not part of the Scanner.
 // scanTunableTable() enumerates every key with its default and range (tests and the REMOTE-TUNING registry).
 //
 // Upstream Amnezia has no counterpart. Tests: tests/scan_core_check.cpp (build_scan_core.sh).
@@ -55,8 +55,6 @@ struct ScanTunables {
     int budgetScanBytes = 1572864;
     int budgetCellularBytesPerHour = 5242880;
     int manualCooldownS = 30;
-    int autoRaceAlternates = 3;
-    int autoRaceStaggerMs = 250;
     int autoCommitBytes = 24576;
     int classFastMs = 400;
     int classSlowMs = 1200;
@@ -136,8 +134,6 @@ inline const QList<ScanTunableSpec> &scanTunableTable()
         {"scan_budget_scan_bytes", &ScanTunables::budgetScanBytes, 1572864, 65536, 16 * 1024 * 1024, "bytes", 1, "most one cellular scan may spend"},
         {"scan_budget_cellular_bytes_per_hour", &ScanTunables::budgetCellularBytesPerHour, 5242880, 262144, 256 * 1024 * 1024, "bytes", 1, "most the scans may spend on cellular per rolling hour"},
         {"scan_manual_cooldown_s", &ScanTunables::manualCooldownS, 30, 5, 3600, "s", 1, "«Повторить» again after a scan start"},
-        {"scan_auto_race_alternates", &ScanTunables::autoRaceAlternates, 3, 0, 8, "count", 1, "racing alternates (ScanAutoRace.h, compiled off)"},
-        {"scan_auto_race_stagger_ms", &ScanTunables::autoRaceStaggerMs, 250, 0, 5000, "ms", 1, "spacing of racing starts (compiled off)"},
         {"scan_auto_commit_bytes", &ScanTunables::autoCommitBytes, 24576, 4096, 262144, "bytes", 1, "a racing probe commits at this many bytes (compiled off)"},
         {"scan_class_fast_ms", &ScanTunables::classFastMs, 400, 50, 10000, "ms", 1, "q = rtt + t64/2 at or below: «быстро»"},
         {"scan_class_slow_ms", &ScanTunables::classSlowMs, 1200, 100, 30000, "ms", 1, "q at or below (and above fast): «средне»; never below fast"},

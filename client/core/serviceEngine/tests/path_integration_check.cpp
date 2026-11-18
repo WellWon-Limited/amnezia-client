@@ -207,6 +207,7 @@ int main(int argc, char **argv)
         CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
         r.result();
         CHECK(r.eng.reenterVerifying() && r.eng.isVerifying());
+        CHECK(!r.eng.reenterVerifying()); // only from Connected (rev-E1): a phase in flight is never thrown back
         CHECK(r.eng.verifyFailed(QStringLiteral("extension no data")) && r.eng.attemptRunning());
         r.confirmStop();
         CHECK(r.last() == QLatin1String("11")); // not 16 again (proven dead here), 17 failed earlier: the last wave
@@ -290,6 +291,31 @@ int main(int argc, char **argv)
         CHECK(!r.eng.connect(err) && err == QLatin1String("exact_unavailable")); // the mode is stronger: not started
         CHECK(r.tun.ups.size() == 2);
         r.eng.setTransportMode(TransportMode::Auto);
+    }
+
+    // 6b. A server of the list is a preference (owner decision of 17.11, coordinator 18.11): its transports first,
+    //     then the best available path with the fallback notice; the preference is kept for the next start. A Scanner
+    //     row (exact) on the same dead server ends with an honest error instead.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.setPinnedNode(QStringLiteral("16"), err));
+        CHECK(r.eng.userChoice().kind == path::UserChoice::Kind::PreferCountry
+              && r.eng.userChoice().pathIds == QStringList{ QStringLiteral("16") });
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("16"));
+        r.noHandshake();
+        CHECK(r.last() == QLatin1String("17")); // the best available after the preferred server
+        r.up();
+        CHECK(r.eng.verifySucceeded());
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.fallbackNotice && res.path.id.id == QLatin1String("17"));
+        CHECK(r.eng.pinnedNodeId() == QLatin1String("16")); // the preference is kept
+        Rig q(pool);
+        q.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16")));
+        CHECK(q.eng.connect(err) && q.last() == QLatin1String("16"));
+        q.noHandshake();
+        const path::AttemptResult exact = q.result();
+        CHECK(exact.reason == path::FailReason::ExactNodeFailed && q.tun.ups.size() == 1);
     }
 
     // 7. A network change in the middle of a start: the leg goes down unrecorded, the attempt starts over on the

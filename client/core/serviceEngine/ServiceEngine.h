@@ -227,6 +227,9 @@ public:
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
     QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
+    // Legs whose tunnel never came up (no handshake / no connect within the start deadline) since the last call -
+    // the white-list detector's "the connect did not come up" input (DebugSnapshot.h::whitelistTriggerFromAttempt).
+    int takeLegStartFailures() { return std::exchange(m_legStartFailures, 0); }
     // The ledger (persisted by the facade: QSettings avpn/pathLedger).
     void loadPathLedger(const QByteArray &json) { m_ledger = path::PathLedger::fromJson(json); m_ledgerDirty = false; }
     QByteArray pathLedgerJson() const { return m_ledger.toJson(); }
@@ -274,9 +277,6 @@ public:
     // in the transport history at most once per rise and without a time to traffic. Compiled for every
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
-    // AVPN (iOS data watch, stage 2): the extension never switches in place - the attempt owner is the only one
-    // that chooses a path (design 2026-11-17 §4). The plan's candidate list is always empty.
-    QList<WatchPlanCandidate> extensionSwitchCandidates() const { return {}; }
     bool feedProbeResult(bool ok);
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
@@ -554,6 +554,7 @@ private:
     QStringList m_attemptJournal;
     QList<path::AttemptEvent> m_ownerQueue;
     bool m_inOwner = false;
+    int m_legStartFailures = 0;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
     std::optional<path::AttemptTimings> m_timingsForTest;
     QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack

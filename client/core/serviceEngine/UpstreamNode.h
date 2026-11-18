@@ -381,4 +381,11 @@ inline bool upstreamGeoSupported(const UpstreamStub &s, const QStringList &avail
     return true;
 }
 
+// The server's policy tier of a node: own nodes 0, a provider stub its server tier (>= 1) - the path engine orders
+// by it (path/PathId.h), the debug rows show it.
+inline int upstreamTierOf(const SubscriptionNode &n)
+{
+    return n.upstream.has_value() ? n.upstream->tier : 0;
+}
+
 } // namespace avpn

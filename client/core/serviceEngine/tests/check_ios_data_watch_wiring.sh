@@ -271,8 +271,6 @@ has "$confirm" 'guard done, systemError == nil else {' && order "$confirm" 'guar
 grep -q '"tribe_backend_hook": True' "$RECIPE/conanfile.py" && grep -q '_xray_pins\["3.1.4-tribe.14"\] = _xray_pins\["3.1.4-tribe.12"\]' "$RECIPE/conanfile.py" \
     && grep -q 'check_backend_hook.sh' "$RECIPE/conanfile.py" \
     || bad "E6: the package of the data watch must be gated on the backend-hook structure check (tribe.14 keeps the pins of tribe.12)"
-order "$(code "$ENGINE/TunnelWatchCandidates.h")" 'isXrayProto(current->proto) || isUpstreamNode(\*current)' 'isXrayProto(n.proto) || isManualOnlyNode(n) || isUpstreamNode(n)' \
-    || bad "E6: a provider (upstream) node is never a switch candidate and a session on one is not switched (transport_pick_check 9d)"
 # The tick keeps running in every outcome: with no engine it retries, before anything asks for a handle.
 has "$(grep -A1 '     private func stallTick() {' "$PATCH")" '+        if self.dataWatchEngineDown != nil { self.dataWatchRetryEngine(); return }' \
     || bad "E6: with no engine the stall tick must retry first (it must not leave on the missing handle)"
@@ -349,9 +347,10 @@ order "$stop_body" 'tribeDataWatch.noteStop(userInitiated: reason == .userInitia
 # session plumbing of the hand-over (status replies, Reasserting, engine down) stays as it was --------------------
 ctor="$(body_of "$FACADE" 'AvpnEngineQml::AvpnEngineQml(')"
 plan_fn="$(body_of "$FACADE" 'void AvpnEngineQml::writeTunnelWatchPlan(')"
-has "$plan_fn" 'in.candidates = m_engine.extensionSwitchCandidates();' || bad "A10: the plan's candidates come from the engine"
-has "$(code "$ENGINE/ServiceEngine.h")" 'QList<WatchPlanCandidate> extensionSwitchCandidates() const { return {}; }' \
-    || bad "A10: the extension must get no candidate to switch to (one owner of the path)"
+has "$plan_fn" 'in.candidates' && bad "A10: the app must write no switch candidate into the plan (one owner of the path)"
+has "$(code "$ENGINE/ServiceEngine.h") $(code "$ENGINE/ServiceEngine.cpp")" 'extensionSwitchCandidates' \
+    && bad "A10: nothing may produce a switch candidate for the extension (one owner of the path)"
+[ -e "$ENGINE/TunnelWatchCandidates.h" ] && bad "A10: the candidate producer is gone (a replaced mechanism does not stay in the tree)"
 [ "$(grep -c 'adoptExtensionSwitch' "$FACADE" "$ENGINE/ServiceEngine.cpp" "$ENGINE/ServiceEngine.h" | awk -F: '{s+=$2} END {print s}')" = "0" ] \
     || bad "A10: nothing adopts a switch of the extension any more"
 resume_fn="$(body_of "$FACADE" 'void AvpnEngineQml::setupTunnelWatchResume()')"
