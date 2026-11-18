@@ -161,6 +161,9 @@ public:
     // one of them carried its body. 1 = the single connection of before.
     int xrayBurst = 4;
     static constexpr int kXrayBurstBytes = 4096;
+    // The race's data body (device 18.11: 190 KB - 1.4 MB per race with the Scanner's 64 KB body, the cellular hour
+    // ran out within a few connects): 24 KB still proves data through the path (a 15-20 KB flow freeze cuts it).
+    static constexpr int kRaceProbeBytes = 24576;
 
 private:
     struct Probe {

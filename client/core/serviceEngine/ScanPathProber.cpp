@@ -159,7 +159,7 @@ void ScanPathProber::launch(quint64 key)
             finish(key, path::PathOutcome::Inconclusive, 0, "no_config");
             return;
         }
-        c.costBytes = scanProbeCostBytes(c.kind, false, t);
+        c.costBytes = qint64(t.warmBytes) + kRaceProbeBytes + 2 * kScanTlsOverheadBytes;
         const int burst = qBound(1, xrayBurst, 6);
         it->parts = burst;
         QList<ScanHostCandidate> parts{c};
@@ -306,7 +306,7 @@ void ScanPathProber::openScan(quint64 race, const QList<ScanHostCandidate> &cand
     req.probeBase = m_session.probeBase;
     req.token = m_session.token;
     req.warmBytes = t.warmBytes;
-    req.bytes = t.stage2Bytes;
+    req.bytes = qMin<int>(t.stage2Bytes, kRaceProbeBytes); // a race proves data, it does not rank speed: a smaller body
     req.probeBaseIps = m_session.baseIps;
     req.candidates = cands;
     const QString scanId = m_scan.id;
