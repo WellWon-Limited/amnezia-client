@@ -34,6 +34,8 @@ PageType {
     signal pickTransport(string mode)
     // AVPN (Scanner): the pinned «Запустить сканер» (the second entry into the Scanner; back returns here)
     signal requestScanner()
+    // a short notice for the host (PageStart: the top shade, or the toast with the scanner switch off)
+    signal pageNotice(string text)
 
 
     // iOS: PageController.safeArea* только для Android → max с SafeArea (как PageNotificationsTribe)
@@ -628,7 +630,8 @@ PageType {
                                                                 && TribeEngine.state === "connected"
                             // a row whose last attempt on this network failed shows no figure (an ICMP answer is not
                             // a working path: device test of 142, «~34 мс» green on a node that never handshook)
-                            readonly property var fig: (row.modelData.attemptFailed && !sigCol.currentLive)
+                            // a row the mode cannot serve (greyed) or whose last attempt here failed: no figure
+                            readonly property var fig: ((row.modelData.attemptFailed || row.modelData.disabled) && !sigCol.currentLive)
                                 ? ({ ms: -1, bars: -1, failed: false })
                                 : root.hasEngine
                                 ? TribeEngine.nodeFigure(row.modelData.upstream === true, sigCol.currentLive,
@@ -663,10 +666,8 @@ PageType {
                             // end. The tap switches the mode to «Авто» on this page first - the selector above moves,
                             // the rows lose their grey, a short notice says why - then selects the server.
                             if (row.modelData.modeOnly) {
-                                if (typeof PageController !== "undefined")
-                                    PageController.showNotificationMessage(
-                                        qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
-                                            .arg(root.transportMode === "xray" ? "Xray" : "Amnezia"))
+                                root.pageNotice(qsTr("Режим соединения — «Авто»: у этого сервера нет транспорта %1")
+                                                    .arg(root.transportMode === "xray" ? "Xray" : "Amnezia"))
                                 Haptic.play("selection"); Haptic.arm()
                                 modePick.nodeId = row.modelData.nodeId
                                 root.pickTransport("auto")
