@@ -14,6 +14,8 @@
 #include "TransportModeGate.h"
 #include "TunnelWatchPlan.h"
 #include "path/AttemptOwner.h"
+
+#include <QJsonArray>
 #include "path/PathProber.h"
 #include "path/PathRace.h"
 #include "dto/Subscription.h"
@@ -202,6 +204,14 @@ public:
     // Standby-pack candidates (UpstreamEngine.h::standbyPackCandidates, computed by the facade): merged
     // after the subscription's nodes into the candidates of every choice and the debug rows. Empty = none.
     void setStandbyCandidates(const QList<SubscriptionNode> &nodes);
+    // Contract 1.14.0: provider stubs of a Scanner batch beyond the delivered ones, parsed by the subscription's own
+    // parser (the upstream revision in force). Kept up to kMaxScanOffered (newest win, deduplicated by node id),
+    // dropped when the upstream revision changes; merged into the pool with the standby candidates (the facade's
+    // syncStandbyCandidates). Returns how many are kept now.
+    static constexpr int kMaxScanOffered = 48;
+    int offerScanNodes(const QJsonArray &nodes);
+    QList<SubscriptionNode> scanOfferedNodes();
+    QList<path::PathCandidate> pathPoolForTest() const { return pathPool(); }
     const QList<SubscriptionNode> &subscriptionNodes() const { return m_pool.nodes(); }
     const QList<SubscriptionNode> &candidateNodes() const { return m_merged; }
 
@@ -577,6 +587,8 @@ private:
     TransportModeGate m_modeGate; // 5.1.109: the stored choice and the mode in force (TransportModeGate.h)
     // Path engine (design 2026-11-17): the one owner of attempts, the evidence, the network, the user's choice.
     path::AttemptOwner m_owner;
+    QList<SubscriptionNode> m_scanOffered;   // contract 1.14.0
+    qint64 m_scanOfferedRevision = 0;
     // stage 2
     path::PathRace m_race;
     path::IPathProber *m_prober = nullptr;

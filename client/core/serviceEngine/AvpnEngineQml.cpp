@@ -311,6 +311,15 @@ public:
     }
 
     // The display name the Connect card would show for a pool row (pickerDisplay / upstreamDisplayName).
+    // Contract 1.14.0: provider rows of a /v1/scan/candidates batch beyond the delivered stubs - into the pool before
+    // any row of the batch can be tapped.
+    void offerScanNodes(const QJsonArray &subscriptionNodes) override
+    {
+        const int kept = m_e->m_engine.offerScanNodes(subscriptionNodes);
+        m_e->syncStandbyCandidates();
+        m_e->reliabilityEvent(QStringLiteral("scan_nodes_offered rows=%1 kept=%2").arg(subscriptionNodes.size()).arg(kept));
+    }
+
     QString rowDisplayName(const QString &rowId) const override
     {
         // one snapshot per view refresh (the rows of one refresh ask within the same event-loop turn)
@@ -11971,6 +11980,15 @@ void AvpnEngineQml::syncStandbyCandidates()
     if (pack && avpn::upstreamNodesEnabled())
         c = avpn::standbyPackCandidates(*pack, m_engine.subscriptionNodes(), m_engine.upstreamRevision(),
                                         QDateTime::currentMSecsSinceEpoch(), avpn::upstreamStandbyMaxAgeSTuned());
+    // contract 1.14.0: the Scanner's offered profiles join the pool (pin / connect); Auto does not start them itself
+    if (avpn::upstreamNodesEnabled())
+        for (const avpn::SubscriptionNode &n : m_engine.scanOfferedNodes()) {
+            bool dup = false;
+            for (const avpn::SubscriptionNode &o : std::as_const(c))
+                dup = dup || o.nodeId == n.nodeId;
+            if (!dup)
+                c << n;
+        }
     m_engine.setStandbyCandidates(c);
 }
 
