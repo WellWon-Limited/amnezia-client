@@ -340,14 +340,21 @@ static void testSelect()
     CHECK(selectPaths(in).isEmpty()); // and only once
     in.tried.clear();
 
-    // preferred country: all its paths first (suspect included, manual_only not demoted), then the rest
+    // preferred country: its paths first inside each evidence group (manual_only not demoted); a preferred path
+    // that failed here goes behind every working or untried path of any country (review E9 of 18.11)
     in.evidence.clear();
     in.evidence.insert(QStringLiteral("12"), viewState(PathState::Suspect));
     in.evidence.insert(QStringLiteral("16"), viewState(PathState::Working, false, 9));
     in.choice = UserChoice::preferCountry(QStringLiteral("de"));
     QList<RankedPath> r = selectPaths(in);
-    CHECK(ids(r).mid(0, 2) == QStringList({ "12:xray", "12" }) && r[0].preferred && r[1].preferred);
-    CHECK(r[2].path.id.id == QLatin1String("16") && !r[2].preferred);
+    CHECK(ids(r).first() == QLatin1String("12:xray") && r[0].preferred); // preferred, untried
+    CHECK(r[1].path.id.id == QLatin1String("16") && !r[1].preferred);   // working elsewhere before untried elsewhere
+    {
+        const int failed = int(ids(r).indexOf(QStringLiteral("12")));
+        CHECK(failed > 1 && r[failed].preferred && r[failed].group == SelectGroup::Suspect);
+        for (int i = 0; i < failed; ++i)
+            CHECK(r[i].group != SelectGroup::Suspect && r[i].group != SelectGroup::QuarantineOver);
+    }
     in.choice = UserChoice::preferCountry(QStringLiteral("FI"));
     CHECK(ids(selectPaths(in)).mid(0, 2) == QStringList({ "11", "11:xray" })); // manual_only 11 inside FI
 
@@ -749,25 +756,28 @@ static void scenarioPreference()
     stopLive(s);
     from = int(s.legs.size());
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
-    row("preferred DE unavailable, tap 2", s, r, from);
-    CHECK(r.connected && r.fallbackNotice && legPaths(s, from) == QStringList({ "de1", "de1:xray", "nl1" }));
+    row("preferred DE failed here, tap 2", s, r, from);
+    // review E9 of 18.11: DE failed on this network - the proven path goes first, DE is not retried ahead of it
+    CHECK(r.connected && r.fallbackNotice && legPaths(s, from) == QStringList({ "nl1" }));
     stopLive(s);
     from = int(s.legs.size());
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
-    row("preferred DE unavailable, tap 3 (DE in quarantine)", s, r, from);
+    row("preferred DE failed here, tap 3", s, r, from);
     CHECK(r.connected && r.fallbackNotice && r.path.id.id == QLatin1String("nl1") && r.paths == 1);
-    // the preference is kept: once the quarantine is over, DE is tried first again
     stopLive(s);
-    s.idle(s.ledger.tunables().quarantineMs[0] + 1000);
-    from = int(s.legs.size());
-    r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
-    CHECK(legPaths(s, from).first() == QLatin1String("de1") && r.fallbackNotice);
-    stopLive(s);
-
     // a server of the list (preferServer: the transports of one host) falls back like a country, with the notice
     from = int(s.legs.size());
     r = s.tap(UserChoice::preferServer(QStringLiteral("DE"), { QStringLiteral("de1"), QStringLiteral("de1:xray") }));
     CHECK(r.connected && r.fallbackNotice && r.path.id.id == QLatin1String("nl1"));
+    stopLive(s);
+
+    // the preference is kept: with nothing working or untried left here, DE is tried before the other failures
+    s.world().set(k, QStringLiteral("nl1"), Behaviour::noHandshake());
+    s.world().set(k, QStringLiteral("fi1"), Behaviour::noHandshake());
+    s.idle(s.ledger.tunables().quarantineMs[0] + 1000);
+    from = int(s.legs.size());
+    r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
+    CHECK(legPaths(s, from).mid(0, 3) == QStringList({ "nl1", "fi1", "de1" })); // working, untried, then the preferred failures
     stopLive(s);
 
     // the exact node never falls back
@@ -820,6 +830,141 @@ static void scenarioRevision()
     CHECK(s.ledger.entry(key(home), QStringLiteral("11"))->revision == QLatin1String("r2"));
 }
 
+// --- Review of 18.11 (E1-E4, E9) as scenarios ------------------------------------------------------------------
+
+static bool hasEffect(const QList<AttemptEffect> &fx, EffectType t)
+{
+    for (const AttemptEffect &e : fx)
+        if (e.type == t)
+            return true;
+    return false;
+}
+
+static void scenarioReview1811()
+{
+    const NetworkObservation home = wifi("192.168.5.1");
+    const QString k = key(home);
+
+    // E1: the native start never answers (no Connecting, nothing): every leg ends by the owner's own deadline, the
+    // attempt has one terminal result, and the next tap is a new attempt at once (nothing stays latched).
+    {
+        World w;
+        Sim s({ awg("a1", "EE"), awg("a2", "NL") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("E1 native start stalls on every path", s, r, 0);
+        CHECK(!r.connected && r.reason == FailReason::NothingProven && !s.owner.running());
+        CHECK(r.elapsedMs <= s.owner.timings().budgetMs && s.results.size() == 1);
+        s.world().set(k, QStringLiteral("a2"), Behaviour::works(300, 400, 100));
+        const int from = int(s.legs.size());
+        const qint64 tapAt = s.now;
+        const AttemptResult r2 = s.tap(UserChoice::automatic());
+        CHECK(r2.connected && r2.attempt == r.attempt + 1 && s.legs[from].startedMs == tapAt);
+    }
+
+    // E2: a duplicate or late native error of a failed leg never fails the next leg (the stamp of the leg that
+    // failed travels with the error; the owner drops it by construction).
+    {
+        World w;
+        w.set(k, QStringLiteral("b2"), Behaviour::works(300, 400, 100));
+        w.set(k, QStringLiteral("b1"), Behaviour::startError(false));
+        Sim s({ awg("b1", "EE", false, 2.0), awg("b2", "NL") }, w, home);
+        s.deliver(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+        s.run([&] { return s.legs.size() == 2; }, 5000);
+        const PathStamp first = s.legs[0].stamp;
+        s.deliver(AttemptEvent::pathFailed(s.now, first, PathOutcome::Inconclusive, /*tunnelGone=*/true)); // duplicate
+        s.at(s.now + 100, [&s, first] { s.deliver(AttemptEvent::pathFailed(s.now, first, PathOutcome::Inconclusive, true)); });
+        s.run([&] { return !s.results.isEmpty(); }, 30000);
+        const AttemptResult r = s.results.isEmpty() ? AttemptResult{} : s.results.last();
+        row("E2 duplicate error of the failed leg", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("b2") && s.legs.size() == 2);
+    }
+
+    // E3: suspended 3 s into a 4.5 s AmneziaWG start; the tunnel comes up during the sleep or just after the
+    // resume (within the resume grace): connected, nothing charged for the sleep.
+    for (const int upMs : { 3500, 34800 }) {
+        World w;
+        w.set(k, QStringLiteral("c1"), Behaviour::works(upMs, 400, 100));
+        Sim s({ awg("c1", "EE") }, w, home);
+        s.suspend(3000, 30000);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row(upMs < 30000 ? "E3 suspended mid-start, up during the sleep" : "E3 suspended mid-start, up after resume",
+            s, r, 0);
+        CHECK(r.connected && r.paths == 1 && s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk);
+    }
+    // E3: suspended in the middle of the data check: the check is run again on the same tunnel, nothing recorded
+    // for the interrupted one, the leg is not abandoned.
+    {
+        World w;
+        w.set(k, QStringLiteral("d1"), PathScript::always(Behaviour::silent(500)).then(20000, Behaviour::works(500, 400, 100)));
+        Sim s({ awg("d1", "EE") }, w, home);
+        s.suspend(1500, 30000);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("E3 suspended mid-check", s, r, 0);
+        CHECK(r.connected && r.paths == 1 && s.rechecks == 1 && s.checksRun == 2);
+        CHECK(s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk);
+    }
+    // E3: an inconclusive check (no suspension) is run again once on the same tunnel, then the leg is given up
+    // with nothing recorded.
+    {
+        AttemptOwner o;
+        PathLedger l;
+        const SelectionContext ctx{ { awg("e1", "EE") }, &l, 0, {} };
+        NetworkTracker tr;
+        tr.observe(home);
+        QList<AttemptEffect> fx = o.handle(AttemptEvent::userStart(0, UserChoice::automatic(), TransportMode::Auto, tr.current()), ctx);
+        const PathStamp leg = o.currentLeg();
+        fx = o.handle(AttemptEvent::tunnelUp(300, leg), ctx);
+        fx = o.handle(AttemptEvent::dataChecked(900, leg, PathOutcome::Inconclusive), ctx);
+        CHECK(hasEffect(fx, EffectType::RunDataCheck) && !hasEffect(fx, EffectType::StopPath) && !hasEffect(fx, EffectType::Report));
+        CHECK(o.phase() == AttemptPhase::Checking && fx.first().recheck);
+        fx = o.handle(AttemptEvent::dataChecked(1500, leg, PathOutcome::Inconclusive), ctx);
+        CHECK(hasEffect(fx, EffectType::StopPath) && !hasEffect(fx, EffectType::Report));
+    }
+
+    // E4: a validated payload delivered exactly at the check deadline wins over the deadline (no grace at all here),
+    // and one delivered past the check's own limit but before the backstop is "works, slow".
+    {
+        AttemptTimings t;
+        t.checkGraceMs = 0;
+        World w;
+        w.set(k, QStringLiteral("f1"), Behaviour::works(500, t.dataCheckMs, 3000));
+        Sim s({ awg("f1", "EE") }, w, home, t);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("E4 payload complete at the check deadline", s, r, 0);
+        CHECK(r.connected && s.reports.size() == 1 && s.reports[0].outcome == PathOutcome::DataOk);
+    }
+    {
+        World w;
+        const AttemptTimings t;
+        w.set(k, QStringLiteral("g1"), Behaviour::works(500, t.dataCheckMs + 800, 3500));
+        w.set(k, QStringLiteral("g2"), Behaviour::silent(500));
+        Sim s({ awg("g1", "EE", false, 2.0), awg("g2", "NL") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("E4 payload complete past the check's limit (slow)", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("g1") && r.paths == 1);
+        // a check that never answers is judged by the backstop: no data, recorded
+        stopLive(s);
+        const AttemptResult r2 = s.tap(UserChoice::exactPath(QStringLiteral("g2")));
+        CHECK(!r2.connected && r2.reason == FailReason::ExactNodeFailed);
+        CHECK(s.reports.last().outcome == PathOutcome::NoData && s.reports.last().path.id == QLatin1String("g2"));
+    }
+
+    // E9: a preferred country whose paths all failed here before does not burn the budget ahead of the path that
+    // works elsewhere: one leg, the fallback notice, the preference kept.
+    {
+        World w;
+        w.set(k, QStringLiteral("nl"), Behaviour::works(300, 400, 100));
+        Sim s({ awg("de1", "DE"), xray("de2", "DE"), xray("de3", "DE"), awg("nl", "NL") }, w, home);
+        for (const char *id : { "de1", "de2", "de3" })
+            s.ledger.record(k, PathId{ QString::fromLatin1(id), QStringLiteral("r1") }, PathOutcome::NoHandshake, s.wall());
+        s.ledger.record(k, PathId{ QStringLiteral("nl"), QStringLiteral("r1") }, PathOutcome::DataOk, s.wall(), 300, 100);
+        const AttemptResult r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
+        row("E9 preferred country failed here before", s, r, 0);
+        CHECK(r.connected && r.paths == 1 && r.path.id.id == QLatin1String("nl") && r.fallbackNotice);
+        CHECK(s.owner.choice().kind == UserChoice::Kind::PreferCountry && s.owner.choice().country == QLatin1String("DE"));
+    }
+}
+
 int main()
 {
     testPathId();
@@ -837,6 +982,7 @@ int main()
     scenarioPreference();
     scenarioModeBeatsPreference();
     scenarioRevision();
+    scenarioReview1811();
 
     std::printf("\n%-55s | %-40s | %8s | %5s | %s\n", "scenario", "outcome", "ms", "paths", "order");
     for (const Row &r : g_rows)

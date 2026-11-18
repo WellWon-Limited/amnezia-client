@@ -113,8 +113,6 @@ static void compiledPlatformMatrix()
         check(isSupportedProto(QStringLiteral("xray")) == want, QStringLiteral("isSupportedProto(xray) ") + tag);
         check(isSupportedProto(QStringLiteral("awg")) && isSupportedProto(QString()), QStringLiteral("awg always ") + tag);
         check(!isSupportedProto(QStringLiteral("vless")), QStringLiteral("unknown proto never ") + tag);
-        check(effectiveTransportMode(TransportMode::Xray) == (want ? TransportMode::Xray : TransportMode::Auto),
-              QStringLiteral("effectiveTransportMode ") + tag);
         // The former kXrayPlatform of ConfigService.cpp, read from the features the caller holds.
         const bool platformWant = p == XrayPlatform::Apple ? true
                                   : (p == XrayPlatform::Other ? false : (platformSwitch && rr));

@@ -13,10 +13,12 @@
 //  3. Exact node (a Scanner row, an explicit server): only its paths (one row = one path; a server of the list =
 //     the transports of that host, ordered by the rules below), whatever the ledger says - the person asked for
 //     it. It never falls back to another server.
-//  4. Preferred country or server of the list (UserChoice::preferServer: the transports of that host): all its
-//     paths the mode allows come first (working, unknown, suspect, quarantine over),
-//     manual_only ones included - a preference is a person's choice, as a pin of a location is today. Then the
-//     rest in the Auto order; the attempt reports the fallback (AttemptResult::fallbackNotice).
+//  4. Preferred country or server of the list (UserChoice::preferServer: the transports of that host): inside
+//     each group of the Auto order below its paths the mode allows come first, manual_only ones included and
+//     ahead of the regular unknown paths elsewhere - a preference is a person's choice, as a pin of a location
+//     is today. Evidence is stronger than the preference (review E9 of 18.11): a preferred path that failed on
+//     this network goes behind every working or untried path of any country. The attempt reports the fallback
+//     (AttemptResult::fallbackNotice).
 //  5. Auto order:
 //       a. working on this network: data proof before probe proof, newest proof first, then faster;
 //       b. unknown, regular: by crowd prior, then server prior (tier: ours -> main provider -> reserve provider,
@@ -287,14 +289,19 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         };
     };
 
-    QList<RankedPath> out;
+    // The preference applies INSIDE each evidence group (review E9 of 18.11): every path that carried data or is
+    // untried here - preferred first - goes before any path that failed on this network, whatever its country,
+    // so a preferred country's failed paths never burn the budget before the fallback.
     for (auto &s : sec) {
         std::sort(s[0].begin(), s[0].end(), working);
         std::sort(s[3].begin(), s[3].end(), byTime(&PathView::lastFailureMs));
         std::sort(s[4].begin(), s[4].end(), byTime(&PathView::quarantineUntilMs));
-        out << s[0] << detail::interleaved(s[1], crowd, lanes, lanesTried)
-            << detail::interleaved(s[2], crowd, lanes, lanesTried) << s[3] << s[4];
     }
+    QList<RankedPath> out;
+    out << sec[0][0] << detail::interleaved(sec[0][1], crowd, lanes, lanesTried) << sec[1][0]
+        << detail::interleaved(sec[1][1], crowd, lanes, lanesTried)
+        << detail::interleaved(sec[0][2], crowd, lanes, lanesTried) << detail::interleaved(sec[1][2], crowd, lanes, lanesTried)
+        << sec[0][3] << sec[1][3] << sec[0][4] << sec[1][4];
     const auto byQuarantine = byTime(&PathView::quarantineUntilMs);
     std::sort(quarantined.begin(), quarantined.end(), [&](const RankedPath &a, const RankedPath &b) {
         if (a.preferred != b.preferred)

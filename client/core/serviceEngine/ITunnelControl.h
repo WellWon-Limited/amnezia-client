@@ -60,8 +60,6 @@ public:
     // Первый коннект к ноде (поднять tun + пир).
     virtual TunnelResult up(const Subscription &sub, const SubscriptionNode &node) = 0;
 
-    // In-place peer swap БЕЗ пересоздания tun (быстрый reconnect). На стабильном /32 адрес не меняется.
-    virtual TunnelResult applyPeer(const Subscription &sub, const SubscriptionNode &node) = 0;
 
     // Снять рантайм-статы (handshake age + rx/tx) для HealthLoop.
     virtual TunnelStats readStats() = 0;
@@ -80,6 +78,21 @@ public:
     virtual bool rebindSocket() { return false; }
 
     virtual void down() = 0;
+
+    // Path engine (review E2 of 18.11): the native layer reports without a stamp, so the leg travels through the
+    // native stream itself. beginNativeOp(leg) is called right before that leg's native start; the adapter puts a
+    // marker into the native event stream ahead of the start, and nativeLegSeen() is the leg of the last marker
+    // that came back - every native event delivered after it (and before the next one) belongs to that leg.
+    // adoptNativeOp(leg): a tunnel this process did not start (adopted) - its events are that leg's at once.
+    // Default (no native stream, tests): the marker is seen at once.
+    // Legs are numbered upwards, so a marker that comes back late never moves the stream back.
+    virtual void beginNativeOp(quint64 leg) { noteNativeLegSeen(leg); }
+    virtual void adoptNativeOp(quint64 leg) { noteNativeLegSeen(leg); }
+    quint64 nativeLegSeen() const { return m_nativeLegSeen; }
+
+protected:
+    void noteNativeLegSeen(quint64 leg) { m_nativeLegSeen = leg > m_nativeLegSeen ? leg : m_nativeLegSeen; }
+    quint64 m_nativeLegSeen = 0;
 };
 
 } // namespace avpn

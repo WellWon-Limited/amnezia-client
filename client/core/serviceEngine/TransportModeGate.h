@@ -13,8 +13,10 @@
 //
 // The mode in force changes in these ways only:
 //  1. a tap on the selector - at once, whatever is running (tap);
-//  2. Xray stops being usable (the server switch, the trust in the cached config ran out, the macOS
-//     service lost tun2socks) - at once: it reads as Auto and stays Auto for what is running;
+//  2. (review E8 of 18.11) Xray stopping being usable (the server switch, the trust in the cached config ran
+//     out, the macOS service lost tun2socks) does NOT change the mode in force: the person's "Xray" stays,
+//     the attempt finds no path the mode allows and says so (an honest error naming the mode) - an
+//     unavailable choice is reported, never broadened silently. The loss is journalled once;
 //  3. the choice is ADMITTED - the only way a usable "Xray" comes (back) into force:
 //      - "Auto" and "Amnezia" need nothing to be usable: in force from load, as before 139;
 //      - "Xray" at load waits for the STARTUP OBSERVATION (the first tunnel status on iOS, the end of
@@ -121,10 +123,11 @@ public:
     };
 
     TransportMode choice() const { return m_choice; }
-    TransportMode inForce() const { return m_inForce; } // readers apply effectiveTransportMode on top
+    TransportMode inForce() const { return m_inForce; }
     bool choicePending(bool xrayUsable) const
     {
-        return effective(m_choice, xrayUsable) != effective(m_inForce, xrayUsable);
+        Q_UNUSED(xrayUsable)
+        return m_choice != m_inForce;
     }
     QStringList takeJournal() { return std::exchange(m_journal, QStringList()); }
     void note(const QString &line) { m_journal << line; }
@@ -234,16 +237,6 @@ public:
 
     // --- events of the engine -------------------------------------------------------------------
 
-    // A pick is about to read the mode: a lost Xray is written down as Auto (as before 139).
-    void writeDownLoss(bool xrayUsable)
-    {
-        if (xrayUsable || m_inForce != TransportMode::Xray)
-            return;
-        m_inForce = TransportMode::Auto;
-        m_xrayUsable = false;
-        m_journal << effectiveLine(TransportMode::Xray, TransportMode::Auto, QStringLiteral("pick"));
-    }
-
     // connect(): a session this process starts runs under the mode in force and is never re-judged.
     void sessionStartedByUs()
     {
@@ -270,9 +263,11 @@ public:
     }
 
 private:
+    // Review E8 of 18.11: availability never rewrites a mode (see rule 2 above).
     static TransportMode effective(TransportMode m, bool xrayUsable)
     {
-        return (m == TransportMode::Xray && !xrayUsable) ? TransportMode::Auto : m;
+        Q_UNUSED(xrayUsable)
+        return m;
     }
     static QString effectiveLine(TransportMode from, TransportMode to, const QString &why)
     {
@@ -296,9 +291,10 @@ private:
     {
         if (xrayUsable && !m_xrayUsable && m_loaded)
             m_gain = true;
+        if (!xrayUsable && m_xrayUsable && m_inForce == TransportMode::Xray)
+            m_journal << QStringLiteral("transport_mode_unavailable mode=xray kept why=%1").arg(why);
         m_xrayUsable = xrayUsable;
-        if (!xrayUsable && m_inForce == TransportMode::Xray)
-            setInForce(TransportMode::Auto, o, why);
+        Q_UNUSED(o)
     }
     void admit(TransportMode target, const QString &why, Outcome &o)
     {

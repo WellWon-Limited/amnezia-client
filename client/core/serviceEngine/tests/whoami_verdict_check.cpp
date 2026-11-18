@@ -254,8 +254,8 @@ int main()
         CHECK(avpn::whoamiAction(WhoamiVerdict::Works, true, false) == WhoamiAction::Succeed, "xray works -> succeed");
         CHECK(avpn::whoamiAction(WhoamiVerdict::NoData, true, false) == WhoamiAction::FailPath, "no data -> next path");
         CHECK(avpn::whoamiAction(WhoamiVerdict::BypassVpn, false, true) == WhoamiAction::FailPath, "bypass -> next path");
-        CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, false, false) == WhoamiAction::ConnectUnproven,
-              "awg 429/404 -> Connected without the mark");
+        CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, false, false) == WhoamiAction::Tiebreak,
+              "awg 429/404 -> generate_204 tiebreak first (review E7 of 18.11: not attributable to the tunnel)");
         CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, true, false) == WhoamiAction::Tiebreak,
               "xray 429/404 -> generate_204 tiebreak first (Connected only after a probe)");
         CHECK(avpn::whoamiAction(WhoamiVerdict::CheckLimited, true, true) == WhoamiAction::ConnectUnproven,

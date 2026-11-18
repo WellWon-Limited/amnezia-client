@@ -158,8 +158,11 @@ inline WhoamiAction whoamiAction(WhoamiVerdict v, bool xrayTransport, bool tiebr
     case WhoamiVerdict::BypassVpn:
         return WhoamiAction::FailPath;
     case WhoamiVerdict::CheckLimited:
-        // Xray is Connected only after a probe through the tunnel (§22.5): a bare 429/404 is not one.
-        return (xrayTransport && !tiebreakDone) ? WhoamiAction::Tiebreak : WhoamiAction::ConnectUnproven;
+        // A bare 429/404 of our API is not attributable to the tunnel on any transport (review E7 of 18.11: the
+        // API may answer past the tunnel): the probe through the tunnel (generate_204) decides. After it, the
+        // probe passed - data through this tunnel.
+        Q_UNUSED(xrayTransport)
+        return tiebreakDone ? WhoamiAction::ConnectUnproven : WhoamiAction::Tiebreak;
     case WhoamiVerdict::Inconclusive:
         return tiebreakDone ? WhoamiAction::ConnectUnproven : WhoamiAction::Tiebreak;
     }

@@ -288,6 +288,7 @@ inline path::AttemptTimings attemptTimingsTuned()
     t.awgStartMs = num("attempt_awg_start_ms", d.awgStartMs, 2000, 20000);
     t.xrayStartMs = num("attempt_xray_start_ms", d.xrayStartMs, 2000, 20000);
     t.providerStartMs = num("attempt_provider_start_ms", d.providerStartMs, 2000, 20000);
+    t.providerLeaseMs = num("attempt_provider_lease_ms", d.providerLeaseMs, 1500, 10000);
     t.dataCheckMs = num("attempt_data_check_ms", d.dataCheckMs, 1500, 15000);
     t.budgetMs = num("attempt_budget_ms", d.budgetMs, 10000, 120000);
     t.maxPaths = num("attempt_max_paths", d.maxPaths, 1, 32);
@@ -295,16 +296,14 @@ inline path::AttemptTimings attemptTimingsTuned()
     return t;
 }
 
-// Upstream nodes (plan provider-pool v2, point 6; CONNECT-INVARIANTS §1, §17.2): the lease acquire runs
-// INSIDE Connecting (VpnConnectionTunnelControl::up), so its timeout is bound below the reconcile
-// watchdog in code: the acquire, the core start and the platform's Connected must fit before the
-// watchdog (and the up-phase deadline of a switch, which is never shorter) fires. Floor 2 s (a direct
-// TLS round trip on a slow cellular link), ceiling watchdog - 4 s; numbers.upstream_acquire_timeout_ms,
-// default 6 s.
+// Upstream nodes (plan provider-pool v2, point 6; CONNECT-INVARIANTS §1, §17.2): the lease acquire runs INSIDE the
+// provider leg of the attempt owner, before the native start (VpnConnectionTunnelControl::up). The leg's start
+// deadline is the lease share plus the native start share (path::AttemptTimings providerLeaseMs + providerStartMs,
+// review E6 of 18.11), so the acquire is bounded by the lease share - one number: numbers.attempt_provider_lease_ms
+// (attemptTimingsTuned). Floor 1.5 s (a direct TLS round trip on a slow cellular link).
 inline int upstreamAcquireTimeoutMsTuned()
 {
-    const int hi = qMax(2000, reconcileWatchdogMsTuned() - 4000);
-    return qBound(2000, int(TuningStore::numberOr(QStringLiteral("upstream_acquire_timeout_ms"), 6000)), hi);
+    return attemptTimingsTuned().providerLeaseMs;
 }
 
 // The release on a user disconnect goes through the tunnel BEFORE the core stops (contract §6) and the

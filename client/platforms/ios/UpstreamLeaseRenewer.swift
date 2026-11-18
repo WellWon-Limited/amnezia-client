@@ -169,11 +169,18 @@ final class UpstreamLeaseRenewer {
         queue.sync { machine.phase == .left }
     }
 
-    // User disconnect (contract section 6): DELETE with the final report through the tunnel BEFORE the
-    // core stops, bounded to releaseTimeoutMs; `completion` runs exactly once (on success, on failure or
-    // at the bound). Nothing is sent after a terminal answer or before a lease exists.
-    func release(completion: @escaping () -> Void) {
-        let request: (url: String, headers: [String: String], body: String)? = queue.sync {
+    // The final report of a user disconnect (contract section 6), read while the core still counts. Review E5 of
+    // 18.11: the DELETE itself goes AFTER the core stopped, over the extension's direct path (sendRelease) - a
+    // release through the tunnel being abandoned hangs when that tunnel carries no data (owner's iPhone, rounds
+    // 1-2). nil: nothing to send (a terminal answer, no lease yet).
+    struct PreparedRelease {
+        let url: String
+        let headers: [String: String]
+        let body: String
+    }
+
+    func prepareRelease() -> PreparedRelease? {
+        queue.sync {
             guard !stopped else { return nil }
             stopped = true
             cancelTimerLocked()
@@ -181,24 +188,37 @@ final class UpstreamLeaseRenewer {
             let step = machine.disconnect(nowMs: nowMs())
             guard let action = step.find(.sendRelease) else { return nil }
             log("Tribe upstream: release seq=\(action.meter.seq)")
-            return (url: leaseURL(action), headers: headers(action), body: UpstreamLeaseWire.meterBody(action.meter))
+            return PreparedRelease(url: leaseURL(action), headers: headers(action),
+                                   body: UpstreamLeaseWire.meterBody(action.meter))
         }
-        guard let request else {
-            completion()
-            return
-        }
+    }
+
+    // Sends a prepared release through `via` (the direct transport after the core stopped; the renewer's own
+    // transport when nil), bounded to releaseTimeoutMs; `completion` runs exactly once (on an answer, on a
+    // failure or at the bound). Only an HTTP answer is logged as released.
+    func sendRelease(_ request: PreparedRelease, via: UpstreamLeaseTransport? = nil, completion: @escaping () -> Void) {
         let once = UpstreamOnce(completion)
         let bound = DispatchTime.now() + .milliseconds(Int(Self.releaseTimeoutMs) + 100)
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: bound) { once.run() }
         // Own task, not the renewal I/O queue: a renewal in flight must not delay the release.
-        let transport = transport
+        let transport: UpstreamLeaseTransport = via ?? self.transport
         let log = log
         DispatchQueue.global(qos: .userInitiated).async {
             let result = transport.send(method: "DELETE", url: request.url, headers: request.headers,
                                         body: request.body, timeoutMs: Self.releaseTimeoutMs)
-            log("Tribe upstream: release answered status=\(result.status) error=\(result.errorCode)")
+            log(result.status > 0 ? "Tribe upstream: release answered status=\(result.status)"
+                                  : "Tribe upstream: release not confirmed error=\(result.errorCode) (seat left to the server TTL)")
             once.run()
         }
+    }
+
+    // prepareRelease + sendRelease through the renewer's own transport (tests; nothing in the provider).
+    func release(completion: @escaping () -> Void) {
+        guard let request = prepareRelease() else {
+            completion()
+            return
+        }
+        sendRelease(request, completion: completion)
     }
 
     // Ends the renewer without a release (after a terminal answer, or a stop without a lease).

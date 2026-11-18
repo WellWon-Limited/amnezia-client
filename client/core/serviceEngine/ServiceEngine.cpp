@@ -300,6 +300,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
             m_sessionHintEndpoint.clear();
             markUpStarted();
             m_health.reset();
+            if (n && m_tunnel)
+                m_tunnel->beginNativeOp(e.stamp.leg); // review E2: the leg travels through the native stream
             const TunnelResult r = (n && m_tunnel) ? m_tunnel->up(m_pool.subscription(), *n)
                                                    : TunnelResult::fail(QStringLiteral("node not in the pool"));
             if (!r.ok) {
@@ -312,6 +314,12 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
         case path::EffectType::RunDataCheck:
             m_state = EngineState::Verifying; // the facade runs the one data check through the raised tunnel
             m_health.reset();
+            if (e.recheck) {
+                // the previous check is void (it spanned a suspension, or could not decide): the facade runs it
+                // again on the same tunnel; nothing was recorded for it
+                m_checkRerun = true;
+                attemptJournal(QStringLiteral("attempt_recheck leg=%1 node=%2").arg(e.stamp.leg).arg(e.path.id.id));
+            }
             break;
         case path::EffectType::StopPath:
             m_rebindAwaiting = false;
@@ -398,7 +406,6 @@ void ServiceEngine::loseLiveSession(path::PathOutcome outcome, bool tunnelGone, 
                             QLatin1String(path::pathOutcomeName(outcome)))
                        .arg(int(tunnelGone)).arg(int(restart)).arg(why));
     m_owner.setTimings(attemptTimings());
-    normalizeTransportMode();
     if (m_owner.phase() == path::AttemptPhase::Connected) {
         feedOwner(path::AttemptEvent::liveLost(nowMs(), outcome, tunnelGone, restart, m_choice, transportMode(),
                                                m_net.current()));
@@ -676,7 +683,6 @@ void ServiceEngine::applyReseedNow(const Subscription &sub)
     // location (the card showed it, Connect raised another country's Xray). None allowed while the
     // location still has connectable nodes -> the pin is dropped, the facade persists and journals it.
     m_pinDroppedForTransport.clear();
-    normalizeTransportMode(); // review R2: a pin re-targeted under Auto must not meet a revived "Xray"
     if (!m_pinnedNodeId.isEmpty() && !newIds.contains(m_pinnedNodeId)) {
         const TransportMode mode = transportMode();
         QList<const SubscriptionNode *> loc;
@@ -823,7 +829,6 @@ bool ServiceEngine::connect(QString &error)
     m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session
     // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном features.xray_client
     // отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
-    normalizeTransportMode();
     m_owner.setTimings(attemptTimings());
     m_state = EngineState::Selecting;
     m_lastResult.reset();
@@ -1181,12 +1186,48 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
         leg.id = path::PathId{ m_sessionHintNodeId.isEmpty() ? QStringLiteral("adopted") : m_sessionHintNodeId, QString() };
         leg.kind = isXrayProto(sessionProto) ? path::PathKind::OwnXray : path::PathKind::OwnAwg;
     }
-    m_state = EngineState::Verifying;
     m_owner.setTimings(attemptTimings());
+    // Review E7 of 18.11: a live tunnel the facade decided to adopt supersedes whatever the owner still holds
+    // (a start the native refused to run over its live profile, a stop of a leg that never ran): that attempt
+    // ends (stopped by the person's own tap or the system - nothing recorded) and the live tunnel goes into the
+    // owner's Checking like every other leg. Connected only after its data check.
+    if (m_owner.running() || m_owner.phase() != path::AttemptPhase::Idle) {
+        attemptJournal(QStringLiteral("attempt_superseded_by_live_session phase=%1")
+                           .arg(QLatin1String(path::attemptPhaseName(m_owner.phase()))));
+        m_facadeStop = true; // nothing of ours runs natively: no down()
+        if (m_owner.running() || m_owner.phase() == path::AttemptPhase::Starting
+            || m_owner.phase() == path::AttemptPhase::Checking || m_owner.phase() == path::AttemptPhase::Connected)
+            feedOwner(path::AttemptEvent::userStop(nowMs()));
+        if (m_owner.phase() == path::AttemptPhase::Stopping)
+            feedOwner(path::AttemptEvent::stopConfirmed(nowMs(), m_owner.stoppingLeg()));
+        m_facadeStop = false;
+    }
+    m_state = EngineState::Verifying;
     feedOwner(path::AttemptEvent::adopted(nowMs(), leg, m_choice, transportMode(), m_net.current()));
-    if (m_owner.phase() != path::AttemptPhase::Checking)
-        m_state = EngineState::Connected; // the owner is busy with an attempt of its own: nothing to check here
+    if (m_owner.phase() != path::AttemptPhase::Checking) {
+        // not reachable after the supersede above; never Connected without a check
+        attemptJournal(QStringLiteral("adopt_refused phase=%1").arg(QLatin1String(path::attemptPhaseName(m_owner.phase()))));
+        m_state = EngineState::Disconnected;
+        return false;
+    }
+    if (m_tunnel)
+        m_tunnel->adoptNativeOp(m_owner.currentLeg().leg); // its native events are this leg's from now on
     return true;
+}
+
+bool ServiceEngine::nativeEventStale(quint64 nativeLeg) const
+{
+    switch (m_owner.phase()) {
+    case path::AttemptPhase::Starting:
+    case path::AttemptPhase::Checking:
+        return nativeLeg != m_owner.currentLeg().leg;
+    case path::AttemptPhase::Stopping:
+        return nativeLeg < m_owner.stoppingLeg().leg;
+    case path::AttemptPhase::Connected:
+    case path::AttemptPhase::Idle:
+        return false;
+    }
+    return false;
 }
 
 // tunnelGone: the platform's Error proves the tunnel is down (desktop); on iOS / macOS NE it does not.
@@ -1452,7 +1493,6 @@ DebugSnapshot ServiceEngine::debugSnapshot() const
 // AVPN awg31-xray-v1: pin — ПО ЛОКАЦИИ (см. ServiceEngine.h).
 bool ServiceEngine::setPinnedNode(const QString &nodeId, QString &error) // AVPN
 {
-    normalizeTransportMode(); // 5.1.109 (review R2): the mode the UI shows, as connect()
     if (nodeId.isEmpty()) {
         error = QStringLiteral("empty nodeId");
         return false;
@@ -1511,7 +1551,7 @@ bool ServiceEngine::pinLacksTransport(TransportMode mode) const
     const SubscriptionNode *pinned = findNode(m_pinnedNodeId);
     if (!pinned)
         return false;
-    const LocationTransports lt = locationTransportsFor(locationKeyOf(*pinned), effectiveTransportMode(mode));
+    const LocationTransports lt = locationTransportsFor(locationKeyOf(*pinned), mode);
     return lt.anySupported && !lt.anyAllowed;
 }
 
@@ -1580,7 +1620,6 @@ void ServiceEngine::judgeAdoptedSession(const QString &sessionProto, bool adopte
 // facade's restart) raises it through the owner.
 bool ServiceEngine::rotateNext(QString &error) // AVPN
 {
-    normalizeTransportMode(); // 5.1.109 (review R2)
     const QString targetId = nextLiveNodeId();
     if (targetId.isEmpty()) {
         error = QStringLiteral("not enough live nodes to rotate");

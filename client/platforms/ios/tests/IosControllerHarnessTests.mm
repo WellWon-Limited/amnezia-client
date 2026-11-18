@@ -1742,7 +1742,6 @@ static void test_rebind_superseded_result_dropped()
 #ifndef HARNESS_OLD
 // Review of 136: a session iOS has kept Connected for 10 min (the cold-start rule shows it Connected,
 // it is adopted) whose NE answers "never handshook". Handshake budget 150 ms x 2 for the test.
-static int g_deadSignals = 0;
 static NSDictionary *stalledReply(id softRestarts, id resumes) // nil counter = absent from the reply
 {
     NSMutableDictionary *r = [[statusReply(@"run-1", @"cfg-1", 0, 0) mutableCopy] autorelease];
@@ -1757,7 +1756,6 @@ static HarnessSession *adoptStalledSession(NSDictionary *reply, bool uplinkUp)
     IosController *c = IosController::Instance();
     c->setRawConfigForTest(awgConfig(150, 2));
     c->setUplinkProbe([uplinkUp] { return uplinkUp; });
-    QObject::connect(c, &IosController::adoptedDeadSessionStopped, [] { ++g_deadSignals; });
     HarnessSession *s = newSession(NEVPNStatusConnected);
     s.runtimeGeneration = @"run-1";
     s.hConnectedDate = [NSDate dateWithTimeIntervalSinceNow:-600];
@@ -1822,19 +1820,16 @@ static void test_adopted_dead_session_stopped()
     CHECK(warned("adopted_dead_check stop=1 why=- shown=1 pending=0 answered=1 hs=0 rx=0 rx_threshold=4096 "
                  "soft_restarts=0 resumes=0 physical_up=1"), "decision inputs of the stop are not journaled");
     CHECK(obs.has(Vpn::ConnectionState::Connected), "cold-start rule did not show the adopted session");
-    CHECK(s.stopCalls == 1, "dead adopted session not stopped");
-    CHECK(g_deadSignals == 1, "adoptedDeadSessionStopped not emitted");
-    CHECK(!obs.has(Vpn::ConnectionState::Error), "dead adopted session stop emitted Error");
-    bool appStop = false;
-    for (const auto &r : obs.reasons)
-        if (r.first == QStringLiteral("expected_app_stop") && !r.second) appStop = true;
-    CHECK(appStop, "stop reason is not expected_app_stop intentional=false");
+    // Path engine (review of 18.11): the native only reports; the attempt owner's data check stops a dead
+    // adopted session through its own stop protocol.
+    CHECK(s.stopCalls == 0, "the native stopped a session by itself");
+    CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "dead adopted session is not reported as Reconnecting");
+    CHECK(!obs.has(Vpn::ConnectionState::Error), "dead adopted session got Error");
 }
 static void expectAdoptedKept(HarnessSession *s, const char *what)
 {
     runStatusPolls(1500);
     CHECK(s.stopCalls == 0, what);
-    CHECK(g_deadSignals == 0, "adoptedDeadSessionStopped emitted for a kept session");
     CHECK(!obs.has(Vpn::ConnectionState::Error), "kept adopted session got Error");
 }
 static void test_adopted_soft_restarted_session_kept()

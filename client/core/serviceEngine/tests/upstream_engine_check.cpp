@@ -126,7 +126,6 @@ struct FakeTunnel : ITunnelControl {
         ups << n.nodeId;
         return TunnelResult::success();
     }
-    TunnelResult applyPeer(const Subscription &, const SubscriptionNode &) override { return TunnelResult::success(); }
     TunnelStats readStats() override { return st; }
     void down() override { ++downs; }
 };
@@ -669,12 +668,12 @@ static void dataCheck()
     CHECK(judgeUpstreamCheck(upstreamCheckInputFrom(sf, noAccess, false)).verdict == UpstreamVerdict::Unverifiable);
     CHECK(judgeUpstreamCheck(upstreamCheckInputFrom(sf, noAccess, false)).passes);
     CHECK(!judgeUpstreamCheck(upstreamCheckInputFrom(sf, noAccess, true)).passes);
-    // Timings: past the hard limit -> no data; past the soft one -> slow but passes.
+    // Timings: a complete body past the soft or the hard limit -> slow but passes (review E4 of 18.11).
     UpstreamProbeFacts slow = facts(200, n, good, "other", "8881", "net-b");
     slow.elapsedMs = 4000;
     CHECK(judge(slow).verdict == UpstreamVerdict::Slow && judge(slow).passes);
     slow.elapsedMs = 6000;
-    CHECK(judge(slow).reason == QLatin1String("total_timeout"));
+    CHECK(judge(slow).verdict == UpstreamVerdict::Slow && judge(slow).passes);
     // The route.
     CHECK(decideUpstreamVerifyRoute(true, true, 0) == UpstreamVerifyRoute::Probe);
     CHECK(decideUpstreamVerifyRoute(false, true, 5000) == UpstreamVerifyRoute::WaitForGrant);
@@ -867,14 +866,16 @@ static void envelopeAndParsing()
     CHECK(upstreamMeterScopeForBuild() == MeterScope::Tunnel); // no platform has a verified per-outbound read
     CHECK(parseUpstreamError(R"({"code":"lease_gone","reason":"seat_taken"})").reason == QLatin1String("seat_taken"));
     CHECK(parseUpstreamError(R"({"code":"lease_gone","reason":"Seat Taken"})").reason.isEmpty());
-    // The acquire's bound is below the reconcile watchdog (bounds in code, §17.2).
-    for (double wd : {5000.0, 15000.0, 120000.0})
-        for (double v : {0.0, 6000.0, 1e9}) {
-            TuningStore::set({{QStringLiteral("reconcile_watchdog_ms"), wd}, {QStringLiteral("upstream_acquire_timeout_ms"), v}}, {}, {}, {});
-            CHECK(upstreamAcquireTimeoutMsTuned() >= 2000 && upstreamAcquireTimeoutMsTuned() <= qMax(2000, reconcileWatchdogMsTuned() - 4000));
-        }
+    // The acquire is bounded by the lease share of the provider leg (review E6 of 18.11): the leg's start
+    // deadline covers the lease and then the whole native start, whatever the server sets.
+    for (double v : {0.0, 4000.0, 1e9}) {
+        TuningStore::set({{QStringLiteral("attempt_provider_lease_ms"), v}}, {}, {}, {});
+        const path::AttemptTimings t = attemptTimingsTuned();
+        CHECK(upstreamAcquireTimeoutMsTuned() == t.providerLeaseMs && t.providerLeaseMs >= 1500 && t.providerLeaseMs <= 10000);
+        CHECK(path::AttemptOwner(t).startTimeoutMs(path::PathKind::Provider) == t.providerLeaseMs + t.providerStartMs);
+    }
     TuningStore::set({}, {}, {}, {});
-    CHECK(upstreamAcquireTimeoutMsTuned() == 6000);
+    CHECK(upstreamAcquireTimeoutMsTuned() == 4000);
 }
 
 

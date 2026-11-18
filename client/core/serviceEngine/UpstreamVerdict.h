@@ -9,8 +9,8 @@
 // Inputs are facts the caller measured; the function decides, in this order:
 //  1. data (any failure -> NoData): requested > 0 (bad_request), a first byte (no_first_byte), exactly the
 //     requested size (an incomplete body is named by its cause: ttfb_timeout, stalled, else incomplete;
-//     oversize), digest (digest_mismatch), total time within its hard limit (total_timeout). A complete body
-//     with a late first byte or a long stall is data - Slow (decision of 18.11);
+//     oversize), digest (digest_mismatch). A complete body with a late first byte, a long stall or past the
+//     total limit is data - Slow (decision of 18.11; review E4 of 18.11 for the total limit);
 //  2. path, in this order (decision of 14.11):
 //     a. egress class "tribe-node" is impossible for an upstream node - the bytes came out of one of OUR
 //        exits, so the leased profile did not carry them (a stale own tunnel, a wrong route):
@@ -130,10 +130,10 @@ inline UpstreamVerdictResult judgeUpstreamCheck(const UpstreamCheckInput &in)
         return noData("oversize");
     if (!in.digestOk)
         return noData("digest_mismatch");
-    if (in.elapsedMs >= 0 && in.elapsedMs > in.limits.totalMs)
-        return noData("total_timeout");
-
-    r.slow = (in.elapsedMs >= 0 && in.elapsedMs > in.limits.softTotalMs) || lateFirstByte || stalled;
+    // A complete, digest-valid body is data through this path whenever it arrived: past the total limit it is
+    // slow, never no_data (review E4 of 18.11 - the only working slow path must not be thrown away).
+    r.slow = (in.elapsedMs >= 0 && (in.elapsedMs > in.limits.softTotalMs || in.elapsedMs > in.limits.totalMs))
+          || lateFirstByte || stalled;
     const UpstreamEgressClass cls = upstreamEgressClassFrom(in.egressClass);
     const bool tokensKnown = !in.egressNetToken.isEmpty() && !in.accessNetToken.isEmpty();
     const bool asnKnown = in.egressAsn > 0 && in.accessAsn > 0;

@@ -736,6 +736,30 @@ private func testRenewerFlow() {
     expect(transport.snapshot.count == 3, "nothing sent after terminal (no renew, no release)")
 }
 
+// Review E5 of 18.11: the final report is read before the core stops, the DELETE goes later through the direct
+// transport given - never through the renewer's own (tunnel) transport.
+private func testRenewerReleaseAfterStopDirect() {
+    let tunnel = FakeTransport(), direct = FakeTransport(), clock = TestClock(), bytes = Bytes()
+    let renewer = makeRenewer(tunnel, clock, bytes)
+    renewer.startActive(lease: lease(seq: 1, epoch: 3))
+    bytes.set(900, 90)
+    guard let prepared = renewer.prepareRelease() else {
+        expect(false, "a live lease has a release to send")
+        return
+    }
+    let sentBefore = tunnel.snapshot.count
+    bytes.set(5000, 500) // the core is gone: later counters do not change the final report
+    direct.answer(204, "")
+    let done = DispatchSemaphore(value: 0)
+    renewer.sendRelease(prepared, via: direct) { done.signal() }
+    expect(done.wait(timeout: .now() + 3) == .success, "direct release completes")
+    expect(tunnel.snapshot.count == sentBefore, "nothing through the tunnel transport")
+    let r = direct.snapshot.last
+    expect(r?.method == "DELETE" && r?.body == #"{"epoch":3,"meter_scope":"tunnel","rx_bytes_delta":900,"seq":2,"tx_bytes_delta":90}"#,
+           "direct release carries the report read before the stop \(r?.body ?? "")")
+    expect(renewer.prepareRelease() == nil, "one release only")
+}
+
 private func testRenewerRelease() {
     let transport = FakeTransport(), clock = TestClock(), bytes = Bytes()
     let renewer = makeRenewer(transport, clock, bytes)
@@ -988,6 +1012,7 @@ struct UpstreamLeaseTestsMain {
         testGeo()
         testRenewerFlow()
         testRenewerRelease()
+        testRenewerReleaseAfterStopDirect()
         testRenewerPendingAndScope()
         testScopeDecision()
         testStatsMerge()

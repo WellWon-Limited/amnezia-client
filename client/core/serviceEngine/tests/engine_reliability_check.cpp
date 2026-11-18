@@ -78,11 +78,6 @@ struct FakeTunnel : ITunnelControl {
         ups << node.nodeId;
         return TunnelResult::success();
     }
-    TunnelResult applyPeer(const Subscription &, const SubscriptionNode &node) override
-    {
-        lastUpNodeId = node.nodeId;
-        return TunnelResult::success();
-    }
     TunnelStats readStats() override { return st; }
     bool rebindSocket() override { ++rebindCalls; return rebindCapable; }
     void down() override { ++downCalls; }

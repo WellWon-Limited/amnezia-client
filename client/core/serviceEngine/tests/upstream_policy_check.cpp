@@ -87,7 +87,7 @@ static void verdict()
     CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "digest_mismatch", false));
     in = good();
     in.elapsedMs = 5001;
-    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "total_timeout", false));
+    CHECK(judgeUpstreamCheck(in).verdict == UpstreamVerdict::Slow && judgeUpstreamCheck(in).passes); // complete = data
     // A stalled transfer that never completed reads as stalled, not incomplete (the stall is the fact).
     in = good();
     in.bytesReceived = 16384;

@@ -56,5 +56,13 @@ int main(int argc, char **argv)
     }
 
     printf(g_fail ? "\n%d FAIL\n" : "\nALL OK\n", g_fail);
+    // E10 (device rounds 2-3 of 18.11): a provider session's control plane uses the edge reachable from foreign
+    // exits at once; our own sessions and no session keep the stored edge; a pinned dev backend keeps its base.
+    {
+        const QString hk = QStringLiteral("https://vpn.wellwon.hk");
+        CHECK(avpn::controlPlaneSessionEdge(true, false, hk) == hk, "provider session -> the reachable edge at once");
+        CHECK(avpn::controlPlaneSessionEdge(false, false, hk).isEmpty(), "own tunnel / no session -> the stored edge");
+        CHECK(avpn::controlPlaneSessionEdge(true, true, hk).isEmpty(), "pinned dev backend -> its own base");
+    }
     return g_fail ? 1 : 0;
 }

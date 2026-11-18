@@ -161,7 +161,7 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     m_lastFetchMs = nowMs();
     const quint64 seq = m_configSeq;
     const quint64 order = ++m_requestOrder;
-    QNetworkRequest req{QUrl(m_activeBase + QStringLiteral("/v1/config"))};
+    QNetworkRequest req{QUrl(activeBaseUrl() + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess]() {
@@ -248,7 +248,7 @@ void ConfigService::fetchEdges()
 {
     if (!m_nam)
         return;
-    QNetworkRequest req{QUrl(m_activeBase + QStringLiteral("/v1/edges"))};
+    QNetworkRequest req{QUrl(activeBaseUrl() + QStringLiteral("/v1/edges"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -343,14 +343,26 @@ void ConfigService::reportNetworkFailure()
     if (m_lastFailMs > 0 && now - m_lastFailMs > 60000)
         m_failStreak = 0;
     m_lastFailMs = now;
+    if (!m_sessionEdge.isEmpty())
+        return; // E10: a failure on the session edge says nothing about the stored edge
     if (++m_failStreak < failThreshold())
         return;
     m_failStreak = 0;
     switchToNextEdge();
 }
 
+void ConfigService::setSessionEdge(const QString &edge)
+{
+    const QString before = activeBaseUrl();
+    m_sessionEdge = m_pinned ? QString() : edge;
+    if (activeBaseUrl() != before)
+        emit activeEdgeChanged(activeBaseUrl());
+}
+
 bool ConfigService::reportSubscriptionOutcome(const QString &requestBase, bool failed)
 {
+    if (!m_sessionEdge.isEmpty())
+        return false; // E10: the walk does not move under a session edge
     if (!m_subscriptionStreak.note(m_activeBase, requestBase, failed))
         return false;
     return switchToNextEdge();

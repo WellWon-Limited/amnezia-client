@@ -128,6 +128,49 @@ final class XrayCoreSocksTransport: UpstreamLeaseTransport {
     }
 }
 
+// Review E5 of 18.11: a plain HTTPS exchange from the extension's own process. Its sockets do not enter its own
+// tunnel, so after the core stopped this is the physical network - the direct path a seat release takes.
+// Blocking (called off every state queue), bounded by timeoutMs; no redirects, no cache, no cookies.
+final class DirectHTTPTransport: NSObject, UpstreamLeaseTransport, URLSessionTaskDelegate {
+    func send(method: String, url: String, headers: [String: String], body: String,
+              timeoutMs: Int64) -> UpstreamLeaseWire.HTTPResult {
+        guard let u = URL(string: url), u.scheme == "https" else {
+            return UpstreamLeaseWire.HTTPResult(status: 0, body: Data(), errorCode: "bad_request")
+        }
+        var req = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData,
+                             timeoutInterval: Double(max(timeoutMs, 1)) / 1000.0)
+        req.httpMethod = method
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        if !body.isEmpty {
+            req.httpBody = Data(body.utf8)
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = req.timeoutInterval
+        config.timeoutIntervalForResource = req.timeoutInterval
+        config.httpShouldSetCookies = false
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        var result = UpstreamLeaseWire.HTTPResult(status: 0, body: Data(), errorCode: "timeout")
+        let done = DispatchSemaphore(value: 0)
+        session.dataTask(with: req) { data, response, error in
+            if let http = response as? HTTPURLResponse {
+                result = UpstreamLeaseWire.HTTPResult(status: http.statusCode, body: data ?? Data(), errorCode: "")
+            } else if let error = error as NSError? {
+                result.errorCode = error.code == NSURLErrorTimedOut ? "timeout" : "transport"
+            }
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + .milliseconds(Int(timeoutMs) + 200))
+        return result
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // redirect_refused, as the SOCKS transport
+    }
+}
+
 extension PacketTunnelProvider {
     // MARK: - start
 
@@ -275,13 +318,23 @@ extension PacketTunnelProvider {
     // Any stop of an upstream session ends its seat: DELETE with the final report through the tunnel
     // while the core still runs, bounded to 1.5 s, then `then` (the normal stopXray). Nothing is sent
     // after a terminal answer (the renewer is already stopped) or for a session without a lease.
-    func stopXrayReleasingUpstream(then: @escaping () -> Void) {
+    // Review E5 of 18.11: one release, after the teardown. The final report is read while the core still counts,
+    // the core stops, and only then the DELETE goes over the extension's direct path (its own sockets never enter
+    // its tunnel) - a provider that failed its data check can no longer swallow the release.
+    func stopXrayThenReleaseUpstream(completionHandler: @escaping () -> Void) {
         guard let renewer = tribeUpstream.renewer else {
-            then()
+            stopXray(completionHandler: completionHandler)
             return
         }
         tribeUpstream.renewer = nil
-        renewer.release(completion: then)
+        let prepared = renewer.prepareRelease()
+        stopXray {
+            guard let prepared else {
+                completionHandler()
+                return
+            }
+            renewer.sendRelease(prepared, via: DirectHTTPTransport(), completion: completionHandler)
+        }
     }
 
     // MARK: - status (contract section 5) and the app message (section 2)

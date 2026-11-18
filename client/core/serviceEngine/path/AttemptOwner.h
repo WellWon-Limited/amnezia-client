@@ -11,8 +11,12 @@
 //
 // Clock: every event carries the caller's monotonic now (an injected clock). The owner counts its deadlines in
 // AWAKE time: a gap between two events longer than clockJumpMs (the app was suspended, the main thread stood)
-// counts as clockJumpMs only, so a suspension never turns into "no handshake" (design Р12: "the check did not
-// happen" is not a path outcome). The platform tick (<= 1 s) drives deadlines.
+// does not count at all, so a suspension never turns into "no handshake" (design R12: "the check did not
+// happen" is not a path outcome). After a suspension the leg in flight gets at least resumeGraceMs, and a data
+// check that was running is run again on the same tunnel (RunDataCheck with `recheck`), nothing recorded.
+// Every event is applied BEFORE the deadlines are evaluated: an answer the platform gave by now (a tunnel up, a
+// completed payload) is evidence and wins over a deadline that expired at the same moment (review E3/E4 18.11).
+// The platform tick (<= 1 s) drives deadlines.
 //
 // Course of an attempt (stage 1, design §4 "no probe host": candidates one at a time with a short deadline):
 //   UserStart -> select (PathSelect.h, ledger of the current network) -> StartPath(leg, start timeout)
@@ -122,7 +126,8 @@ struct AttemptEffect {
     EffectType type = EffectType::Show;
     PathStamp stamp;          // StartPath / StopPath / RunDataCheck: echo it in every callback
     PathCandidate path;
-    int timeoutMs = 0;        // StartPath: start deadline; RunDataCheck: check deadline (for native timeouts)
+    int timeoutMs = 0;        // StartPath: start deadline; RunDataCheck: the check's own limit (it answers by then)
+    bool recheck = false;     // RunDataCheck: run the check again on the same tunnel (the previous one is void)
     OutcomeReport report;     // Report: write into the ledger
     AttemptPhase phase = AttemptPhase::Idle; // Show
     AttemptResult result;     // Finish
@@ -236,9 +241,10 @@ public:
 
     QList<AttemptEffect> handle(const AttemptEvent &ev, const SelectionContext &ctx)
     {
-        advance(ev.nowMs);
+        const bool resumed = advance(ev.nowMs);
+        if (resumed)
+            onResumed();
         QList<AttemptEffect> out;
-        checkDeadlines(ctx, out);
         switch (ev.type) {
         case EventType::UserStart: onUserStart(ev, ctx, out); break;
         case EventType::UserStop: onUserStop(out); break;
@@ -249,8 +255,9 @@ public:
         case EventType::TunnelUp:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
                 m_phase = AttemptPhase::Checking;
+                m_checkSuspended = false;
                 m_leg.upAt = m_awake;
-                m_leg.deadline = m_awake + m_t.dataCheckMs;
+                m_leg.deadline = m_awake + checkDeadlineMs();
                 out << effect(EffectType::RunDataCheck, m_t.dataCheckMs) << show(AttemptPhase::Checking);
             }
             break;
@@ -258,6 +265,10 @@ public:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Checking) {
                 if (ev.outcome == PathOutcome::DataOk)
                     connected(ev.ttfbMs, out);
+                else if (m_checkSuspended)
+                    recheck(out); // the check spanned a suspension: it did not happen
+                else if (ev.outcome == PathOutcome::Inconclusive && m_leg.rechecks < m_t.maxRechecks)
+                    recheck(out);
                 else
                     failLeg(ev.outcome == PathOutcome::Inconclusive ? PathOutcome::Inconclusive : PathOutcome::NoData, out);
             }
@@ -271,6 +282,10 @@ public:
         case EventType::LiveLost: onLiveLost(ev, ctx, out); break;
         case EventType::Adopted: onAdopted(ev, out); break;
         }
+        // A check that was running across a suspension and has not answered yet: void, run it again.
+        if (m_checkSuspended && m_phase == AttemptPhase::Checking)
+            recheck(out);
+        checkDeadlines(ctx, out);
         return out;
     }
 
@@ -291,12 +306,13 @@ public:
     // New numbers (the server may tune them): they apply from the next deadline that is set.
     void setTimings(const AttemptTimings &t) { m_t = t; }
 
+    // A provider leg: the seat lease and the native start, each with its own share (review E6 of 18.11).
     int startTimeoutMs(PathKind k) const
     {
         switch (k) {
         case PathKind::OwnAwg: return m_t.awgStartMs;
         case PathKind::OwnXray: return m_t.xrayStartMs;
-        case PathKind::Provider: return m_t.providerStartMs;
+        case PathKind::Provider: return m_t.providerLeaseMs + m_t.providerStartMs;
         }
         return m_t.awgStartMs;
     }
@@ -308,14 +324,48 @@ private:
         qint64 startedAt = 0;
         qint64 upAt = 0;
         qint64 deadline = 0;
+        int rechecks = 0; // inconclusive checks run again on this leg
     };
 
-    void advance(qint64 now)
+    // true: the gap since the last event was a suspension (none of it counts).
+    bool advance(qint64 now)
     {
-        if (m_lastNow >= 0 && now > m_lastNow)
-            m_awake += std::min<qint64>(now - m_lastNow, m_t.clockJumpMs);
+        bool suspended = false;
+        if (m_lastNow >= 0 && now > m_lastNow) {
+            const qint64 gap = now - m_lastNow;
+            suspended = gap > m_t.clockJumpMs;
+            if (!suspended)
+                m_awake += gap;
+        }
         if (now > m_lastNow)
             m_lastNow = now;
+        return suspended;
+    }
+
+    // Back from a suspension: what the platform did meanwhile arrives now - the leg in flight gets time for it;
+    // a check that was running did not happen (its answer, if any, is not a verdict on the path).
+    void onResumed()
+    {
+        if (m_phase == AttemptPhase::Starting)
+            m_leg.deadline = std::max(m_leg.deadline, m_awake + m_t.resumeGraceMs);
+        else if (m_phase == AttemptPhase::Checking)
+            m_checkSuspended = true;
+        else if (m_phase == AttemptPhase::Stopping)
+            m_stopDeadline = std::max(m_stopDeadline, m_awake + m_t.resumeGraceMs);
+    }
+
+    int checkDeadlineMs() const { return m_t.dataCheckMs + m_t.checkGraceMs; }
+
+    // The data check again on the same tunnel; the platform drops the previous one (nothing recorded).
+    void recheck(QList<AttemptEffect> &out)
+    {
+        if (!m_checkSuspended)
+            ++m_leg.rechecks;
+        m_checkSuspended = false;
+        m_leg.deadline = m_awake + checkDeadlineMs();
+        AttemptEffect e = effect(EffectType::RunDataCheck, m_t.dataCheckMs);
+        e.recheck = true;
+        out << e;
     }
 
     bool isLiveLeg(const PathStamp &s) const { return s.isValid() && s == m_leg.stamp; }
@@ -528,8 +578,9 @@ private:
         m_leg.path = ev.path;
         m_leg.startedAt = m_awake;
         m_leg.upAt = m_awake;
-        m_leg.deadline = m_awake + m_t.dataCheckMs;
+        m_leg.deadline = m_awake + checkDeadlineMs();
         m_phase = AttemptPhase::Checking;
+        m_checkSuspended = false;
         m_progressTotal = 1;
         out << effect(EffectType::RunDataCheck, m_t.dataCheckMs) << show(AttemptPhase::Checking);
     }
@@ -600,6 +651,7 @@ private:
     std::optional<AttemptResult> m_pending;
     qint64 m_stopDeadline = 0;
     int m_progressTotal = 0;
+    bool m_checkSuspended = false; // the running data check spanned a suspension
 };
 
 } // namespace avpn::path

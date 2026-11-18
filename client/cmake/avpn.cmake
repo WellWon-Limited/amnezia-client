@@ -68,7 +68,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/RttProbeIcmp.h
     ${AVPN_SE}/BenchRunner.h
     ${AVPN_SE}/BenchAnalysis.h
-    ${AVPN_SE}/Switcher.h
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/TribeDiagReport.h
     ${AVPN_SE}/ServiceEngine.h

@@ -1053,6 +1053,9 @@ private:
     // stop → дождаться Disconnected → start (никогда не up() поверх незакрытой iOS-NE-сессии). Это
     // убирает «подбираем сервер»→«Network Error» и залипания. См. memory tribe-server-switch-fix.
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
+    void settleOperation(const char *why); // review E1 of 18.11: the one release of the operation latches
+    void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
+    QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
     // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик
@@ -1363,6 +1366,7 @@ private:
     quint64                     m_subscriptionSequence = 0;
     quint64                     m_bootstrapSequence = 0;
     QString                     m_savedPin;
+    QString                     m_savedPinCountry; // review E8: the country of the saved preference
     QString                     m_xrayPolicyJournaled; // 5.1.109: the last journalled xray_policy reason
     QElapsedTimer               m_reliabilityClock;
     QTimer                      m_transitionTimer;
@@ -1724,7 +1728,6 @@ private:
     int                          m_lastUpstreamTtfbMs = -1;
     int                          m_attemptCheckedShown = 0;
     int                          m_attemptTotalShown = 0;
-    bool                         m_adoptedDeadStop = false;        // review of 136: native stopped a dead adopted session
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного

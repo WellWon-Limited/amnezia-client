@@ -163,13 +163,12 @@ static void xrayWaitsForTheStartupObservation()
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
         CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
     }
-    {   // Xray is not usable at load and does not become usable: nothing waits, nothing is journalled
+    {   // review E8 of 18.11: Xray not usable at load - the choice still comes into force (the attempt then reports
+        // that no path fits the mode); availability never keeps it at Auto
         TransportModeGate g;
         g.load(kXray, true, /*xrayUsable=*/false);
-        CHECK(!g.choicePending(false));
         TransportModeGate::Outcome o = g.observe(idleDown(), false, kIdleWhy);
-        CHECK(!o.modeChanged && g.inForce() == Auto && g.choice() == Xray);
-        CHECK(g.takeJournal().isEmpty());
+        CHECK(changed(o, Auto, Xray) && g.inForce() == Xray && g.choice() == Xray);
     }
 }
 
@@ -192,10 +191,9 @@ static void admissionOnlyWhileNothingIsRunning()
     };
     for (const Case &c : busy) {
         TransportModeGate g;
-        g.load(kXray, true, /*xrayUsable=*/false);            // Xray frozen at load ...
-        g.observe(idleDown(), false, kIdleWhy);               // (the startup observation is done)
+        g.load(kXray, true, /*xrayUsable=*/true);             // the choice waits for the startup observation ...
         CHECK(!g.idle(c.a));
-        TransportModeGate::Outcome o = g.observe(c.a, /*xrayUsable=*/true, kConfig); // ... allowed again now
+        TransportModeGate::Outcome o = g.observe(c.a, /*xrayUsable=*/true, kConfig); // ... made while busy
         if (o.modeChanged || g.inForce() != Auto || o.pin != Pin::Keep) {
             std::printf("FAIL admission while %s\n", c.what);
             ++g_fail;
@@ -208,7 +206,7 @@ static void admissionOnlyWhileNothingIsRunning()
         o = g.observe(idleDown(), true, kIdleWhy);            // ... and it comes when everything stopped
         CHECK(changed(o, Auto, Xray));
         CHECK(o.pin == Pin::Unapply);                         // un-applied only: the saved pin is never erased
-        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
     }
     TransportModeGate g;
     CHECK(!g.idle(notObserved()));                            // not observed yet: not idle
@@ -230,35 +228,22 @@ static void admissionNeverErasesThePin()
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
         CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
     }
-    {   // not usable at load (an untrusted cache), a fresh config allows it while idle: the same
-        // outcome for the pin, journalled by its own reason
+    {   // not usable at load (an untrusted cache): review E8 of 18.11 - the same load admission, the same outcome
+        // for the pin; availability plays no part
         TransportModeGate g;
         g.load(kXray, true, false);
-        g.observe(idleDown(), false, kIdleWhy);
-        TransportModeGate::Outcome o = g.observe(idleDown(), true, kConfig);
+        TransportModeGate::Outcome o = g.observe(idleDown(), false, kIdleWhy);
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
-        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=config"));
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=start"));
     }
-    {   // the gain arrives BEFORE the startup observation: it waits for it
+    {   // a config before the startup observation: the choice still waits for the observation
         TransportModeGate g;
         g.load(kXray, true, false);
         TransportModeGate::Outcome o = g.observe(notObserved(), true, kConfig);
         CHECK(!o.modeChanged && g.inForce() == Auto);
         o = g.startupObserved(notObserved(), true);
         CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
-        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle")); // not "start": a gain
-    }
-    {   // a gain that is lost again before the admission admits nothing; the next one does
-        TransportModeGate g;
-        g.load(kXray, true, false);
-        g.observe(idleDown(), false, kIdleWhy);
-        g.observe(liveSession(), true, kConfig);              // allowed under a session: waits
-        TransportModeGate::Outcome o = g.observe(liveSession(), false, kConfig); // and forbidden again
-        CHECK(!o.modeChanged && !g.choicePending(false));
-        o = g.observe(idleDown(), false, kIdleWhy);
-        CHECK(!o.modeChanged && g.inForce() == Auto);
-        o = g.observe(idleDown(), true, kConfig);             // usable again, while idle
-        CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+        CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
     }
     {   // "Amnezia" is admitted back after a session that excluded it
         TransportModeGate g;
@@ -271,7 +256,8 @@ static void admissionNeverErasesThePin()
     }
 }
 
-// Xray stops being usable: at once, whatever is running - the server switch must act on the next pick.
+// Review E8 of 18.11: Xray stops being usable - the mode stays as the person chose it (the attempt reports that
+// no path fits); the loss is journalled once, never a silent switch to Auto.
 static void lossIsImmediateAndStaysForTheSession()
 {
     TransportModeGate g;
@@ -281,32 +267,16 @@ static void lossIsImmediateAndStaysForTheSession()
     g.takeJournal();
     g.sessionStartedByUs();
     TransportModeGate::Outcome o = g.observe(liveSession(), /*xrayUsable=*/false, kConfig);
-    CHECK(changed(o, Xray, Auto) && o.pin == Pin::Keep);      // under the live session, at once
-    CHECK(g.choice() == Xray);                                // the choice is kept (138: lost)
-    CHECK(has(g.takeJournal(), "transport_mode_effective from=xray to=auto why=config"));
-    o = g.observe(liveSession(), true, kConfig);              // allowed again under the same session
-    CHECK(!o.modeChanged && g.inForce() == Auto);             // no return under it
-    CHECK(has(g.takeJournal(), "transport_mode_pending choice=xray in_force=auto why=config"));
-    o = g.observe(idleDown(), true, kIdleWhy);
-    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
-    CHECK(has(g.takeJournal(), "transport_mode_effective from=auto to=xray why=idle"));
-
-    TransportModeGate pick;                                   // the engine notices the loss at a pick
-    pick.set(Xray, true);
-    pick.writeDownLoss(true);
-    CHECK(pick.inForce() == Xray && pick.takeJournal().isEmpty());
-    pick.writeDownLoss(false);
-    CHECK(pick.inForce() == Auto && pick.choice() == Xray);
-    CHECK(has(pick.takeJournal(), "transport_mode_effective from=xray to=auto why=pick"));
-    pick.writeDownLoss(false);
-    CHECK(pick.takeJournal().isEmpty());
-    o = pick.observe(liveSession(), true, kConfig);           // usable again under the session
-    CHECK(!o.modeChanged && pick.inForce() == Auto);
-    o = pick.observe(idleDown(), true, kIdleWhy);
-    CHECK(changed(o, Auto, Xray) && o.pin == Pin::Unapply);
+    CHECK(!o.modeChanged && g.inForce() == Xray && g.choice() == Xray); // kept, under the live session too
+    CHECK(has(g.takeJournal(), "transport_mode_unavailable mode=xray kept why=config"));
+    o = g.observe(idleDown(), false, kIdleWhy);
+    CHECK(!o.modeChanged && g.inForce() == Xray && g.takeJournal().isEmpty()); // journalled once
+    o = g.observe(idleDown(), true, kIdleWhy);                // usable again: nothing to change back
+    CHECK(!o.modeChanged && g.inForce() == Xray);
+    CHECK(!g.choicePending(false) && !g.choicePending(true));
     TransportModeGate awg;                                    // Amnezia does not depend on Xray
     awg.set(Awg, true);
-    awg.writeDownLoss(false);
+    awg.observe(idleDown(), false, kIdleWhy);
     CHECK(awg.inForce() == Awg);
 }
 
@@ -326,10 +296,9 @@ static void tap()
     t = g.tap(Awg, true);
     CHECK(!t.noop && g.choice() == Awg && g.inForce() == Awg);
 
-    TransportModeGate waiting;                                // the choice waits under a live session
-    waiting.load(kXray, true, false);
-    waiting.observe(idleDown(), false, kIdleWhy);
-    waiting.observe(liveSession(), true, kConfig);
+    TransportModeGate waiting;                                // the choice waits under a start in flight
+    waiting.load(kXray, true, true);
+    waiting.observe(startInFlight(), true, kConfig);
     CHECK(waiting.inForce() == Auto && waiting.choicePending(true));
     t = waiting.tap(Xray, true);                              // the user taps it: in force now
     CHECK(!t.noop && !t.refused && waiting.inForce() == Xray && !waiting.choicePending(true));
@@ -519,12 +488,12 @@ static void sessionsThisProcessDidNotStart()
         g.sessionAdopted(kAwg, true);
         CHECK(g.idle(notObserved()));
     }
-    {   // Xray is lost while a foreign Xray session is up
+    {   // Xray is lost while a foreign Xray session is up: the mode stays (review E8 of 18.11)
         TransportModeGate g;
         g.load(kXray, true, true);
         g.sessionAdopted(kXray, true);
         TransportModeGate::Outcome o = g.sessionTransportKnown(kXray, /*xrayUsable=*/false);
-        CHECK(changed(o, Xray, Auto));
+        CHECK(!o.modeChanged && g.inForce() == Xray);
     }
     CHECK(sessionFitsMode(Auto, kAwg) && sessionFitsMode(Auto, kXray) && sessionFitsMode(Auto, QString()));
     CHECK(sessionFitsMode(Xray, kXray) && !sessionFitsMode(Xray, kAwg) && sessionFitsMode(Xray, QString()));
