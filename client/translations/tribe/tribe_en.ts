@@ -1084,7 +1084,7 @@
 <context>
     <name>PageConnectTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+175"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageConnectTribe.qml" line="+182"/>
         <source>12 дн.</source>
         <translation>12 d</translation>
     </message>
@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+469"/>
+        <location line="+485"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-467"/>
+        <location line="-483"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>Traffic went around the VPN — trying another route</translation>
     </message>
@@ -1175,7 +1175,12 @@
         <translation>Checking…</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+1"/>
+        <source>Ищем рабочий сервер — проверено %1 из %2</source>
+        <translation>Looking for a working server — %1 of %2 checked</translation>
+    </message>
+    <message>
+        <location line="+4"/>
         <source>Защита активна — ваше соединение безопасно</source>
         <translation>Protection is active — your connection is secure</translation>
     </message>
@@ -1185,7 +1190,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-690"/>
+        <location line="-693"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1195,7 +1200,7 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+692"/>
+        <location line="+695"/>
         <source>Доступ приостановлен — подписка истекла</source>
         <translation>Access paused — subscription expired</translation>
     </message>
@@ -1260,17 +1265,12 @@
         <translation>One moment…</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Сервис запускает узел</source>
-        <translation>The service is starting a node</translation>
-    </message>
-    <message>
-        <location line="-59"/>
+        <location line="-58"/>
         <source> мс</source>
         <translation> ms</translation>
     </message>
     <message>
-        <location line="+105"/>
+        <location line="+118"/>
         <source>Российский сервер: доступность сервисов — как внутри РФ</source>
         <translation>Russian server: service availability matches what you get inside Russia</translation>
     </message>
@@ -1297,12 +1297,22 @@
         <translation>How do I renew my access?</translation>
     </message>
     <message>
-        <location line="-128"/>
+        <location line="-141"/>
         <source>Авто</source>
         <translation>Auto</translation>
     </message>
     <message>
-        <location line="+247"/>
+        <location line="+4"/>
+        <source>Сервис подберёт быстрейший узел</source>
+        <translation>The service picks the fastest node</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Вы выбрали: %1</source>
+        <translation>You chose: %1</translation>
+    </message>
+    <message>
+        <location line="+244"/>
         <source>Заменить сервер</source>
         <translation>Change server</translation>
     </message>
@@ -1312,8 +1322,8 @@
         <translation>Installing…</translation>
     </message>
     <message>
-        <location line="-462"/>
-        <location line="+463"/>
+        <location line="-475"/>
+        <location line="+476"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -1787,7 +1797,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+216"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+227"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1797,7 +1807,7 @@ A gift for every friend!</translation>
         <translation>unavailable in this version</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+78"/>
         <source>Выбор сервера</source>
         <translation>Choose server</translation>
     </message>
@@ -1857,12 +1867,17 @@ A gift for every friend!</translation>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+45"/>
+        <location line="+49"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+48"/>
+        <location line="+19"/>
+        <source>Режим соединения — «Авто»: у этого сервера нет транспорта %1</source>
+        <translation>Connection mode is now “Auto”: this server has no %1 transport</translation>
+    </message>
+    <message>
+        <location line="+43"/>
         <source>Нет активного доступа</source>
         <translation>No active access</translation>
     </message>
