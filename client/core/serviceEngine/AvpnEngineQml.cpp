@@ -585,8 +585,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Волна-4 (ENG-02): персистнутый рабочий вход API (edge-walk прошлой сессии) — с самого старта.
     // ConfigService поднимает его для себя, но activeEdgeChanged на холодном старте не эмитится, и
     // подписка/регистрация/чат/carve-out били в основной адрес, даже если работало только зеркало.
-    if (envUrl.isEmpty())
-        m_baseUrl = avpn::ConfigStore::activeEdge(m_baseUrl);
+    // R1a (device round 4): the walk of an earlier run is not restored - every run starts at the Russian entry.
 #ifdef Q_OS_IOS
     AvpnDiagnostics_setBase(m_baseUrl.toUtf8().constData());
 #endif
@@ -1115,7 +1114,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
     // AVPN upstream nodes: lease / standby / probe I/O with the same client, key and token as /v1 calls.
     // The direct base is read at each call (edge walk moves m_baseUrl).
-    m_tunnel.configureUpstream(m_nam, [this]() { return m_baseUrl; }, kConfigPubKeyHex,
+    // R1a: a lease acquire for a new leg and a release after a stop are DIRECT requests - the direct edge, never the
+    // session edge of a tunnel that is (still) up.
+    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->directBaseUrl() : m_baseUrl; },
+                               kConfigPubKeyHex,
                                [this]() { return authToken(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
@@ -3185,14 +3187,17 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
 }
 
 // E10 (device rounds 2-3 of 18.11): while a provider session is up the control plane goes to the edge reachable
-// from foreign exits at once (EdgeWalk.h::controlPlaneSessionEdge); the stored edge comes back when it ends.
+// from foreign exits at once (EdgeWalk.h::apiSessionEdgeFor); the direct edge comes back when it ends.
 void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
 {
     if (!m_configSvc)
         return;
-    const bool providerUp = tunnelUp && m_engine.currentNodeIsUpstream();
-    const QString edge = avpn::controlPlaneSessionEdge(providerUp, m_configSvc->isPinned(),
-                                                       QString::fromLatin1(avpn::kWhoamiXrayEdge));
+    // R1a: by the route a request takes now - a tunnel in its carrying phase (the leg is checked or connected), not
+    // merely "a tunnel reported up": while the owner brings up the next leg, requests are direct.
+    const bool carrying = m_engine.isVerifying() || m_engine.state() == avpn::EngineState::Connected;
+    const avpn::ApiRoute route = avpn::apiRouteNow(tunnelUp, carrying);
+    const QString edge = avpn::apiSessionEdgeFor(route, m_configSvc->isPinned(),
+                                                 QString::fromLatin1(avpn::kWhoamiXrayEdge));
     if (edge != m_sessionEdge) {
         reliabilityEvent(QStringLiteral("control_plane_edge session=%1").arg(edge.isEmpty() ? QStringLiteral("-")
                                                                                             : QUrl(edge).host()));
@@ -3258,6 +3263,7 @@ bool AvpnEngineQml::syncAttempt()
                 startDataPathVerification();
         });
     }
+    syncControlPlaneEdge(m_lastTunnelState == Vpn::Connected); // R1a: a new leg's requests are direct at once
     const int legStartFailures = m_engine.takeLegStartFailures();
     const std::optional<avpn::path::AttemptResult> result = m_engine.takeAttemptResult();
     // Review E1 of 18.11: the owner's terminal result settles the facade's operation - a start whose native

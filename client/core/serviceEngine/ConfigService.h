@@ -30,13 +30,16 @@ public:
     // Тихая установка и подтверждение «жива» опираются только на свежий конфиг (ревью 2026-09-22).
     bool isFresh() const { return m_fresh; }
     bool isPinned() const { return m_pinned; }
-    // The edge requests go to: the session edge while one is set (E10, EdgeWalk.h::controlPlaneSessionEdge), else
-    // the active edge of the walk.
+    // The edge requests go to: the session edge while a tunnel carries requests (EdgeWalk.h::apiSessionEdgeFor), else
+    // the walk's direct edge.
     QString activeBaseUrl() const { return m_sessionEdge.isEmpty() ? m_activeBase : m_sessionEdge; }
     // E10: set (non-empty) while a provider session is up, cleared when it ends. Never stored; the edge walk does
     // not move while it is set (a failure there says nothing about the stored edge). Emits activeEdgeChanged with
     // the edge requests go to now when that changes.
     void setSessionEdge(const QString &edge);
+    // R1a: the edge a DIRECT request goes to now (no tunnel carries it): the walk's edge of this run, never the
+    // session edge - a new leg's seat request and a release after a stop use this.
+    QString directBaseUrl() const { return m_activeBase; }
     // AVPN upstream nodes: the config signing key (dev or prod, as chosen by the facade) - the lease
     // answer is signed by the same key under its own context (SignedContext.h).
     const QString &publicKeyHex() const { return m_pubKeyHex; }
