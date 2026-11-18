@@ -124,6 +124,7 @@
         <file>Tribe/components/TribeTransportBadge.qml</file>
         <file>Tribe/components/TribeScanRow.qml</file>
         <file>Tribe/components/TribeConnectionCard.qml</file>
+        <file>Tribe/components/TribeSupportCheckBar.qml</file>
         <file>Tribe/components/TribeCountryMenu.qml</file>
         <file>Tribe/components/TribeScanBar.qml</file>
         <file>Tribe/components/TribeShade.qml</file>

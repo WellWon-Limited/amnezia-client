@@ -74,11 +74,11 @@ PageType {
             tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageConnectTribe.qml")
     }
 
-    // AVPN (Scanner): open the Scanner page (non-tab, back to `origin`: home | servers | chat); withCheck = the
-    // chat's run_diag (the full check starts with the scan). Only while the `scanner` switch is on.
-    function openScanner(origin, withCheck) {
+    // AVPN (Scanner): open the Scanner page (non-tab, back to `origin`: home | servers | chat). Only while the
+    // `scanner` switch is on. (The full check no longer opens it: it runs from Support, variant B 18.11.)
+    function openScanner(origin) {
         if (!ScanSwitches.scanner) return
-        tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageScannerTribe.qml", { origin: origin, withCheck: withCheck === true })
+        tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageScannerTribe.qml", { origin: origin })
     }
     function currentPageIs(name) {
         return tabBarStackView.currentItem && String(tabBarStackView.currentItem.objectName).indexOf(name) !== -1
@@ -90,7 +90,7 @@ PageType {
         ignoreUnknownSignals: true
         function onOpenScreenRequested() {
             if (root.avpnNav && !root.onboardingActive && !root.currentPageIs("PageScannerTribe.qml"))
-                root.openScanner("home", false)
+                root.openScanner("home")
         }
     }
 
@@ -175,17 +175,21 @@ PageType {
         // AVPN: «Панель администратора» (низ настроек, Dev.adminPanelVisible) → бенч соединения
         function onRequestAdminPanel() { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageAdminTribe.qml") }
         // AVPN (Доктор v1): любая страница просит попап диагностики (главная/чат)
-        // AVPN (Scanner): with `scanner` on and `doctor_legacy` off the Doctor entries (chat run_diag / «+») open
-        // the Scanner with the full check of «Ваше подключение» instead of the sheet
+        // AVPN (Scanner, variant B 18.11): with `scanner` on and `doctor_legacy` off a Doctor entry runs the full
+        // check with the report from Support (TribeScanner.checkFromSupport, no Scanner screen) and shows the chat
+        // the report lands in; otherwise the old sheet
         function onRequestDoctor() {
-            if (ScanSwitches.replacesDoctor)
-                root.openScanner(root.currentPageIs("PageSupportTribe.qml") ? "chat" : "home", true)
-            else
+            if (ScanSwitches.replacesDoctor && typeof TribeScanner !== "undefined") {
+                TribeScanner.checkFromSupport()
+                if (!root.currentPageIs("PageSupportTribe.qml"))
+                    root.goAvpnTab(1)
+            } else {
                 doctorSheet.show()
+            }
         }
         // AVPN (Scanner): «Сканер» (home) / «Запустить сканер» (servers)
         function onRequestScanner() {
-            root.openScanner(root.currentPageIs("PageServersTribe.qml") ? "servers" : "home", false)
+            root.openScanner(root.currentPageIs("PageServersTribe.qml") ? "servers" : "home")
         }
         // AVPN in-app Legal: Privacy/Terms внутри приложения (кэш+fallback, без выброса в браузер)
         function onRequestLegalDoc(doc) { tabBarStackView.goToTabBarPageUrl("../Tribe/Pages/PageLegalTribe.qml", { docKey: doc }) }

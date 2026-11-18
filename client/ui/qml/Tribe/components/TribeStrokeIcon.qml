@@ -51,7 +51,9 @@ Item {
         "check-circle": "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 12l2 2 4-4",
         "alert-triangle": "M21.73 18l-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z M12 9v4 M12 17h.01",
         // the Scanner's network chip on a mobile network (Lucide «signal»), owner 18.11 - app only, like the keys above
-        "cellular": "M2 20h.01 M7 20v-4 M12 20v-8 M17 20V8 M22 4v16"
+        "cellular": "M2 20h.01 M7 20v-4 M12 20v-8 M17 20V8 M22 4v16",
+        // Support's «Проверить подключение и отправить отчёт» (variant B, 18.11): the former Doctor button's glyph
+        "activity": "M22 12h-4l-3 9L9 3l-3 9H2"
     })
     readonly property string pathD: paths[icon] || ""
 

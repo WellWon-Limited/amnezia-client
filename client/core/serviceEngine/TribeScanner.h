@@ -287,6 +287,9 @@ public:
     Q_INVOKABLE void chooseCountry(const QString &cc);
     Q_INVOKABLE void tapRow(const QString &id);
     Q_INVOKABLE void tapCheck();
+    // Support's «Проверить подключение и отправить отчёт» (variant B, 18.11): the same check without the Scanner
+    // screen (ScanMachine::supportCheckTapped); its progress is view.support_check {running, progress}.
+    Q_INVOKABLE void checkFromSupport();
     Q_INVOKABLE void tapReportLink();
     Q_INVOKABLE void tapShade();
     Q_INVOKABLE void showShade(const QString &tone, const QString &textKey, const QStringList &args = {},

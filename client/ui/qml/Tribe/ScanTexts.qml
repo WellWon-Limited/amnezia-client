@@ -48,21 +48,8 @@ QtObject {
     readonly property string ms: qsTr("%1 мс")
     readonly property string msApprox: qsTr("~%1 мс")
 
-    // ── card «Ваше подключение» ──
-    readonly property string cardTitle: qsTr("Ваше подключение")
+    // ── what is connected now: the one line at the top of the list (variant B, 18.11) ──
     readonly property string cardOff: qsTr("VPN не подключён")
-    readonly property string cardServer: qsTr("Сервер")
-    readonly property string cardServices: qsTr("Сервисы")
-    readonly property string cardSites: qsTr("Сайты РФ")
-    readonly property string cardSpeed: qsTr("Скорость")
-    readonly property string cardByButton: qsTr("проверим кнопкой ниже")   // device round 3: «по кнопке» read as cryptic next to the «?» chips
-    readonly property string sitesOk: qsTr("работают")
-    readonly property string sitesBad: qsTr("не открываются")
-    readonly property string sitesOff: qsTr("выключено")
-    readonly property string speedComfortable: qsTr("комфортно")
-    readonly property string speedSlow: qsTr("медленно")
-    readonly property string cardCheck: qsTr("Проверить и отправить отчёт")
-    readonly property string cardChecking: qsTr("Проверяем…")
 
     // ── bottom bar ──
     readonly property string allCountries: qsTr("Все страны")
@@ -150,6 +137,12 @@ QtObject {
     readonly property string scanScope: qsTr("Сканировать")                               // bar button: a country chosen that the shown result does not cover
     readonly property string emptyScopeTitle: qsTr("%1: доступных нод сейчас нет")         // empty result of a country scan (%1 = the country)
     readonly property string emptyScopeText: qsTr("Попробуйте другую страну или проверьте все страны.") // text, the same state
+    // variant B (owner decision 18.11): the check with the report lives in Support - the bar under the chat header
+    readonly property string supportCheck: qsTr("Проверить подключение и отправить отчёт") // Support bar, idle
+    readonly property string supportCheckSub: qsTr("Отчёт придёт сюда, в чат") // its second line
+    readonly property string supportChecking: qsTr("Проверяем подключение…")             // the bar while the stages run
+    readonly property string supportSending: qsTr("Отправляем отчёт…")                    // the bar: no connection, the report alone / the last stage
+    readonly property string supportCheckingSub: qsTr("До 20 секунд — отчёт сам придёт в чат") // its second line while running
     // ELSEWHERE: «Не удалось сохранить отчёт на устройстве — он не отправлен» - chat toast, TribeSupportChat.cpp (queue lane)
     // NO FRAME, existing texts reused (no new wording; listed so the owner sees every fallback):
     //  - stage «preparing» (manifest requested): stageReachShort without the counts + an indeterminate bar

@@ -644,11 +644,17 @@ PageType {
                     fontSizeMode: Text.HorizontalFit; minimumPixelSize: 10
                     font.family: Theme.font.display; font.pixelSize: 16; font.weight: Theme.font.wBold
                 }
+                // AVPN (Scanner, variant B 18.11): the «Сайты РФ» status left the Scanner with its card; when the
+                // engine's background RU check (RuSplitSentinel) says the sites do not open, the banner says so.
+                // WAITS FOR THE ENGINE: TribeEngine.ruSitesState "ok" | "bad" | "unknown" (not sent yet).
                 Text {
+                    readonly property bool sitesBad: bypassStore.masterOn && root.hasEngine
+                                                     && TribeEngine.ruSitesState === "bad"
                     width: parent.width
-                    text: bypassStore.masterOn ? qsTr("Теперь VPN выключать не нужно.")
+                    text: sitesBad ? qsTr("Сайты РФ сейчас не открываются")
+                          : bypassStore.masterOn ? qsTr("Теперь VPN выключать не нужно.")
                                                : qsTr("Ozon, WB, Госуслуги, Банки, Kinopoisk")
-                    color: root.slate500; elide: Text.ElideRight
+                    color: sitesBad ? Theme.color.warning : root.slate500; elide: Text.ElideRight
                     fontSizeMode: Text.HorizontalFit; minimumPixelSize: 9
                     font.family: Theme.font.body; font.pixelSize: 11
                 }

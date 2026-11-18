@@ -8,9 +8,10 @@ import "../components"
 import "../../Controls2" // PageType
 
 // AVPN: the Scanner («Сканер») — ONE screen (owner, artboard design/systems/tribe-backend/lab/vpn-scanner @ 9ac7ccff,
-// plan scanner-client-plan.md §1, §4): header «Сканер» (+ the 18 px mark after the scan and the network), the
-// caption «Проверено …», the rings with one status line and a thin bar while scanning (they collapse into the mark
-// in 360 ms), then the list - card «Ваше подключение», rows by speed, the crowd legend - and the pinned bar (country
+// plan scanner-client-plan.md §1, §4; owner review 18.11): header «Сканер» (+ the 18 px mark after the scan), the
+// two status chips (last check, network), the rings with one status line and a thin bar while scanning (they
+// collapse in 360 ms), then the list - one line of what is connected now (variant B: the card «Ваше подключение»
+// and its check left for Support), rows by speed, the crowd legend - and the pinned bar (country
 // menu left of «Повторить» / «Остановить»). The empty result and the «Скан сейчас невозможен» reasons are drawn from
 // the same kit parts. The screen only DRAWS the view: TribeScanner.view = ScanView JSON (ScanMachine.h
 // scanViewToJson); every decision (order, filter, stop, cooldown, budget, card, shades) is the pure machine's.
@@ -23,7 +24,6 @@ PageType {
     signal requestTab(int index)  // -> the chat (tab 1) it was opened from
 
     property string origin: "home"        // "home" | "servers" | "chat"
-    property bool withCheck: false        // chat run_diag: open with the full check (L1 scenario chat_run_diag)
 
     readonly property real safeTop: Math.max(PageController.safeAreaTopMargin, SafeArea.margins.top)
     readonly property bool hasScanner: typeof TribeScanner !== "undefined"
@@ -103,9 +103,6 @@ PageType {
     property string liveLabel: ""
     property string liveCc: ""
     property bool leaving: false
-    // Owner 18.11, item 7: the one-line connection status instead of the card «Ваше подключение» - a PROPOSAL, off
-    // until the owner chooses (the check and the report would move to Support; see the artboard «Правки 18.11»).
-    readonly property bool connectionLine: false
 
     // ── navigation ──
     function goBack() {
@@ -122,7 +119,8 @@ PageType {
         syncRows()
         completed = true
         refreshServiceAction()
-        if (hasScanner) TribeScanner.open(root.withCheck)
+        // the check with the report runs from Support now (variant B, 18.11): the Scanner never opens with it
+        if (hasScanner) TribeScanner.open(false)
     }
     // leaving the screen = closed(): a running scan stops, a pending connect the scan started is cancelled (S19)
     Component.onDestruction: if (hasScanner) TribeScanner.close()
@@ -490,19 +488,8 @@ PageType {
                 }
 
                 TribeConnectionCard {
-                    // always on the list (owner, device test of 142): with the coordinator's card hidden it still
-                    // shows the live VPN state, as the compact card
+                    // what is connected now, one line (owner 18.11, variant B): always on the list, in every phase
                     width: parent.width
-                    // its rows fill in at the end of a scan: grow smoothly so the rows under it slide instead of
-                    // jumping by the card's new height (owner 18.11 «передёргивание»)
-                    height: implicitHeight
-                    clip: true
-                    Behavior on height {
-                        enabled: !Theme.motion.reduceMotion
-                        NumberAnimation { duration: Theme.motion.normal; easing.type: Easing.OutCubic }
-                    }
-                    card: root.card
-                    line: root.connectionLine
                     liveState: root.liveVpn
                     liveProto: (typeof TribeEngine !== "undefined") ? String(TribeEngine.activeProto || "") : ""
                     liveProtoVersion: (typeof TribeEngine !== "undefined" && TribeEngine.currentNode)
@@ -511,8 +498,6 @@ PageType {
                                  || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.name || "") : "")
                     serverCc: root.card.server_cc || root.liveCc
                               || ((typeof TribeEngine !== "undefined" && TribeEngine.currentNode) ? (TribeEngine.currentNode.countryCode || "") : "")
-                    // a full report queue answers with the shade «Отчёты ждут связи: N…» (the machine, plan §3.1)
-                    onCheckTapped: if (root.hasScanner) TribeScanner.tapCheck()
                 }
 
                 Text {
@@ -677,8 +662,8 @@ PageType {
                         lineHeightMode: Text.FixedHeight
                     }
                 }
-                // a finished scan WITH rows and no live connection (desktop with the VPN off: the card says «VPN не
-                // подключён», no button) still sends its results to support - the empty state's link, the view's
+                // a finished scan WITH rows and no live connection (desktop with the VPN off: the line says «VPN не
+                // подключён») still sends its results to support - the empty state's link, the view's
                 // empty.report_link (ScanMachine reportLinkOffered; lab seam S7, no artboard frame)
                 ReportLink {
                     visible: root.phase === "done" && root.emptyView.report_link === true
