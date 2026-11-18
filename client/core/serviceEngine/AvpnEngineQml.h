@@ -1074,6 +1074,8 @@ private:
     bool m_scanNetCompareArmed = false;
     bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
     QString m_exactRestorePin;         // R3: the choice before it
+    bool m_exactRestoreReconnect = false;    // S6: the VPN was connected when the row was tapped
+    bool m_exactRestoreReconnectNow = false; // S6: bring that session back after the row failed
     void endExactRowRequest(bool connected);
     void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check

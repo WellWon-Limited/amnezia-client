@@ -915,6 +915,12 @@ static void scannerRowChain()
 static void scannerLiveView()
 {
     const QString none;
+    // S2 (device round 5): connected without the data mark (an adopted session after a relaunch) is not «connecting»
+    {
+        const ScanLiveView a = scanLiveView(QStringLiteral("connected"), true, QString(), none, none, none, true, false,
+                                            /*dataFlowing=*/false, false);
+        CHECK(a.live && !a.connecting);
+    }
     ScanLiveView v = scanLiveView(QStringLiteral("disconnected"), false, none, none, none, QStringLiteral("9"), false, false, false, /*attemptFailed=*/false);
     CHECK(!v.live && !v.connecting && v.nodeId.isEmpty() && v.attemptNodeId.isEmpty());
     v = scanLiveView(QStringLiteral("connecting"), false, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, false, /*attemptFailed=*/false);

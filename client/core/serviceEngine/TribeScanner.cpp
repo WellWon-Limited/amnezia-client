@@ -431,6 +431,9 @@ void TribeScanner::refreshView()
     for (int i = 0; i < rows.size() && i < v.rows.size(); ++i) {
         QJsonObject r = rows.at(i).toObject();
         r.insert(QStringLiteral("version"), v.rows.at(i).transportVersion);
+        const QString st = r.value(QLatin1String("state")).toString();
+        if ((st == QLatin1String("works") || st == QLatin1String("slow")) && m_engine->rowFailedInTunnelHere(v.rows.at(i).id))
+            r.insert(QStringLiteral("state"), QStringLiteral("failed")); // a tunnel no-data outranks the probe
         const QString name = m_engine->rowDisplayName(v.rows.at(i).id);
         if (!name.isEmpty())
             r.insert(QStringLiteral("label"), name);

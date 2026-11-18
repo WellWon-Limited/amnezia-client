@@ -519,6 +519,16 @@ void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutco
     applyRaceEffects(m_race.probeDone(nowMs(), stamp, outcome, bytesSpent));
 }
 
+bool ServiceEngine::failedInTunnelHere(const QString &nodeId) const
+{
+    const SubscriptionNode *n = findNode(nodeId);
+    if (!n || !m_net.current().usable())
+        return false;
+    const path::LedgerEntry *e = m_ledger.entry(m_net.current().local, path::derivePathId(*n).id);
+    return e && e->revision == path::derivePathId(*n).revision && e->failStreak > 0 && e->noDataMs > 0
+        && e->noDataMs >= e->dataOkMs;
+}
+
 bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &source)
 {
     const SubscriptionNode *n = findNode(nodeId);
@@ -1340,8 +1350,10 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     const QString sessionProto = hintGiven ? (proto.isEmpty() ? QStringLiteral("awg") : proto) : QString();
     if (hintGiven) {
         const auto *node = findNode(nodeId);
+        // S2 (device round 5): a provider stub has no endpoint of its own (the profile's server is in its lease) -
+        // it is identified by its node id and proto alone, as tryIdentifyCurrentNode does.
         if (node && protoOf(*node) == (proto.isEmpty() ? QStringLiteral("awg") : proto)
-            && node->endpoint == endpoint) {
+            && (node->endpoint == endpoint || isUpstreamNode(*node))) {
             if (m_currentNodeId != nodeId)
                 resetHealSession(nodeId);
             m_currentNodeId = nodeId;

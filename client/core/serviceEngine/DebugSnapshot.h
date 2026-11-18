@@ -1075,7 +1075,10 @@ inline ScanLiveView scanLiveView(const QString &state, bool nativeUp, const QStr
     v.live = up || (switching && nativeUp && !pendingSwitch.isEmpty());
     v.nodeId = v.live ? current : QString();
     v.failed = attemptFailed;
-    v.connecting = wantConnected && !dataFlowing && !v.failed;
+    // S2 (device round 5): the same state as the home screen - "connected" is connected whether or not the data mark
+    // came (an adopted session after a relaunch showed «Подключаемся…» here while home said Connected).
+    Q_UNUSED(dataFlowing)
+    v.connecting = wantConnected && state != QLatin1String("connected") && !v.failed;
     if (!wantConnected)
         return v;
     QString target;

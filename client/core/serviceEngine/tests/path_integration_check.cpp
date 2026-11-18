@@ -502,6 +502,18 @@ int main(int argc, char **argv)
     for (const char *ours : { "transport", "rate_limited", "upstream_unavailable", "invalid_request", "envelope",
                               "bridge_refused", "invoke", "signature", "http_502", "standby_unconfirmed", "unknown" })
         CHECK(ServiceEngine::startFailureOutcome(QString::fromLatin1(ours)) == path::PathOutcome::Inconclusive);
+    // S6 (device round 5): a tunnel no-data outranks a later probe ok for the Scanner's screen too
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        r.up();
+        CHECK(r.eng.verifyFailed(QStringLiteral("no data")));
+        CHECK(r.eng.failedInTunnelHere(QStringLiteral("17")));
+        CHECK(r.eng.recordProbeProof(QStringLiteral("17"), QStringLiteral("scanner")));
+        CHECK(r.eng.failedInTunnelHere(QStringLiteral("17"))); // the probe does not lift it
+        CHECK(!r.eng.failedInTunnelHere(QStringLiteral("16")));
+    }
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }

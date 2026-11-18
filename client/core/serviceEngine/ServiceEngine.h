@@ -254,6 +254,8 @@ public:
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
     bool recordProbeProof(const QString &nodeId, const QString &source);
+    // S6: the path's real tunnel came up and carried no data on the current network, with no data ok since.
+    bool failedInTunnelHere(const QString &nodeId) const;
     // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
     static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }

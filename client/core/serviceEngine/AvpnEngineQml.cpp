@@ -320,6 +320,12 @@ public:
         m_e->reliabilityEvent(QStringLiteral("scan_nodes_offered rows=%1 kept=%2").arg(subscriptionNodes.size()).arg(kept));
     }
 
+    bool rowFailedInTunnelHere(const QString &rowId) const override
+    {
+        const QString node = m_e->m_engine.nodeById(rowId) ? rowId : QStringLiteral("up:") + rowId;
+        return m_e->m_engine.failedInTunnelHere(node);
+    }
+
     QString rowDisplayName(const QString &rowId) const override
     {
         // one snapshot per view refresh (the rows of one refresh ask within the same event-loop turn)
@@ -1123,6 +1129,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // 5.1.108: AVPN_API_URL pins the control plane - no stored edge, no edge walk to the prod edges.
     m_configPubKeyHex = kConfigPubKeyHex; // AVPN Scanner: the coordinator verifies the manifest with the same key
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
+    // S5 (device round 5): after a relaunch with the tunnel still up (the extension outlives the app) the first
+    // requests leave through that tunnel before its first status arrives - the edge for a carrying tunnel from the
+    // start; the first observed state corrects it either way (syncControlPlaneEdge).
+    if (QSettings().value(QStringLiteral("avpn/tunnelCarrying"), false).toBool()) {
+        m_sessionEdge = avpn::apiSessionEdgeFor(avpn::ApiRoute::Tunnel, m_configSvc->isPinned(),
+                                                QString::fromLatin1(avpn::kWhoamiXrayEdge));
+        m_configSvc->setSessionEdge(m_sessionEdge);
+        if (!m_sessionEdge.isEmpty())
+            m_baseUrl = m_configSvc->activeBaseUrl();
+    }
     // AVPN upstream nodes: lease / standby / probe I/O with the same client, key and token as /v1 calls.
     // The direct base is read at each call (edge walk moves m_baseUrl).
     // S1 (device round 5): by the route the request takes NOW - through a tunnel that carries requests (seat-first
@@ -2871,8 +2887,12 @@ QVariantList AvpnEngineQml::nodePool() const
             continue;
         // R7 (device round 4): one evidence source for the list and the Scanner - an own row without an ICMP figure
         // shows the Scanner's figure on this network, like a provider row («Эстония 3»: a dash here, «Доступно» there).
-        const int rtt = upstream ? scanMs.value(id, -1)
-                                 : (display.at(i).rttMs >= 0 ? display.at(i).rttMs : scanMs.value(id, -1));
+        int rtt = upstream ? scanMs.value(id, -1)
+                           : (display.at(i).rttMs >= 0 ? display.at(i).rttMs : scanMs.value(id, -1));
+        // S6 (device round 5): the server we are on has no off-tunnel figure while the tunnel is up - its live RTT
+        // through the tunnel is its figure (the remembered working server showed a dash).
+        if (rtt < 0 && id == m_engine.currentNodeId() && m_liveRtt >= 0)
+            rtt = m_liveRtt;
         // Upstream nodes (release A, 1.10.0): our form of the name - the admin's own label, «<country> <n>» or
         // «Белые списки <n>»; never «Сервер <n>».
         n[QStringLiteral("name")] = upstream
@@ -3214,6 +3234,7 @@ void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
         reliabilityEvent(QStringLiteral("control_plane_edge session=%1").arg(edge.isEmpty() ? QStringLiteral("-")
                                                                                             : QUrl(edge).host()));
         m_sessionEdge = edge;
+        QSettings().setValue(QStringLiteral("avpn/tunnelCarrying"), !edge.isEmpty()); // S5: known at the next launch
     }
     m_configSvc->setSessionEdge(edge);
 }
@@ -3265,6 +3286,8 @@ void AvpnEngineQml::endExactRowRequest(bool connected)
     m_exactRestoreArmed = false;
     const QString row = m_exactRow;
     m_exactRow.clear();
+    m_exactRestoreReconnectNow = !connected && m_exactRestoreReconnect;
+    m_exactRestoreReconnect = false;
     if (!connected) {
         QString err;
         if (m_exactRestorePin.isEmpty())
@@ -3357,6 +3380,13 @@ bool AvpnEngineQml::syncAttempt()
             m_busy = false;
             reliabilityEvent(QStringLiteral("intent_off why=attempt_failed reason=%1")
                                  .arg(QLatin1String(avpn::path::failReasonName(r->reason))));
+            if (std::exchange(m_exactRestoreReconnectNow, false)) {
+                // S6: the failed Scanner row does not leave the VPN off - the session before the tap comes back
+                // through the ordinary start with the restored choice
+                m_wantConnected = true;
+                reliabilityEvent(QStringLiteral("exact_row_failed_previous_session_restored"));
+                QTimer::singleShot(0, this, [this]() { reconcile(); });
+            }
             switch (r->reason) {
             case avpn::path::FailReason::ExactNodeFailed:
                 emit error(tr("Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»"));
@@ -3994,6 +4024,10 @@ void AvpnEngineQml::identifyAdoptedSession()
 
 void AvpnEngineQml::onTick()
 {
+    // S2 (device round 5): the identity of an adopted session is looked for on every tick until it is known - after a
+    // relaunch the session metadata often arrives after the first Connected (the card had no server name, the
+    // Scanner showed «VPN не подключён»).
+    identifyAdoptedSession();
     // AVPN upstream nodes: the lease owner's due work (macOS renewals, a provisional seat's retries and
     // deadline) and the standby pack's refresh ride on this existing tick - no timer of their own. Before
     // the health gates: a renewal is due whatever the health sampling does.
@@ -7758,6 +7792,8 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
     if (!m_exactRestoreArmed) {
         m_exactRestoreArmed = true;
         m_exactRestorePin = m_savedPin;
+        // S6 (device round 5): a live session before the tap comes back if the row fails
+        m_exactRestoreReconnect = m_wantConnected && m_engine.state() == avpn::EngineState::Connected;
     }
     m_exactRow = nodeId; // a Scanner row is one exact path (never a fallback to another row or server)
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
@@ -8487,7 +8523,12 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     req.setRawHeader(QByteArrayLiteral("Accept-Encoding"), QByteArrayLiteral("identity"));
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     QNetworkReply *r = m_nam->get(req);
-    avpn::armTimeout(r, int(left)); // the whoami budget bounds the request - no timer of its own
+    // S3 (device round 5): judged by progress, not by a hard per-request cut. The first byte must come within the
+    // whoami share (`left`); once bytes flow, the request lives while they keep coming (no gap longer than
+    // kWhoamiStallMs), up to the whole check budget (the backstop below). A path that moves its payload steadily but
+    // slowly is "works (slow)" - it used to flip between pass and "no data" at ~1.6 s from one connect to the next.
+    const qint64 budgetLeft = std::max<qint64>(left, qint64(m_engine.dataCheckMs()) - m_verifyClock.elapsed());
+    avpn::armTimeout(r, int(budgetLeft));
     // Count and hash what actually arrives (readyRead), so a transfer cut after the headers still
     // reports its real size: < 16 KiB = data does not pass, >= 16 KiB cut by our timeout = slow link.
     struct Received {
@@ -8504,6 +8545,21 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
     };
     connect(r, &QNetworkReply::readyRead, r, drain);
     const qint64 t0 = m_verifyClock.elapsed();
+    {
+        auto lastByteAt = std::make_shared<qint64>(-1);
+        connect(r, &QNetworkReply::readyRead, r, [this, lastByteAt]() { *lastByteAt = m_verifyClock.elapsed(); });
+        auto *watch = new QTimer(r);
+        watch->setInterval(200);
+        connect(watch, &QTimer::timeout, r, [this, r, lastByteAt, t0, left]() {
+            if (!r->isRunning())
+                return;
+            if (avpn::whoamiProgressCut(m_verifyClock.elapsed(), t0, *lastByteAt, left)) {
+                r->setProperty("avpn_timed_out", true); // our clock ended it, not the path
+                r->abort();
+            }
+        });
+        watch->start();
+    }
     const qint64 armedWall = QDateTime::currentMSecsSinceEpoch();
     const bool otherEdge = base != m_baseUrl;
     connect(r, &QNetworkReply::finished, this, [this, r, epoch, nonce, rx, drain, t0, armedWall, left, otherEdge]() {
@@ -8571,6 +8627,9 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
             QTimer::singleShot(avpn::kWhoamiRetryDelayMs, this, [this, epoch]() { whoamiAttempt(epoch); });
             return;
         }
+        // S3: the transfer time is the path's speed on this network (the ledger ranks slower working paths lower)
+        if (v == avpn::WhoamiVerdict::Works)
+            m_lastVerifyTtfbMs = int(m_verifyClock.elapsed() - t0);
         finishWhoami(epoch, v, facts);
     });
 }
