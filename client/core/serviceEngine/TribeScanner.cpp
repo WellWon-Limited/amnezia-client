@@ -482,7 +482,7 @@ ScanNetwork TribeScanner::buildNetwork() const
     if (m_hostGenFolded)
         n.sources << m_hostGen;
     n.fingerprint = scanNetFingerprint(QLatin1String(scanNetKindName(f.kind)), n.key, f.gatewayHash);
-    n.radio = f.kind == ScanNetKind::Cellular ? f.radio : QString();
+    n.radio = f.kind != ScanNetKind::Cellular ? QString() : !f.radio.isEmpty() ? f.radio : m_radio ? m_radio() : QString();
     return n;
 }
 

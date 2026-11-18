@@ -29,6 +29,7 @@
     #include "core/serviceEngine/TribeHaptics.h" // AVPN (haptics): тактильный отклик → QML
     #include "core/serviceEngine/TribeScanner.h" // AVPN Scanner (lane L6b): the coordinator «Сканер» → QML
     #include "core/serviceEngine/ScanPathProberApi.h" // AVPN path engine stage 2: the race's probe host
+    #include "core/serviceEngine/TribeNetInfo.h"      // AVPN: avpn::cellularGeneration (the Scanner's net_radio)
     #include "core/serviceEngine/TuningStore.h"       // AVPN: development-build flag overrides
     #if defined(Q_OS_IOS)
         #include "core/serviceEngine/IosScanHost.h" // AVPN Scanner (lane L4): the probe host in the tunnel extension
@@ -321,6 +322,7 @@ void CoreController::initControllers()
         scanDeps.host = avpnEngine->scanHost();
         auto *tribeScanner = new avpn::TribeScanner(scanDeps, avpnEngine);
         avpnEngine->attachScanner(tribeScanner);
+        tribeScanner->setRadioSource([]() { return avpn::cellularGeneration(); }); // view.net_radio (the engine's source)
         setQmlContextProperty("TribeScanner", tribeScanner);
 #if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)
         avpn::IosHybridScanHost::installAutorun(tribeScanner); // AVPN: debug run without UI taps (control file)

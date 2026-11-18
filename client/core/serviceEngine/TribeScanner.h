@@ -340,6 +340,10 @@ public:
     // raceBytesLeft: what may still be spent now (-1 = no cap: no cellular cap applies and no device budget);
     // raceCharge: real bytes of the race's probes and server calls into the same ledger; hostScanRunning: the
     // Scanner's own scan holds the probe host (a race waits).
+    // The cellular radio generation for view.net_radio ("5g" | "lte" | "3g" | "2g" | ""): the same platform source the
+    // engine reports (TribeNetInfo.h avpn::cellularGeneration), set by the app wiring; unset = none. Used only when
+    // the engine's own ScanNetFacts.radio is empty and the network is cellular.
+    void setRadioSource(std::function<QString()> radio) { m_radio = std::move(radio); }
     qint64 raceBytesLeft();
     void raceCharge(qint64 bytes);
     bool hostScanRunning() const;
@@ -600,6 +604,7 @@ private:
     bool m_speedBusy = false;
     QString m_speedToken;                    // SECRET: a token fetched for the speed sample alone
     qint64 m_speedTokenExpiresAtMs = 0;
+    std::function<QString()> m_radio;
     QHash<QString, HostScan> m_hostScans;    // host scan id -> its state
     QHash<QString, Lease> m_leases;          // candidate id -> its probe lease
     QString m_lightReqId;
