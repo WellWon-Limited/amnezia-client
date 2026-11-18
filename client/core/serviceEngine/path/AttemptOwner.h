@@ -23,6 +23,10 @@
 //   say nothing about the new one) over -> the running leg is cut (NOT recorded: its check did not complete),
 //   stopped, and the attempt ends Failed(nothing proven) - or Failed(exact node failed) for an exact node.
 //   Also ends: maxPaths legs on one network, no candidate left, no network, the user's stop.
+// Live session (after Connected): LiveLost reports what the loss proves and, with `restart`, begins the
+// failover attempt (the lost path is not offered again in it when the loss is attributable); Adopted makes a
+// tunnel found alive the first leg of a new attempt, already up, judged by the data check. A stop that is never
+// confirmed ends the wait after stopConfirmMs (StopUnconfirmed; nothing recorded).
 // Results: Connected(path) with fallbackNotice when a preferred country was unavailable and another path
 // carried data; Failed(nothing proven / exact node failed / stopped by user / no candidate / no network).
 // After Connected the owner keeps the leg as the live session: a later UserStart or UserStop stops it first
@@ -110,7 +114,9 @@ struct OutcomeReport {
     int ttfbMs = -1;
 };
 
-enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish };
+// StopUnconfirmed: the stop of `stamp` was not confirmed within stopConfirmMs - the attempt went on (journal it;
+// the platform layer keeps its own stop retries).
+enum class EffectType { StartPath, StopPath, RunDataCheck, Report, Show, Finish, StopUnconfirmed };
 
 struct AttemptEffect {
     EffectType type = EffectType::Show;
@@ -122,7 +128,17 @@ struct AttemptEffect {
     AttemptResult result;     // Finish
 };
 
-enum class EventType { UserStart, UserStop, PathFailed, TunnelUp, DataChecked, Tick, NetworkChanged, StopConfirmed };
+enum class EventType {
+    UserStart, UserStop, PathFailed, TunnelUp, DataChecked, Tick, NetworkChanged, StopConfirmed,
+    // The live session (after Connected) stopped carrying data or went away. `outcome` - what it proves about the
+    // path (attributable: recorded; Inconclusive: not); `tunnelGone` - the tunnel is already down (nothing to stop);
+    // `restart` - a new attempt follows with `choice` / `mode` / `network` (design §4 "keep": failover is a new
+    // attempt through the same owner). A path that failed here is not offered again in that attempt.
+    LiveLost,
+    // A live tunnel this process did not raise (found at launch, re-bound): it becomes the leg of a new attempt
+    // with `choice` / `mode` / `network`, already up - one in-tunnel data check decides like for any leg.
+    Adopted,
+};
 
 struct AttemptEvent {
     EventType type = EventType::Tick;
@@ -132,7 +148,10 @@ struct AttemptEvent {
     int ttfbMs = -1;                                 // DataChecked
     UserChoice choice;                               // UserStart
     TransportMode mode = TransportMode::Auto;        // UserStart
-    NetworkKey network;                              // UserStart, NetworkChanged
+    NetworkKey network;                              // UserStart, NetworkChanged, LiveLost, Adopted
+    PathCandidate path;                              // Adopted
+    bool tunnelGone = false;                         // LiveLost, PathFailed
+    bool restart = false;                            // LiveLost
 
     static AttemptEvent userStart(qint64 now, const UserChoice &c, TransportMode m, const NetworkKey &net)
     {
@@ -143,6 +162,24 @@ struct AttemptEvent {
         return e;
     }
     static AttemptEvent userStop(qint64 now) { return at(EventType::UserStop, now); }
+    static AttemptEvent liveLost(qint64 now, PathOutcome o, bool tunnelGone, bool restart, const UserChoice &c,
+                                 TransportMode m, const NetworkKey &net)
+    {
+        AttemptEvent e = userStart(now, c, m, net);
+        e.type = EventType::LiveLost;
+        e.outcome = o;
+        e.tunnelGone = tunnelGone;
+        e.restart = restart;
+        return e;
+    }
+    static AttemptEvent adopted(qint64 now, const PathCandidate &p, const UserChoice &c, TransportMode m,
+                                const NetworkKey &net)
+    {
+        AttemptEvent e = userStart(now, c, m, net);
+        e.type = EventType::Adopted;
+        e.path = p;
+        return e;
+    }
     static AttemptEvent tick(qint64 now) { return at(EventType::Tick, now); }
     static AttemptEvent networkChanged(qint64 now, const NetworkKey &net)
     {
@@ -152,10 +189,12 @@ struct AttemptEvent {
     }
     static AttemptEvent tunnelUp(qint64 now, const PathStamp &s) { return cb(EventType::TunnelUp, now, s); }
     static AttemptEvent stopConfirmed(qint64 now, const PathStamp &s) { return cb(EventType::StopConfirmed, now, s); }
-    static AttemptEvent pathFailed(qint64 now, const PathStamp &s, PathOutcome o)
+    // tunnelGone: the platform already reports the tunnel down (nothing to stop, no confirmation to wait for).
+    static AttemptEvent pathFailed(qint64 now, const PathStamp &s, PathOutcome o, bool tunnelGone = false)
     {
         AttemptEvent e = cb(EventType::PathFailed, now, s);
         e.outcome = o;
+        e.tunnelGone = tunnelGone;
         return e;
     }
     static AttemptEvent dataChecked(qint64 now, const PathStamp &s, PathOutcome o, int ttfbMs = -1)
@@ -199,13 +238,13 @@ public:
     {
         advance(ev.nowMs);
         QList<AttemptEffect> out;
-        checkDeadlines(out);
+        checkDeadlines(ctx, out);
         switch (ev.type) {
         case EventType::UserStart: onUserStart(ev, ctx, out); break;
         case EventType::UserStop: onUserStop(out); break;
         case EventType::PathFailed:
             if (isLiveLeg(ev.stamp) && (m_phase == AttemptPhase::Starting || m_phase == AttemptPhase::Checking))
-                failLeg(isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out);
+                failLeg(isSuccess(ev.outcome) ? PathOutcome::Inconclusive : ev.outcome, out, ev.tunnelGone ? &ctx : nullptr);
             break;
         case EventType::TunnelUp:
             if (isLiveLeg(ev.stamp) && m_phase == AttemptPhase::Starting) {
@@ -229,6 +268,8 @@ public:
             if (m_phase == AttemptPhase::Stopping && ev.stamp == m_stopping)
                 onStopped(ctx, out);
             break;
+        case EventType::LiveLost: onLiveLost(ev, ctx, out); break;
+        case EventType::Adopted: onAdopted(ev, out); break;
         }
         return out;
     }
@@ -238,8 +279,17 @@ public:
     quint64 attempt() const { return m_attempt; }
     const NetworkKey &network() const { return m_net; }
     PathStamp currentLeg() const { return m_leg.stamp; }
+    PathStamp stoppingLeg() const { return m_stopping; }
+    const PathCandidate &currentPath() const { return m_leg.path; }
+    const UserChoice &choice() const { return m_choice; }
+    // "checked N of M" of the running attempt on this network: legs brought up, and those plus the candidates
+    // still in the order at the last choice (both 0 before the first choice).
+    int progressDone() const { return m_pathsThisNet; }
+    int progressTotal() const { return m_progressTotal; }
     qint64 awakeMs() const { return m_awake; }
     const AttemptTimings &timings() const { return m_t; }
+    // New numbers (the server may tune them): they apply from the next deadline that is set.
+    void setTimings(const AttemptTimings &t) { m_t = t; }
 
     int startTimeoutMs(PathKind k) const
     {
@@ -326,13 +376,22 @@ private:
     {
         out << effect(EffectType::StopPath);
         m_stopping = m_leg.stamp;
+        m_stopDeadline = m_awake + m_t.stopConfirmMs;
         m_phase = AttemptPhase::Stopping;
     }
 
-    void failLeg(PathOutcome o, QList<AttemptEffect> &out)
+    // gone (non-null): the tunnel is already down - no stop, the next choice at once.
+    void failLeg(PathOutcome o, QList<AttemptEffect> &out, const SelectionContext *gone = nullptr)
     {
         report(o, -1, -1, out);
-        stopLeg(out);
+        if (!gone) {
+            stopLeg(out);
+            return;
+        }
+        m_phase = AttemptPhase::Idle;
+        m_leg = Leg{};
+        if (m_running)
+            beginNext(*gone, out);
     }
 
     void connected(int ttfbMs, QList<AttemptEffect> &out)
@@ -346,8 +405,16 @@ private:
         finish(res, out);
     }
 
-    void checkDeadlines(QList<AttemptEffect> &out)
+    void checkDeadlines(const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
+        // A stop never confirmed: the platform is taken as stopped (its outcome, not the path's - nothing is
+        // recorded) so the attempt never hangs on it.
+        if (m_phase == AttemptPhase::Stopping && m_awake >= m_stopDeadline) {
+            AttemptEffect e = effect(EffectType::StopUnconfirmed);
+            e.stamp = m_stopping;
+            out << e;
+            onStopped(ctx, out);
+        }
         if (!m_running)
             return;
         if (m_awake >= m_budgetEnd) {
@@ -372,17 +439,7 @@ private:
 
     void onUserStart(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
-        if (m_running)
-            finish(failure(FailReason::StoppedByUser), out); // the previous attempt ends here, once
-        ++m_attempt;
-        m_running = true;
-        m_choice = ev.choice;
-        m_mode = ev.mode;
-        if (ev.network.generation >= m_net.generation)
-            m_net = ev.network;
-        m_pathsTotal = 0;
-        m_attemptStart = m_awake;
-        restartOnNetwork();
+        beginAttempt(ev, out);
         if (legActive() || m_phase == AttemptPhase::Connected)
             stopLeg(out); // what the previous attempt raised goes down first
         else if (m_phase != AttemptPhase::Stopping)
@@ -420,6 +477,63 @@ private:
             beginNext(ctx, out);
     }
 
+    void beginAttempt(const AttemptEvent &ev, QList<AttemptEffect> &out)
+    {
+        if (m_running)
+            finish(failure(FailReason::StoppedByUser), out); // the previous attempt ends here, once
+        ++m_attempt;
+        m_running = true;
+        m_choice = ev.choice;
+        m_mode = ev.mode;
+        if (ev.network.generation >= m_net.generation)
+            m_net = ev.network;
+        m_pathsTotal = 0;
+        m_attemptStart = m_awake;
+        restartOnNetwork();
+    }
+
+    void onLiveLost(const AttemptEvent &ev, const SelectionContext &ctx, QList<AttemptEffect> &out)
+    {
+        if (m_phase != AttemptPhase::Connected)
+            return; // nothing live is ours (a leg in flight is judged by its own deadlines)
+        report(ev.outcome, -1, -1, out);
+        const QString lost = m_leg.path.id.id;
+        if (ev.restart) {
+            beginAttempt(ev, out);
+            if (isAttributable(ev.outcome))
+                m_tried.insert(lost); // proven dead here a moment ago: not again in this attempt
+        }
+        if (!ev.tunnelGone) {
+            stopLeg(out);
+            return;
+        }
+        m_phase = AttemptPhase::Idle;
+        m_leg = Leg{};
+        if (m_running)
+            beginNext(ctx, out);
+        else
+            out << show(AttemptPhase::Idle);
+    }
+
+    void onAdopted(const AttemptEvent &ev, QList<AttemptEffect> &out)
+    {
+        if (m_running || m_phase != AttemptPhase::Idle || !ev.path.id.isValid())
+            return; // only a tunnel nobody here is driving
+        beginAttempt(ev, out);
+        m_tried.insert(ev.path.id.id);
+        ++m_pathsThisNet;
+        ++m_pathsTotal;
+        m_leg = Leg{};
+        m_leg.stamp = PathStamp{ m_attempt, m_net.generation, ++m_legSeq };
+        m_leg.path = ev.path;
+        m_leg.startedAt = m_awake;
+        m_leg.upAt = m_awake;
+        m_leg.deadline = m_awake + m_t.dataCheckMs;
+        m_phase = AttemptPhase::Checking;
+        m_progressTotal = 1;
+        out << effect(EffectType::RunDataCheck, m_t.dataCheckMs) << show(AttemptPhase::Checking);
+    }
+
     void onStopped(const SelectionContext &ctx, QList<AttemptEffect> &out)
     {
         m_stopping = PathStamp{};
@@ -448,6 +562,7 @@ private:
         in.crowd = ctx.crowd;
         in.tried = m_tried;
         const QList<RankedPath> order = selectPaths(in);
+        m_progressTotal = m_pathsThisNet + int(order.size());
         if (order.isEmpty()) {
             const bool nothingEver = m_pathsTotal == 0 && !exact();
             return finish(failure(nothingEver ? FailReason::NoCandidate : FailReason::NothingProven), out);
@@ -483,6 +598,8 @@ private:
     Leg m_leg;
     PathStamp m_stopping;
     std::optional<AttemptResult> m_pending;
+    qint64 m_stopDeadline = 0;
+    int m_progressTotal = 0;
 };
 
 } // namespace avpn::path

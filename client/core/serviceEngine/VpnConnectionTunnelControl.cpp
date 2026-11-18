@@ -99,14 +99,6 @@ VpnConnectionTunnelControl::VpnConnectionTunnelControl(VpnConnection *conn, QObj
             qWarning() << "avpn upstream: seat release not confirmed by the server - it frees the seat at the lease TTL";
         // The machine first: an acquire of the same profile that waited for this release goes out now.
         applyUpstreamEvents(m_upOwner.onReleaseDone(id, upstreamClockMs()));
-        // Contract §6: the core stops only after the release answered (or its 1.5 s bound passed).
-        if (m_stopAfterRelease && id == m_stopReleaseId) {
-            m_stopAfterRelease = false;
-            if (m_conn)
-                QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
-            if (m_afterRelease)
-                std::exchange(m_afterRelease, {})();
-        }
     };
     if (m_conn) {
         connect(m_conn, &VpnConnection::bytesChanged, this,
@@ -564,26 +556,21 @@ bool VpnConnectionTunnelControl::rebindSocket()
 
 void VpnConnectionTunnelControl::down()
 {
-    // AVPN upstream nodes (contract §6): the release with the final meter goes through the tunnel BEFORE
-    // the core stops - on macOS (the GUI owns the lease) the stop is sent when the release answered, at
-    // most kUpstreamReleaseTimeoutMs later (its own transfer bound; the facade's stop watchdog stays the
-    // backstop). Elsewhere the extension releases on its own stop.
-    m_stopAfterRelease = false;
+    // AVPN upstream nodes (decision of 18.11, UpstreamLeaseWire.h::upstreamReleaseDue): the core stops at once; a
+    // release this app owns (the macOS / Windows GUI owner, or a lease that never reached a running tunnel) waits
+    // for the confirmed stop (upstreamTunnelDown) and goes over the direct path - never through the tunnel being
+    // abandoned. Elsewhere the extension releases on its own stop.
     ++m_statsSession; // the tunnel session ends: statistics asked on it are stale
 #if defined(Q_OS_IOS)
     IosController::Instance()->clearUpstreamStart(); // abort: an armed, not yet taken start is dropped
 #endif
-    if (m_afterRelease)
-        std::exchange(m_afterRelease, {})(); // a repeated stop: what waited for the release runs now
     // A seat taken for a switch (prepareUpstream) outlives the old tunnel's stop: the up() after it brings it up.
     if (m_upOwner.active() && !m_upOwner.preparing()) {
+        if (m_leaseClient)
+            m_leaseClient->holdReleasesForStop();
         applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));
-        if (m_upOwner.releaseSent() && m_upOwner.options().keepOwnership && m_leaseClient) {
-            m_stopReleaseId = m_leaseClient->lastReleaseRequestId();
-            m_stopAfterRelease = true;
-        }
     }
-    if (m_conn && !m_stopAfterRelease)
+    if (m_conn)
         QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);
     m_stats = TunnelStats{};
 #if AVPN_UPSTREAM_GUI_OWNER
@@ -889,12 +876,14 @@ void VpnConnectionTunnelControl::adoptUpstreamFromRecord(qint64 daemonStartedAtW
 
 void VpnConnectionTunnelControl::runAfterUpstreamRelease(std::function<void()> fn)
 {
-    if (!fn)
-        return;
-    if (m_stopAfterRelease)
-        m_afterRelease = std::move(fn);
-    else
-        fn();
+    if (fn)
+        fn(); // decision of 18.11: nothing waits for a release any more - it follows the confirmed stop
+}
+
+void VpnConnectionTunnelControl::upstreamTunnelDown()
+{
+    if (m_leaseClient)
+        m_leaseClient->tunnelStopped(); // the held releases go now, over the direct path
 }
 
 void VpnConnectionTunnelControl::retryUpstreamAdoption()

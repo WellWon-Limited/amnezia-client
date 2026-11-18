@@ -19,7 +19,8 @@
 //  - cellular: "cell:<MCC-MNC>:<generation>" (design §3: operator and radio generation), "-" for an unknown part;
 //  - offline: empty local key - nothing is read or written, an attempt cannot run;
 //  - Unknown medium is NOT a network change: iOS reports it while any VPN is up (the "net" flip of the 17.11
-//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation;
+//    journal, SELECTION-MAP §2.4), so it keeps the current key and generation; as the FIRST observation it
+//    starts one usable network "unknown" (a platform that cannot tell the medium still connects);
 //  - coarse key: "<medium>:asn:<N>" when the ASN is known (the Scanner's format), else "cellular:<MCC-MNC>"
 //    for cellular, else empty. Learning the ASN later on the same local key is not a network change.
 #pragma once
@@ -100,8 +101,17 @@ class NetworkTracker {
 public:
     bool observe(const NetworkObservation &o)
     {
-        if (o.medium == NetMedium::Unknown)
-            return false;
+        if (o.medium == NetMedium::Unknown) {
+            if (m_started)
+                return false;
+            // nothing known yet and the platform cannot tell: one usable "unknown" network (an attempt can
+            // run; its evidence stays apart from every identified network)
+            m_started = true;
+            m_key.local = QStringLiteral("unknown");
+            m_key.coarse.clear();
+            ++m_key.generation;
+            return true;
+        }
         const QString local = localNetworkKey(o);
         if (m_started && local == m_key.local) {
             const QString coarse = coarseNetworkKey(o);

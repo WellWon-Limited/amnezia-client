@@ -141,6 +141,10 @@ class AvpnEngineQml : public QObject {
     // AVPN: реальные серверы (вместо хардкода). currentNode = {region,endpoint,ip,connected,hasNode};
     // nodePool = список нод [{nodeId,region,endpoint,...}] из живой подписки.
     Q_PROPERTY(QVariantMap currentNode READ currentNode NOTIFY changed)
+    // Path engine (design 2026-11-17): "checked N of M" of the attempt in progress (0/0 = no walk) - the caption
+    // under the orb.
+    Q_PROPERTY(int attemptChecked READ attemptChecked NOTIFY changed)
+    Q_PROPERTY(int attemptTotal READ attemptTotal NOTIFY changed)
     Q_PROPERTY(QVariantList nodePool READ nodePool NOTIFY changed)
     // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
     // позже выбор сервера гейтится этим одним флагом. CONSTANT — значение не меняется в рантайме.
@@ -413,6 +417,8 @@ public:
 
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
+    int attemptChecked() const { return m_engine.attemptChecked(); }
+    int attemptTotal() const { return m_engine.attemptTotal(); }
     QVariantList nodePool() const;
     // The signal a node shows on the Connect card and in its server list row - one rule (NodeRanking.h::nodeFigure):
     // {ms, bars, failed}; listRttMs = the row's figure (nodePool / currentNode measuredRttMs).
@@ -1051,13 +1057,26 @@ private:
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
     // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик
     // data-plane движка сохраняются (без requestStop).
-    void guardedStop(const char *why, bool keepEngineSwitch = false);
+    void guardedStop(const char *why);
     void beginStartPreparation();
-    bool freshRttCoversPool();        // волна-2: замер после смены сети и по всем авто-нодам
     void finishStartPreparation(const QString &reason);
     void cancelStartPreparation();
     void invalidateNetworkMeasurements();
     void persistPin();
+    // Path engine: the user's choice for the attempt owner - Auto (no pin), an exact server (a pin tapped in this
+    // run: the transports of its host; a Scanner row: that one path) or a preferred country (a pin saved by an
+    // earlier run: design §3 "saved pins become country preferences").
+    void syncChoice();
+    QString choiceJournal() const;
+    // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
+    // selected (coordinator decision 9 of 18.11: the latest explicit action wins; the UI gets a notice).
+    bool pinServer(const QString &nodeId, QString &err);
+    // The attempt owner's journal lines, its ledger (persisted) and its result for the person. true = something
+    // changed for the UI.
+    bool syncAttempt();
+    // The network as the platform sees it with the tunnel down (the facade's one networkKind() source, the
+    // physical interface's subnet, the macOS gateway hash, the cellular operator and generation).
+    avpn::path::NetworkObservation currentNetworkObservation() const;
     // AVPN (фикс-волна 2026-09-22, A7): pinBefore — pin движка ДО применения тела подписки/reseed
     // (перенос явного pin на соседа сохраняется, неявный pin в памяти не персистится).
     void restorePin(const QString &pinBefore);
@@ -1086,7 +1105,6 @@ private:
     void writeTunnelWatchPlan(const char *why);       // plan file for the extension (contract C1)
     void onTunnelWatchSnapshot(const QVariantMap &snapshot); // status reply with `watch` (contract C2)
     void onTunnelEngineDown();                         // status reply with `engine_down` (stage 2)
-    void onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs); // build 142: the one no-handshake rule (iOS)
     qint64 freezeBoundaryMs() const;                   // build 142: the app's last freeze (hide / return)
     bool tunnelWatchFrozen(const char *site);          // resume freeze: hold this decision?
     bool deferWhileTunnelWatchFrozen(const char *site, std::function<void()> resume);
@@ -1105,7 +1123,6 @@ private:
     // сторож) — взвести ограниченный повтор или разрешить честно (DebugSnapshot::decideUnconfirmedStop).
     void driveUnconfirmedStop(const char *why);
     // Сторож старта: на время системного диалога «Разрешить VPN» (C4) — потолок натива + обычный бюджет.
-    int startWatchdogMs() const;
     void onLiveSessionTimeout();
     // Волна-4: единая классификация исхода запроса к API (edge-walk + детектор белых списков).
     void noteApiOutcome(QNetworkReply *reply);
@@ -1113,7 +1130,6 @@ private:
     void noteSubscriptionEdgeOutcome(QNetworkReply *reply, const QString &requestBase);
     void onForegroundDebounced();   // волна-4 (P2-4): одна пачка на возврат на экран
     void runConnectEffects();       // волна-4 (P2-3): чипы + пробы сервисов для новой сессии
-    void onSwitchDeadline();
     void onSelectionBudget(quint64 epoch, bool ceiling);
     void notePreparationPoolSettled(bool poolWillBeProbed);
     void saveLkgSubscriptionGuarded(const QByteArray &body, bool bodyHasNodes);
@@ -1191,17 +1207,9 @@ private:
     // each attempt (tunnel down - the medium is the real one; with the tunnel up macOS reports the
     // utun route and iOS Wi-Fi the SIM radio) and carried through it for the read, the write at the
     // verdict and the forget on failure. An explicit «Авто» tap clears the entry of this network.
-    QString currentNetworkMemoryKey() const;
-    bool networkMemoryAllowed() const;
-    void rememberNetworkPath(const QString &nodeId);
-    void forgetNetworkPath(const QString &nodeId);
-    void clearNetworkMemoryForAutoTap();
-    void forgetNetworkMemoryAfterFailedStart(const char *why); // owner test 06.11, see the .cpp
     // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
     // data-plane (ServiceEngine::dataPlaneExhausted) — показать честную ошибку, снять намерение
     // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
-    bool surrenderIfDataPlaneDead();
-    void persistTransportHistory();
     void refreshDataFlowing(); // 5.1.108: recompute m_dataFlowing, emit dataFlowingChanged on change
     void applyReseed(const avpn::Subscription &sub, quint64 sequence, const QString &token);
     void applyPendingReseed();
@@ -1394,7 +1402,6 @@ private:
     // Disconnected/Error до Connected — не внешний обрыв, а сорвавшийся Connect (повтор старта).
     bool                        m_liveSessionPending = false;
     QTimer                      m_liveSessionTimer;
-    int                         m_startWatchdogDeferrals = 0;    // волна-4 (P1-5): перевзводы сторожа старта при живой NE-сессии
     qint64                      m_lastTunnelTransitionMs = -1;   // волна-4: момент последнего наблюдённого перехода туннеля
     qint64                      m_lastOwnOpMs = -1;              // волна-4: момент своего guardedStart/guardedStop (окно «своего» события сети)
     qint64                      m_lastResumeMs = -1;             // волна-4: последний выход на экран
@@ -1725,14 +1732,18 @@ private:
     int                          m_fastRoundTargets = 0;
     qint64                       m_apiTransportFailMs = -1;   // the last direct API request without an HTTP answer
     qint64                       m_apiAnswerMs = -1;          // the last one with any HTTP answer
-    avpn::FastTierEvidence fastTierEvidenceNow() const;
     QString                      m_lastWhoamiFacts;
     bool                         m_whoamiTiebreak = false;         // generate_204 runs as the whoami tiebreak
     // Who asked for the next start (set by start/reprobe/rotate/pin/Doctor) and the snapshot for the
     // current attempt (guardedStart); the engine's own heals inside the attempt inherit it.
     StartOrigin                  m_startOrigin = StartOrigin::User;
     StartOrigin                  m_attemptOrigin = StartOrigin::User;
-    QString                      m_attemptNetKey;                  // network-memory key of the current attempt
+    bool                         m_pinExact = false;               // the pin was tapped in this run (exact server)
+    QString                      m_exactRow;                       // a Scanner row: one exact path
+    int                          m_lastVerifyTtfbMs = -1;          // first byte of the data check that passed
+    int                          m_lastUpstreamTtfbMs = -1;
+    int                          m_attemptCheckedShown = 0;
+    int                          m_attemptTotalShown = 0;
     bool                         m_adoptedDeadStop = false;        // review of 136: native stopped a dead adopted session
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
@@ -1740,11 +1751,8 @@ private:
                                                                    // входа guardedStart. НЕ сбрасывается сменой
                                                                    // состояния (в отличие от m_opInFlight) — иначе
                                                                    // reconcile внутри цикла застекал бы 2-й loop.exec
-    int                          m_startAttempts = 0;              // подряд неудачных connect — анти-зацикливание
     bool                         m_waitUplink = false;             // волна-3: старт ждёт физический аплинк (попытки не считаются)
     bool                         m_componentLost = false;          // волна-3: §16-сторож сообщил о мёртвом демоне (следующий Disconnected = Component)
-    int                          m_startBackoffRound = 0;          // волна-3: раунд паузы 30/60/120 с после исчерпания попыток
-    quint64                      m_startRetryEpoch = 0;            // волна-3: отмена отложенного повтора (start/stop/успех)
     // AVPN (sub-grace): флаг для UI «движок сам погасил туннель по истечению подписки» (Q_PROPERTY
     // subEnforcedStop) + гард однократности, пока идёт остановка. Оба сбрасывает явный start().
     bool                         m_subEnforcedStop = false;
@@ -1839,7 +1847,6 @@ private:
     avpn::ScanOwnConnect         m_scanOwnConnect;
     avpn::ScanRowAttempt         m_scanRow;
     avpn::UpstreamSeatFirst      m_seatFirst;                 // a provider pick waiting for its seat (live tunnel kept)
-    int                          m_scanRowBackoffRound = 0;   // m_startBackoffRound when the row tap began
     QString                      m_scanLastCurrent;           // the last ScanCurrent sent (dedupe, never secret)
     quint64                      m_scanLightEpoch = 0;
     // The full check of «Проверить и отправить отчёт» = the Doctor pipeline in scan mode (no start(), no

@@ -10,8 +10,9 @@
 //  1. The transport mode is stronger than any choice: "Amnezia" offers only our AmneziaWG paths, "Xray" only
 //     our Xray listeners and provider profiles. A choice the mode cannot serve yields nothing (honest failure).
 //  2. A path already tried in this attempt is never offered again.
-//  3. Exact node (a Scanner row, an explicit server): only that path, whatever the ledger says about it - the
-//     person asked for it. It never falls back to another path.
+//  3. Exact node (a Scanner row, an explicit server): only its paths (one row = one path; a server of the list =
+//     the transports of that host, ordered by the rules below), whatever the ledger says - the person asked for
+//     it. It never falls back to another server.
 //  4. Preferred country: all its paths the mode allows come first (working, unknown, suspect, quarantine over),
 //     manual_only ones included - a preference is a person's choice, as a pin of a location is today. Then the
 //     rest in the Auto order; the attempt reports the fallback (AttemptResult::fallbackNotice).
@@ -48,6 +49,7 @@
 #include <QList>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 
 #include <algorithm>
 #include <limits>
@@ -59,12 +61,15 @@ namespace avpn::path {
 struct UserChoice {
     enum class Kind { Auto, PreferCountry, ExactPath };
     Kind kind = Kind::Auto;
-    QString country; // PreferCountry: ISO alpha-2
-    QString pathId;  // ExactPath: path identity
+    QString country;     // PreferCountry: ISO alpha-2
+    QStringList pathIds; // ExactPath: the paths of the chosen server (a Scanner row: one; a server of the list:
+                         // the transports of that one host) - never anything else
 
     static UserChoice automatic() { return {}; }
     static UserChoice preferCountry(const QString &cc) { return { Kind::PreferCountry, cc.trimmed().toUpper(), {} }; }
-    static UserChoice exactPath(const QString &id) { return { Kind::ExactPath, {}, id }; }
+    static UserChoice exactPath(const QString &id) { return { Kind::ExactPath, {}, { id } }; }
+    static UserChoice exactPaths(const QStringList &ids) { return { Kind::ExactPath, {}, ids }; }
+    bool operator==(const UserChoice &o) const { return kind == o.kind && country == o.country && pathIds == o.pathIds; }
 };
 
 enum class SelectGroup { Exact, Working, Unknown, LastWave, Suspect, QuarantineOver, Quarantined };
@@ -191,7 +196,7 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         r.path = c;
         r.view = in.evidence.value(c.id.id);
         if (in.choice.kind == UserChoice::Kind::ExactPath) {
-            if (c.id.id == in.choice.pathId) {
+            if (in.choice.pathIds.contains(c.id.id)) {
                 r.group = SelectGroup::Exact;
                 exact << r;
             }
@@ -223,8 +228,18 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
             break;
         }
     }
-    if (in.choice.kind == UserChoice::Kind::ExactPath)
+    if (in.choice.kind == UserChoice::Kind::ExactPath) {
+        // the transports of the chosen server: proven first, then by kind and server prior; dead last
+        std::stable_sort(exact.begin(), exact.end(), [&in](const RankedPath &a, const RankedPath &b) {
+            const auto rank = [](const PathView &v) {
+                return v.state == PathState::Working ? 0 : v.state == PathState::Unknown ? 1 : v.state == PathState::Suspect ? 2 : 3;
+            };
+            if (rank(a.view) != rank(b.view))
+                return rank(a.view) < rank(b.view);
+            return detail::priorLess(a, b, in.crowd);
+        });
         return exact;
+    }
 
     const auto &crowd = in.crowd;
     const QHash<QString, int> lanes = detail::laneEvidence(in.pool, in.evidence);

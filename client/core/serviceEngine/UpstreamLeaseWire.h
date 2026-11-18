@@ -253,6 +253,27 @@ inline bool upstreamLeaseIdValid(const QString &id)
 // row (a reset storm) - ends it as NotConfirmed: never reported as released; the seat is left to the server's TTL
 // and the journal says so (review round 2). No new timer: nothing is kept owed.
 inline constexpr int kUpstreamReleaseMaxResends = 8;
+// Decision of 18.11 (owner's iPhone, rounds 1-2: releases timed out inside provider paths that carried no data,
+// and through a working provider tunnel api.tribevpn.com is often unreachable): a seat release never rides the
+// tunnel that is being abandoned. It goes over the app's direct API path - the route's tunnel_api_base serves the
+// renewals of a running session only - and the app sends it after the tunnel's stop is confirmed; a stop that is
+// never confirmed holds it at most kUpstreamReleaseHoldMaxMs (the native stop deadline), never for good. The
+// extension (iOS, Android) keeps releasing on its own stop as before. Pure: what to send, and when.
+inline constexpr int kUpstreamReleaseHoldMaxMs = 10000;
+struct UpstreamReleaseDue {
+    bool send = false; // send the held releases now
+    bool hold = false; // keep holding (the stop is not confirmed yet and the bound has not passed)
+};
+inline UpstreamReleaseDue upstreamReleaseDue(bool stopPending, qint64 heldSinceMs, qint64 nowMs, bool tunnelDown)
+{
+    UpstreamReleaseDue d;
+    if (!stopPending || tunnelDown || nowMs - heldSinceMs >= kUpstreamReleaseHoldMaxMs)
+        d.send = true;
+    else
+        d.hold = true;
+    return d;
+}
+
 enum class UpstreamReleaseTry { Resend, Answered, NotConfirmed };
 inline UpstreamReleaseTry upstreamReleaseNext(int attemptsDone, bool canceled, bool timedOut, bool httpAnswered)
 {

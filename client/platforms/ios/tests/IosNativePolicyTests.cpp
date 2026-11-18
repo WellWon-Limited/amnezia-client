@@ -281,12 +281,6 @@ static void testEstablishedSession()
     assert(!showEstablishedAsConnected(true, false, 10 * 60 * 1000));  // наш подъём в полёте
     assert(!showEstablishedAsConnected(false, true, 10 * 60 * 1000));  // уже видели живой (Reasserting)
     assert(!showEstablishedAsConnected(false, false, -1));             // время подключения неизвестно
-    // Build 142 (S3/S5): the fact the facade decides on - answered, no handshake, no data.
-    assert(answeredWithoutHandshake(0, 0, 4096));
-    assert(answeredWithoutHandshake(0, 4095, 4096));
-    assert(!answeredWithoutHandshake(1794869620, 0, 4096)); // a handshake
-    assert(!answeredWithoutHandshake(0, 4096, 4096));       // data came back
-    assert(!answeredWithoutHandshake(-1, 0, 4096));         // no answer (no stats)
 }
 
 // Owner test 06.11 (device 36): an adopted session that never completed a handshake (NE answered:

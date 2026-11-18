@@ -66,6 +66,7 @@ public:
         QByteArray body;
         qint64 bytes = 0;                     // counted: TLS estimate + request + answer headers + body
         bool cut = false;                     // aborted at maxBytes
+        bool canceled = false;                // aborted from outside (our own tunnel transition aborts requests)
         QByteArray header(const char *name) const { return headers.value(QByteArray(name).toLower()); }
     };
     using DoneFn = std::function<void(const Response &)>;
@@ -73,6 +74,15 @@ public:
     // `done` exactly once, on the GUI thread, never from inside send().
     virtual void send(const Request &r, DoneFn done) = 0;
 };
+
+// A manifest / token request our own tunnel switch cancelled (no HTTP answer, canceled from outside - not a timeout)
+// is sent again after kScanCanceledRetryDelayMs, at most kScanCanceledRetries times; anything else ends as before.
+inline constexpr int kScanCanceledRetries = 3;
+inline constexpr int kScanCanceledRetryDelayMs = 1500;
+inline bool scanRetryCanceledRequest(int status, bool canceled, int retriesDone)
+{
+    return status == 0 && canceled && retriesDone < kScanCanceledRetries;
+}
 
 // The bytes a request counts before any answer (plan §2.2b: worst cases include one TLS handshake).
 qint64 scanHttpRequestBytes(const IScanHttp::Request &r);
@@ -237,6 +247,9 @@ private:
     void manifestGet(std::shared_ptr<ManifestRun> run, bool conditional);
     void manifestToken(std::shared_ptr<ManifestRun> run);
     void manifestFinish(std::shared_ptr<ManifestRun> run);
+    // A request our own tunnel switch cancelled (net_error 5, not a timeout, not our byte cap) is sent again once
+    // the tunnel had time to come up, instead of ending the scan with manifest_unavailable (coordinator 18.11).
+    bool retryCanceled(std::shared_ptr<ManifestRun> run, const IScanHttp::Response &r, std::function<void()> again);
 
     IScanHttp *m_http = nullptr;
     IScanStore *m_store = nullptr;

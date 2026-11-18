@@ -95,7 +95,12 @@ void CoreSignalHandlers::initAllHandlers()
 void CoreSignalHandlers::initErrorMessagesHandler()
 {
     connect(m_coreController->m_connectionUiController, &ConnectionUiController::connectionErrorOccurred, this, [this](ErrorCode errorCode) {
+#ifdef AVPN_ENGINE_ENABLED
+        // AVPN: the Tribe engine reports its own errors in plain words; no modal «ErrorCode: 101» for a native Error.
+        Q_UNUSED(errorCode)
+#else
         emit m_coreController->m_pageController->showErrorMessage(errorCode);
+#endif
         m_coreController->m_connectionController->setConnectionState(Vpn::ConnectionState::Disconnected);
     });
 

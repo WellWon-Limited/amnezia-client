@@ -187,6 +187,10 @@ static void testNetworkKey()
     CHECK(coarseNetworkKey(home).isEmpty());
     CHECK(coarseNetworkKey(cell("250-01", "lte")) == QLatin1String("cellular:250-01"));
 
+    NetworkTracker first;
+    CHECK(first.observe(NetworkObservation{}) && first.current().local == QLatin1String("unknown")
+          && first.current().usable() && first.current().generation == 1); // nothing known: still connectable
+    CHECK(first.observe(wifi("192.168.1.1")) && first.current().generation == 2);
     NetworkTracker t;
     CHECK(t.observe(home) && t.current().generation == 1);
     CHECK(!t.observe(home) && t.current().generation == 1);
@@ -422,18 +426,92 @@ static void testOwnerStale()
     CHECK(s4.ledger.size() == 0);
 }
 
+
+// --- AttemptOwner: live session lost, adopted session, stop never confirmed, exact server ----------------
+
+static void testOwnerLive()
+{
+    const NetworkObservation home = wifi("192.168.3.1");
+    const QString k = key(home);
+    World w;
+    const Behaviour ok = Behaviour::works(300, 400, 100);
+    w.set(k, QStringLiteral("17"), ok);
+    w.set(k, QStringLiteral("16"), ok);
+    const QList<PathCandidate> pool = { awg("17", "EE", false, 2.0), awg("16", "NL") };
+    Sim s(pool, w, home);
+    AttemptResult r = s.tap(UserChoice::automatic());
+    CHECK(r.connected && r.path.id.id == QLatin1String("17"));
+
+    // not blamed (a first health DEAD): the failover attempt raises the same proven path again (re-up)
+    int from = int(s.legs.size());
+    s.deliver(AttemptEvent::liveLost(s.now, PathOutcome::Inconclusive, false, true, UserChoice::automatic(),
+                                     TransportMode::Auto, s.tracker.current()));
+    s.run([&] { return s.results.size() > 1; }, 30000);
+    CHECK(s.results.size() == 2 && s.results.last().connected && legPaths(s, from) == QStringList({ "17" }));
+
+    // blamed (data proven dead): recorded, and the failover attempt does not take it again
+    from = int(s.legs.size());
+    s.deliver(AttemptEvent::liveLost(s.now, PathOutcome::NoData, false, true, UserChoice::automatic(),
+                                     TransportMode::Auto, s.tracker.current()));
+    s.run([&] { return s.results.size() > 2; }, 30000);
+    CHECK(s.results.last().connected && s.results.last().path.id.id == QLatin1String("16"));
+    CHECK(legPaths(s, from) == QStringList({ "16" }) && stateOf(s, pool[0]) == PathState::Suspect);
+
+    // the tunnel went away by itself without a failover: the owner holds nothing live any more
+    s.deliver(AttemptEvent::liveLost(s.now, PathOutcome::Inconclusive, true, false, UserChoice::automatic(),
+                                     TransportMode::Auto, s.tracker.current()));
+    CHECK(s.owner.phase() == AttemptPhase::Idle && !s.owner.running());
+
+    // an adopted live tunnel: one data check decides; data passes -> Connected without a start
+    from = int(s.legs.size());
+    s.deliver(AttemptEvent::adopted(s.now, pool[1], UserChoice::automatic(), TransportMode::Auto, s.tracker.current()));
+    s.run([&] { return s.results.size() > 3; }, 10000);
+    CHECK(s.results.size() == 4 && s.results.last().connected && s.legs.size() == from); // nothing (re)started
+    CHECK(s.results.last().elapsedMs <= s.owner.timings().dataCheckMs);
+    stopLive(s);
+    // adopted, but no data: the attempt walks on to the other path
+    Sim s2(pool, World{}, home);
+    s2.deliver(AttemptEvent::adopted(0, pool[0], UserChoice::automatic(), TransportMode::Auto, s2.tracker.current()));
+    s2.run([&] { return !s2.results.isEmpty(); }, 60000);
+    CHECK(s2.reports.size() >= 1 && s2.reports[0].outcome == PathOutcome::NoData && s2.legs.size() == 1
+          && s2.legs[0].path == QLatin1String("16"));
+
+    // a stop that is never confirmed does not block the attempt (nothing recorded for it)
+    World w3;
+    w3.set(k, QStringLiteral("16"), ok);
+    Sim s3(pool, w3, home);
+    s3.stopMs = 600000;
+    r = s3.tap(UserChoice::automatic());
+    CHECK(r.connected && r.path.id.id == QLatin1String("16")
+          && r.elapsedMs == s3.owner.timings().awgStartMs + s3.owner.timings().stopConfirmMs + 700);
+    CHECK(s3.reports.size() == 2); // the no-handshake of 17 and the data of 16, nothing about the stop
+
+    // an exact server with two transports: both are its own, nothing else is ever taken
+    World w4;
+    w4.set(k, QStringLiteral("12:xray"), ok);
+    w4.set(k, QStringLiteral("16"), ok);
+    Sim s4({ awg("12", "DE"), xray("12:xray", "DE"), awg("16", "NL") }, w4, home);
+    r = s4.tap(UserChoice::exactPaths({ QStringLiteral("12"), QStringLiteral("12:xray") }));
+    CHECK(r.connected && r.path.id.id == QLatin1String("12:xray") && legPaths(s4) == QStringList({ "12", "12:xray" }));
+    r = s4.tap(UserChoice::exactPaths({ QStringLiteral("12"), QStringLiteral("12:xray") }), TransportMode::Awg);
+    CHECK(r.reason == FailReason::ExactNodeFailed && legPaths(s4).last() == QLatin1String("12"));
+}
+
 // --- scenarios (design §9) -------------------------------------------------------------------------------
 
 // The pool of 17.11 (SELECTION-MAP §2, COMPLAINTS K01): AmneziaWG 17/16/12 automatic, 10/11/15 manual_only;
-// relayed Xray listeners 11/12/15 automatic; four provider profiles. Countries of 16/17 and of the providers
-// and the provider priorities are a reconstruction (not in the journal); 10 and 15 never ran on that Wi-Fi in
-// the journal - they are modelled as blocked (RU blocks of their exits since 06.11 / 10.11, COMPLAINTS K01).
-static QList<PathCandidate> pool1711()
+// relayed Xray listeners 11/12/15 automatic; four provider profiles. Countries of 16/17 and of the providers are
+// a reconstruction (not in the journal); 10 and 15 never ran on that Wi-Fi in the journal - they are modelled as
+// blocked (RU blocks of their exits since 06.11 / 10.11, COMPLAINTS K01). Provider priority: the journal's fresh
+// Xray-mode attempt at 19:59 took 2eec first among the providers (it had the best priority then) -
+// `providerFirst` = that order; false = the pessimistic order of the 20:03 rounds (b1fd, 53a6 before 2eec).
+static QList<PathCandidate> pool1711(bool providerFirst = true)
 {
+    const int p2eec = providerFirst ? 0 : 2, pb1fd = providerFirst ? 1 : 0, p53a6 = providerFirst ? 2 : 1;
     return { awg("17", "EE"), awg("16", "NL"), awg("12", "DE"), awg("10", "US", true), awg("11", "FI", true),
              awg("15", "EE", true), xray("11:xray", "FI"), xray("12:xray", "DE"), xray("15:xray", "EE"),
-             prov("up:b1fd", UpstreamKind::Country, "NL", 0), prov("up:53a6", UpstreamKind::Country, "DE", 1),
-             prov("up:2eec", UpstreamKind::Country, "FI", 2), prov("up:786a", UpstreamKind::Country, "NL", 3) };
+             prov("up:b1fd", UpstreamKind::Country, "NL", pb1fd), prov("up:53a6", UpstreamKind::Country, "DE", p53a6),
+             prov("up:2eec", UpstreamKind::Country, "FI", p2eec), prov("up:786a", UpstreamKind::Country, "NL", 3) };
 }
 // Behaviour on the owner's Wi-Fi from journal_app.jsonl 17.11: 11 handshake 2.0 s + whoami 1.17 s; own Xray up in
 // ~2 s, no data; provider 2eec up 0.45 s, data 0.34 s (ttfb 219 ms); b1fd/53a6/786a up 0.4 s, no first byte.
@@ -454,25 +532,18 @@ static void scenarioHomeWifi()
     const NetworkObservation home = wifi("192.168.1.1");
     const QList<PathCandidate> pool = pool1711();
 
-    // AmneziaWG mode, as at 19:38
+    // AmneziaWG mode, as at 19:38: the first tap walks the regular nodes, then the last wave reaches 11
     {
         Sim s(pool, world1711(key(home)), home);
         int from = 0;
         AttemptResult r = s.tap(UserChoice::automatic(), TransportMode::Awg);
         row("home Wi-Fi 17.11, AWG mode, tap 1", s, r, from);
-        CHECK(!r.connected && r.reason == FailReason::NothingProven);
-        CHECK(r.elapsedMs <= s.owner.timings().budgetMs + s.stopMs);
-        CHECK(legPaths(s) == QStringList({ "12", "16", "17" }));
-        CHECK(stateOf(s, pool[2]) == PathState::Suspect && stateOf(s, pool[1]) == PathState::Suspect); // 12, 16
-        CHECK(stateOf(s, pool[0]) == PathState::Unknown); // 17 was cut by the budget: not recorded
+        CHECK(r.connected && r.path.id.id == QLatin1String("11"));
+        CHECK(r.elapsedMs <= s.owner.timings().budgetMs);
+        CHECK(legPaths(s) == QStringList({ "12", "16", "17", "10", "11" }));
+        CHECK(stateOf(s, pool[2]) == PathState::Suspect && stateOf(s, pool[0]) == PathState::Suspect);
         for (const LegTrace &l : s.legs)
             CHECK(l.path != QLatin1String("11:xray") && !l.path.startsWith(QLatin1String("up:"))); // mode
-        s.idle(5000);
-        from = int(s.legs.size());
-        r = s.tap(UserChoice::automatic(), TransportMode::Awg);
-        row("home Wi-Fi 17.11, AWG mode, tap 2", s, r, from);
-        CHECK(r.connected && r.path.id.id == QLatin1String("11"));
-        CHECK(legPaths(s, from) == QStringList({ "17", "10", "11" })); // untried first, never 12/16 again
         stopLive(s);
         s.idle(5000);
         from = int(s.legs.size());
@@ -495,21 +566,33 @@ static void scenarioHomeWifi()
         CHECK(r.reason == FailReason::ExactNodeFailed && r.paths == 1);
         CHECK(s.ledger.view(key(home), pool[12].id, s.wall()).state == PathState::Dead);
         // Auto afterwards still goes straight to the proven path
-        from = int(s.legs.size());
         r = s.tap(UserChoice::automatic(), TransportMode::Auto);
         CHECK(r.connected && r.path.id.id == QLatin1String("11") && r.paths == 1);
     }
 
-    // Auto mode on the same Wi-Fi, nothing known yet (fresh ledger)
+    // Auto mode on the same Wi-Fi, nothing known yet (fresh ledger): connects on the FIRST tap
     {
         Sim s(pool, world1711(key(home)), home);
+        AttemptResult r = s.tap(UserChoice::automatic(), TransportMode::Auto);
+        row("home Wi-Fi 17.11, Auto, tap 1", s, r, 0);
+        CHECK(r.connected && r.path.id.id == QLatin1String("up:2eec"));
+        stopLive(s);
+        const int from = int(s.legs.size());
+        r = s.tap(UserChoice::automatic(), TransportMode::Auto);
+        row("home Wi-Fi 17.11, Auto, next connect", s, r, from);
+        CHECK(r.connected && r.path.id.id == QLatin1String("up:2eec") && r.paths == 1 && r.elapsedMs < 1000);
+    }
+
+    // the same with the pessimistic provider order: every candidate stays inside one walk, never twice
+    {
+        Sim s(pool1711(false), world1711(key(home)), home);
         AttemptResult r;
         int tap = 0;
         do {
             ++tap;
             const int from = int(s.legs.size());
             r = s.tap(UserChoice::automatic(), TransportMode::Auto);
-            const QByteArray name = "home Wi-Fi 17.11, Auto, tap " + QByteArray::number(tap);
+            const QByteArray name = "home Wi-Fi 17.11, Auto, 2eec 3rd provider, tap " + QByteArray::number(tap);
             row(name.constData(), s, r, from);
             CHECK(r.elapsedMs <= s.owner.timings().budgetMs + s.stopMs);
             QSet<QString> seen;
@@ -518,13 +601,8 @@ static void scenarioHomeWifi()
                 seen.insert(p);
             }
             s.idle(5000);
-        } while (!r.connected && tap < 6);
-        CHECK(r.connected && r.path.id.id == QLatin1String("up:2eec") && tap == 3);
-        stopLive(s);
-        const int from = int(s.legs.size());
-        r = s.tap(UserChoice::automatic(), TransportMode::Auto);
-        row("home Wi-Fi 17.11, Auto, next connect", s, r, from);
-        CHECK(r.connected && r.path.id.id == QLatin1String("up:2eec") && r.paths == 1 && r.elapsedMs < 1000);
+        } while (!r.connected && tap < 4);
+        CHECK(r.connected && r.path.id.id == QLatin1String("up:2eec") && tap <= 2);
     }
 }
 
@@ -568,7 +646,7 @@ static void scenarioWhitelist()
         row(name.constData(), s, r, from);
         s.idle(5000);
     } while (!r.connected && tap < 5);
-    CHECK(r.connected && r.path.id.id == QLatin1String("up:wl1") && tap == 2);
+    CHECK(r.connected && r.path.id.id == QLatin1String("up:wl1") && tap == 1);
     stopLive(s);
     const int from = int(s.legs.size());
     r = s.tap(UserChoice::automatic());
@@ -743,6 +821,7 @@ int main()
     testLedger();
     testSelect();
     testOwnerStale();
+    testOwnerLive();
     scenarioHomeWifi();
     scenarioClean();
     scenarioWhitelist();

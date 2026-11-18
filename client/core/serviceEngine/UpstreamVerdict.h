@@ -7,9 +7,10 @@
 // bypass" (WhoamiVerdict.h) does not apply: a provider exit is by definition not one of our nodes.
 //
 // Inputs are facts the caller measured; the function decides, in this order:
-//  1. data (any failure -> NoData): requested > 0 (bad_request), a first byte (no_first_byte), TTFB within
-//     its limit (ttfb_timeout), no stall above its limit (stalled), exactly the requested size
-//     (incomplete / oversize), digest (digest_mismatch), total time within its hard limit (total_timeout);
+//  1. data (any failure -> NoData): requested > 0 (bad_request), a first byte (no_first_byte), exactly the
+//     requested size (an incomplete body is named by its cause: ttfb_timeout, stalled, else incomplete;
+//     oversize), digest (digest_mismatch), total time within its hard limit (total_timeout). A complete body
+//     with a late first byte or a long stall is data - Slow (decision of 18.11);
 //  2. path, in this order (decision of 14.11):
 //     a. egress class "tribe-node" is impossible for an upstream node - the bytes came out of one of OUR
 //        exits, so the leased profile did not carry them (a stale own tunnel, a wrong route):
@@ -23,7 +24,7 @@
 //     e. tokens known and different: verified (verified_net_token); ASNs known and different: verified
 //        (verified_asn);
 //     f. nothing comparable: Unverifiable (reason unverifiable).
-//  3. time: a verified, complete check past the soft time -> Slow (reason slow; pathReason keeps the
+//  3. time: a verified, complete check past the soft time, or with a late first byte / a stall -> Slow (reason slow; pathReason keeps the
 //     proof). `slow` is reported for an Unverifiable result too.
 // passes = Works or Slow, or Unverifiable when the server has not made it strict
 // (features.upstream_unverifiable_strict, default off = works-with-note). An unknown egress class string
@@ -113,12 +114,18 @@ inline UpstreamVerdictResult judgeUpstreamCheck(const UpstreamCheckInput &in)
         return noData("bad_request");
     if (in.bytesReceived <= 0)
         return noData("no_first_byte");
-    if (in.ttfbMs >= 0 && in.ttfbMs > in.limits.ttfbMs)
-        return noData("ttfb_timeout");
-    if (in.maxStallMs >= 0 && in.maxStallMs > in.limits.stallMs)
-        return noData("stalled");
-    if (in.bytesReceived < in.bytesRequested)
+    // A late first byte or a long stall explain an INCOMPLETE body; a body that arrived whole within the total
+    // limit carried data - slow, never no_data (owner's iPhone 18.11: all 131072 bytes in 3.5 s with a 3.1 s
+    // first byte were judged no_data and a working provider path was thrown away).
+    const bool lateFirstByte = in.ttfbMs >= 0 && in.ttfbMs > in.limits.ttfbMs;
+    const bool stalled = in.maxStallMs >= 0 && in.maxStallMs > in.limits.stallMs;
+    if (in.bytesReceived < in.bytesRequested) {
+        if (lateFirstByte)
+            return noData("ttfb_timeout");
+        if (stalled)
+            return noData("stalled");
         return noData("incomplete");
+    }
     if (in.bytesReceived > in.bytesRequested)
         return noData("oversize");
     if (!in.digestOk)
@@ -126,7 +133,7 @@ inline UpstreamVerdictResult judgeUpstreamCheck(const UpstreamCheckInput &in)
     if (in.elapsedMs >= 0 && in.elapsedMs > in.limits.totalMs)
         return noData("total_timeout");
 
-    r.slow = in.elapsedMs >= 0 && in.elapsedMs > in.limits.softTotalMs;
+    r.slow = (in.elapsedMs >= 0 && in.elapsedMs > in.limits.softTotalMs) || lateFirstByte || stalled;
     const UpstreamEgressClass cls = upstreamEgressClassFrom(in.egressClass);
     const bool tokensKnown = !in.egressNetToken.isEmpty() && !in.accessNetToken.isEmpty();
     const bool asnKnown = in.egressAsn > 0 && in.accessAsn > 0;

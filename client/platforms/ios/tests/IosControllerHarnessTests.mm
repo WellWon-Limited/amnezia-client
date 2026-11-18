@@ -1902,87 +1902,6 @@ static void test_uplink_probe_set_from_cxx_unit()
     CHECK(s.stopCalls == 0, "session stopped although the probe set from C++ says no network");
 }
 
-// Build 142: the native facts of the one no-handshake rule (DebugSnapshot.h::decideNoHandshake). Every handshake
-// timeout of a session whose NE answered "no handshake, no data" is told with its number and the send time of
-// its status request; nothing else is told and the native path is unchanged.
-static std::vector<int> g_neverTimeouts;
-static qint64 g_factSentMs = -1;
-static void tapHandshakeFacts()
-{
-    QObject::connect(IosController::Instance(), &IosController::handshakeNeverCompleted, [](int t, qint64 sent) {
-        g_neverTimeouts.push_back(t);
-        g_factSentMs = sent;
-    });
-}
-static HarnessSession *establishedSession(NSDictionary *reply, int timeoutMs, NSDate *connectedAt)
-{
-    IosController *c = IosController::Instance();
-    c->setRawConfigForTest(awgConfig(timeoutMs, 3));
-    HarnessSession *s = newSession(NEVPNStatusConnected);
-    s.runtimeGeneration = @"run-1";
-    s.hConnectedDate = connectedAt;
-    s.statusReply = reply;
-    g_managers = [@[newManager(@"mgr-1", @"cfg-1", s)] retain];
-    g_loadMode = LoadMode::Deliver;
-    c->requestReconcileStatus();
-    return s;
-}
-// S3, 16.11 23:20:26: the relaunch adopts an established session (26 min, soft restarts, hs=never). The cold-start
-// rule shows it Connected; the first handshake timeout is told, with a send time from this run.
-static void test_adopted_session_timeouts_told()
-{
-    const qint64 since = QDateTime::currentMSecsSinceEpoch();
-    tapHandshakeFacts();
-    HarnessSession *s = establishedSession(stalledReply(@7, @0), 150, [NSDate dateWithTimeIntervalSinceNow:-1560]);
-    runStatusPolls(600);
-    CHECK(obs.has(Vpn::ConnectionState::Connected), "the cold-start rule no longer shows the established session");
-    CHECK(!g_neverTimeouts.empty() && g_neverTimeouts.front() == 1, "the adopted session's first timeout not told");
-    CHECK(g_factSentMs >= since && g_factSentMs <= QDateTime::currentMSecsSinceEpoch(), "the fact has no send time");
-    CHECK(s.stopCalls == 0, "the native stopped a soft-restarted session itself (the facade decides)");
-}
-// Review round 3, M1: the native flaps Reconnecting -> Connecting -> Reconnecting (a status refresh re-observes the
-// live session as Connecting, ios_controller.mm cold-start branch with previouslyLive). The facts must go on after
-// the flap - the rule never loses its trigger - and stop once the engine handshakes.
-static void test_timeouts_told_across_a_flap()
-{
-    tapHandshakeFacts();
-    HarnessSession *s = establishedSession(stalledReply(@7, @0), 150, [NSDate dateWithTimeIntervalSinceNow:-1560]);
-    runStatusPolls(400);
-    CHECK(obs.has(Vpn::ConnectionState::Reconnecting), "no timeout before the flap");
-    const size_t before = g_neverTimeouts.size();
-    CHECK(before >= 1, "no fact before the flap");
-    s.hStatus = NEVPNStatusReasserting; // the re-observation: Connecting
-    notifyStatus(s);
-    spin(50);
-    CHECK(obs.has(Vpn::ConnectionState::Connecting), "the flap did not reach Connecting");
-    s.hStatus = NEVPNStatusConnected;   // back, still no handshake
-    notifyStatus(s);
-    runStatusPolls(500);
-    CHECK(g_neverTimeouts.size() > before, "after the flap the timeouts are no longer told (the trigger is lost)");
-    const size_t afterFlap = g_neverTimeouts.size();
-    s.statusReply = statusReply(@"run-1", @"cfg-1", 1794869620, 0); // the engine handshakes
-    runStatusPolls(400);
-    CHECK(g_neverTimeouts.size() == afterFlap, "told after the handshake");
-    CHECK(!obs.states.empty() && obs.states.back() == Vpn::ConnectionState::Connected, "the handshake not confirmed");
-}
-// Build 142 (S5): a session that came up a moment ago (shown Connecting) and never handshakes - every handshake
-// timeout is told with its number; an unanswered status is not.
-static void test_timeouts_told_when_never_handshook()
-{
-    tapHandshakeFacts();
-    establishedSession(statusReply(@"run-1", @"cfg-1", 0, 0), 150, [NSDate date]);
-    runStatusPolls(700);
-    CHECK(!g_neverTimeouts.empty() && g_neverTimeouts.front() == 1, "the first timeout not told as 1");
-    for (size_t i = 1; i < g_neverTimeouts.size(); ++i)
-        CHECK(g_neverTimeouts[i] == int(i + 1), "timeouts not told in order");
-}
-static void test_timeouts_not_told_without_answer()
-{
-    tapHandshakeFacts();
-    establishedSession(nil, 150, [NSDate date]);
-    runStatusPolls(700);
-    CHECK(g_neverTimeouts.empty(), "a timeout without an NE answer was told as no handshake");
-}
 #endif
 
 struct Test { const char *name; void (*fn)(); };
@@ -2278,10 +2197,6 @@ static const Test kTests[] = {
     {"adopted_session_empty_reply_kept", test_adopted_session_empty_reply_kept},
     {"adopted_session_no_counters_kept", test_adopted_session_no_counters_kept},
     {"uplink_probe_set_from_cxx_unit", test_uplink_probe_set_from_cxx_unit},
-    {"adopted_session_timeouts_told", test_adopted_session_timeouts_told},
-    {"timeouts_told_across_a_flap", test_timeouts_told_across_a_flap},
-    {"timeouts_told_when_never_handshook", test_timeouts_told_when_never_handshook},
-    {"timeouts_not_told_without_answer", test_timeouts_not_told_without_answer},
 #endif
     {"on_demand_armed_after_handshake", test_on_demand_armed_after_handshake},
 #ifndef HARNESS_OLD

@@ -1153,10 +1153,28 @@ static void releaseResend()
     CHECK(kUpstreamReleaseMaxResends >= 4);
 }
 
+// Decision of 18.11 (owner's iPhone, rounds 1-2): a failed provider leg's seat release never rides the tunnel being
+// abandoned. It is held while the stop is pending, sent when the stop is confirmed or at the latest after the native
+// stop deadline, and always over the direct path (the lease's bearer, not its tunnel_api_base).
+static void releaseAfterStop()
+{
+    const qint64 t0 = 1000000;
+    CHECK(upstreamReleaseDue(/*stopPending=*/false, 0, t0, false).send);            // no stop: at once
+    UpstreamReleaseDue d = upstreamReleaseDue(true, t0, t0 + 300, /*tunnelDown=*/false);
+    CHECK(d.hold && !d.send);                                                        // the leg is being stopped
+    CHECK(upstreamReleaseDue(true, t0, t0 + 400, /*tunnelDown=*/true).send);         // stop confirmed: now
+    CHECK(upstreamReleaseDue(true, t0, t0 + kUpstreamReleaseHoldMaxMs, false).send); // never confirmed: bounded
+    CHECK(kUpstreamReleaseHoldMaxMs == 10000);
+    const LeaseRoute lease{QStringLiteral("renew-token"), QStringLiteral("https://tunnel-api.example")};
+    const LeaseRoute direct = upstreamReleaseRoute(lease);
+    CHECK(direct.apiBase.isEmpty() && direct.renewToken == QLatin1String("renew-token"));
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     std::setvbuf(stdout, nullptr, _IONBF, 0); // FAIL lines survive a crash of a mutated build
+    releaseAfterStop();
     signature();
     wire();
     freshSession();

@@ -1,4 +1,5 @@
 #include "AvpnEngineQml.h"
+#include "TransportPick.h" // the Doctor's alternatives: exit RTT order (display/measurement only)
 
 #ifdef Q_OS_ANDROID
 #include "platforms/android/android_controller.h" // AVPN: адопт снапшота статуса (рассинхрон после фона)
@@ -136,6 +137,9 @@ extern "C" void AvpnDockBadge_install();
 #endif
 
 namespace avpn {
+
+// Path engine (design 2026-11-17): the evidence ledger of the attempt owner (PathLedger.h JSON).
+static constexpr char kPathLedgerSettingsKey[] = "avpn/pathLedger";
 
 // Ключ платформы для карт версий (определение — ниже, рядом с self-update).
 static QString avpnPlatformKey();
@@ -333,10 +337,12 @@ ScanCurrent ScanEngineAdapter::current() const
     const Vpn::ConnectionState nat = m_e->m_lastTunnelState;
     const bool nativeUp = nat == Vpn::Connected || nat == Vpn::Reconnecting || nat == Vpn::Disconnecting;
     const SubscriptionNode *next = m_e->m_engine.nextCandidate();
-    const ScanLiveView v = scanLiveView(s.state, nativeUp, s.currentNodeId, m_e->m_engine.pendingSwitchNodeId(),
+    // "Nothing works" only as the attempt's final result (the engine never passes through error mid-walk now).
+    const bool attemptFailed = m_e->m_engine.state() == EngineState::Error && !m_e->m_engine.attemptRunning();
+    const ScanLiveView v = scanLiveView(s.state, nativeUp, s.currentNodeId, QString(),
                                         m_e->m_engine.pinnedNodeId(), next ? next->nodeId : QString(),
                                         m_e->m_wantConnected, m_e->m_needsRestart || m_e->m_seatFirst.pending,
-                                        m_e->m_dataFlowing);
+                                        m_e->m_dataFlowing, attemptFailed);
     c.nodeId = v.nodeId;
     c.live = v.live;
     c.connecting = v.connecting;
@@ -492,8 +498,14 @@ void ScanEngineAdapter::fillManifestInput(ScanManifestInput &in) const
         }
         in.ownNodes << n;
     }
-    in.freshFailures = m_e->m_engine.failedThisSession();
-    in.lastKnownGood = m_e->m_engine.networkMemoryNode();
+    // Every provider of the manifest gets our form of the name (the admin's label, «<country> <n>», «Белые списки
+    // <n>») - also one outside the pool, which otherwise fell back to the server's label ("NL 3").
+    for (const ScanManifestUpstream &u : in.manifest.upstream)
+        if (!in.upstreamNames.contains(u.profileId))
+            in.upstreamNames.insert(u.profileId, m_e->upstreamRowName(u.label, u.labelCustom, u.ordinal,
+                                                                       upstreamRowKind(u.kind, u.countryCode), u.countryCode));
+    in.freshFailures = m_e->m_engine.pathsFailedHere(); // the ledger of this network (path engine)
+    in.lastKnownGood = m_e->m_engine.bestWorkingPathHere();
     in.restrictCountry.clear();
     // awg_mini: the device's own tunnel address and key are known (awgProbeInput); the API IP comes from the
     // coordinator (knownHostIps / its own resolution).
@@ -625,13 +637,16 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Error reaches reconcile (the restart picks another node); the lease owner's verdicts come back as
     // signals and are applied deferred (CONNECT-INVARIANTS §3: never from inside a tunnel callback stack).
     m_tunnel.setUpstreamStartFailureSink([this](const QString &nodeId, const QString &code) {
-        m_engine.excludeForAttempt(nodeId, code);
         reliabilityEvent(QStringLiteral("upstream_start_failed node=%1 code=%2").arg(nodeId, code));
-        // Release A: tell the user only when the restart really goes on to another node (with none left the
-        // existing error path speaks). Deferred: this runs inside the tunnel adapter's stack.
-        const avpn::SubscriptionNode *next = m_engine.nextCandidate();
-        if (next && next->nodeId != nodeId)
-            noticeUpstreamLeft(code);
+        // An outcome of the attempt's leg (no seat / refused); the owner walks on. Deferred: this runs inside the
+        // tunnel adapter's stack (CONNECT-INVARIANTS §3).
+        QTimer::singleShot(0, this, [this, nodeId, code]() {
+            const bool walking = m_engine.attemptRunning();
+            m_engine.noteStartRefused(nodeId, code);
+            syncAttempt();
+            if (walking && m_engine.attemptRunning())
+                noticeUpstreamLeft(code);
+        });
     });
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamLeaveRequested, this,
             [this](const QString &code, const QString &detail) {
@@ -665,7 +680,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 emit changed();
             });
     connect(&m_tunnel, &avpn::VpnConnectionTunnelControl::upstreamAccessFacts, this, [this](qint64 asn) {
-        const QString net = currentNetworkMemoryKey();
+        const QString net = m_engine.network().local;
         if (!net.isEmpty() && asn > 0)
             m_accessAsnByNet.insert(net, asn);
     });
@@ -964,7 +979,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (reachable)
             m_liveProven = true;     // 5.1.108: ONLINE without node_scan (dataFlowingNow)
         if (reachable)
-            m_startBackoffRound = 0;             // волна-4: данные подтверждены — бэкофф с нуля
         // AVPN (красные палочки): различаем «ещё мерю» (m_liveDead=false → плейсхолдер 1 зелёная)
         // и «связь подтверждённо мертва» (m_liveDead=true → 0 зелёных + все красные). Один таймаут
         // в «мертво» НЕ роняем — ждём kLiveDeadStreak неудач подряд (анти-фликер на транзиентном дропе).
@@ -983,11 +997,9 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         // handshake): N провалов подряд (xray_probe_fail_cycles) → движок уводит на другой транспорт
         // той же локации (двухфазный свитч, как health-DEAD). awg — no-op внутри. Сигнал приходит с
         // верха цикла событий (async-ответ QNetworkReply), не из-под Selector::pick.
-        if (m_engine.feedProbeResult(reachable)) {
-            persistTransportHistory();
+        if (m_engine.feedProbeResult(reachable)) { // a dead live session: the failover attempt of the owner
+            syncAttempt();
             emit changed();
-        } else if (surrenderIfDataPlaneDead()) {
-            persistTransportHistory(); // AVPN (ревью волны, MAJOR-1): кап провалов исчерпан → честный OFF
         }
     });
 
@@ -1234,33 +1246,25 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                                    // ограничивает ожидание (~1 handshake-таймаут); политика «3 таймаута»
                                    // в ios_controller работает для OS-инициированных стартов (интент/Настройки).
     connect(&m_watchdog, &QTimer::timeout, this, &AvpnEngineQml::onWatchdog);
-    m_transitionTimer.setInterval(1000);
+    // Path engine (design 2026-11-17): the attempt owner's clock. Its deadlines count awake time (a late tick of a
+    // frozen process counts at most clockJumpMs), so no freeze shift is needed here.
+    m_transitionTimer.setInterval(500);
     connect(&m_transitionTimer, &QTimer::timeout, this, [this]() {
-        // 5.1.109 (R7): a tick far later than its 1 s period = the process was frozen; the freeze is not
-        // spent switch time and no evidence about the tunnel (device 35, 138: an 11.6 h overdue tick
-        // stopped a session the extension had healed). Shift the phase clock, ask for status; the
-        // next ticks judge the deadline as before.
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         const qint64 since = m_lastTransitionTickMs < 0 ? m_transitionTimer.interval() : now - m_lastTransitionTickMs;
         m_lastTransitionTickMs = now;
-        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(since, m_transitionTimer.interval());
 #ifdef Q_OS_IOS
         tickTunnelWatchFreeze(since); // AVPN (iOS data watch, 141): the resume freeze rides on this tick
+#else
+        Q_UNUSED(since)
 #endif
-        if (!tick.evaluate) {
-            switch (m_engine.shiftSwitchClock(tick.frozenMs)) {
-            case avpn::SwitchClockResync::Shifted: // once per phase (R7a) - one journal line (R7b)
-                reliabilityEvent(QStringLiteral("switch_deadline_frozen_shift frozen_ms=%1").arg(tick.frozenMs));
-                requestFreshTunnelStatus();
-                return;
-            case avpn::SwitchClockResync::NoPhase:
-                return;
-            case avpn::SwitchClockResync::AlreadyShifted:
-                break; // slowed timers, not a new freeze: judge the deadline as before
-            }
-        }
-        if (!m_engine.expireSwitch(avpn::reconcileWatchdogMsTuned())) return;
-        onSwitchDeadline();
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+        if (m_permissionPromptPending)
+            return; // the person reads the system's VPN dialog: no deadline runs meanwhile
+#endif
+        m_engine.attemptTick();
+        if (syncAttempt())
+            QTimer::singleShot(0, this, [this]() { reconcile(); });
     });
     m_transitionTimer.start();
     // AVPN (фикс-волна 2026-09-22, A1): ограниченные повторы запроса статуса и стопа (backoff).
@@ -1288,9 +1292,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             [this](const QString &line) { reliabilityEvent(line); }, Qt::QueuedConnection);
     connect(IosController::Instance(), &IosController::tunnelEngineDown, this,
             &AvpnEngineQml::onTunnelEngineDown, Qt::QueuedConnection);
-    // Build 142: a handshake timeout of a session that never handshook - the one rule (DebugSnapshot.h::decideNoHandshake).
-    connect(IosController::Instance(), &IosController::handshakeNeverCompleted, this,
-            &AvpnEngineQml::onHandshakeNeverCompleted, Qt::QueuedConnection);
 #endif
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     connect(IosController::Instance(), &IosController::sessionMetadataChanged, this,
@@ -1364,9 +1365,8 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     connect(IosController::Instance(), &IosController::permissionPromptPending, this, [this](bool pending) {
         m_permissionPromptPending = pending;
         reliabilityEvent(QStringLiteral("permission_prompt pending=%1 op=%2").arg(pending).arg(int(m_op)));
-        if (m_op != Op::Starting)
-            return;
-        armWatchdog(startWatchdogMs(), /*freezeRearm=*/true); // same start; true — потолок диалога, false — обычный бюджет
+        // The attempt owner's clock does not run while the dialog is open (the transition timer skips its
+        // tick); the first tick after it counts at most clockJumpMs.
     });
     // Review of 136: the native stops an adopted session that never completed a handshake only while
     // the device has a physical network path (an On-Demand session raised offline is not dead) - and
@@ -1431,7 +1431,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
                 m_paused = false;
                 m_wasConnected = false;
                 m_wantConnected = true;
-                m_startAttempts = 0;
                 reconcile();
                 emit changed();
             });
@@ -1572,7 +1571,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(loaded.storedMode));
             s.setValue(QStringLiteral("avpn/transportModeByChoice"), true);
         }
-        m_engine.loadTransportHistory(s.value(QStringLiteral("avpn/transportHistory")).toByteArray());
+        m_engine.loadPathLedger(s.value(QLatin1String(kPathLedgerSettingsKey)).toByteArray());
         m_savedPin = s.value(QStringLiteral("avpn/pinnedNode")).toString();
         m_reliabilityRing.lines = s.value(QStringLiteral("avpn/reliabilityLog")).toStringList().mid(0, 128);
         restorePin();
@@ -1696,7 +1695,6 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         if (!up || !m_wantConnected || !m_waitUplink)
             return;
         m_waitUplink = false;
-        m_startAttempts = 0;
         QTimer::singleShot(1500, this, [this]() {
             if (m_wantConnected && m_lastTunnelState != Vpn::Connected)
                 reconcile();
@@ -1773,6 +1771,14 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
         };
         connect(ni, &QNetworkInformation::reachabilityChanged, this, netEvent);
         connect(ni, &QNetworkInformation::transportMediumChanged, this, netEvent);
+        // Path engine: the network generation (an attempt in flight restarts on the new network).
+        auto netKey = [this]() {
+            m_engine.observeNetwork(currentNetworkObservation());
+            if (syncAttempt())
+                QTimer::singleShot(0, this, [this]() { reconcile(); });
+        };
+        connect(ni, &QNetworkInformation::reachabilityChanged, this, netKey);
+        connect(ni, &QNetworkInformation::transportMediumChanged, this, netKey);
         connect(ni, &QNetworkInformation::transportMediumChanged, this, [this]() { scanNotifyNetwork(); }); // AVPN Scanner
     }
     // Ответы control plane: метод, путь без идентификаторов, код. Только пути API (/v1, /admin) —
@@ -2748,6 +2754,35 @@ QVariantMap AvpnEngineQml::currentNode() const
         listRtt = pick->upstream ? ((m_scanner && m_scanSwitches.scanner) ? m_scanner->listFigures().value(pick->nodeId, -1) : -1)
                                  : m_engine.measuredRtt().value(pick->nodeId, -1);
     node["measuredRttMs"] = listRtt;
+    // Chosen vs connected (path engine): the person's choice straight from the attempt owner's UserChoice -
+    // "" = Auto; QML shows «Вы выбрали: …» when the connected node differs.
+    const avpn::path::UserChoice &choice = m_engine.userChoice();
+    QString choiceId, choiceName;
+    if (choice.kind != avpn::path::UserChoice::Kind::Auto) {
+        choiceId = pinned;
+        for (const NodeDebugRow &r : s.pool) {
+            if (r.nodeId != pinned)
+                continue;
+            const QString lang = appLang();
+            choiceName = r.upstream ? upstreamRowName(r.name, r.upstreamLabelCustom, r.upstreamOrdinal, r.upstreamKind,
+                                                      r.countryCode)
+                         : choice.kind == avpn::path::UserChoice::Kind::PreferCountry
+                             ? doctor::countryDisplayName(r.countryCode, lang)
+                             : pickerDisplay({{r.location, r.proto, doctor::localizedNodeLabel(r.name, r.countryCode, lang),
+                                               doctor::countryDisplayName(r.countryCode, lang), -1}}).constFirst().name;
+            break;
+        }
+    }
+    bool choiceShown = choiceId.isEmpty();
+    if (!choiceShown && pick) {
+        if (choice.kind == avpn::path::UserChoice::Kind::ExactPath)
+            choiceShown = choice.pathIds.contains(pick->nodeId);
+        else
+            choiceShown = pick->countryCode.compare(choice.country, Qt::CaseInsensitive) == 0;
+    }
+    node["choiceNodeId"] = choiceId;
+    node["choiceName"] = choiceName;
+    node["choiceIsShown"] = choiceShown;
     return node;
 }
 
@@ -2813,6 +2848,9 @@ QVariantList AvpnEngineQml::nodePool() const
             : display.at(i).name;
         n[QStringLiteral("measuredRttMs")] = rtt;
         n[QStringLiteral("measuredBars")] = (rtt >= 0) ? barsForNode(rtt) : -1;
+        // Per-network evidence (path engine ledger): the node failed on THIS network (suspect / dead).
+        const QString here = m_engine.pathStateHere(id);
+        n[QStringLiteral("lastAttemptFailed")] = here == QLatin1String("suspect") || here == QLatin1String("dead");
         byId.insert(id, n);
         // A provider row keeps the engine's order (tier, then priority): its Scanner figure is shown, not ranked.
         rows.append({ id, upstream ? -1 : rtt });
@@ -2905,7 +2943,7 @@ void AvpnEngineQml::probeNodeRtt()
 void AvpnEngineQml::invalidateNetworkMeasurements()
 {
     ++m_rttEpoch;
-    m_lastNetChangeMs = QDateTime::currentMSecsSinceEpoch(); // волна-2: свежесть кэша RTT (rttCoverageFresh)
+    m_lastNetChangeMs = QDateTime::currentMSecsSinceEpoch(); // волна-2: момент смены сети
     if (m_rttProbe) m_rttProbe->cancel();
     m_rttInFlight = false;
     // AVPN (фикс-волна 2026-09-22, A11/B9): последний известный RTT сохраняем (движок ранжирует его
@@ -2927,33 +2965,9 @@ void AvpnEngineQml::invalidateNetworkMeasurements()
             m_prepPoolSettled = false;
             refreshSubscription();
         }
-        if (startRttRoundImmediately(m_engine.hasConnectablePin(), m_engine.hasSubscription()))
-            probeNodeRtt();
     }
 }
 
-// Волна-2 (ревью 5.1.95, п.2): кэш RTT годится для «подключаемся сразу», только если замер сделан
-// после последней смены сети и покрывает ВСЕ авто-ноды пула (живые, поддерживаемые, не manual/RU).
-bool AvpnEngineQml::freshRttCoversPool()
-{
-    const QHash<QString, int> fresh = m_engine.measuredRtt();
-    int eligible = 0, measured = 0;
-    const QVariantList pool = debugSnapshot().value(QStringLiteral("pool")).toList();
-    for (const QVariant &v : pool) {
-        const QVariantMap n = v.toMap();
-        if (!n.value(QStringLiteral("alive")).toBool()) continue;
-        if (n.value(QStringLiteral("manualOnly")).toBool()) continue;
-        if (n.value(QStringLiteral("countryCode")).toString().compare(QStringLiteral("RU"), Qt::CaseInsensitive) == 0) continue;
-        if (!avpn::isSupportedProto(n.value(QStringLiteral("proto")).toString())) continue;
-        if (n.value(QStringLiteral("upstream")).toBool()) continue; // no ICMP target: never measured
-        const QString id = n.value(QStringLiteral("nodeId")).toString();
-        if (id.isEmpty()) continue;
-        ++eligible;
-        if (fresh.value(id, -1) >= 0) ++measured;
-    }
-    const qint64 sinceNet = m_lastNetChangeMs < 0 ? -1 : QDateTime::currentMSecsSinceEpoch() - m_lastNetChangeMs;
-    return rttCoverageFresh(eligible, measured, m_engine.measuredRttAgeMs(), sinceNet);
-}
 
 // Волна-2: «UI на экране». На macOS Qt::ApplicationActive = фокус приложения (qcocoa: только
 // didBecomeActive/didResignActive), а не видимость: окно видно, но фокус в другом приложении —
@@ -2994,33 +3008,17 @@ void AvpnEngineQml::beginStartPreparation()
     // Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1): пул есть и цель известна (pin или
     // свежий замер) — подключаемся сразу, без сети. До волны здесь каждый Connect ждал ответа
     // refresh, а тот после гашения туннеля висел до 15 с → бюджет 6 с (журнал Mac 26–28.09).
-    const StartPrep prep = decideStartPreparation(m_engine.hasSubscription(),
-                                                  m_engine.hasConnectablePin(),
-                                                  freshRttCoversPool());
+    const StartPrep prep = decideStartPreparation(m_engine.hasSubscription());
     if (prep == StartPrep::ConnectNow) {
         m_prepPoolSettled = true;
         // Волна-2 (ревью 5.1.95, п.3): пул освежаем В ФОНЕ, не дожидаясь ответа — если бэкенд снял
         // ноду, свежая выдача успеет к повтору (applyReseed), а кнопка не ждёт сеть (§1).
         if (!authToken().isEmpty())
             refreshSubscription();
-        finishStartPreparation(m_engine.hasConnectablePin() ? QStringLiteral("pinned_location_ready")
-                                                            : QStringLiteral("measured_cache"));
+        finishStartPreparation(QStringLiteral("pool_ready"));
         return;
     }
     reliabilityEvent(QStringLiteral("selection_wait_fresh_pool"));
-    if (prep == StartPrep::MeasureRtt) {
-        // Пул есть, цели нет («Авто» без свежего замера): ждём только ICMP-раунд (≤ 1,5 с);
-        // пул освежаем параллельно в фоне. Потолок — на случай, если пул исчезнет (пустая
-        // выдача) прямо во время раунда: без него подготовка ждала бы вечно (ревью, п.4).
-        m_prepPoolSettled = true;
-        if (!authToken().isEmpty())
-            refreshSubscription();
-        probeNodeRtt();
-        QTimer::singleShot(kStartPrepSoftBudgetMs, this, [this, epoch]() { onSelectionBudget(epoch, false); });
-        QTimer::singleShot(kStartPrepCeilingMs, this, [this, epoch]() { onSelectionBudget(epoch, true); });
-        emit changed();
-        return;
-    }
     // Bound control-plane + measurement latency. A usable LKG remains an explicit
     // fallback if the API is unavailable; an empty pool never enters a nested event loop.
     if (authToken().isEmpty()) {
@@ -3034,10 +3032,6 @@ void AvpnEngineQml::beginStartPreparation()
     } else {
         refreshSubscription();
     }
-    // A11: без пригодного pin ICMP-раунд — сразу, параллельно refresh (цель — Connect ≤ ~2.5 с
-    // при живой сети); раньше раунд ждал таймер 4 с. Свежий пул (Applied) перезапустит раунд.
-    if (startRttRoundImmediately(m_engine.hasConnectablePin(), m_engine.hasSubscription()))
-        probeNodeRtt();
     QTimer::singleShot(kStartPrepSoftBudgetMs, this, [this, epoch]() { onSelectionBudget(epoch, false); });
     QTimer::singleShot(kStartPrepCeilingMs, this, [this, epoch]() { onSelectionBudget(epoch, true); });
     emit changed();
@@ -3069,13 +3063,8 @@ void AvpnEngineQml::notePreparationPoolSettled(bool poolWillBeProbed)
 {
     if (!m_preparingStart) return;
     m_prepPoolSettled = true;
-    if (poolWillBeProbed) return;
-    if (m_engine.hasConnectablePin())
-        finishStartPreparation(QStringLiteral("pinned_location_ready"));
-    else if (m_prepRoundDone)
-        finishStartPreparation(QStringLiteral("rtt_round_complete"));
-    else if (!m_rttInFlight)
-        probeNodeRtt();
+    Q_UNUSED(poolWillBeProbed)
+    finishStartPreparation(QStringLiteral("pool_settled")); // the pool is what the start waited for
 }
 
 void AvpnEngineQml::finishStartPreparation(const QString &reason)
@@ -3095,18 +3084,9 @@ void AvpnEngineQml::finishStartPreparation(const QString &reason)
     if (m_rttProbe) m_rttProbe->cancel();
     m_rttInFlight = false;
     m_busy = false;
-    const QHash<QString, int> fresh = m_engine.measuredRtt();
-    QStringList candidateIds = fresh.keys();
-    candidateIds.sort();
-    reliabilityEvent(QStringLiteral("selection_pool=%1 rtt_age_ms=%2 candidates=%3")
-        .arg(m_engine.poolRevision()).arg(m_engine.measuredRttAgeMs()).arg(candidateIds.join(QLatin1Char(','))));
-    const bool measured = !fresh.isEmpty();
-    const bool pinned = reason == QLatin1String("pinned_location_ready");
-    // A11: карточка обещает «быстрейший узел» только при выборе по свежему замеру.
-    m_lastSelectionMeasured = !pinned && measured;
-    reliabilityEvent(pinned ? reason
-        : reason + (measured ? QStringLiteral(" measured_candidates")
-                             : QStringLiteral(" weight_fallback")));
+    // The order comes from the attempt owner (ledger of this network, server prior) - no RTT round is waited for.
+    reliabilityEvent(QStringLiteral("selection_pool=%1 reason=%2").arg(m_engine.poolRevision()).arg(reason));
+    m_lastSelectionMeasured = false;
     if (!m_wantConnected) { emit changed(); return; }
     if (!m_engine.hasSubscription()) {
         m_wantConnected = false;
@@ -3133,6 +3113,151 @@ void AvpnEngineQml::cancelStartPreparation()
     m_rttInFlight = false;
 }
 
+// ---- Path engine, stage 1 (design 2026-11-17): the facade's side of the attempt owner -----------------------
+
+void AvpnEngineQml::syncChoice()
+{
+    const QString pin = m_engine.pinnedNodeId();
+    const avpn::SubscriptionNode *n = m_engine.nodeById(pin);
+    avpn::path::UserChoice c;
+    if (n && !m_exactRow.isEmpty() && m_exactRow == pin) {
+        c = avpn::path::UserChoice::exactPath(pin);
+    } else if (n && m_pinExact) {
+        QStringList paths;
+        const QString loc = avpn::locationKeyOf(*n);
+        for (const avpn::SubscriptionNode &o : m_engine.candidateNodes())
+            if (avpn::locationKeyOf(o) == loc)
+                paths << o.nodeId;
+        c = avpn::path::UserChoice::exactPaths(paths);
+    } else if (n) {
+        c = avpn::path::UserChoice::preferCountry(n->countryCode);
+    }
+    m_engine.setUserChoice(c);
+}
+
+QString AvpnEngineQml::choiceJournal() const
+{
+    const avpn::path::UserChoice &c = m_engine.userChoice();
+    switch (c.kind) {
+    case avpn::path::UserChoice::Kind::Auto: return QStringLiteral("auto");
+    case avpn::path::UserChoice::Kind::PreferCountry: return QStringLiteral("country:") + c.country;
+    case avpn::path::UserChoice::Kind::ExactPath: return QStringLiteral("exact:") + c.pathIds.join(QLatin1Char(','));
+    }
+    return QString();
+}
+
+bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
+{
+    if (!m_engine.setPinnedNode(nodeId, err)) {
+        if (!err.startsWith(QLatin1String("no_transport")))
+            return false;
+        // Decision 9 of 18.11: the server the person tapped wins over the transport mode chosen earlier.
+        const QString was = avpn::transportModeToString(m_engine.transportMode());
+        setTransportMode(QStringLiteral("auto"));
+        if (!m_engine.setPinnedNode(nodeId, err))
+            return false;
+        reliabilityEvent(QStringLiteral("transport_mode_auto why=server_tap mode_was=%1 node=%2").arg(was, nodeId));
+        emit notice(tr("Режим подключения переключён на «Авто», чтобы подключить выбранный сервер"));
+    }
+    m_pinExact = true;
+    if (m_exactRow != nodeId)
+        m_exactRow.clear();
+    syncChoice();
+    return true;
+}
+
+bool AvpnEngineQml::syncAttempt()
+{
+    bool changedAny = false;
+    for (const QString &line : m_engine.takeAttemptJournal()) {
+        reliabilityEvent(line);
+        changedAny = true;
+    }
+    if (m_engine.pathLedgerDirty()) {
+        QSettings().setValue(QLatin1String(kPathLedgerSettingsKey), m_engine.pathLedgerJson());
+        m_engine.clearPathLedgerDirty();
+    }
+    if (m_engine.attemptChecked() != m_attemptCheckedShown || m_engine.attemptTotal() != m_attemptTotalShown) {
+        m_attemptCheckedShown = m_engine.attemptChecked();
+        m_attemptTotalShown = m_engine.attemptTotal();
+        changedAny = true;
+    }
+    if (const std::optional<avpn::path::AttemptResult> r = m_engine.takeAttemptResult()) {
+        changedAny = true;
+        const QString lang = appLang();
+        if (r->connected) {
+            if (r->fallbackNotice) {
+                const QString wanted = doctor::countryDisplayName(m_engine.userChoice().country, lang);
+                const QString got = doctor::countryDisplayName(r->path.country, lang);
+                emit notice(got.isEmpty() ? tr("%1 в этой сети недоступна — подключено через другой сервер").arg(wanted)
+                                          : tr("%1 в этой сети недоступна — подключено через %2").arg(wanted, got));
+            }
+        } else if (r->reason != avpn::path::FailReason::StoppedByUser) {
+            m_wantConnected = false;
+            m_busy = false;
+            reliabilityEvent(QStringLiteral("intent_off why=attempt_failed reason=%1")
+                                 .arg(QLatin1String(avpn::path::failReasonName(r->reason))));
+            switch (r->reason) {
+            case avpn::path::FailReason::ExactNodeFailed:
+                emit error(tr("Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»"));
+                break;
+            case avpn::path::FailReason::NoCandidate:
+                emit error(tr("В выбранном режиме нет ни одного сервера — включите режим «Авто»"));
+                break;
+            case avpn::path::FailReason::NoNetwork:
+                emit error(tr("Нет сети — подключитесь, когда она появится"));
+                break;
+            default:
+                emit error(tr("В этой сети не удалось найти рабочий сервер — проверьте сеть и попробуйте снова"));
+                break;
+            }
+        }
+    }
+    if (changedAny)
+        emit changed();
+    return changedAny;
+}
+
+// The IPv4 subnet of the physical interface of `kind` ("a.b.c.0/nn"), read from the OS without any permission:
+// part of the local network key (iOS gives no gateway or SSID without extra entitlements).
+static QString physicalSubnet(const QString &kind)
+{
+    if (kind != QLatin1String("wifi") && kind != QLatin1String("ethernet"))
+        return QString();
+    for (const QNetworkInterface &i : QNetworkInterface::allInterfaces()) {
+        const auto f = i.flags();
+        if (!(f & QNetworkInterface::IsUp) || !(f & QNetworkInterface::IsRunning) || (f & QNetworkInterface::IsLoopBack)
+            || avpn::physicalIfaceNameVirtual(i.name()))
+            continue;
+        for (const QNetworkAddressEntry &e : i.addressEntries()) {
+            if (e.ip().protocol() != QAbstractSocket::IPv4Protocol || e.prefixLength() <= 0)
+                continue;
+            const quint32 mask = e.prefixLength() >= 32 ? 0xffffffffu : ~(0xffffffffu >> e.prefixLength());
+            return QHostAddress(e.ip().toIPv4Address() & mask).toString() + QLatin1Char('/')
+                 + QString::number(e.prefixLength());
+        }
+    }
+    return QString();
+}
+
+avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const
+{
+    avpn::path::NetworkObservation o;
+    const QString kind = networkKind();
+    if (kind == QLatin1String("wifi"))
+        o.medium = avpn::path::NetMedium::Wifi;
+    else if (kind == QLatin1String("ethernet"))
+        o.medium = avpn::path::NetMedium::Ethernet;
+    else if (kind == QLatin1String("cellular"))
+        o.medium = avpn::path::NetMedium::Cellular;
+    // nothing known: Unknown keeps the last network (never "offline" from a guess - a leg's own deadline judges)
+    o.gateway = netKindInputs().gatewayHash; // the macOS path monitor; "" elsewhere
+    o.subnet = physicalSubnet(kind);
+    o.carrier = avpn::carrierCode();
+    o.radio = avpn::cellularGenerationForKind(kind, avpn::cellularGeneration());
+    return o;
+}
+
 void AvpnEngineQml::persistPin()
 {
 #ifdef Q_OS_IOS
@@ -3140,6 +3265,7 @@ void AvpnEngineQml::persistPin()
 #endif
     m_savedPin = m_engine.pinnedNodeId();
     QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
+    syncChoice();
 #ifdef Q_OS_IOS
     if (m_savedPin != pinBefore)
         writeTunnelWatchPlan("pin"); // AVPN (iOS data watch, 141): the extension follows the pin at once
@@ -3172,8 +3298,12 @@ void AvpnEngineQml::restorePin(const QString &pinBefore)
     case PinRestoreAction::ApplySaved: {
         QString error;
         // Временно отфильтрованная/отсутствующая нода не стирает сохранённый выбор пользователя.
+        // A pin saved by an earlier run is a country preference (design §3), not an exact server.
+        m_pinExact = false;
+        m_exactRow.clear();
         if (m_engine.setPinnedNode(m_savedPin, error))
             persistPin();
+        syncChoice();
         return;
     }
     }
@@ -3351,20 +3481,17 @@ void AvpnEngineQml::writeTunnelWatchPlan(const char *why)
     in.sessionNodeId = m_engine.currentNodeId();
     in.sessionProto = m_engine.currentNodeProto();
     in.sessionCountry = countryOf(in.sessionNodeId);
+    // The extension no longer reads a per-network memory of the app: the attempt owner's ledger is the only one
+    // (design 2026-11-17); the plan carries none.
     in.cellularKey = avpn::networkMemoryKey(QStringLiteral("cellular"), diagCarrier());
-    const QByteArray memory = s.value(QLatin1String(avpn::kNetworkMemorySettingsKey)).toByteArray();
-    in.memory = {avpn::watchPlanMemoryEntry(memory, QStringLiteral("wifi"), now / 1000),
-                 avpn::watchPlanMemoryEntry(memory, in.cellularKey, now / 1000)};
     in.numbers = avpn::watchPlanNumbers([](const avpn::TunnelWatchNumberSpec &spec) {
         return avpn::TuningStore::numberOr(QLatin1String(spec.key), spec.def);
     });
     // The white-list detector's own lists (WhitelistDetector.cpp); not set on the server - empty here,
     // and the extension uses its built-in targets, which are the same compiled defaults.
-    // Stage 2: where the extension may switch to in place. Collected only with both flags on.
-    if (in.watch && in.watchSwitch)
-        in.candidates = m_engine.extensionSwitchCandidates();
-    // The engine's own picks skip a node the extension proved dead on THIS network (for half an hour).
-    m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
+    // Stage 2 (in-place switch by the extension) is inert: the attempt owner is the only one that chooses a path,
+    // so the plan never carries candidates (ServiceEngine::extensionSwitchCandidates is empty).
+    in.candidates = m_engine.extensionSwitchCandidates();
     in.sanityTargets = avpn::watchPlanSanityTargets(
         avpn::TuningStore::listOr(QStringLiteral("ios_tw_sanity_urls"), {}),
         avpn::TuningStore::listOr(QStringLiteral("whitelist_probe_domains"), {}),
@@ -3414,54 +3541,13 @@ void AvpnEngineQml::setupTunnelWatchResume()
     };
     // The app's own per-network memory forgets the node (§29 item 7, the same stored-copy function a
     // failed start uses); the key is the attempt's (computed with the tunnel down).
-    ops.adoptSwitch = [this](const QString &nodeId, const avpn::WatchSwitchStamp &stamp) {
-        // Stage 2: the extension moved the tunnel while the app slept. The engine takes the node; the
-        // app's own check of it runs only where the app has one (features.node_scan). The evidence
-        // against the node it left is filed under the network and the moment of the switch itself.
-        m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
-        if (!m_engine.adoptExtensionSwitch(nodeId, featureEnabled(QStringLiteral("node_scan"), false),
-                                           avpn::watchEvidenceNetKey(stamp.net, avpn::networkMemoryKey(QStringLiteral("cellular"), diagCarrier()),
-                                                                     currentNetworkMemoryKey()),
-                                           stamp.atMs))
-            return false;
-        writeTunnelWatchPlan("adopt"); // the candidates are counted from the node the tunnel stands on
-        emit changed();
-        return true;
-    };
-    // Stage 2: the way back to the user's pinned location when the extension's evidence has aged
-    // (TunnelWatchStatus.h::decideExtensionReturn) - by the ordinary restart through reconcile, with the
-    // app's own data check after the start and its own failover if that check fails.
-    ops.returnFacts = [this] {
-        m_engine.setExtensionEvidenceNetwork(currentNetworkMemoryKey());
-        const avpn::ServiceEngine::ExtensionReturnFacts f = m_engine.extensionReturnFacts();
-        avpn::WatchReturnInputs in;
-        in.movedByExtension = f.movedByExtension;
-        in.pinRaisable = f.pinRaisable;
-        in.evidenceFresh = f.evidenceFresh;
-        in.nodeScanOn = featureEnabled(QStringLiteral("node_scan"), false);
-        in.engineConnected = m_engine.state() == avpn::EngineState::Connected;
-        in.wantConnected = m_wantConnected;
-        in.busy = m_opInFlight || m_needsRestart || m_paused || !uiForeground();
-        return in;
-    };
-    ops.restartToChoice = [this] {
-        m_startOrigin = StartOrigin::User;
-        m_needsRestart = true;
-        m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
-        m_restartOrigin = QStringLiteral("extension_return");
-        m_startAttempts = 0;
-        emit changed();
-        reconcile(); // the hand-over calls this last: nothing of it runs after the restart is asked
-    };
-    ops.forgetNode = [this](const QString &nodeId) {
-        if (m_attemptNetKey.isEmpty())
-            return;
-        QSettings s;
-        const bool removed = avpn::networkMemoryForgetStored(s, m_attemptNetKey, nodeId);
-        reliabilityEvent(QStringLiteral("network_memory_forget why=extension_no_data key=%1 node=%2 removed=%3")
-                             .arg(m_attemptNetKey, nodeId)
-                             .arg(int(removed)));
-    };
+    // Stage 2 is inert (the attempt owner is the only one that chooses a path): the extension never moves the
+    // session, so there is nothing to adopt and no way back to take; its no-data verdict reaches the owner through
+    // the app's own re-check (reenterVerifying -> the data check -> a lost live session).
+    ops.adoptSwitch = [](const QString &, const avpn::WatchSwitchStamp &) { return false; };
+    ops.returnFacts = [] { return avpn::WatchReturnInputs{}; };
+    ops.restartToChoice = [] {};
+    ops.forgetNode = [](const QString &) {};
     m_watchResume = std::make_unique<avpn::TunnelWatchResume>(std::move(ops));
 #endif
 }
@@ -3500,52 +3586,6 @@ void AvpnEngineQml::tickTunnelWatchFreeze(qint64 sinceMs)
 #endif
 }
 
-#ifdef Q_OS_IOS
-// Build 142: the native told a handshake timeout of a session whose extension answered "no handshake, no data".
-// The one rule decides (DebugSnapshot.h::decideNoHandshake / handleNoHandshakeFact); here only its effects.
-void AvpnEngineQml::onHandshakeNeverCompleted(int timeouts, qint64 requestSentMs)
-{
-    avpn::NoHandshakeOps ops;
-    ops.facts = [this, requestSentMs] {
-        avpn::NoHandshakeInputs in;
-        in.fresh = avpn::nativeFactFresh(requestSentMs, freezeBoundaryMs());
-        in.ownStartInFlight = m_op == Op::Starting && m_wantConnected;
-        in.tunnelHeldUp = m_op == Op::None && m_wantConnected
-            && (m_engine.state() == avpn::EngineState::Connected || m_engine.isVerifying());
-        const avpn::SubscriptionNode *node = m_engine.nodeById(m_engine.currentNodeId());
-        in.nodeIsAwg = node && !avpn::isUpstreamNode(*node) && !avpn::isXrayProto(avpn::protoOf(*node));
-        in.autoMode = m_engine.transportMode() == avpn::TransportMode::Auto;
-        const QStringList hint = m_engine.attemptOrder();
-        in.explicitNode = !hint.isEmpty() && hint.first() == m_engine.currentNodeId();
-        in.alreadyLeft = m_engine.awgBanned();
-        in.xrayPick = (in.ownStartInFlight || in.tunnelHeldUp) && in.nodeIsAwg && m_engine.xrayPickWithoutAwg();
-        return in;
-    };
-    ops.journal = [this](const QString &line) { reliabilityEvent(line); };
-    ops.banAwg = [this] {
-        m_engine.banAwgForAttempt();
-        persistTransportHistory();
-    };
-    ops.endSession = [this](bool ownStart) {
-        if (ownStart) {
-            // A failed start, as the start watchdog's: counted, the network memory forgets its node.
-            m_op = Op::None;
-            m_opInFlight = false;
-            m_busy = false;
-            m_watchdog.stop();
-            ++m_startAttempts;
-            forgetNetworkMemoryAfterFailedStart("no_handshake");
-        } else {
-            forgetNetworkPath(m_engine.currentNodeId()); // this network's memory: the node did not carry data
-        }
-        m_stopRetries = 0;
-        guardedStop("no_handshake"); // the intent stays on: reconcile starts the next pick after Disconnected
-        emit changed();
-    };
-    avpn::handleNoHandshakeFact(timeouts, m_engine.currentNodeId(), ops);
-}
-#endif
-
 // The status reply said the tunnel has no engine (a failed in-place switch; the extension keeps retrying
 // the previous node). The app does what it does for a dead tunnel of its own: the ordinary restart
 // through reconcile. Once: the flags below hold until that restart is under way; not in the background.
@@ -3565,7 +3605,6 @@ void AvpnEngineQml::onTunnelEngineDown()
     m_needsRestart = true;
     m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
     m_restartOrigin = QStringLiteral("engine_down");
-    m_startAttempts = 0;
     emit changed();
     reconcile();
 #endif
@@ -3726,7 +3765,7 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     const QString proto = metadata.value(QStringLiteral("proto")).toString();
     const QString endpoint = metadata.value(QStringLiteral("endpoint")).toString();
     if (!m_engine.adoptTunnelConnected(nodeId, proto, endpoint)
-        && m_engine.state() != avpn::EngineState::Connected) {
+        && m_engine.state() != avpn::EngineState::Connected && !m_engine.isVerifying()) {
         // Нода сессии не в пуле (или identity сменилась): факт показываем, identity неизвестна.
         // Health работает и без неё (K5/B3); после reseed движок опознаёт по endpoint (A5).
         m_engine.requestStop();
@@ -3736,14 +3775,20 @@ bool AvpnEngineQml::tryAdoptObservedTunnel(const char *why)
     identifyAdoptedSession();
     reliabilityEvent(QStringLiteral("adopt_%1 verdict=%2 node=%3")
                          .arg(QLatin1String(why)).arg(int(verdict)).arg(m_engine.currentNodeId()));
-    return m_engine.state() == avpn::EngineState::Connected;
+    syncAttempt();
+    // Decision 6 of 18.11: the adopted tunnel becomes the owner's leg after one in-tunnel data check.
+    if (m_engine.isVerifying() && m_lastTunnelState == Vpn::Connected)
+        startDataPathVerification();
+    return m_engine.state() == avpn::EngineState::Connected || m_engine.isVerifying();
 #else
     Q_UNUSED(why)
     // Не-iOS платформы: поведение базы 3c8cc74e — адопт, если наша операция не в полёте.
     if (m_op != Op::None)
         return false;
     m_wantConnected = true;
-    return m_engine.adoptTunnelConnected();
+    const bool adopted = m_engine.adoptTunnelConnected();
+    syncAttempt();
+    return adopted;
 #endif
 }
 
@@ -3809,11 +3854,8 @@ void AvpnEngineQml::onTick()
     if (healthHeld) {
         // nothing: decided again after the snapshot or the timeout
     } else if (m_engine.tick(QDateTime::currentSecsSinceEpoch())) {
-        persistTransportHistory(); // AVPN awg31-xray-v1: DEAD записан в историю транспорта
-        emit changed(); // произошёл свитч
-    } else if (surrenderIfDataPlaneDead()) {
-        persistTransportHistory(); // AVPN (ревью волны, MAJOR-1): провал записан, дальше — честный OFF
-        return;
+        syncAttempt(); // a dead live session: the failover attempt of the owner
+        emit changed();
     }
 
     // AVPN (реальные палочки): пока соединение активно — мерим RTT через туннель (async, без nested loop).
@@ -3945,7 +3987,7 @@ QJsonObject AvpnEngineQml::benchExtra() const
         tr.insert(QStringLiteral("probe_fail_streak"), m_liveFailStreak);
         // AVPN (ревью волны, MAJOR-1): подряд идущие провалы data-plane за сессию — паттерн
         // «оператор × сеть × сколько кандидатов не пропустили трафик» ищется по bench_reports.
-        tr.insert(QStringLiteral("dataplane_fail_streak"), m_engine.dataPlaneFailStreak());
+        tr.insert(QStringLiteral("attempt_checked"), m_engine.attemptChecked());
         tr.insert(QStringLiteral("probe_reachable"), m_liveReachable);
         extra.insert(QStringLiteral("transport"), tr);
     }
@@ -5352,6 +5394,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // profile refused before the core started) proves nothing new and asks for no status (D4 of 16.11).
         observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
+            m_tunnel.upstreamTunnelDown(); // seat releases held for this stop go now, over the direct path
             m_stopGeneration = SessionGeneration{};
             m_stopRetries = 0;
             m_stopRetryTimer.stop();
@@ -5426,10 +5469,6 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         }
         break;
     case Vpn::Error:
-        // AVPN awg31-xray-v1: провал подъёма (наш start в полёте) — в локальную историю транспорта
-        // (EWMA успеха по паре локация×proto: следующий выбор демоутит транспорт после 2+ провалов).
-        if (m_op == Op::Starting && m_engine.recordTransportOutcome(false))
-            persistTransportHistory();
         ++m_verifyEpoch; // стейл-ответы верификации xray выбрасываются
         // A1b: статус перед новым стартом запросит reconcile (AwaitStatus, backoff 1/2/4 с).
         // AVPN (анти-авто-коннект): РАНЬШЕ обрыв из Connected → notifyConnectionLost() → реактивный
@@ -5438,7 +5477,11 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // с другим VPN и самоподключаясь при входе в приложение. Теперь как обычное VPN-приложение:
         // фиксируем факт, НЕ реконнектим сами. (Failover по РЕАЛЬНОЙ смерти ноды остаётся в health-loop
         // tick — onTick→m_engine.tick, см. §анти-авто-коннект ниже + CONNECT-INVARIANTS §13.)
-        m_engine.onTunnelError();
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+        m_engine.onTunnelError(/*tunnelGone=*/false); // iOS/MACOS_NE: Error does not prove the teardown
+#else
+        m_engine.onTunnelError(/*tunnelGone=*/true);
+#endif
         break;
     case Vpn::Disconnected:
         // onTunnelDisconnected САМ продолжит НАМЕРЕННЫЙ свитч ноды (Switching+pendingSwitch → up());
@@ -5472,7 +5515,6 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
     // состояние ПОСЛЕ onTunnelError — всегда "error", и Error посреди внутреннего failover снимал
     // намерение без тоста) плюс флаг прерванного свитча движка (K5/B5). Внутренний свитч: намерение
     // сохраняется, следующий старт — после подтверждённого терминала (A1b), с m_startAttempts.
-    bool engineOwnSwitchLost = false;
     // Ревью CL-A r2 (K3): после liveSessionFound фасад снял свой Op::Starting и ждёт реальный статус.
     // Disconnected/Error до Connected — это сорвавшийся Connect пользователя (намерение сохраняем,
     // попытка считается, reconcile повторит старт), а не внешний обрыв с тихим снятием намерения.
@@ -5487,7 +5529,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         const QString est = m_engine.debugSnapshot().state; // DebugSnapshot-структура (поле, не QVariantMap)
         const bool weAreOperating = (m_op != Op::None) || liveSessionLost; // наш start/stop в полёте
         const bool engineStillSwitching = (s == Vpn::Disconnected && engineOwnTransitionState(est));
-        const bool interrupted = m_engine.hasInterruptedSwitch();
+        const bool interrupted = m_engine.attemptRunning(); // the attempt owner walks on: our own operation
         // Волна-3 (2026-09-28): класс обрыва вместо «внешний / не внешний». Намерение снимает ТОЛЬКО
         // External (§13); «нет сети» → ждём аплинк; «упал компонент» (демон) → повтор через reconcile.
         const bool componentLost = componentLossFresh(m_componentLost, m_componentLostMs,
@@ -5504,13 +5546,10 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
             m_waitUplink = true;
             reliabilityEvent(QStringLiteral("loss class=no_network intent kept"));
         } else if (loss == LossClass::Component && m_wantConnected) {
-            // Волна-4 (ревью): попытки НЕ обнуляем — крэш-луп службы уходит в паузу 30/60/120 с.
-            engineOwnSwitchLost = true; // повтор через reconcile, когда служба вернётся (guardedStart ждёт launchd)
-            reliabilityEvent(QStringLiteral("loss class=component intent kept"));
+            reliabilityEvent(QStringLiteral("loss class=component intent kept")); // reconcile starts a new attempt
         } else if (!weAreOperating && !engineStillSwitching && m_wantConnected) {
-            engineOwnSwitchLost = true; // свитч/failover движка сорвался — повтор через reconcile
-            reliabilityEvent(QStringLiteral("engine_switch_lost state_before=%1 cause=%2")
-                                 .arg(engineStateBefore, m_engine.interruptedSwitchCause()));
+            reliabilityEvent(QStringLiteral("engine_switch_lost state_before=%1 attempt=%2")
+                                 .arg(engineStateBefore).arg(int(m_engine.attemptRunning())));
         }
         m_adoptedDeadStop = false; // review of 136: the reason belongs to this one terminal state
     }
@@ -5531,32 +5570,22 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
             m_opInFlight = false;
             m_busy = false;
             m_watchdog.stop();
-            if (s == Vpn::Connected) {
-                m_startAttempts = 0;                 // успех — счётчик попыток сброшен
-                // Волна-4 (ревью): раунд бэкоффа НЕ сбрасываем на Connected — при мёртвом data-plane
-                // туннель доходит до Connected каждый цикл, и пауза после «сдаёмся» не росла;
-                // сброс — по подтверждённым данным (живая проба достижима) и в start()/stop().
+            Q_UNUSED(finished)
+            if (s == Vpn::Connected)
                 m_waitUplink = false;
-            }
-            else if ((s == Vpn::Error && finished == Op::Starting) || engineOwnSwitchLost
-                     || liveSessionLost) {
-                ++m_startAttempts;                   // connect не удался — считаем попытку (анти-зацикливание)
-                if (finished == Op::Starting)
-                    forgetNetworkMemoryAfterFailedStart("native_error");
-            }
         } else {
             m_busy = true;                           // идёт переход — занято
         }
         // AVPN awg31-xray-v1: xray поднят, но ещё не подтверждён пробой — орб остаётся «занят»
         // (спиннер «Подключаемся…»/«Проверяем трафик…»), stopping=false (намерение = онлайн).
-        if (m_engine.isVerifying())
+        if (m_engine.isVerifying() || m_engine.attemptRunning())
             m_busy = true;
         // AVPN awg31-xray-v1 (reseed, инвариант §4.4): терминал → отложенное тело пула применяем
         // с верха цикла событий (никогда из стека колбэка туннеля / Selector::pick).
         if (s == Vpn::Disconnected && m_engine.hasPendingReseed())
             QTimer::singleShot(0, this, [this]() { applyPendingReseed(); });
     }
-    persistTransportHistory(); // AVPN awg31-xray-v1: no-op, если движок ничего не записал
+    syncAttempt(); // path engine: the attempt's journal, ledger and result (no-op when nothing changed)
 
     // AVPN (реальные палочки): туннель не в Connected → гасим живые палочки (кэш RTT не должен
     // маскировать обрыв). При следующем Connected проба пере-сидирует SignalQuality с нуля.
@@ -5622,7 +5651,12 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     // Протокол-уровневая ошибка раньше терялась (сигнал не был подключён). Surface наружу в error().
     // AVPN (анти-авто-коннект): больше НЕ зовём notifyConnectionLost() (реактивный failover/реконнект) —
     // фиксируем факт ошибки; подключение только вручную. См. onConnectionStateChanged выше.
-    m_engine.onTunnelError();
+#if defined(Q_OS_IOS) || defined(MACOS_NE)
+    m_engine.onTunnelError(/*tunnelGone=*/false);
+#else
+    m_engine.onTunnelError(/*tunnelGone=*/true);
+#endif
+    syncAttempt();
     // AVPN (фикс залипания): ошибка ОБЯЗАНА снять op-in-flight (раньше не трогала m_pendingStart →
     // следующий start() мгновенно return → орб залипал навсегда). Теперь машина разблокируется.
     const Op finished = m_op;
@@ -5630,10 +5664,7 @@ void AvpnEngineQml::onVpnProtocolError(amnezia::ErrorCode code) // AVPN
     m_opInFlight = false;
     m_busy = false;
     m_watchdog.stop();
-    if (finished == Op::Starting) {
-        ++m_startAttempts;
-        forgetNetworkMemoryAfterFailedStart("protocol_error");
-    }
+    Q_UNUSED(finished)
     // AVPN: на iOS «InternalError» (код 101) — ЛОЖНЫЙ: m_vpnProtocol там всегда null (туннель ведёт
     // IosController, это норма), а VpnConnection::lastError() из-за этого отдаёт InternalError. Не пугаем
     // им пользователя (он лез тостом при смене сервера/rotateNext). Реальные ошибки показываем.
@@ -6007,12 +6038,7 @@ void AvpnEngineQml::noteUserStart()
     // Намерение: хотим быть онлайн (к авто/закреплённой ноде). Факт догонит reconcile() из терминала.
     m_wantConnected = true;
     m_startOrigin = StartOrigin::User; // plan v3 step 5: network memory may be read and written
-    m_engine.beginUserAttempt(); // upstream nodes: a new attempt - its start-failure exclusions are new
-    m_startAttempts = 0;        // ручной запуск — свежая серия попыток
-    m_startBackoffRound = 0;    // волна-3: свежая серия пауз
-    ++m_startRetryEpoch;        // волна-3: отменить отложенный повтор
     m_waitUplink = false;
-    m_engine.clearInterruptedSwitch();
     m_liveSessionPending = false;
     m_liveSessionTimer.stop();
     // AVPN (фикс-волна 2026-09-22, A1): ручной старт — свежий бюджет запросов статуса. Стоп в пути
@@ -6028,7 +6054,6 @@ void AvpnEngineQml::noteUserStart()
 void AvpnEngineQml::noteIntentChange()
 {
     ++m_intentSerial;
-    m_engine.clearAwgBan(); // build 142 (S5): any action of the person on the intent ends the transport ban
     // Every action on the intent (stop, start, Auto, another pick, ...) ends a seat taken for a switch that has not
     // brought it up yet - before any operation guard (review F1 of 17.11: Stop during the switch's own teardown
     // skipped guardedStop, and the held seat was never given back).
@@ -6071,7 +6096,6 @@ void AvpnEngineQml::stop()
     if (m_probe) m_probe->cancel();
     // Cancel internal failover immediately, even while its down/up is awaiting native.
     m_engine.requestStop();
-    m_engine.beginUserAttempt(); // upstream nodes: the attempt ended
     // AVPN (Task 7): явный stop() отменяет ожидающую авто-паузу (пользователь сам выключил VPN).
     m_pauseTimer.stop();
     m_paused = false;
@@ -6079,11 +6103,7 @@ void AvpnEngineQml::stop()
     // Намерение: хотим быть офлайн. reconcile() опустит туннель, если он поднят.
     m_wantConnected = false;
     m_needsRestart = false;
-    m_startAttempts = 0;
-    m_startBackoffRound = 0;    // волна-3
-    ++m_startRetryEpoch;        // волна-3: отменить отложенный повтор
     m_waitUplink = false;
-    m_engine.clearInterruptedSwitch();
     m_statusRequestAttempts = 0;
     m_statusRetryTimer.stop();
     m_liveSessionPending = false;
@@ -6127,8 +6147,18 @@ void AvpnEngineQml::reconcile()
     // мог выбрать даже только что признанную DEAD ноду. Из Switching движок выходит ТОЛЬКО через
     // колбэки туннеля (Connected/Error) — каждый снова ставит singleShot(0, reconcile), так что
     // гейт машину не подвешивает.
-    if (m_engine.state() == avpn::EngineState::Switching)
+    // Path engine (design 2026-11-17): while the attempt owner walks its candidates it is the only one that
+    // raises and lowers the tunnel; the facade only steps in for the person: an intent off or another choice
+    // (a restart) stops the walk through the ordinary stop.
+    if (m_engine.attemptRunning() || m_engine.state() == avpn::EngineState::Switching) {
+        if ((!m_wantConnected || m_needsRestart) && m_op != Op::Stopping) {
+            const bool restart = m_needsRestart;
+            m_needsRestart = false;
+            m_stopRetries = 0;
+            guardedStop(restart ? "attempt_restart" : "attempt_intent_off");
+        }
         return;
+    }
 
     const Vpn::ConnectionState s = m_lastTunnelState;
     const ObservedTunnel observed = s == Vpn::Connected ? ObservedTunnel::Connected
@@ -6189,29 +6219,6 @@ void AvpnEngineQml::reconcile()
             if (m_waitUplink && !uplinkUp()) {
                 // Волна-3: сети нет — не крутим попытки, старт придёт по событию аплинка.
                 reliabilityEvent(QStringLiteral("start_wait_uplink"));
-                emit changed();
-                return;
-            }
-            if (m_startAttempts >= 3) {  // постоянный провал connect при живой сети
-                m_startAttempts = 0;
-                m_engine.clearInterruptedSwitch();
-                if (avpn::TuningStore::flag(QStringLiteral("start_retry_backoff"), true)) {
-                    // Волна-3 (2026-09-28): как апстрим/Mullvad — намерение не снимаем, пауза с ростом
-                    // 30/60/120 с и снова; пользователь выключает сам. Раньше — intent_off и OFF навсегда.
-                    const int delay = startRetryBackoffMs(m_startBackoffRound++);
-                    const quint64 epoch = ++m_startRetryEpoch;
-                    reliabilityEvent(QStringLiteral("start_backoff round=%1 delay_ms=%2")
-                                         .arg(m_startBackoffRound).arg(delay));
-                    QTimer::singleShot(delay, this, [this, epoch]() {
-                        if (epoch != m_startRetryEpoch || !m_wantConnected || m_lastTunnelState == Vpn::Connected)
-                            return;
-                        reconcile();
-                    });
-                    emit changed();
-                    return;
-                }
-                m_wantConnected = false;
-                reliabilityEvent(QStringLiteral("intent_off why=start_attempts_exhausted")); // U10: кто снял намерение
                 emit changed();
                 return;
             }
@@ -6296,7 +6303,6 @@ void AvpnEngineQml::guardedStart()
                     // The flag used to stay set on this return: the next Connect skipped its own
                     // preparation, and until then the facade never looked idle (no mode admission).
                     m_startPrepared = false;
-                    ++m_startAttempts;
                     reliabilityEvent(QStringLiteral("intent_off why=svc_install_declined"));
                     emit error(cerr.isEmpty() ? tr("Установка службы VPN отменена") : cerr);
                     emit changed();
@@ -6323,13 +6329,9 @@ void AvpnEngineQml::guardedStart()
     m_opInFlight = true;
     m_busy = true;
     m_needsRestart = false;   // свежий старт всегда поднимает целевую (pin/auto) ноду — рестарт не нужен
-    // AVPN backend-first (final review MF-2): свежее значение сторожа на каждый взвод (server-driven,
-    // без ребилда); setInterval конструктора (15000) остаётся вкомпиленным дефолтом.
-    // Пол связан с handshake-бюджетом (ConnectTunables.h): watchdog ВСЕГДА > handshake_timeout,
-    // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
-    m_startWatchdogDeferrals = 0;              // волна-4 (P1-5): новый старт — новый бюджет перевзводов
+    // Path engine: no start watchdog - the attempt owner judges every leg by its own deadline (one owner of
+    // "this start failed", design 2026-11-17 §7).
     m_lastOwnOpMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P2-6): окно «своего» события сети
-    armWatchdog(startWatchdogMs()); // ревью CL-A r2: диалог «Разрешить VPN» продлевает
     emit changed();
 
     QString err;
@@ -6340,38 +6342,18 @@ void AvpnEngineQml::guardedStart()
     // к appendSplitTunnelingConfig, который читает routeMode/vpnSites из репозитория при openConnection.
     applyRuBypassSplit();
 
-    // Plan v3 step 5 (features.node_scan, default off): honest "Connected" for every transport and
-    // the network memory as the first candidate after the manual choice. Read once per start (the
-    // tunnel is down here, so the network medium is the physical one); the engine's own failovers
-    // within this attempt keep the setting. QSettings only - no network (§1).
-    {
-        const bool nodeScan = featureEnabled(QStringLiteral("node_scan"), false);
-        m_engine.setVerifyEveryTransport(nodeScan);
-        m_attemptOrigin = m_startOrigin; // the engine's heals inside this attempt inherit it
-        // The network key of this attempt: computed now, with the tunnel down (the real medium), and
-        // carried to the verdict (write) and the failure (forget).
-        m_attemptNetKey = nodeScan ? currentNetworkMemoryKey() : QString();
-        // Read the memory only for a start the user asked for with automatic choice: not on the
-        // explicit «Авто» tap (fastest by measurement), «Заменить сервер», Doctor or the node sweep.
-        const QString key = networkMemoryAllowed() ? m_attemptNetKey : QString();
-        QString remembered;
-        if (!key.isEmpty()) {
-            QSettings st;
-            remembered = avpn::networkMemoryReadStored(st, key, QDateTime::currentSecsSinceEpoch());
-        }
-        m_engine.setNetworkMemoryNode(remembered);
-        m_pathCheck.clear();
-        // Owner test 06.11: a remembered node without a fresh RTT (not in the selection pool) is not
-        // used for this attempt - the RTT pick decides (ServiceEngine::networkMemoryCandidate).
-        const QString skip = m_engine.networkMemorySkipReason();
-        const QString memoryLog = remembered.isEmpty() ? QStringLiteral("-")
-            : skip.isEmpty() ? remembered
-                             : QStringLiteral("skipped reason=%1 node=%2").arg(skip, remembered);
-        if (nodeScan)
-            reliabilityEvent(QStringLiteral("node_scan start origin=%1 net=%2 memory=%3")
-                                 .arg(int(m_attemptOrigin))
-                                 .arg(key.isEmpty() ? QStringLiteral("-") : key, memoryLog));
-    }
+    // Path engine: the network of this attempt (computed with the tunnel down - the real medium) and the
+    // user's choice; the owner reads the ledger of that network.
+    m_attemptOrigin = m_startOrigin;
+    m_pathCheck.clear();
+    m_engine.observeNetwork(currentNetworkObservation());
+    syncChoice();
+    reliabilityEvent(QStringLiteral("attempt_start origin=%1 net=%2 net_gen=%3 choice=%4 mode=%5")
+                         .arg(int(m_attemptOrigin))
+                         .arg(m_engine.network().local.isEmpty() ? QStringLiteral("-") : m_engine.network().local)
+                         .arg(m_engine.network().generation)
+                         .arg(choiceJournal())
+                         .arg(avpn::transportModeToString(m_engine.transportMode())));
 
     // AVPN (КОРНЕВОЙ фикс зависания UI + краша на 2-м коннекте): если подписка УЖЕ загружена
     // (bootstrap при старте или прошлый connect) — поднимаем туннель ЛОКАЛЬНО через m_engine.connect(),
@@ -6383,7 +6365,6 @@ void AvpnEngineQml::guardedStart()
     // на время вызова, чтобы переисполнение guardedStart из этого цикла отложилось (см. гард выше), а не
     // застекало второй loop.exec(). QScopedValueRollback гарантирует сброс даже при исключении.
     syncStandbyCandidates(); // upstream nodes: pack candidates against the pool in force (pure, no I/O)
-    m_engine.setFastTierEvidence(fastTierEvidenceNow()); // decided inside connect() (pure, no I/O)
     bool ok;
     {
         QScopedValueRollback<bool> syncGuard(m_inSyncNetCall, true);
@@ -6396,7 +6377,9 @@ void AvpnEngineQml::guardedStart()
         m_opInFlight = false;
         m_busy = false;
         m_watchdog.stop();
-        ++m_startAttempts;
+        syncAttempt(); // the attempt's journal lines and its result (ended at once)
+        m_wantConnected = false;
+        reliabilityEvent(QStringLiteral("intent_off why=attempt_not_started err=%1").arg(err));
         emit error(humanEngineError(err)); // AVPN awg31-xray-v1: no_transport/unsupported_proto → человеческий текст
         emit changed();
         return;
@@ -6405,6 +6388,7 @@ void AvpnEngineQml::guardedStart()
     writeTunnelWatchPlan("start"); // AVPN (iOS data watch, 141): before the queued up() reaches the extension
 #endif
     m_healthTimer.start();
+    syncAttempt();
     // up() в очереди — реальный Connecting→Connected/Error прилетит в onConnectionStateChanged, где
     // op-in-flight снимется. m_busy остаётся true до тех пор.
     emit changed();
@@ -6447,7 +6431,8 @@ void AvpnEngineQml::finishSvcInstall(bool ok, const QString &err)
     m_svcInstalling = false;
     m_busy = false;              // guardedStart сам вернёт busy, если старт продолжится
     if (!ok) {
-        ++m_startAttempts;
+        m_wantConnected = false;
+        reliabilityEvent(QStringLiteral("intent_off why=svc_install_failed"));
         emit error(err.isEmpty() ? tr("Не удалось установить службу VPN") : err);
         emit changed();
         return;
@@ -6598,7 +6583,6 @@ void AvpnEngineQml::wakeLivenessProbe()
         qInfo() << "[wake] tunnel dead after sleep — restarting (our operation)";
         m_wakeRestartPending = true;
         m_wakeTries = 1;
-        m_startAttempts = 0;                     // wake-попытки меряем своим капом
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("wake");
@@ -6626,7 +6610,6 @@ void AvpnEngineQml::wakeKick()
     // Намерение восстанавливаем: неудача СОБСТВЕННОГО wake-рестарта ≠ «пользователь выключил»
     // (спека §2.1 шаг 4). Это не авто-коннект §13 — операция началась с живого туннеля до сна.
     m_wantConnected = true;
-    m_startAttempts = 0;
     reconcile();
 }
 
@@ -6722,15 +6705,14 @@ void AvpnEngineQml::daemonDirectDeactivate()
 }
 #endif
 
-void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
+void AvpnEngineQml::guardedStop(const char *why)
 {
     // Критик полноты (U10, жалоба 2 «сам выключается»): каждый наш стоп подписан причиной —
     // кольцо reliability уходит в отчёты Доктора/краша, по нему видно, КТО погасил туннель.
-    keepEngineSwitch = keepEngineSwitch && m_engine.hasInterruptedSwitch();
     m_lastOwnOpMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P2-6): окно «своего» события сети
-    reliabilityEvent(QStringLiteral("guarded_stop why=%1 native=%2 intent_on=%3 engine=%4 keep_switch=%5")
+    reliabilityEvent(QStringLiteral("guarded_stop why=%1 native=%2 intent_on=%3 engine=%4")
                          .arg(QLatin1String(why)).arg(int(m_lastTunnelState)).arg(m_wantConnected)
-                         .arg(m_engine.debugSnapshot().state).arg(keepEngineSwitch));
+                         .arg(m_engine.debugSnapshot().state));
     cancelStartPreparation();
     if (m_probe) m_probe->cancel();
     if (!m_wantConnected)
@@ -6757,9 +6739,8 @@ void AvpnEngineQml::guardedStop(const char *why, bool keepEngineSwitch)
     // иначе сторож рвёт штатный медленный коннект (ревью 2026-07-11).
     armWatchdog(avpn::reconcileWatchdogMsTuned());
     m_healthTimer.stop();
-    // Критик полноты (жалобы 1/2): повтор после дедлайна свитча — без requestStop(), иначе он
-    // стирал цель повтора (в том числе переподъём EE), бюджет лечения и стрик data-plane движка.
-    facadeEngineStop(m_engine, keepEngineSwitch);
+    // The attempt owner learns of the stop (its attempt ends StoppedByUser once the stop is confirmed).
+    m_engine.requestStop();
     // AVPN (разбор 2026-09-23): стоп с намерением ON — часть перезапуска; фоновое время iOS берём ДО
     // стопа, чтобы свёрнутое приложение дожило до Disconnected и отправило старт.
     syncRestartGuard();
@@ -6801,24 +6782,6 @@ void AvpnEngineQml::onWatchdog()
 {
     if (!m_opInFlight)
         return;
-    // 5.1.109 (R7): the start watchdog fired late - the app was frozen past its deadline (device 269,
-    // builds 128/138: a working session stopped by an overdue start watchdog). Re-arm once for the same
-    // operation without spending a deferral or an attempt and ask for status; a Connected in between
-    // completes the start, a second late firing is judged as before.
-    if (m_op == Op::Starting && m_lastTunnelState != Vpn::Connected && m_watchdogArmedMs >= 0) {
-        const avpn::DeadlineTick tick = avpn::decideDeadlineTick(
-            QDateTime::currentMSecsSinceEpoch() - m_watchdogArmedMs, m_watchdog.interval());
-        if (avpn::rearmStartWatchdogAfterFreeze(tick, m_watchdogFreezeRearmed)) {
-            reliabilityEvent(QStringLiteral("watchdog_start_frozen_rearm frozen_ms=%1 native=%2")
-                                 .arg(tick.frozenMs).arg(int(m_lastTunnelState)));
-            m_engine.noteAppFrozenDuringUp(); // R7d: no time-to-traffic sample for this start
-            const int interval = m_watchdog.interval();
-            armWatchdog(interval, /*freezeRearm=*/true);
-            m_watchdogFreezeRearmed = true;
-            requestFreshTunnelStatus();
-            return;
-        }
-    }
     const Op finished = m_op;
     m_op = Op::None;
     m_opInFlight = false;
@@ -6847,43 +6810,6 @@ void AvpnEngineQml::onWatchdog()
         emit changed();
         reconcile();
 #endif
-    } else if (finished == Op::Starting && m_lastTunnelState != Vpn::Connected) {
-#if defined(Q_OS_IOS) || defined(MACOS_NE)
-        // Волна-4 (P1-5): натив сообщает живую NE-сессию (Connecting/Reconnecting) — его бюджеты
-        // (дедлайн коннекта, рукопожатие 3×12 с → Error+stop) сами дадут терминал. 15-секундный
-        // сторож гасил сессию посреди медленного рукопожатия на сотовой (12 watchdog_start/9 у-сут).
-        const bool nativeAlive = m_lastTunnelState == Vpn::Connecting || m_lastTunnelState == Vpn::Reconnecting;
-        if (decideStartWatchdog(nativeAlive, m_startWatchdogDeferrals) == StartWatchdog::Defer) {
-            ++m_startWatchdogDeferrals;
-            m_op = finished;
-            m_opInFlight = true;
-            m_busy = true;
-            reliabilityEvent(QStringLiteral("watchdog_start_deferred native=%1 n=%2")
-                                 .arg(int(m_lastTunnelState)).arg(m_startWatchdogDeferrals));
-            armWatchdog(avpn::reconcileWatchdogMsTuned(), /*freezeRearm=*/true); // same operation
-            return;
-        }
-#endif
-        // connect завис без терминала → принудительный teardown (→ Disconnected → reconcile ретрайнет
-        // с учётом анти-зацикливания m_startAttempts, либо остановится, если попытки исчерпаны).
-        // Волна-3 (2026-09-28): без физического аплинка попытка НЕ считается — ждём сеть
-        // (26.09 12:43: 3×15 с в сеть без default route, маршрут вернулся за секунду до OFF).
-        const bool counted = judgeStartFailure(uplinkUp()) == StartFailure::CountAndRetry;
-        if (counted) {
-            ++m_startAttempts;
-            forgetNetworkMemoryAfterFailedStart("watchdog_start"); // owner test 06.11
-        } else {
-            m_waitUplink = true;
-        }
-        // AVPN (фикс-волна 2026-09-22, A1a): это НАШ стоп — через guardedStop (сторож стопа,
-        // ограниченные повторы, подтверждение Disconnected), а не голый down() без сторожа.
-        m_stopRetries = 0;
-        guardedStop(counted ? "watchdog_start" : "watchdog_start_offline");
-        // AVPN (белые списки): коннект не поднялся по watchdog — триггер раунда проб. Детектор
-        // сам проверит гейты (Cellular + туннель опущен + дебаунс); teardown выше уже запущен.
-        if (m_whitelistDetector)
-            m_whitelistDetector->noteConnectFailure();
-        emit changed();
     } else {
         emit changed();
         reconcile();
@@ -6922,9 +6848,7 @@ void AvpnEngineQml::onStopRetryTimer()
         return;
     }
     reliabilityEvent(QStringLiteral("stop_retry n=%1 native=%2").arg(m_stopRetries).arg(int(m_lastTunnelState)));
-    // Повтор стопа ради повтора прерванного свитча (дедлайн, A8) тоже сохраняет цель движка:
-    // пользовательский стоп/отказ запись уже сняли (clearInterruptedSwitch), тогда это обычный стоп.
-    guardedStop("stop_retry", /*keepEngineSwitch=*/true);
+    guardedStop("stop_retry");
 }
 
 void AvpnEngineQml::driveUnconfirmedStop(const char *why)
@@ -6958,15 +6882,6 @@ void AvpnEngineQml::driveUnconfirmedStop(const char *why)
 #endif
 }
 
-int AvpnEngineQml::startWatchdogMs() const
-{
-#if defined(Q_OS_IOS) || defined(MACOS_NE)
-    if (m_permissionPromptPending)
-        return avpn_ios::nativeTimings().permissionPromptCapMs + avpn::reconcileWatchdogMsTuned();
-#endif
-    return avpn::reconcileWatchdogMsTuned();
-}
-
 // Ревью CL-A r2 (K3): liveSessionFound, а реальный терминал так и не пришёл — не держим m_busy
 // вечно: перечитываем статус, считаем попытку и отдаём решение reconcile.
 void AvpnEngineQml::onLiveSessionTimeout()
@@ -6974,7 +6889,6 @@ void AvpnEngineQml::onLiveSessionTimeout()
     if (!m_liveSessionPending)
         return;
     m_liveSessionPending = false;
-    ++m_startAttempts;
     m_busy = false;
     reliabilityEvent(QStringLiteral("live_session_status_timeout native=%1").arg(int(m_lastTunnelState)));
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
@@ -7010,71 +6924,15 @@ void AvpnEngineQml::resolveUnconfirmedStop()
     QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
-// AVPN (фикс-волна 2026-09-22, A8/K5): истёк дедлайн фазы внутреннего свитча движка. Раньше:
-// намерение снималось, VPN гас с тостом (легальный медленный failover на сотовой рвался). Теперь —
-// повтор подключения обычным guardedStart через reconcile (сначала подтверждённый down), с
-// анти-зацикливанием m_startAttempts; намерение снимается только при исчерпании попыток.
-void AvpnEngineQml::onSwitchDeadline()
-{
-    reliabilityEvent(QStringLiteral("switch_deadline cause=%1 attempts=%2")
-                         .arg(m_engine.interruptedSwitchCause()).arg(m_startAttempts + 1));
-    if (m_probe) m_probe->cancel();
-    ++m_startAttempts;
-    m_needsRestart = false;
-    if (decideSwitchDeadline(m_startAttempts) == SwitchDeadlineAction::GiveUp
-        && avpn::TuningStore::flag(QStringLiteral("start_retry_backoff"), true)) {
-        // Волна-4 (P1-5): исчерпанный свитч не гасит VPN и не снимает намерение (у апстрима таких
-        // авто-выключений нет). Туннель поднят — остаёмся на нём и выравниваем движок по факту;
-        // опущен — reconcile уйдёт в паузу 30/60/120 с (m_startAttempts >= 3) и повторит.
-        m_engine.clearInterruptedSwitch();
-        m_wantConnected = true;
-        reliabilityEvent(QStringLiteral("switch_deadline_backoff attempts=%1 native=%2")
-                             .arg(m_startAttempts).arg(int(m_lastTunnelState)));
-        const bool downOrUnknown = m_lastTunnelState == Vpn::Disconnected || m_lastTunnelState == Vpn::Unknown;
-        if (switchGiveUpNeedsStop(downOrUnknown, m_op != Op::None)) {
-            // down() свитча уже мог уйти — поднятый/переходный туннель адоптировать нельзя (поздний
-            // Disconnected выглядел бы внешним обрывом); честный стоп, Disconnected → reconcile → пауза.
-            m_stopRetries = 0;
-            guardedStop("switch_deadline_backoff");
-        } else {
-            m_busy = m_op != Op::None;
-            QTimer::singleShot(0, this, [this]() { reconcile(); });
-        }
-        emit changed();
-        return;
-    }
-    if (decideSwitchDeadline(m_startAttempts) == SwitchDeadlineAction::GiveUp) {
-        m_wantConnected = false;
-        m_startAttempts = 0;
-        m_engine.clearInterruptedSwitch();
-        if (m_lastTunnelState != Vpn::Disconnected && m_op == Op::None)
-            guardedStop("switch_deadline_give_up");
-        else
-            m_busy = false;
-        emit changed();
-        emit error(tr("Не удалось переключить сервер. Подключитесь ещё раз."));
-        return;
-    }
-    m_wantConnected = true;
-    if (m_lastTunnelState == Vpn::Disconnected || m_op != Op::None) {
-        m_busy = m_op != Op::None;
-        QTimer::singleShot(0, this, [this]() { reconcile(); });
-    } else {
-        // подтверждённый down → reconcile поднимет цель. Критик полноты (жалобы 1/2): без
-        // requestStop() — connect() повторит сохранённую цель прерванного свитча (переподъём EE),
-        // а не пин/RTT/веса, и не сбросит бюджет лечения и стрик data-plane (кап карусели).
-        guardedStop("switch_deadline", /*keepEngineSwitch=*/true);
-    }
-    emit changed();
-}
-
 void AvpnEngineQml::reprobe()
 {
     noteIntentChange(); // AVPN Scanner
-    clearNetworkMemoryForAutoTap(); // plan v3 step 5 (#6): «Авто» = fastest, not the remembered path
+    // «Авто» clears no evidence (coordinator decision 4 of 18.11): the ledger keeps what this network proved.
     // AVPN: re-pick авто-ноды через единый reconcile (не дёргаем m_engine.connect() напрямую — это
     // обходило бы стейт-машину и давало back-to-back up()). Снимаем pin; если онлайн — перевыбираем.
     m_engine.clearPin();
+    m_pinExact = false;
+    m_exactRow.clear();
     persistPin();
     const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
     if (avpn::isTunnelUpStateName(st)) { // AVPN awg31-xray-v1: verifying = туннель поднят
@@ -7083,7 +6941,6 @@ void AvpnEngineQml::reprobe()
         m_needsRestart = true;   // переподнять на свежевыбранной авто-ноде
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("reprobe");
-        m_startAttempts = 0;
     }
     emit changed();
     reconcile();
@@ -7109,9 +6966,6 @@ static QString humanPinError(const QString &technical)
     qWarning() << "avpn: setPinnedNode failed:" << technical;
     if (technical.startsWith(QLatin1String("unsupported_proto")))
         return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
-    // AVPN awg31-xray-v1: ручной режим транспорта отфильтровал локацию/пул.
-    if (technical.startsWith(QLatin1String("no_transport")))
-        return AvpnEngineQml::tr("У этого сервера нет выбранного транспорта — переключите режим на «Авто»");
     return AvpnEngineQml::tr("Не удалось выбрать сервер — обновите список серверов");
 }
 
@@ -7137,7 +6991,13 @@ static QString upstreamNoticeText(avpn::UpstreamNotice n)
 static QString humanEngineError(const QString &technical)
 {
     if (technical.startsWith(QLatin1String("no_transport")))
-        return AvpnEngineQml::tr("У этого сервера нет выбранного транспорта — переключите режим на «Авто»");
+        return AvpnEngineQml::tr("В выбранном режиме нет ни одного сервера — включите режим «Авто»");
+    if (technical == QLatin1String("no_network"))
+        return AvpnEngineQml::tr("Нет сети — подключимся, когда она появится");
+    if (technical == QLatin1String("exact_unavailable"))
+        return AvpnEngineQml::tr("Этот сервер сейчас недоступен — выберите другой или «Авто»");
+    if (technical == QLatin1String("no nodes available"))
+        return AvpnEngineQml::tr("Нет доступных серверов — обновите список серверов");
     if (technical.startsWith(QLatin1String("unsupported_proto")))
         return AvpnEngineQml::tr("Сервер недоступен в этой версии приложения — обновите приложение");
     return technical;
@@ -7159,7 +7019,7 @@ void AvpnEngineQml::switchToNodeImpl(const QString &nodeId, bool persist)
 {
     noteIntentChange(); // AVPN Scanner
     QString err;
-    if (!m_engine.setPinnedNode(nodeId, err)) {
+    if (!pinServer(nodeId, err)) {
         emit error(humanPinError(err));
         return;
     }
@@ -7169,7 +7029,6 @@ void AvpnEngineQml::switchToNodeImpl(const QString &nodeId, bool persist)
     m_wantConnected = false;
     reliabilityEvent(QStringLiteral("intent_off why=select_node_offline")); // U10: кто снял намерение
     m_needsRestart = false;
-    m_startAttempts = 0;
     reconcile();
     emit changed();
 }
@@ -7201,7 +7060,7 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
     // Scanner's row tap, review F9 of 17.11), else the pin as it is now.
     const QString prevPin = pinBefore ? *pinBefore : m_engine.pinnedNodeId();
     QString err;
-    if (!m_engine.setPinnedNode(nodeId, err)) {
+    if (!pinServer(nodeId, err)) {
         emit error(humanPinError(err));
         return;
     }
@@ -7215,7 +7074,6 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
         m_needsRestart = intent.needsRestart; // поднят: stop→Disconnected→start; лежит: reconcile просто стартует
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("pin");
-        m_startAttempts = 0;
         // Seat first (D4 of 16.11): a provider node is not worth the working tunnel until its seat and a valid
         // profile are in hand - the seat is taken through the live tunnel now; onUpstreamPrepared restarts.
         const avpn::SubscriptionNode *target = m_engine.nodeById(nodeId);
@@ -7229,7 +7087,6 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
     } else {
         m_wantConnected = false; // офлайн: только цель, туннель не стартуем
         m_needsRestart = false;
-        m_startAttempts = 0;
     }
     emit changed();
     reconcile();
@@ -7243,19 +7100,19 @@ void AvpnEngineQml::pinAndReconnectImpl(const QString &nodeId, bool persist, boo
 // Модель «выбор = задать цель, коннект — кнопкой»: НЕ реконнектим автоматически (без back-to-back up()).
 void AvpnEngineQml::selectAuto()
 {
-    clearNetworkMemoryForAutoTap(); // plan v3 step 5 (#6): «Авто» = fastest, not the remembered path
-    selectAutoImpl(true); // явный выбор «Авто» пользователем
+    selectAutoImpl(true); // явный выбор «Авто» пользователем (clears no evidence: decision 4 of 18.11)
 }
 
 void AvpnEngineQml::selectAutoImpl(bool persist)
 {
     noteIntentChange(); // AVPN Scanner
     m_engine.clearPin();
+    m_pinExact = false;
+    m_exactRow.clear();
     if (persist) persistPin();
     m_wantConnected = false;
     reliabilityEvent(QStringLiteral("intent_off why=select_auto")); // U10: кто снял намерение
     m_needsRestart = false;
-    m_startAttempts = 0;
     reconcile();        // онлайн → guardedStop (орб OFF); оффлайн → no-op
     emit changed();
 }
@@ -7273,7 +7130,7 @@ void AvpnEngineQml::rotateNext()
         return;
     }
     QString err;
-    if (!m_engine.setPinnedNode(next, err)) {
+    if (!pinServer(next, err)) {
         emit error(humanPinError(err));
         return;
     }
@@ -7285,7 +7142,6 @@ void AvpnEngineQml::rotateNext()
     m_needsRestart = true;
     m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
     m_restartOrigin = QStringLiteral("rotate");
-    m_startAttempts = 0;
     emit changed();
     reconcile();
 }
@@ -7550,8 +7406,8 @@ void AvpnEngineQml::scanSyncState()
     // Seat first: the tapped provider row's chain has not touched the tunnel yet - the live node's data is not its.
     if (m_scanRow.active && !m_seatFirst.pending) {
         const QString engineNode = m_engine.currentNodeId();
-        const bool gaveUp = !m_wantConnected || m_startBackoffRound > m_scanRowBackoffRound
-                            || m_engine.dataPlaneExhausted();
+        const bool gaveUp = !m_wantConnected
+                            || (m_engine.state() == avpn::EngineState::Error && !m_engine.attemptRunning());
         const ScanRowStep st = scanRowAttemptObserve(m_scanRow, m_intentSerial, engineNode, m_dataFlowing, gaveUp);
         for (const QString &n : st.failed) {
             scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1").arg(n),
@@ -7650,15 +7506,19 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
         scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=%1").arg(why),
                     {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                      {QStringLiteral("why"), why}});
+        if (m_scanner)
+            m_scanner->connectRefused(nodeId); // a request that is not started ends with a result the Scanner gets
         return;
     }
     // The pin is checked before the intent changes: a row that cannot be pinned leaves everything as it was.
     const QString pinBefore = m_engine.pinnedNodeId(); // before the pin changes: a refused seat restores it
     QString err;
-    if (!m_engine.setPinnedNode(nodeId, err)) {
+    if (!pinServer(nodeId, err)) {
         scanJournal(QStringLiteral("scan_connect_ignored reason=scan_row why=pin node=%1").arg(nodeId),
                     {{QStringLiteral("event"), QStringLiteral("connect_ignored")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
                      {QStringLiteral("why"), QStringLiteral("pin")}, {QStringLiteral("node"), nodeId}});
+        if (m_scanner)
+            m_scanner->connectRefused(nodeId);
         emit error(humanPinError(err));
         return;
     }
@@ -7674,13 +7534,12 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
                  {QStringLiteral("order"), int(attemptOrder.size())}});
     if (rc.userStartBookkeeping)
         noteUserStart();
-    QStringList hint{nodeId};
-    hint << attemptOrder;
-    facadeScanRowHint(m_engine, hint, hintTtlMs);
+    Q_UNUSED(attemptOrder)
+    Q_UNUSED(hintTtlMs)
+    m_exactRow = nodeId; // a Scanner row is one exact path (never a fallback to another row or server)
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
                         rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);
     scanRowAttemptBegin(m_scanRow, nodeId, m_intentSerial);
-    m_scanRowBackoffRound = m_startBackoffRound;
 }
 
 // StartLightChecks: the light facts of «Ваше подключение» on every scan (plan §3, F9) from the existing
@@ -8072,7 +7931,6 @@ void AvpnEngineQml::setTransportMode(const QString &mode)
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("transport");
-        m_startAttempts = 0;
         reconcile();
     }
     emit changed();
@@ -8089,24 +7947,11 @@ void AvpnEngineQml::refreshDataFlowing()
     emit dataFlowingChanged();
 }
 
-void AvpnEngineQml::persistTransportHistory()
-{
-    if (!m_engine.transportHistoryDirty())
-        return;
-    QSettings s;
-    s.setValue(QStringLiteral("avpn/transportHistory"), m_engine.transportHistoryJson());
-    m_engine.clearTransportHistoryDirty();
-}
-
 // Побочные эффекты реального «Подключено» — единая точка для awg (Vpn::Connected) и xray (после verify).
 void AvpnEngineQml::onTunnelUpEffects()
 {
     cancelStartPreparation();
     m_healthTimer.start(); // Cold adoption also needs a health driver.
-    // AVPN awg31-xray-v1: исход подъёма в локальную историю транспорта (время до реального трафика);
-    // xray уже записал движок в verifySucceeded (повтор — no-op).
-    m_engine.recordTransportOutcome(true);
-    persistTransportHistory();
     // AVPN (Task 9): контекстный запрос разрешения на пуши — в момент очевидной ценности (VPN
     // поднялся), а не на холодном старте. Один раз за установку (persist). Мост дёрнет натив
     // (UNUserNotificationCenter + registerForRemoteNotifications); на desktop — no-op.
@@ -8196,7 +8041,7 @@ void AvpnEngineQml::verifyAttempt(int epoch)
     if (deferWhileTunnelWatchFrozen("verify", [this, epoch]() { verifyAttempt(epoch); }))
         return;
 #endif
-    const int budget = avpn::xrayVerifyTimeoutMsTuned();
+    const int budget = m_engine.dataCheckMs();
     const qint64 elapsed = m_verifyClock.elapsed();
     if (elapsed >= budget) {
         finishVerify(epoch, false);
@@ -8262,7 +8107,7 @@ void AvpnEngineQml::verifyAttempt(int epoch)
         case avpn::VerifyStep::KeepTrying:
             break;
         }
-        if (m_verifyClock.elapsed() >= avpn::xrayVerifyTimeoutMsTuned()) {
+        if (m_verifyClock.elapsed() >= m_engine.dataCheckMs()) {
             finishVerify(epoch, false);
             return;
         }
@@ -8294,10 +8139,7 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
         m_pathCheck = QLatin1String(avpn::upstreamVerdictName(v.verdict));
         reliabilityEvent(QStringLiteral("upstream_verdict verdict=%1 reason=%2 node=%3 fallback=generate_204")
                              .arg(m_pathCheck, v.reason, m_engine.currentNodeId()));
-        if (v.passes) {
-            rememberNetworkPath(m_engine.currentNodeId());
-        } else {
-            forgetNetworkPath(m_engine.currentNodeId());
+        if (!v.passes) {
             ok = false;
             reason = QStringLiteral("upstream %1 (failover)").arg(m_pathCheck);
         }
@@ -8307,34 +8149,26 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
     if (ok) {
         qInfo() << "[avpn verify]" << m_engine.currentNodeProto() << "data-plane verified in" << m_lastVerifyMs
                 << "ms, attempts" << m_verifyAttempts << "rx-proof" << m_lastVerifyRxProof;
-        m_engine.verifySucceeded();
-        m_busy = false;
-        onTunnelUpEffects();
+        m_engine.verifySucceeded(m_lastVerifyTtfbMs);
+        m_lastVerifyTtfbMs = -1;
+        syncAttempt();
+        if (m_engine.state() == avpn::EngineState::Connected) {
+            m_busy = false;
+            onTunnelUpEffects();
+        }
         emit changed();
         return;
     }
     qWarning() << "[avpn verify]" << m_engine.currentNodeProto() << "data-plane NOT verified after"
                << m_lastVerifyMs << "ms — failover" << reason;
-    // Движок: история (провал) + другой транспорт той же локации через двухфазный свитч
-    // (down → Disconnected → up), потом соседняя локация; кандидатов нет → Error при поднятом
-    // туннеле — гасим честно через reconcile (намерение OFF), как внешний провал.
+    // The one data-check event of the attempt owner (no data): recorded for this network, the leg goes down and
+    // the next candidate comes up - or, for a live session's re-check, the failover attempt begins.
     const bool leftUpstream = m_engine.currentNodeIsUpstream(); // release A: before the engine moves on
     m_engine.verifyFailed(reason);
-    persistTransportHistory();
-    // AVPN (независимое ревью волны, MAJOR-1): исчерпан кап подряд идущих провалов data-plane —
-    // отдельный текст (дело не в конкретном сервере, а в сети/ТСПУ), намерение снимается там же.
-    const bool surrendered = surrenderIfDataPlaneDead();
-    if (!surrendered && m_engine.state() == avpn::EngineState::Error) {
-        emit error(tr("Сервер не пропускает трафик — попробуйте другой сервер"));
-        m_wantConnected = false;
-        reliabilityEvent(QStringLiteral("intent_off why=verify_failed")); // U10: кто снял намерение
-        m_needsRestart = false;
-    } else if (!surrendered && leftUpstream && m_wantConnected) {
-        // Upstream nodes (release A): the data check of a provider node failed and the next node is being
-        // connected - a short notice by the verdict (no_data / not_through_provider); never for own nodes.
-        noticeUpstreamLeft(m_pathCheck);
-    }
-    m_busy = m_engine.state() == avpn::EngineState::Switching || m_op != Op::None; // волна-4: стоп surrender в пути
+    syncAttempt();
+    if (leftUpstream && m_wantConnected && m_engine.attemptRunning())
+        noticeUpstreamLeft(m_pathCheck); // a short notice by the verdict; never for own nodes
+    m_busy = m_engine.attemptRunning() || m_op != Op::None;
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
@@ -8350,10 +8184,7 @@ void AvpnEngineQml::startDataPathVerification()
         startUpstreamVerification();
         return;
     }
-    if (m_engine.verifyEveryTransport())
-        startWhoamiVerification();
-    else
-        startXrayVerification();
+    startWhoamiVerification(); // our node, any transport (path engine: every leg is judged by one data check)
 }
 
 void AvpnEngineQml::startWhoamiVerification()
@@ -8384,7 +8215,7 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
 #endif
     const QString token = authToken();
     // whoami gets at most ~60 % of the verify budget; the rest is the generate_204 tiebreak's.
-    const int budget = avpn::xrayVerifyTimeoutMsTuned();
+    const int budget = m_engine.dataCheckMs();
     const qint64 left = avpn::whoamiBudgetMs(budget) - m_verifyClock.elapsed();
     switch (avpn::whoamiAttemptGate(m_verifyAttempts, left, budget - m_verifyClock.elapsed())) {
     case avpn::WhoamiGate::NoEvidence:
@@ -8491,7 +8322,7 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
                          /*tiebreakDone=*/true);
             return;
         }
-        const qint64 leftNow = avpn::whoamiBudgetMs(avpn::xrayVerifyTimeoutMsTuned()) - m_verifyClock.elapsed();
+        const qint64 leftNow = avpn::whoamiBudgetMs(m_engine.dataCheckMs()) - m_verifyClock.elapsed();
         if (avpn::whoamiNextStep(v, o.httpStatus, m_verifyAttempts, leftNow) == avpn::WhoamiStep::Retry) {
             // One retry: no answer at all, or "past the VPN" on the first answer (routes of a fresh
             // tunnel may not have settled yet).
@@ -8528,13 +8359,11 @@ void AvpnEngineQml::finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString
         // included (finishVerify -> verifyFailed -> onDead).
         m_pathCheck = avpn::whoamiVerdictName(v);
         reliabilityEvent(QStringLiteral("whoami verdict=%1 node=%2 proto=%3 %4").arg(m_pathCheck, node, proto, facts));
-        forgetNetworkPath(node);
         finishVerify(epoch, false, avpn::whoamiFailoverReason(v));
         return;
     case avpn::WhoamiAction::Succeed: {
         m_pathCheck = avpn::whoamiVerdictName(v);
         reliabilityEvent(QStringLiteral("whoami verdict=%1 node=%2 proto=%3 %4").arg(m_pathCheck, node, proto, facts));
-        rememberNetworkPath(node);
         const avpn::TunnelStats st = m_tunnel.readStats();
         m_lastVerifyRxProof = st.valid && st.rxBytes > 0;
         finishVerify(epoch, true);
@@ -8545,7 +8374,14 @@ void AvpnEngineQml::finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString
         // data (the give-up streak stays - on a dead network health walks the ladder to the cap).
         m_pathCheck = avpn::whoamiVerdictName(avpn::WhoamiVerdict::CheckLimited);
         reliabilityEvent(QStringLiteral("whoami verdict=%1 node=%2 proto=%3 %4").arg(m_pathCheck, node, proto, facts));
-        finishVerifyInconclusive(epoch);
+        // An answer that came back through the tunnel (429/404 of our API, generate_204 of the tiebreak) is data;
+        // a check the app's suspension cut has no evidence either way.
+        if (facts.contains(QLatin1String("suspended")) || facts.contains(QLatin1String("no_evidence"))) {
+            finishVerifyInconclusive(epoch);
+        } else {
+            m_whoamiTiebreak = false;
+            finishVerify(epoch, true);
+        }
         return;
     }
 }
@@ -8560,129 +8396,13 @@ void AvpnEngineQml::finishVerifyInconclusive(int epoch)
     qInfo() << "[avpn verify]" << m_engine.currentNodeProto() << "data path not decided in" << m_lastVerifyMs
             << "ms — connected without the data-flows mark";
     m_engine.verifyInconclusive();
-    m_busy = false;
-    onTunnelUpEffects();
-    emit changed();
-}
-
-QString AvpnEngineQml::currentNetworkMemoryKey() const
-{
-    return avpn::networkMemoryKey(doctorNetType(), diagCarrier());
-}
-
-// Network memory belongs to attempts the user asked for (orb, picker, intents and the engine's
-// heals inside them). The explicit «Авто» tap, «Заменить сервер», Doctor and the node sweep neither
-// read nor write it: their paths say nothing about what the user's automatic start should prefer.
-bool AvpnEngineQml::networkMemoryAllowed() const
-{
-    return m_attemptOrigin == StartOrigin::User && !doctorRunning() && !sweepRunning();
-}
-
-void AvpnEngineQml::rememberNetworkPath(const QString &nodeId)
-{
-    if (!networkMemoryAllowed() || nodeId.isEmpty())
-        return;
-    const QString key = m_attemptNetKey; // computed at the start of this attempt (tunnel down)
-    if (key.isEmpty())
-        return;
-    QSettings s;
-    const QByteArray before = s.value(QLatin1String(avpn::kNetworkMemorySettingsKey)).toByteArray();
-    const QByteArray after = avpn::networkMemoryRemember(before, key, nodeId, QDateTime::currentSecsSinceEpoch());
-    if (after != before)
-        s.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey), after);
-}
-
-void AvpnEngineQml::forgetNetworkPath(const QString &nodeId)
-{
-    if (!networkMemoryAllowed() || nodeId.isEmpty())
-        return;
-    const QString key = m_attemptNetKey;
-    if (key.isEmpty())
-        return;
-    QSettings s;
-    if (avpn::networkMemoryForgetStored(s, key, nodeId))
-        reliabilityEvent(QStringLiteral("network_memory_forget net=%1 node=%2").arg(key, nodeId));
-}
-
-// Owner test 06.11 (device 36, build 135): a start the network memory chose never came up (native
-// Error after the handshake budget, protocol error, start watchdog). The retries of this attempt went
-// to the same remembered node again (memory is re-read per start and the session failure list did not
-// cover a failed start), so the ladder never reached the RTT pick. Forget that node for this network:
-// the retry of this attempt and later starts take the RTT pick.
-void AvpnEngineQml::forgetNetworkMemoryAfterFailedStart(const char *why)
-{
-    // Upstream nodes: every failed start of this attempt (native error, protocol error, start watchdog)
-    // also counts for the node's tier - in a whitelist window own nodes fail to start, and the upstream
-    // tier must open after K of them (no-op with the switch off or without upstream candidates).
-    m_engine.noteStartFailedForTier(QLatin1String(why));
-    const QString node = m_engine.networkMemoryStartNode();
-    if (node.isEmpty())
-        return;
-    m_engine.setNetworkMemoryNode(QString());
-    reliabilityEvent(QStringLiteral("network_memory_start_failed why=%1 node=%2").arg(QLatin1String(why), node));
-    forgetNetworkPath(node);
-}
-
-// #6: an explicit «Авто» tap (online reprobe or offline selectAuto) means "the fastest by
-// measurement" - drop the remembered path of this network until a later user connect proves one.
-// Online the attempt's key is used (computed with the tunnel down), offline the medium is real now.
-void AvpnEngineQml::clearNetworkMemoryForAutoTap()
-{
-    if (!featureEnabled(QStringLiteral("node_scan"), false))
-        return;
-    const QString st = debugSnapshot().value(QStringLiteral("state")).toString();
-    const QString key = (avpn::isTunnelUpStateName(st) && !m_attemptNetKey.isEmpty()) ? m_attemptNetKey
-                                                                                       : currentNetworkMemoryKey();
-    if (key.isEmpty())
-        return;
-    QSettings s;
-    const QByteArray before = s.value(QLatin1String(avpn::kNetworkMemorySettingsKey)).toByteArray();
-    const QByteArray after = avpn::networkMemoryClear(before, key);
-    if (after != before) {
-        s.setValue(QLatin1String(avpn::kNetworkMemorySettingsKey), after);
-        reliabilityEvent(QStringLiteral("network_memory_clear net=%1 why=auto_tap").arg(key));
-    }
-}
-
-// AVPN (независимое ревью волны, MAJOR-1): движок сдался — data-plane мёртв на всех перепробованных
-// узлах подряд (captive portal, ТСПУ, сеть без интернета). До этой правки цикл up → verifying →
-// verifyFailed → down → up крутился вечно, и пользователь не видел ни ошибки, ни причины. Теперь:
-// честный текст + снятие намерения (§13 — поднимает туннель только пользователь) + гашение через
-// reconcile (§2, монополия на туннель). Идемпотентно: requestStop() внутри guardedStop() обнуляет
-// счётчик, так что второй раз ветка не сработает.
-bool AvpnEngineQml::surrenderIfDataPlaneDead()
-{
-    if (!m_engine.dataPlaneExhausted() || m_engine.state() != avpn::EngineState::Error)
-        return false;
-    if (!m_wantConnected)
-        return false; // намерение уже снято (стоп/пауза) — гасить и жаловаться нечего
-    qWarning() << "[avpn] data-plane dead on every candidate — giving up (streak"
-               << m_engine.dataPlaneFailStreak() << ")";
-    if (m_startBackoffRound == 0 || !avpn::TuningStore::flag(QStringLiteral("start_retry_backoff"), true))
-        emit error(tr("Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова"));
-    if (avpn::TuningStore::flag(QStringLiteral("start_retry_backoff"), true)) {
-        // Волна-4 (P1-5): не OFF навсегда, а пауза 30/60/120 с с повтором (намерение держим, как
-        // апстрим/Mullvad). requestStop() сбрасывает внутренний свитч и стрик data-plane, иначе
-        // повтор упёрся бы в кап карусели; поднятый туннель гасим через сторожевой guardedStop.
-        reliabilityEvent(QStringLiteral("data_plane_surrender backoff streak=%1").arg(m_engine.dataPlaneFailStreak()));
-        m_engine.requestStop();
-        m_needsRestart = false;
+    syncAttempt();
+    if (m_engine.state() == avpn::EngineState::Connected) { // a live session's re-check: it stays
         m_busy = false;
-        m_startAttempts = 3;
-        if (m_lastTunnelState == Vpn::Connected && m_op == Op::None)
-            guardedStop("data_plane_surrender");
-        else
-            QTimer::singleShot(0, this, [this]() { reconcile(); });
-        emit changed();
-        return true;
+        onTunnelUpEffects();
     }
-    m_wantConnected = false;
-    reliabilityEvent(QStringLiteral("intent_off why=data_plane_surrender")); // U10: кто снял намерение
-    m_needsRestart = false;
-    m_busy = false;
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
-    return true;
 }
 
 // Reseed пула по pool_revision (см. refreshSubscription). Вызывается ТОЛЬКО с верха цикла событий.
@@ -9333,7 +9053,6 @@ void AvpnEngineQml::resumeFromPause()
     // Поднимаем туннель обратно только если до паузы он был активен. Иначе — просто снимаем флаг.
     if (m_wasConnected) {
         m_wantConnected = true;
-        m_startAttempts = 0;
         reconcile();
     }
     m_wasConnected = false;
@@ -10667,11 +10386,9 @@ void AvpnEngineQml::docRestoreSelection()
         m_needsRestart = true; // reconcile: stop→Disconnected→start на авто-выборе
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch(); // волна-4 (P1-6)
         m_restartOrigin = QStringLiteral("doctor_restore");
-        m_startAttempts = 0;
     } else if (!up && keep) {
         m_wantConnected = true; // туннель лежит после альтернатив — просто поднять на авто-выборе
         m_needsRestart = false;
-        m_startAttempts = 0;
     }
     emit changed();
     reconcile();
@@ -11788,7 +11505,7 @@ void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
 {
     if (epoch != m_verifyEpoch || !m_engine.isVerifying() || m_lastTunnelState != Vpn::Connected)
         return;
-    const int budget = avpn::xrayVerifyTimeoutMsTuned();
+    const int budget = m_engine.dataCheckMs();
     const qint64 left = budget - m_verifyClock.elapsed();
     // Lab 14.11 D3: the poll is also the clock of the seat confirmation's short early retries (the lease
     // owner's due work, normally on the 4 s health tick) - this loop's epoch and budget, no timer of its own.
@@ -11839,13 +11556,14 @@ void AvpnEngineQml::upstreamVerifyAttempt(int epoch)
         const avpn::UpstreamCheckInput in =
             avpn::upstreamCheckInputFrom(f, grant, avpn::upstreamUnverifiableStrictTuned(), limits);
         const avpn::UpstreamVerdictResult v = avpn::judgeUpstreamCheck(in);
+        m_lastUpstreamTtfbMs = int(f.ttfbMs);
         // Facts for the journal: codes and timings only - no host, token, address or lease id.
         const QString facts = QStringLiteral("http=%1 bytes=%2/%3 ms=%4 ttfb=%5 stall=%6 class=%7 asn_known=%8 attempt=%9")
                                   .arg(f.httpStatus).arg(f.bytesReceived).arg(f.bytesRequested).arg(f.elapsedMs)
                                   .arg(f.ttfbMs).arg(f.maxStallMs)
                                   .arg(f.egressClass.isEmpty() ? QStringLiteral("-") : f.egressClass.left(16))
                                   .arg(int(in.egressAsn > 0 && in.accessAsn > 0)).arg(m_upstreamVerifyAttempts);
-        const qint64 leftNow = avpn::xrayVerifyTimeoutMsTuned() - m_verifyClock.elapsed();
+        const qint64 leftNow = m_engine.dataCheckMs() - m_verifyClock.elapsed();
         // Lab 14.11 D3: a profile may refuse every connection in its first seconds - an attempt that got
         // nothing yet is retried inside this check's budget on a short growing spacing; a complete answer
         // (also a bad one: not through the provider, wrong digest) decides at once; when the budget is
@@ -11871,14 +11589,13 @@ void AvpnEngineQml::finishUpstreamVerify(int epoch, const avpn::UpstreamVerdictR
                          .arg(m_pathCheck, v.reason, v.pathReason.isEmpty() ? QStringLiteral("-") : v.pathReason, node,
                               facts));
     if (v.passes) {
-        rememberNetworkPath(node); // the memory of this network (inside the upstream tier, point 5)
         const avpn::TunnelStats st = m_tunnel.readStats();
         m_lastVerifyRxProof = st.valid && st.rxBytes > 0;
+        m_lastVerifyTtfbMs = m_lastUpstreamTtfbMs;
         finishVerify(epoch, true);
         return;
     }
-    // No data / not through the provider / strict unverifiable: the existing verifyFailed ladder.
-    forgetNetworkPath(node);
+    // No data / not through the provider / strict unverifiable: the leg's no-data outcome.
     finishVerify(epoch, false, QStringLiteral("upstream %1 (failover)").arg(m_pathCheck));
 }
 
@@ -11927,19 +11644,10 @@ void AvpnEngineQml::onUpstreamLeave(const QString &code, const QString &detail)
     reliabilityEvent(QStringLiteral("upstream_leave code=%1 detail=%2 node=%3")
                          .arg(code, detail.isEmpty() ? QStringLiteral("-") : detail, node));
     ++m_verifyEpoch; // a check of the left session is over
-    persistTransportHistory();
-    // The same handling as a failed data check (finishVerify): the cap gives up honestly; no candidate
-    // left -> Error with the tunnel up -> intent off, the tunnel goes down through reconcile.
-    const bool surrendered = surrenderIfDataPlaneDead();
-    if (!surrendered && m_engine.state() == avpn::EngineState::Error) {
-        emit error(tr("Сервер не пропускает трафик — попробуйте другой сервер"));
-        m_wantConnected = false;
-        reliabilityEvent(QStringLiteral("intent_off why=upstream_leave"));
-        m_needsRestart = false;
-    } else if (!surrendered && m_wantConnected) {
+    syncAttempt(); // the failover attempt of the owner walks on (or its result tells the person)
+    if (m_wantConnected && m_engine.attemptRunning())
         noticeUpstreamLeft(code); // release A: moving on to the next node
-    }
-    m_busy = m_engine.state() == avpn::EngineState::Switching || m_op != Op::None;
+    m_busy = m_engine.attemptRunning() || m_op != Op::None;
     emit changed();
     QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
@@ -11967,7 +11675,6 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
         m_needsRestart = true;
         m_restartRequestedMs = QDateTime::currentMSecsSinceEpoch();
         m_restartOrigin = QStringLiteral("pin");
-        m_startAttempts = 0;
         emit changed();
         reconcile();
         return;
@@ -11975,7 +11682,6 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
         // The working tunnel was never touched: the node is out for this attempt, the pick is undone.
         const avpn::UpstreamSeatFirst p = m_seatFirst;
         m_seatFirst = avpn::UpstreamSeatFirst();
-        m_engine.excludeForAttempt(nodeId, code);
         reliabilityEvent(QStringLiteral("upstream_start_failed node=%1 code=%2 live_kept=1").arg(nodeId, code));
         QString err;
         if (p.prevPin.isEmpty())
@@ -12018,19 +11724,6 @@ void AvpnEngineQml::applyUpstreamTunnelStatus(const QJsonObject &upstream)
     }
 }
 
-avpn::FastTierEvidence AvpnEngineQml::fastTierEvidenceNow() const
-{
-    avpn::FastTierEvidence e;
-    e.nowMs = QDateTime::currentMSecsSinceEpoch();
-    e.rttRoundAtMs = m_fastRoundAtMs;
-    e.ownProbed = m_fastRoundProbed;
-    e.ownAnswered = m_fastRoundAnsweredN;
-    e.apiTransportFailAtMs = m_apiTransportFailMs;
-    e.apiAnswerAtMs = m_apiAnswerMs;
-    e.whitelistActive = m_whitelistDetector && m_whitelistDetector->active();
-    return e;
-}
-
 QString AvpnEngineQml::upstreamNetworkKeyNow() const
 {
     // With our tunnel up the platform reports the tunnel's medium (macOS utun, iOS Wi-Fi as cellular):
@@ -12038,7 +11731,7 @@ QString AvpnEngineQml::upstreamNetworkKeyNow() const
     if (m_lastTunnelState != Vpn::Disconnected && m_lastTunnelState != Vpn::Unknown)
         return m_standbyNetKey.isEmpty() ? QStringLiteral("unknown") : m_standbyNetKey;
     return avpn::upstreamNetworkKey(doctorNetType(), diagCarrierAuto(), avpn::cellularGeneration(),
-                                    m_accessAsnByNet.value(currentNetworkMemoryKey()));
+                                    m_accessAsnByNet.value(m_engine.network().local));
 }
 
 void AvpnEngineQml::loadStandbyPackFromDisk()

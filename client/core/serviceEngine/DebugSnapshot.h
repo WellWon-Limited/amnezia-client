@@ -234,13 +234,6 @@ inline UnconfirmedStopStep decideUnconfirmedStop(const TeardownLatch &latch, Obs
 
 // A8: истёк дедлайн внутреннего свитча — повтор старта (обычный guardedStart), пока не исчерпан
 // анти-зацикливающий счётчик; намерение снимается только при исчерпании (с честной ошибкой).
-enum class SwitchDeadlineAction { RetryStart, GiveUp };
-inline SwitchDeadlineAction decideSwitchDeadline(int startAttemptsAfterThisFailure, int maxAttempts = 3)
-{
-    return startAttemptsAfterThisFailure < maxAttempts ? SwitchDeadlineAction::RetryStart
-                                                       : SwitchDeadlineAction::GiveUp;
-}
-
 // A9: Disconnected/Error — внешний обрыв (снять намерение, §13) только если ни мы (m_op), ни движок
 // (свой свитч/failover ДО этого колбэка или прерванный свитч) не вели операцию.
 inline bool engineOwnTransitionState(const QString &engineStateBeforeCallback)
@@ -249,13 +242,6 @@ inline bool engineOwnTransitionState(const QString &engineStateBeforeCallback)
         || engineStateBeforeCallback == QLatin1String("connecting")
         || engineStateBeforeCallback == QLatin1String("selecting");
 }
-inline bool tunnelLossIsExternal(bool weAreOperating, const QString &engineStateBeforeCallback,
-                                 bool engineInterruptedSwitch)
-{
-    return !weAreOperating && !engineOwnTransitionState(engineStateBeforeCallback)
-        && !engineInterruptedSwitch;
-}
-
 // Критик полноты (U8, жалоба 3): смена сети в фасаде — ТОЛЬКО noteNetworkChange движка. Раньше
 // фасад перед ней безусловно звал resetHealthSampling(): это обходило кап серии 2×grace и
 // «остывание» HealthLoop (REV-5), и при флаппинге чаще раза в ~12 с мёртвый туннель не доходил до
@@ -264,19 +250,6 @@ template <typename Engine>
 inline void facadeNoteNetworkChange(Engine &engine, qint64 nowEpoch = -1)
 {
     engine.noteNetworkChange(nowEpoch);
-}
-
-// Критик полноты (жалобы 1/2): стоп фасада. keepEngineSwitch=true — туннель опускаем ради ПОВТОРА
-// прерванного внутреннего свитча (дедлайн фазы, A8): requestStop() не зовём, иначе он стирал цель
-// повтора (interruptedSwitchTarget, в том числе переподъём EE), бюджет лечения ноды и стрик
-// провалов data-plane (кап карусели), и connect() выбирал по пину/весам. Выборку health чистим.
-template <typename Engine>
-inline void facadeEngineStop(Engine &engine, bool keepEngineSwitch)
-{
-    if (keepEngineSwitch && engine.hasInterruptedSwitch())
-        engine.resetHealthSampling();
-    else
-        engine.requestStop();
 }
 
 // Критик полноты (U1, жалоба 1 «сами перекидываются ноды»): Доктор пробует альтернативы и
@@ -454,14 +427,6 @@ inline DeadlineTick decideDeadlineTick(qint64 sinceLastTickMs, qint64 periodMs)
         return {true, 0};
     return {false, sinceLastTickMs - periodMs};
 }
-// The start watchdog (one-shot) fired late: re-arm it once for the same operation without spending a
-// deferral or an attempt, and ask for status (device 269, builds 128/138: a working session was
-// stopped by an overdue start watchdog). A second late firing of the same operation is judged.
-inline bool rearmStartWatchdogAfterFreeze(const DeadlineTick &tick, bool rearmedThisOperation)
-{
-    return !tick.evaluate && !rearmedThisOperation;
-}
-
 // A10: бюджет подготовки старта. С пулом — мягкий бюджет завершает подготовку; без пула
 // (свежая установка: enroll+fetch) намерение НЕ снимается до общего потолка (~20 с).
 // Волна «как апстрим» (2026-09-28): мягкий бюджет 6 с → 2 с. С пулом подготовка ждёт только
@@ -478,23 +443,14 @@ inline SelectionBudget decideSelectionBudget(bool haveSubscription, qint64 elaps
         return elapsedMs >= softBudgetMs ? SelectionBudget::Finish : SelectionBudget::KeepWaiting;
     return elapsedMs >= ceilingMs ? SelectionBudget::GiveUp : SelectionBudget::KeepWaiting;
 }
-// A11: ICMP-раунд стартует сразу, параллельно refresh, если нет пригодного pin и есть пул.
-inline bool startRttRoundImmediately(bool hasConnectablePin, bool haveSubscription)
+// Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1 «кнопка Connect в сеть не ходит»): что делать на
+// входе в подготовку старта. Пул уже есть (LKG/последний refresh) - подключаемся сразу: the attempt owner orders
+// the candidates by the ledger of this network and the server prior, no ICMP round is waited for (path engine,
+// design 2026-11-17 §7). Без пула - bootstrap.
+enum class StartPrep { ConnectNow, AwaitPool };
+inline StartPrep decideStartPreparation(bool haveSubscription)
 {
-    return !hasConnectablePin && haveSubscription;
-}
-// Волна «как апстрим» (2026-09-28, CONNECT-INVARIANTS §1 «кнопка Connect в сеть не ходит»):
-// что делать на входе в подготовку старта. Пул уже есть (LKG/последний refresh), и цель известна —
-// закреплённая локация или свежий (≤ TTL) замер RTT — подключаемся сразу; пул обновляют фоновые
-// refresh (выход на экран, таймер), не кнопка. Без цели — только ICMP-раунд; без пула — bootstrap.
-enum class StartPrep { ConnectNow, MeasureRtt, AwaitPool };
-inline StartPrep decideStartPreparation(bool haveSubscription, bool hasConnectablePin, bool haveFreshRtt)
-{
-    if (!haveSubscription)
-        return StartPrep::AwaitPool;
-    if (hasConnectablePin || haveFreshRtt)
-        return StartPrep::ConnectNow;
-    return StartPrep::MeasureRtt;
+    return haveSubscription ? StartPrep::ConnectNow : StartPrep::AwaitPool;
 }
 // Волна «как апстрим» (2026-09-28): фоновые сетевые опросы — пока окно приложения активно. У апстрима
 // периодических сетевых таймеров нет вовсе; у нас HEAD /v1/ping шёл каждые 4 с и /v1/subscription
@@ -512,15 +468,6 @@ inline bool liveProbeDue(bool flagOn, bool connected, bool uiActive, int bgTick)
         return false;
     return uiActive || (bgTick > 0 && bgTick % kBackgroundProbeEveryTicks == 0);
 }
-// Волна-2: «подключаемся сразу по кэшу RTT» — только если замер сделан ПОСЛЕ последней смены
-// сети и покрывает все авто-ноды пула. Частичный замер (EE потерял пакет, US измерен) или замер
-// из прошлой сети (Wi-Fi → LTE) уводил бы на дальнюю ноду без раунда.
-inline bool rttCoverageFresh(int eligible, int measuredEligible, qint64 rttAgeMs, qint64 sinceNetChangeMs)
-{
-    if (eligible <= 0 || measuredEligible < eligible || rttAgeMs < 0)
-        return false;
-    return sinceNetChangeMs < 0 || rttAgeMs < sinceNetChangeMs;
-}
 inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 {
     return uiActive ? configuredTicks : qMax(configuredTicks, kBackgroundTrafficSyncTicks);
@@ -532,17 +479,6 @@ inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 // (2) исчерпание попыток при живой сети = пауза с ростом 30/60/120 с, не OFF (пользователь
 // всегда может выключить сам); (3) обрыв классифицируется, намерение снимает ТОЛЬКО внешний
 // (§13: пользователь/другой VPN/ОС), а «нет сети» и «упал компонент» его держат.
-enum class StartFailure { CountAndRetry, WaitUplink };
-inline StartFailure judgeStartFailure(bool uplinkUp)
-{
-    return uplinkUp ? StartFailure::CountAndRetry : StartFailure::WaitUplink;
-}
-inline int startRetryBackoffMs(int exhaustedRounds)
-{
-    static const int steps[] = { 30000, 60000, 120000 };
-    const int i = exhaustedRounds < 0 ? 0 : (exhaustedRounds > 2 ? 2 : exhaustedRounds);
-    return steps[i];
-}
 enum class LossClass { Own, External, NoNetwork, Component };
 inline LossClass classifyLoss(bool weAreOperating, const QString &engineStateBeforeCallback,
                               bool engineInterruptedSwitch, bool componentLost, bool uplinkUp)
@@ -633,12 +569,6 @@ inline const char *orbTapName(OrbTap d)
 // сессия есть (Connecting/Reconnecting), сторож перевзводится, но не дольше бюджета рукопожатия
 // натива (3×12 с): для СВОЕГО старта натив Error не отдаёт (m_connectPending снят до
 // startVPNTunnel, после 36 с — только Reconnecting), поэтому потолок держит фасад: 3×15 с.
-enum class StartWatchdog { Stop, Defer };
-inline StartWatchdog decideStartWatchdog(bool nativeSessionAlive, int deferrals, int maxDeferrals = 2)
-{
-    return (nativeSessionAlive && deferrals < maxDeferrals) ? StartWatchdog::Defer : StartWatchdog::Stop;
-}
-
 // P2-2: отказ API идёт в edge-walk/детектор белых списков, только если он честный: не наш abort
 // при гашении туннеля (OperationCanceled без таймаута), не запрос, начатый до заморозки iOS
 // (t0 < момент выхода на экран), не отказ в окне 5 с после своего перехода туннеля (keep-alive
@@ -756,14 +686,6 @@ constexpr qint64 kRestartRequestTtlMs = 120000;
 inline bool restartRequestStale(qint64 requestedMs, qint64 nowMs)
 {
     return requestedMs > 0 && nowMs - requestedMs > kRestartRequestTtlMs;
-}
-
-// P1-5: исчерпан дедлайн внутреннего свитча. Раньше: intent_off + гашение туннеля навсегда. Теперь:
-// намерение держим; поднятый/переходный туннель гасим через сторожевой guardedStop (down() свитча
-// уже мог уйти — адоптировать его нельзя), опущенный — сразу в паузу с ростом (start_retry_backoff).
-inline bool switchGiveUpNeedsStop(bool tunnelDownOrUnknown, bool ownOpInFlight)
-{
-    return !tunnelDownOrUnknown && !ownOpInFlight;
 }
 
 // P2-6: собственные up/down utun приходят как reachability/transportMedium changed и инвалидировали
@@ -913,13 +835,6 @@ inline ScannerRowConnect scannerRowConnect(bool tunnelUpOrComingUp)
     r.userStartBookkeeping = !tunnelUpOrComingUp;
     return r;
 }
-// The engine part of a row tap that the facade and tests/facade_engine_check.cpp share: the one-attempt order
-// hint (head = the tapped row) for ServiceEngine::nextCandidate / connect() / onDead step 3.
-template <typename Engine>
-inline void facadeScanRowHint(Engine &engine, const QStringList &order, qint64 ttlMs)
-{
-    engine.setAttemptOrder(order, ttlMs);
-}
 enum class ScanRowGate { Connect, IgnoreSwitchOff, IgnoreNoNode };
 inline ScanRowGate decideScanRowConnect(bool scannerOn, const QString &nodeId)
 {
@@ -1022,99 +937,6 @@ inline ScanCancel decideScanCancel(const ScanOwnConnect &a, quint64 processEpoch
     return ScanCancel::Stop;
 }
 
-// Build 142 - ONE rule for a session that never handshakes (owner's iPhone, build 140, 16.11; S3 and S5,
-// three review rounds). The native tells every handshake timeout of a session whose extension answered "no
-// handshake, no data" (IosController::handshakeNeverCompleted) with the send time of that status request.
-// Invariant: an AmneziaWG session without a handshake within its budget is never kept as «Подключено»; what
-// follows is the app's ORDINARY start path, whose end is proven (a handshake - and the data check where the app
-// has one - or the counted failed start, the next pick and the backoff; it never shows Connected without a
-// handshake). There is no special check of its own that could be left waiting (review rounds 1-3: the adopted
-// session's re-check through the data check leaked three times around freezes and native state changes).
-//  * stale: the request was sent before the app's last freeze (nativeFactFresh) - nothing; the next timeout
-//    tells again (every 12 s while the native awaits the handshake);
-//  * our own start in flight: its own budget goes on (start watchdog, failed start); only S5 acts - in Auto
-//    mode, not for an exactly chosen node (a Scanner row tap), when an Xray pick exists and AmneziaWG is not
-//    banned yet: AmneziaWG is banned for the attempt and the start ends as a failed start (next pick: Xray);
-//  * a session the app holds as up (adopted at a relaunch - S3 of 23:20:26 -, or its own after a reassert),
-//    no operation in flight: it is not kept - the same AmneziaWG ban when allowed, then the ordinary restart
-//    (our guarded stop, reconcile starts the next pick of this attempt). Whatever states the native went
-//    through meanwhile (Reconnecting -> Connecting -> Reconnecting around a thaw) and whatever was decided for
-//    an earlier fact: the next fresh fact decides again, nothing is "already checked".
-struct NoHandshakeInputs {
-    bool fresh = false;            // the fact's status request was sent after the app's last freeze
-    bool ownStartInFlight = false; // our start is in flight and the person still wants the VPN on
-    bool tunnelHeldUp = false;     // the engine holds the session as up (Connected / Verifying), nothing in flight,
-                                   // the person wants the VPN on
-    bool nodeIsAwg = false;        // the session's node is an own AmneziaWG node
-    bool autoMode = false;         // the effective transport mode is Auto
-    bool explicitNode = false;     // the person chose exactly this node (a Scanner row tap)
-    bool alreadyLeft = false;      // AmneziaWG is already banned in this attempt
-    bool xrayPick = false;         // with every AmneziaWG node out this start could take an Xray node
-};
-enum class NoHandshake { LeaveAwg, Restart, IgnoreStale, IgnoreNotOurs, IgnoreOwnStartGoesOn };
-inline NoHandshake decideNoHandshake(const NoHandshakeInputs &in)
-{
-    if (!in.fresh)
-        return NoHandshake::IgnoreStale;
-    if (!in.ownStartInFlight && !in.tunnelHeldUp)
-        return NoHandshake::IgnoreNotOurs;
-    const bool leave = in.nodeIsAwg && in.autoMode && !in.explicitNode && !in.alreadyLeft && in.xrayPick;
-    if (in.ownStartInFlight)
-        return leave ? NoHandshake::LeaveAwg : NoHandshake::IgnoreOwnStartGoesOn;
-    return leave ? NoHandshake::LeaveAwg : NoHandshake::Restart;
-}
-inline const char *noHandshakeName(NoHandshake d)
-{
-    switch (d) {
-    case NoHandshake::LeaveAwg: return "leave_awg";
-    case NoHandshake::Restart: return "restart";
-    case NoHandshake::IgnoreStale: return "stale";
-    case NoHandshake::IgnoreNotOurs: return "not_ours";
-    case NoHandshake::IgnoreOwnStartGoesOn: return "own_start_goes_on";
-    }
-    return "unknown";
-}
-// The facade's only path for the fact - its effects handed in, so the whole sequence runs in a test.
-//  facts()          - the inputs as the facade sees them now (fresh = the request's send time vs. the freeze);
-//  banAwg()         - ServiceEngine::banAwgForAttempt (records the failed rise, bans AmneziaWG for the attempt);
-//  endSession(own)  - our start in flight: the failed-start bookkeeping; a held session: the network memory
-//                     forgets its node; then our guarded stop with the intent kept - reconcile starts again.
-struct NoHandshakeOps {
-    std::function<NoHandshakeInputs()> facts;
-    std::function<void(const QString &)> journal;
-    std::function<void()> banAwg;
-    std::function<void(bool ownStart)> endSession;
-};
-inline NoHandshake handleNoHandshakeFact(int timeouts, const QString &nodeId, const NoHandshakeOps &ops)
-{
-    const NoHandshakeInputs in = ops.facts();
-    const NoHandshake d = decideNoHandshake(in);
-    // Told every 12 s: silent unless something is done or a start of ours is being judged for the first time.
-    if (d == NoHandshake::IgnoreNotOurs || (d == NoHandshake::IgnoreOwnStartGoesOn && (in.alreadyLeft || timeouts > 1)))
-        return d;
-    ops.journal(QStringLiteral("no_handshake node=%1 timeouts=%2 own_start=%3 held=%4 -> %5")
-                    .arg(nodeId.isEmpty() ? QStringLiteral("-") : nodeId)
-                    .arg(timeouts)
-                    .arg(int(in.ownStartInFlight))
-                    .arg(int(in.tunnelHeldUp))
-                    .arg(QLatin1String(noHandshakeName(d))));
-    if (d == NoHandshake::LeaveAwg)
-        ops.banAwg();
-    if (d == NoHandshake::LeaveAwg || d == NoHandshake::Restart)
-        ops.endSession(in.ownStartInFlight);
-    return d;
-}
-
-// Build 142 (review round 2, N4): a state or a fact from before the app's last freeze is never evidence.
-// iOS suspends the app with requests and timers pending; the extension lives on and may restore the path
-// meanwhile. freezeBoundaryMs = the later of the last hide and the last return to the screen (the P2-2 rule of
-// classifyApiOutcome); <= 0 = never frozen.
-// A native fact (an answered status reply) counts only if its request was sent after the boundary.
-inline bool nativeFactFresh(qint64 requestSentMs, qint64 freezeBoundaryMs)
-{
-    return freezeBoundaryMs <= 0 || requestSentMs >= freezeBoundaryMs;
-}
-
 // A row tap's connect chain as the coordinator needs it: the node the ladder left (connectFailed), the end
 // of the chain without data (attemptEnded), «Подключено» (dataFlowing on a node). Observed from engine
 // state on every change; no timer.
@@ -1188,16 +1010,18 @@ struct ScanLiveView {
     QString nodeId;
     QString attemptNodeId;
 };
+// attemptFailed: the attempt owner finished without a path ("nothing works" is a final result only - between the
+// legs of a walk the engine is never in error).
 inline ScanLiveView scanLiveView(const QString &state, bool nativeUp, const QString &current, const QString &pendingSwitch,
                                  const QString &pinned, const QString &next, bool wantConnected, bool restartPending,
-                                 bool dataFlowing)
+                                 bool dataFlowing, bool attemptFailed)
 {
     ScanLiveView v;
     const bool up = state == QLatin1String("connected") || state == QLatin1String("verifying");
     const bool switching = state == QLatin1String("switching");
     v.live = up || (switching && nativeUp && !pendingSwitch.isEmpty());
     v.nodeId = v.live ? current : QString();
-    v.failed = state == QLatin1String("error");
+    v.failed = attemptFailed;
     v.connecting = wantConnected && !dataFlowing && !v.failed;
     if (!wantConnected)
         return v;

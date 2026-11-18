@@ -60,14 +60,23 @@ static void verdict()
     in = good();
     in.bytesReceived = 0;
     CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "no_first_byte", false));
+    // Decision of 18.11 (owner's iPhone: 131072 bytes in 3.5 s, first byte at 3.1 s, judged no_data): a body that
+    // arrived whole within the total limit is data - slow, whatever its first byte or stalls.
     in = good();
-    in.ttfbMs = 3001;
-    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "ttfb_timeout", false));
+    in.ttfbMs = 3100;
+    in.elapsedMs = 3500;
+    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::Slow, "slow", true));
     in.ttfbMs = 3000;
-    CHECK(judgeUpstreamCheck(in).passes); // the limit itself is inside
+    in.elapsedMs = 900;
+    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::Works, "verified_net_token", true)); // the limit itself is inside
     in = good();
     in.maxStallMs = 1501;
-    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "stalled", false));
+    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::Slow, "slow", true));
+    // An incomplete body is named by its cause.
+    in = good();
+    in.bytesReceived = 16384;
+    in.ttfbMs = 3001;
+    CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "ttfb_timeout", false));
     in = good();
     in.bytesReceived = 131071;
     CHECK(is(judgeUpstreamCheck(in), UpstreamVerdict::NoData, "incomplete", false));

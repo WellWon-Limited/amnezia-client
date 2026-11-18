@@ -140,6 +140,15 @@ struct LeaseRoute {
     bool operator==(const LeaseRoute &o) const { return renewToken == o.renewToken && apiBase == o.apiBase; }
 };
 
+// Decision of 18.11 (UpstreamLeaseWire.h::upstreamReleaseDue): a release goes over the app's direct API path - the
+// lease's bearer stays, its tunnel_api_base does not.
+inline LeaseRoute upstreamReleaseRoute(const LeaseRoute &leaseRoute)
+{
+    LeaseRoute r = leaseRoute;
+    r.apiBase.clear();
+    return r;
+}
+
 struct LeaseAction {
     LeaseActionKind kind = LeaseActionKind::SendAcquire;
     quint64 requestId = 0;
