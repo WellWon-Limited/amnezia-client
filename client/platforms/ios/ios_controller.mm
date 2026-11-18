@@ -2919,8 +2919,13 @@ void IosController::requestInetAccess() {
 }
 
 bool IosController::isTestFlight() {
+    // AVPN (device test of 142): a sandbox receipt alone also marks a development or ad-hoc install; those carry
+    // their provisioning profile in the bundle, a TestFlight (and App Store) install never does - the journal's rule
+    // (TribeJournalIos_isTestFlight).
     NSURL *receiptURL = [[NSBundle mainBundle] appStoreReceiptURL];
-    return receiptURL && [[receiptURL lastPathComponent] isEqualToString:@"sandboxReceipt"];
+    const bool sandbox = receiptURL && [[receiptURL lastPathComponent] isEqualToString:@"sandboxReceipt"];
+    const bool provisioned = [[NSBundle mainBundle] pathForResource:@"embedded" ofType:@"mobileprovision"] != nil;
+    return sandbox && !provisioned;
 }
 
 
