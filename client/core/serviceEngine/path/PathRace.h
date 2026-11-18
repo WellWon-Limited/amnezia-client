@@ -43,7 +43,9 @@ namespace avpn::path {
 struct RaceTimings {
     int parallelism = 4;        // probes in flight at once (further capped by the host's caps)
     int staggerMs = 250;        // between two probe starts
-    int waveSize = 6;           // candidates per wave
+    // Candidates per window: above the host's in-flight total, so a kind that is capped (two AmneziaWG, the provider
+    // pool) or slow never keeps the next kinds out (T1b of device round 6: the first proof came at 5.3 s on LTE).
+    int waveSize = 10;
     int raceBudgetMs = 8000;    // awake time of one race; then the owner walks without it
     int probeTimeoutMs = 4000;  // one probe's own bound (the host answers by then)
     int providerPerRace = 3;    // provider probes per race (probe seats a lost batch answer can strand)

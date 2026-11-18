@@ -47,6 +47,9 @@ enum class WhoamiAction { Succeed, FailPath, ConnectUnproven, Tiebreak };
 constexpr qint64 kWhoamiMinBodyBytes = 16 * 1024;
 // S3 (device round 5): once bytes flow, a gap longer than this ends the whoami request (progress, not a hard cut).
 constexpr qint64 kWhoamiStallMs = 1000;
+// T1 (device round 6): after this long with no first byte a data check is "starving" - a proven alternative from the
+// race may end it (a working path answers within a second on every network measured).
+constexpr qint64 kWhoamiFirstByteShareMs = 1000;
 // true = our clock ends the request now: no first byte within firstByteLimitMs, or bytes stopped for kWhoamiStallMs.
 // lastByteAtMs < 0 = nothing arrived yet. A request that keeps receiving runs on (up to the check's own backstop).
 inline bool whoamiProgressCut(qint64 nowMs, qint64 startMs, qint64 lastByteAtMs, qint64 firstByteLimitMs)

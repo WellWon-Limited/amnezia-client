@@ -503,6 +503,23 @@ int main(int argc, char **argv)
         CHECK(b.eng.connect(err) && b.eng.attemptRunning() && b.tun.ups.isEmpty());
         b.eng.requestStop();
         CHECK(!b.eng.attemptRunning() && !b.eng.raceRunning() && !b.eng.ownerHoldsNativeLeg() && b.tun.ups.isEmpty());
+        // T1 (device round 6): the leg in its data check has no first byte and the race proved another path - the
+        // leg is left at once (nothing recorded) and the proven one comes up; a leg receiving bytes is kept
+        Rig t(pool);
+        FakeProber tp;
+        t.eng.setProber(&tp);
+        CHECK(t.eng.connect(err) && t.last() == QLatin1String("17"));
+        t.up(); // 17 is up, in its check
+        t.eng.noteCheckStarved(false); // receiving: nothing happens even with a proof
+        t.pass(500);
+        t.eng.onProbeResult(tp.stampOf("16"), path::PathOutcome::ProbeOk, 1000);
+        CHECK(t.tun.downs == 0 && t.eng.isVerifying());
+        t.eng.noteCheckStarved(true); // no first byte past its share
+        CHECK(t.tun.downs == 1);
+        t.confirmStop();
+        CHECK(t.last() == QLatin1String("16") && t.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        t.journal << t.eng.takeAttemptJournal();
+        CHECK(journalHas(t.journal, "leg_preempted_for_proof node=17"));
         // no host: stage 1
         Rig q(pool);
         FakeProber off;

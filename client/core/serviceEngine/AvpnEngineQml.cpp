@@ -8565,6 +8565,9 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         connect(watch, &QTimer::timeout, r, [this, r, lastByteAt, t0, left]() {
             if (!r->isRunning())
                 return;
+            // T1: no first byte past the first-byte share - the engine may leave this leg for a proven alternative
+            if (*lastByteAt < 0 && m_verifyClock.elapsed() - t0 > avpn::kWhoamiFirstByteShareMs)
+                m_engine.noteCheckStarved(true);
             if (avpn::whoamiProgressCut(m_verifyClock.elapsed(), t0, *lastByteAt, left)) {
                 r->setProperty("avpn_timed_out", true); // our clock ended it, not the path
                 r->abort();
