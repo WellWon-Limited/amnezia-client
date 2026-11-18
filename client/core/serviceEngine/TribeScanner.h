@@ -84,6 +84,7 @@
 #include <QVariantMap>
 
 #include <functional>
+#include <QJsonArray>
 #include <memory>
 
 class QNetworkAccessManager;
@@ -167,6 +168,15 @@ public:
     {
         Q_UNUSED(nodeId);
         return {};
+    }
+    // Contract 1.14.0: the stub nodes of a /v1/scan/candidates batch's provider rows (each the exact SubscriptionNode
+    // the subscription would carry: no config, a lease grants its seat). The engine adds them to its pool the way it
+    // adds standby-pack entries, BEFORE any row of the batch can be tapped, so a tap pins and connects a profile that is
+    // not one of the device's 24 stubs. Called on the GUI thread when the batch arrives; the default (an engine
+    // without the hook) adds nothing - such a row then fails its connect as an unknown node.
+    virtual void offerScanNodes(const QJsonArray &subscriptionNodes)
+    {
+        Q_UNUSED(subscriptionNodes);
     }
     // The ONLY three ways to the tunnel (CONNECT-INVARIANTS §32).
     virtual void userConnectForScan() = 0;
@@ -258,6 +268,7 @@ public:
         IScanClock *clock = nullptr;  // null = the system clock pair
         IScanTimer *timer = nullptr;  // null = one QTimer
         IScanResolver *resolver = nullptr; // null = QHostInfo
+        bool fetchPoolOnOpen = true;  // GET /v1/scan/pool when the screen opens (contract 1.14.0; off in byte-exact tests)
     };
     explicit TribeScanner(const Deps &deps, QObject *parent = nullptr);
     ~TribeScanner() override;
@@ -537,6 +548,8 @@ private:
     void doRelease(const ScanAction &a);
     void doOutcomes(const ScanAction &a);
     void doLiveProbe(const ScanAction &a);
+    void doCandidates(const ScanAction &a);
+    void fetchPoolIfStale();
     void doLight(const ScanAction &a);
     void doShade(const ShadeRequest &r);
     void applyShadeStep(const ShadeStep &s);
@@ -577,6 +590,9 @@ private:
     bool m_serverOff = false;   // a scan endpoint answered 404 (the server's switch): nothing requested until the switches change
 
     ScanNetwork m_lastNet;
+    qint64 m_poolAt = -1;            // when /v1/scan/pool last answered (or was asked); the server allows 60 per hour
+    bool m_poolUnsupported = false;  // an older server: no pool endpoint
+    bool m_fetchPoolOnOpen = true;
     bool m_hostGenFolded = false;
     ScanNetSource m_hostGen;
     QList<ScanNetSource> m_hostGenLeft; // monitor starts (source + epoch) the host element moved away from (<= 8)

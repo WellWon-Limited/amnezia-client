@@ -223,6 +223,8 @@ enum class ScanActionKind {
     OpenScreen,         // open the Scanner page (the Wi-Fi intent fired)
     ProbeLiveTunnel,    // nodeId, warmBytes, bytes: the sized /v1/probe through the LIVE tunnel (review F2), answer
                         // with liveProbeResult - the connected row is «works» only after it
+    RequestCandidates,  // networkKey, scopeCountry ("" | cc | "whitelist"), ids = seen, batch = limit: POST
+                        // /v1/scan/candidates (1.14.0), answer with candidatesReady / candidatesUnavailable
     // The only three that touch the tunnel (§32 above):
     UserConnectForScan,   // VPN-required host, VPN off, the user opened / pressed scan: the ordinary user connect
     CancelPendingConnect, // Stop / leave while that connect has not reached «Подключено»: the ordinary user cancel
@@ -248,6 +250,7 @@ inline const char *scanActionName(ScanActionKind k)
     case ScanActionKind::CloseScreen: return "close_screen";
     case ScanActionKind::OpenScreen: return "open_screen";
     case ScanActionKind::ProbeLiveTunnel: return "probe_live_tunnel";
+    case ScanActionKind::RequestCandidates: return "request_candidates";
     case ScanActionKind::UserConnectForScan: return "user_connect_for_scan";
     case ScanActionKind::CancelPendingConnect: return "cancel_pending_connect";
     case ScanActionKind::ConnectRow: break;
@@ -542,6 +545,7 @@ struct ScanBarView {
     ScanHint hint = ScanHint::None;
     qint64 hintBytes = 0;            // CellularCost: «Скан потратит до N МБ»
     QList<ScanCountryView> scopeCountries; // the pool's countries (own nodes + provider profiles), most paths first
+    int scopeWhitelist = -1;         // the pool's white-list rows (/v1/scan/pool; -1 = unknown)
     QString scannedScope;            // the country the shown result covers ("" = all)
     QString scope;                   // the scope of the next scan ("" = all)
 };
@@ -683,6 +687,19 @@ private:
 
 // «Найти ещё»: candidates one batch probes (the next untried ones, mixed across tiers; UI spec 18.11).
 inline constexpr int kScanMoreBatch = 10;
+// The first batch of a scope scan (a country, the white lists): the server's default page.
+inline constexpr int kScanScopeFirstBatch = 12;
+// The white-list scope (no country): chooseCountry("whitelist"), scanned_scope "whitelist".
+inline constexpr char kScanScopeWhitelist[] = "whitelist";
+
+// A scope as the machine keeps it: "" (all), an upper-case country code, or "whitelist".
+inline QString scanScopeOf(const QString &raw)
+{
+    const QString t = raw.trimmed();
+    if (t.compare(QLatin1String(kScanScopeWhitelist), Qt::CaseInsensitive) == 0)
+        return QLatin1String(kScanScopeWhitelist);
+    return t.toUpper();
+}
 
 // --- the machine -----------------------------------------------------------------------------------------------
 
@@ -821,7 +838,7 @@ public:
         const bool sameNet = m_completed && m_scanNet.key == m_net.key && m_scanNet.generation() == m_net.generation();
         m_continuation = true;
         m_moreKeepRows = sameNet;
-        m_moreCountry = country.trimmed().isEmpty() ? m_scope : country.trimmed().toUpper();
+        m_moreCountry = country.trimmed().isEmpty() ? m_scope : scanScopeOf(country);
         m_worksBase = sameNet ? freshWorkingCount() : 0;
         if (!sameNet)
             m_shownNet.clear();
@@ -842,11 +859,12 @@ public:
                 m_filter = cc;
             // The country is also the SCOPE of the next scan over the whole pool (UI spec 18.11): «Сканировать» /
             // retry() and «Найти ещё» then probe only that country's paths. "" = every country.
-            bool inPool = cc.isEmpty();
-            for (const ScanCountryView &c : m_scopeCountries)
-                inPool = inPool || c.countryCode == cc;
+            const QString scope = scanScopeOf(cc);
+            bool inPool = scope.isEmpty() || (scope == QLatin1String(kScanScopeWhitelist) && m_poolWhitelist > 0);
+            for (const ScanCountryView &c : scopeList())
+                inPool = inPool || c.countryCode == scope;
             if (inPool || present)
-                m_scope = cc;
+                m_scope = scope;
         }
         finishStep(s, now);
         return s;
@@ -949,7 +967,69 @@ public:
         }
         if (m_phase == ScanPhase::Preparing || m_phase == ScanPhase::Connecting)
             m_haveManifestForScan = true;
-        if (m_phase == ScanPhase::Preparing)
+        if (m_phase == ScanPhase::Preparing) {
+            if (wantServerBatch())
+                requestCandidates(now, s); // a scope or «Найти ещё»: the server's batch first (1.14.0)
+            else
+                startHost(now, s);
+        }
+        finishStep(s, now);
+        return s;
+    }
+
+    // --- the server's pool and batches (contract 1.14.0) ------------------------------------------------------
+    // GET /v1/scan/pool (asked by the coordinator when the screen opens): the scope menu's countries and the
+    // white-list rows' count over the whole pool, not only what this device's manifest delivered.
+    ScanStep poolReady(const ScanPoolView &p, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        m_poolCountries.clear();
+        for (const ScanPoolView::Country &c : p.countries)
+            if (c.own + c.provider > 0)
+                m_poolCountries << ScanCountryView{c.countryCode, c.own + c.provider};
+        std::stable_sort(m_poolCountries.begin(), m_poolCountries.end(),
+                         [](const ScanCountryView &a, const ScanCountryView &b) { return a.count > b.count; });
+        m_poolWhitelist = p.whitelist;
+        finishStep(s, now);
+        return s;
+    }
+
+    // The batch of POST /v1/scan/candidates: only its rows are probed (the server's order: crowd score first across
+    // tiers, then tier and rank), `exhausted` ends «Найти ещё». A stale answer only settles its bytes.
+    ScanStep candidatesReady(const QString &requestId, const ScanCandidatesView &c, qint64 apiBytes, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        const bool current = requestId == m_candReqId && m_phase == ScanPhase::Preparing;
+        if (requestId == m_candReqId)
+            m_candReqId.clear();
+        s.actions << appRequestDone(requestId, apiBytes, now).actions;
+        if (current) {
+            m_serverBatch = ServerBatch::Yes;
+            m_fromServer = true;
+            m_serverExhausted = c.exhausted;
+            m_manifest.manifest.nodes = c.nodes;
+            m_manifest.manifest.upstream = c.upstream;
+            startHost(now, s);
+        }
+        finishStep(s, now);
+        return s;
+    }
+
+    // No batch (an older server: 404 / invalid answer -> this session falls back for good; transport, rate limit ->
+    // only this scan): the scan runs over the device's own candidates (the local continuation / scope).
+    ScanStep candidatesUnavailable(const QString &requestId, const QString &reason, qint64 apiBytes, qint64 now)
+    {
+        now = clock(now);
+        ScanStep s;
+        const bool current = requestId == m_candReqId && m_phase == ScanPhase::Preparing;
+        if (requestId == m_candReqId)
+            m_candReqId.clear();
+        s.actions << appRequestDone(requestId, apiBytes, now).actions;
+        if (reason == QLatin1String("scanner_off") || reason == QLatin1String("invalid") || reason == QLatin1String("unsupported"))
+            m_serverBatch = ServerBatch::No;
+        if (current)
             startHost(now, s);
         finishStep(s, now);
         return s;
@@ -1591,7 +1671,8 @@ public:
                       : m_moreAvailable ? QStringLiteral("available")
                                         : QStringLiteral("exhausted");
         v.netRadio = m_net.kind == ScanNetKind::Cellular ? m_net.radio : QString();
-        v.bar.scopeCountries = m_scopeCountries;
+        v.bar.scopeCountries = scopeList();
+        v.bar.scopeWhitelist = m_poolWhitelist;
         v.bar.scannedScope = m_completed || scanPhaseScanning(m_phase) ? m_scannedScope : QString();
         v.bar.scope = m_scope;
         if (m_phase == ScanPhase::Empty)
@@ -2371,6 +2452,9 @@ private:
         m_unverified.clear();
         m_tapFailed.clear();
         m_scannedScope = m_continuation ? m_moreCountry : m_scope;
+        m_fromServer = false;
+        m_serverExhausted = false;
+        m_candReqId.clear();
         m_filter = m_scannedScope;
         m_planRemaining = 0;
         m_lastSeq = 0;
@@ -2492,10 +2576,14 @@ private:
             std::stable_sort(m_scopeCountries.begin(), m_scopeCountries.end(),
                              [](const ScanCountryView &a, const ScanCountryView &b) { return a.count > b.count; });
         }
-        in.restrictCountry = !m_scannedScope.isEmpty() ? m_scannedScope : m_manifest.restrictCountry;
+        const bool whitelistScope = m_scannedScope == QLatin1String(kScanScopeWhitelist);
+        in.restrictCountry = whitelistScope ? QString() : !m_scannedScope.isEmpty() ? m_scannedScope : m_manifest.restrictCountry;
+        in.onlyWhitelist = whitelistScope;
         if (m_continuation && m_moreKeepRows)
             in.skip = m_shownNet;
-        if (m_continuation) {
+        if (m_fromServer) {
+            in.scoreOrder = true; // the server's batch: its order, all its rows (the server sized it)
+        } else if (m_continuation) {
             in.maxProbe = kScanMoreBatch; // the next 10 untried, mixed across tiers (UI spec 18.11)
             in.interleave = true;
         }
@@ -2505,7 +2593,7 @@ private:
         in.awgProbeIpKnown = m_manifest.awgProbeIpKnown;
         in.awgAddressKnown = m_manifest.awgAddressKnown;
         const ScanPlan plan = buildScanPlan(in);
-        m_planRemaining = plan.remaining;
+        m_planRemaining = m_fromServer ? (m_serverExhausted ? 0 : 1) : plan.remaining;
         m_planCandidates = plan.probe.size() + plan.orderOnly.size();
         m_manifestRevision = m_manifest.manifest.upstreamRevision;
         m_lastProjection = plan.projectedBytes;
@@ -2930,20 +3018,13 @@ private:
         return false;
     }
 
-    // Stop at scan_stop_works working rows - unless a candidate of a tier below a row in the list is still
-    // open: it could take that row's place (the list is filled in tier order, D9), so it blocks the stop
-    // until it has its verdict or the deadline comes.
+    // Stop at scan_stop_works working rows (a continuation counts only its own new ones). The rows are admitted by
+    // what the scan itself measured, across tiers (contract 1.14.0 / owner 18.11: tiers order Auto only) - an open
+    // candidate of a lower tier no longer holds the stop: the first screen shows what proved fastest now.
     void checkStop(qint64 now, ScanStep &s)
     {
         if ((m_phase != ScanPhase::Reach && m_phase != ScanPhase::Data) || freshWorkingCount() - m_worksBase < m_t.stopWorks)
-            return; // a continuation counts only its own new working rows
-        int maxTier = -1;
-        for (const ScanRowView &r : displayRows(now))
-            if (r.verified && !r.current && r.state != ScanRowState::Connecting && r.state != ScanRowState::Failed)
-                maxTier = qMax(maxTier, tierOfRow(r.id));
-        for (const Cand &c : m_cands)
-            if (!c.finalDone && !c.dropped && c.c.tier < maxTier)
-                return;
+            return;
         stopStage2(now, QStringLiteral("limit"), s);
     }
 
@@ -4069,6 +4150,37 @@ private:
     QString m_scope;                 // the chosen country: the scope of the next scan ("" = all)
     QString m_scannedScope;          // the scope of the running / last scan
     QList<ScanCountryView> m_scopeCountries; // the pool's countries of the last manifest
+    QList<ScanCountryView> m_poolCountries;  // the server's pool (/v1/scan/pool), preferred when known
+    int m_poolWhitelist = -1;
+    enum class ServerBatch { Unknown, Yes, No };
+    ServerBatch m_serverBatch = ServerBatch::Unknown; // /v1/scan/candidates answered / refused this session
+    QString m_candReqId;
+    bool m_fromServer = false;       // this scan probes the server's batch
+    bool m_serverExhausted = false;
+
+    QList<ScanCountryView> scopeList() const { return m_poolCountries.isEmpty() ? m_scopeCountries : m_poolCountries; }
+
+    // A scope (a country, the white lists) or «Найти ещё» asks the server for its batch while it may answer.
+    bool wantServerBatch() const
+    {
+        return m_serverBatch != ServerBatch::No && (!m_scannedScope.isEmpty() || (m_continuation && m_moreKeepRows));
+    }
+
+    void requestCandidates(qint64 now, ScanStep &s)
+    {
+        ScanAction a = act(ScanActionKind::RequestCandidates, m_net.key);
+        a.scopeCountry = m_scannedScope;
+        a.batch = m_continuation ? kScanMoreBatch : kScanScopeFirstBatch;
+        QStringList seen = QStringList(m_shownNet.begin(), m_shownNet.end());
+        seen.sort();
+        a.ids = seen.mid(0, 512);
+        if (!sendApp(QStringLiteral("candidates"), qint64(m_t.costManifestBytes), now, s, a)) {
+            startHost(now, s); // no room for the request: the device's own candidates
+            return;
+        }
+        m_candReqId = a.requestId;
+        s.actions << a;
+    }
     bool m_completed = false;
     bool m_screenOpen = false;
     bool m_startedVpn = false;
@@ -4345,6 +4457,8 @@ inline QJsonObject scanViewToJson(const ScanView &v)
         bar.insert(QStringLiteral("scope_countries"), scope);
         bar.insert(QStringLiteral("scanned_scope"), v.bar.scannedScope);
     }
+    if (v.bar.scopeWhitelist >= 0)
+        bar.insert(QStringLiteral("scope_whitelist"), v.bar.scopeWhitelist);
     bar.insert(QStringLiteral("total"), v.bar.total);
     bar.insert(QStringLiteral("button"), QLatin1String(scanBarButtonName(v.bar.button)));
     bar.insert(QStringLiteral("button_enabled"), v.bar.buttonEnabled);

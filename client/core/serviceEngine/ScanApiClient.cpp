@@ -605,6 +605,113 @@ QString ScanApiClient::storedTunnelBase(const QString &networkKey) const
     return st.ok ? trimBase(st.obj.value(QLatin1String("tunnel_api_base")).toString()) : QString();
 }
 
+// --- the whole pool (contract 1.14.0) -------------------------------------------------------------------------
+
+namespace {
+QString scanErrorReason(int status)
+{
+    switch (status) {
+    case 403: return QStringLiteral("not_entitled");
+    case 404: return QStringLiteral("scanner_off");
+    case 410: return QStringLiteral("over_quota");
+    case 422: return QStringLiteral("invalid");
+    case 429: return QStringLiteral("rate_limited");
+    default: break;
+    }
+    return QStringLiteral("transport");
+}
+} // namespace
+
+void ScanApiClient::fetchPool(qint64 costBytes, std::function<void(const Pool &)> done)
+{
+    const QString b = base();
+    const QString dt = m_deviceToken ? m_deviceToken() : QString();
+    if (!configured() || b.isEmpty() || dt.isEmpty()) {
+        QTimer::singleShot(0, this, [done]() {
+            Pool p;
+            p.reason = QStringLiteral("transport");
+            if (done)
+                done(p);
+        });
+        return;
+    }
+    IScanHttp::Request rq;
+    rq.method = QByteArrayLiteral("GET");
+    rq.url = b + QStringLiteral("/v1/scan/pool");
+    rq.headers << qMakePair(QByteArrayLiteral("Authorization"), bearer(dt));
+    rq.maxBytes = costBytes;
+    QPointer<ScanApiClient> self(this);
+    m_http->send(rq, [self, done](const IScanHttp::Response &r) {
+        Pool p;
+        p.bytes = r.bytes;
+        p.status = r.status;
+        if (r.status == 200) {
+            p.ok = scanPoolFromJson(QJsonDocument::fromJson(r.body).object(), p.view);
+            if (!p.ok)
+                p.reason = QStringLiteral("invalid");
+        } else {
+            p.reason = scanErrorReason(r.status);
+        }
+        if (self)
+            self->emitLog(QStringLiteral("pool status=%1 countries=%2 bytes=%3").arg(r.status).arg(p.view.countries.size()).arg(r.bytes));
+        if (done)
+            done(p);
+    });
+}
+
+void ScanApiClient::fetchCandidates(const QString &networkKey, const QString &scope, const QString &country,
+                                    const QStringList &seen, int limit, qint64 costBytes, std::function<void(const Candidates &)> done)
+{
+    const QString b = base();
+    const QString dt = m_deviceToken ? m_deviceToken() : QString();
+    if (!configured() || b.isEmpty() || dt.isEmpty()) {
+        QTimer::singleShot(0, this, [done]() {
+            Candidates c;
+            c.reason = QStringLiteral("transport");
+            if (done)
+                done(c);
+        });
+        return;
+    }
+    QJsonObject body{{QStringLiteral("network_key"), networkKey}, {QStringLiteral("scope"), scope},
+                     {QStringLiteral("limit"), qBound(1, limit, 24)}};
+    if (scope == QLatin1String("country"))
+        body.insert(QStringLiteral("country"), country.toUpper());
+    QJsonArray s;
+    for (const QString &id : seen)
+        if (s.size() < 512)
+            s << id;
+    body.insert(QStringLiteral("seen"), s);
+    IScanHttp::Request rq;
+    rq.method = QByteArrayLiteral("POST");
+    rq.url = b + QStringLiteral("/v1/scan/candidates");
+    rq.headers << qMakePair(QByteArrayLiteral("Authorization"), bearer(dt))
+               << qMakePair(QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/json"));
+    rq.body = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    rq.maxBytes = costBytes;
+    QPointer<ScanApiClient> self(this);
+    m_http->send(rq, [self, done](const IScanHttp::Response &r) {
+        Candidates c;
+        c.bytes = r.bytes;
+        c.status = r.status;
+        if (r.status == 200 && self) {
+            const QString key = self->m_pubKeyHex ? self->m_pubKeyHex() : QString();
+            const bool sigOk = !key.isEmpty()
+                               && verifyDetachedWithContext(key, QLatin1String(kScanCandidatesSigContext), r.body, r.header("x-tribe-sig"));
+            c.ok = sigOk && scanCandidatesFromJson(QJsonDocument::fromJson(r.body).object(), c.view);
+            if (!c.ok)
+                c.reason = QStringLiteral("invalid"); // an unverified answer is never used
+        } else {
+            c.reason = scanErrorReason(r.status);
+        }
+        if (self)
+            self->emitLog(QStringLiteral("candidates status=%1 nodes=%2 upstream=%3 exhausted=%4 bytes=%5")
+                              .arg(r.status).arg(c.view.nodes.size()).arg(c.view.upstream.size()).arg(c.view.exhausted).arg(r.bytes));
+        if (done)
+            done(c);
+    });
+}
+
 // --- probe-batch -----------------------------------------------------------------------------------------------
 
 void ScanApiClient::probeBatch(const QStringList &profileIds, bool includeConfig, qint64 costBytes,

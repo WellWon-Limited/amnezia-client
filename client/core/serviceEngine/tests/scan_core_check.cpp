@@ -3477,6 +3477,16 @@ static void findMore()
                 out << a.candidates;
         return out;
     };
+    // manifestReady, and for a scope / «Найти ещё» an older server's answer to the batch request (local fallback)
+    const auto afterManifest = [&](ScanMachine &mm, qint64 at) {
+        ScanStep st = mm.manifestReady(manifestInputFrom(manifestArgs(w)), at);
+        for (const ScanAction &a : st.actions)
+            if (a.kind == ScanActionKind::RequestCandidates) {
+                const ScanStep f = mm.candidatesUnavailable(a.requestId, QStringLiteral("scanner_off"), 300, at + 1);
+                st.actions << f.actions;
+            }
+        return st;
+    };
     const auto works = [](const QString &id) {
         ScanProbeFacts f = goodData();
         f.id = id;
@@ -3485,7 +3495,7 @@ static void findMore()
     };
     ScanMachine m(w.caps);
     m.opened(openOf(w, QString(), false), kT0);
-    const QList<ScanCandidate> first = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50));
+    const QList<ScanCandidate> first = candidatesOf(afterManifest(m, kT0 + 50));
     CHECK(first.size() >= 3);
     if (first.size() < 3)
         return;
@@ -3498,7 +3508,7 @@ static void findMore()
     // batch 2: the proven row stays fresh, its candidate is not probed again; the stop counts the new rows only
     CHECK(m.moreTapped(QString(), kT0 + 9000).actions.isEmpty() && m.view(kT0 + 9000).moreState == QLatin1String("available")); // the cooldown holds
     CHECK(m.moreTapped(QString(), kT0 + 31000).has(ScanActionKind::RequestManifest));
-    const QList<ScanCandidate> second = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050));
+    const QList<ScanCandidate> second = candidatesOf(afterManifest(m, kT0 + 31050));
     bool skipped = !second.isEmpty();
     for (const ScanCandidate &c : second)
         skipped = skipped && c.id != first.at(0).id;
@@ -3516,14 +3526,14 @@ static void findMore()
 
     // batch 3: nothing left - ends at once, still nothing more
     m.moreTapped(QString(), kT0 + 70000);
-    const QList<ScanCandidate> third = candidatesOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 70050));
+    const QList<ScanCandidate> third = candidatesOf(afterManifest(m, kT0 + 70050));
     v = m.view(kT0 + 70100);
     CHECK(third.isEmpty() && !v.scanning && !v.moreAvailable && v.batch == 3 && v.verifiedCount == 1 + second.size());
 
     // a country batch over the whole pool: only that country's candidates, the filter set to it
     ScanMachine c(w.caps);
     c.opened(openOf(w, QString(), false), kT0);
-    const QList<ScanCandidate> any = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50));
+    const QList<ScanCandidate> any = candidatesOf(afterManifest(c, kT0 + 50));
     c.tick(kT0 + 50 + 8000);
     QString cc;
     for (const ScanCandidate &x : any)
@@ -3531,7 +3541,7 @@ static void findMore()
             cc = x.countryCode;
     CHECK(!cc.isEmpty());
     c.moreTapped(cc.toLower(), kT0 + 31000);
-    const QList<ScanCandidate> only = candidatesOf(c.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050));
+    const QList<ScanCandidate> only = candidatesOf(afterManifest(c, kT0 + 31050));
     bool sameCountry = !only.isEmpty();
     for (const ScanCandidate &x : only)
         sameCountry = sameCountry && x.countryCode == cc;
@@ -3543,8 +3553,8 @@ static void findMore()
     o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
     o.tick(kT0 + 50 + 8000);
     o.moreTapped(QString(), kT0 + 31000);
-    o.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050);
-    o.tick(kT0 + 31050 + 8000);
+    afterManifest(o, kT0 + 31050);
+    o.tick(kT0 + 31050 + 8100);
     CHECK(o.view(kT0 + 39100).batch == 2);
     o.retryTapped(kT0 + 90000);
     CHECK(o.view(kT0 + 90010).batch == 1);
@@ -3562,7 +3572,7 @@ static void findMore()
     sc.filterChosen(scopeCc, kT0 + 8200);
     CHECK(sc.view(kT0 + 8200).bar.scope == scopeCc);
     sc.retryTapped(kT0 + 40000);
-    const QList<ScanCandidate> scoped = candidatesOf(sc.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050));
+    const QList<ScanCandidate> scoped = candidatesOf(afterManifest(sc, kT0 + 40050));
     bool inScope = !scoped.isEmpty();
     for (const ScanCandidate &x : scoped)
         inScope = inScope && x.countryCode == scopeCc;
@@ -3589,6 +3599,130 @@ static void findMore()
     CHECK(nr == ro.network);
     rd.networkChanged(nr, ScanCachedResult(), true, kT0 + 10);
     CHECK(rd.view(kT0 + 10).netRadio == QLatin1String("5g"));
+}
+
+
+// The server's side of the scope and «Найти ещё» (contract 1.14.0): /v1/scan/pool feeds the scope menu,
+// /v1/scan/candidates gives the batch (score order across tiers, `seen`, `exhausted`); an older server falls back.
+static void serverBatches()
+{
+    // the parsers
+    {
+        const QJsonObject pool{{"type", "scan_pool"}, {"version", 1}, {"upstream_revision", 7}, {"upstream_eligible", true},
+                               {"countries", QJsonArray{QJsonObject{{"country_code", "de"}, {"own", 1}, {"provider", 3}},
+                                                        QJsonObject{{"country_code", "XYZ"}, {"own", 1}, {"provider", 0}}}},
+                               {"functions", QJsonArray{QJsonObject{{"kind", "whitelist"}, {"provider", 4}}}}};
+        ScanPoolView pv;
+        CHECK(scanPoolFromJson(pool, pv) && pv.countries.size() == 1 && pv.countries.first().countryCode == "DE"
+              && pv.countries.first().own == 1 && pv.countries.first().provider == 3 && pv.whitelist == 4);
+        CHECK(!scanPoolFromJson(QJsonObject{{"type", "scan_manifest"}}, pv));
+        World w = baseWorld("srv_parse", hostMac(), ScanNetKind::Wifi);
+        const QJsonObject body = manifestBody(w);
+        QJsonArray ups = body.value("upstream").toArray();
+        QJsonObject u0 = ups.at(0).toObject();
+        u0.insert("score", 0.8);
+        u0.insert("node", QJsonObject{{"node_id", "up:" + u0.value("profile_id").toString()}, {"proto", "xray"}});
+        QJsonArray nodes = body.value("nodes").toArray();
+        QJsonObject n0 = nodes.at(0).toObject();
+        n0.insert("score", QJsonValue::Null);
+        const QJsonObject cand{{"type", "scan_candidates"}, {"version", 1}, {"issued_at", "2026-11-18T10:00:00Z"},
+                               {"network_key", body.value("network_key")}, {"scope", "country"}, {"country", "de"},
+                               {"upstream_revision", 7}, {"exhausted", true}, {"nodes", QJsonArray{n0}}, {"upstream", QJsonArray{u0}},
+                               {"probe_seats", QJsonArray{QJsonObject{{"tier", 1}, {"free", 5}}}}};
+        ScanCandidatesView cv;
+        CHECK(scanCandidatesFromJson(cand, cv) && cv.exhausted && cv.country == "DE" && cv.nodes.size() == 1 && cv.upstream.size() == 1
+              && cv.upstream.first().score == 0.8 && cv.nodes.first().score < 0 && cv.providerNodes.size() == 1
+              && cv.freeSeats.value(1) == 5);
+        QJsonObject bad = cand;
+        bad.remove("exhausted");
+        CHECK(!scanCandidatesFromJson(bad, cv));
+    }
+
+    World w = baseWorld("srv", hostMac(), ScanNetKind::Wifi);
+    w.nodes = ownOnly(w.nodes);
+    w.numbers.insert(QStringLiteral("scan_stop_works"), 1);
+    const auto actionOf = [](const ScanStep &s, ScanActionKind k) {
+        for (const ScanAction &a : s.actions)
+            if (a.kind == k)
+                return a;
+        return ScanAction();
+    };
+    const auto works = [](const QString &id) {
+        ScanProbeFacts f = goodData();
+        f.id = id;
+        f.egressNode = id.section(QLatin1Char(':'), 0, 0);
+        return f;
+    };
+    ScanMachine m(w.caps);
+    m.opened(openOf(w, QString(), false), kT0);
+    // the first screen of the whole pool: the manifest, no batch request
+    const ScanStep first = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+    const ScanAction start1 = actionOf(first, ScanActionKind::StartHostScan);
+    CHECK(actionOf(first, ScanActionKind::RequestCandidates).requestId.isEmpty() && start1.candidates.size() >= 3);
+    if (start1.candidates.size() < 3)
+        return;
+    m.hostProgress(progressOf(m, {works(start1.candidates.at(0).id)}), kT0 + 900);
+    m.tick(kT0 + 50 + 8100);
+    // the pool: the menu covers the whole pool and the white lists
+    m.poolReady(ScanPoolView{{{QStringLiteral("NL"), 2, 9}, {QStringLiteral("DE"), 1, 3}}, 4, 7}, kT0 + 8200);
+    ScanView v = m.view(kT0 + 8200);
+    CHECK(v.bar.scopeCountries.size() == 2 && v.bar.scopeCountries.first().countryCode == "NL" && v.bar.scopeCountries.first().count == 11
+          && v.bar.scopeWhitelist == 4 && scanViewToJson(v).value("bar").toObject().value("scope_whitelist").toInt() == 4);
+
+    // «Найти ещё»: the server's batch with `seen`; only its rows, in its order (score first across tiers)
+    m.moreTapped(QString(), kT0 + 31000);
+    const ScanStep ms = m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 31050);
+    const ScanAction rc = actionOf(ms, ScanActionKind::RequestCandidates);
+    CHECK(!rc.requestId.isEmpty() && rc.ids.contains(start1.candidates.at(0).id) && rc.batch == kScanMoreBatch
+          && rc.scopeCountry.isEmpty() && actionOf(ms, ScanActionKind::StartHostScan).candidates.isEmpty());
+    ScanManifestView mv;
+    scanManifestViewFromJson(manifestBody(w), mv);
+    ScanCandidatesView cv;
+    cv.exhausted = true;
+    for (const ScanManifestNode &n : mv.nodes)
+        if (n.nodeId != start1.candidates.at(0).id && cv.nodes.size() < 2 && std::any_of(start1.candidates.begin(), start1.candidates.end(),
+                                                                                      [&n](const ScanCandidate &c) { return c.id == n.nodeId; }))
+            cv.nodes << n;
+    CHECK(cv.nodes.size() == 2);
+    cv.nodes[1].score = 0.9; // the crowd's favourite goes first whatever its rank
+    const ScanStep cs = m.candidatesReady(rc.requestId, cv, 4000, kT0 + 31300);
+    const ScanAction start2 = actionOf(cs, ScanActionKind::StartHostScan);
+    CHECK(start2.candidates.size() == 2 && start2.candidates.first().id == cv.nodes.at(1).nodeId);
+    QList<ScanProbeFacts> all;
+    for (const ScanCandidate &c : start2.candidates)
+        all << works(c.id);
+    m.hostProgress(progressOf(m, all), kT0 + 32000);
+    m.tick(kT0 + 31300 + 8100);
+    v = m.view(kT0 + 39500);
+    CHECK(!v.scanning && v.moreState == QLatin1String("exhausted") && v.verifiedCount == 3);
+    CHECK(m.candidatesReady(rc.requestId, cv, 10, kT0 + 39600).actions.isEmpty() || !m.view(kT0 + 39600).scanning); // stale: nothing starts
+
+    // a country scope: the server's first page of that country
+    m.filterChosen(QStringLiteral("nl"), kT0 + 70000);
+    CHECK(m.view(kT0 + 70000).bar.scope == "NL");
+    m.retryTapped(kT0 + 70000);
+    const ScanAction rn = actionOf(m.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 70050), ScanActionKind::RequestCandidates);
+    CHECK(rn.scopeCountry == "NL" && rn.batch == kScanScopeFirstBatch && rn.ids.isEmpty());
+
+    // the white lists: a scope of their own; an older server -> the device's own rows of that kind (none here)
+    ScanMachine wl(w.caps);
+    wl.opened(openOf(w, QString(), false), kT0);
+    wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 50);
+    wl.tick(kT0 + 50 + 8100);
+    wl.filterChosen(QStringLiteral("whitelist"), kT0 + 8200);
+    CHECK(wl.view(kT0 + 8200).bar.scope.isEmpty()); // the pool says nothing of white lists yet
+    wl.poolReady(ScanPoolView{{}, 3, 1}, kT0 + 8300);
+    wl.filterChosen(QStringLiteral("WhiteList"), kT0 + 8300);
+    CHECK(wl.view(kT0 + 8300).bar.scope == QLatin1String(kScanScopeWhitelist));
+    wl.retryTapped(kT0 + 40000);
+    const ScanAction rw = actionOf(wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 40050), ScanActionKind::RequestCandidates);
+    CHECK(rw.scopeCountry == QLatin1String(kScanScopeWhitelist));
+    const ScanStep fb = wl.candidatesUnavailable(rw.requestId, QStringLiteral("scanner_off"), 300, kT0 + 40100);
+    CHECK(actionOf(fb, ScanActionKind::StartHostScan).candidates.isEmpty() && !wl.view(kT0 + 40100).scanning); // nothing to probe
+    // the session fell back for good: the next scope scan does not ask again
+    wl.filterChosen(QString(), kT0 + 80000);
+    wl.moreTapped(QStringLiteral("NL"), kT0 + 80000);
+    CHECK(actionOf(wl.manifestReady(manifestInputFrom(manifestArgs(w)), kT0 + 80050), ScanActionKind::RequestCandidates).requestId.isEmpty());
 }
 
 static void rowsAfter17Nov()
@@ -3821,6 +3955,7 @@ int main(int argc, char **argv)
     cooldownRule();
     rowsAfter17Nov();
     findMore();
+    serverBatches();
     overruns();
     properties();
     if (g_fail) {

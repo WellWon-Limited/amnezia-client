@@ -77,6 +77,9 @@ struct ScanPlanInput {
     int maxProbe = 0;                       // «Найти ещё»: at most this many probed candidates (0 = all); the rest
                                             // is counted in ScanPlan::remaining
     bool interleave = false;                // own and provider candidates alternate (also for hosts other than the app)
+    bool onlyWhitelist = false;             // the white-list scope: only provider rows of kind whitelist
+    bool scoreOrder = false;                // a /v1/scan/candidates batch: the server's order - crowd score first across
+                                            // tiers (own and provider mixed), then tier and rank (contract 1.14.0)
     QMap<QString, QString> upstreamNames;   // profile_id -> display name (UpstreamNode.h::upstreamDisplayName)
     bool awgMiniEnabled = false;            // features.scanner_awg_mini (scanAwgMiniFlag), compiled default off
     bool awgProbeIpKnown = false;           // the app resolved the API's IP (the RU-split carve-out set)
@@ -149,6 +152,18 @@ inline bool scanCandidateLess(const ScanCandidate &a, const ScanCandidate &b)
     if (a.rank != b.rank)
         return a.rank < b.rank;
     return a.id < b.id;
+}
+
+// The order of a /v1/scan/candidates batch (contract 1.14.0): rows with a crowd score first, higher first, across
+// tiers; then the D9 order (tier, last-known-good, fresh failure, rank, id).
+inline bool scanCandidateScoreLess(const ScanCandidate &a, const ScanCandidate &b)
+{
+    const bool as = a.score >= 0, bs = b.score >= 0;
+    if (as != bs)
+        return as;
+    if (as && a.score != b.score)
+        return a.score > b.score;
+    return scanCandidateLess(a, b);
 }
 
 // The candidate a full-profile follow-up probes (D8): same identity, kind xray_full, no reach stage, its
@@ -231,6 +246,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             exclude(mn.nodeId, "shown");
             continue;
         }
+        if (in.onlyWhitelist) {
+            exclude(mn.nodeId, "scope");
+            continue;
+        }
         const auto it = pool.constFind(mn.nodeId);
         if (it == pool.constEnd()) {
             exclude(mn.nodeId, "not_in_pool");
@@ -261,6 +280,7 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
         c.tier = 0;
         c.rank = mn.rank;
         c.crowdWorks = mn.crowdWorks;
+        c.score = mn.score;
         c.entryIp = n.entryIp;
         c.entryPort = n.entryPort;
         c.freshFailure = in.freshFailures.contains(c.id);
@@ -319,6 +339,10 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
                 exclude(id, "country");
                 continue;
             }
+            if (in.onlyWhitelist && u.kind != UpstreamKind::Whitelist) {
+                exclude(id, "scope");
+                continue;
+            }
             ScanCandidate c;
             c.id = id;
             c.origin = ScanOrigin::Upstream;
@@ -332,6 +356,7 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
             c.composite = u.composite;
             c.trimmed = u.trimmed;
             c.crowdWorks = u.crowdWorks;
+            c.score = u.score;
             c.freshFailure = in.freshFailures.contains(c.id);
             c.lastKnownGood = !in.lastKnownGood.isEmpty() && c.id == in.lastKnownGood;
             c.needsLease = true;
@@ -354,9 +379,9 @@ inline ScanPlan buildScanPlan(const ScanPlanInput &in)
         }
     }
 
-    std::stable_sort(p.probe.begin(), p.probe.end(), scanCandidateLess);
-    std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), scanCandidateLess);
-    if (in.interleave || scanPlanInterleaves(caps))
+    std::stable_sort(p.probe.begin(), p.probe.end(), in.scoreOrder ? scanCandidateScoreLess : scanCandidateLess);
+    std::stable_sort(p.orderOnly.begin(), p.orderOnly.end(), in.scoreOrder ? scanCandidateScoreLess : scanCandidateLess);
+    if (!in.scoreOrder && (in.interleave || scanPlanInterleaves(caps)))
         p.probe = scanInterleaveOrigins(p.probe);
     if (in.maxProbe > 0 && p.probe.size() > in.maxProbe) {
         p.remaining = int(p.probe.size()) - in.maxProbe;

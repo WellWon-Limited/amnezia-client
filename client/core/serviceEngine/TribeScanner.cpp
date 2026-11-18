@@ -161,6 +161,7 @@ TribeScanner::TribeScanner(const Deps &d, QObject *parent)
     : QObject(parent), m_engine(d.engine), m_host(d.host), m_m(d.host ? d.host->knownCaps() : ScanHostCaps())
 {
     Q_ASSERT(m_engine);
+    m_fetchPoolOnOpen = d.fetchPoolOnOpen;
     if (d.store) {
         m_store = d.store;
     } else {
@@ -344,6 +345,9 @@ void TribeScanner::execute(const ScanAction &a)
         break;
     case ScanActionKind::ProbeLiveTunnel:
         doLiveProbe(a);
+        break;
+    case ScanActionKind::RequestCandidates:
+        doCandidates(a);
         break;
     // The only three that reach the tunnel (CONNECT-INVARIANTS §32): handed to the engine lane unchanged.
     case ScanActionKind::UserConnectForScan:
@@ -1804,6 +1808,60 @@ void TribeScanner::doOutcomes(const ScanAction &a)
     });
 }
 
+// POST /v1/scan/candidates (1.14.0): the scope's next batch; the provider rows' stub nodes go into the engine's pool
+// before the machine sees the rows (a tap pins them like any node).
+void TribeScanner::doCandidates(const ScanAction &a)
+{
+    const QString scope = a.scopeCountry.isEmpty() ? QStringLiteral("default")
+                          : a.scopeCountry == QLatin1String(kScanScopeWhitelist) ? QStringLiteral("whitelist")
+                                                                                 : QStringLiteral("country");
+    const QString country = scope == QLatin1String("country") ? a.scopeCountry : QString();
+    emitLog(QStringLiteral("action request_candidates scope=%1 country=%2 seen=%3 limit=%4")
+                .arg(scope, country.isEmpty() ? QStringLiteral("-") : country).arg(a.ids.size()).arg(a.batch));
+    const QString id = a.requestId;
+    QPointer<TribeScanner> self(this);
+    m_api->fetchCandidates(a.networkKey, scope, country, a.ids, a.batch, a.costBytes, [self, id](const ScanApiClient::Candidates &r) {
+        if (!self)
+            return;
+        if (r.ok) {
+            if (!r.view.providerNodes.isEmpty())
+                self->m_engine->offerScanNodes(r.view.providerNodes);
+            self->dispatch(self->m_m.candidatesReady(id, r.view, r.bytes, self->now()));
+        } else {
+            const QString reason = r.status == 404 ? QStringLiteral("unsupported") : r.reason; // the manifest answered: 404 = no endpoint
+            self->dispatch(self->m_m.candidatesUnavailable(id, reason, r.bytes, self->now()));
+        }
+    });
+}
+
+// GET /v1/scan/pool when the screen opens, at most every 10 minutes (the server allows 60 per hour): the scope menu
+// over the whole pool. Its few bytes go into the Scanner's ledger like any request outside a scan.
+void TribeScanner::fetchPoolIfStale()
+{
+    if (!m_fetchPoolOnOpen || m_poolUnsupported || m_serverOff || !m_api || !m_api->configured())
+        return;
+    const qint64 t = now();
+    if (m_poolAt >= 0 && t - m_poolAt < 10 * 60 * 1000)
+        return;
+    bool cellular = false;
+    const qint64 cost = m_m.tunables().costApiBytes;
+    if (!admitOutsideScan(cost, &cellular))
+        return;
+    m_poolAt = t;
+    QPointer<TribeScanner> self(this);
+    m_api->fetchPool(cost, [self, cellular](const ScanApiClient::Pool &p) {
+        if (!self)
+            return;
+        self->chargeOutsideScan(p.bytes, cellular);
+        if (p.ok)
+            self->dispatch(self->m_m.poolReady(p.view, self->now()));
+        else if (p.status == 404)
+            self->m_poolUnsupported = true;
+        else
+            self->m_poolAt = -1; // ask again at the next open
+    });
+}
+
 void TribeScanner::doLiveProbe(const ScanAction &a)
 {
     const ScanCurrent c = m_engine->current();
@@ -1896,6 +1954,7 @@ void TribeScanner::open(bool withCheck)
     o.connectOnOpen = m_connectOnOpen;
     m_lastNet = o.network;
     emitLog(QStringLiteral("open with_check=%1").arg(withCheck));
+    fetchPoolIfStale();
     dispatch(m_m.reportQueueState(m_engine->reportQueueFull(), now()));
     dispatch(m_m.opened(o, now()));
 }
