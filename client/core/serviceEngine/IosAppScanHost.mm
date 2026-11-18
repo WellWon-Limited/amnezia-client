@@ -29,6 +29,8 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QHash>
+#include <QJsonArray>
+#include <QVariantMap>
 #include <QPointer>
 #include <QStandardPaths>
 #include <QTimer>
@@ -439,9 +441,49 @@ void IosHybridScanHost::installAutorun(TribeScanner *scanner)
                            {QStringLiteral("front"), appInFront()},
                            {QStringLiteral("waited_tries"), *tries}});
         sc->open(false);
-        QTimer::singleShot(c.closeAfterS * 1000, sc.data(), [sc]() {
+        // The view's 1.14.0 parts at each step (the scope menu, more.state, counts) into the measurement journal.
+        auto snapshot = [sc](const char *when) {
             if (!sc)
                 return;
+            const QVariantMap v = sc->view();
+            const QVariantMap bar = v.value(QStringLiteral("bar")).toMap();
+            record(QJsonObject{{QStringLiteral("ev"), QStringLiteral("autorun_view")},
+                               {QStringLiteral("when"), QLatin1String(when)},
+                               {QStringLiteral("phase"), v.value(QStringLiteral("phase")).toString()},
+                               {QStringLiteral("verified"), v.value(QStringLiteral("verified")).toInt()},
+                               {QStringLiteral("unverified"), v.value(QStringLiteral("unverified")).toInt()},
+                               {QStringLiteral("batch"), v.value(QStringLiteral("batch")).toInt()},
+                               {QStringLiteral("more"), QJsonObject::fromVariantMap(v.value(QStringLiteral("more")).toMap())},
+                               {QStringLiteral("scope_countries"), QJsonArray::fromVariantList(bar.value(QStringLiteral("scope_countries")).toList())},
+                               {QStringLiteral("scope_whitelist"), bar.value(QStringLiteral("scope_whitelist")).toInt()},
+                               {QStringLiteral("scanned_scope"), bar.value(QStringLiteral("scanned_scope")).toString()},
+                               {QStringLiteral("rows"), v.value(QStringLiteral("rows")).toList().size()}});
+        };
+        int at = c.stepS;
+        if (!c.autorunScope.isEmpty()) {
+            QTimer::singleShot(at * 1000, sc.data(), [sc, c, snapshot]() {
+                if (!sc)
+                    return;
+                snapshot("before_scope");
+                record(QJsonObject{{QStringLiteral("ev"), QStringLiteral("autorun_scope")}, {QStringLiteral("scope"), c.autorunScope}});
+                sc->chooseCountry(c.autorunScope);
+                sc->retry();
+            });
+            at += c.stepS;
+        }
+        for (int i = 0; i < c.autorunMore; ++i, at += c.stepS)
+            QTimer::singleShot(at * 1000, sc.data(), [sc, snapshot]() {
+                if (!sc)
+                    return;
+                snapshot("before_more");
+                record(QJsonObject{{QStringLiteral("ev"), QStringLiteral("autorun_more")}});
+                sc->findMore();
+            });
+        const int closeAt = qMax(c.closeAfterS, at + (c.autorunMore > 0 || !c.autorunScope.isEmpty() ? c.stepS : 0));
+        QTimer::singleShot(closeAt * 1000, sc.data(), [sc, snapshot]() {
+            if (!sc)
+                return;
+            snapshot("close");
             record(QJsonObject{{QStringLiteral("ev"), QStringLiteral("autorun_close")}});
             sc->close();
         });

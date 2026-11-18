@@ -698,7 +698,10 @@ void ScanApiClient::fetchCandidates(const QString &networkKey, const QString &sc
             const QString key = self->m_pubKeyHex ? self->m_pubKeyHex() : QString();
             const bool sigOk = !key.isEmpty()
                                && verifyDetachedWithContext(key, QLatin1String(kScanCandidatesSigContext), r.body, r.header("x-tribe-sig"));
-            c.ok = sigOk && scanCandidatesFromJson(QJsonDocument::fromJson(r.body).object(), c.view);
+            const QJsonObject o = QJsonDocument::fromJson(r.body).object();
+            c.ok = sigOk && scanCandidatesFromJson(o, c.view);
+            if (c.ok)
+                c.body = o;
             if (!c.ok)
                 c.reason = QStringLiteral("invalid"); // an unverified answer is never used
         } else {
