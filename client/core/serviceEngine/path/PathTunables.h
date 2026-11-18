@@ -6,7 +6,6 @@
 // owner's Wi-Fi and on cellular). They become server numbers later (design §6: "probe, quarantine and budget
 // terms are server numbers"); until then the integration passes these defaults.
 //
-// Nothing outside path/ reads these values yet: the core is not wired into the engine in this step.
 #pragma once
 
 #include <array>
@@ -21,9 +20,21 @@ struct AttemptTimings {
     // reaches data in 4.0-5.7 s in total, own Xray in 2.6-4.6 s, a provider profile in 2.4-3.4 s.
     int awgStartMs = 4500;      // to be calibrated on device
     int xrayStartMs = 5000;     // to be calibrated on device
-    int providerStartMs = 6000; // to be calibrated on device (includes the seat lease, 0.2-0.6 s observed)
+    int providerStartMs = 6000; // to be calibrated on device (the native start after the seat lease)
+    // A provider leg has two phases inside its one start deadline (review E6 of 18.11): the seat lease (its
+    // acquisition is bounded by this, ConnectTunables.h::upstreamAcquireTimeoutMsTuned reads the same number;
+    // 0.2-0.6 s observed) and then the native start (providerStartMs). With the direct API blocked the cached
+    // profile starts only after the lease timed out - the leg's deadline still covers its whole native start.
+    int providerLeaseMs = 4000; // to be calibrated on device
     // The one in-tunnel data check: from "tunnel up" to "data proven".
     int dataCheckMs = 4000; // to be calibrated on device
+    // The check itself answers by dataCheckMs (complete payload = works, possibly slow; nothing = no data). The
+    // owner's own deadline is only a backstop for a check that never answers: dataCheckMs + this. A payload that
+    // completed is always judged before a timeout (review E4 of 18.11).
+    int checkGraceMs = 1500;
+    // A check that could not decide (inconclusive, not interrupted by a suspension) runs again on the same tunnel
+    // at most this many times before the leg is given up (nothing recorded either way).
+    int maxRechecks = 1;
     // Overall budget of the attempt on one network: nothing proven within it -> honest failure. Stage 1 walks
     // the candidates one at a time, so one tap must be able to walk a hostile network (coordinator 18.11);
     // the 20 s target of the design applies once the probe race exists (stage 2).
@@ -35,9 +46,12 @@ struct AttemptTimings {
     // stopped (an outcome of the platform, never of the path - nothing is recorded). The native stop deadline
     // (IosNativePolicy.h NativeTimings: 10 s).
     int stopConfirmMs = 10000;
-    // A gap between two events longer than this is a clock jump (the app was suspended, the main thread was
-    // stopped): only this much of it counts against deadlines. Must exceed the platform tick period (1 s).
+    // A gap between two events longer than this is a suspension (the app was suspended, the main thread was
+    // stopped): none of it counts against deadlines (review E3 of 18.11). Must exceed the platform tick period
+    // (1 s). After it, the leg in flight gets at least resumeGraceMs for the platform's answers to arrive, and a
+    // data check that was running is run again on the same tunnel (it did not happen - design R12).
     int clockJumpMs = 2500;
+    int resumeGraceMs = 2000;
 };
 
 // The evidence store (PathLedger.h).

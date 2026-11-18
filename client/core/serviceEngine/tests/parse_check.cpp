@@ -8,7 +8,6 @@
 #include "../GoodputProbe.h"
 #include "../HealthLoop.h"
 #include "../MtprotoProbe.h"
-#include "../Selector.h"
 #include "../SignalQuality.h"
 #include "../SubscriptionParser.h"
 #include "../SubscriptionRequest.h"
@@ -408,43 +407,7 @@ int main(int argc, char **argv)
         printf("fingerprint: OK (sha256-hex, 3 bodies, omit-when-empty, 403 detail)\n");
     }
 
-    // --- Selector: чистые score()/choose() (детерминированно) ---
     {
-        auto mk = [](const QString &id, int rtt, double w) {
-            ScoredNodeS s; s.node.nodeId = id; s.node.weight = w; s.rttMs = rtt;
-            s.score = (rtt < 0) ? 0.0 : Selector::score(rtt, w);
-            return s;
-        };
-        // score = rtt/weight
-        bool sOk = qFuzzyCompare(Selector::score(100, 2.0), 50.0)
-                   && qFuzzyCompare(Selector::score(100, 0.0), 100.0); // weight<=0 → 1
-        // выбор лучшего по score (B: 60/1=60 < A:100/1=100, C недостижим)
-        QList<ScoredNodeS> set{mk("A", 100, 1.0), mk("B", 60, 1.0), mk("C", -1, 1.0)};
-        auto pick1 = Selector::choose(set, QString(), 75, 0);
-        // гистерезис: текущая A (100), лучшая B (60). разница 40 ≤ tolerance 75 → остаёмся на A
-        auto pickHyst = Selector::choose(set, QStringLiteral("A"), 75, 0);
-        // без допуска (tolerance 10): 40 > 10 → переключаемся на B
-        auto pickSwitch = Selector::choose(set, QStringLiteral("A"), 10, 0);
-        // джиттер: две near-equal (A100,D110 при tol 75 → группа {лучшая=A, D}), seed=1 → второй (D)
-        QList<ScoredNodeS> tie{mk("A", 100, 1.0), mk("D", 110, 1.0)};
-        auto pickJit0 = Selector::choose(tie, QString(), 75, 0);
-        auto pickJit1 = Selector::choose(tie, QString(), 75, 1);
-        printf("selector: best=%s hyst=%s switch=%s jit0=%s jit1=%s\n",
-               pick1 ? pick1->nodeId.toUtf8().constData() : "-",
-               pickHyst ? pickHyst->nodeId.toUtf8().constData() : "-",
-               pickSwitch ? pickSwitch->nodeId.toUtf8().constData() : "-",
-               pickJit0 ? pickJit0->nodeId.toUtf8().constData() : "-",
-               pickJit1 ? pickJit1->nodeId.toUtf8().constData() : "-");
-        bool selOk = sOk
-                     && pick1 && pick1->nodeId == QLatin1String("B")
-                     && pickHyst && pickHyst->nodeId == QLatin1String("A")
-                     && pickSwitch && pickSwitch->nodeId == QLatin1String("B")
-                     && pickJit0 && pickJit0->nodeId == QLatin1String("A")
-                     && pickJit1 && pickJit1->nodeId == QLatin1String("D")
-                     && !Selector::choose({mk("X", -1, 1.0)}, QString(), 75, 0).has_value(); // все недостижимы → nullopt
-        if (!selOk) { fprintf(stderr, "FAIL: Selector score/choose mismatch\n"); return 7; }
-        printf("selector: OK (score, best-pick, hysteresis, switch, jitter, all-down=none)\n");
-
         // живой TCP-ping smoke (best-effort: сеть может быть недоступна в песочнице — не валит тест)
         int rtt = Prober::tcpPing(QStringLiteral("1.1.1.1"), 443, 1500);
         printf("tcpPing 1.1.1.1:443 -> %d ms (%s)\n", rtt, rtt >= 0 ? "reachable" : "n/a (offline?)");
@@ -469,16 +432,9 @@ int main(int argc, char **argv)
         bool dead4 = h4.feed(S(now - 3, 100, 300), now);
         printf("health: dead1=%d dead2=%d dead3=%d dead4=%d\n", dead1, dead2, dead3, dead4);
 
-        // Selector: исключение мёртвой ноды — лучшая B исключена → выбираем A
-        auto mk = [](const QString &id, int rtt, double w) {
-            ScoredNodeS s; s.node.nodeId = id; s.node.weight = w; s.rttMs = rtt; s.score = Selector::score(rtt, w); return s;
-        };
-        auto exPick = Selector::choose({mk("A", 100, 1.0), mk("B", 60, 1.0)}, QString(), 75, 0, QStringLiteral("B"));
-        printf("health/exclude: exPick=%s\n", exPick ? exPick->nodeId.toUtf8().constData() : "-");
-
-        bool hOk = dead1 && !dead2 && !dead3 && !dead4 && exPick && exPick->nodeId == QLatin1String("A");
-        if (!hOk) { fprintf(stderr, "FAIL: HealthLoop/exclude mismatch\n"); return 8; }
-        printf("healthloop: OK (one-way death→DEAD, healthy/idle/fresh-handshake→alive, exclude works)\n");
+        bool hOk = dead1 && !dead2 && !dead3 && !dead4;
+        if (!hOk) { fprintf(stderr, "FAIL: HealthLoop mismatch\n"); return 8; }
+        printf("healthloop: OK (one-way death→DEAD, healthy/idle/fresh-handshake→alive)\n");
 
         // --- HealthLoop: server-tunable пороги (backend-first Task 2) ---
         // Дефолт (пустой TuningStore) — DEAD только после 2 «плохих» циклов подряд (как раньше).

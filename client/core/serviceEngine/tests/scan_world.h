@@ -25,7 +25,6 @@
 //   cached = ScanTypes.h scanCachedResultToJson.
 #pragma once
 
-#include "../ScanAutoRace.h"
 #include "../ScanMachine.h"
 
 #include <QJsonArray>

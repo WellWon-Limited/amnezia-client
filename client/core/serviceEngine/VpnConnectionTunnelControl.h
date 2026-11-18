@@ -44,10 +44,8 @@ public:
     // вырезаются (awg-apple 3.1.4 бросает invalidLine).
     TunnelResult up(const Subscription &sub, const SubscriptionNode &node) override;
 
-    // applyPeer (MVP): «быстрый reconnect» = down + up с новым узлом. На стабильном /32 адрес tun не меняется.
     // TODO(оптимизация in-place): desktop — switchServer (держать gateway/device const); iOS — слать
     // wg-quick через sendProviderMessage→WireGuardAdapter.update; Android — новый JNI awgSetConfig (см. README).
-    TunnelResult applyPeer(const Subscription &sub, const SubscriptionNode &node) override;
 
     // readStats: rx/tx из bytesChanged; latestHandshakeEpoch — из платформенного сигнала handshakeChanged.
     //   iOS:     IosController::checkStatus парсит UAPI last_handshake_time_sec → handshakeChanged.
@@ -65,6 +63,10 @@ public:
     bool rebindSocket() override;
 
     void down() override;
+
+    // Review E2 of 18.11: a marker through the VpnConnection thread ahead of the leg's connectToVpn (both queued
+    // to that thread in order, so every event of the previous leg reaches the GUI thread before the marker).
+    void beginNativeOp(quint64 leg) override;
 
     // AVPN bench v5 (tunnel.config): санитизированный снапшот ПОСЛЕДНЕГО реально ушедшего в
     // connectToVpn конфига (reportSummary + факты сева: split/split-DNS/dns-override). up() —

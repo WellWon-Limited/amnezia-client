@@ -11,7 +11,6 @@
 #include "Identity.h"
 #include "NodePool.h"
 #include "NodeRotation.h"
-#include "Switcher.h"
 #include "TransportModeGate.h"
 #include "TunnelWatchPlan.h"
 #include "path/AttemptOwner.h"
@@ -41,13 +40,13 @@ enum class ReseedResult { Applied, Deferred, Rejected, Unchanged };
 
 class ServiceEngine {
 public:
-    ServiceEngine() : m_switcher(nullptr), m_owner(path::AttemptTimings{})
+    ServiceEngine() : m_owner(path::AttemptTimings{})
     {
         m_net.observe(path::NetworkObservation{}); // "unknown" until the platform tells the network (observeNetwork)
     }
 
     // Платформенный туннель-адаптер (владение — у вызывающего).
-    void setTunnel(ITunnelControl *tunnel) { m_tunnel = tunnel; m_switcher = Switcher(tunnel); }
+    void setTunnel(ITunnelControl *tunnel) { m_tunnel = tunnel; }
 
     // AVPN (фикс-волна 2026-09-22): инъекция часов (epoch ms) для тестов — TTL кэша RTT и часы
     // фаз свитча. Пусто = QDateTime::currentMSecsSinceEpoch().
@@ -227,6 +226,17 @@ public:
     int dataCheckMs() const { return m_owner.timings().dataCheckMs; }
     std::optional<path::AttemptResult> takeAttemptResult() { return std::exchange(m_lastResult, std::nullopt); }
     QStringList takeAttemptJournal() { return std::exchange(m_attemptJournal, QStringList()); }
+    // Legs whose tunnel never came up (no handshake / no connect within the start deadline) since the last call -
+    // the white-list detector's "the connect did not come up" input (DebugSnapshot.h::whitelistTriggerFromAttempt).
+    int takeLegStartFailures() { return std::exchange(m_legStartFailures, 0); }
+    // The owner asked to run the data check again on the same tunnel (RunDataCheck recheck): the facade drops the
+    // running check and starts a new one.
+    bool takeCheckRerun() { return std::exchange(m_checkRerun, false); }
+    // Review E2 of 18.11: a native event delivered while the native stream is at `nativeLeg`
+    // (ITunnelControl::nativeLegSeen) belongs to that leg; one of an older leg than the leg the owner is starting,
+    // checking or stopping is obsolete (a duplicate error, a late answer) and is dropped before any state change.
+    bool nativeEventStale(quint64 nativeLeg) const;
+    quint64 attemptLeg() const { return m_owner.currentLeg().leg; }
     // The ledger (persisted by the facade: QSettings avpn/pathLedger).
     void loadPathLedger(const QByteArray &json) { m_ledger = path::PathLedger::fromJson(json); m_ledgerDirty = false; }
     QByteArray pathLedgerJson() const { return m_ledger.toJson(); }
@@ -274,20 +284,14 @@ public:
     // in the transport history at most once per rise and without a time to traffic. Compiled for every
     // platform, called only from the facade's Q_OS_IOS block (PLATFORM-SCOPING §2).
     bool reenterVerifying();
-    // AVPN (iOS data watch, stage 2): the extension never switches in place - the attempt owner is the only one
-    // that chooses a path (design 2026-11-17 §4). The plan's candidate list is always empty.
-    QList<WatchPlanCandidate> extensionSwitchCandidates() const { return {}; }
     bool feedProbeResult(bool ok);
 
     // AVPN awg31-xray-v1: ручной режим транспорта (Авто / Amnezia / Xray). Локальная настройка —
     // персистит фасад (QSettings avpn/transportMode). В ручном режиме — hard-filter по proto на
     // всех путях выбора (connect/failover/ротация/pin); нет кандидатов → честная ошибка no_transport.
-    // AVPN (независимое ревью волны, MAJOR-2): недоступный Xray (kill-switch features.xray_client
-    // или платформа) всегда читается как Auto — и при загрузке сохранённой настройки, и в UI, и на
-    // всех путях выбора (normalizeTransportMode зовётся в начале connect()/onDead()).
-    // 5.1.109 (review R2): also at the start of setPinnedNode, rotateNext, continuePendingSwitch and
-    // the pool refresh; const readers (nextCandidate, the pick helpers, nextLiveNodeId,
-    // pinLacksTransport, debugSnapshot) use transportMode(). One rule: effectiveTransportMode.
+    // Review E8 of 18.11: an unavailable Xray (kill switch features.xray_client or the platform) no longer
+    // reads as Auto - the mode stays as chosen and the attempt reports that it has no path (TransportModeGate.h
+    // rule 2); every reader uses transportMode().
     //
     // 5.1.109 (S4.1; defect of 12.11.2026 on 138): the user's CHOICE is kept apart from the mode IN
     // FORCE, and the whole rule of how the mode in force follows the choice is one plain class -
@@ -298,9 +302,9 @@ public:
     // calls below and applies the returned ModeChange (tests: transport_mode_gate_check for the
     // rule, transport_pick_check §17 for this side of it).
     void setTransportMode(TransportMode m) { m_modeGate.set(m, xrayClientSupported()); } // choice + in force
-    TransportMode transportMode() const { return effectiveTransportMode(m_modeGate.inForce()); }
+    // Review E8 of 18.11: the mode in force as the person chose it - availability never broadens it.
+    TransportMode transportMode() const { return m_modeGate.inForce(); }
     TransportMode chosenTransportMode() const { return m_modeGate.choice(); }
-    void normalizeTransportMode() { m_modeGate.writeDownLoss(xrayClientSupported()); }
     bool transportModeChoicePending() const { return m_modeGate.choicePending(xrayClientSupported()); }
 
     // What an event did. pinUnapplied - a pin the admitted mode cannot serve was dropped from the
@@ -353,7 +357,7 @@ public:
     QString pinnedNodeId() const { return m_pinnedNodeId; }   // AVPN
     bool hasConnectablePin() const;
     // 5.1.109: the pinned location has connectable nodes but none of them serves transport mode
-    // `mode` (read as effectiveTransportMode) - the no_transport refusal of setPinnedNode (which
+    // `mode` (as chosen - review E8 of 18.11) - the no_transport refusal of setPinnedNode (which
     // normalizes the stored mode first), without its side effects (setPinnedNode also drops the
     // interrupted-switch replay). False without a pin, for a pin no longer in the pool and in Auto.
     // The facade clears such a pin on a mode change (DebugSnapshot.h::decidePinOnTransportMode).
@@ -368,8 +372,7 @@ public:
     // before connecting. Not covered: the one-shot retry of an interrupted switch (no user choice).
     // Inside an equal-weight tier without measurements the pick is random - callers that must not
     // flicker show it only when the choice is deterministic (pin or a manual transport mode).
-    // 5.1.109: the pick helpers read the effective mode (transportMode()), as connect() does after
-    // normalizeTransportMode() - test transport_pick_check §15.
+    // 5.1.109: the pick helpers read the mode in force (transportMode()), as connect() does.
     const SubscriptionNode *nextCandidate() const; // the owner's first choice now (PathSelect), no side effect
     QString pinnedLocation() const;                           // AVPN awg31-xray-v1
     // AVPN (RU-нода): закреплена ли сейчас РФ-нода (countryCode==RU). RU достижима ТОЛЬКО через ручной pin
@@ -511,7 +514,6 @@ private:
     Identity      m_identity;
     NodePool      m_pool;
     bool          m_lkgActive = false; // AVPN (LKG): пул наполнен из дискового кэша, свежего фетча ещё не было
-    Switcher      m_switcher;
     HealthLoop    m_health;
     ITunnelControl *m_tunnel = nullptr;
     EngineState   m_state = EngineState::Disconnected;
@@ -554,6 +556,8 @@ private:
     QStringList m_attemptJournal;
     QList<path::AttemptEvent> m_ownerQueue;
     bool m_inOwner = false;
+    int m_legStartFailures = 0;
+    bool m_checkRerun = false;
     bool m_facadeStop = false;                 // the facade itself takes the tunnel down (user stop / restart)
     std::optional<path::AttemptTimings> m_timingsForTest;
     QList<SubscriptionNode> m_packCandidates;  // upstream: synthesized from the standby pack

@@ -1,5 +1,7 @@
 #include "VpnConnectionTunnelControl.h"
 
+#include <QPointer>
+
 // [IN-FORK BUILD] заголовки форка:
 #include "vpnConnection.h"
 #include "core/utils/containerEnum.h"   // AVPN: DockerContainer enum (was wrong path core/defs.h)
@@ -507,12 +509,6 @@ TunnelResult VpnConnectionTunnelControl::up(const Subscription &sub, const Subsc
     return TunnelResult::success();
 }
 
-TunnelResult VpnConnectionTunnelControl::applyPeer(const Subscription &sub, const SubscriptionNode &node)
-{
-    // MVP: быстрый reconnect (VpnConnection не отдаёт server-switch наружу на всех платформах).
-    down();
-    return up(sub, node);
-}
 
 TunnelStats VpnConnectionTunnelControl::readStats()
 {
@@ -552,6 +548,23 @@ bool VpnConnectionTunnelControl::rebindSocket()
 #else
     return false; // Android (нет awgSetConfig в JNI) / Windows (wireguard-nt) — сразу failover
 #endif
+}
+
+void VpnConnectionTunnelControl::beginNativeOp(quint64 leg)
+{
+    if (!m_conn) {
+        noteNativeLegSeen(leg);
+        return;
+    }
+    QPointer<VpnConnectionTunnelControl> self(this);
+    QMetaObject::invokeMethod(
+        m_conn,
+        [self, leg] {
+            if (self)
+                QMetaObject::invokeMethod(
+                    self.data(), [self, leg] { if (self) self->noteNativeLegSeen(leg); }, Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
 }
 
 void VpnConnectionTunnelControl::down()

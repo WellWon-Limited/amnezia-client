@@ -256,21 +256,26 @@ inline constexpr int kUpstreamReleaseMaxResends = 8;
 // Decision of 18.11 (owner's iPhone, rounds 1-2: releases timed out inside provider paths that carried no data,
 // and through a working provider tunnel api.tribevpn.com is often unreachable): a seat release never rides the
 // tunnel that is being abandoned. It goes over the app's direct API path - the route's tunnel_api_base serves the
-// renewals of a running session only - and the app sends it after the tunnel's stop is confirmed; a stop that is
-// never confirmed holds it at most kUpstreamReleaseHoldMaxMs (the native stop deadline), never for good. The
-// extension (iOS, Android) keeps releasing on its own stop as before. Pure: what to send, and when.
+// renewals of a running session only - and the app sends it after the tunnel's stop is CONFIRMED (review E5 of
+// 18.11): elapsed time never stands in for the confirmation. A stop that is not confirmed within
+// kUpstreamReleaseHoldMaxMs (the native stop deadline) keeps the obligation - it is journalled as "held, stop not
+// confirmed" and sent at the next confirmed teardown (the direct path is free again then). The extension (iOS,
+// Android) releases on its own stop, after its core stopped, over its direct path. Pure: what to send, and when.
 inline constexpr int kUpstreamReleaseHoldMaxMs = 10000;
 struct UpstreamReleaseDue {
-    bool send = false; // send the held releases now
-    bool hold = false; // keep holding (the stop is not confirmed yet and the bound has not passed)
+    bool send = false;    // send the held releases now
+    bool hold = false;    // keep holding (the stop is not confirmed yet)
+    bool overdue = false; // held past the native stop deadline: journal it once (still held)
 };
 inline UpstreamReleaseDue upstreamReleaseDue(bool stopPending, qint64 heldSinceMs, qint64 nowMs, bool tunnelDown)
 {
     UpstreamReleaseDue d;
-    if (!stopPending || tunnelDown || nowMs - heldSinceMs >= kUpstreamReleaseHoldMaxMs)
+    if (!stopPending || tunnelDown) {
         d.send = true;
-    else
-        d.hold = true;
+        return d;
+    }
+    d.hold = true;
+    d.overdue = nowMs - heldSinceMs >= kUpstreamReleaseHoldMaxMs;
     return d;
 }
 

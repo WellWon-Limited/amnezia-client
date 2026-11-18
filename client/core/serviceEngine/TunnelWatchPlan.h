@@ -18,7 +18,6 @@
 #pragma once
 
 #include "ConnectTunables.h"
-#include "NetworkMemory.h"
 
 #include <QByteArray>
 #include <QJsonArray>
@@ -69,34 +68,12 @@ inline QString watchPlanProto(const QString &engineProto)
     return engineProto.startsWith(QLatin1String("xray")) ? QStringLiteral("xray") : QStringLiteral("awg");
 }
 
-// One live entry of the network memory (NetworkMemory.h, same JSON blob): the node and when it was saved.
-struct WatchPlanMemoryEntry {
-    QString key;
-    int nodeId = 0;
-    qint64 savedMs = 0;
-};
-
-// The entry for `key` if it is live by the same rule as networkMemoryLookup (newer than maxAgeSec, has a
-// timestamp, the node id is an integer); otherwise nodeId == 0.
-inline WatchPlanMemoryEntry watchPlanMemoryEntry(const QByteArray &json, const QString &key, qint64 nowSec,
-                                                 qint64 maxAgeSec = kNetworkMemoryMaxAgeSec)
+// The cellular key the extension files its evidence under: "cellular:<MCC-MNC>", plain "cellular" when the code is
+// unknown (the format the extension reads; the app's own per-network memory is the path engine's ledger now).
+inline QString watchPlanCellularKey(const QString &carrierCode)
 {
-    WatchPlanMemoryEntry e;
-    e.key = key;
-    if (key.isEmpty())
-        return e;
-    for (const QJsonValue &v : netmemory_detail::load(json)) {
-        const QJsonObject o = v.toObject();
-        if (o.value(QStringLiteral("k")).toString() != key)
-            continue;
-        const QJsonValue t = o.value(QStringLiteral("t"));
-        if (!t.isDouble() || nowSec - qint64(t.toDouble()) > maxAgeSec)
-            return e;
-        e.nodeId = watchPlanNodeId(o.value(QStringLiteral("n")).toString());
-        e.savedMs = e.nodeId ? qint64(t.toDouble()) * 1000 : 0;
-        return e;
-    }
-    return e;
+    const QString code = carrierCode.trimmed();
+    return code.isEmpty() ? QStringLiteral("cellular") : QStringLiteral("cellular:") + code;
 }
 
 // Stage 2: one node the extension may switch to in place. `peer` is the node's part of the tunnel
@@ -108,65 +85,9 @@ struct WatchPlanCandidate {
 };
 constexpr int kWatchPlanMaxCandidates = 5; // spare nodes; the current one is in the profile
 
-// The keys of a node's own half of the configuration: its endpoint, keys and AmneziaWG parameters.
-// Nothing of the device (private key, tunnel address) and nothing the session keeps (DNS, MTU, routes).
-inline const QStringList &watchPlanCandidateKeys()
-{
-    static const QStringList keys{
-        QStringLiteral("hostName"), QStringLiteral("port"), QStringLiteral("server_pub_key"), QStringLiteral("psk_key"),
-        QStringLiteral("persistent_keep_alive"),
-        QStringLiteral("Jc"), QStringLiteral("Jmin"), QStringLiteral("Jmax"), QStringLiteral("S1"), QStringLiteral("S2"),
-        QStringLiteral("S3"), QStringLiteral("S4"), QStringLiteral("H1"), QStringLiteral("H2"), QStringLiteral("H3"),
-        QStringLiteral("H4"), QStringLiteral("I1"), QStringLiteral("I2"), QStringLiteral("I3"), QStringLiteral("I4"),
-        QStringLiteral("I5"), QStringLiteral("HeaderProtectionKey"), QStringLiteral("ContentPaddingAddition"),
-        QStringLiteral("RekeyAfterTime"), QStringLiteral("RekeyTimeout"), QStringLiteral("RejectAfterTime"),
-        QStringLiteral("KeepaliveTimeout"), QStringLiteral("MaxHandshakeAttempts"), QStringLiteral("RandomTrailers"),
-        QStringLiteral("DisableCookies"),
-    };
-    return keys;
-}
 
-// `inner` - the node's full tunnel configuration (AwgConfigBuilder::buildInner). Numbers become strings
-// (the extension reads strings); empty values and every other key are left out.
-inline QJsonObject watchPlanCandidatePeer(const QJsonObject &inner)
-{
-    QJsonObject peer;
-    for (const QString &key : watchPlanCandidateKeys()) {
-        const QJsonValue v = inner.value(key);
-        const QString text = v.isString() ? v.toString() : v.isDouble() ? QString::number(qint64(v.toDouble())) : QString();
-        if (!text.isEmpty())
-            peer.insert(key, text);
-    }
-    return peer;
-}
 
-// A switch in place keeps the session's interface: only a node with the same DNS, MTU, tunnel address
-// and routed ranges qualifies; the others wait for the app. Compared on what the builder really emits
-// for the two nodes (its defaults included): the interface lines of the wg-quick text the extension
-// starts with, and the builder's own `mtu` and `allowed_ips`.
-inline QStringList watchPlanSessionLines(const QJsonObject &inner)
-{
-    QStringList out;
-    const QStringList lines = inner.value(QStringLiteral("config")).toString().split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        const QString t = line.trimmed();
-        for (const char *key : {"DNS = ", "MTU = ", "Address = ", "AllowedIPs = "})
-            if (t.startsWith(QLatin1String(key)))
-                out.append(t);
-    }
-    return out;
-}
 
-inline bool watchPlanInPlace(const QJsonObject &currentInner, const QJsonObject &candidateInner)
-{
-    const QStringList current = watchPlanSessionLines(currentInner);
-    if (current.isEmpty() || current != watchPlanSessionLines(candidateInner))
-        return false;
-    for (const char *key : {"mtu", "allowed_ips", "client_ip"})
-        if (currentInner.value(QLatin1String(key)) != candidateInner.value(QLatin1String(key)))
-            return false;
-    return true;
-}
 
 struct WatchPlanInputs {
     qint64 nowMs = 0;              // wall clock of the write
@@ -182,8 +103,7 @@ struct WatchPlanInputs {
     QString sessionNodeId;
     QString sessionProto;          // engine proto
     QString sessionCountry;
-    QString cellularKey;           // networkMemoryKey("cellular", carrier): "cellular:<MCC-MNC>" or "cellular"
-    QList<WatchPlanMemoryEntry> memory; // entries for "wifi" and cellularKey (dead ones are dropped here)
+    QString cellularKey;           // watchPlanCellularKey(carrier): "cellular:<MCC-MNC>" or "cellular"
     QList<QPair<QString, long long>> numbers; // clamped plan numbers (key, value) in table order
     QStringList sanityTargets;     // watchPlanSanityTargets(); empty = the extension's built-in ones
     // Stage 2: where the extension may switch to, in the ladder's order. Written only with BOTH flags on
@@ -258,15 +178,9 @@ inline QJsonObject buildWatchPlan(const WatchPlanInputs &in)
     const long long leaseMin = watchPlanNumber(in.numbers, "ios_tw_switch_lease_min");
     const bool switching = in.watch && in.watchSwitch;
 
-    QJsonObject memory;
-    for (const WatchPlanMemoryEntry &e : in.memory) {
-        if (e.key.isEmpty() || e.nodeId <= 0)
-            continue; // only live entries (watchPlanMemoryEntry already applied the 7-day rule)
-        if (e.key != QLatin1String("wifi") && e.key != in.cellularKey)
-            continue; // only the two keys of net_keys
-        memory.insert(e.key, QJsonObject{{QStringLiteral("node_id"), e.nodeId},
-                                         {QStringLiteral("saved_ms"), double(e.savedMs)}});
-    }
+    // net_memory: the extension still reads the field; the app keeps no per-network memory of its own any more
+    // (the path engine's ledger), so it is always empty.
+    const QJsonObject memory;
 
     QJsonArray candidates;
     if (in.watch && in.watchSwitch) {

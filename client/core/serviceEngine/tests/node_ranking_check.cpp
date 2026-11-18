@@ -50,28 +50,6 @@ int main()
         CHECK(out[2].nodeId == "E1" && out[3].nodeId == "E2", "equal rtt keep input order");
     }
 
-    // fastestMeasuredNodeId: nodeId с минимальным rtt>=0 (для авто-выбора «Авто быстрейший»); "" если нет.
-    {
-        QList<RankRow> in;
-        in.append({ QStringLiteral("A"), 200 });
-        in.append({ QStringLiteral("B"), -1 });
-        in.append({ QStringLiteral("C"), 50 });
-        in.append({ QStringLiteral("D"), 120 });
-        CHECK(fastestMeasuredNodeId(in) == "C", "fastest measured = C (50ms)");
-    }
-    {
-        QList<RankRow> in; // все неизмерены → пусто (фолбэк на weight в движке)
-        in.append({ QStringLiteral("U1"), -1 });
-        in.append({ QStringLiteral("U2"), -1 });
-        CHECK(fastestMeasuredNodeId(in).isEmpty(), "all unknown -> empty (fallback)");
-    }
-    {
-        QList<RankRow> in; // ничья rtt → стабильно первый
-        in.append({ QStringLiteral("E1"), 100 });
-        in.append({ QStringLiteral("E2"), 100 });
-        CHECK(fastestMeasuredNodeId(in) == "E1", "tie -> first wins (stable)");
-    }
-
     if (g_failures) { std::printf("\n%d FAILURES\n", g_failures); return 1; }
     std::printf("\nALL PASS\n");
     return 0;

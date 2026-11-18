@@ -1,5 +1,7 @@
 #include "UpstreamLeaseClient.h"
 
+#include <QDebug>
+
 #include "ConnectTunables.h"
 #include "NetAwait.h" // armTimeout: the API client's per-request bound (no timer of our own)
 
@@ -157,8 +159,15 @@ void UpstreamLeaseClient::holdReleasesForStop()
     if (!m_stopPending)
         m_heldSinceMs = QDateTime::currentMSecsSinceEpoch();
     m_stopPending = true;
-    // The bound: a stop that is never confirmed does not keep the seat.
-    QTimer::singleShot(kUpstreamReleaseHoldMaxMs, this, [this]() { flushHeld(false); });
+    // Review E5 of 18.11: past the native stop deadline the obligation stays (sent at the next confirmed
+    // teardown); the journal says so - never a silent "released".
+    QTimer::singleShot(kUpstreamReleaseHoldMaxMs, this, [this]() {
+        const UpstreamReleaseDue d = upstreamReleaseDue(m_stopPending, m_heldSinceMs,
+                                                        QDateTime::currentMSecsSinceEpoch(), false);
+        if (d.overdue && !m_held.isEmpty())
+            qWarning() << "avpn upstream: release held - stop not confirmed after" << kUpstreamReleaseHoldMaxMs
+                       << "ms, kept until the tunnel is confirmed down, held=" << m_held.size();
+    });
 }
 
 void UpstreamLeaseClient::tunnelStopped()

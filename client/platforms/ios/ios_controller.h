@@ -194,9 +194,6 @@ signals:
     // это время остаётся в своём Op::Starting. Если за ожидание профиль снова поднялся (Настройки),
     // это уже живая сессия — liveSessionFound.
     void liveSessionFound();
-    // AVPN (owner test 06.11, review of 136): the native stopped an adopted session that never
-    // completed a handshake (stopNeverConnectedAdoptedSession) - the facade logs the real reason.
-    void adoptedDeadSessionStopped();
     // AVPN (контракт K4): итог provider message {"action":"rebind"}. performed=true — NE ответил
     // {"rebind":"performed"}; false — {"rebind":"denied",...}, нет живого туннеля, ошибка отправки
     // или ответ не пришёл за 3 с. Эмитится ровно один раз на каждый вызов rebindTunnel(), вернувший

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Standalone build+run of the whoami verdict and network memory checks (WhoamiVerdict.h,
-# NetworkMemory.h): pure inline functions, no network, QtCore only. Plan v3 step 5.
+# Standalone build+run of the whoami verdict checks (WhoamiVerdict.h): pure inline functions, no network,
+# QtCore only. Plan v3 step 5.
 set -e
 QT="${QT_ROOT:-$HOME/Qt/6.10.2/macos}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

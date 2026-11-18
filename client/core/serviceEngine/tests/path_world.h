@@ -23,7 +23,10 @@
 namespace avpn::path::sim {
 
 struct Behaviour {
-    enum class Kind { Works, NoHandshake, NoData, StartError, NoSeat };
+    // Works: up, the check proves data after checkMs (past the check's own limit = a late but complete payload).
+    // NoData: up, the check answers "no data" at its own limit. Silent: up, the check never answers (the owner's
+    // backstop deadline judges it).
+    enum class Kind { Works, NoHandshake, NoData, StartError, NoSeat, Silent };
     Kind kind = Kind::NoHandshake;
     int upMs = 0;     // start -> tunnel up (Works, NoData)
     int checkMs = 0;  // data check start -> data proven (Works)
@@ -35,6 +38,7 @@ struct Behaviour {
     static Behaviour noData(int upMs) { return { Kind::NoData, upMs, 0, -1, true }; }
     static Behaviour startError(bool attributable) { return { Kind::StartError, 0, 0, -1, attributable }; }
     static Behaviour noSeat() { return { Kind::NoSeat, 0, 0, -1, true }; }
+    static Behaviour silent(int upMs) { return { Kind::Silent, upMs, 0, -1, true }; }
 };
 
 // Behaviour of one path on one network over time: the last segment whose start <= t applies.
@@ -102,6 +106,9 @@ public:
     qint64 wall() const { return kWallBase + now; }
     SelectionContext ctx() const { return SelectionContext{ m_pool, &ledger, wall(), crowd }; }
     void setPool(const QList<PathCandidate> &pool) { m_pool = pool; }
+    World &world() { return m_world; }
+    int checksRun = 0;   // RunDataCheck effects (rechecks included)
+    int rechecks = 0;    // of them, runs again on the same tunnel
 
     // --- driving --------------------------------------------------------------------------------------------
     void deliver(const AttemptEvent &ev) { apply(owner.handle(ev, ctx())); }
@@ -189,7 +196,8 @@ private:
                 m_legBehaviour.insert(e.stamp.leg, b);
                 switch (b.kind) {
                 case Behaviour::Kind::Works:
-                case Behaviour::Kind::NoData: schedule(now + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
+                case Behaviour::Kind::NoData:
+                case Behaviour::Kind::Silent: schedule(now + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
                 case Behaviour::Kind::NoHandshake: break; // the owner's start deadline judges it
                 case Behaviour::Kind::StartError:
                     schedule(now + 50, AttemptEvent::pathFailed(0, e.stamp, b.attributable ? PathOutcome::Refused
@@ -203,12 +211,29 @@ private:
             }
             case EffectType::RunDataCheck: {
                 // an adopted leg was never started here: the network's behaviour for that path decides
-                const Behaviour b = m_legBehaviour.contains(e.stamp.leg)
+                // the first check: the behaviour the leg started with; a check run again: the network as it is now
+                const Behaviour b = m_legBehaviour.contains(e.stamp.leg) && !e.recheck
                     ? m_legBehaviour.value(e.stamp.leg)
                     : m_world.at(tracker.current().local, e.path.id.id, now);
+                ++checksRun;
+                rechecks += e.recheck ? 1 : 0;
+                // a check run again voids the previous one on that leg (its answer is dropped, as the platform does)
+                const int gen = ++m_checkGen[e.stamp.leg];
+                const quint64 leg = e.stamp.leg;
+                const auto answer = [this, leg, gen](qint64 t, const AttemptEvent &ev) {
+                    at(t, [this, leg, gen, ev] {
+                        if (m_checkGen.value(leg) != gen)
+                            return;
+                        AttemptEvent x = ev;
+                        x.nowMs = now;
+                        deliver(x);
+                    });
+                };
                 if (b.kind == Behaviour::Kind::Works)
-                    schedule(now + b.checkMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::DataOk, b.ttfbMs));
-                break; // no data: nothing comes, the owner's check deadline judges it
+                    answer(now + b.checkMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::DataOk, b.ttfbMs));
+                else if (b.kind == Behaviour::Kind::NoData)
+                    answer(now + e.timeoutMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::NoData));
+                break; // Silent: nothing comes, the owner's backstop deadline judges it
             }
             case EffectType::StopPath: schedule(now + stopMs, AttemptEvent::stopConfirmed(0, e.stamp)); break;
             case EffectType::Report:
@@ -230,6 +255,7 @@ private:
     quint64 m_seq = 0;
     QList<std::pair<qint64, qint64>> m_suspend;
     QHash<quint64, Behaviour> m_legBehaviour;
+    QHash<quint64, int> m_checkGen;
     qint64 m_tapAt = 0;
 };
 

@@ -31,16 +31,9 @@
 // A scenario starts with a NEW machine built from CAPS, the ledger restored. Actions compare as an ordered
 // list, objects by exact key set and value.
 //
-// ---- scan_race_vectors.json (ScanAutoRace.h) ----------------------------------------------------------------
-// { "schema": 1, "cases": [ { "name", "config": {enabled, alternates, stagger_ms, commit_bytes, probe_total_ms},
-//   "candidates": [{id, tier, rank, lkg, eligible}], "live": bool,
-//   "steps": [ { "event": "start" | "progress" | "failed" | "commit_failed" | "tick" | "cancel", "id", "bytes",
-//                "now_ms", "expect": { "actions": [{kind, id, tier, reason}], "wake_at_ms", "state", "tier" } } ] } ] }
-//
 // Build/run: build_scan_core.sh  (re-record: build_scan_core.sh --record)
 #include "scan_scenarios.h"
 
-#include "../ScanAutoRace.h"
 #include "../ScanHostContract.h"
 #include "../ScanMachine.h"
 
@@ -764,132 +757,6 @@ static void replayMachine(const QJsonObject &f)
     }
 }
 
-// --- race vectors ------------------------------------------------------------------------------------------
-
-struct RaceEv {
-    const char *event;
-    const char *id;
-    qint64 bytes;
-    qint64 now;
-};
-
-static QJsonObject raceStepJson(const ScanRaceStep &s, const ScanAutoRace &r)
-{
-    QJsonArray acts;
-    for (const ScanRaceAction &a : s.actions)
-        acts << QJsonObject{{QStringLiteral("kind"), QLatin1String(scanRaceActionName(a.kind))}, {QStringLiteral("id"), a.id},
-                            {QStringLiteral("tier"), a.tier}, {QStringLiteral("reason"), a.reason}};
-    return QJsonObject{{QStringLiteral("actions"), acts}, {QStringLiteral("wake_at_ms"), double(s.wakeAtMs)},
-                       {QStringLiteral("state"), QLatin1String(scanRaceStateName(r.state()))}, {QStringLiteral("tier"), r.tier()}};
-}
-
-static ScanRaceStep raceApply(ScanAutoRace &r, const QJsonObject &c, const QJsonObject &step)
-{
-    const QString e = step.value(QStringLiteral("event")).toString();
-    const qint64 now = qint64(step.value(QStringLiteral("now_ms")).toDouble());
-    const QString id = step.value(QStringLiteral("id")).toString();
-    if (e == QLatin1String("start")) {
-        QList<ScanRaceCandidate> cs;
-        for (const QJsonValue &v : c.value(QStringLiteral("candidates")).toArray()) {
-            const QJsonObject o = v.toObject();
-            cs << ScanRaceCandidate{o.value(QStringLiteral("id")).toString(), o.value(QStringLiteral("tier")).toInt(),
-                                    o.value(QStringLiteral("rank")).toInt(), o.value(QStringLiteral("lkg")).toBool(),
-                                    o.value(QStringLiteral("eligible")).toBool(true)};
-        }
-        const QJsonObject k = c.value(QStringLiteral("config")).toObject();
-        ScanRaceConfig cfg;
-        cfg.enabled = k.value(QStringLiteral("enabled")).toBool();
-        cfg.alternates = k.value(QStringLiteral("alternates")).toInt();
-        cfg.staggerMs = k.value(QStringLiteral("stagger_ms")).toInt();
-        cfg.commitBytes = k.value(QStringLiteral("commit_bytes")).toInt();
-        cfg.probeTotalMs = k.value(QStringLiteral("probe_total_ms")).toInt();
-        return r.start(cs, c.value(QStringLiteral("live")).toBool(), cfg, now);
-    }
-    if (e == QLatin1String("progress"))
-        return r.probeProgress(id, qint64(step.value(QStringLiteral("bytes")).toDouble()), now);
-    if (e == QLatin1String("failed"))
-        return r.probeFailed(id, QStringLiteral("no_data"), now);
-    if (e == QLatin1String("commit_failed"))
-        return r.commitFailed(id, now);
-    if (e == QLatin1String("cancel"))
-        return r.cancel(now);
-    return r.tick(now);
-}
-
-static QJsonObject raceCase(const char *name, bool enabled, bool live, const QList<ScanRaceCandidate> &cands, const QList<RaceEv> &evs,
-                            int alternates = 3)
-{
-    const ScanRaceConfig d = scanRaceConfigFrom(ScanTunables(), enabled);
-    QJsonObject c{{QStringLiteral("name"), QLatin1String(name)}, {QStringLiteral("live"), live},
-                  {QStringLiteral("config"), QJsonObject{{QStringLiteral("enabled"), enabled}, {QStringLiteral("alternates"), alternates},
-                                                         {QStringLiteral("stagger_ms"), d.staggerMs}, {QStringLiteral("commit_bytes"), d.commitBytes},
-                                                         {QStringLiteral("probe_total_ms"), d.probeTotalMs}}}};
-    QJsonArray cs;
-    for (const ScanRaceCandidate &x : cands)
-        cs << QJsonObject{{QStringLiteral("id"), x.id}, {QStringLiteral("tier"), x.tier}, {QStringLiteral("rank"), x.rank},
-                          {QStringLiteral("lkg"), x.lastKnownGood}, {QStringLiteral("eligible"), x.eligible}};
-    c.insert(QStringLiteral("candidates"), cs);
-    ScanAutoRace r;
-    QJsonArray steps;
-    for (const RaceEv &e : evs) {
-        QJsonObject st{{QStringLiteral("event"), QLatin1String(e.event)}, {QStringLiteral("id"), QLatin1String(e.id)},
-                       {QStringLiteral("bytes"), double(e.bytes)}, {QStringLiteral("now_ms"), double(e.now)}};
-        const ScanRaceStep s = raceApply(r, c, st);
-        check(r.inFlight().size() <= 1 + alternates, QString::fromLatin1(name) + QStringLiteral(": race width"));
-        st.insert(QStringLiteral("expect"), raceStepJson(s, r));
-        steps << st;
-    }
-    c.insert(QStringLiteral("steps"), steps);
-    return c;
-}
-
-static QJsonObject raceVectors()
-{
-    const QList<ScanRaceCandidate> one{{QStringLiteral("own-a"), 0, 1, false, true}, {QStringLiteral("own-lkg"), 0, 5, true, true},
-                                       {QStringLiteral("own-b"), 0, 2, false, true}, {QStringLiteral("own-c"), 0, 3, false, true},
-                                       {QStringLiteral("own-d"), 0, 4, false, true}, {QStringLiteral("up-1"), 1, 0, false, true},
-                                       {QStringLiteral("up-2"), 1, 1, true, true}, {QStringLiteral("own-x"), 0, 0, false, false}};
-    QJsonArray cases;
-    cases << raceCase("disabled", false, false, one, {{"start", "", 0, 1000}});
-    cases << raceCase("live_session_never_moved", true, true, one, {{"start", "", 0, 1000}, {"tick", "", 0, 2000}});
-    cases << raceCase("lkg_first_then_alternates_commit", true, false, one,
-                      {{"start", "", 0, 1000}, {"tick", "", 0, 1250}, {"tick", "", 0, 1500}, {"tick", "", 0, 1750}, {"tick", "", 0, 2000},
-                       {"progress", "own-b", 12000, 2100}, {"progress", "own-b", 24576, 2300}, {"progress", "own-a", 30000, 2400}});
-    cases << raceCase("failure_frees_slot_with_stagger", true, false, one,
-                      {{"start", "", 0, 1000}, {"tick", "", 0, 1250}, {"tick", "", 0, 1500}, {"tick", "", 0, 1750},
-                       {"failed", "own-lkg", 0, 1800}, {"tick", "", 0, 2000}, {"failed", "own-a", 0, 2100}, {"tick", "", 0, 2350}});
-    cases << raceCase("tier_blocked_until_exhausted", true, false, one,
-                      {{"start", "", 0, 0}, {"tick", "", 0, 250}, {"tick", "", 0, 500}, {"tick", "", 0, 750},
-                       {"failed", "own-lkg", 0, 900}, {"failed", "own-a", 0, 950}, {"tick", "", 0, 1000}, {"failed", "own-b", 0, 1100},
-                       {"failed", "own-c", 0, 1200}, {"tick", "", 0, 5250}, {"progress", "up-2", 24576, 5600}});
-    cases << raceCase("commit_failed_resumes", true, false, one,
-                      {{"start", "", 0, 0}, {"tick", "", 0, 250}, {"progress", "own-lkg", 24576, 400}, {"commit_failed", "own-lkg", 0, 1500},
-                       {"tick", "", 0, 1750}});
-    cases << raceCase("give_up", true, false, {{QStringLiteral("solo"), 0, 0, true, true}},
-                      {{"start", "", 0, 0}, {"tick", "", 0, 5000}});
-    cases << raceCase("no_alternates", true, false, one, {{"start", "", 0, 0}, {"tick", "", 0, 250}, {"failed", "own-lkg", 0, 300}}, 0);
-    cases << raceCase("cancel", true, false, one, {{"start", "", 0, 0}, {"tick", "", 0, 250}, {"cancel", "", 0, 300}});
-    return QJsonObject{{QStringLiteral("schema"), 1}, {QStringLiteral("cases"), cases}};
-}
-
-static void replayRace(const QJsonObject &f)
-{
-    check(f.value(QStringLiteral("schema")).toInt() == 1, QStringLiteral("race schema"));
-    for (const QJsonValue &cv : f.value(QStringLiteral("cases")).toArray()) {
-        const QJsonObject c = cv.toObject();
-        ScanAutoRace r;
-        int i = 0;
-        for (const QJsonValue &sv : c.value(QStringLiteral("steps")).toArray()) {
-            const QJsonObject st = sv.toObject();
-            const ScanRaceStep s = raceApply(r, c, st);
-            check(raceStepJson(s, r) == st.value(QStringLiteral("expect")).toObject(),
-                  c.value(QStringLiteral("name")).toString() + QStringLiteral("#") + QString::number(i++));
-        }
-    }
-}
-
-// --- files ---------------------------------------------------------------------------------------------------
-
 static QJsonObject readJson(const QString &path)
 {
     QFile f(path);
@@ -951,24 +818,20 @@ int main(int argc, char **argv)
     if (args.contains(QStringLiteral("--record"))) {
         const QJsonObject host = hostVectors();
         const QJsonObject machine = machineVectors();
-        const QJsonObject race = raceVectors();
         // the recorded files must replay against the same code before they may be written
         replayHost(host);
         replayMachine(machine);
-        replayRace(race);
         if (g_fail) {
             std::printf("recording REFUSED: %d of %d self-checks failed - nothing written\n", g_fail, g_total);
             return 1;
         }
         const bool ok = writeJson(dir + QStringLiteral("/scan_host_vectors.json"), host)
-                        && writeMachineJson(dir + QStringLiteral("/scan_machine_vectors.json"), machine)
-                        && writeJson(dir + QStringLiteral("/scan_race_vectors.json"), race);
+                        && writeMachineJson(dir + QStringLiteral("/scan_machine_vectors.json"), machine);
         std::printf(ok ? "recorded into %s (%d self-checks)\n" : "FAILED to write into %s\n", qPrintable(dir), g_total);
         return ok ? 0 : 1;
     }
     replayHost(readJson(dir + QStringLiteral("/scan_host_vectors.json")));
     replayMachine(readJson(dir + QStringLiteral("/scan_machine_vectors.json")));
-    replayRace(readJson(dir + QStringLiteral("/scan_race_vectors.json")));
     if (g_fail) {
         std::printf("scan_vectors_check: %d of %d FAILED\n", g_fail, g_total);
         return 1;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Scanner engine lane (L6b): mutation pass on the connect-path guards (DebugSnapshot.h, ServiceEngine hint), the
+# Scanner engine lane (L6b): mutation pass on the connect-path guards (DebugSnapshot.h), the
 # schema-5 report rules (DoctorReport.h) and the iOS terminal codes. Usage: QT_ROOT=... python3 scan_engine_mutations.py [M01 ...]
 # Each mutation breaks one rule in the source, runs the test scripts that pin it and expects a failure;
 # the original file is restored after every run (also on error).
@@ -13,7 +13,7 @@ ENV = dict(os.environ, QT_ROOT=os.environ.get("QT_ROOT", os.path.expanduser("~/Q
 
 M = [
     ("M01 cancel after connected allowed", "DebugSnapshot.h",
-     "    if (a.reachedConnected || dataFlowingNow)\n        return ScanCancel::IgnoreAfterConnected;\n", "",
+     "    if (a.reachedConnected || shownConnectedNow)\n        return ScanCancel::IgnoreAfterConnected;\n", "",
      ["build_facade_policy.sh"]),
     ("M02 stale record of another process cancels (relaunch)", "DebugSnapshot.h",
      "    if (a.processEpoch != processEpoch)\n        return ScanCancel::IgnoreOtherProcess;\n", "",
@@ -61,7 +61,7 @@ M = [
      "    if (!scannerOn)\n        return ScanRowGate::IgnoreSwitchOff;\n", "",
      ["build_facade_policy.sh"]),
     ("M16 «Подключено» not latched", "DebugSnapshot.h",
-     "    if (a.active() && dataFlowingNow)\n        a.reachedConnected = true;", "    (void)dataFlowingNow;",
+     "    if (a.active() && shownConnectedNow)\n        a.reachedConnected = true;", "    (void)shownConnectedNow;",
      ["build_facade_policy.sh"]),
     ("M17 the node the ladder left is not reported", "DebugSnapshot.h",
      "    if (!engineNode.isEmpty() && engineNode != a.lastNode) {\n        fail(a.lastNode);",
@@ -70,28 +70,6 @@ M = [
     ("M18 attempt node shown as live on a switch's down phase", "DebugSnapshot.h",
      "    v.live = up || (switching && nativeUp && !pendingSwitch.isEmpty());", "    v.live = up;",
      ["build_facade_policy.sh"]),
-    ("M19 hint retries a row failed in this session", "ServiceEngine.cpp",
-     "        if (sessionExclusions().contains(n->nodeId) || m_attemptExcluded.contains(n->nodeId))\n            continue;\n        return n;",
-     "        if (m_attemptExcluded.contains(n->nodeId))\n            continue;\n        return n;",
-     ["build_facade_engine.sh"]),
-    ("M20 hint survives a new user attempt", "ServiceEngine.h",
-     "        clearAttemptOrder(); // AVPN Scanner: a hint belongs to the attempt it was given for", "",
-     ["build_facade_engine.sh"]),
-    ("M21 ladder step 3 ignores the hint", "ServiceEngine.cpp",
-     "    if (const SubscriptionNode *hinted = hintedCandidate(m_currentNodeId)) {\n        candidate = *hinted;\n    } else if",
-     "    if (false) {\n    } else if",
-     ["build_facade_engine.sh"]),
-    ("M22 connect() ignores the hint", "ServiceEngine.cpp",
-     "    if (!candidate)\n        if (const SubscriptionNode *hinted = hintedCandidate(QString())) {",
-     "    if (false)\n        if (const SubscriptionNode *hinted = hintedCandidate(QString())) {",
-     ["build_facade_engine.sh"]),
-    ("M23 hint kept after data passed", "ServiceEngine.cpp",
-     "    clearAttemptOrder(); // AVPN Scanner: data passed - the tap's attempt is over", "",
-     ["build_facade_engine.sh"]),
-    ("M24 hint TTL ignored", "ServiceEngine.cpp",
-     "    if (m_attemptOrderUntilMs < 0 || nowMs() > m_attemptOrderUntilMs)\n        return {};\n    return m_attemptOrder;",
-     "    return m_attemptOrder;",
-     ["build_facade_engine.sh"]),
     ("M25 bare network class accepted", "DoctorReport.h",
      "    if (k.size() > 48 || !detail::matches(QLatin1String(detail::kNetworkKeyPattern), k))\n        return false;",
      "    if (k.size() > 48)\n        return false;",

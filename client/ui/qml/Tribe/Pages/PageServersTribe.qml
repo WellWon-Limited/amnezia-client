@@ -208,11 +208,17 @@ PageType {
                               supported: bn.transportSupported !== false,
                               active: activeProto.length > 0 && activeProto === p })
             }
+            // The off-tunnel figure belongs to the location (its exit host), not to the transport the mode lets
+            // through: a mode switch keeps it (coordinator 18.11) - the best row's own figure, else a sibling's.
+            let figure = best
+            if (!(best.measuredRttMs >= 0))
+                for (let f = 0; f < nodes.length; ++f)
+                    if (nodes[f].measuredRttMs >= 0) { figure = nodes[f]; break }
             out.push({ key: key, cc: cc, name: name, nodeId: best.nodeId,
-                       rtt: best.measuredRttMs,
+                       rtt: figure.measuredRttMs,
                        // -1 = no measurement (own: no ICMP answer yet; provider: no Scanner result on this
                        // network): the idle track, never the server's health drawn as five green bars
-                       bars: best.measuredBars >= 0 ? best.measuredBars : -1,
+                       bars: figure.measuredBars >= 0 ? figure.measuredBars : -1,
                        // order only (unmeasured own rows keep their old place): not shown
                        healthRank: Math.round((best.health || 0) * 5),
                        upstream: isUp,

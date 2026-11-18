@@ -1365,35 +1365,16 @@ void IosController::checkStatus()
                             m_lastAdoptedDeadCheck = deadCheck;
                             qWarning().noquote() << "IosController::checkStatus :" << deadCheck;
                         }
-                        if (avpn_ios::stopNeverConnectedAdoptedSession(dead)
-                            && m_currentTunnel
-                            && [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
-                            qWarning() << "IosController::checkStatus : adopted session never completed a handshake"
-                                       << "(rx" << rxBytes << ") — stopping it";
-                            m_handshakeAwaiting = false;
-                            m_handshakeTimer.invalidate();
-                            emit adoptedDeadSessionStopped();
-                            markLocalStopRequested();
-                            noteAppStopForCurrentSession();
-                            stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);
-                        } else {
-                            m_handshakeTimer.restart();
-                            emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
-                        }
+                        // Path engine (review of 18.11, leftovers): the native neither stops a session nor ends a
+                        // start by its own handshake budget any more. Our start is a leg of the attempt owner (its
+                        // start deadline judges it); an adopted session is a leg judged by its one data check - the
+                        // owner stops either through its own stop protocol. The native only reports.
+                        m_handshakeTimer.restart();
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
                     } else if (m_handshakeTimeouts >= handshakeMaxTimeouts) {
-                        qWarning() << "IosController::checkStatus : handshake failed after"
-                                   << m_handshakeTimeouts << "timeouts — stopping tunnel";
-                        m_handshakeAwaiting = false;
-                        m_handshakeTimer.invalidate();
-                        emitConnectionStateIfChanged(Vpn::ConnectionState::Error);
-                        if (m_currentTunnel &&
-                            [m_currentTunnel.connection isKindOfClass:[NETunnelProviderSession class]]) {
-                            // AVPN (C2/K2): этот стоп — решение приложения, не пользователя: NE запишет
-                            // .userInitiated, но Disconnected должен прийти как expected_app_stop.
-                            markLocalStopRequested();
-                            noteAppStopForCurrentSession();
-                            stopTunnelHonoringOnDemand(avpn_ios::OnDemandStop::AppStop);
-                        }
+                        // the start is the attempt owner's to judge (no Error, no stop from here)
+                        m_handshakeTimer.restart();
+                        emitConnectionStateIfChanged(Vpn::ConnectionState::Reconnecting);
                     } else {
                         qDebug() << "IosController::checkStatus : handshake timed out, keeping tunnel alive"
                                  << m_handshakeTimeouts << "/" << handshakeMaxTimeouts;

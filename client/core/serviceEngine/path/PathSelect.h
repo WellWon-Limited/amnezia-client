@@ -13,9 +13,12 @@
 //  3. Exact node (a Scanner row, an explicit server): only its paths (one row = one path; a server of the list =
 //     the transports of that host, ordered by the rules below), whatever the ledger says - the person asked for
 //     it. It never falls back to another server.
-//  4. Preferred country: all its paths the mode allows come first (working, unknown, suspect, quarantine over),
-//     manual_only ones included - a preference is a person's choice, as a pin of a location is today. Then the
-//     rest in the Auto order; the attempt reports the fallback (AttemptResult::fallbackNotice).
+//  4. Preferred country or server of the list (UserChoice::preferServer: the transports of that host): inside
+//     each group of the Auto order below its paths the mode allows come first, manual_only ones included and
+//     ahead of the regular unknown paths elsewhere - a preference is a person's choice, as a pin of a location
+//     is today. Evidence is stronger than the preference (review E9 of 18.11): a preferred path that failed on
+//     this network goes behind every working or untried path of any country. The attempt reports the fallback
+//     (AttemptResult::fallbackNotice).
 //  5. Auto order:
 //       a. working on this network: data proof before probe proof, newest proof first, then faster;
 //       b. unknown, regular: by crowd prior, then server prior (tier: ours -> main provider -> reserve provider,
@@ -61,12 +64,18 @@ namespace avpn::path {
 struct UserChoice {
     enum class Kind { Auto, PreferCountry, ExactPath };
     Kind kind = Kind::Auto;
-    QString country;     // PreferCountry: ISO alpha-2
-    QStringList pathIds; // ExactPath: the paths of the chosen server (a Scanner row: one; a server of the list:
-                         // the transports of that one host) - never anything else
+    QString country;     // PreferCountry: ISO alpha-2 (the whole country when pathIds is empty)
+    QStringList pathIds; // PreferCountry: the preferred server of the list (the transports of its host);
+                         // ExactPath: the paths of the exact choice (a Scanner row: one) - never anything else
 
     static UserChoice automatic() { return {}; }
     static UserChoice preferCountry(const QString &cc) { return { Kind::PreferCountry, cc.trimmed().toUpper(), {} }; }
+    // A server of the list (owner decision of 17.11 / coordinator 18.11): its paths first, then the best available
+    // path with a notice; the preference is kept.
+    static UserChoice preferServer(const QString &cc, const QStringList &ids)
+    {
+        return { Kind::PreferCountry, cc.trimmed().toUpper(), ids };
+    }
     static UserChoice exactPath(const QString &id) { return { Kind::ExactPath, {}, { id } }; }
     static UserChoice exactPaths(const QStringList &ids) { return { Kind::ExactPath, {}, ids }; }
     bool operator==(const UserChoice &o) const { return kind == o.kind && country == o.country && pathIds == o.pathIds; }
@@ -103,6 +112,17 @@ struct SelectInput {
     QHash<QString, double> crowd;      // path id -> share of reporters it worked for, [0..1]; missing = neutral
     QSet<QString> tried;               // tried in this attempt on this network
 };
+
+// Inside the preference of a "prefer" choice: one of the preferred server's paths, or - for a country preference -
+// a path of that country. Also the rule of the fallback notice (AttemptResult::fallbackNotice).
+inline bool isPreferred(const UserChoice &choice, const PathCandidate &c)
+{
+    if (choice.kind != UserChoice::Kind::PreferCountry)
+        return false;
+    if (!choice.pathIds.isEmpty())
+        return choice.pathIds.contains(c.id.id);
+    return !c.country.isEmpty() && c.country == choice.country;
+}
 
 inline bool modeAllows(PathKind k, TransportMode mode)
 {
@@ -202,8 +222,7 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
             }
             continue;
         }
-        r.preferred = in.choice.kind == UserChoice::Kind::PreferCountry && !c.country.isEmpty()
-                      && c.country == in.choice.country;
+        r.preferred = isPreferred(in.choice, c);
         const int p = r.preferred ? 0 : 1;
         switch (r.view.state) {
         case PathState::Working: r.group = SelectGroup::Working; sec[p][0] << r; break;
@@ -270,14 +289,19 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         };
     };
 
-    QList<RankedPath> out;
+    // The preference applies INSIDE each evidence group (review E9 of 18.11): every path that carried data or is
+    // untried here - preferred first - goes before any path that failed on this network, whatever its country,
+    // so a preferred country's failed paths never burn the budget before the fallback.
     for (auto &s : sec) {
         std::sort(s[0].begin(), s[0].end(), working);
         std::sort(s[3].begin(), s[3].end(), byTime(&PathView::lastFailureMs));
         std::sort(s[4].begin(), s[4].end(), byTime(&PathView::quarantineUntilMs));
-        out << s[0] << detail::interleaved(s[1], crowd, lanes, lanesTried)
-            << detail::interleaved(s[2], crowd, lanes, lanesTried) << s[3] << s[4];
     }
+    QList<RankedPath> out;
+    out << sec[0][0] << detail::interleaved(sec[0][1], crowd, lanes, lanesTried) << sec[1][0]
+        << detail::interleaved(sec[1][1], crowd, lanes, lanesTried)
+        << detail::interleaved(sec[0][2], crowd, lanes, lanesTried) << detail::interleaved(sec[1][2], crowd, lanes, lanesTried)
+        << sec[0][3] << sec[1][3] << sec[0][4] << sec[1][4];
     const auto byQuarantine = byTime(&PathView::quarantineUntilMs);
     std::sort(quarantined.begin(), quarantined.end(), [&](const RankedPath &a, const RankedPath &b) {
         if (a.preferred != b.preferred)

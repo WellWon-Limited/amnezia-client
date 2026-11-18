@@ -53,7 +53,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/Enrollment.h
     ${AVPN_SE}/NodePool.h
     ${AVPN_SE}/Prober.h
-    ${AVPN_SE}/Selector.h
     ${AVPN_SE}/HealthLoop.h
     ${AVPN_SE}/ConnectTunables.h
     ${AVPN_SE}/SignalQuality.h
@@ -69,7 +68,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/RttProbeIcmp.h
     ${AVPN_SE}/BenchRunner.h
     ${AVPN_SE}/BenchAnalysis.h
-    ${AVPN_SE}/Switcher.h
     ${AVPN_SE}/DebugSnapshot.h
     ${AVPN_SE}/TribeDiagReport.h
     ${AVPN_SE}/ServiceEngine.h
@@ -94,7 +92,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/WhitelistDetector.h
     ${AVPN_SE}/DoctorReport.h
     ${AVPN_SE}/WhoamiVerdict.h
-    ${AVPN_SE}/NetworkMemory.h
     ${AVPN_SE}/Ipv6Presence.h
     ${AVPN_SE}/CrashGuard.h
     ${AVPN_SE}/TribeNetInfo.h
@@ -107,8 +104,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/UpstreamLeaseWire.h
     ${AVPN_SE}/UpstreamLeaseMachine.h
     ${AVPN_SE}/UpstreamVerdict.h
-    ${AVPN_SE}/UpstreamTierRule.h
-    ${AVPN_SE}/UpstreamTier.h
     ${AVPN_SE}/UpstreamStandbyPack.h
     ${AVPN_SE}/UpstreamEngine.h
     ${AVPN_SE}/UpstreamLeaseOwner.h
@@ -125,7 +120,6 @@ list(APPEND HEADERS
     ${AVPN_SE}/ScanHostContract.h
     ${AVPN_SE}/ShadeQueue.h
     ${AVPN_SE}/ScanMachine.h
-    ${AVPN_SE}/ScanAutoRace.h
     ${AVPN_SE}/IScanHost.h
     ${AVPN_SE}/ScanApiClient.h
     ${AVPN_SE}/TribeScanner.h

@@ -75,24 +75,6 @@ inline NodeFigure nodeFigure(bool upstream, bool currentLive, bool liveReachable
     return f;
 }
 
-// Для авто-выбора «Авто (быстрейший)»: nodeId с МИНИМАЛЬНЫМ измеренным rtt (>=0). Пусто (""),
-// если ни одна нода не измерена → движок откатывается на pickByWeight (backend-weight). Ничья rtt —
-// стабильно первый по исходному порядку (детерминированно).
-inline QString fastestMeasuredNodeId(const QList<RankRow> &rows)
-{
-    QString best;
-    int bestRtt = -1;
-    for (const RankRow &r : rows) {
-        if (r.rttMs < 0)
-            continue;
-        if (bestRtt < 0 || r.rttMs < bestRtt) {
-            bestRtt = r.rttMs;
-            best = r.nodeId;
-        }
-    }
-    return best;
-}
-
 // Server picker / Connect card: what a row SHOWS (owner test of 5.1.102, 2026-11-05). An Xray
 // listener shares its exit host (location = host_id) with an AWG node, but its off-tunnel ICMP RTT
 // is measured to the RU entry that relays every listener (~14 ms everywhere), and its label may

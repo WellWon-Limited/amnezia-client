@@ -235,22 +235,7 @@ static void planBuilder()
     WatchPlanInputs noCarrier = planInputs();
     noCarrier.cellularKey.clear();
     CHECK(buildWatchPlan(noCarrier).value("net_keys").toObject().value("cellular").toString() == "cellular", "no carrier code -> the shared key");
-    const qint64 nowSec = 1800000000;
-    QByteArray memory = networkMemoryRemember(QByteArray(), QStringLiteral("wifi"), QStringLiteral("15"), nowSec - 100);
-    memory = networkMemoryRemember(memory, QStringLiteral("cellular:250-02"), QStringLiteral("16"), nowSec - kNetworkMemoryMaxAgeSec - 1);
-    memory = networkMemoryRemember(memory, QStringLiteral("cellular:250-99"), QStringLiteral("12"), nowSec - 5);
-    const WatchPlanMemoryEntry wifi = watchPlanMemoryEntry(memory, QStringLiteral("wifi"), nowSec);
-    const WatchPlanMemoryEntry stale = watchPlanMemoryEntry(memory, QStringLiteral("cellular:250-02"), nowSec);
-    CHECK(wifi.nodeId == 15 && wifi.savedMs == (nowSec - 100) * 1000, "a live entry: node and time");
-    CHECK(stale.nodeId == 0 && stale.savedMs == 0, "an entry older than 7 days is not handed over");
-    CHECK(watchPlanMemoryEntry(memory, QStringLiteral("nope"), nowSec).nodeId == 0 && watchPlanMemoryEntry(memory, QString(), nowSec).nodeId == 0
-              && watchPlanMemoryEntry(QByteArray("garbage"), QStringLiteral("wifi"), nowSec).nodeId == 0, "absent key / garbage blob -> nothing");
-    WatchPlanInputs withMemory = planInputs();
-    withMemory.memory = {wifi, stale, watchPlanMemoryEntry(memory, QStringLiteral("cellular:250-99"), nowSec)};
-    const QJsonObject mem = buildWatchPlan(withMemory).value("net_memory").toObject();
-    CHECK(mem.size() == 1 && mem.value("wifi").toObject().value("node_id").toInt() == 15
-              && qint64(mem.value("wifi").toObject().value("saved_ms").toDouble()) == (nowSec - 100) * 1000,
-          "net_memory: the live entry of one of the two keys; another carrier's entry stays out");
+    CHECK(plan.value("net_memory").toObject().isEmpty(), "net_memory: the app keeps no per-network memory (the ledger does)");
 
     // Targets of the request that bypasses the tunnel (review finding A4): the operator's own list, else the
     // white-list detector's marketplace tier plus one anchor; nothing known - nothing written.
@@ -904,48 +889,12 @@ static void handOver()
     }
 }
 
-// ---- stage 2: candidates in the plan, the switch the app finds made -----------------------------------
-static QJsonObject innerConfig(const char *host, const char *dns = "1.1.1.1, 1.0.0.1", const char *mtu = "1280")
-{
-    // The shape AwgConfigBuilder::buildInner gives a node (what matters here).
-    return QJsonObject{
-        {"client_ip", "10.7.0.5/32"}, {"client_priv_key", "PRIVATE"}, {"client_pub_key", "PUB"}, {"client_id", "PUB"},
-        {"server_pub_key", "K1nDpUbLiCkEyExAmPlE0000000000000000000000="}, {"psk_key", "PSK"}, {"hostName", host}, {"port", 585},
-        {"allowed_ips", QJsonArray{"0.0.0.0/0", "::/0"}}, {"persistent_keep_alive", "25"}, {"mtu", mtu},
-        {"Jc", "4"}, {"Jmin", "50"}, {"Jmax", "1000"}, {"S1", "86"}, {"S2", "57"}, {"H1", "1"}, {"H2", "2"}, {"H3", "3"}, {"H4", "4"},
-        {"I1", ""}, {"RandomTrailers", "0"}, {"isObfuscationEnabled", true},
-        {"config", QStringLiteral("[Interface]\nPrivateKey = PRIVATE\nAddress = 10.7.0.5/32\nDNS = %1\nMTU = %2\nJc = 4\n"
-                                  "[Peer]\nPublicKey = K\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %3:585\n")
-                       .arg(QLatin1String(dns), QLatin1String(mtu), QLatin1String(host))},
-    };
-}
-
+// ---- stage 2: the plan field of candidates (the app writes none; the extension's switch goes in stage 3) ------
 static void stageTwo()
 {
-    // --- a node's own half of the configuration ---
-    const QJsonObject inner = innerConfig("203.0.113.12");
-    const QJsonObject peer = watchPlanCandidatePeer(inner);
-    CHECK(peer.value("hostName").toString() == "203.0.113.12" && peer.value("port").toString() == "585", "the endpoint; a number becomes a string");
-    CHECK(peer.value("server_pub_key") == inner.value("server_pub_key") && peer.value("psk_key").toString() == "PSK"
-              && peer.value("persistent_keep_alive").toString() == "25", "keys and keepalive");
-    CHECK(peer.value("Jc").toString() == "4" && peer.value("H4").toString() == "4" && peer.value("RandomTrailers").toString() == "0", "the AmneziaWG parameters");
-    for (const char *never : {"client_priv_key", "client_ip", "client_pub_key", "client_id", "config", "mtu", "allowed_ips", "isObfuscationEnabled", "I1"})
-        CHECK(!peer.contains(QLatin1String(never)), "nothing of the device, nothing the session keeps, no empty value");
-    for (auto it = peer.begin(); it != peer.end(); ++it)
-        CHECK(it.value().isString() && watchPlanCandidateKeys().contains(it.key()), "strings by the allow-listed keys only");
-    // --- a switch in place keeps the interface ---
-    CHECK(watchPlanInPlace(inner, innerConfig("203.0.113.9")), "another endpoint only: in place");
-    CHECK(!watchPlanInPlace(inner, innerConfig("203.0.113.9", "9.9.9.9, 1.0.0.1")), "another DNS: the app's own switch");
-    CHECK(!watchPlanInPlace(inner, innerConfig("203.0.113.9", "1.1.1.1, 1.0.0.1", "1376")), "another MTU: the app's own switch");
-    QJsonObject otherRoutes = innerConfig("203.0.113.9");
-    otherRoutes.insert("allowed_ips", QJsonArray{"10.0.0.0/8"});
-    CHECK(!watchPlanInPlace(inner, otherRoutes), "other routed ranges: the app's own switch");
-    QJsonObject otherAddress = innerConfig("203.0.113.9");
-    otherAddress.insert("client_ip", "10.7.0.6/32");
-    CHECK(!watchPlanInPlace(inner, otherAddress), "another tunnel address: not in place");
-    QJsonObject noText = inner;
-    noText.remove("config");
-    CHECK(!watchPlanInPlace(noText, noText), "nothing to compare: not offered");
+    // The app no longer builds candidates (the attempt owner is the only one that chooses a path); the plan writer
+    // still carries the field the extension reads, checked here with a synthetic peer.
+    const QJsonObject peer{{"hostName", "203.0.113.12"}, {"port", "585"}};
     // --- candidates in the plan: only with both flags ---
     WatchPlanInputs in = planInputs();
     in.candidates.append({QStringLiteral("11"), QStringLiteral("FI"), QJsonObject()}); // no configuration: never written

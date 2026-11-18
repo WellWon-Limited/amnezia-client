@@ -36,7 +36,6 @@ struct FakeTunnel : ITunnelControl {
         ups << node.nodeId;
         return TunnelResult::success();
     }
-    TunnelResult applyPeer(const Subscription &, const SubscriptionNode &) override { return TunnelResult::success(); }
     TunnelStats readStats() override { return st; }
     bool rebindSocket() override { ++rebindCalls; return rebindCapable; }
     void down() override { ++downs; }
@@ -207,6 +206,7 @@ int main(int argc, char **argv)
         CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
         r.result();
         CHECK(r.eng.reenterVerifying() && r.eng.isVerifying());
+        CHECK(!r.eng.reenterVerifying()); // only from Connected (rev-E1): a phase in flight is never thrown back
         CHECK(r.eng.verifyFailed(QStringLiteral("extension no data")) && r.eng.attemptRunning());
         r.confirmStop();
         CHECK(r.last() == QLatin1String("11")); // not 16 again (proven dead here), 17 failed earlier: the last wave
@@ -292,6 +292,31 @@ int main(int argc, char **argv)
         r.eng.setTransportMode(TransportMode::Auto);
     }
 
+    // 6b. A server of the list is a preference (owner decision of 17.11, coordinator 18.11): its transports first,
+    //     then the best available path with the fallback notice; the preference is kept for the next start. A Scanner
+    //     row (exact) on the same dead server ends with an honest error instead.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.setPinnedNode(QStringLiteral("16"), err));
+        CHECK(r.eng.userChoice().kind == path::UserChoice::Kind::PreferCountry
+              && r.eng.userChoice().pathIds == QStringList{ QStringLiteral("16") });
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("16"));
+        r.noHandshake();
+        CHECK(r.last() == QLatin1String("17")); // the best available after the preferred server
+        r.up();
+        CHECK(r.eng.verifySucceeded());
+        const path::AttemptResult res = r.result();
+        CHECK(res.connected && res.fallbackNotice && res.path.id.id == QLatin1String("17"));
+        CHECK(r.eng.pinnedNodeId() == QLatin1String("16")); // the preference is kept
+        Rig q(pool);
+        q.eng.setUserChoice(path::UserChoice::exactPath(QStringLiteral("16")));
+        CHECK(q.eng.connect(err) && q.last() == QLatin1String("16"));
+        q.noHandshake();
+        const path::AttemptResult exact = q.result();
+        CHECK(exact.reason == path::FailReason::ExactNodeFailed && q.tun.ups.size() == 1);
+    }
+
     // 7. A network change in the middle of a start: the leg goes down unrecorded, the attempt starts over on the
     //    new network (its own evidence), late answers of the old leg change nothing.
     {
@@ -362,6 +387,52 @@ int main(int argc, char **argv)
         CHECK(!r.eng.connect(err) && err.startsWith(QLatin1String("no_transport")) && r.tun.ups.isEmpty());
         CHECK(r.eng.state() == EngineState::Error && !r.eng.attemptRunning());
         r.eng.setTransportMode(TransportMode::Auto);
+    }
+
+    // Review of 18.11, E2: a native event of an older leg is obsolete - the facade drops it before any state change
+    // (ServiceEngine::nativeEventStale on the native stream marker, ITunnelControl::nativeLegSeen).
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.last() == QLatin1String("17"));
+        const quint64 legA = r.eng.attemptLeg();
+        CHECK(r.tun.nativeLegSeen() == legA && !r.eng.nativeEventStale(r.tun.nativeLegSeen()));
+        r.now += 200;
+        r.eng.onTunnelError(/*tunnelGone=*/true); // A's first error: the walk goes on to B at once
+        CHECK(r.last() == QLatin1String("16") && r.eng.attemptLeg() != legA);
+        // the duplicate of A's error arrives while the native stream is still at A (the marker of B not back yet)
+        CHECK(r.eng.nativeEventStale(legA));
+        r.tun.beginNativeOp(legA); // a late marker of A never moves the stream back
+        CHECK(r.tun.nativeLegSeen() == r.eng.attemptLeg() && !r.eng.nativeEventStale(r.tun.nativeLegSeen()));
+        r.up();
+        CHECK(r.eng.verifySucceeded() && r.result().connected && r.eng.currentNodeId() == QLatin1String("16"));
+        CHECK(!r.eng.nativeEventStale(legA)); // a live session: every event is its own
+    }
+
+    // Review of 18.11, E3: the owner asks for the data check again on the same tunnel (an inconclusive check) - the
+    // facade restarts it; nothing recorded, no new start.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err));
+        r.up();
+        CHECK(r.eng.verifyInconclusive() && r.eng.takeCheckRerun() && r.eng.isVerifying());
+        CHECK(r.tun.ups.size() == 1 && r.tun.downs == 0 && r.eng.pathStateHere(QStringLiteral("17")) == QLatin1String("unknown"));
+        CHECK(r.eng.verifySucceeded() && r.result().connected);
+    }
+
+    // Review of 18.11, E7: a live session found while the owner is busy (the native refused our start over its live
+    // profile) supersedes the attempt and goes into the owner's Checking - never Connected without its data check.
+    {
+        Rig r(pool);
+        QString err;
+        CHECK(r.eng.connect(err) && r.eng.attemptRunning());
+        r.eng.requestStop(); // liveSessionFound: the facade cancels its start
+        CHECK(r.eng.adoptTunnelConnected(QStringLiteral("16"), QStringLiteral("awg"), QStringLiteral("1.1.1.16:585")));
+        CHECK(r.eng.isVerifying() && r.eng.state() != EngineState::Connected && r.eng.attemptRunning());
+        CHECK(r.eng.verifySucceeded() && r.eng.state() == EngineState::Connected);
+        r.journal << r.eng.takeAttemptJournal();
+        CHECK(journalHas(r.journal, "attempt_superseded_by_live_session"));
     }
 
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);

@@ -56,7 +56,7 @@ public:
     void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     quint64 lastReleaseRequestId() const { return m_lastReleaseId; }
     // Decision of 18.11 (UpstreamLeaseWire.h::upstreamReleaseDue): the tunnel is being stopped - releases wait for
-    // tunnelStopped() (at most kUpstreamReleaseHoldMaxMs) and then go over the direct path.
+    // tunnelStopped() (the confirmed teardown; never a timer - review E5 of 18.11) and then go over the direct path.
     void holdReleasesForStop();
     void tunnelStopped();
     int heldReleases() const { return int(m_held.size()); }

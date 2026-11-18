@@ -71,7 +71,7 @@ struct ScanPlanInput {
     ScanNetKind net = ScanNetKind::Unknown;
     ScanTunables tunables;
     QSet<QString> freshFailures;            // engine node ids
-    QString lastKnownGood;                  // engine node id of network memory (NetworkMemory.h)
+    QString lastKnownGood;                  // engine node id proven on this network (the path engine's ledger)
     QString restrictCountry;                // empty = every country
     QMap<QString, QString> upstreamNames;   // profile_id -> display name (UpstreamNode.h::upstreamDisplayName)
     bool awgMiniEnabled = false;            // features.scanner_awg_mini (scanAwgMiniFlag), compiled default off

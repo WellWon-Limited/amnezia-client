@@ -1163,7 +1163,11 @@ static void releaseAfterStop()
     UpstreamReleaseDue d = upstreamReleaseDue(true, t0, t0 + 300, /*tunnelDown=*/false);
     CHECK(d.hold && !d.send);                                                        // the leg is being stopped
     CHECK(upstreamReleaseDue(true, t0, t0 + 400, /*tunnelDown=*/true).send);         // stop confirmed: now
-    CHECK(upstreamReleaseDue(true, t0, t0 + kUpstreamReleaseHoldMaxMs, false).send); // never confirmed: bounded
+    // review E5 of 18.11: never confirmed - still held (elapsed time is not a teardown), journalled as overdue
+    d = upstreamReleaseDue(true, t0, t0 + kUpstreamReleaseHoldMaxMs, false);
+    CHECK(!d.send && d.hold && d.overdue);
+    CHECK(!upstreamReleaseDue(true, t0, t0 + 300, false).overdue);
+    CHECK(upstreamReleaseDue(true, t0, t0 + 10 * kUpstreamReleaseHoldMaxMs, /*tunnelDown=*/true).send); // sent at the next confirmed teardown
     CHECK(kUpstreamReleaseHoldMaxMs == 10000);
     const LeaseRoute lease{QStringLiteral("renew-token"), QStringLiteral("https://tunnel-api.example")};
     const LeaseRoute direct = upstreamReleaseRoute(lease);

@@ -1,10 +1,9 @@
 // AVPN Scanner core (lane L1, scanner-client-plan.md): every rule of ScanTunables / ScanTypes / ScanClass /
-// ScanPlan / ScanBudget / ScanOutcomes / ScanHostContract / ShadeQueue / ScanMachine / ScanAutoRace, the
+// ScanPlan / ScanBudget / ScanOutcomes / ScanHostContract / ShadeQueue / ScanMachine, the
 // artboard's demo scenarios on a fake clock (tests/scan_scenarios.h) and seeded property tests.
 // Build/run: build_scan_core.sh
 #include "scan_scenarios.h"
 
-#include "../ScanAutoRace.h"
 #include "../ScanMachine.h"
 #include "../TuningStore.h"
 
@@ -1073,135 +1072,6 @@ static void shades()
     CHECK(s.actions.isEmpty() && c.visible());
 }
 
-// --- auto racing ---------------------------------------------------------------------------------------------
-
-static QList<ScanRaceCandidate> raceCands()
-{
-    return {ScanRaceCandidate{QStringLiteral("a"), 0, 2, false, true}, ScanRaceCandidate{QStringLiteral("b"), 0, 1, false, true},
-            ScanRaceCandidate{QStringLiteral("lkg"), 0, 9, true, true}, ScanRaceCandidate{QStringLiteral("c"), 0, 3, false, true},
-            ScanRaceCandidate{QStringLiteral("d"), 0, 4, false, true}, ScanRaceCandidate{QStringLiteral("u1"), 1, 0, true, true},
-            ScanRaceCandidate{QStringLiteral("u2"), 1, 1, false, true}, ScanRaceCandidate{QStringLiteral("off"), 0, 0, false, false}};
-}
-
-static QStringList started(const ScanRaceStep &s)
-{
-    QStringList ids;
-    for (const ScanRaceAction &a : s.actions)
-        if (a.kind == ScanRaceActionKind::StartProbe)
-            ids << a.id;
-    return ids;
-}
-
-static void autoRace()
-{
-    TuningStore::reset();
-    CHECK(!scanAutoRaceEnabled());
-    TuningStore::set({}, {{QStringLiteral("scan_auto_race"), true}});
-    CHECK(!scanAutoRaceEnabled() && !kScanAutoRaceBuild); // compiled off in this release, whatever the server says
-    TuningStore::reset();
-    const ScanRaceConfig cfg = scanRaceConfigFrom(ScanTunables(), true); // the module itself, enabled explicitly
-    CHECK(cfg.alternates == 3 && cfg.staggerMs == 250 && cfg.commitBytes == 24576 && cfg.probeTotalMs == 5000);
-    ScanAutoRace r;
-    ScanRaceStep s = r.start(raceCands(), false, scanRaceConfigFrom(ScanTunables(), false), 0);
-    CHECK(s.actions.isEmpty() && r.state() == ScanRaceState::Disabled);
-    s = r.start(raceCands(), true, cfg, 0);
-    CHECK(s.actions.isEmpty() && r.state() == ScanRaceState::Refused); // a live session is never moved
-    s = r.start(raceCands(), false, cfg, 0);
-    CHECK(started(s) == QStringList{QStringLiteral("lkg")} && s.wakeAtMs == 250); // LKG at once
-    s = r.tick(249);
-    CHECK(started(s).isEmpty());
-    s = r.tick(250);
-    CHECK(started(s) == QStringList{QStringLiteral("b")});
-    s = r.tick(500);
-    CHECK(started(s) == QStringList{QStringLiteral("a")});
-    s = r.tick(750);
-    CHECK(started(s) == QStringList{QStringLiteral("c")});
-    s = r.tick(1000);
-    CHECK(started(s).isEmpty() && r.inFlight().size() == 4); // 1 + 3 alternates at most
-    s = r.probeFailed(QStringLiteral("b"), QStringLiteral("no_data"), 1100);
-    CHECK(started(s) == QStringList{QStringLiteral("d")}); // a freed slot: the next of the tier
-    s = r.probeProgress(QStringLiteral("a"), 10000, 1200);
-    CHECK(s.actions.isEmpty());
-    s = r.probeProgress(QStringLiteral("a"), 24576, 1300);
-    int cancels = 0;
-    bool commit = false;
-    for (const ScanRaceAction &a : s.actions) {
-        cancels += a.kind == ScanRaceActionKind::CancelProbe ? 1 : 0;
-        commit = commit || (a.kind == ScanRaceActionKind::Commit && a.id == QLatin1String("a"));
-    }
-    CHECK(commit && cancels == 3 && r.state() == ScanRaceState::Committed && r.inFlight().isEmpty());
-    s = r.probeProgress(QStringLiteral("c"), 99999, 1400); // after the commit: ignored
-    CHECK(s.actions.isEmpty());
-    // the data gate refuses the committed node: the race goes on (cancelled ones may start again)
-    s = r.commitFailed(QStringLiteral("a"), 2000);
-    CHECK(r.state() == ScanRaceState::Racing && !started(s).isEmpty() && !started(s).contains(QStringLiteral("a")));
-    // tier boundary: tier 1 opens only when tier 0 is used up and nothing of it is in flight
-    ScanAutoRace t;
-    QList<ScanRaceCandidate> two{ScanRaceCandidate{QStringLiteral("x"), 0, 0, false, true}, ScanRaceCandidate{QStringLiteral("y"), 1, 0, false, true}};
-    s = t.start(two, false, cfg, 0);
-    CHECK(started(s) == QStringList{QStringLiteral("x")});
-    s = t.tick(3000);
-    CHECK(started(s).isEmpty()); // x still inside its limits blocks tier 1
-    s = t.tick(5000);            // x timed out
-    bool exhausted = false;
-    for (const ScanRaceAction &a : s.actions)
-        exhausted = exhausted || (a.kind == ScanRaceActionKind::TierExhausted && a.tier == 0);
-    CHECK(exhausted && started(s) == QStringList{QStringLiteral("y")} && t.tier() == 1);
-    s = t.probeFailed(QStringLiteral("y"), QStringLiteral("x"), 6000);
-    CHECK(s.has(ScanRaceActionKind::GiveUp) && t.state() == ScanRaceState::GaveUp);
-    // no candidate at all
-    ScanAutoRace e;
-    CHECK(e.start({}, false, cfg, 0).has(ScanRaceActionKind::GiveUp));
-    // unknown probe events are ignored; the clock never goes back
-    ScanAutoRace u;
-    u.start(two, false, cfg, 1000);
-    CHECK(u.probeFailed(QStringLiteral("nope"), QString(), 900).actions.isEmpty() && u.inFlight() == QStringList{QStringLiteral("x")});
-    // cancel
-    s = u.cancel(1100);
-    CHECK(s.actions.size() == 1 && s.actions.at(0).kind == ScanRaceActionKind::CancelProbe && u.state() == ScanRaceState::Idle);
-    // property: random event streams
-    std::mt19937 rng(7);
-    for (int iter = 0; iter < 400; ++iter) {
-        QList<ScanRaceCandidate> cs;
-        const int nc = 1 + int(rng() % 9);
-        for (int i = 0; i < nc; ++i)
-            cs << ScanRaceCandidate{QStringLiteral("n%1").arg(i), int(rng() % 3), int(rng() % 5), rng() % 4 == 0, rng() % 6 != 0};
-        ScanRaceConfig c = cfg;
-        c.alternates = int(rng() % 4);
-        ScanAutoRace x;
-        qint64 now = 0;
-        ScanRaceStep st = x.start(cs, false, c, now);
-        int commits = 0;
-        for (int k = 0; k < 60 && x.state() == ScanRaceState::Racing; ++k) {
-            now += 50 + qint64(rng() % 600);
-            const QStringList fl = x.inFlight();
-            const int pick = int(rng() % 4);
-            if (pick == 0 && !fl.isEmpty())
-                st = x.probeFailed(fl.at(int(rng() % fl.size())), QString(), now);
-            else if (pick == 1 && !fl.isEmpty())
-                st = x.probeProgress(fl.at(int(rng() % fl.size())), qint64(rng() % 40000), now);
-            else
-                st = x.tick(now);
-            for (const ScanRaceAction &a : st.actions)
-                commits += a.kind == ScanRaceActionKind::Commit ? 1 : 0;
-            checkMsg(x.inFlight().size() <= 1 + c.alternates, QStringLiteral("race width"));
-            int minTier = 99;
-            for (const QString &id : x.inFlight())
-                for (const ScanRaceCandidate &cc : cs)
-                    if (cc.id == id)
-                        minTier = qMin(minTier, cc.tier);
-            for (const QString &id : x.inFlight())
-                for (const ScanRaceCandidate &cc : cs)
-                    if (cc.id == id)
-                        checkMsg(cc.tier == minTier && cc.tier == x.tier(), QStringLiteral("one tier in flight"));
-            for (const QString &id : x.started())
-                for (const ScanRaceCandidate &cc : cs)
-                    if (cc.id == id)
-                        checkMsg(cc.eligible, QStringLiteral("only eligible candidates race"));
-        }
-        checkMsg(commits <= 1, QStringLiteral("at most one commit"));
-    }
-}
 
 // --- scenarios -----------------------------------------------------------------------------------------------
 
@@ -3786,7 +3656,6 @@ int main(int argc, char **argv)
     outcomes();
     hostContract();
     shades();
-    autoRace();
     scenariosAll();
     machineRules();
     extras();

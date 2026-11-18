@@ -638,8 +638,8 @@ public:
     // AVPN (волна UX Доктора 07-22): интро-шаги. Авто-тип сети ("wifi"/"cellular"/"ethernet"/"" =
     // неизвестно) — по нему интро решает, спрашивать ли «какой у вас интернет». Ручной выбор НЕ
     // персистится (сеть меняется между запусками) — benchExtra берёт его последним фолбэком.
-    // Only the network-memory keys still read it (currentNetworkMemoryKey, upstreamNetworkKeyNow): under the
-    // tunnel its CoreTelephony fallback says "cellular" on Wi-Fi. Every other reader uses networkKind().
+    // Only upstreamNetworkKeyNow still reads it: under the tunnel its CoreTelephony fallback says "cellular" on
+    // Wi-Fi. Every other reader uses networkKind().
     Q_INVOKABLE QString doctorNetType() const;
     // The one answer to "what network is the device on" ("wifi" | "cellular" | "ethernet" | "" = unknown): the
     // physical kind under any VPN, the order the Scanner uses (scanNetworkKindPick: the path monitor, the
@@ -1053,6 +1053,10 @@ private:
     // stop → дождаться Disconnected → start (никогда не up() поверх незакрытой iOS-NE-сессии). Это
     // убирает «подбираем сервер»→«Network Error» и залипания. См. memory tribe-server-switch-fix.
     void reconcile();      // привести факт (m_lastTunnelState) к намерению (m_wantConnected + pin)
+    void settleOperation(const char *why); // review E1 of 18.11: the one release of the operation latches
+    void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
+    QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
+    bool m_scanNetCompareArmed = false;       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
     // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик
@@ -1063,9 +1067,9 @@ private:
     void cancelStartPreparation();
     void invalidateNetworkMeasurements();
     void persistPin();
-    // Path engine: the user's choice for the attempt owner - Auto (no pin), an exact server (a pin tapped in this
-    // run: the transports of its host; a Scanner row: that one path) or a preferred country (a pin saved by an
-    // earlier run: design §3 "saved pins become country preferences").
+    // Path engine: the user's choice for the attempt owner - Auto (no pin), a preferred server (a server of the list,
+    // tapped now or saved earlier: its transports first, then fallback with a notice) or an exact node (a Scanner
+    // row: that one path, an honest error if it fails).
     void syncChoice();
     QString choiceJournal() const;
     // Pin a server the person tapped. A server the transport mode cannot serve switches the mode to Auto and is
@@ -1148,16 +1152,12 @@ private:
     // AVPN awg31-xray-v1 (спека §2.3):
     //  onTunnelUpEffects()     — побочные эффекты реального «Подключено» (пуши, чипы, живой RTT,
     //                            история транспорта); awg — сразу на Vpn::Connected, xray — после verify.
-    //  startXrayVerification() — фаза Verifying: HEAD generate_204 ЧЕРЕЗ туннель, повторы каждые
-    //                            ~1.2с в бюджете xray_verify_timeout_ms (кламп ConnectTunables.h);
-    //                            async, без nested QEventLoop (§1). Успех → verifySucceeded →
-    //                            эффекты; провал → verifyFailed → движок уводит на другой транспорт
-    //                            той же локации (двухфазный свитч), нет кандидатов → честный OFF.
-    //  persistTransportHistory()— QSettings avpn/transportHistory, только когда движок пометил dirty.
+    //  the data check of a leg (startDataPathVerification): whoami through the tunnel for our nodes, the sized probe
+    //                            for a provider - one result to the attempt owner (verify*), within its
+    //                            data check deadline; async, без nested QEventLoop (§1).
     //  applyReseed()/applyPendingReseed() — reseed пула по pool_revision (refreshSubscription →
     //                            QTimer::singleShot(0), никогда из-под Selector::pick / sync-вызова).
     void onTunnelUpEffects();
-    void startXrayVerification();
     void verifyAttempt(int epoch);
     // failReason: reason for ServiceEngine::verifyFailed (empty = the xray probe's own reason).
     void finishVerify(int epoch, bool ok, const QString &failReason = QString());
@@ -1203,13 +1203,6 @@ private:
     // tiebreakDone: the verdict came from the generate_204 tiebreak and is final.
     void finishWhoami(int epoch, avpn::WhoamiVerdict v, const QString &facts, bool tiebreakDone = false);
     void finishVerifyInconclusive(int epoch);
-    // Network memory (NetworkMemory.h, QSettings avpn/netMemory): the key is computed at the start of
-    // each attempt (tunnel down - the medium is the real one; with the tunnel up macOS reports the
-    // utun route and iOS Wi-Fi the SIM radio) and carried through it for the read, the write at the
-    // verdict and the forget on failure. An explicit «Авто» tap clears the entry of this network.
-    // AVPN (независимое ревью волны, MAJOR-1): движок исчерпал кап подряд идущих провалов
-    // data-plane (ServiceEngine::dataPlaneExhausted) — показать честную ошибку, снять намерение
-    // (§13) и погасить туннель через reconcile (§2). true = сдались этим вызовом.
     void refreshDataFlowing(); // 5.1.108: recompute m_dataFlowing, emit dataFlowingChanged on change
     void applyReseed(const avpn::Subscription &sub, quint64 sequence, const QString &token);
     void applyPendingReseed();
@@ -1374,6 +1367,7 @@ private:
     quint64                     m_subscriptionSequence = 0;
     quint64                     m_bootstrapSequence = 0;
     QString                     m_savedPin;
+    QString                     m_savedPinCountry; // review E8: the country of the saved preference
     QString                     m_xrayPolicyJournaled; // 5.1.109: the last journalled xray_policy reason
     QElapsedTimer               m_reliabilityClock;
     QTimer                      m_transitionTimer;
@@ -1723,28 +1717,18 @@ private:
     qint64                       m_standbyLastTryWallMs = 0;  // wall clock of the last attempt (throttle)
     int                          m_standbyEntries = -1;       // -1 = no usable pack
     QString                      m_standbyNetKey;
-    QHash<QString, qint64>       m_accessAsnByNet;            // network-memory key -> access ASN of the last direct acquire
-    // Evidence of "own tier pre-exhausted" (UpstreamTier.h::decideFastTierOpen), wall clock ms:
-    qint64                       m_fastRoundAtMs = -1;        // the last completed off-tunnel ICMP round
-    int                          m_fastRoundProbed = 0;       // own nodes probed in it
-    int                          m_fastRoundAnsweredN = 0;    // of them answered
-    QSet<QString>                m_fastRoundAnswered;         // the round in flight
-    int                          m_fastRoundTargets = 0;
-    qint64                       m_apiTransportFailMs = -1;   // the last direct API request without an HTTP answer
-    qint64                       m_apiAnswerMs = -1;          // the last one with any HTTP answer
+    QHash<QString, qint64>       m_accessAsnByNet;            // local network key -> access ASN of the last direct acquire
     QString                      m_lastWhoamiFacts;
     bool                         m_whoamiTiebreak = false;         // generate_204 runs as the whoami tiebreak
     // Who asked for the next start (set by start/reprobe/rotate/pin/Doctor) and the snapshot for the
     // current attempt (guardedStart); the engine's own heals inside the attempt inherit it.
     StartOrigin                  m_startOrigin = StartOrigin::User;
     StartOrigin                  m_attemptOrigin = StartOrigin::User;
-    bool                         m_pinExact = false;               // the pin was tapped in this run (exact server)
     QString                      m_exactRow;                       // a Scanner row: one exact path
     int                          m_lastVerifyTtfbMs = -1;          // first byte of the data check that passed
     int                          m_lastUpstreamTtfbMs = -1;
     int                          m_attemptCheckedShown = 0;
     int                          m_attemptTotalShown = 0;
-    bool                         m_adoptedDeadStop = false;        // review of 136: native stopped a dead adopted session
     bool                         m_opInFlight    = false;          // start/stop в полёте — ждём терминального
     bool                         m_inSyncNetCall = false;          // AVPN (краш-фикс): внутри вложенного
                                                                    // QEventLoop (awaitReply) → запрет повторного

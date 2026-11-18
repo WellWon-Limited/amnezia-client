@@ -426,11 +426,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             stopOpenVPN(with: reason,
                         completionHandler: completionHandler)
         case .xray:
-            // AVPN (upstream nodes, contract section 6): release the seat (<= 1.5 s) before the core stops.
-            stopXrayReleasingUpstream { [weak self] in
-                guard let self else { completionHandler(); return }
-                self.stopXray(completionHandler: completionHandler)
-            }
+            // AVPN (upstream nodes, contract section 6; review E5 of 18.11): the core stops first, then the seat is
+            // released (<= 1.5 s) over the extension's direct path - never through the tunnel being abandoned.
+            stopXrayThenReleaseUpstream(completionHandler: completionHandler)
         }
     }
   
