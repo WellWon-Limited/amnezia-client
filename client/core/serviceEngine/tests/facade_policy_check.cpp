@@ -843,6 +843,15 @@ static void scannerCancelAfterShownConnectedWithoutData()
 // tunnel stayed up. With no event loop running the Scanner cancels nothing - whatever the phase.
 // The white-list detector's trigger from the attempt owner (it lived in the deleted start watchdog).
 // R1 (device round 4): a failed data check is the path's only on the path's own evidence.
+// B1 (race measurement 18.11): a stop during the race prelude has no native Disconnected to wait for.
+static void stopNothingNative()
+{
+    CHECK(avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, /*ownerHoldsNativeLeg=*/false));
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Disconnected, true));  // a leg is starting
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Unknown, false));      // not observed yet: maybe up
+    CHECK(!avpn::stopFindsNothingNative(avpn::ObservedTunnel::Connected, false));    // an adopted session
+}
+
 static void checkBlameRule()
 {
     using avpn::CheckBlame;
@@ -915,6 +924,12 @@ static void scannerRowChain()
 static void scannerLiveView()
 {
     const QString none;
+    // S2 (device round 5): connected without the data mark (an adopted session after a relaunch) is not «connecting»
+    {
+        const ScanLiveView a = scanLiveView(QStringLiteral("connected"), true, QString(), none, none, none, true, false,
+                                            /*dataFlowing=*/false, false);
+        CHECK(a.live && !a.connecting);
+    }
     ScanLiveView v = scanLiveView(QStringLiteral("disconnected"), false, none, none, none, QStringLiteral("9"), false, false, false, /*attemptFailed=*/false);
     CHECK(!v.live && !v.connecting && v.nodeId.isEmpty() && v.attemptNodeId.isEmpty());
     v = scanLiveView(QStringLiteral("connecting"), false, QStringLiteral("9"), none, none, QStringLiteral("9"), true, false, false, /*attemptFailed=*/false);
@@ -1275,6 +1290,7 @@ int main()
     scannerCancelNeverDuringAppQuit();
     whitelistTriggerFromOwner();
     checkBlameRule();
+    stopNothingNative();
     scannerRowChain();
     scannerLiveView();
     scannerPhysicalNetworkKind();

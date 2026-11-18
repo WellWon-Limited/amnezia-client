@@ -247,6 +247,13 @@ int main()
               "suspended -> Connected without the mark on both transports (verifyInconclusive)");
     }
 
+    // --- S3 (device round 5): the request is judged by progress, not by a hard cut ---
+    {
+        CHECK(!avpn::whoamiProgressCut(1500, 0, -1, 1600), "no first byte yet, within its limit: runs");
+        CHECK(avpn::whoamiProgressCut(1700, 0, -1, 1600), "no first byte past its limit: cut");
+        CHECK(!avpn::whoamiProgressCut(2600, 0, 2400, 1600), "bytes still arriving past 1.6 s: runs (works, slow)");
+        CHECK(avpn::whoamiProgressCut(3500, 0, 2400, 1600), "bytes stopped for over a second: cut");
+    }
     // --- N1: what each verdict does; xray never connects on a bare 429/404 ---
     {
         using avpn::WhoamiAction;

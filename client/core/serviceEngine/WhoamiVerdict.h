@@ -45,6 +45,16 @@ enum class WhoamiAction { Succeed, FailPath, ConnectUnproven, Tiebreak };
 
 // The contract's minimum body is 64 KiB; less than 16 KiB is "data does not pass" (plan step 5).
 constexpr qint64 kWhoamiMinBodyBytes = 16 * 1024;
+// S3 (device round 5): once bytes flow, a gap longer than this ends the whoami request (progress, not a hard cut).
+constexpr qint64 kWhoamiStallMs = 1000;
+// true = our clock ends the request now: no first byte within firstByteLimitMs, or bytes stopped for kWhoamiStallMs.
+// lastByteAtMs < 0 = nothing arrived yet. A request that keeps receiving runs on (up to the check's own backstop).
+inline bool whoamiProgressCut(qint64 nowMs, qint64 startMs, qint64 lastByteAtMs, qint64 firstByteLimitMs)
+{
+    if (lastByteAtMs < 0)
+        return nowMs - startMs > firstByteLimitMs;
+    return nowMs - lastByteAtMs > kWhoamiStallMs;
+}
 // A body above this is not our whoami (contract max is 256 KiB): stop downloading on metered links.
 constexpr qint64 kWhoamiMaxBodyBytes = 1024 * 1024;
 // At most this many whoami requests per verification (one retry), under the server's 6/min limit.

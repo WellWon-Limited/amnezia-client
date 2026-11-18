@@ -101,5 +101,13 @@ has "$(code "$FACADE")" 'endScanRowRequest(QString(), "attempt_failed");' \
 has "$(code "$FACADE")" 'm_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },' \
     || bad "S1: the seat client must take the edge of the route the request takes now"
 
+# B1 (race measurement): a stop that finds nothing native (the race prelude) settles at once through settleOperation.
+stop_fn="$(code "$FACADE" | awk '/^void AvpnEngineQml::guardedStop\(const char \*why\)/{f=1} f{print} f&&/^}/{exit}')"
+l1="$(printf '%s\n' "$stop_fn" | grep -nF 'avpn::stopFindsNothingNative(observedTunnelOf(m_lastTunnelState), m_engine.ownerHoldsNativeLeg())' | head -1 | cut -d: -f1)"
+l2="$(printf '%s\n' "$stop_fn" | grep -nF 'settleOperation("stop_nothing_native");' | head -1 | cut -d: -f1)"
+l3="$(printf '%s\n' "$stop_fn" | grep -nF 'm_tunnel.down();' | head -1 | cut -d: -f1)"
+{ [ -n "$l1" ] && [ -n "$l2" ] && [ -n "$l3" ] && [ "$l1" -lt "$l2" ] && [ "$l2" -lt "$l3" ]; } \
+    || bad "B1: a stop with nothing native must settle before any native stop is asked"
+
 [ "$fail" = 0 ] && echo "check_lifecycle_142_wiring: OK" || echo "check_lifecycle_142_wiring: FAILED"
 exit $fail

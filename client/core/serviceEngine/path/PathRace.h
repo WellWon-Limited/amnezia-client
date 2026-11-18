@@ -47,6 +47,14 @@ struct RaceTimings {
     int raceBudgetMs = 8000;    // awake time of one race; then the owner walks without it
     int probeTimeoutMs = 4000;  // one probe's own bound (the host answers by then)
     int providerPerRace = 3;    // provider probes per race (probe seats a lost batch answer can strand)
+    // B3 (race measurement 18.11):
+    // The owner starts its first choice when nothing is proven by then, the race runs beside it. 0 = at once: the
+    // "first candidate works" case is never slower than without the race; a proof arriving while that leg has not
+    // come up is the owner's next choice at the leg's own deadline.
+    int hedgeMs = 0;
+    int spareProofs = 1;        // proofs kept after the winner, then the race stops (no probing on)
+    int knownFreshMin = 30;     // a known path that carried data here this recently: no race at all
+    int cellularMaxBytes = 262144; // bytes one race may spend on cellular (the Scanner's hour budget stays its own)
 };
 
 // What the platform's probe host can run at once (IScanHost caps of the spike: 6 legs, 1 full Xray, 2 AmneziaWG).
@@ -64,7 +72,7 @@ struct ProbeStamp {
     bool operator==(const ProbeStamp &o) const { return race == o.race && network == o.network && probe == o.probe; }
 };
 
-enum class RaceDoneReason { None, Exhausted, Budget, Bytes, NetworkChanged, Stopped };
+enum class RaceDoneReason { None, Exhausted, Budget, Bytes, NetworkChanged, Stopped, Proven };
 
 inline const char *raceDoneReasonName(RaceDoneReason r)
 {
@@ -75,11 +83,13 @@ inline const char *raceDoneReasonName(RaceDoneReason r)
     case RaceDoneReason::Bytes: return "bytes";
     case RaceDoneReason::NetworkChanged: return "network_changed";
     case RaceDoneReason::Stopped: return "stopped";
+    case RaceDoneReason::Proven: return "proven";
     }
     return "";
 }
 
-enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done };
+// Hedge: nothing proven within hedgeMs - the engine starts the owner on its first choice, the race runs on beside it.
+enum class RaceEffectType { StartProbe, CancelProbe, Report, Spent, Winner, Done, Hedge };
 
 struct RaceEffect {
     RaceEffectType type = RaceEffectType::Done;
@@ -128,11 +138,19 @@ public:
         m_inFlight.clear();
         m_winner.clear();
         m_providersStarted = 0;
+        m_proven = 0;      // B2: per race
+        m_hedged = false;
         m_lastNow = now;
         m_awake = 0;
         m_budgetEnd = m_t.raceBudgetMs;
         m_nextStartAt = 0;
         pump(out);
+        if (m_running && m_t.hedgeMs <= 0) {
+            m_hedged = true;
+            RaceEffect h;
+            h.type = RaceEffectType::Hedge;
+            out << h;
+        }
         return out;
     }
 
@@ -162,6 +180,10 @@ public:
             r.networkGeneration = m_net.generation;
             out << r;
             ++m_proven;
+            if (!m_winner.isEmpty() && m_proven > 1 + m_t.spareProofs) {
+                finish(RaceDoneReason::Proven, out); // B3: the winner and its spares are enough
+                return out;
+            }
             if (m_winner.isEmpty()) {
                 // the engine tells whether the ledger now holds it as working (a tunnel no-data outranks a probe ok)
                 RaceEffect w;
@@ -184,6 +206,12 @@ public:
         advance(now);
         if (!m_running)
             return out;
+        if (!m_hedged && m_winner.isEmpty() && m_awake >= m_t.hedgeMs) {
+            m_hedged = true;
+            RaceEffect h;
+            h.type = RaceEffectType::Hedge;
+            out << h;
+        }
         // a probe past its own bound and the host's grace: the host did not answer - cancel it, nothing recorded
         for (auto it = m_inFlight.begin(); it != m_inFlight.end();) {
             if (m_awake >= it.value().deadline) {
@@ -368,6 +396,7 @@ private:
     int m_providersQueued = 0;
     int m_providersStarted = 0;
     int m_proven = 0;
+    bool m_hedged = false;
     bool m_running = false;
 };
 

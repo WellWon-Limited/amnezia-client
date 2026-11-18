@@ -500,12 +500,22 @@ void ServiceEngine::beginRaceForTap()
     const QList<path::RankedPath> order = path::selectPaths(in);
     if (order.isEmpty())
         return; // the owner reports "no candidate" itself
-    // (a) a path proven on this network leads: it starts at once, the race runs over the rest beside it
+    // (a) a path proven on this network leads: it starts at once, the race runs over the rest beside it - and when it
+    // carried data here recently there is no race at all (B3c: the race only where nothing works or it just failed)
     const bool known = order.first().view.state == path::PathState::Working;
+    const path::RaceTimings rt = m_race.timings();
+    if (known && order.first().view.strength == path::EvidenceStrength::Data
+        && nowMs() - order.first().view.lastSuccessMs <= qint64(rt.knownFreshMin) * 60000) {
+        attemptJournal(QStringLiteral("race_skipped known=%1 fresh").arg(order.first().path.id.id));
+        return;
+    }
     QList<path::PathCandidate> race;
     for (int i = known ? 1 : 0; i < order.size(); ++i)
         race << order.at(i).path;
-    const qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
+    qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
+    // B3d: on cellular one race spends at most cellularMaxBytes (the Scanner's hour budget stays its own)
+    if (m_net.current().coarse.startsWith(QLatin1String("cell")))
+        bytesLeft = bytesLeft < 0 ? rt.cellularMaxBytes : std::min<qint64>(bytesLeft, rt.cellularMaxBytes);
     attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3")
                        .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft));
     m_raceFirst = !known;
@@ -517,6 +527,16 @@ void ServiceEngine::beginRaceForTap()
 void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
 {
     applyRaceEffects(m_race.probeDone(nowMs(), stamp, outcome, bytesSpent));
+}
+
+bool ServiceEngine::failedInTunnelHere(const QString &nodeId) const
+{
+    const SubscriptionNode *n = findNode(nodeId);
+    if (!n || !m_net.current().usable())
+        return false;
+    const path::LedgerEntry *e = m_ledger.entry(m_net.current().local, path::derivePathId(*n).id);
+    return e && e->revision == path::derivePathId(*n).revision && e->failStreak > 0 && e->noDataMs > 0
+        && e->noDataMs >= e->dataOkMs;
 }
 
 bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &source)
@@ -580,6 +600,9 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
                 attemptJournal(QStringLiteral("race_winner node=%1").arg(e.path.id.id));
                 startOwnerAfterRace("winner");
             }
+            break;
+        case path::RaceEffectType::Hedge:
+            startOwnerAfterRace("hedge"); // B3a: nothing proven yet - the first choice starts, the race runs beside it
             break;
         case path::RaceEffectType::Done:
             attemptJournal(QStringLiteral("race_done reason=%1 proven=%2")
@@ -1340,8 +1363,10 @@ bool ServiceEngine::adoptTunnelConnected(const QString &nodeId, const QString &p
     const QString sessionProto = hintGiven ? (proto.isEmpty() ? QStringLiteral("awg") : proto) : QString();
     if (hintGiven) {
         const auto *node = findNode(nodeId);
+        // S2 (device round 5): a provider stub has no endpoint of its own (the profile's server is in its lease) -
+        // it is identified by its node id and proto alone, as tryIdentifyCurrentNode does.
         if (node && protoOf(*node) == (proto.isEmpty() ? QStringLiteral("awg") : proto)
-            && node->endpoint == endpoint) {
+            && (node->endpoint == endpoint || isUpstreamNode(*node))) {
             if (m_currentNodeId != nodeId)
                 resetHealSession(nodeId);
             m_currentNodeId = nodeId;

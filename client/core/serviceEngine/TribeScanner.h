@@ -140,6 +140,13 @@ public:
     // R7 (device round 4): the one naming function of the server list for a row id (a node id, "up:<profile>"), so
     // the Scanner never shows «Serbia 1» where the list shows «Сербия 1» (cached rows included). "" = not in the
     // pool now: the row keeps its own label.
+    // S6 (device round 5): the ledger's rule on the screen - a row whose real tunnel came up and carried no data on
+    // this network (and has not carried data since) is not shown «Доступно» on a later light probe.
+    virtual bool rowFailedInTunnelHere(const QString &rowId) const
+    {
+        Q_UNUSED(rowId)
+        return false;
+    }
     virtual QString rowDisplayName(const QString &rowId) const
     {
         Q_UNUSED(rowId)

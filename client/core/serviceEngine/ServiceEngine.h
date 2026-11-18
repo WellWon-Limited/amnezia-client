@@ -232,6 +232,8 @@ public:
     void attemptTick();
     // Stage 2: a race that runs before the owner's first leg is part of the attempt (the orb is busy, reconcile waits).
     bool attemptRunning() const { return m_owner.running() || m_raceFirst; }
+    // B1: the owner has a leg the platform may be running (starting, checking, connected or being stopped).
+    bool ownerHoldsNativeLeg() const { return m_owner.phase() != path::AttemptPhase::Idle; }
 
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
     // The platform's probe host (nullptr = none: stage-1 behaviour exactly). Server switch features.path_race
@@ -254,6 +256,8 @@ public:
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
     bool recordProbeProof(const QString &nodeId, const QString &source);
+    // S6: the path's real tunnel came up and carried no data on the current network, with no data ok since.
+    bool failedInTunnelHere(const QString &nodeId) const;
     // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
     static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }

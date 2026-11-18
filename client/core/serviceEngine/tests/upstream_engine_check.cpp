@@ -1701,6 +1701,15 @@ static void scanOfferedRows()
     // Auto does not start it on its own: the delivered candidates bound Auto
     for (const path::PathCandidate &c : e.pathPoolForTest())
         CHECK(c.id.id != offered);
+    // S2 (device round 5): an adopted provider session is identified by its node id (a stub has no endpoint)
+    {
+        ServiceEngine a;
+        FakeTunnel t2;
+        a.setTunnel(&t2);
+        CHECK(a.loadSubscription(body(realisticPool()), err));
+        CHECK(a.adoptTunnelConnected(QStringLiteral("up:aaaaaaaaaaaaaaa0"), QStringLiteral("xray"), QStringLiteral("198.51.100.7:443")));
+        CHECK(a.currentNodeId() == QLatin1String("up:aaaaaaaaaaaaaaa0"));
+    }
     // an exact Scanner row: the one path, through the owner
     e.setUserChoice(path::UserChoice::exactPath(offered));
     CHECK(e.connect(err) && tun.ups == QStringList{ offered });
