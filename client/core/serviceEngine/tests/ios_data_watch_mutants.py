@@ -542,6 +542,7 @@ WIRING = [
 
 # Survivors that are accepted, with the reason no test of this group can or should kill them.
 ACCEPTED = {
+    "w-t7a": "equivalent since the path engine (A10): the app adopts no extension switch (ops.adoptSwitch is inert), so nothing reads switch_ms; the extension's stage-2 switch code and its plan fields go in stage 3",
     "rs-16": "equivalent: prepare() runs once per process (a new extension process per session), where both are zero already",
     "rs-01": "equivalent: a second lock - the parse keeps candidates only with the switch key on and a live lease (xl-01, xl-02, xp-06), so a plan with candidates always has the key on",
     "sb-02": "equivalent: the same second lock at the start choice (the pure function's own lock is pinned by xc-12)",
