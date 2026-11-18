@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+485"/>
+        <location line="+487"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-483"/>
+        <location line="-485"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>Traffic went around the VPN — trying another route</translation>
     </message>
@@ -1166,11 +1166,12 @@
     </message>
     <message>
         <location line="+3"/>
+        <location line="+479"/>
         <source>Отключаемся…</source>
         <translation>Disconnecting…</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-478"/>
         <source>Проверяем…</source>
         <translation>Checking…</translation>
     </message>
@@ -1317,13 +1318,13 @@
         <translation>Change server</translation>
     </message>
     <message>
-        <location line="+2"/>
+        <location line="+4"/>
         <source>Устанавливаем…</source>
         <translation>Installing…</translation>
     </message>
     <message>
-        <location line="-475"/>
-        <location line="+476"/>
+        <location line="-477"/>
+        <location line="+478"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -1333,7 +1334,7 @@
         <translation>Picking a server…</translation>
     </message>
     <message>
-        <location line="-59"/>
+        <location line="-61"/>
         <source>Доктор</source>
         <translation>Doctor</translation>
     </message>
@@ -1727,7 +1728,7 @@ banks, cinemas, government services and marketplaces keep working without switch
         <translation>Link copied — paste it in a messenger</translation>
     </message>
     <message>
-        <location line="+60"/>
+        <location line="+65"/>
         <source>Пригласи друзей</source>
         <translation>Invite friends</translation>
     </message>
@@ -1784,20 +1785,25 @@ A gift for every friend!</translation>
         <translation>Bonus GB</translation>
     </message>
     <message>
+        <location line="+3"/>
+        <source>дней и %1 ГБ за друга</source>
+        <translation>days and %1 GB per friend</translation>
+    </message>
+    <message>
         <location line="+1"/>
         <source>Дней за друга</source>
         <translation>Days per friend</translation>
     </message>
     <message>
         <location line="+6"/>
-        <source>Друг засчитывается, когда активирует код по вашей ссылке. История по каждому появится позже.</source>
-        <translation>A friend counts once they activate a code via your link. Per-friend history is coming later.</translation>
+        <source>Друг засчитывается, когда активирует код по вашей ссылке.</source>
+        <translation>A friend counts once they activate a code from your link.</translation>
     </message>
 </context>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+227"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+229"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1867,12 +1873,12 @@ A gift for every friend!</translation>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+49"/>
+        <location line="+50"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
     <message>
-        <location line="+19"/>
+        <location line="+17"/>
         <source>Режим соединения — «Авто»: у этого сервера нет транспорта %1</source>
         <translation>Connection mode is now “Auto”: this server has no %1 transport</translation>
     </message>
@@ -1997,12 +2003,12 @@ You can attach a photo or video.</translation>
     <name>ScanTexts</name>
     <message>
         <location filename="../../ui/qml/Tribe/ScanTexts.qml" line="+14"/>
-        <location line="+75"/>
+        <location line="+74"/>
         <source>Сканер</source>
         <translation>Scanner</translation>
     </message>
     <message>
-        <location line="-74"/>
+        <location line="-73"/>
         <source>Wi‑Fi</source>
         <translation>Wi‑Fi</translation>
     </message>
@@ -2022,12 +2028,7 @@ You can attach a photo or video.</translation>
         <translation>Checked %1&#xa0;min ago</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>РАБОТАЮТ СЕЙЧАС</source>
-        <translation>WORKING NOW</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -2042,12 +2043,7 @@ You can attach a photo or video.</translation>
         <translation>Checking reachability</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>Проверяем передачу данных · рабочих %1 из&#xa0;%2</source>
-        <translation>Checking data transfer · working %1 of&#xa0;%2</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>Проверяем ваше подключение</source>
         <translation>Checking your connection</translation>
     </message>
@@ -2103,11 +2099,6 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+1"/>
-        <source>Проверим при подключении</source>
-        <translation>Checked on connect</translation>
-    </message>
-    <message>
-        <location line="+1"/>
         <source>%1&#xa0;мс</source>
         <translation>%1&#xa0;ms</translation>
     </message>
@@ -2147,12 +2138,7 @@ You can attach a photo or video.</translation>
         <translation>Speed</translation>
     </message>
     <message>
-        <location line="+1"/>
-        <source>по кнопке</source>
-        <translation>with the button</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+2"/>
         <source>работают</source>
         <translation>open</translation>
     </message>
@@ -2262,27 +2248,7 @@ You can attach a photo or video.</translation>
         <translation>Sending the report…</translation>
     </message>
     <message>
-        <location line="+3"/>
-        <source>Найдена 1 рабочая нода</source>
-        <translation>Found 1 working node</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдено %1 рабочая нода</source>
-        <translation>Found %1 working nodes</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдено %1 рабочие ноды</source>
-        <translation>Found %1 working nodes</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Найдено %1 рабочих нод</source>
-        <translation>Found %1 working nodes</translation>
-    </message>
-    <message>
-        <location line="+1"/>
+        <location line="+7"/>
         <source>Сейчас все места заняты — подключаем следующую</source>
         <translation>All seats are taken right now — connecting the next server</translation>
     </message>
@@ -2422,12 +2388,47 @@ You can attach a photo or video.</translation>
         <translation>Start the service</translation>
     </message>
     <message>
-        <location line="-88"/>
+        <location line="-100"/>
+        <source>ДОСТУПНЫ СЕЙЧАС</source>
+        <translation>AVAILABLE NOW</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Проверяем передачу данных · доступно %1 из&#xa0;%2</source>
+        <translation>Checking data transfer · %1 of&#xa0;%2 available</translation>
+    </message>
+    <message>
+        <location line="+9"/>
         <source>Доступно</source>
         <translation>Available</translation>
     </message>
     <message>
-        <location line="+76"/>
+        <location line="+16"/>
+        <source>проверим кнопкой ниже</source>
+        <translation>check with the button below</translation>
+    </message>
+    <message>
+        <location line="+29"/>
+        <source>Найдена 1 доступная нода</source>
+        <translation>1 available server found</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Найдена %1 доступная нода</source>
+        <translation>%1 available servers found</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Найдено %1 доступные ноды</source>
+        <translation>%1 available servers found</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Найдено %1 доступных нод</source>
+        <translation>%1 available servers found</translation>
+    </message>
+    <message>
+        <location line="+27"/>
         <source>Службу Tribe VPN нужно обновить</source>
         <translation>The Tribe VPN service needs an update</translation>
     </message>
@@ -3063,7 +3064,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4020"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4062"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3163,7 +3164,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2820"/>
+        <location line="-2856"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3213,7 +3214,7 @@ You can attach a photo or video.</translation>
         <translation>Current server</translation>
     </message>
     <message>
-        <location line="+402"/>
+        <location line="+376"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No active subscription. Get one to connect.</translation>
     </message>
@@ -3223,7 +3224,43 @@ You can attach a photo or video.</translation>
         <translation>Could not refresh the server list. Try connecting again.</translation>
     </message>
     <message>
-        <location line="+533"/>
+        <location line="+63"/>
+        <source>Режим подключения переключён на «Авто», чтобы подключить выбранный сервер</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+32"/>
+        <source>%1 в этой сети недоступна — подключено через другой сервер</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 в этой сети недоступна — подключено через %2</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Выбранный сервер сейчас не работает в этой сети — выберите другой или «Авто»</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <location line="+3789"/>
+        <source>В выбранном режиме нет ни одного сервера — включите режим «Авто»</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="-3786"/>
+        <source>Нет сети — подключитесь, когда она появится</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>В этой сети не удалось найти рабочий сервер — проверьте сеть и попробуйте снова</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+478"/>
         <source>Отправляем…</source>
         <translation>Sending…</translation>
     </message>
@@ -3238,7 +3275,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+1121"/>
+        <location line="+1124"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3319,17 +3356,17 @@ You can attach a photo or video.</translation>
         <translation>baseline and amnezia see the same egress (%1) — looks like the VPN wasn&apos;t off during the baseline measurement</translation>
     </message>
     <message>
-        <location line="+1111"/>
+        <location line="+1075"/>
         <source>Установка службы VPN отменена</source>
         <translation>VPN service installation cancelled</translation>
     </message>
     <message>
-        <location line="+150"/>
+        <location line="+129"/>
         <source>Не удалось установить службу VPN</source>
         <translation>Couldn&apos;t install the VPN service</translation>
     </message>
     <message>
-        <location line="+553"/>
+        <location line="+482"/>
         <source>Не удалось отключить VPN. Повторите или отключите его в Настройках iOS.</source>
         <translation>Could not turn off the VPN. Try again or turn it off in iOS Settings.</translation>
     </message>
@@ -3339,24 +3376,13 @@ You can attach a photo or video.</translation>
         <translation>The system has not confirmed the disconnect yet.</translation>
     </message>
     <message>
-        <location line="+48"/>
-        <source>Не удалось переключить сервер. Подключитесь ещё раз.</source>
-        <translation>Could not switch the server. Connect again.</translation>
-    </message>
-    <message>
-        <location line="+56"/>
-        <location line="+31"/>
+        <location line="+47"/>
+        <location line="+34"/>
         <source>Сервер недоступен в этой версии приложения — обновите приложение</source>
         <translation>This server is not supported in this app version — please update the app</translation>
     </message>
     <message>
-        <location line="-28"/>
-        <location line="+26"/>
-        <source>У этого сервера нет выбранного транспорта — переключите режим на «Авто»</source>
-        <translation>This server has no transport for the selected mode — switch the mode to “Auto”</translation>
-    </message>
-    <message>
-        <location line="-25"/>
+        <location line="-33"/>
         <source>Не удалось выбрать сервер — обновите список серверов</source>
         <translation>Could not pick a server — refresh the server list</translation>
     </message>
@@ -3376,28 +3402,32 @@ You can attach a photo or video.</translation>
         <translation>This server is unavailable right now — connecting another one</translation>
     </message>
     <message>
-        <location line="+142"/>
+        <location line="+12"/>
+        <source>Нет сети — подключимся, когда она появится</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Этот сервер сейчас недоступен — выберите другой или «Авто»</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Нет доступных серверов — обновите список серверов</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location line="+129"/>
         <source>Недостаточно живых серверов для переключения</source>
         <translation>Not enough live servers to switch</translation>
     </message>
     <message>
-        <location line="+763"/>
+        <location line="+765"/>
         <source>Xray недоступен в этой версии приложения</source>
         <translation>Xray is not available in this app version</translation>
     </message>
     <message>
-        <location line="+293"/>
-        <location line="+3607"/>
-        <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
-        <translation>The server is not passing traffic — try another server</translation>
-    </message>
-    <message>
-        <location line="-3273"/>
-        <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
-        <translation>Traffic gets through no server — check your network and try again</translation>
-    </message>
-    <message>
-        <location line="+97"/>
+        <location line="+585"/>
         <source>Введите код доступа</source>
         <translation>Enter your access code</translation>
     </message>
@@ -3468,7 +3498,7 @@ You can attach a photo or video.</translation>
         <translation>Could not activate the key</translation>
     </message>
     <message>
-        <location line="+420"/>
+        <location line="+419"/>
         <source>Не указано устройство</source>
         <translation>No device specified</translation>
     </message>

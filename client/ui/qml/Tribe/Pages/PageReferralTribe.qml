@@ -89,9 +89,12 @@ PageType {
         radius: Theme.radius.md
         color: Theme.color.surface1
         border.width: 1; border.color: Theme.color.border
-        implicitHeight: 76
+        implicitHeight: Math.max(76, statCol.implicitHeight + 2 * Theme.space.md)
+        Layout.fillHeight: true   // the row's cards keep one height when a caption wraps
         Column {
+            id: statCol
             anchors.centerIn: parent; spacing: 3
+            width: parent.width - 2 * Theme.space.sm
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: parent.parent.value
@@ -99,7 +102,9 @@ PageType {
                 font.family: Theme.font.display; font.pixelSize: Theme.font.h3; font.weight: Theme.font.wBold
             }
             Text {
-                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
                 text: parent.parent.caption
                 color: Theme.color.text3
                 font.family: Theme.font.body; font.pixelSize: Theme.font.caption
@@ -379,13 +384,16 @@ PageType {
                     StatCard { Layout.fillWidth: true; value: "" + root.invited;      caption: qsTr("Приглашено") }
                     StatCard { Layout.fillWidth: true; value: "+" + root.daysEarned;  caption: qsTr("Бонус-дней") }
                     StatCard { Layout.fillWidth: true; visible: root.gbEarned > 0; value: "+" + root.gbEarned; caption: qsTr("Бонус-ГБ") }
-                    StatCard { Layout.fillWidth: true; value: "+" + root.daysPerFriend; caption: qsTr("Дней за друга") }
+                    StatCard { Layout.fillWidth: true; value: "+" + root.daysPerFriend
+                               // the whole offer, as the pill and the share text (device round 3: the GB were missing)
+                               caption: root.gbPerFriend > 0 ? qsTr("дней и %1 ГБ за друга").arg(root.gbPerFriend)
+                                                             : qsTr("Дней за друга") }
                 }
 
                 // ── футер-подсказка ──
                 Text {
                     width: parent.width
-                    text: qsTr("Друг засчитывается, когда активирует код по вашей ссылке. История по каждому появится позже.")
+                    text: qsTr("Друг засчитывается, когда активирует код по вашей ссылке.")
                     color: Theme.color.text3; wrapMode: Text.WordWrap
                     horizontalAlignment: Text.AlignHCenter
                     font.family: Theme.font.body; font.pixelSize: Theme.font.caption

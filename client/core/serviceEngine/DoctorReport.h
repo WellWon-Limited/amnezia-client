@@ -8,6 +8,8 @@
 // серверы (где/качество) → сервисы (WhatsApp/TG/YT/IG через туннель) → скорость (бенч через туннель).
 // Спека: tribe-front docs/superpowers/specs/2026-07-17-doctor-v1-design.md.
 
+#include "CountryNames.h"
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -175,7 +177,11 @@ inline QString countryNameRu(const QString &code)
         {QStringLiteral("CZ"), QStringLiteral("Чехия")},
     };
     const auto it = t.constFind(cc);
-    return it != t.constEnd() ? it.value() : cc;
+    if (it != t.constEnd())
+        return it.value();
+    // every other ISO code (device test of 142: «Israel 1», «India 1», «Serbia 1» stayed English) - CountryNames.h
+    const QString gen = avpn::countrynames::name(cc, QStringLiteral("ru"));
+    return gen.isEmpty() ? cc : gen;
 }
 
 // 5.1.108: Spanish names for the same countries (QLocale::territoryToString is English only, so an
@@ -210,7 +216,10 @@ inline QString countryNameEs(const QString &code)
         {QStringLiteral("CZ"), QStringLiteral("Chequia")},
     };
     const auto it = t.constFind(cc);
-    return it != t.constEnd() ? it.value() : cc;
+    if (it != t.constEnd())
+        return it.value();
+    const QString gen = avpn::countrynames::name(cc, QStringLiteral("es"));
+    return gen.isEmpty() ? cc : gen;
 }
 
 // Name of a server that came without a label (owner test of 5.1.102, 2026-11-05: Xray listeners

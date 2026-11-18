@@ -54,9 +54,9 @@ Rectangle {
         : (rowState === "slow" || rowState === "connecting") ? Theme.color.badgeWarn
         : rowState === "failed" ? Theme.color.badgeOff
         : Theme.color.glass
-    // the speed word is gone (the bars and ms say it); only a reason follows the badges on the bottom line
-    readonly property string subText: notVerified ? ScanTexts.rowCheckOnConnect
-        : (liveUnverified && rowState === "connected") ? ScanTexts.liveChecking
+    // the speed word is gone (the bars and ms say it); the «Не проверено» badge says what its reason said (device round 3:
+    // «Проверим при под…» was cut off), so only the live row's own check follows the badges - never on a cached row
+    readonly property string subText: (liveUnverified && rowState === "connected" && !cached) ? ScanTexts.liveChecking
         : ""
     readonly property bool subIsReason: subText !== ""
 
