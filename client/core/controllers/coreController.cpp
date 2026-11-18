@@ -24,6 +24,9 @@
     #include "core/serviceEngine/TribeScanner.h" // AVPN Scanner (lane L6b): the coordinator «Сканер» → QML
     #if defined(Q_OS_IOS)
         #include "core/serviceEngine/IosScanHost.h" // AVPN Scanner (lane L4): the probe host in the tunnel extension
+        #if defined(AVPN_IOS_APP_SCAN_HOST)
+            #include "core/serviceEngine/IosAppScanHost.h" // AVPN (path engine stage 0): the probe engine in the app
+        #endif
     #endif
     #if defined(Q_OS_ANDROID)
         #include "core/serviceEngine/AndroidScanHost.h" // AVPN Scanner (lane A3): the probe host in the Xray service
@@ -52,7 +55,13 @@ namespace {
 // `caps` = what the coordinator's machine starts from before the host answers its first scan_caps.
 void installScanHost(avpn::AvpnEngineQml *engine) // AVPN
 {
-#if defined(Q_OS_IOS)
+#if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)
+    // AVPN (path engine stage 0, option AVPN_IOS_APP_SCAN_HOST): probes in the app process, routed per scan
+    // (IosAppScanHost.h); the control file's mode "off" restores the extension-only host.
+    const bool appProbe = avpn::IosHybridScanHost::readControl().mode != avpn::IosAppScanMode::Off;
+    engine->setScanHostFactory(appProbe ? avpn::iosAppScanKnownCaps() : avpn::iosScanKnownCaps(),
+                               []() -> avpn::IScanHost * { return new avpn::IosHybridScanHost(); });
+#elif defined(Q_OS_IOS)
     engine->setScanHostFactory(avpn::iosScanKnownCaps(), []() -> avpn::IScanHost * { return new avpn::IosScanHost(); });
 #elif defined(Q_OS_ANDROID)
     // AVPN Scanner (lane A3): probes run in :amneziaXrayService (decision A-7); NeedsVpn otherwise.
@@ -289,6 +298,9 @@ void CoreController::initControllers()
         auto *tribeScanner = new avpn::TribeScanner(scanDeps, avpnEngine);
         avpnEngine->attachScanner(tribeScanner);
         setQmlContextProperty("TribeScanner", tribeScanner);
+#if defined(Q_OS_IOS) && defined(AVPN_IOS_APP_SCAN_HOST)
+        avpn::IosHybridScanHost::installAutorun(tribeScanner); // AVPN: debug run without UI taps (control file)
+#endif
     }
 
     // AVPN (store-flow E): пуш type=payment (бэк продлил подписку после оплаты) → мгновенный

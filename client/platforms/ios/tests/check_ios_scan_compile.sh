@@ -1,6 +1,7 @@
 #!/bin/bash
 # AVPN (Scanner, lane L4): iOS syntax compile (clang -fsyntax-only: no object, no link, no moc) of the app-side
-# translation units of the iOS probe host - client/core/serviceEngine/IosScanHost.mm and
+# translation units of the iOS probe host - client/core/serviceEngine/IosScanHost.mm, the in-app host IosAppScanHost.mm
+# (with -DAVPN_IOS_APP_SCAN_HOST=1) and
 # client/platforms/ios/ios_controller.mm (the scan channel) - with the iPhoneOS SDK, Qt for iOS and the iOS app's
 # defines, the way core/serviceEngine/tests/check_upstream_compile.sh does its IOS=1 pass (generated headers from
 # a macOS desktop build tree). The files are compiled MRC, like the app target compiles them. Nothing is built,
@@ -33,7 +34,7 @@ if [ -z "${SWIFT_HEADER_DIR:-}" ]; then
     [ -f "$d/AmneziaVPN-Swift.h" ] && { SWIFT_HEADER_DIR="$d"; break; }
   done
 fi
-TUS=("$CLIENT/core/serviceEngine/IosScanHost.mm")
+TUS=("$CLIENT/core/serviceEngine/IosScanHost.mm" "$CLIENT/core/serviceEngine/IosAppScanHost.mm")
 if [ -n "${SWIFT_HEADER_DIR:-}" ] && [ -f "$SWIFT_HEADER_DIR/AmneziaVPN-Swift.h" ]; then
   IOS_INC="$IOS_INC -I$SWIFT_HEADER_DIR"
   TUS+=("$CLIENT/platforms/ios/ios_controller.mm")
@@ -43,9 +44,11 @@ else
 fi
 fail=0
 for tu in "${TUS[@]}"; do
+  # The in-app probe host exists only with the CMake option AVPN_IOS_APP_SCAN_HOST (its define).
+  TU_DEF=""; case "$tu" in *IosAppScanHost.mm) TU_DEF="-DAVPN_IOS_APP_SCAN_HOST=1";; esac
   # shellcheck disable=SC2086
   if eval xcrun clang++ -x objective-c++ -std=gnu++17 -target arm64-apple-ios16.0 -isysroot "$SDK" -fno-objc-arc \
-      -Werror=return-type $IOS_DEF $IOS_INC -fsyntax-only "\"$tu\"" 2>/tmp/ios_scan_compile_err.txt; then
+      -Werror=return-type $IOS_DEF $TU_DEF $IOS_INC -fsyntax-only "\"$tu\"" 2>/tmp/ios_scan_compile_err.txt; then
     echo "iOS syntax OK: ${tu#$CLIENT/} ($(grep -c 'warning:' /tmp/ios_scan_compile_err.txt) warnings)"
   else
     echo "iOS syntax FAIL: ${tu#$CLIENT/}"; grep -m 20 "error:" /tmp/ios_scan_compile_err.txt; fail=1

@@ -184,6 +184,10 @@ public:
     // The physical network kind of the same monitor's last path (iosAppPathKind): "ethernet" | "wifi" | "cellular",
     // "" before the first path or when the path names no physical interface. Thread-safe; no extra monitor.
     static QString appPathKind();
+    // The same monitor's most preferred physical interface (its index, the one the path uses first; 0 before the
+    // first path or when the path names none) and, in *satisfied, whether that path is usable. The in-app probe
+    // host (IosAppScanHost.h) binds its probe sockets to it. Thread-safe; no extra monitor.
+    static unsigned appBindInterfaceIndex(bool *satisfied = nullptr);
 
     struct State;
 

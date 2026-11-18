@@ -74,6 +74,15 @@ if [ "${IOS:-0}" = "1" ]; then
       echo "iOS syntax FAIL: ${tu#$CLIENT/}"; grep -m 12 "error:" "$ERR"; fail=1
     fi
   done
+  # The option AVPN_IOS_APP_SCAN_HOST (the in-app probe host, IosAppScanHost.h): coreController's other factory.
+  if [ -n "$SWIFT_DIR" ]; then
+    # shellcheck disable=SC2086
+    if eval clang++ -std=gnu++17 -target arm64-apple-ios16.0 -isysroot "$SDK" $IOS_DEF -DAVPN_IOS_APP_SCAN_HOST=1 $IOS_INC $DEPS_INC -fsyntax-only "\"$CC_TU\"" 2>"$ERR"; then
+      echo "iOS syntax OK: ${CC_TU#$CLIENT/} (AVPN_IOS_APP_SCAN_HOST)"
+    else
+      echo "iOS syntax FAIL: ${CC_TU#$CLIENT/} (AVPN_IOS_APP_SCAN_HOST)"; grep -m 12 "error:" "$ERR"; fail=1
+    fi
+  fi
 fi
 
 if [ "${ANDROID:-0}" = "1" ]; then

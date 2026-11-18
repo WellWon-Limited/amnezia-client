@@ -13,3 +13,8 @@ clang++ -std=c++17 -fPIC -include arm_acle.h -Wall -Wextra -Wno-unused-parameter
   -I"$QT/lib/QtCore.framework/Headers" -I"$CLIENT" -I"$CLIENT/core/serviceEngine" -F"$QT/lib" \
   "$HERE/ios_scan_host_check.cpp" -framework QtCore -Wl,-rpath,"$QT/lib" -o "$OUT_DIR/ios_scan_host_check"
 "$OUT_DIR/ios_scan_host_check" "$CLIENT/core/serviceEngine/tests/vectors"
+# AVPN (path engine stage 0): the in-app probe host's pure parts (IosAppScanHost.h).
+clang++ -std=c++17 -fPIC -include arm_acle.h -Wall -Wextra -Wno-unused-parameter \
+  -I"$QT/lib/QtCore.framework/Headers" -I"$CLIENT" -I"$CLIENT/core/serviceEngine" -F"$QT/lib" \
+  "$HERE/ios_app_scan_host_check.cpp" -framework QtCore -Wl,-rpath,"$QT/lib" -o "$OUT_DIR/ios_app_scan_host_check"
+"$OUT_DIR/ios_app_scan_host_check" "$CLIENT/core/serviceEngine/tests/vectors"
