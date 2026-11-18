@@ -150,6 +150,7 @@ struct IosHybridScanHost::State
     QObject context;
     IosAppScanMode mode = IosAppScanMode::Always;
     bool awgBesideTunnelRefuse = false;
+    bool noLegs = false;
     std::unique_ptr<IosScanHost> ext;
     IosAppScanRoutes routes;
     quint64 epoch = 1;          // host_epoch of the app engine: moves on every stop-all (stale starts are refused)
@@ -209,6 +210,7 @@ IosHybridScanHost::IosHybridScanHost() : m_state(std::make_shared<State>())
     const IosAppScanControl control = readControl();
     s.mode = control.mode;
     s.awgBesideTunnelRefuse = control.awgBesideTunnelRefuse;
+    s.noLegs = control.noLegs;
     s.ext = std::make_unique<IosScanHost>(); // also starts the app path monitor
     s.tunnelDown = !IosController::Instance()->scanHostRunning();
     const std::weak_ptr<State> weak = m_state;
@@ -315,7 +317,9 @@ void IosHybridScanHost::sendMessage(const QByteArray &request, ReplyFn reply)
     const std::weak_ptr<State> weak = m_state;
 
     if (f.action == QLatin1String("scan_caps")) {
-        callEngine(request, s.options(false), bound, [reply](const QByteArray &bytes) { reply(iosAppScanDecorateCaps(bytes)); });
+        const bool noLegs = s.noLegs;
+        callEngine(request, s.options(false), bound,
+                   [reply, noLegs](const QByteArray &bytes) { reply(iosAppScanDecorateCaps(bytes, noLegs)); });
         return;
     }
 

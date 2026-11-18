@@ -76,6 +76,10 @@ struct IosAppScanControl {
     // "awg_beside_tunnel": "extension" (default: a scan with awg_mini beside a tunnel goes to the extension, which
     // knows the live peer) | "refuse" (refused awg_live_peer_unknown: the coordinator retries without AWG, in-app).
     bool awgBesideTunnelRefuse = false;
+    // "legs": false - the in-app caps offer no leg pool (max_leg_concurrent 0, no xray_leg kind, no DNS plan), so
+    // every Xray candidate is probed as xray_full: the whole tunnel config in its own instance (the full-path
+    // comparison of the leg probe's blind spot, device 18.11).
+    bool noLegs = false;
     int autorunS = 0;
     int closeAfterS = 45;
 };
@@ -86,6 +90,7 @@ inline IosAppScanControl iosAppScanControlFrom(const QByteArray &json)
     const QJsonObject o = QJsonDocument::fromJson(json).object();
     c.mode = iosAppScanModeFrom(o.value(QLatin1String("mode")).toString(), IosAppScanMode::Always);
     c.awgBesideTunnelRefuse = o.value(QLatin1String("awg_beside_tunnel")).toString() == QLatin1String("refuse");
+    c.noLegs = o.value(QLatin1String("legs")) == QJsonValue(false);
     c.autorunS = qBound(0, o.value(QLatin1String("autorun_s")).toInt(0), 600);
     c.closeAfterS = qBound(10, o.value(QLatin1String("close_after_s")).toInt(45), 600);
     return c;
@@ -254,8 +259,22 @@ inline QByteArray iosAppScanNoPathReply()
 // The engine's scan_caps reply with the in-app host's one addition: needs_vpn false (the engine's iOS platform says
 // true: it was built for the extension). Every other byte stays; a reply that is not a scan_caps object, or one
 // without needs_vpn true, comes back as it is.
-inline QByteArray iosAppScanDecorateCaps(const QByteArray &reply)
+inline QByteArray iosAppScanDecorateCaps(const QByteArray &reply, bool noLegs = false)
 {
+    if (noLegs) { // a host addition like the extension's memory lowering of the pools
+        QJsonObject o = QJsonDocument::fromJson(reply).object();
+        if (o.value(QLatin1String("type")).toString() == QLatin1String("scan_caps") && !o.contains(QLatin1String("error"))) {
+            o.insert(QStringLiteral("max_leg_concurrent"), 0);
+            o.insert(QStringLiteral("dns_plan"), false);
+            QJsonArray kinds;
+            for (const QJsonValue &k : o.value(QLatin1String("kinds")).toArray())
+                if (k.toString() != QLatin1String("xray_leg"))
+                    kinds << k;
+            o.insert(QStringLiteral("kinds"), kinds);
+            o.insert(QStringLiteral("needs_vpn"), false);
+            return QJsonDocument(o).toJson(QJsonDocument::Compact);
+        }
+    }
     const QJsonObject o = QJsonDocument::fromJson(reply).object();
     if (o.value(QLatin1String("type")).toString() != QLatin1String("scan_caps") || o.contains(QLatin1String("error"))
         || o.value(QLatin1String("needs_vpn")) != QJsonValue(true))

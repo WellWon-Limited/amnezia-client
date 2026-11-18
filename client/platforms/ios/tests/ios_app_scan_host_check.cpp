@@ -67,6 +67,12 @@ static void testCaps()
     check(d == expect, "caps: only needs_vpn changes, every other byte kept");
     const ScanHostReply r = scanDecodeReply(d);
     check(r.kind == ScanHostReplyKind::Caps && !r.caps.needsVpn && r.caps.maxLegConcurrent == 6, "decorated caps decode");
+    const ScanHostReply nl = scanDecodeReply(iosAppScanDecorateCaps(goCaps, true));
+    check(nl.kind == ScanHostReplyKind::Caps && nl.caps.maxLegConcurrent == 0 && !nl.kinds.contains(QStringLiteral("xray_leg"))
+              && nl.kinds.contains(QStringLiteral("xray_full")) && !nl.caps.dnsPlan && !nl.caps.needsVpn,
+          "legs off: no leg pool, every Xray candidate a full probe");
+    check(iosAppScanControlFrom(R"({"legs":false})").noLegs && !iosAppScanControlFrom(R"({"legs":true})").noLegs
+              && !iosAppScanControlFrom("{}").noLegs, "legs read");
     const QByteArray spaced = R"({"type": "scan_caps", "version": "tribe-scan-v1", "needs_vpn": true, "max_full_concurrent": 1})";
     check(!scanDecodeReply(iosAppScanDecorateCaps(spaced)).caps.needsVpn, "non-compact caps re-encoded with needs_vpn false");
     for (const QByteArray &same : {QByteArray(R"({"error":"no_vpn"})"), QByteArray(R"({"type":"scan_ack","scan_id":"a"})"),
