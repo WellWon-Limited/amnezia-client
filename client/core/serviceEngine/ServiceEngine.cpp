@@ -3,6 +3,7 @@
 #include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
 #include "SubscriptionParser.h"
 #include "TransportPick.h" // AVPN awg31-xray-v1: locations x transports, exit RTT for the bars
+#include "UpstreamLeaseWire.h" // R1: the server's refusal codes (startFailureOutcome)
 #include "path/PathId.h"
 
 #include <QDateTime>
@@ -203,8 +204,9 @@ bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail
         return false;
     appendSwitchLog(QStringLiteral("upstream lease %1%2 on %3: leaving the node")
                         .arg(code, detail.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(detail), m_currentNodeId));
-    loseLiveSession(code == QLatin1String("no_seat") ? path::PathOutcome::NoSeat : path::PathOutcome::Refused,
-                    /*tunnelGone=*/false, /*restart=*/true, QStringLiteral("upstream lease %1").arg(code));
+    // R1: only the server's own refusal is the path's outcome (a lease that could not be confirmed is not)
+    loseLiveSession(startFailureOutcome(code), /*tunnelGone=*/false, /*restart=*/true,
+                    QStringLiteral("upstream lease %1").arg(code));
     return true;
 }
 
@@ -212,10 +214,27 @@ void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
 {
     if (nodeId.isEmpty() || m_owner.phase() != path::AttemptPhase::Starting || m_owner.currentPath().id.id != nodeId)
         return;
-    appendSwitchLog(QStringLiteral("upstream start refused on %1 code=%2").arg(nodeId, code));
-    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(),
-                                             code == QLatin1String("no_seat") ? path::PathOutcome::NoSeat
-                                                                              : path::PathOutcome::Refused));
+    const path::PathOutcome o = startFailureOutcome(code);
+    appendSwitchLog(QStringLiteral("upstream start refused on %1 code=%2 outcome=%3")
+                        .arg(nodeId, code, QLatin1String(path::pathOutcomeName(o))));
+    // Inconclusive: the leg ends and the attempt walks on, nothing is recorded against the path.
+    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), o));
+}
+
+// R1 (device round 4): only the server's own answer about this profile is the path's outcome. A transport failure
+// or timeout of OUR control plane (the lease request), a retry-later answer (429, 503), a request our server
+// rejected as malformed and every local failure (envelope, bridge, invoke) say nothing about the path.
+path::PathOutcome ServiceEngine::startFailureOutcome(const QString &codeIn)
+{
+    const QString code = codeIn.section(QLatin1Char('/'), 0, 0);
+    switch (upstreamErrorCodeFrom(code)) {
+    case UpstreamErrorCode::NoSeat: return path::PathOutcome::NoSeat;
+    case UpstreamErrorCode::Disabled:
+    case UpstreamErrorCode::NotEntitled:
+    case UpstreamErrorCode::OverQuota: return path::PathOutcome::Refused;
+    default: break;
+    }
+    return path::PathOutcome::Inconclusive;
 }
 
 void ServiceEngine::markUpStarted()

@@ -27,7 +27,9 @@ struct Behaviour {
     // Works: up, the check proves data after checkMs (past the check's own limit = a late but complete payload).
     // NoData: up, the check answers "no data" at its own limit. Silent: up, the check never answers (the owner's
     // backstop deadline judges it).
-    enum class Kind { Works, NoHandshake, NoData, StartError, NoSeat, Silent };
+    // ControlPlane: up, the check could not reach our endpoints while the tunnel carried data (R1 of device round 4:
+    // the facade's attribution gate answers Inconclusive).
+    enum class Kind { Works, NoHandshake, NoData, StartError, NoSeat, Silent, ControlPlane };
     Kind kind = Kind::NoHandshake;
     int upMs = 0;     // start -> tunnel up (Works, NoData)
     int checkMs = 0;  // data check start -> data proven (Works)
@@ -40,6 +42,7 @@ struct Behaviour {
     static Behaviour startError(bool attributable) { return { Kind::StartError, 0, 0, -1, attributable }; }
     static Behaviour noSeat() { return { Kind::NoSeat, 0, 0, -1, true }; }
     static Behaviour silent(int upMs) { return { Kind::Silent, upMs, 0, -1, true }; }
+    static Behaviour controlPlaneDown(int upMs) { return { Kind::ControlPlane, upMs, 0, -1, true }; }
 };
 
 // Behaviour of one path on one network over time: the last segment whose start <= t applies.
@@ -97,7 +100,8 @@ struct World {
         case Behaviour::Kind::StartError:
         case Behaviour::Kind::NoSeat: return ProbeBehaviour::fail(300);
         case Behaviour::Kind::NoHandshake:
-        case Behaviour::Kind::Silent: break;
+        case Behaviour::Kind::Silent:
+        case Behaviour::Kind::ControlPlane: break;
         }
         return ProbeBehaviour::silent();
     }
@@ -283,7 +287,8 @@ private:
                 switch (b.kind) {
                 case Behaviour::Kind::Works:
                 case Behaviour::Kind::NoData:
-                case Behaviour::Kind::Silent: schedule(now + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
+                case Behaviour::Kind::Silent:
+                case Behaviour::Kind::ControlPlane: schedule(now + b.upMs, AttemptEvent::tunnelUp(0, e.stamp)); break;
                 case Behaviour::Kind::NoHandshake: break; // the owner's start deadline judges it
                 case Behaviour::Kind::StartError:
                     schedule(now + 50, AttemptEvent::pathFailed(0, e.stamp, b.attributable ? PathOutcome::Refused
@@ -319,6 +324,8 @@ private:
                     answer(now + b.checkMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::DataOk, b.ttfbMs));
                 else if (b.kind == Behaviour::Kind::NoData)
                     answer(now + e.timeoutMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::NoData));
+                else if (b.kind == Behaviour::Kind::ControlPlane)
+                    answer(now + e.timeoutMs, AttemptEvent::dataChecked(0, e.stamp, PathOutcome::Inconclusive));
                 break; // Silent: nothing comes, the owner's backstop deadline judges it
             }
             case EffectType::StopPath: schedule(now + stopMs, AttemptEvent::stopConfirmed(0, e.stamp)); break;

@@ -773,6 +773,7 @@ static void scenarioPreference()
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
     row("preferred DE failed here, tap 3", s, r, from);
     CHECK(r.connected && r.fallbackNotice && r.path.id.id == QLatin1String("nl1") && r.paths == 1);
+    CHECK(!r.preferredTried); // R2: the notice says "recently did not work", not "does not work"
     stopLive(s);
     // a server of the list (preferServer: the transports of one host) falls back like a country, with the notice
     from = int(s.legs.size());
@@ -786,7 +787,9 @@ static void scenarioPreference()
     s.idle(s.ledger.tunables().quarantineMs[0] + 1000);
     from = int(s.legs.size());
     r = s.tap(UserChoice::preferCountry(QStringLiteral("DE")));
-    CHECK(legPaths(s, from).mid(0, 3) == QStringList({ "nl1", "fi1", "de1" })); // working, untried, then the preferred failures
+    // R2 (device round 4): DE failed here longer ago than the first quarantine step - it gets one real try first
+    CHECK(legPaths(s, from).mid(0, 2) == QStringList({ "de1", "de1:xray" }));
+    CHECK(legPaths(s, from).count(QStringLiteral("de1")) == 1); // once per attempt
     stopLive(s);
 
     // the exact node never falls back
@@ -1134,6 +1137,59 @@ static void scenarioRace()
     }
 }
 
+// --- Device round 4, R1: what is not the path's fault never enters the ledger ------------------------------------
+
+static void scenarioAttribution()
+{
+    const NetworkObservation home = wifi("192.168.4.1");
+    const QString k = key(home);
+    // Control plane down right after a launch: the remembered path's checks cannot reach our endpoints (the tunnel
+    // carries data) - the path stays "working", nothing is recorded, the attempt ends without blaming it.
+    {
+        World w;
+        w.set(k, QStringLiteral("17"), Behaviour::works(600, 300, 100));
+        Sim s({ awg("17", "EE"), awg("16", "NL") }, w, home);
+        CHECK(s.tap(UserChoice::automatic()).connected);
+        stopLive(s);
+        s.world().set(k, QStringLiteral("17"), Behaviour::controlPlaneDown(600));
+        s.world().set(k, QStringLiteral("16"), Behaviour::controlPlaneDown(600));
+        const int reports = int(s.reports.size());
+        const int from = int(s.legs.size());
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("R1: control plane down after launch", s, r, from);
+        CHECK(!r.connected && s.reports.size() == reports);
+        CHECK(stateOf(s, awg("17", "EE")) == PathState::Working); // still the remembered path
+        CHECK(legPaths(s, from).first() == QLatin1String("17") && s.rechecks >= 1);
+    }
+    // Slow control plane: the provider's lease answer comes after the lease share (a transport failure of OUR
+    // request): the leg ends, the path is not refused; the next tap tries it again.
+    {
+        World w;
+        w.set(k, QStringLiteral("up:sw"), Behaviour::startError(/*attributable=*/false));
+        w.set(k, QStringLiteral("16"), Behaviour::works(800, 300, 100));
+        Sim s({ prov("up:sw", UpstreamKind::Country, "CH", 0), awg("16", "NL") }, w, home);
+        const AttemptResult r = s.tap(UserChoice::preferCountry(QStringLiteral("CH")));
+        row("R1: slow lease answer (control plane)", s, r, 0);
+        CHECK(r.connected && stateOf(s, prov("up:sw", UpstreamKind::Country, "CH", 0)) == PathState::Unknown);
+        stopLive(s);
+        const int from = int(s.legs.size());
+        s.tap(UserChoice::preferCountry(QStringLiteral("CH")));
+        CHECK(legPaths(s, from).first() == QLatin1String("up:sw")); // not skipped for an error that was ours
+    }
+    // A request stretched by a suspension: the check is run again, nothing is recorded.
+    {
+        World w;
+        w.set(k, QStringLiteral("wl"), PathScript::always(Behaviour::silent(400)).then(10000, Behaviour::works(400, 300, 100)));
+        Sim s({ prov("wl", UpstreamKind::Whitelist, "", 0) }, w, home);
+        s.suspend(1000, 13800);
+        const AttemptResult r = s.tap(UserChoice::automatic());
+        row("R1: check stretched by a suspension", s, r, 0);
+        CHECK(r.connected && s.rechecks == 1);
+        for (const OutcomeReport &rep : s.reports)
+            CHECK(rep.outcome == PathOutcome::DataOk);
+    }
+}
+
 int main()
 {
     testPathId();
@@ -1153,6 +1209,7 @@ int main()
     scenarioRevision();
     scenarioReview1811();
     scenarioRace();
+    scenarioAttribution();
 
     std::printf("\n%-55s | %-40s | %8s | %5s | %s\n", "scenario", "outcome", "ms", "paths", "order");
     for (const Row &r : g_rows)

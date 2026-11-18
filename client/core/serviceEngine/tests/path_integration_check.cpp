@@ -496,6 +496,12 @@ int main(int argc, char **argv)
         TuningStore::set({}, {{QStringLiteral("rebind_heal"), false}, {QStringLiteral("xray_client"), true}}, {}, {});
     }
 
+    // R1 (device round 4): only the server's own answer about a profile is the path's outcome.
+    CHECK(ServiceEngine::startFailureOutcome(QStringLiteral("no_seat")) == path::PathOutcome::NoSeat);
+    CHECK(ServiceEngine::startFailureOutcome(QStringLiteral("disabled")) == path::PathOutcome::Refused);
+    for (const char *ours : { "transport", "rate_limited", "upstream_unavailable", "invalid_request", "envelope",
+                              "bridge_refused", "invoke", "signature", "http_502", "standby_unconfirmed", "unknown" })
+        CHECK(ServiceEngine::startFailureOutcome(QString::fromLatin1(ours)) == path::PathOutcome::Inconclusive);
     std::printf("path_integration_check: %d/%d passed\n", g_total - g_failed, g_total);
     return g_failed ? 1 : 0;
 }

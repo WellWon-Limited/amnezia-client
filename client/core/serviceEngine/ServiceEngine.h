@@ -239,6 +239,8 @@ public:
     // A probe proof that came from elsewhere (the Scanner's finished scan on the current network): recorded at
     // "probe ok" strength, like a race result. false = not recorded (unknown node, no usable network).
     bool recordProbeProof(const QString &nodeId, const QString &source);
+    // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
+    static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }
     void setRaceTimingsForTest(const path::RaceTimings &t) { m_raceTimingsForTest = t; }
     // "checked N of M" of the running attempt (0/0 = no walk).

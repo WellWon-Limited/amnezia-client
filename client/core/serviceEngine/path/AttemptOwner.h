@@ -103,6 +103,7 @@ struct AttemptResult {
     bool connected = false;
     FailReason reason = FailReason::None;
     PathCandidate path;          // Connected: the path that carried data
+    bool preferredTried = false; // a preferred path was brought up in this attempt (the notice may say "does not work")
     bool fallbackNotice = false; // preferred country unavailable, connected elsewhere ("<country> is unavailable on
                                  // this network - connected via <other>"); the preference is kept
     int paths = 0;               // legs brought up in this attempt
@@ -452,6 +453,7 @@ private:
         res.connected = true;
         res.path = m_leg.path;
         res.fallbackNotice = m_choice.kind == UserChoice::Kind::PreferCountry && !isPreferred(m_choice, m_leg.path);
+        res.preferredTried = m_preferredTried;
         finish(res, out);
     }
 
@@ -538,6 +540,7 @@ private:
         if (ev.network.generation >= m_net.generation)
             m_net = ev.network;
         m_pathsTotal = 0;
+        m_preferredTried = false;
         m_attemptStart = m_awake;
         restartOnNetwork();
     }
@@ -612,6 +615,8 @@ private:
         in.mode = m_mode;
         in.crowd = ctx.crowd;
         in.tried = m_tried;
+        in.nowMs = ctx.wallNowMs;
+        in.preferredRetryAfterMs = ctx.ledger ? ctx.ledger->tunables().quarantineMs[0] : 0;
         const QList<RankedPath> order = selectPaths(in);
         m_progressTotal = m_pathsThisNet + int(order.size());
         if (order.isEmpty()) {
@@ -619,6 +624,7 @@ private:
             return finish(failure(nothingEver ? FailReason::NoCandidate : FailReason::NothingProven), out);
         }
         const PathCandidate &next = order.first().path;
+        m_preferredTried = m_preferredTried || isPreferred(m_choice, next);
         m_tried.insert(next.id.id);
         ++m_pathsThisNet;
         ++m_pathsTotal;
@@ -652,6 +658,7 @@ private:
     qint64 m_stopDeadline = 0;
     int m_progressTotal = 0;
     bool m_checkSuspended = false; // the running data check spanned a suspension
+    bool m_preferredTried = false; // a preferred path was brought up in this attempt
 };
 
 } // namespace avpn::path

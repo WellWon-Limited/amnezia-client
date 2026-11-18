@@ -859,7 +859,7 @@ PageType {
               // caption follows the orb's phase: our own stop, taking over a live session, connecting.
               : root.engineOwnStopping ? qsTr("Отключаемся…")
               : root.showBusy ? (root.adopting ? qsTr("Проверяем…")
-                                 : root.attemptTotalNow > 1 ? qsTr("Ищем рабочий сервер — проверено %1 из %2")
+                                 : root.attemptTotalNow > 1 ? qsTr("Ищем рабочий сервер — пробуем %1 из %2")
                                                                   .arg(root.attemptCheckedNow).arg(root.attemptTotalNow)
                                  : qsTr("Подключаемся…"))
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
@@ -1336,7 +1336,9 @@ PageType {
                     // она приходит УЖЕ после подъёма туннеля, поэтому проверяется первой.
                     text: !(root.hasEngine && TribeEngine.busy) ? qsTr("Заменить сервер")
                           // our own stop is no server pick (device round 3: «Подбираем сервер…» while disconnecting)
-                          : root.engineStopping ? qsTr("Отключаемся…")
+                          // R5 (device round 4): one state source with the orb - our own stop only (engineOwnStopping)
+                          : root.engineOwnStopping ? qsTr("Отключаемся…")
+                          : root.engineStopping ? qsTr("Заменить сервер")
                           : (root.verifyingNow ? qsTr("Проверяем трафик…")
                           : (TribeEngine.svcInstalling === true ? qsTr("Устанавливаем…")
                           : (root.curNode.pinned === true ? qsTr("Подключаемся…") : qsTr("Подбираем сервер…"))))

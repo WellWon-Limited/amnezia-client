@@ -876,7 +876,7 @@ static void envelopeAndParsing()
         CHECK(path::AttemptOwner(t).startTimeoutMs(path::PathKind::Provider) == t.providerLeaseMs + t.providerStartMs);
     }
     TuningStore::set({}, {}, {}, {});
-    CHECK(upstreamAcquireTimeoutMsTuned() == 4000);
+    CHECK(upstreamAcquireTimeoutMsTuned() == 6000); // device round 4: sized against the server's 3.8-4.2 s
 }
 
 

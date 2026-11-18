@@ -482,6 +482,36 @@ inline int trafficSyncTicks(int configuredTicks, bool uiActive)
 // The white-list detector's trigger "the connect did not come up" (its spec §3.1; it lived in the start watchdog
 // before the path engine): a leg of the attempt owner whose tunnel never came up, or an attempt that ended with
 // nothing proven. The detector itself gates the round (cellular, tunnel fully down, its own debounce); no timer here.
+// R1 (device round 4): whether a failed data check is the PATH's outcome - the one gate before a check failure
+// reaches the ledger (AvpnEngineQml::finishVerify). Not the path's ("the check did not happen", nothing recorded):
+// the device had no network; the check was stretched by a suspension (wall time far past its budget - a request
+// that hung 13.8 s after the app sat in the background); the tunnel itself carried data while the check ran (its
+// receive counter grew) but our endpoints did not answer - a control-plane problem, not a dead path.
+enum class CheckBlame { Path, NoNetwork, Suspended, ControlPlane };
+inline const char *checkBlameName(CheckBlame b)
+{
+    switch (b) {
+    case CheckBlame::Path: return "path";
+    case CheckBlame::NoNetwork: return "no_network";
+    case CheckBlame::Suspended: return "suspended";
+    case CheckBlame::ControlPlane: return "control_plane";
+    }
+    return "";
+}
+inline constexpr qint64 kCheckStretchGraceMs = 3000;
+inline constexpr qint64 kCheckTunnelRxProofBytes = 4096;
+inline CheckBlame checkFailureBlame(bool uplinkUp, qint64 wallElapsedMs, qint64 budgetMs, bool statsValid,
+                                    qint64 rxDeltaBytes)
+{
+    if (!uplinkUp)
+        return CheckBlame::NoNetwork;
+    if (wallElapsedMs > budgetMs + kCheckStretchGraceMs)
+        return CheckBlame::Suspended;
+    if (statsValid && rxDeltaBytes >= kCheckTunnelRxProofBytes)
+        return CheckBlame::ControlPlane;
+    return CheckBlame::Path;
+}
+
 inline bool whitelistTriggerFromAttempt(int legStartFailures, bool attemptEndedNothingProven)
 {
     return legStartFailures > 0 || attemptEndedNothingProven;
@@ -954,6 +984,7 @@ struct ScanRowAttempt {
     QString lastNode;
     quint64 intentSerial = 0;
     QStringList reported;
+    bool seenTapped = false; // R4: the engine raised the tapped row - nodes before it are the old session's
 };
 struct ScanRowStep {
     QStringList failed;
@@ -987,6 +1018,20 @@ inline ScanRowStep scanRowAttemptObserve(ScanRowAttempt &a, quint64 intentSerial
             st.failed << n;
         }
     };
+    // R4 (device round 4): until the engine raises the tapped row, the node it carries is the session before the tap -
+    // never a row of this chain («Эстония 3» was marked failed though never tried).
+    if (!a.seenTapped) {
+        if (engineNode == a.tapped) {
+            a.seenTapped = true;
+        } else {
+            if (gaveUp) {
+                fail(a.tapped);
+                a.active = false;
+                st.ended = true;
+            }
+            return st;
+        }
+    }
     if (dataFlowing && !engineNode.isEmpty()) {
         if (engineNode != a.lastNode)
             fail(a.lastNode);
