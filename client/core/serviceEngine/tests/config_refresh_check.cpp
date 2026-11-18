@@ -36,6 +36,7 @@ bool verifyDetached(const QString &, const QByteArray &, const QByteArray &sig)
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSignalSpy>
+#include <QElapsedTimer>
 #include <QTest>
 #include <functional>
 #include <utility>
@@ -253,6 +254,32 @@ private slots:
         QTRY_VERIFY(service.config().features.value("xray_client", false));
         QCOMPARE(requests, 2);
         QVERIFY(service.isFresh());
+    }
+    // Fast failover (device round 4): a direct edge that stays silent on its first try in this run is left after
+    // ~2.5 s - not after three 15 s failures; the next edge is asked at once.
+    void silentEdgeOnFirstTryFailsOverFast()
+    {
+        QTcpServer silent; // accepts and never answers (the frozen route of round 4)
+        QVERIFY(silent.listen(QHostAddress::LocalHost));
+        QList<QTcpSocket *> held;
+        connect(&silent, &QTcpServer::newConnection, this, [&]() {
+            while (auto *socket = silent.nextPendingConnection())
+                held << socket;
+        });
+        ConfigServer edgeB([](int) { return httpAnswer("503 Service Unavailable", "{}"); });
+        LoopbackOnlyNam network;
+        const QString a = QString("http://127.0.0.1:%1").arg(silent.serverPort()), b = edgeB.base();
+        avpn::ConfigService service(&network, a, "fixture-key", {a, b});
+        QSignalSpy switched(&service, &avpn::ConfigService::activeEdgeChanged);
+        QElapsedTimer t;
+        t.start();
+        service.start();
+        QTRY_COMPARE_WITH_TIMEOUT(switched.count(), 1, 6000);
+        QVERIFY(t.elapsed() < 4500);
+        QCOMPARE(service.activeBaseUrl(), b);
+        QCOMPARE(service.directBaseUrl(), b);
+        QTRY_COMPARE(edgeB.configRequests, 1);
+        qDeleteAll(held);
     }
     // Decision 2026-11-05: small calls succeed on the edge (they reset the edge walk), but two
     // /v1/subscription transport failures in a row on it switch the active edge; a delivered

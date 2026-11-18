@@ -6,6 +6,9 @@
 
 #include "ConfigService.h" // AVPN remote-config (T5/T6): ConfigService + RemoteConfig (featureEnabled/configUrl/updateState)
 #include "ServiceEngine.h"
+// The facade offers the race's probe-host hooks (attachPathProber / pathProbeResult): coreController.cpp wires
+// ScanPathProber only when this is defined.
+#define AVPN_PATH_PROBER_FACADE 1
 #include "ServiceProbe.h"    // AVPN backend-first (Task 4): ServiceProbeConfig — m_svcCfgsAll (kill-switch чипов)
 #include "SignalQuality.h"   // AVPN: RTT→0..5 баров (EWMA+гистерезис)
 #include "SelfUpdate.h"      // AVPN (2026-09-02): установка обновления внутри приложения (macOS)
@@ -926,6 +929,12 @@ public:
     // the support report queue, then the coordinator itself (owned by this engine from here on).
     IScanEngine *scanEngine();
     IScanHost *scanHost();
+    // Path engine stage 2: the platform's race probe host (coreController.cpp makes ScanPathProber over the Scanner's
+    // pipeline; none = stage-1 behaviour) with the Scanner's one byte ledger (bytes left / charge), and its results.
+    // GUI thread. A result carries the race's stamp (race, network generation, probe): one of an older race, an older
+    // network or a cancelled probe is dropped by the race itself.
+    void attachPathProber(path::IPathProber *prober, std::function<qint64()> bytesLeft, std::function<void(qint64)> charge);
+    void pathProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent);
     void setScanHostFactory(const ScanHostCaps &caps, std::function<IScanHost *()> make);
     void attachSupport(TribeSupportChat *support);
     void attachScanner(TribeScanner *scanner);

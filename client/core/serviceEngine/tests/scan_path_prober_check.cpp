@@ -287,7 +287,7 @@ static void caseCaps()
     check(!w.prober.caps().available, "unavailable before the host's caps are known");
     w.ready();
     const path::ProberCaps c = w.prober.caps();
-    check(c.available && c.legs == 6 && c.providerAtOnce == 4 && c.awgAtOnce == 2, "the host's pools (in-app: 4 full profiles)");
+    check(c.available && c.inFlight == 6 && c.providerAtOnce == 4 && c.awgAtOnce == 2, "the host's pools (in-app: 4 full profiles)");
     check(w.prober.sessionReady() && w.api.sessions == 1, "warm-up fetched the session of the network");
     w.prober.hostBusy = []() { return true; };
     check(!w.prober.caps().available, "the Scanner's own scan owns the host: no race");
@@ -302,7 +302,7 @@ static void caseCaps()
     ext.maxLegConcurrent = 6;
     ext.maxAwgConcurrent = 2;
     const path::ProberCaps e = scanPathProberCaps(ext, true);
-    check(e.legs == 6 && e.providerAtOnce == 1, "the extension's pools: one provider profile at a time");
+    check(e.inFlight == 6 && e.providerAtOnce == 1, "the extension's pools: one provider profile at a time");
 }
 
 static void caseOwnXrayAndJoin()

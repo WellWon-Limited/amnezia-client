@@ -93,7 +93,9 @@ private:
 
     QNetworkAccessManager *m_nam = nullptr;
     QString      m_activeBase;
-    QString      m_sessionEdge; // E10: the control plane's edge while a provider session is up
+    QString      m_sessionEdge; // the control plane's edge while a tunnel carries requests (R1a)
+    bool         m_edgeAnswered = false; // the direct edge gave an HTTP answer in this run (fast failover)
+    static constexpr int kFastEdgeFirstTryMs = 2500;
     QString      m_pubKeyHex;
     QStringList  m_bakedEdges;
     RemoteConfig m_config;

@@ -226,7 +226,12 @@ public:
     // ---- Stage 2: the probe race in front of the owner (path/PathRace.h) ----
     // The platform's probe host (nullptr = none: stage-1 behaviour exactly). Server switch features.path_race
     // (compiled default off) gates it on top of the host's own availability.
-    void setProber(path::IPathProber *prober) { m_prober = prober; }
+    void setProber(path::IPathProber *prober)
+    {
+        m_prober = prober;
+        if (m_prober && m_net.current().usable())
+            m_prober->prepare(m_net.current());
+    }
     // The one byte ledger the Scanner uses: bytes the race may still spend now (-1 = no cap) and the charge of what
     // a probe spent. Unset = no cap, nothing charged.
     void setProbeBudget(std::function<qint64()> bytesLeft, std::function<void(qint64)> charge)

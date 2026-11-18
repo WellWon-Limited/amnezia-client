@@ -381,10 +381,14 @@ order "$cfg_start" '#ifdef Q_OS_IOS' 'freezeCachedFeatures(c.features, /\*ios=\*
 [ "$(grep -c 'freezeCachedFeatures(' "$ENGINE/ConfigService.cpp")" = "2" ] || bad "A10: the freeze is applied in one place"
 
 # ---- E7: the package and the targets ----------------------------------------------------------------------
-grep -q 'self.requires("awg-apple/3.1.4-tribe.14")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.14"
-grep -q '^    version = "3.1.4-tribe.14"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.14"
+# tribe.15 (the probe engine's host limits, an engine patch) = tribe.14's package patches byte for byte.
+grep -q 'self.requires("awg-apple/3.1.4-tribe.15")' "$ROOT/conanfile.py" || bad "E7: the root conanfile must require tribe.15"
+grep -q '^    version = "3.1.4-tribe.15"' "$RECIPE/conanfile.py" || bad "E7: the recipe version must be tribe.15"
+list15="$(awk '/^  "3.1.4-tribe.15":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 list14="$(awk '/^  "3.1.4-tribe.14":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
 list12="$(awk '/^  "3.1.4-tribe.12":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')"
+[ -n "$list15" ] && [ "$list15" = "$(awk '/^  "3.1.4-tribe.14":/ { on = 1; next } on && /^  "/ { exit } on && /patch_file/ { print $3 }' "$RECIPE/conandata.yml" | tr -d '"')" ] \
+    || bad "E7: tribe.15 must carry the package patches of tribe.14 unchanged, in the same order"
 # tribe.14 = the list of tribe.12, untouched in number and order, with 0012 right after 0011 and 0016 last.
 [ -n "$list12" ] && [ "$(printf '%s\n' "$list14" | grep -v 'tribe-data-watch')" = "$list12" ] \
     || bad "E7: tribe.14 must carry the patches of tribe.12 unchanged, in the same order"

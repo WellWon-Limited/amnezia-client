@@ -52,7 +52,7 @@ struct RaceTimings {
 // What the platform's probe host can run at once (IScanHost caps of the spike: 6 legs, 1 full Xray, 2 AmneziaWG).
 struct ProberCaps {
     bool available = false; // false = no host on this platform / build / server switch: stage-1 behaviour
-    int legs = 6;
+    int inFlight = 6;   // probes the host keeps in flight in total (any kind)
     int providerAtOnce = 1;
     int awgAtOnce = 2;
 };
@@ -262,7 +262,7 @@ private:
 
     bool hostTakes(const PathCandidate &c) const
     {
-        const int cap = std::min(m_t.parallelism, m_caps.legs);
+        const int cap = std::min(m_t.parallelism, m_caps.inFlight);
         if (int(m_inFlight.size()) >= cap)
             return false;
         if (c.kind == PathKind::Provider)

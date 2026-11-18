@@ -415,6 +415,8 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
                        .arg(m_net.current().generation));
     if (m_race.running())
         applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
+    if (m_prober && m_net.current().usable())
+        m_prober->prepare(m_net.current()); // the host warms up for the new network (caps, probe session)
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
@@ -436,6 +438,7 @@ bool ServiceEngine::raceAllowed() const
 
 void ServiceEngine::beginRaceForTap()
 {
+    m_prober->prepare(m_net.current()); // idempotent: a fresh session is kept
     m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
     const path::SelectionContext ctx = ownerContext();
     path::SelectInput in;

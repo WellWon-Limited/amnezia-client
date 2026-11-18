@@ -341,7 +341,6 @@ void CoreController::initControllers()
             };
             avpnEngine->attachPathProber(prober, [tribeScanner]() { return tribeScanner->raceBytesLeft(); },
                                          [tribeScanner](qint64 bytes) { tribeScanner->raceCharge(bytes); });
-            prober->startAutoWarm();
         }
 #endif
     }

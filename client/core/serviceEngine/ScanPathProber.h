@@ -89,12 +89,12 @@ public:
     virtual void releaseSeats(const QStringList &leaseIds) = 0;
 };
 
-// Pure: the race caps of a host's scan_caps (legs = the total the race may keep in flight).
+// Pure: the race caps of a host's scan_caps (inFlight = the total the race may keep in flight).
 inline path::ProberCaps scanPathProberCaps(const ScanHostCaps &c, bool usable)
 {
     path::ProberCaps p;
     p.available = usable && (c.maxLegConcurrent > 0 || c.maxFullConcurrent > 0 || c.maxAwgConcurrent > 0);
-    p.legs = qMax(qMax(c.maxLegConcurrent, c.maxFullConcurrent), 1);
+    p.inFlight = qMax(qMax(c.maxLegConcurrent, c.maxFullConcurrent), 1);
     p.providerAtOnce = qMax(0, c.maxFullConcurrent);
     p.awgAtOnce = qMax(0, c.maxAwgConcurrent);
     return p;
@@ -143,10 +143,14 @@ public:
     void cancel(const path::ProbeStamp &stamp) override;
 
     // Ask the host's caps and fetch the session of the current network ahead of a tap. Idempotent; a fresh session is
-    // kept. Called by the wiring at start and by the prober itself every warmEveryMs while the app is in front (a
+    // kept. Called through prepare() by the engine (attach, a network change, every tap before a race) - no timer (a
     // network change gives a new reporting key: the next warm-up fetches its session; nothing in the background).
     void warmUp();
-    void startAutoWarm(int warmEveryMs = 30000);
+    void prepare(const path::NetworkKey &net) override
+    {
+        Q_UNUSED(net)
+        warmUp();
+    }
     bool sessionReady() const;
     int liveProbes() const { return int(m_probes.size()); }
     QString openScanId() const { return m_scan.id; }
@@ -211,7 +215,6 @@ private:
     HostScan m_scan;
     quint64 m_scanSeq = 0;
     QTimer m_pollTimer;
-    QTimer m_warmTimer;
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
 };
 

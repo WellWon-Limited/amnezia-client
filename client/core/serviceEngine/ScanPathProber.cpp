@@ -73,17 +73,6 @@ void ScanPathProber::warmUp()
         fetchSession();
 }
 
-void ScanPathProber::startAutoWarm(int warmEveryMs)
-{
-    m_warmTimer.setInterval(qMax(1000, warmEveryMs));
-    QObject::connect(&m_warmTimer, &QTimer::timeout, this, [this]() {
-        if (m_engine && m_engine->appInFront())
-            warmUp();
-    }, Qt::UniqueConnection);
-    m_warmTimer.start();
-    warmUp();
-}
-
 void ScanPathProber::fetchSession()
 {
     if (m_sessionFetching || !m_api || !m_api->configured())

@@ -9,6 +9,8 @@
 #include "UpstreamNode.h" // AVPN upstream nodes: the bounded trust of the cached features.upstream_nodes
 
 #include <QDateTime>
+#include <QDebug>
+#include <QTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -164,8 +166,30 @@ void ConfigService::requestConfig(bool startedByApiSuccess)
     QNetworkRequest req{QUrl(activeBaseUrl() + QStringLiteral("/v1/config"))};
     QNetworkReply *reply = m_nam->get(req);
     armTimeout(reply);
+    // Fast failover (device round 4): the first request of a run (or after a walk step) to a DIRECT edge that has not
+    // answered yet gets kFastEdgeFirstTryMs to start answering (headers); silence = the edge is unreachable from here
+    // and the walk steps at once - not after three 15 s failures. Once an edge answered, the usual rules apply.
+    if (!m_pinned && m_sessionEdge.isEmpty() && !m_edgeAnswered) {
+        QTimer::singleShot(kFastEdgeFirstTryMs, reply, [reply]() {
+            if (reply->isRunning() && !reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()) {
+                reply->setProperty("avpn_fast_edge", true);
+                reply->abort();
+            }
+        });
+    }
     connect(reply, &QNetworkReply::finished, this, [this, reply, seq, order, startedByApiSuccess]() {
         reply->deleteLater();
+        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid())
+            m_edgeAnswered = true;
+        if (reply->property("avpn_fast_edge").toBool() && seq == m_configSeq) {
+            m_configInFlight = false;
+            qWarning() << "avpn config: edge" << activeBaseUrl() << "silent for" << kFastEdgeFirstTryMs
+                       << "ms on its first try - the next edge now";
+            emit transportFailed();
+            if (!switchToNextEdge())
+                m_lastFetchMs = -1;
+            return;
+        }
         // 5.1.109: the active edge was switched while this request was in flight, and the new edge
         // was asked at once (switchToNextEdge). The FAILURE of this request says nothing about the
         // edge in use now and is ignored (it used to be counted against the new edge). Its ANSWER is
@@ -378,6 +402,7 @@ bool ConfigService::switchToNextEdge()
         return false;
     m_failStreak = 0;
     m_activeBase = next; // this run only (R1a): never stored
+    m_edgeAnswered = false; // its own fast first try
     emit activeEdgeChanged(next);
     // 5.1.109 (reviews of d5d739403 and 3dbe0361f): a config request still in flight went to the OLD
     // edge. Before, the in-flight guard swallowed the immediate request below, the new edge was not

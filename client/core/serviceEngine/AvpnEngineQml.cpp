@@ -1,4 +1,5 @@
 #include "AvpnEngineQml.h"
+#include "ScanBudget.h" // attachPathProber: the Scanner's price of a probe
 #include "TransportPick.h" // the Doctor's alternatives: exit RTT order (display/measurement only)
 
 #ifdef Q_OS_ANDROID
@@ -3204,6 +3205,29 @@ void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
         m_sessionEdge = edge;
     }
     m_configSvc->setSessionEdge(edge);
+}
+
+void AvpnEngineQml::attachPathProber(path::IPathProber *prober, std::function<qint64()> bytesLeft,
+                                     std::function<void(qint64)> charge)
+{
+    // the race charges a probe as the Scanner does (ScanBudget.h::scanProbeCostBytes) - one ledger, one price list
+    const ScanTunables t;
+    path::PathRace::Costs c;
+    c.awg = scanProbeCostBytes(ScanProbeKind::AwgMini, false, t);
+    c.xray = scanProbeCostBytes(ScanProbeKind::XrayLeg, false, t);
+    c.provider = scanProbeCostBytes(ScanProbeKind::XrayFull, false, t) + t.costBatchBytes + t.costConfigBytes;
+    m_engine.setProbeCosts(c);
+    m_engine.setProbeBudget(std::move(bytesLeft), std::move(charge));
+    m_engine.setProber(prober);
+    reliabilityEvent(QStringLiteral("race_prober attached=%1").arg(int(prober != nullptr)));
+}
+
+void AvpnEngineQml::pathProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
+{
+    m_engine.onProbeResult(stamp, outcome, bytesSpent);
+    // a winner starts the owner's first leg: its journal, the ledger and the progress reach the screen now
+    if (syncAttempt())
+        QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
 // R3 (device round 4): the end of a Scanner row's one request.
