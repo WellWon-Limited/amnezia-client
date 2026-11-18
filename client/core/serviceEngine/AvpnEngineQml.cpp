@@ -5352,6 +5352,7 @@ void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s) // AVPN
         // profile refused before the core started) proves nothing new and asks for no status (D4 of 16.11).
         observeTunnelState(m_latch, observedTunnelOf(m_lastTunnelState), observedTunnelOf(s), errorProvesTeardown);
         if (s == Vpn::Disconnected) {
+            m_tunnel.upstreamTunnelDown(); // seat releases held for this stop go now, over the direct path
             m_stopGeneration = SessionGeneration{};
             m_stopRetries = 0;
             m_stopRetryTimer.stop();

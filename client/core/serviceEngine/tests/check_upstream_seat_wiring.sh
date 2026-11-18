@@ -112,6 +112,24 @@ has "$upu" 'if (m_upOwner.preparedUsable(node.nodeId, upstreamClockMs())) {' && 
 cup="$(body_of "$ADP" 'void VpnConnectionTunnelControl::cancelUpstreamPrepare()')"
 has "$cup" 'applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));' || bad "cancelUpstreamPrepare must release the held seat"
 
+# R1 (decision of 18.11): a seat release never rides the tunnel being abandoned - the adapter stops the core at once
+# and holds the release for the confirmed stop (UpstreamLeaseWire.h::upstreamReleaseDue, tested in
+# upstream_lease_check releaseAfterStop); the facade tells the adapter that the stop is confirmed; the client
+# sends every release over the direct path (upstreamReleaseRoute).
+down="$(body_of "$ADP" 'void VpnConnectionTunnelControl::down()')"
+p1="$(first_line "$down" 'm_leaseClient->holdReleasesForStop();')"
+p2="$(first_line "$down" 'applyUpstreamEvents(m_upOwner.disconnect(upstreamClockMs()));')"
+{ [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" -lt "$p2" ]; } || bad "R1: down() must hold the release for the stop before it ends the lease"
+has "$down" 'QMetaObject::invokeMethod(m_conn, "disconnectFromVpn", Qt::QueuedConnection);' && ! has "$down" 'm_stopAfterRelease' \
+    || bad "R1: the core stop must not wait for the release"
+has "$(body_of "$FAC" 'void AvpnEngineQml::onConnectionStateChanged(Vpn::ConnectionState s)')" 'm_tunnel.upstreamTunnelDown();' \
+    || bad "R1: the facade must tell the adapter that the stop is confirmed"
+has "$(body_of "$ADP" 'void VpnConnectionTunnelControl::upstreamTunnelDown()')" 'm_leaseClient->tunnelStopped();' \
+    || bad "R1: a confirmed stop must send the held releases"
+rel="$(body_of "$SE/UpstreamLeaseClient.cpp" 'void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,')"
+has "$rel" 'const LeaseRoute direct = upstreamReleaseRoute(route);' && has "$rel" 'sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);' \
+    || bad "R1: a release must go over the direct path"
+
 if [ "$fail" -ne 0 ]; then
     echo "check_upstream_seat_wiring: FAILED"
     exit 1

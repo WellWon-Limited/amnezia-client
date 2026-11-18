@@ -55,6 +55,11 @@ public:
     void renew(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     void release(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter, const LeaseRoute &route) override;
     quint64 lastReleaseRequestId() const { return m_lastReleaseId; }
+    // Decision of 18.11 (UpstreamLeaseWire.h::upstreamReleaseDue): the tunnel is being stopped - releases wait for
+    // tunnelStopped() (at most kUpstreamReleaseHoldMaxMs) and then go over the direct path.
+    void holdReleasesForStop();
+    void tunnelStopped();
+    int heldReleases() const { return int(m_held.size()); }
 
     // GET /v1/upstream/standby?network_key= with the device token on the direct base. done(httpStatus,
     // body, X-Tribe-Sig) - status 0 = no answer. One fetch at a time (false = one is in flight / not
@@ -104,6 +109,16 @@ private:
     QString m_pubKeyHex;
     quint64 m_lastReleaseId = 0;
     QPointer<QNetworkReply> m_standbyReply;
+    struct HeldRelease {
+        quint64 requestId = 0;
+        QString leaseId;
+        UpstreamMeter meter;
+        LeaseRoute route;
+    };
+    QList<HeldRelease> m_held;
+    bool m_stopPending = false;
+    qint64 m_heldSinceMs = 0;
+    void flushHeld(bool tunnelDown);
 };
 
 } // namespace avpn

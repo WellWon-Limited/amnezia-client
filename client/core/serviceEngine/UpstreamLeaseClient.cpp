@@ -4,6 +4,7 @@
 #include "NetAwait.h" // armTimeout: the API client's per-request bound (no timer of our own)
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -143,7 +144,38 @@ void UpstreamLeaseClient::release(quint64 requestId, const QString &leaseId, con
                                   const LeaseRoute &route)
 {
     m_lastReleaseId = requestId;
-    sendRelease(requestId, leaseId, meter, route, /*attempt=*/0);
+    const LeaseRoute direct = upstreamReleaseRoute(route); // never through the tunnel being abandoned
+    if (upstreamReleaseDue(m_stopPending, m_heldSinceMs, QDateTime::currentMSecsSinceEpoch(), false).hold) {
+        m_held.append({requestId, leaseId, meter, direct});
+        return;
+    }
+    sendRelease(requestId, leaseId, meter, direct, /*attempt=*/0);
+}
+
+void UpstreamLeaseClient::holdReleasesForStop()
+{
+    if (!m_stopPending)
+        m_heldSinceMs = QDateTime::currentMSecsSinceEpoch();
+    m_stopPending = true;
+    // The bound: a stop that is never confirmed does not keep the seat.
+    QTimer::singleShot(kUpstreamReleaseHoldMaxMs, this, [this]() { flushHeld(false); });
+}
+
+void UpstreamLeaseClient::tunnelStopped()
+{
+    flushHeld(true);
+}
+
+void UpstreamLeaseClient::flushHeld(bool tunnelDown)
+{
+    if (!m_stopPending)
+        return;
+    if (!upstreamReleaseDue(m_stopPending, m_heldSinceMs, QDateTime::currentMSecsSinceEpoch(), tunnelDown).send)
+        return;
+    m_stopPending = false;
+    const QList<HeldRelease> held = std::exchange(m_held, {});
+    for (const HeldRelease &h : held)
+        sendRelease(h.requestId, h.leaseId, h.meter, h.route, /*attempt=*/0);
 }
 
 void UpstreamLeaseClient::sendRelease(quint64 requestId, const QString &leaseId, const UpstreamMeter &meter,

@@ -102,6 +102,8 @@ public:
     // The platform reported the tunnel of the current session up (facade, Connected): a provisional
     // session confirms its seat through the tunnel now.
     void upstreamTunnelUp();
+    // The tunnel's stop is confirmed (the facade's Disconnected): the seat releases held for it go now.
+    void upstreamTunnelDown();
     // macOS: adoption of a live upstream session after a GUI restart (decision B, point 9). Called from
     // adoptXrayIfRunning; retryUpstreamAdoption asks the daemon again (the switch turned on later than the
     // startup probe: it is frozen off on a cached config).
@@ -191,9 +193,6 @@ private:
     SubscriptionNode m_upStub;                     // the stub of the session being brought up / running
     std::optional<StandbyPack> m_standbyPack;
     std::function<void(const QString &, const QString &)> m_upStartFailureSink;
-    quint64 m_stopReleaseId = 0;                   // macOS: the stop waits for this release
-    bool m_stopAfterRelease = false;
-    std::function<void()> m_afterRelease;
 };
 
 } // namespace avpn
