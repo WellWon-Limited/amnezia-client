@@ -261,6 +261,10 @@ public:
     // R1 (device round 4): the ledger outcome of a provider start failure code (Inconclusive = not the path's).
     static path::PathOutcome startFailureOutcome(const QString &code);
     bool raceRunning() const { return m_race.running(); }
+    // T1 (device round 6): the running data check has had no first byte past its first-byte share. With a proven
+    // alternative from the race, the leg is left at once (nothing recorded) and the owner brings the proven path up;
+    // a leg that is receiving bytes is never abandoned. The facade tells it (its check knows the bytes).
+    void noteCheckStarved(bool starved);
     void setRaceTimingsForTest(const path::RaceTimings &t) { m_raceTimingsForTest = t; }
     // "checked N of M" of the running attempt (0/0 = no walk).
     int attemptChecked() const { return m_owner.running() ? m_owner.progressDone() : 0; }
@@ -602,6 +606,8 @@ private:
     std::optional<path::RaceTimings> m_raceTimingsForTest;
     bool m_ownerQueueRaceStop = false; // the owner finished inside an effect batch: stop the race after it
     bool m_raceStartedOwner = false; // this tap's owner was started by the race (never a second UserStart)
+    bool m_checkStarved = false;   // T1: the running check has no first byte past its share
+    void maybePreemptStarvedCheck();
     bool m_raceFirst = false; // the race runs and the owner waits for its first proven path (or its end)
     bool raceAllowed() const;
     void beginRaceForTap();

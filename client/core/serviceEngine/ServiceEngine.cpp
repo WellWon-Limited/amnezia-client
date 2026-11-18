@@ -386,6 +386,7 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
         case path::EffectType::RunDataCheck:
             m_state = EngineState::Verifying; // the facade runs the one data check through the raised tunnel
             m_health.reset();
+            m_checkStarved = false;
             if (e.recheck) {
                 // the previous check is void (it spanned a suspension, or could not decide): the facade runs it
                 // again on the same tunnel; nothing was recorded for it
@@ -554,6 +555,31 @@ bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &sourc
     return true;
 }
 
+void ServiceEngine::noteCheckStarved(bool starved)
+{
+    m_checkStarved = starved;
+    if (starved)
+        maybePreemptStarvedCheck();
+}
+
+void ServiceEngine::maybePreemptStarvedCheck()
+{
+    if (!m_checkStarved || m_owner.phase() != path::AttemptPhase::Checking || !m_race.hasWinner())
+        return;
+    // the proven alternative: any path of this network the ledger holds as working that is not the current leg
+    const path::PathCandidate current = m_owner.currentPath();
+    bool alternative = false;
+    for (const SubscriptionNode &n : m_merged)
+        if (n.nodeId != current.id.id
+            && m_ledger.view(m_net.current().local, path::derivePathId(n), nowMs()).state == path::PathState::Working)
+            alternative = true;
+    if (!alternative)
+        return;
+    m_checkStarved = false;
+    attemptJournal(QStringLiteral("leg_preempted_for_proof node=%1 (no first byte, a proven path waits)").arg(current.id.id));
+    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), path::PathOutcome::Inconclusive));
+}
+
 void ServiceEngine::startOwnerAfterRace(const char *why)
 {
     if (!m_raceFirst)
@@ -599,6 +625,7 @@ void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
                 m_race.acceptWinner(e.path.id.id);
                 attemptJournal(QStringLiteral("race_winner node=%1").arg(e.path.id.id));
                 startOwnerAfterRace("winner");
+                maybePreemptStarvedCheck(); // T1: a starving check of another leg goes now
             }
             break;
         case path::RaceEffectType::Hedge:
