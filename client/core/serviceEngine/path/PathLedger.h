@@ -4,7 +4,8 @@
 // revision it was recorded with, and a different revision resets it. [header-only, QtCore; pure]
 //
 // What is recorded - only outcomes that belong to the path itself (design Р12):
-//   probe ok       a light check next to the tunnel passed (weak proof: may raise the path, never "Connected");
+//   probe ok       a light check next to the tunnel passed (weak proof: may raise the path, never "Connected";
+//                  it never clears a tunnel "no data" - only a data ok does);
 //   data ok        data passed through the raised tunnel, with time to tunnel and time to first byte (strong);
 //   no handshake   the path did not come up within its start deadline (AmneziaWG handshake, Xray connect);
 //   no data        the tunnel came up, no data passed within the check deadline;
@@ -111,6 +112,7 @@ struct LedgerEntry {
     QString revision;
     qint64 dataOkMs = 0;
     qint64 probeOkMs = 0;
+    qint64 noDataMs = 0;       // newest tunnel "no data" (stage 2: a probe ok does not clear it)
     int connectMs = -1;
     int ttfbMs = -1;
     int failStreak = 0;
@@ -151,8 +153,15 @@ public:
             e.refusedUntilMs = 0;
             [[fallthrough]];
         case PathOutcome::ProbeOk:
-            if (o == PathOutcome::ProbeOk)
+            if (o == PathOutcome::ProbeOk) {
                 e.probeOkMs = nowMs;
+                // Stage 2: a tunnel that came up and carried no data outranks a light probe (device round 18.11:
+                // own Xray 15 on LTE probes fine, the real tunnel passes nothing). Only a data ok through the
+                // tunnel clears such a failure; the probe is kept, the path stays suspect / dead, so the race
+                // does not pick it again and again.
+                if (e.failStreak > 0 && e.noDataMs > 0 && e.noDataMs >= e.dataOkMs)
+                    break;
+            }
             e.failStreak = 0;
             e.quarantineUntilMs = 0;
             break;
@@ -161,6 +170,8 @@ public:
             ++e.failStreak;
             e.lastFailureMs = nowMs;
             e.lastFailure = o;
+            if (o == PathOutcome::NoData)
+                e.noDataMs = nowMs;
             if (e.failStreak >= 2) {
                 const int level = std::min<int>(e.failStreak - 2, int(m_t.quarantineMs.size()) - 1);
                 e.quarantineUntilMs = nowMs + m_t.quarantineMs[size_t(level)];
@@ -248,7 +259,7 @@ public:
             const LedgerEntry e = m_entries.value(k);
             arr.append(QJsonObject{
                 { QStringLiteral("n"), e.network }, { QStringLiteral("p"), e.path }, { QStringLiteral("r"), e.revision },
-                { QStringLiteral("d"), double(e.dataOkMs) }, { QStringLiteral("pr"), double(e.probeOkMs) },
+                { QStringLiteral("d"), double(e.dataOkMs) }, { QStringLiteral("pr"), double(e.probeOkMs) }, { QStringLiteral("nd"), double(e.noDataMs) },
                 { QStringLiteral("c"), e.connectMs }, { QStringLiteral("t"), e.ttfbMs }, { QStringLiteral("f"), e.failStreak },
                 { QStringLiteral("lf"), double(e.lastFailureMs) },
                 { QStringLiteral("lo"), QString::fromLatin1(pathOutcomeName(e.lastFailure)) },
@@ -275,6 +286,7 @@ public:
             e.revision = o.value(QStringLiteral("r")).toString();
             e.dataOkMs = qint64(o.value(QStringLiteral("d")).toDouble());
             e.probeOkMs = qint64(o.value(QStringLiteral("pr")).toDouble());
+            e.noDataMs = qint64(o.value(QStringLiteral("nd")).toDouble());
             e.connectMs = o.value(QStringLiteral("c")).toInt(-1);
             e.ttfbMs = o.value(QStringLiteral("t")).toInt(-1);
             e.failStreak = std::max(0, o.value(QStringLiteral("f")).toInt());

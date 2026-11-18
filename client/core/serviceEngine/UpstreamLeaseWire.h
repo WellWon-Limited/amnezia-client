@@ -262,6 +262,9 @@ inline constexpr int kUpstreamReleaseMaxResends = 8;
 // confirmed" and sent at the next confirmed teardown (the direct path is free again then). The extension (iOS,
 // Android) releases on its own stop, after its core stopped, over its direct path. Pure: what to send, and when.
 inline constexpr int kUpstreamReleaseHoldMaxMs = 10000;
+// R1a (device round 4): how long an acquire the attempt stopped waiting for still lives, so a late grant (a real
+// seat) can be released instead of left to its TTL.
+inline constexpr int kUpstreamLateGrantGraceMs = 10000;
 struct UpstreamReleaseDue {
     bool send = false;    // send the held releases now
     bool hold = false;    // keep holding (the stop is not confirmed yet)

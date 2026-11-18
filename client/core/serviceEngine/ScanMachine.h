@@ -317,8 +317,10 @@ inline constexpr int kScanProbeBatchMax = 12;
 // apart: a press inside it does nothing (no countdown is shown; the button stays enabled). Compiled, not a
 // server number. It only matters for scans that armed no cooldown (they never reached a host).
 inline constexpr qint64 kScanManifestBackoffMs = 1000;
-// Cached rows older than this are never shown, not even as history while a scan runs (plan §1.2).
-inline constexpr qint64 kScanCacheShowMaxMs = 24LL * 3600 * 1000;
+// R7 (device round 4): a past result is shown beside a fresh scan only while it can still say something about the
+// network now - at most 30 min old («Проверено 114 мин назад» opened the screen with stale rows); older -> the screen
+// shows the fresh scan only. Without a running scan the rule is scan_cache_works_ttl_s (10 min).
+inline constexpr qint64 kScanCacheShowMaxMs = 30LL * 60 * 1000;
 
 // --- inputs ----------------------------------------------------------------------------------------------------
 

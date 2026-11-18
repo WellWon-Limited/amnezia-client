@@ -134,6 +134,14 @@ public:
     virtual bool reportQueueFull() const = 0;
     // The app's UI language ("ru", "en", "es", ...: AvpnEngineQml::appLang()) for the country menu's names.
     virtual QString uiLanguage() const = 0;
+    // R7 (device round 4): the one naming function of the server list for a row id (a node id, "up:<profile>"), so
+    // the Scanner never shows «Serbia 1» where the list shows «Сербия 1» (cached rows included). "" = not in the
+    // pool now: the row keeps its own label.
+    virtual QString rowDisplayName(const QString &rowId) const
+    {
+        Q_UNUSED(rowId)
+        return QString();
+    }
     // The AWG mini-session input of an own AWG node (nodeId as in the manifest, e.g. "9"); false = the engine has
     // no config for that node (it is then «Не проверено»). The default (no AWG input: every AWG row «Не
     // проверено» awg_no_address) keeps an engine that does not implement it yet building; L6b overrides it.
@@ -331,6 +339,10 @@ public:
 
     // The timer fired (the IScanTimer's onFire; public for the tests' fake timer).
     void timerFired();
+
+    // Stage 2 of the path engine: the results of a finished scan, as saved (the engine writes them into its ledger
+    // at "probe ok" strength - one fact, and Auto reads it from there). Called on the GUI thread.
+    std::function<void(const ScanCachedResult &)> onResultsSaved;
 
 signals:
     void viewChanged();

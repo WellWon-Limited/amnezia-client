@@ -1056,7 +1056,12 @@ private:
     void settleOperation(const char *why); // review E1 of 18.11: the one release of the operation latches
     void syncControlPlaneEdge(bool tunnelUp); // E10: the provider session's control-plane edge
     QString m_sessionEdge;                    // E10: the session edge in force ("" = the stored edge)
-    bool m_scanNetCompareArmed = false;       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
+    bool m_scanNetCompareArmed = false;
+    bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
+    QString m_exactRestorePin;         // R3: the choice before it
+    void endExactRowRequest(bool connected);
+    qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
+    qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож
     // опустить туннель (requestStop+down): op-in-flight + сторож. why — кто гасит (reliability-кольцо,
     // отчёты); keepEngineSwitch — повтор прерванного свитча движка: цель/бюджет лечения/стрик

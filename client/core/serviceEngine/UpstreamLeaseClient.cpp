@@ -94,10 +94,15 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
 {
     const QString base = baseFor(route);
     const QString token = m_token ? m_token() : QString();
+    // Device round 4 (R1a): the server granted seats in 3.8-4.2 s while the client gave up at 4 s - the seat stayed
+    // taken and the path was blamed. The attempt stops WAITING at the lease share of its leg (a transport failure
+    // for the owner, never recorded against the path), but the request lives on for kUpstreamLateGrantGraceMs: a
+    // grant that arrives after that point was a real seat and is released at once over the direct route.
+    const int waitMs = upstreamAcquireTimeoutMsTuned();
     QNetworkReply *r = base.isEmpty() ? nullptr
                                       : post(base + QStringLiteral("/v1/upstream/lease"),
                                              upstreamAcquireBody(profileId, kind, standbyConfigSha256), token,
-                                             upstreamAcquireTimeoutMsTuned());
+                                             waitMs + kUpstreamLateGrantGraceMs);
     if (!r) {
         // Not sendable (no base / no token): a transport failure, answered from the top of the loop.
         QTimer::singleShot(0, this, [this, requestId]() {
@@ -106,15 +111,34 @@ void UpstreamLeaseClient::acquire(quint64 requestId, const QString &profileId, L
         });
         return;
     }
-    connect(r, &QNetworkReply::finished, this, [this, r, requestId]() {
+    auto answered = std::make_shared<bool>(false);
+    QTimer::singleShot(waitMs, r, [this, requestId, answered]() {
+        if (*answered)
+            return;
+        *answered = true; // the attempt stops waiting; the request goes on (a late grant is released below)
+        qWarning() << "avpn upstream: lease answer later than" << upstreamAcquireTimeoutMsTuned()
+                   << "ms - the attempt moves on, a late grant will be released";
+        if (onAcquire)
+            onAcquire(requestId, classifyAcquireReply(0, {}, {}, m_pubKeyHex));
+    });
+    connect(r, &QNetworkReply::finished, this, [this, r, requestId, answered, route]() {
         r->deleteLater();
         const int status = answerStatus(r); // 0 = no complete HTTP answer (transport, timeout)
         const QByteArray body = r->read(kMaxLeaseAnswerBytes);
         const QByteArray sig = r->rawHeader(QByteArrayLiteral("X-Tribe-Sig"));
         // Lab 14.11 D1: an answer of our server (any status, any body) never starts from the standby pack.
         const bool fromTribeApi = upstreamFromTribeApi(r->rawHeader(QByteArray(kUpstreamTribeApiHeader)));
+        const AcquireReply reply = classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi);
+        if (*answered) {
+            if (reply.kind == LeaseReplyKind::Granted && upstreamLeaseIdValid(reply.grant.leaseId)) {
+                qWarning() << "avpn upstream: a late grant arrived after the attempt moved on - releasing it";
+                sendRelease(0, reply.grant.leaseId, UpstreamMeter{}, upstreamReleaseRoute(route), /*attempt=*/0);
+            }
+            return;
+        }
+        *answered = true;
         if (onAcquire)
-            onAcquire(requestId, classifyAcquireReply(status, body, sig, m_pubKeyHex, fromTribeApi));
+            onAcquire(requestId, reply);
     });
 }
 

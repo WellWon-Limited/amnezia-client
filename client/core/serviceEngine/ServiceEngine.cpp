@@ -3,6 +3,7 @@
 #include "NodeRotation.h" // AVPN: healthAggregate/isRuNode/nextLiveNodeId (чистая логика, тестируется автономно)
 #include "SubscriptionParser.h"
 #include "TransportPick.h" // AVPN awg31-xray-v1: locations x transports, exit RTT for the bars
+#include "UpstreamLeaseWire.h" // R1: the server's refusal codes (startFailureOutcome)
 #include "path/PathId.h"
 
 #include <QDateTime>
@@ -203,8 +204,9 @@ bool ServiceEngine::leaveUpstreamNode(const QString &code, const QString &detail
         return false;
     appendSwitchLog(QStringLiteral("upstream lease %1%2 on %3: leaving the node")
                         .arg(code, detail.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(detail), m_currentNodeId));
-    loseLiveSession(code == QLatin1String("no_seat") ? path::PathOutcome::NoSeat : path::PathOutcome::Refused,
-                    /*tunnelGone=*/false, /*restart=*/true, QStringLiteral("upstream lease %1").arg(code));
+    // R1: only the server's own refusal is the path's outcome (a lease that could not be confirmed is not)
+    loseLiveSession(startFailureOutcome(code), /*tunnelGone=*/false, /*restart=*/true,
+                    QStringLiteral("upstream lease %1").arg(code));
     return true;
 }
 
@@ -212,10 +214,27 @@ void ServiceEngine::noteStartRefused(const QString &nodeId, const QString &code)
 {
     if (nodeId.isEmpty() || m_owner.phase() != path::AttemptPhase::Starting || m_owner.currentPath().id.id != nodeId)
         return;
-    appendSwitchLog(QStringLiteral("upstream start refused on %1 code=%2").arg(nodeId, code));
-    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(),
-                                             code == QLatin1String("no_seat") ? path::PathOutcome::NoSeat
-                                                                              : path::PathOutcome::Refused));
+    const path::PathOutcome o = startFailureOutcome(code);
+    appendSwitchLog(QStringLiteral("upstream start refused on %1 code=%2 outcome=%3")
+                        .arg(nodeId, code, QLatin1String(path::pathOutcomeName(o))));
+    // Inconclusive: the leg ends and the attempt walks on, nothing is recorded against the path.
+    feedOwner(path::AttemptEvent::pathFailed(nowMs(), m_owner.currentLeg(), o));
+}
+
+// R1 (device round 4): only the server's own answer about this profile is the path's outcome. A transport failure
+// or timeout of OUR control plane (the lease request), a retry-later answer (429, 503), a request our server
+// rejected as malformed and every local failure (envelope, bridge, invoke) say nothing about the path.
+path::PathOutcome ServiceEngine::startFailureOutcome(const QString &codeIn)
+{
+    const QString code = codeIn.section(QLatin1Char('/'), 0, 0);
+    switch (upstreamErrorCodeFrom(code)) {
+    case UpstreamErrorCode::NoSeat: return path::PathOutcome::NoSeat;
+    case UpstreamErrorCode::Disabled:
+    case UpstreamErrorCode::NotEntitled:
+    case UpstreamErrorCode::OverQuota: return path::PathOutcome::Refused;
+    default: break;
+    }
+    return path::PathOutcome::Inconclusive;
 }
 
 void ServiceEngine::markUpStarted()
@@ -278,6 +297,8 @@ void ServiceEngine::feedOwner(const path::AttemptEvent &ev)
         applyOwnerEffects(m_owner.handle(e, ownerContext()));
     }
     m_inOwner = false;
+    if (std::exchange(m_ownerQueueRaceStop, false))
+        applyRaceEffects(m_race.stop(nowMs()));
 }
 
 void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
@@ -362,6 +383,8 @@ void ServiceEngine::applyOwnerEffects(const QList<path::AttemptEffect> &effects)
                                .arg(r.connected ? r.path.id.id : QStringLiteral("-"))
                                .arg(r.paths).arg(r.elapsedMs).arg(int(r.fallbackNotice)));
             m_lastResult = r;
+            if (m_race.running()) // the attempt has its result: the spares are not needed any more
+                m_ownerQueueRaceStop = true;
             if (r.connected) {
                 m_state = EngineState::Connected;
                 if (findNode(r.path.id.id)) // an adopted session of an unknown node keeps its identity unknown
@@ -390,13 +413,128 @@ void ServiceEngine::observeNetwork(const path::NetworkObservation &o)
                        .arg(m_net.current().local.isEmpty() ? QStringLiteral("-") : m_net.current().local,
                             m_net.current().coarse.isEmpty() ? QStringLiteral("-") : m_net.current().coarse)
                        .arg(m_net.current().generation));
+    if (m_race.running())
+        applyRaceEffects(m_race.networkChanged(nowMs(), m_net.current()));
     feedOwner(path::AttemptEvent::networkChanged(nowMs(), m_net.current()));
 }
 
 void ServiceEngine::attemptTick()
 {
     m_owner.setTimings(attemptTimings());
+    if (m_race.running())
+        applyRaceEffects(m_race.tick(nowMs()));
     feedOwner(path::AttemptEvent::tick(nowMs()));
+}
+
+// ---- Stage 2: the probe race (path/PathRace.h) ------------------------------------------------------------------
+
+bool ServiceEngine::raceAllowed() const
+{
+    return m_prober && m_prober->caps().available && TuningStore::flag(QStringLiteral("path_race"), false)
+        && m_choice.kind != path::UserChoice::Kind::ExactPath; // an exact node is the person's: nothing to race
+}
+
+void ServiceEngine::beginRaceForTap()
+{
+    m_race.setTimings(m_raceTimingsForTest ? *m_raceTimingsForTest : raceTimingsTuned());
+    const path::SelectionContext ctx = ownerContext();
+    path::SelectInput in;
+    in.pool = ctx.pool;
+    in.evidence = m_ledger.viewOf(m_net.current().local, ctx.pool, ctx.wallNowMs);
+    in.choice = m_choice;
+    in.mode = transportMode();
+    const QList<path::RankedPath> order = path::selectPaths(in);
+    if (order.isEmpty())
+        return; // the owner reports "no candidate" itself
+    // (a) a path proven on this network leads: it starts at once, the race runs over the rest beside it
+    const bool known = order.first().view.state == path::PathState::Working;
+    QList<path::PathCandidate> race;
+    for (int i = known ? 1 : 0; i < order.size(); ++i)
+        race << order.at(i).path;
+    const qint64 bytesLeft = m_probeBytesLeft ? m_probeBytesLeft() : -1;
+    attemptJournal(QStringLiteral("race_begin known=%1 candidates=%2 bytes_left=%3")
+                       .arg(known ? order.first().path.id.id : QStringLiteral("-")).arg(race.size()).arg(bytesLeft));
+    m_raceFirst = !known;
+    applyRaceEffects(m_race.begin(nowMs(), race, m_net.current(), m_prober->caps(), bytesLeft, m_probeCosts));
+    if (m_raceFirst && !m_race.running())
+        m_raceFirst = false; // nothing could be raced: the owner walks at once
+}
+
+void ServiceEngine::onProbeResult(const path::ProbeStamp &stamp, path::PathOutcome outcome, qint64 bytesSpent)
+{
+    applyRaceEffects(m_race.probeDone(nowMs(), stamp, outcome, bytesSpent));
+}
+
+bool ServiceEngine::recordProbeProof(const QString &nodeId, const QString &source)
+{
+    const SubscriptionNode *n = findNode(nodeId);
+    if (!n || !m_net.current().usable())
+        return false;
+    const path::PathId id = path::derivePathId(*n);
+    if (!m_ledger.record(m_net.current().local, id, path::PathOutcome::ProbeOk, nowMs()))
+        return false;
+    m_ledgerDirty = true;
+    attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=probe_ok source=%5 state=%6")
+                       .arg(m_net.current().local).arg(m_net.current().generation).arg(id.id, id.revision, source,
+                            QLatin1String(path::pathStateName(m_ledger.view(m_net.current().local, id, nowMs()).state))));
+    return true;
+}
+
+void ServiceEngine::startOwnerAfterRace(const char *why)
+{
+    if (!m_raceFirst)
+        return;
+    m_raceFirst = false;
+    m_raceStartedOwner = true;
+    attemptJournal(QStringLiteral("race_owner_start why=%1").arg(QLatin1String(why)));
+    m_owner.setTimings(attemptTimings());
+    feedOwner(path::AttemptEvent::userStart(nowMs(), m_choice, transportMode(), m_net.current()));
+}
+
+void ServiceEngine::applyRaceEffects(const QList<path::RaceEffect> &effects)
+{
+    for (const path::RaceEffect &e : effects) {
+        switch (e.type) {
+        case path::RaceEffectType::StartProbe:
+            attemptJournal(QStringLiteral("race_probe race=%1 probe=%2 node=%3 kind=%4")
+                               .arg(e.stamp.race).arg(e.stamp.probe).arg(e.path.id.id)
+                               .arg(QLatin1String(path::pathKindName(e.path.kind))));
+            if (m_prober)
+                m_prober->start(e.stamp, e.path, e.timeoutMs);
+            break;
+        case path::RaceEffectType::CancelProbe:
+            if (m_prober)
+                m_prober->cancel(e.stamp);
+            break;
+        case path::RaceEffectType::Report:
+            if (findNode(e.path.id.id) && m_net.isCurrent(e.networkGeneration)
+                && m_ledger.record(e.network, e.path.id, e.outcome, nowMs()))
+                m_ledgerDirty = true;
+            attemptJournal(QStringLiteral("path_outcome net=%1 net_gen=%2 node=%3 rev=%4 outcome=%5 source=race state=%6")
+                               .arg(e.network).arg(e.networkGeneration).arg(e.path.id.id, e.path.id.revision,
+                                    QLatin1String(path::pathOutcomeName(e.outcome)),
+                                    QLatin1String(path::pathStateName(m_ledger.view(e.network, e.path.id, nowMs()).state))));
+            break;
+        case path::RaceEffectType::Spent:
+            if (m_chargeProbeBytes)
+                m_chargeProbeBytes(e.bytes);
+            break;
+        case path::RaceEffectType::Winner:
+            // only a path the ledger now holds as working wins (a tunnel no-data outranks the probe)
+            if (m_ledger.view(m_net.current().local, e.path.id, nowMs()).state == path::PathState::Working) {
+                m_race.acceptWinner(e.path.id.id);
+                attemptJournal(QStringLiteral("race_winner node=%1").arg(e.path.id.id));
+                startOwnerAfterRace("winner");
+            }
+            break;
+        case path::RaceEffectType::Done:
+            attemptJournal(QStringLiteral("race_done reason=%1 proven=%2")
+                               .arg(QLatin1String(path::raceDoneReasonName(e.reason))).arg(m_race.proven()));
+            if (e.reason != path::RaceDoneReason::Stopped)
+                startOwnerAfterRace(path::raceDoneReasonName(e.reason));
+            break;
+        }
+    }
 }
 
 void ServiceEngine::loseLiveSession(path::PathOutcome outcome, bool tunnelGone, bool restart, const QString &why)
@@ -827,11 +965,19 @@ bool ServiceEngine::connect(QString &error)
         return false;
     }
     m_modeGate.sessionStartedByUs(); // 5.1.109 (S4.1): never re-judged as an adopted session
-    // AVPN (независимое ревью волны, MAJOR-2): сохранённый режим «Xray» при выключенном features.xray_client
-    // отсекал бы ВСЕ кандидаты (no_transport) — приводим к Auto.
     m_owner.setTimings(attemptTimings());
     m_state = EngineState::Selecting;
     m_lastResult.reset();
+    // Stage 2: with a probe host, a known working path starts at once and the spares are raced beside it; with
+    // none known, the race runs first and the owner starts with its first proven path (or when it ends).
+    if (raceAllowed()) {
+        m_raceStartedOwner = false;
+        beginRaceForTap();
+        if (m_raceFirst)
+            return true;
+        if (m_raceStartedOwner) // the race ended at once (nothing it could pay) and started the owner itself
+            return m_owner.running() || m_lastResult.value_or(path::AttemptResult{}).connected;
+    }
     feedOwner(path::AttemptEvent::userStart(nowMs(), m_choice, transportMode(), m_net.current()));
     if (m_owner.running())
         return true;
@@ -1298,6 +1444,9 @@ void ServiceEngine::requestStop() // AVPN
     m_sessionHintProto.clear();
     m_sessionHintEndpoint.clear();
     resetHealSession(QString());
+    m_raceFirst = false; // the person stops: a race in front of the owner ends without starting it
+    if (m_race.running())
+        applyRaceEffects(m_race.stop(nowMs()));
     if (m_owner.running() || m_owner.phase() != path::AttemptPhase::Idle) {
         m_facadeStop = true;
         feedOwner(path::AttemptEvent::userStop(nowMs()));

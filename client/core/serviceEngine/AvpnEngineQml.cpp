@@ -310,6 +310,20 @@ public:
     }
 
     // The display name the Connect card would show for a pool row (pickerDisplay / upstreamDisplayName).
+    QString rowDisplayName(const QString &rowId) const override
+    {
+        // one snapshot per view refresh (the rows of one refresh ask within the same event-loop turn)
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (!m_nameSnap || now - m_nameSnapMs > 200) {
+            m_nameSnap = m_e->m_engine.debugSnapshot();
+            m_nameSnapMs = now;
+        }
+        for (const NodeDebugRow &r : m_nameSnap->pool)
+            if (r.nodeId == rowId || (r.upstream && r.nodeId == QStringLiteral("up:") + rowId))
+                return rowLabel(*m_nameSnap, r);
+        return QString();
+    }
+
     QString rowLabel(const DebugSnapshot &s, const NodeDebugRow &r) const
     {
         const QString lang = m_e->appLang();
@@ -327,6 +341,8 @@ public:
 private:
     AvpnEngineQml *m_e;
     mutable QString m_kindDisagreement; // the last journalled monitor / interface-list disagreement
+    mutable std::optional<DebugSnapshot> m_nameSnap; // R7: the pool the row names were read from
+    mutable qint64 m_nameSnapMs = 0;
 };
 
 ScanCurrent ScanEngineAdapter::current() const
@@ -569,8 +585,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     // Волна-4 (ENG-02): персистнутый рабочий вход API (edge-walk прошлой сессии) — с самого старта.
     // ConfigService поднимает его для себя, но activeEdgeChanged на холодном старте не эмитится, и
     // подписка/регистрация/чат/carve-out били в основной адрес, даже если работало только зеркало.
-    if (envUrl.isEmpty())
-        m_baseUrl = avpn::ConfigStore::activeEdge(m_baseUrl);
+    // R1a (device round 4): the walk of an earlier run is not restored - every run starts at the Russian entry.
 #ifdef Q_OS_IOS
     AvpnDiagnostics_setBase(m_baseUrl.toUtf8().constData());
 #endif
@@ -1099,7 +1114,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
     // AVPN upstream nodes: lease / standby / probe I/O with the same client, key and token as /v1 calls.
     // The direct base is read at each call (edge walk moves m_baseUrl).
-    m_tunnel.configureUpstream(m_nam, [this]() { return m_baseUrl; }, kConfigPubKeyHex,
+    // R1a: a lease acquire for a new leg and a release after a stop are DIRECT requests - the direct edge, never the
+    // session edge of a tunnel that is (still) up.
+    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->directBaseUrl() : m_baseUrl; },
+                               kConfigPubKeyHex,
                                [this]() { return authToken(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
     // уже вырезает каждый вход, поэтому смена edge не требует перезапуска туннеля.
@@ -1552,10 +1570,26 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             s.setValue(QStringLiteral("avpn/transportMode"), avpn::transportModeToString(loaded.storedMode));
             s.setValue(QStringLiteral("avpn/transportModeByChoice"), true);
         }
+        bool devLedgerReset = false;
+#ifdef AVPN_DEV_TOOLS
+        // R6 (device round 4, development builds only): Documents/tribe-reset-ledger -> start from an empty ledger once.
+        {
+            const QString control = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                                  + QStringLiteral("/tribe-reset-ledger");
+            if (QFile::exists(control)) {
+                s.remove(QLatin1String(kPathLedgerSettingsKey));
+                QFile::remove(control);
+                qWarning() << "[avpn dev] path ledger reset by the control file";
+                devLedgerReset = true;
+            }
+        }
+#endif
         m_engine.loadPathLedger(s.value(QLatin1String(kPathLedgerSettingsKey)).toByteArray());
-        m_savedPin = s.value(QStringLiteral("avpn/pinnedNode")).toString();
-        m_savedPinCountry = s.value(QStringLiteral("avpn/pinnedCountry")).toString(); // review E8: the preference survives a pool without the node
         m_reliabilityRing.lines = s.value(QStringLiteral("avpn/reliabilityLog")).toStringList().mid(0, 128);
+        if (devLedgerReset)
+            m_reliabilityRing.lines.prepend(QStringLiteral("ledger_reset why=dev_control_file"));
+        m_savedPinCountry = s.value(QStringLiteral("avpn/pinnedCountry")).toString(); // review E8: the preference survives a pool without the node
+        m_savedPin = s.value(QStringLiteral("avpn/pinnedNode")).toString();
         restorePin();
     }
 
@@ -2654,7 +2688,11 @@ QVariantMap AvpnEngineQml::currentNode() const
     //  • иначе → ничего (hasNode=false) → карточка «Умный выбор сервера».
     QString showId;
     // AVPN awg31-xray-v1: в verifying туннель поднят на реальной ноде — показываем её (как connected).
-    if ((connectedNow || s.state == QLatin1String("verifying")) && !s.currentNodeId.isEmpty())
+    // R4 (device round 4): while the owner walks, the card shows the server being tried now (the choice stays in
+    // «Вы выбрали: …»), not the chosen one.
+    if ((connectedNow || s.state == QLatin1String("verifying")
+         || (m_engine.attemptRunning() && (s.state == QLatin1String("connecting") || s.state == QLatin1String("switching"))))
+        && !s.currentNodeId.isEmpty())
         showId = s.currentNodeId;
     else if (!pinned.isEmpty())
         showId = pinned;
@@ -2819,7 +2857,10 @@ QVariantList AvpnEngineQml::nodePool() const
                      : avpn::UpstreamKind::Unspecified;
         if (upstream && !avpn::upstreamKindListed(kind))
             continue;
-        const int rtt = upstream ? scanMs.value(id, -1) : display.at(i).rttMs;
+        // R7 (device round 4): one evidence source for the list and the Scanner - an own row without an ICMP figure
+        // shows the Scanner's figure on this network, like a provider row («Эстония 3»: a dash here, «Доступно» there).
+        const int rtt = upstream ? scanMs.value(id, -1)
+                                 : (display.at(i).rttMs >= 0 ? display.at(i).rttMs : scanMs.value(id, -1));
         // Upstream nodes (release A, 1.10.0): our form of the name - the admin's own label, «<country> <n>» or
         // «Белые списки <n>»; never «Сервер <n>».
         n[QStringLiteral("name")] = upstream
@@ -3146,20 +3187,43 @@ bool AvpnEngineQml::pinServer(const QString &nodeId, QString &err)
 }
 
 // E10 (device rounds 2-3 of 18.11): while a provider session is up the control plane goes to the edge reachable
-// from foreign exits at once (EdgeWalk.h::controlPlaneSessionEdge); the stored edge comes back when it ends.
+// from foreign exits at once (EdgeWalk.h::apiSessionEdgeFor); the direct edge comes back when it ends.
 void AvpnEngineQml::syncControlPlaneEdge(bool tunnelUp)
 {
     if (!m_configSvc)
         return;
-    const bool providerUp = tunnelUp && m_engine.currentNodeIsUpstream();
-    const QString edge = avpn::controlPlaneSessionEdge(providerUp, m_configSvc->isPinned(),
-                                                       QString::fromLatin1(avpn::kWhoamiXrayEdge));
+    // R1a: by the route a request takes now - a tunnel in its carrying phase (the leg is checked or connected), not
+    // merely "a tunnel reported up": while the owner brings up the next leg, requests are direct.
+    const bool carrying = m_engine.isVerifying() || m_engine.state() == avpn::EngineState::Connected;
+    const avpn::ApiRoute route = avpn::apiRouteNow(tunnelUp, carrying);
+    const QString edge = avpn::apiSessionEdgeFor(route, m_configSvc->isPinned(),
+                                                 QString::fromLatin1(avpn::kWhoamiXrayEdge));
     if (edge != m_sessionEdge) {
         reliabilityEvent(QStringLiteral("control_plane_edge session=%1").arg(edge.isEmpty() ? QStringLiteral("-")
                                                                                             : QUrl(edge).host()));
         m_sessionEdge = edge;
     }
     m_configSvc->setSessionEdge(edge);
+}
+
+// R3 (device round 4): the end of a Scanner row's one request.
+void AvpnEngineQml::endExactRowRequest(bool connected)
+{
+    m_exactRestoreArmed = false;
+    const QString row = m_exactRow;
+    m_exactRow.clear();
+    if (!connected) {
+        QString err;
+        if (m_exactRestorePin.isEmpty())
+            m_engine.clearPin();
+        else
+            m_engine.setPinnedNode(m_exactRestorePin, err); // refused (not in the pool now): the saved choice stays
+        m_savedPin = m_exactRestorePin;
+        QSettings().setValue(QStringLiteral("avpn/pinnedNode"), m_savedPin);
+    }
+    syncChoice();
+    reliabilityEvent(QStringLiteral("exact_row_request_end row=%1 connected=%2 choice=%3")
+                         .arg(row).arg(int(connected)).arg(choiceJournal()));
 }
 
 // Review E1 of 18.11: the one place a finished operation releases the facade's latches (the operation in
@@ -3199,6 +3263,7 @@ bool AvpnEngineQml::syncAttempt()
                 startDataPathVerification();
         });
     }
+    syncControlPlaneEdge(m_lastTunnelState == Vpn::Connected); // R1a: a new leg's requests are direct at once
     const int legStartFailures = m_engine.takeLegStartFailures();
     const std::optional<avpn::path::AttemptResult> result = m_engine.takeAttemptResult();
     // Review E1 of 18.11: the owner's terminal result settles the facade's operation - a start whose native
@@ -3212,6 +3277,8 @@ bool AvpnEngineQml::syncAttempt()
         m_whitelistDetector->noteConnectFailure(); // the detector gates its round (cellular, tunnel down, debounce)
     if (const std::optional<avpn::path::AttemptResult> &r = result) {
         changedAny = true;
+        if (m_exactRestoreArmed && r->reason != avpn::path::FailReason::StoppedByUser)
+            endExactRowRequest(r->connected);
         const QString lang = appLang();
         if (r->connected) {
             if (r->fallbackNotice) {
@@ -3219,8 +3286,15 @@ bool AvpnEngineQml::syncAttempt()
                 const QVariantMap card = currentNode();
                 const QString wanted = card.value(QStringLiteral("choiceName")).toString();
                 const QString got = card.value(QStringLiteral("name")).toString();
-                emit notice(got.isEmpty() ? tr("«%1» в этой сети не работает — подключено через другой сервер").arg(wanted)
-                                          : tr("«%1» в этой сети не работает — подключено через «%2»").arg(wanted, got));
+                // R2 (device round 4): "does not work" only on this attempt's own evidence; a preference skipped for a
+                // recent failure here says so.
+                if (r->preferredTried)
+                    emit notice(got.isEmpty() ? tr("«%1» в этой сети не работает — подключено через другой сервер").arg(wanted)
+                                              : tr("«%1» в этой сети не работает — подключено через «%2»").arg(wanted, got));
+                else
+                    emit notice(got.isEmpty()
+                                    ? tr("«%1» недавно не работал в этой сети — подключено через другой сервер").arg(wanted)
+                                    : tr("«%1» недавно не работал в этой сети — подключено через «%2»").arg(wanted, got));
                 Q_UNUSED(lang)
             }
         } else if (r->reason != avpn::path::FailReason::StoppedByUser) {
@@ -7249,6 +7323,20 @@ void AvpnEngineQml::attachScanner(TribeScanner *scanner)
     if (!scanner)
         return;
     scanner->setParent(this); // owned: deleted first in the destructor (it holds the adapter and the host)
+    // Stage 2: one fact, one store - a row the Scanner proved (works / slow) on this network is a probe proof in the
+    // path engine's ledger, and Auto reads it from there. A Scanner failure is not recorded (a light probe never
+    // quarantines a path). The Scanner drops results of an older network itself (its generation tuple).
+    scanner->onResultsSaved = [this](const avpn::ScanCachedResult &c) {
+        int recorded = 0;
+        for (const avpn::ScanCachedRow &r : c.rows) {
+            if (r.cls != avpn::ScanClass::Works && r.cls != avpn::ScanClass::Slow)
+                continue;
+            const QString node = r.origin == avpn::ScanOrigin::Upstream ? avpn::upstreamNodeIdFor(r.profileId) : r.id;
+            recorded += m_engine.recordProbeProof(node, QStringLiteral("scanner")) ? 1 : 0;
+        }
+        reliabilityEvent(QStringLiteral("scan_results_to_ledger rows=%1 recorded=%2").arg(c.rows.size()).arg(recorded));
+        syncAttempt(); // the ledger is persisted with the attempt's journal
+    };
     scanner->configureApi(m_nam, [this]() { return m_baseUrl; }, [this]() { return m_configPubKeyHex; },
                           [this]() { return authToken(); });
     connect(scanner, &TribeScanner::shadeChanged, this, &AvpnEngineQml::shadeChanged);
@@ -7598,6 +7686,12 @@ void AvpnEngineQml::connectToNode(const QString &nodeId, const QStringList &atte
         noteUserStart();
     Q_UNUSED(attemptOrder)
     Q_UNUSED(hintTtlMs)
+    // R3 (device round 4): the exact row applies to this one request - the previous choice comes back if it fails,
+    // and on success the row stays as an ordinary preferred server (never an exact home choice).
+    if (!m_exactRestoreArmed) {
+        m_exactRestoreArmed = true;
+        m_exactRestorePin = m_savedPin;
+    }
     m_exactRow = nodeId; // a Scanner row is one exact path (never a fallback to another row or server)
     pinAndReconnectImpl(nodeId, pinOriginPersists(PinOrigin::UserChoice), rc.forceConnect,
                         rc.userOrigin ? StartOrigin::User : StartOrigin::AutoTap, &pinBefore);
@@ -8208,6 +8302,22 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
         emit changed();
         return;
     }
+    // R1 (device round 4): a failure that is not the path's own never reaches the ledger - the check did not
+    // happen; the owner runs it again on the same tunnel once, then walks on with nothing recorded.
+    {
+        const avpn::TunnelStats st = m_tunnel.readStats();
+        const qint64 rxDelta = (st.valid && m_verifyRxStart >= 0) ? st.rxBytes - m_verifyRxStart : -1;
+        const avpn::CheckBlame blame = avpn::checkFailureBlame(
+            uplinkUp(), QDateTime::currentMSecsSinceEpoch() - m_verifyWallStartMs, m_engine.dataCheckMs(),
+            st.valid && m_verifyRxStart >= 0, rxDelta);
+        if (blame != avpn::CheckBlame::Path) {
+            reliabilityEvent(QStringLiteral("check_not_attributable blame=%1 node=%2 rx_delta=%3 reason=%4")
+                                 .arg(QLatin1String(avpn::checkBlameName(blame)), m_engine.currentNodeId())
+                                 .arg(rxDelta).arg(reason));
+            finishVerifyInconclusive(epoch);
+            return;
+        }
+    }
     qWarning() << "[avpn verify]" << m_engine.currentNodeProto() << "data-plane NOT verified after"
                << m_lastVerifyMs << "ms — failover" << reason;
     // The one data-check event of the attempt owner (no data): recorded for this network, the leg goes down and
@@ -8228,6 +8338,12 @@ void AvpnEngineQml::finishVerify(int epoch, bool ok, const QString &failReason)
 void AvpnEngineQml::startDataPathVerification()
 {
     m_upstreamFallbackVerify = false;
+    // R1: what the attribution gate of a failure needs - the wall clock and the tunnel's receive counter at the start
+    m_verifyWallStartMs = QDateTime::currentMSecsSinceEpoch();
+    {
+        const avpn::TunnelStats st = m_tunnel.readStats();
+        m_verifyRxStart = st.valid ? st.rxBytes : -1;
+    }
     // Upstream nodes: their own check (sized /v1/probe through the provider); whoami never applies.
     if (m_engine.currentNodeIsUpstream()) {
         startUpstreamVerification();
@@ -8357,6 +8473,15 @@ void AvpnEngineQml::whoamiAttempt(int epoch)
         // the latter also covers device sleep) = the app was suspended mid-request: no evidence.
         // Not counted as a sent request; Connected without the mark; memory and streak untouched.
         const qint64 sinceArm = std::max(m_verifyClock.elapsed() - t0, QDateTime::currentMSecsSinceEpoch() - armedWall);
+        // Device round 18.11 (relaunch through devicectl): the check of an adopted tunnel was aborted by our own
+        // connection reset (net_error 5, not our timeout) and read as "no data" - the engine left a working node.
+        // A request we cancelled is no evidence: the check did not happen (the owner runs it again).
+        if (r->error() == QNetworkReply::OperationCanceledError && !o.timedOut) {
+            --m_verifyAttempts;
+            finishWhoami(epoch, avpn::WhoamiVerdict::CheckLimited, facts + QStringLiteral(" no_evidence=cancelled"),
+                         /*tiebreakDone=*/true);
+            return;
+        }
         if (avpn::whoamiCutBySuspension(v, o, sinceArm, left)) {
             --m_verifyAttempts;
 #ifdef Q_OS_IOS

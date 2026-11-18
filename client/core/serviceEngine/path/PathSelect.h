@@ -111,6 +111,11 @@ struct SelectInput {
     TransportMode mode = TransportMode::Auto;
     QHash<QString, double> crowd;      // path id -> share of reporters it worked for, [0..1]; missing = neutral
     QSet<QString> tried;               // tried in this attempt on this network
+    // R2 (device round 4): a preferred path that failed here, but longer ago than this (the first quarantine step),
+    // gets one real try in each attempt among the untried paths - the person asked for it, and an old failure may
+    // be gone. 0 = off. nowMs = the ledger's wall clock.
+    qint64 nowMs = 0;
+    qint64 preferredRetryAfterMs = 0;
 };
 
 // Inside the preference of a "prefer" choice: one of the preferred server's paths, or - for a country preference -
@@ -224,6 +229,13 @@ inline QList<RankedPath> selectPaths(const SelectInput &in)
         }
         r.preferred = isPreferred(in.choice, c);
         const int p = r.preferred ? 0 : 1;
+        if (r.preferred && in.preferredRetryAfterMs > 0 && !r.view.inQuarantine && !r.view.refused
+            && (r.view.state == PathState::Suspect || r.view.state == PathState::Dead)
+            && in.nowMs - r.view.lastFailureMs >= in.preferredRetryAfterMs) {
+            r.group = SelectGroup::Unknown; // R2: one real try in this attempt
+            sec[0][1] << r;
+            continue;
+        }
         switch (r.view.state) {
         case PathState::Working: r.group = SelectGroup::Working; sec[p][0] << r; break;
         case PathState::Unknown:
