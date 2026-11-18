@@ -842,6 +842,7 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             return st.value(QStringLiteral("AvpnBypass/masterOn"), false).toBool();
         },
         this);
+    connect(m_ruSentinel, &RuSplitSentinel::sitesStateChanged, this, &AvpnEngineQml::changed);
     connect(this, &AvpnEngineQml::changed, this, [this] {
         const QString st = state();
         if (m_ruSentinel)
@@ -3370,6 +3371,18 @@ static QString physicalSubnet(const QString &kind)
         }
     }
     return QString();
+}
+
+QString AvpnEngineQml::ruSitesState() const
+{
+    return m_ruSentinel ? m_ruSentinel->sitesState() : QStringLiteral("unknown");
+}
+
+// The network chip (Scanner variant B): the radio generation of a cellular network, from the same inputs as
+// networkKind() and the path engine's network key ("" when the kind is not cellular or the generation is unknown).
+QString AvpnEngineQml::netRadio() const
+{
+    return avpn::cellularGenerationForKind(networkKind(), avpn::cellularGeneration());
 }
 
 avpn::path::NetworkObservation AvpnEngineQml::currentNetworkObservation() const

@@ -147,6 +147,10 @@ class AvpnEngineQml : public QObject {
     // Path engine (design 2026-11-17): "checked N of M" of the attempt in progress (0/0 = no walk) - the caption
     // under the orb.
     Q_PROPERTY(int attemptChecked READ attemptChecked NOTIFY changed)
+    // Scanner variant B: the background RU-sites check for the home banner - "ok" | "bad" | "unknown".
+    Q_PROPERTY(QString ruSitesState READ ruSitesState NOTIFY changed)
+    // The radio generation of a cellular network ("5g" | "lte" | "3g" | "2g"; "" otherwise), from networkKind()'s inputs.
+    Q_PROPERTY(QString netRadio READ netRadio NOTIFY changed)
     Q_PROPERTY(int attemptTotal READ attemptTotal NOTIFY changed)
     Q_PROPERTY(QVariantList nodePool READ nodePool NOTIFY changed)
     // AVPN (live-node picker): Pro-гейт-заглушка. Сейчас всегда true (trial выбирает уже сейчас);
@@ -421,6 +425,8 @@ public:
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
     int attemptChecked() const { return m_engine.attemptChecked(); }
+    QString ruSitesState() const;
+    QString netRadio() const;
     int attemptTotal() const { return m_engine.attemptTotal(); }
     QVariantList nodePool() const;
     // The signal a node shows on the Connect card and in its server list row - one rule (NodeRanking.h::nodeFigure):

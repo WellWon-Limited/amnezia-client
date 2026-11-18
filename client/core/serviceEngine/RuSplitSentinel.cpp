@@ -112,6 +112,18 @@ void RuSplitSentinel::finishRound()
         m_inFlight = false;
         const int code = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         m_tunnelAlive = (rep->error() == QNetworkReply::NoError && code > 0);
+        {
+            int bad = 0;
+            for (const auto &p : m_round)
+                bad += rusentinel::probeOk(p.cls) ? 0 : 1;
+            const QString next = !m_tunnelAlive || m_round.isEmpty() ? QStringLiteral("unknown")
+                               : 2 * bad >= int(m_round.size()) ? QStringLiteral("bad")
+                                                                : QStringLiteral("ok");
+            if (next != m_sitesState) {
+                m_sitesState = next;
+                emit sitesStateChanged();
+            }
+        }
 
         QSettings st;
         const qint64 today = QDateTime::currentSecsSinceEpoch() / 86400;

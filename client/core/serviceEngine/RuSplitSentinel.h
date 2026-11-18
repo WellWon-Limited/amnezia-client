@@ -131,6 +131,14 @@ public:
     // Дёргается из движка на каждом changed(): сам детектит фронт connected/idle.
     void onTunnelStateChanged(const QString &state);
 
+    // Scanner variant B (18.11): the last round's answer for the home banner - "ok" (the watched RU sites open),
+    // "bad" (at least half of them do not open while the tunnel itself is alive: «Сайты РФ сейчас не открываются»),
+    // "unknown" (no round yet, the internet itself was down, or the RU-sites switch is off).
+    QString sitesState() const { return m_masterOn && !m_masterOn() ? QStringLiteral("unknown") : m_sitesState; }
+
+signals:
+    void sitesStateChanged();
+
 private:
     void scheduleRun(int delayMs);
     void runProbes();
@@ -151,6 +159,7 @@ private:
     QList<Probe> m_round;
     int m_pending = 0;
     bool m_tunnelAlive = false;
+    QString m_sitesState = QStringLiteral("unknown");
 };
 
 } // namespace avpn
