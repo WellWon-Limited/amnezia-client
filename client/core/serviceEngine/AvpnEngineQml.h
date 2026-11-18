@@ -1075,6 +1075,7 @@ private:
     bool m_exactRestoreArmed = false;  // R3: a Scanner row's request is running
     QString m_exactRestorePin;         // R3: the choice before it
     void endExactRowRequest(bool connected);
+    void endScanRowRequest(const QString &node, const char *why); // S1: the one end of a Scanner row's request
     qint64 m_verifyWallStartMs = 0;  // R1: wall clock at the start of the data check
     qint64 m_verifyRxStart = -1;     // R1: the tunnel's receive counter then (-1 = unknown)       // (c) of 18.11: a Scanner network notice waits for our tunnel to settle
     void guardedStart();   // поднять туннель (startFlow→connect→up): op-in-flight + сторож

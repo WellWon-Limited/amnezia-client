@@ -1125,9 +1125,10 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
     m_configSvc = new avpn::ConfigService(m_nam, m_baseUrl, kConfigPubKeyHex, kBakedEdges, this, devApi);
     // AVPN upstream nodes: lease / standby / probe I/O with the same client, key and token as /v1 calls.
     // The direct base is read at each call (edge walk moves m_baseUrl).
-    // R1a: a lease acquire for a new leg and a release after a stop are DIRECT requests - the direct edge, never the
-    // session edge of a tunnel that is (still) up.
-    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->directBaseUrl() : m_baseUrl; },
+    // S1 (device round 5): by the route the request takes NOW - through a tunnel that carries requests (seat-first
+    // while the live session stays up) the edge reachable from its exit, otherwise the direct edge (a new leg, a
+    // release after a stop: the session edge is cleared outside the carrying phase - syncControlPlaneEdge).
+    m_tunnel.configureUpstream(m_nam, [this]() { return m_configSvc ? m_configSvc->activeBaseUrl() : m_baseUrl; },
                                kConfigPubKeyHex,
                                [this]() { return authToken(); });
     // AVPN (разбор 2026-09-23): IP ВСЕХ edge-кандидатов — в carve-out заранее: любой обычный старт
@@ -3240,6 +3241,24 @@ void AvpnEngineQml::pathProbeResult(const path::ProbeStamp &stamp, path::PathOut
         QTimer::singleShot(0, this, [this]() { reconcile(); });
 }
 
+// S1 (device round 5): the ONE way a Scanner row's request ends without a connect - the row is told it failed and
+// the chain is over (a row stayed «Подключение…» for minutes after seat-first failed with the live tunnel kept).
+void AvpnEngineQml::endScanRowRequest(const QString &node, const char *why)
+{
+    if (!m_scanRow.active)
+        return;
+    m_scanRow.active = false;
+    const QString n = node.isEmpty() ? m_scanRow.tapped : node;
+    scanJournal(QStringLiteral("scan_row_failed reason=scan_row node=%1 why=%2").arg(n, QLatin1String(why)),
+                {{QStringLiteral("event"), QStringLiteral("row_failed")}, {QStringLiteral("reason"), QStringLiteral("scan_row")},
+                 {QStringLiteral("node"), n}, {QStringLiteral("why"), QLatin1String(why)}});
+    if (m_scanner) {
+        if (!n.isEmpty() && !m_scanRow.reported.contains(n))
+            m_scanner->connectFailed(n);
+        m_scanner->attemptEnded();
+    }
+}
+
 // R3 (device round 4): the end of a Scanner row's one request.
 void AvpnEngineQml::endExactRowRequest(bool connected)
 {
@@ -3313,6 +3332,8 @@ bool AvpnEngineQml::syncAttempt()
         changedAny = true;
         if (m_exactRestoreArmed && r->reason != avpn::path::FailReason::StoppedByUser)
             endExactRowRequest(r->connected);
+        if (!r->connected && r->reason != avpn::path::FailReason::StoppedByUser)
+            endScanRowRequest(QString(), "attempt_failed"); // S1: the owner's terminal result ends the row's request
         const QString lang = appLang();
         if (r->connected) {
             if (r->fallbackNotice) {
@@ -11904,7 +11925,14 @@ void AvpnEngineQml::onUpstreamPrepared(const QString &nodeId, quint64 prepareId,
             m_engine.clearPin();
         if (p.persistPin)
             persistPin();
-        emit changed(); // scanSyncState: the tapped row ends failed, the live connection stays
+        // S1 (device round 5): the tapped row's request ends here - it never reached the owner, the live tunnel stays
+        if (m_exactRestoreArmed) {
+            m_exactRestoreArmed = false;
+            m_exactRow.clear();
+            syncChoice();
+        }
+        endScanRowRequest(nodeId, "seat_first_failed");
+        emit changed();
         return;
     }
     }
