@@ -225,6 +225,7 @@ struct Server {
     QHash<QString, QByteArray> configs; // profile id -> the normalized config a probe grant carries (+ its sha256)
     QJsonObject numbers;  // manifest numbers
     bool scopeApi = false;  // contract 1.14.0: /v1/scan/pool and /v1/scan/candidates answer (else 404: an older server)
+    QJsonArray extraUpstream; // provider rows only /v1/scan/candidates offers (beyond the manifest's)
     QList<QJsonObject> candidateRequests;
     int manifestStatus = 0; // non-zero: /v1/scan/manifest answers this status (no body)
     int tokenStatus = 0;    // non-zero: /v1/scan/token answers this status
@@ -381,7 +382,10 @@ struct Server {
                 else
                     ++left;
             }
-            for (const QJsonValue &v : upstream) {
+            QJsonArray allUp = upstream;
+            for (const QJsonValue &v : extraUpstream)
+                allUp << v;
+            for (const QJsonValue &v : allUp) {
                 QJsonObject u = v.toObject();
                 const QString id = QStringLiteral("up:") + u.value("profile_id").toString();
                 if (seen.contains(id) || (!cc.isEmpty() && u.value("country_code").toString() != cc))
@@ -3798,6 +3802,10 @@ static void caseServerScope()
         w.server.scopeApi = true;
         w.poolOnOpen = true;
         w.server.numbers.insert(QStringLiteral("scan_stop_works"), 2); // the first screen stops early: rows are left
+        QJsonObject extra = w.server.upstream.at(0).toObject(); // a profile beyond the manifest's rows (and the 24 stubs)
+        extra.insert("profile_id", "abcdefabcdefabcd");
+        w.server.extraUpstream << extra;
+        w.host.outcomes.insert(QStringLiteral("up:abcdefabcdefabcd"), Outcome{true, 90, 500});
         w.start();
         w.s->open();
         w.run(20000);
@@ -3822,6 +3830,12 @@ static void caseServerScope()
                 if (l.contains(QLatin1String("candidates")) || l.contains(QLatin1String("find_more")))
                     std::fprintf(stderr, "  log: %s\n", qPrintable(l));
         CHECK(!w.engine.offered.isEmpty()); // the batch's provider rows: their nodes are in the engine's pool
+        bool extraProbed = false; // a row beyond the manifest: probed with its own projection's leg (device 18.11 bug)
+        for (const QJsonObject &rq : w.host.requests)
+            for (const QJsonValue &c : rq.value("candidates").toArray())
+                extraProbed = extraProbed || (c.toObject().value("id").toString() == QLatin1String("up:abcdefabcdefabcd")
+                                              && !c.toObject().value("config").toString().isEmpty());
+        CHECK(extraProbed);
         const QString state = QJsonObject::fromVariantMap(w.s->view().value(QStringLiteral("more")).toMap()).value("state").toString();
         CHECK(state == "exhausted" || state == "available");
         w.s->close();

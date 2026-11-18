@@ -198,6 +198,7 @@ public:
         bool ok = false;
         QString reason;
         ScanCandidatesView view;
+        QJsonObject body;          // the verified body (SECRET: the provider rows' projections - their leg configs)
         qint64 bytes = 0;
         int status = 0;
     };

@@ -1824,6 +1824,16 @@ void TribeScanner::doCandidates(const ScanAction &a)
         if (!self)
             return;
         if (r.ok) {
+            // The batch's provider rows carry their projections (the leg configs the probes dial): they join the
+            // active scan body the configs are taken from (scanProviderLegConfig), next to the manifest's rows.
+            QJsonArray ups = self->m_active.body.value(QLatin1String("upstream")).toArray();
+            QSet<QString> have;
+            for (const QJsonValue &v : ups)
+                have.insert(v.toObject().value(QLatin1String("profile_id")).toString());
+            for (const QJsonValue &v : r.body.value(QLatin1String("upstream")).toArray())
+                if (!have.contains(v.toObject().value(QLatin1String("profile_id")).toString()))
+                    ups << v;
+            self->m_active.body.insert(QStringLiteral("upstream"), ups);
             if (!r.view.providerNodes.isEmpty())
                 self->m_engine->offerScanNodes(r.view.providerNodes);
             self->dispatch(self->m_m.candidatesReady(id, r.view, r.bytes, self->now()));
@@ -1844,7 +1854,7 @@ void TribeScanner::fetchPoolIfStale()
     if (m_poolAt >= 0 && t - m_poolAt < 10 * 60 * 1000)
         return;
     bool cellular = false;
-    const qint64 cost = m_m.tunables().costApiBytes;
+    const qint64 cost = 4 * qint64(m_m.tunables().costApiBytes); // counts only, but the TLS estimate is counted too
     if (!admitOutsideScan(cost, &cellular))
         return;
     m_poolAt = t;
