@@ -309,14 +309,15 @@ public:
     // The display name the Connect card would show for a pool row (pickerDisplay / upstreamDisplayName).
     QString rowLabel(const DebugSnapshot &s, const NodeDebugRow &r) const
     {
-        const QString country = doctor::countryDisplayName(r.countryCode, m_e->appLang());
+        const QString lang = m_e->appLang();
+        const QString country = doctor::countryDisplayName(r.countryCode, lang);
         if (r.upstream)
             return m_e->upstreamRowName(r.name, r.upstreamLabelCustom, r.upstreamOrdinal, r.upstreamKind, r.countryCode);
-        QList<PickerRow> loc{{r.location, r.proto, r.name, country, -1}};
+        QList<PickerRow> loc{{r.location, r.proto, doctor::localizedNodeLabel(r.name, r.countryCode, lang), country, -1}};
         if (r.name.isEmpty() && !r.location.isEmpty())
             for (const NodeDebugRow &o : s.pool)
                 if (&o != &r && o.location == r.location)
-                    loc.append({o.location, o.proto, o.name, QString(), -1});
+                    loc.append({o.location, o.proto, doctor::localizedNodeLabel(o.name, o.countryCode, lang), QString(), -1});
         return pickerDisplay(loc).constFirst().name;
     }
 
@@ -382,49 +383,62 @@ static QString physicalKindFromInterfaces()
     return physicalUplinkKind(list);
 }
 
-ScanNetFacts ScanEngineAdapter::network() const
-{
-    ScanNetFacts f;
-    const QString platformMedium = m_e->doctorNetType();
-    if (!m_e->m_scanSwitches.scanner) {
-        f.kind = scanNetKindFrom(platformMedium);
-        f.reportingKey = m_e->upstreamNetworkKeyNow();
-        return f; // the Scanner does not exist: no path monitor is touched for it
-    }
-    QString pathKind, interfacesKind;
-#if defined(Q_OS_IOS)
+// The inputs of the network kind (scanNetworkKindPick) and the app's network element the Scanner also needs.
+struct NetKindInputs {
+    QString pathKind;
+    QString interfacesKind;
+    bool hasApp = false;
     ScanNetSource app;
-    if (IosScanHost::appGeneration(app))
-        f.appSources << app;
+    QString gatewayHash; // macOS path monitor only ("" = none)
+};
+
+static NetKindInputs netKindInputs()
+{
+    NetKindInputs in;
+#if defined(Q_OS_IOS)
+    in.hasApp = IosScanHost::appGeneration(in.app);
     // The app's own path monitor (virtual interfaces prohibited): the physical kind under the VPN. The platform
     // medium is the fallback only - CoreTelephony makes it "cellular" whenever a radio is known, Wi-Fi or not.
-    pathKind = IosScanHost::appPathKind();
+    in.pathKind = IosScanHost::appPathKind();
 #elif defined(Q_OS_ANDROID)
     // AVPN Scanner (lane A3): the app process's element and the physical kind of the UNDERLYING network (the VPN
     // network excluded, NetworkState.kt ScanAppNetwork); the platform medium is the fallback only.
-    ScanNetSource app;
-    QString appKind;
-    if (AndroidScanHost::appGeneration(app, &appKind))
-        f.appSources << app;
-    pathKind = appKind;
+    in.hasApp = AndroidScanHost::appGeneration(in.app, &in.pathKind);
 #else
     // macOS desktop: the authoritative nw_path_monitor (utun/ipsec/ppp excluded; under the Mac's own VPN its kind
     // comes from the route table's physical default route); the QNetworkInformation fallback of the other
     // platforms has no source (epoch 0) - their element comes from their own lane.
     const UplinkMonitor *m = UplinkMonitor::instance();
     if (m->pathEpoch() != 0) {
-        ScanNetSource app;
-        app.source = QStringLiteral("app");
-        app.epoch = m->pathEpoch();
-        app.counter = m->pathCounter();
-        f.appSources << app;
-        f.gatewayHash = m->pathGatewayHash();
-        pathKind = m->pathKind();
+        in.hasApp = true;
+        in.app.source = QStringLiteral("app");
+        in.app.epoch = m->pathEpoch();
+        in.app.counter = m->pathCounter();
+        in.gatewayHash = m->pathGatewayHash();
+        in.pathKind = m->pathKind();
     }
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
-    interfacesKind = physicalKindFromInterfaces();
+    in.interfacesKind = physicalKindFromInterfaces();
 #endif
 #endif
+    return in;
+}
+
+ScanNetFacts ScanEngineAdapter::network() const
+{
+    ScanNetFacts f;
+    const QString platformMedium = m_e->platformNetKind();
+    if (!m_e->m_scanSwitches.scanner) {
+        f.kind = scanNetKindFrom(platformMedium);
+        f.reportingKey = m_e->upstreamNetworkKeyNow();
+        return f; // the Scanner does not exist: its facts are not asked for
+    }
+    const NetKindInputs in = netKindInputs();
+    if (in.hasApp)
+        f.appSources << in.app;
+    f.gatewayHash = in.gatewayHash;
+    const QString &pathKind = in.pathKind;
+    const QString &interfacesKind = in.interfacesKind;
     const ScanKindPick pick = scanNetworkKindPick(pathKind, interfacesKind, platformMedium);
     if (pick.disagree) {
         const QString pair = pathKind + QLatin1Char('/') + interfacesKind;
@@ -1733,9 +1747,12 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             }
         });
     }
+    // Start the app's path monitor now (iOS nw_path_monitor, Android ScanAppNetwork): its first path arrives
+    // asynchronously, and until then networkKind() can only fall back to the platform medium.
+    (void)networkKind();
     if (auto *ni = QNetworkInformation::instance()) {
-        auto netEvent = [ni]() {
-            QString reach, medium;
+        auto netEvent = [this, ni]() {
+            QString reach;
             switch (ni->reachability()) {
             case QNetworkInformation::Reachability::Online: reach = QStringLiteral("online"); break;
             case QNetworkInformation::Reachability::Disconnected: reach = QStringLiteral("disconnected"); break;
@@ -1743,18 +1760,15 @@ AvpnEngineQml::AvpnEngineQml(VpnConnection *conn, SecureAppSettingsRepository *s
             case QNetworkInformation::Reachability::Site: reach = QStringLiteral("site"); break;
             default: reach = QStringLiteral("unknown"); break;
             }
-            switch (ni->transportMedium()) {
-            case QNetworkInformation::TransportMedium::WiFi: medium = QStringLiteral("wifi"); break;
-            case QNetworkInformation::TransportMedium::Cellular: medium = QStringLiteral("cellular"); break;
-            case QNetworkInformation::TransportMedium::Ethernet: medium = QStringLiteral("ethernet"); break;
-            default: medium = QStringLiteral("unknown"); break;
-            }
+            // The physical network (networkKind - the Scanner's answer; Qt's medium is Unknown under any VPN on
+            // iOS) and the radio generation only on cellular (CoreTelephony names it on Wi-Fi too).
+            const QString kind = networkKind();
             // Оператор (MCC-MNC) и поколение сотовой — отличить блокировку оператором от сбоя ноды.
             avpn::TribeJournal::append(QStringLiteral("net"),
                                        {{QStringLiteral("reach"), reach},
-                                        {QStringLiteral("medium"), medium},
+                                        {QStringLiteral("medium"), kind.isEmpty() ? QStringLiteral("unknown") : kind},
                                         {QStringLiteral("carrier"), avpn::carrierCode()},
-                                        {QStringLiteral("gen"), avpn::cellularGeneration()},
+                                        {QStringLiteral("gen"), avpn::cellularGenerationForKind(kind, avpn::cellularGeneration())},
                                         {QStringLiteral("metered"), avpn::meteredState()}});
         };
         connect(ni, &QNetworkInformation::reachabilityChanged, this, netEvent);
@@ -2681,12 +2695,13 @@ QVariantMap AvpnEngineQml::currentNode() const
     // sibling), else the country name - never the region code (NodeRanking.h::pickerDisplay).
     QString pickName;
     if (pick) {
-        QList<PickerRow> loc{{pick->location, pick->proto, pick->name,
-                              doctor::countryDisplayName(pick->countryCode, appLang()), -1}};
+        const QString lang = appLang();
+        QList<PickerRow> loc{{pick->location, pick->proto, doctor::localizedNodeLabel(pick->name, pick->countryCode, lang),
+                              doctor::countryDisplayName(pick->countryCode, lang), -1}};
         if (pick->name.isEmpty() && !pick->location.isEmpty())
             for (const NodeDebugRow &r : s.pool)
                 if (&r != pick && r.location == pick->location)
-                    loc.append({r.location, r.proto, r.name, QString(), -1});
+                    loc.append({r.location, r.proto, doctor::localizedNodeLabel(r.name, r.countryCode, lang), QString(), -1});
         pickName = pickerDisplay(loc).constFirst().name;
         if (pick->upstream) // release A: the same name as its row in the server list
             pickName = upstreamRowName(pick->name, pick->upstreamLabelCustom, pick->upstreamOrdinal,
@@ -2726,7 +2741,21 @@ QVariantMap AvpnEngineQml::currentNode() const
     }
     node["nextProto"]        = nextProto;
     node["nextProtoVersion"] = nextProtoVersion;
+    // The figure its server list row shows (nodePool): a provider node - the Scanner's latest result on this
+    // network, own - the off-tunnel ICMP RTT; -1 = none. The card reads it through nodeFigure (one rule).
+    int listRtt = -1;
+    if (pick)
+        listRtt = pick->upstream ? ((m_scanner && m_scanSwitches.scanner) ? m_scanner->listFigures().value(pick->nodeId, -1) : -1)
+                                 : m_engine.measuredRtt().value(pick->nodeId, -1);
+    node["measuredRttMs"] = listRtt;
     return node;
+}
+
+QVariantMap AvpnEngineQml::nodeFigure(bool upstream, bool currentLive, bool liveReachable, bool liveDead, int liveRttMs,
+                                      int liveBars, int listRttMs) const
+{
+    const avpn::NodeFigure f = avpn::nodeFigure(upstream, currentLive, liveReachable, liveDead, liveRttMs, liveBars, listRttMs);
+    return {{QStringLiteral("ms"), f.ms}, {QStringLiteral("bars"), f.bars}, {QStringLiteral("failed"), f.failed}};
 }
 
 // AVPN: весь пул нод для страницы «Серверы» / шторки выбора.
@@ -2746,9 +2775,10 @@ QVariantList AvpnEngineQml::nodePool() const
     display.reserve(pool.size());
     for (const QVariant &v : std::as_const(pool)) {
         const QVariantMap n = v.toMap();
+        const QString cc = n.value(QStringLiteral("countryCode")).toString();
         display.append({n.value(QStringLiteral("location")).toString(), n.value(QStringLiteral("proto")).toString(),
-                        n.value(QStringLiteral("name")).toString(),
-                        doctor::countryDisplayName(n.value(QStringLiteral("countryCode")).toString(), lang),
+                        doctor::localizedNodeLabel(n.value(QStringLiteral("name")).toString(), cc, lang),
+                        doctor::countryDisplayName(cc, lang),
                         measured.value(n.value(QStringLiteral("nodeId")).toString(), -1)});
     }
     display = pickerDisplay(display);
@@ -3592,6 +3622,7 @@ void AvpnEngineQml::syncJournal()
     avpn::TribeJournal::setActive(on, m_store && m_store->isSaveLogs());
     if (on && !was) {
         m_journalLastState = state();
+        const QString netKind = networkKind();
         avpn::TribeJournal::append(QStringLiteral("journal_on"),
                                    {{QStringLiteral("forced"), journalForced()},
                                     {QStringLiteral("testflight"), avpn::TribeJournal::isTestFlight()},
@@ -3600,7 +3631,8 @@ void AvpnEngineQml::syncJournal()
                                     {QStringLiteral("os"), QSysInfo::productVersion()},
                                     {QStringLiteral("device"), avpn::deviceMarketingName()},
                                     {QStringLiteral("carrier"), avpn::carrierCode()},
-                                    {QStringLiteral("gen"), avpn::cellularGeneration()},
+                                    {QStringLiteral("net"), netKind.isEmpty() ? QStringLiteral("unknown") : netKind},
+                                    {QStringLiteral("gen"), avpn::cellularGenerationForKind(netKind, avpn::cellularGeneration())},
                                     {QStringLiteral("tunnel"), m_journalLastState}});
         m_journalTimer.start();
         QTimer::singleShot(0, this, [this]() { m_journal->flush(QStringLiteral("enabled")); });
@@ -3941,28 +3973,15 @@ QJsonObject AvpnEngineQml::benchExtra() const
                 extra.insert(QStringLiteral("node_rtt_cache"), rtts);
         }
     }
-    // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить
-    static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
-    if (niLoaded) {
-        if (auto *ni = QNetworkInformation::instance()) {
-            switch (ni->transportMedium()) {
-            case QNetworkInformation::TransportMedium::Ethernet:  extra.insert(QStringLiteral("net_type"), QStringLiteral("ethernet")); break;
-            case QNetworkInformation::TransportMedium::WiFi:      extra.insert(QStringLiteral("net_type"), QStringLiteral("wifi")); break;
-            case QNetworkInformation::TransportMedium::Cellular:  extra.insert(QStringLiteral("net_type"), QStringLiteral("cellular")); break;
-            default: break; // unknown/bluetooth — не пишем, чтобы не врать
-            }
-        }
-    }
-    // Волна UX Доктора 07-22: iOS на сотовой отдаёт Unknown из QNetworkInformation («сеть
-    // доступна» вместо «сотовая» — жалоба владельца). Деривация из CoreTelephony: поколение
-    // сотовой непусто ⇒ мы на сотовой (работает и под VPN). Последний фолбэк — ручной выбор
-    // в интро Доктора (не персистится: сеть могла смениться между запусками).
-    if (!extra.contains(QStringLiteral("net_type"))) {
-        if (!avpn::cellularGeneration().isEmpty())
-            extra.insert(QStringLiteral("net_type"), QStringLiteral("cellular"));
-        else if (!m_diagNetManual.isEmpty())
-            extra.insert(QStringLiteral("net_type"), m_diagNetManual);
-    }
+    // тип сети: Wi-Fi и сотовая несравнимы между собой — без этого поля два замера не сопоставить.
+    // The physical kind (networkKind, the Scanner's order): Qt's medium is Unknown under any VPN on iOS and
+    // CoreTelephony names a radio on Wi-Fi too, so neither alone says what carries the data. Unknown -> the
+    // Doctor's manual choice (not persisted: the network may change between launches), else nothing.
+    const QString netKind = networkKind();
+    if (!netKind.isEmpty())
+        extra.insert(QStringLiteral("net_type"), netKind);
+    else if (!m_diagNetManual.isEmpty())
+        extra.insert(QStringLiteral("net_type"), m_diagNetManual);
     // AVPN (BUG-4 auto-heal): сколько раз за запуск heal ребайндил сокет — в каждый отчёт
     // (паттерн «оператор×нода×heal помог/нет» ищется по bench_reports без релиза).
     if (m_engine.rebindHealTotal() > 0)
@@ -10581,10 +10600,12 @@ void AvpnEngineQml::docNetMaybeDone()
 {
     if (m_docNetPending > 0 && --m_docNetPending > 0)
         return; // ждём вторую параллельную пробу
+    const QJsonObject extra = benchExtra();
+    const QString netType = extra.value(QStringLiteral("net_type")).toString();
     docStageDone(doctor::networkStage(
-        m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
-        avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
-        benchExtra().value(QStringLiteral("carrier")).toString(), detectLanIpv6()));
+        m_docNetCaptive, netType,
+        avpn::cellularGenerationForKind(netType, avpn::cellularGeneration()), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
+        extra.value(QStringLiteral("carrier")).toString(), detectLanIpv6()));
 }
 
 void AvpnEngineQml::docStartConnect()
@@ -10889,14 +10910,17 @@ void AvpnEngineQml::docGuardFired()
 {
     // стадия не уложилась в сторож: честный частичный вердикт, диагностика продолжается
     switch (m_docPhase) {
-    case DoctorPhase::Network:
+    case DoctorPhase::Network: {
         // собираем что успели (незавершённые пробы останутся -1 — честно)
         m_docNetPending = 0;
+        const QJsonObject extra = benchExtra();
+        const QString netType = extra.value(QStringLiteral("net_type")).toString();
         docStageDone(doctor::networkStage(
-            m_docNetCaptive, benchExtra().value(QStringLiteral("net_type")).toString(),
-            avpn::cellularGeneration(), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
-            benchExtra().value(QStringLiteral("carrier")).toString(), detectLanIpv6()));
+            m_docNetCaptive, netType,
+            avpn::cellularGenerationForKind(netType, avpn::cellularGeneration()), avpn::meteredState(), avpn::roamingState(), m_docNetWl,
+            extra.value(QStringLiteral("carrier")).toString(), detectLanIpv6()));
         break;
+    }
     case DoctorPhase::Connect: {
         // сторож: либо не поднялись (45с), либо зависла проба данных (15с) — вердикт по факту
         m_docConnecting = false;
@@ -11570,6 +11594,30 @@ QString AvpnEngineQml::doctorNetType() const
     if (!avpn::cellularGeneration().isEmpty())
         return QStringLiteral("cellular");
     return {};
+}
+
+QString AvpnEngineQml::platformNetKind() const
+{
+    QString qtMedium;
+    static const bool niLoaded = QNetworkInformation::loadDefaultBackend();
+    if (niLoaded) {
+        if (auto *ni = QNetworkInformation::instance()) {
+            switch (ni->transportMedium()) {
+            case QNetworkInformation::TransportMedium::Ethernet: qtMedium = QStringLiteral("ethernet"); break;
+            case QNetworkInformation::TransportMedium::WiFi:     qtMedium = QStringLiteral("wifi"); break;
+            case QNetworkInformation::TransportMedium::Cellular: qtMedium = QStringLiteral("cellular"); break;
+            default: break;
+            }
+        }
+    }
+    const bool ownTunnelUp = m_lastTunnelState != Vpn::Disconnected && m_lastTunnelState != Vpn::Unknown;
+    return avpn::platformNetworkKind(qtMedium, avpn::cellularGeneration(), ownTunnelUp);
+}
+
+QString AvpnEngineQml::networkKind() const
+{
+    const NetKindInputs in = netKindInputs();
+    return avpn::scanNetworkKindPick(in.pathKind, in.interfacesKind, platformNetKind()).kind;
 }
 
 // Ручной тип сети из интро. НЕ персистится (сеть меняется между запусками) — живёт до

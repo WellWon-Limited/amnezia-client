@@ -128,7 +128,7 @@ Item {
         netChoice = ""
         nodeTab = 0
         // тип сети замеряем на момент открытия; выбранный ранее оператор — из настроек
-        autoNet = hasEngine ? TribeEngine.doctorNetType() : "wifi"
+        autoNet = hasEngine ? TribeEngine.networkKind() : "wifi"
         carrierSel = hasEngine ? TribeEngine.diagCarrier() : ""
         opened = true
         depthIndex = PageController.incrementDrawerDepth()

@@ -414,6 +414,10 @@ public:
     // AVPN: реальные серверы для UI (карточка Connect + страница Серверы).
     QVariantMap currentNode() const;
     QVariantList nodePool() const;
+    // The signal a node shows on the Connect card and in its server list row - one rule (NodeRanking.h::nodeFigure):
+    // {ms, bars, failed}; listRttMs = the row's figure (nodePool / currentNode measuredRttMs).
+    Q_INVOKABLE QVariantMap nodeFigure(bool upstream, bool currentLive, bool liveReachable, bool liveDead,
+                                       int liveRttMs, int liveBars, int listRttMs) const;
     // AVPN (live-node picker): Pro-гейт-заглушка — выбор сервера доступен (сейчас всегда true).
     bool proSelectionEnabled() const { return true; }
     // AVPN (store-flow): compile-time флаг store-сборки (см. Q_PROPERTY storeBuild выше).
@@ -628,7 +632,14 @@ public:
     // AVPN (волна UX Доктора 07-22): интро-шаги. Авто-тип сети ("wifi"/"cellular"/"ethernet"/"" =
     // неизвестно) — по нему интро решает, спрашивать ли «какой у вас интернет». Ручной выбор НЕ
     // персистится (сеть меняется между запусками) — benchExtra берёт его последним фолбэком.
+    // Only the network-memory keys still read it (currentNetworkMemoryKey, upstreamNetworkKeyNow): under the
+    // tunnel its CoreTelephony fallback says "cellular" on Wi-Fi. Every other reader uses networkKind().
     Q_INVOKABLE QString doctorNetType() const;
+    // The one answer to "what network is the device on" ("wifi" | "cellular" | "ethernet" | "" = unknown): the
+    // physical kind under any VPN, the order the Scanner uses (scanNetworkKindPick: the path monitor, the
+    // interface list, then platformNetworkKind). The journal, the reports and the Doctor read it.
+    Q_INVOKABLE QString networkKind() const;
+    QString platformNetKind() const; // the last input of networkKind (DebugSnapshot.h::platformNetworkKind)
     Q_INVOKABLE void setDiagNetType(const QString &t);
     // Операторы РФ для плашки интро (server-driven lists.doctor_operators "MCC-MNC|Имя").
     Q_INVOKABLE QVariantList diagOperators() const;

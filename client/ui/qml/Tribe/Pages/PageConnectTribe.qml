@@ -848,6 +848,10 @@ PageType {
                                     ? qsTr("Трафик шёл мимо VPN — пробуем другой путь")
                                     : qsTr("Сервер не пропускает данные — пробуем другой путь"))
               : root.whitelistModeNow ? qsTr("Сеть ограничена оператором — подключитесь к Wi-Fi")
+              // Device test of 142: while the orb said «Connecting…» the caption still asked to tap it. The
+              // caption follows the orb's phase: our own stop, taking over a live session, connecting.
+              : root.engineOwnStopping ? qsTr("Отключаемся…")
+              : root.showBusy ? (root.adopting ? qsTr("Проверяем…") : qsTr("Подключаемся…"))
               : root.isOn ? (root.liveDeadNow ? qsTr("Подключено, трафик не проходит")
                                               : qsTr("Защита активна — ваше соединение безопасно"))
                           : (root.subEnforcedStopNow ? qsTr("Доступ приостановлен — подписка истекла")
@@ -935,6 +939,14 @@ PageType {
                     readonly property bool reachable: root.hasEngine && TribeEngine.liveReachable === true
                     // мёртвая связь = движок подтвердил неудачу пробы (kLiveDeadStreak подряд). // AVPN
                     readonly property bool dead: root.hasEngine && TribeEngine.liveDead === true
+                    // Device test of 142: the bars and ms follow the same rule as this node's server list row
+                    // (TribeEngine.nodeFigure): a provider node shows its Scanner figure or none, never the live
+                    // probe; our own node the live probe; a dead probe red bars.
+                    readonly property var fig: root.hasEngine
+                        ? TribeEngine.nodeFigure(root.curNode.upstream === true, infoCol.sig, infoCol.reachable,
+                                                 infoCol.dead, Number(TribeEngine.liveRttMs), Number(TribeEngine.liveBars),
+                                                 root.curNode.measuredRttMs === undefined ? -1 : Number(root.curNode.measuredRttMs))
+                        : ({ ms: -1, bars: -1, failed: false })
                     readonly property real cellH: onlineBadge.implicitHeight
 
                     Item {
@@ -982,9 +994,10 @@ PageType {
                                     id: topBars
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
-                                    // мёртвая связь → 0 зелёных + красные; иначе мин. 1 зелёная, reachable уточняет 1..5. // AVPN
-                                    failed: infoCol.dead
-                                    level: infoCol.dead ? 0 : (infoCol.reachable ? Math.max(1, Number(TribeEngine.liveBars)) : 1)
+                                    // мёртвая связь → красные; своя нода — живая проба (мин. 1), провайдерская —
+                                    // цифра сканера или пустой трек (nodeFigure). // AVPN
+                                    failed: infoCol.fig.failed === true
+                                    level: Math.max(0, Number(infoCol.fig.bars))
                                 }
                             }
                             Item {
@@ -994,8 +1007,8 @@ PageType {
                                     id: msText
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
-                                    visible: infoCol.reachable && Number(TribeEngine.liveRttMs) >= 0
-                                    text: (root.hasEngine ? Number(TribeEngine.liveRttMs) : 0) + qsTr(" мс")
+                                    visible: Number(infoCol.fig.ms) >= 0
+                                    text: Number(infoCol.fig.ms) + qsTr(" мс")
                                     color: root.slate500
                                     font.family: Theme.font.mono; font.pixelSize: Theme.font.micro
                                 }

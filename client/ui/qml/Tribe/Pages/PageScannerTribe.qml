@@ -551,9 +551,14 @@ PageType {
                     NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                     NumberAnimation { property: "y"; from: ViewTransition.destination.y + 8; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                 }
+                // A row added and moved again within the add animation (results arrive faster than 220 ms) had its
+                // add animation cut short and stayed half or fully transparent: an empty gap in the list that still
+                // took taps, while the row the person saw was elsewhere (device test of 142). The move animation
+                // finishes the arrival too (Qt ViewTransition, "Handling Interrupted Animations").
                 move: Transition {
                     enabled: !Theme.motion.reduceMotion
                     NumberAnimation { property: "y"; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "opacity"; to: 1; duration: Theme.motion.normal; easing.type: Easing.OutCubic }
                 }
             }
         }

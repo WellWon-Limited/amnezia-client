@@ -4,6 +4,7 @@
 // падает на утверждении (canAdoptObservedTunnel «manual OFF»).
 #include "../DebugSnapshot.h"
 #include "../DoctorReport.h"
+#include "../NodeRanking.h" // nodeFigure (U7)
 #include "../ReportDelivery.h"
 #include "../UplinkMonitor.h"
 #include "../UpstreamEngine.h" // upstreamNetworkKey (Scanner item 7)
@@ -1152,6 +1153,28 @@ static void scannerPhysicalNetworkKind()
     CHECK(upstreamNetworkKey(ios.kind, QStringLiteral("250-02"), QStringLiteral("lte"), 0).startsWith(QLatin1String("cell:250-02:")));
     ios = scanNetworkKindPick(QStringLiteral("cellular"), QString(), QStringLiteral("wifi"));
     CHECK(ios.kind == QLatin1String("cellular"));
+    // U1 (device test 142, iPhone Air on Wi-Fi with a SIM, VPN up): Qt's medium Unknown, CoreTelephony "lte".
+    // The platform input says "unknown" under our tunnel instead of guessing cellular...
+    CHECK(platformNetworkKind(QString(), QStringLiteral("lte"), /*ownTunnelUp=*/true).isEmpty());
+    // ...so a path monitor that has not answered yet leaves the kind unknown, never "cellular".
+    CHECK(scanNetworkKindPick(QString(), QString(), platformNetworkKind(QString(), QStringLiteral("lte"), true)).kind.isEmpty());
+    // The monitor's Wi-Fi wins and the report carries no radio generation for it.
+    ios = scanNetworkKindPick(QStringLiteral("wifi"), QString(), platformNetworkKind(QString(), QStringLiteral("lte"), true));
+    CHECK(ios.kind == QLatin1String("wifi"));
+    CHECK(cellularGenerationForKind(ios.kind, QStringLiteral("lte")).isEmpty());
+    // With the tunnel down Unknown + a radio is cellular (iOS reports Unknown on cellular), Qt's known medium wins.
+    CHECK(platformNetworkKind(QString(), QStringLiteral("lte"), false) == QLatin1String("cellular"));
+    CHECK(platformNetworkKind(QStringLiteral("wifi"), QStringLiteral("lte"), false) == QLatin1String("wifi"));
+    CHECK(platformNetworkKind(QStringLiteral("wifi"), QStringLiteral("lte"), true) == QLatin1String("wifi"));
+    CHECK(platformNetworkKind(QString(), QString(), false).isEmpty());
+    CHECK(cellularGenerationForKind(QStringLiteral("cellular"), QStringLiteral("lte")) == QLatin1String("lte"));
+    CHECK(cellularGenerationForKind(QString(), QStringLiteral("lte")).isEmpty());
+    // The Doctor's line in the support report: Wi-Fi with a SIM reads "Wi-Fi", not "сотовая LTE".
+    {
+        const auto st = doctor::networkStage(0, QStringLiteral("wifi"), cellularGenerationForKind(QStringLiteral("wifi"), QStringLiteral("lte")), -1, -1, -1);
+        CHECK(st.note == QStringLiteral("Сеть: Wi-Fi"));
+        CHECK(!st.data.contains(QStringLiteral("cellular_gen")));
+    }
     // The reporting key from the physical kind: never "unknown" for a Mac on Wi-Fi under its VPN.
     CHECK(upstreamNetworkKey(QStringLiteral("wifi"), QString(), QString(), 0) == QLatin1String("wifi"));
     CHECK(upstreamNetworkKey(QString(), QString(), QString(), 0) == QLatin1String("unknown"));
@@ -1359,6 +1382,33 @@ static void upstreamSeatFirstRule()
     CHECK(v.live && v.nodeId == QLatin1String("12:xray") && v.attemptNodeId == QLatin1String("up:aaaaaaaaaaaaaaa0"));
 }
 
+// U7 (device test of 142): the Connect card and the server list row show a node's signal by one rule.
+static void nodeFigureOneRule()
+{
+    // A connected provider node: the live probe answered 47 ms, the Scanner has no figure on this network ->
+    // nothing (the card showed 47 ms and green bars while its row showed "—").
+    NodeFigure f = nodeFigure(/*upstream=*/true, /*currentLive=*/true, true, false, 47, 5, -1);
+    CHECK(f.ms == -1 && f.bars == -1 && !f.failed);
+    // ...with a Scanner figure: that figure, on the card as in the row.
+    f = nodeFigure(true, true, true, false, 47, 5, 92);
+    CHECK(f.ms == 92 && f.bars == barsForNode(92));
+    const NodeFigure row = nodeFigure(true, false, true, false, 47, 5, 92);
+    CHECK(row.ms == f.ms && row.bars == f.bars);
+    // Our own node carrying the tunnel: the live probe; at least one bar before it answers, no figure then.
+    f = nodeFigure(false, true, true, false, 41, 4, 60);
+    CHECK(f.ms == 41 && f.bars == 4);
+    f = nodeFigure(false, true, false, false, -1, 0, 60);
+    CHECK(f.ms == -1 && f.bars == 1);
+    // A dead probe on the node carrying the tunnel: red, whatever the kind.
+    CHECK(nodeFigure(false, true, true, true, 41, 4, 60).failed);
+    CHECK(nodeFigure(true, true, true, true, 41, 4, 92).failed);
+    // Rows not carrying the tunnel: their figure, else the idle track.
+    f = nodeFigure(false, false, true, false, 41, 4, 60);
+    CHECK(f.ms == 60 && f.bars == barsForNode(60) && !f.failed);
+    f = nodeFigure(false, false, true, true, 41, 4, -1);
+    CHECK(f.ms == -1 && f.bars == -1 && !f.failed);
+}
+
 int main()
 {
     a1ErrorDoesNotLatchAdoption();
@@ -1403,6 +1453,7 @@ int main()
     scannerServicePlan();
     preNativeErrorNeedsNoStatus();
     upstreamSeatFirstRule();
+    nodeFigureOneRule();
     if (g_fail) {
         std::printf("facade_policy_check: %d FAILED\n", g_fail);
         return 1;

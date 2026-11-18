@@ -29,6 +29,11 @@ PageType {
                                          ? Number(referralData.days_per_friend) : 7
     readonly property int gbPerFriend: referralData && referralData.gb_per_friend !== undefined
                                        ? Number(referralData.gb_per_friend) : 3
+    // The offer in one place (device test of 142: the card said «7 дней + 10 ГБ» while the text below said
+    // «добавим 7 дней»): the pill and the share text both show it; no gigabytes when the server gives none.
+    readonly property string offerText: gbPerFriend > 0
+                                        ? qsTr("%1 дней + %2 ГБ").arg(daysPerFriend).arg(gbPerFriend)
+                                        : qsTr("%1 дней").arg(daysPerFriend)
 
     function refreshReferral() {
         if (hasEngine && typeof TribeEngine.refreshReferral === "function")
@@ -264,7 +269,7 @@ PageType {
                             }
                         }
 
-                        // пилюля во всю ширину: «7 дней + 3 ГБ» золотом / статистика, если уже приглашал
+                        // пилюля во всю ширину: оффер (offerText) золотом / статистика, если уже приглашал
                         Rectangle {
                             Layout.fillWidth: true
                             implicitHeight: pillText.implicitHeight + 2 * Theme.space.sm
@@ -280,7 +285,7 @@ PageType {
                                       ? (root.gbEarned > 0
                                          ? qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней · +%4 ГБ").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned).arg(root.gbEarned)
                                          : qsTr("<font color='%1'>Приглашено %2</font> · +%3 дней").arg(Theme.color.cta).arg(root.invited).arg(root.daysEarned))
-                                      : qsTr("<font color='%1'>%2 дней + %3 ГБ</font> бесплатно").arg(Theme.color.cta).arg(root.daysPerFriend).arg(root.gbPerFriend)
+                                      : qsTr("<font color='%1'>%2</font> бесплатно").arg(Theme.color.cta).arg(root.offerText)
                                 color: "white"
                                 font.family: Theme.font.body; font.pixelSize: Theme.font.bodyS
                                 font.weight: Theme.font.wMedium
@@ -310,7 +315,7 @@ PageType {
 
                         Text {
                             width: parent.width
-                            text: qsTr("Поделитесь ссылкой — за каждого друга добавим %1 дней бесплатно!").arg(root.daysPerFriend)
+                            text: qsTr("Поделитесь ссылкой — за каждого друга добавим %1 бесплатно!").arg(root.offerText)
                             color: Theme.color.text1; wrapMode: Text.WordWrap
                             font.family: Theme.font.body; font.pixelSize: Theme.font.bodyM
                         }

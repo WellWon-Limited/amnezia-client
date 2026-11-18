@@ -1145,12 +1145,12 @@
     </message>
     <message>
         <location line="+203"/>
-        <location line="+456"/>
+        <location line="+469"/>
         <source>Проверяем трафик…</source>
         <translation>Checking traffic…</translation>
     </message>
     <message>
-        <location line="-454"/>
+        <location line="-467"/>
         <source>Трафик шёл мимо VPN — пробуем другой путь</source>
         <translation>Traffic went around the VPN — trying another route</translation>
     </message>
@@ -1165,6 +1165,16 @@
         <translation>Network restricted by carrier — connect to Wi-Fi</translation>
     </message>
     <message>
+        <location line="+3"/>
+        <source>Отключаемся…</source>
+        <translation>Disconnecting…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Проверяем…</source>
+        <translation>Checking…</translation>
+    </message>
+    <message>
         <location line="+2"/>
         <source>Защита активна — ваше соединение безопасно</source>
         <translation>Protection is active — your connection is secure</translation>
@@ -1175,7 +1185,7 @@
         <translation>Connected, but traffic is not getting through</translation>
     </message>
     <message>
-        <location line="-686"/>
+        <location line="-690"/>
         <source>Нет связи</source>
         <translation>No connection</translation>
     </message>
@@ -1185,7 +1195,7 @@
         <translation>Loading…</translation>
     </message>
     <message>
-        <location line="+688"/>
+        <location line="+692"/>
         <source>Доступ приостановлен — подписка истекла</source>
         <translation>Access paused — subscription expired</translation>
     </message>
@@ -1195,12 +1205,12 @@
         <translation>Connect — tap the button above</translation>
     </message>
     <message>
-        <location line="+109"/>
+        <location line="+117"/>
         <source>ONLINE</source>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+56"/>
+        <location line="+57"/>
         <source>Сервер</source>
         <translation>Server</translation>
     </message>
@@ -1302,7 +1312,8 @@
         <translation>Installing…</translation>
     </message>
     <message>
-        <location line="+1"/>
+        <location line="-462"/>
+        <location line="+463"/>
         <source>Подключаемся…</source>
         <translation>Connecting…</translation>
     </message>
@@ -1680,7 +1691,17 @@ banks, cinemas, government services and marketplaces keep working without switch
 <context>
     <name>PageReferralTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+42"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageReferralTribe.qml" line="+35"/>
+        <source>%1 дней + %2 ГБ</source>
+        <translation>%1 days + %2 GB</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 дней</source>
+        <translation>%1 days</translation>
+    </message>
+    <message>
+        <location line="+11"/>
         <source>Ссылка скопирована — отправь другу</source>
         <translation>Link copied — send it to a friend</translation>
     </message>
@@ -1719,13 +1740,13 @@ A gift for every friend!</translation>
     </message>
     <message>
         <location line="+1"/>
-        <source>&lt;font color=&apos;%1&apos;&gt;%2 дней + %3 ГБ&lt;/font&gt; бесплатно</source>
-        <translation>&lt;font color=&apos;%1&apos;&gt;%2 days + %3 GB&lt;/font&gt; free</translation>
+        <source>&lt;font color=&apos;%1&apos;&gt;%2&lt;/font&gt; бесплатно</source>
+        <translation>&lt;font color=&apos;%1&apos;&gt;%2&lt;/font&gt; free</translation>
     </message>
     <message>
         <location line="+30"/>
-        <source>Поделитесь ссылкой — за каждого друга добавим %1 дней бесплатно!</source>
-        <translation>Share your link — we&apos;ll add %1 free days for every friend!</translation>
+        <source>Поделитесь ссылкой — за каждого друга добавим %1 бесплатно!</source>
+        <translation>Share your link — we&apos;ll add %1 free for every friend!</translation>
     </message>
     <message>
         <location line="+21"/>
@@ -1766,7 +1787,7 @@ A gift for every friend!</translation>
 <context>
     <name>PageServersTribe</name>
     <message>
-        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+197"/>
+        <location filename="../../ui/qml/Tribe/Pages/PageServersTribe.qml" line="+216"/>
         <source>недоступно для этого режима</source>
         <translation>unavailable for this mode</translation>
     </message>
@@ -1791,24 +1812,14 @@ A gift for every friend!</translation>
         <translation>Search country</translation>
     </message>
     <message>
-        <location line="+66"/>
+        <location line="+67"/>
         <source>Авто (быстрейший)</source>
         <translation>Auto (fastest)</translation>
     </message>
     <message>
-        <location line="+0"/>
-        <source>Авто</source>
-        <translation>Auto</translation>
-    </message>
-    <message>
-        <location line="+11"/>
+        <location line="+10"/>
         <source>Сервис подберёт быстрейший узел</source>
         <translation>The service picks the fastest node</translation>
-    </message>
-    <message>
-        <location line="+1"/>
-        <source>Сервис подберёт узел автоматически</source>
-        <translation>The service will pick a server automatically</translation>
     </message>
     <message>
         <location line="+52"/>
@@ -1846,7 +1857,7 @@ A gift for every friend!</translation>
         <translation>ONLINE</translation>
     </message>
     <message>
-        <location line="+36"/>
+        <location line="+45"/>
         <source>~%1 мс</source>
         <translation>~%1 ms</translation>
     </message>
@@ -3047,7 +3058,7 @@ You can attach a photo or video.</translation>
 <context>
     <name>avpn::AvpnEngineQml</name>
     <message>
-        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4001"/>
+        <location filename="../../core/serviceEngine/AvpnEngineQml.cpp" line="+4020"/>
         <source>Метка «%1» — замер БЕЗ нашего туннеля. Сначала отключи Tribe VPN.</source>
         <translation>Label «%1» — measurement WITHOUT our tunnel. Turn off Tribe VPN first.</translation>
     </message>
@@ -3147,7 +3158,7 @@ You can attach a photo or video.</translation>
         <translation>Report sent to developer ✓</translation>
     </message>
     <message>
-        <location line="-2815"/>
+        <location line="-2820"/>
         <source>Предыдущей версии для возврата нет</source>
         <translation>There is no previous version to go back to</translation>
     </message>
@@ -3192,12 +3203,12 @@ You can attach a photo or video.</translation>
         <translation>Downloading the update…</translation>
     </message>
     <message>
-        <location line="+409"/>
+        <location line="+410"/>
         <source>Текущий сервер</source>
         <translation>Current server</translation>
     </message>
     <message>
-        <location line="+387"/>
+        <location line="+402"/>
         <source>Нет активной подписки. Оформите её, чтобы подключиться.</source>
         <translation>No active subscription. Get one to connect.</translation>
     </message>
@@ -3207,7 +3218,7 @@ You can attach a photo or video.</translation>
         <translation>Could not refresh the server list. Try connecting again.</translation>
     </message>
     <message>
-        <location line="+531"/>
+        <location line="+533"/>
         <source>Отправляем…</source>
         <translation>Sending…</translation>
     </message>
@@ -3222,7 +3233,7 @@ You can attach a photo or video.</translation>
         <translation>Recording, sent at %1</translation>
     </message>
     <message>
-        <location line="+1134"/>
+        <location line="+1121"/>
         <source>Этот отчёт уже доставлен</source>
         <translation>This report has already been delivered</translation>
     </message>
@@ -3371,12 +3382,12 @@ You can attach a photo or video.</translation>
     </message>
     <message>
         <location line="+293"/>
-        <location line="+3578"/>
+        <location line="+3607"/>
         <source>Сервер не пропускает трафик — попробуйте другой сервер</source>
         <translation>The server is not passing traffic — try another server</translation>
     </message>
     <message>
-        <location line="-3244"/>
+        <location line="-3273"/>
         <source>Трафик не проходит ни через один сервер — проверьте сеть и попробуйте снова</source>
         <translation>Traffic gets through no server — check your network and try again</translation>
     </message>

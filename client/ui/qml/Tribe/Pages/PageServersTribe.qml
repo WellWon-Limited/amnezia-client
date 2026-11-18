@@ -79,14 +79,33 @@ PageType {
     // делегатов, сброс скролла). Пересобираем массив ТОЛЬКО при реальном изменении содержимого.
     property var countries: []
     property string countriesKey: ""
+    // Device test of 142: the list re-sorted and jumped under the finger - every RTT answer or health tick
+    // (changed(), ~4 s) reassigned the model, which resets the ListView to the top and re-sorts the rows. While the
+    // list is being touched an update waits (rebuildPending) and is applied when the movement ends; an applied
+    // update keeps the scroll position.
+    property bool rebuildPending: false
+    readonly property bool listTouched: list.moving || list.dragging
 
     function rebuildCountries() {
+        if (root.listTouched) {
+            root.rebuildPending = true
+            return
+        }
+        root.rebuildPending = false
         const next = computeCountries()
         const key = JSON.stringify(next)
         if (key === root.countriesKey) return
         root.countriesKey = key
+        const top = list.originY - list.topMargin
+        const offset = list.contentY - top
         root.countries = next
+        if (offset > 0) {
+            // a new array resets the view to the top: put it back where the person left it (clamped to the end)
+            const end = Math.max(0, list.contentHeight + list.topMargin + list.bottomMargin - list.height)
+            list.contentY = list.originY - list.topMargin + Math.min(offset, end)
+        }
     }
+    onListTouchedChanged: if (!listTouched && rebuildPending) rebuildCountries()
 
     // AVPN awg31-xray-v1: ключ строки — движковый `location` (host_id, фолбэк country_code+region);
     // старый бинарь поля не отдаёт ⇒ фолбэк на страну, поведение как раньше.
@@ -347,9 +366,10 @@ PageType {
                     spacing: 2
                     Text {
                         Layout.fillWidth: true
-                        // AVPN (A11): «быстрейший» — только если последний авто-выбор был по замеру RTT
-                        text: (root.hasEngine && TribeEngine.lastSelectionMeasured)
-                              ? qsTr("Авто (быстрейший)") : qsTr("Авто")
+                        // One text in every state, as the approved artboard's «Авто» card (kit autoCard): the
+                        // former switch on lastSelectionMeasured flipped the card on every engine selection
+                        // (device test of 142).
+                        text: qsTr("Авто (быстрейший)")
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         color: Theme.color.text1
@@ -359,9 +379,7 @@ PageType {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: (root.hasEngine && TribeEngine.lastSelectionMeasured)
-                              ? qsTr("Сервис подберёт быстрейший узел")
-                              : qsTr("Сервис подберёт узел автоматически")
+                        text: qsTr("Сервис подберёт быстрейший узел")
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         color: Theme.color.text2
@@ -578,21 +596,30 @@ PageType {
                         // AVPN: справа — палочки сигнала, под ними скорость (RTT). Палочки чуть
                         // уменьшены (scale) и подняты; скорость выровнена по их центру.
                         ColumnLayout {
+                            id: sigCol
                             Layout.alignment: Qt.AlignVCenter
                             spacing: 3
+                            // one rule with the Connect card (TribeEngine.nodeFigure): the row carrying the tunnel -
+                            // own: the live probe, provider: its Scanner figure or none; other rows their figure
+                            readonly property bool currentLive: row.modelData.isCurrent && root.hasEngine
+                                                                && TribeEngine.state === "connected"
+                            readonly property var fig: root.hasEngine
+                                ? TribeEngine.nodeFigure(row.modelData.upstream === true, sigCol.currentLive,
+                                                         TribeEngine.liveReachable === true, TribeEngine.liveDead === true,
+                                                         Number(TribeEngine.liveRttMs), Number(TribeEngine.liveBars),
+                                                         Number(row.modelData.rtt))
+                                : ({ ms: Number(row.modelData.rtt), bars: Number(row.modelData.bars), failed: false })
                             LoadBars {
                                 Layout.alignment: Qt.AlignHCenter
                                 scale: 0.9
                                 transformOrigin: Item.Bottom
-                                // текущая страна при коннекте — живой замер через туннель
                                 // no measurement (bars -1): the idle track (UI-DESIGN §3, idle .4)
-                                level: (row.modelData.isCurrent && root.hasEngine
-                                        && TribeEngine.state === "connected")
-                                       ? TribeEngine.liveBars : Math.max(0, row.modelData.bars)
+                                failed: sigCol.fig.failed === true
+                                level: Math.max(0, Number(sigCol.fig.bars))
                             }
                             Text {
                                 Layout.alignment: Qt.AlignHCenter
-                                text: row.modelData.rtt >= 0 ? qsTr("~%1 мс").arg(row.modelData.rtt) : "—"
+                                text: Number(sigCol.fig.ms) >= 0 ? qsTr("~%1 мс").arg(sigCol.fig.ms) : "—"
                                 textFormat: Text.PlainText
                                 color: Theme.color.text3
                                 font.family: Theme.font.mono
